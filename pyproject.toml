@@ -139,22 +139,50 @@ partsegcore = [
 all_optional = [
     "napari[optional,partsegcore]"
 ]
-# napari-engine specific dependencies
-engine = [
+# napari-cuda specific dependencies
+
+# CUDA Python bindings - requires system CUDA runtime
+cuda = [
+    "pycuda>=2022.1",
+    # CuPy version must be installed based on system CUDA version
+    # See setup_hpc.sh for dynamic installation
+]
+
+# Streaming and networking
+streaming = [
     "websockets>=12.0",
+    "aiohttp>=3.9.0",
     "msgpack>=1.0.5",
-    "pyzmq>=25.1.0",
-    "aiofiles>=23.1.0",
-    "pillow>=10.0.0",  # for image compression
-    "lz4>=4.3.2",  # fast compression
 ]
-engine-server = [
-    "napari-cuda[engine]",
-    "uvloop>=0.19.0 ; platform_system != 'Windows'",
-    "xvfbwrapper>=0.2.9 ; platform_system == 'Linux'",  # virtual display on Linux
+
+# Video encoding/decoding
+video = [
+    "av>=10.0.0",  # PyAV for H.264 codec
+    "opencv-python-headless>=4.8.0 ; platform_system == 'Linux'",
+    "pillow>=10.0.0",  # for fallback image handling
 ]
-engine-client = [
-    "napari-cuda[engine]",
+
+# Server dependencies (for HPC)
+server = [
+    "napari-cuda[streaming]",
+    "napari-cuda[video]",
+    "xvfbwrapper>=0.2.9 ; platform_system == 'Linux'",  # virtual display
+    "uvloop>=0.19.0 ; platform_system != 'Windows'",  # faster event loop
+]
+
+# Client dependencies (for local machine)
+client = [
+    "napari-cuda[streaming]",
+    "napari-cuda[video]",
+]
+
+# Complete development environment
+cuda-dev = [
+    "napari-cuda[server]",
+    "napari-cuda[client]",
+    "napari-cuda[cuda]",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.10.0",
 ]
 testing = [
     "napari[gallery]",
@@ -252,9 +280,9 @@ napari_builtins = "napari_builtins:builtins.yaml"
 
 [project.scripts]
 napari = "napari.__main__:main"
-napari-cuda-server = "napari_cuda.server:main"
-napari-cuda-client = "napari_cuda.client:main"
-napari-cuda = "napari_cuda.cli:main"
+napari-cuda-server = "napari_cuda.server.headless_server:main"
+napari-cuda-client = "napari_cuda.client.launcher:main"
+napari-cuda-test = "napari_cuda.tests.test_interop:main"
 
 [tool.setuptools]
 zip-safe = false

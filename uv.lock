@@ -2490,6 +2490,7 @@ wheels = [
 
 [[package]]
 name = "napari-cuda"
+version = "0.6.4.dev4060+gc8071fadd.d20250905"
 source = { editable = "." }
 dependencies = [
     { name = "app-model" },
