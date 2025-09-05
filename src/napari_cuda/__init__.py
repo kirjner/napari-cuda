@@ -9,32 +9,41 @@ import os
 import warnings
 from typing import Optional
 
-# Check CUDA availability
-try:
-    import cupy as cp
-    import pycuda.driver as cuda
-    cuda.init()
-    HAS_CUDA = True
-    CUDA_DEVICE_NAME = cuda.Device(0).name()
-    print(f"✅ CUDA available: {CUDA_DEVICE_NAME}")
-except (ImportError, Exception) as e:
-    HAS_CUDA = False
-    CUDA_DEVICE_NAME = None
-    if os.environ.get('NAPARI_CUDA_REQUIRED'):
-        raise ImportError("CUDA required but not available") from e
-    else:
-        warnings.warn(f"CUDA not available, using CPU fallbacks: {e}")
+# Lazy CUDA availability check
+HAS_CUDA = None
+CUDA_DEVICE_NAME = None
 
-# Smart imports based on availability
-if HAS_CUDA:
-    from napari_cuda.cuda.screenshot import CUDAScreenshot as Screenshot
-    from napari_cuda.cuda.memory import GPUMemoryManager
-else:
-    from napari_cuda.cpu.screenshot import CPUScreenshot as Screenshot
-    from napari_cuda.cpu.memory import CPUMemoryManager as GPUMemoryManager
+def _check_cuda():
+    """Lazy check for CUDA availability."""
+    global HAS_CUDA, CUDA_DEVICE_NAME
+    
+    if HAS_CUDA is not None:
+        return HAS_CUDA
+        
+    try:
+        import cupy as cp
+        import pycuda.driver as cuda
+        cuda.init()
+        HAS_CUDA = True
+        CUDA_DEVICE_NAME = cuda.Device(0).name()
+        print(f"✅ CUDA available: {CUDA_DEVICE_NAME}")
+    except (ImportError, Exception) as e:
+        HAS_CUDA = False
+        CUDA_DEVICE_NAME = None
+        if os.environ.get('NAPARI_CUDA_REQUIRED'):
+            raise ImportError("CUDA required but not available") from e
+        else:
+            # Only warn when actually trying to use CUDA
+            pass
+    
+    return HAS_CUDA
+
+# Don't import anything at module level - let individual components check CUDA when needed
 
 __version__ = "0.1.0"
-__all__ = ["Screenshot", "GPUMemoryManager", "HAS_CUDA", "accelerate"]
+# Export only safe, lazily evaluated API at import time.
+# Client-side imports must not force CUDA checks.
+__all__ = ["HAS_CUDA", "accelerate", "benchmark", "_check_cuda", "__version__"]
 
 
 def accelerate(viewer=None):
@@ -52,7 +61,7 @@ def accelerate(viewer=None):
     bool
         True if CUDA acceleration was enabled, False otherwise.
     """
-    if not HAS_CUDA:
+    if not _check_cuda():
         warnings.warn("Cannot enable CUDA acceleration: CUDA not available")
         return False
     

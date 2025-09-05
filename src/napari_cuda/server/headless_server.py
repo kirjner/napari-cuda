@@ -23,6 +23,7 @@ from napari.layers import Image
 
 from .cuda_streaming_layer import CudaStreamingLayer
 from .render_thread import CUDARenderThread
+from .metrics import Metrics
 from ..protocol.messages import StateMessage, FrameMessage
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class HeadlessServer:
                  host='localhost',
                  state_port=8081,
                  pixel_port=8082,
+                 metrics_port=8083,
                  enable_cuda=True):
         """
         Initialize the headless server.
@@ -64,6 +66,7 @@ class HeadlessServer:
         self.state_port = state_port
         self.pixel_port = pixel_port
         self.enable_cuda = enable_cuda
+        self.metrics_port = metrics_port
         
         self.viewer = None
         self.cuda_layer = None
@@ -72,6 +75,9 @@ class HeadlessServer:
         # WebSocket clients
         self.state_clients = set()
         self.pixel_clients = set()
+        
+        # Metrics
+        self.metrics = Metrics()
         
         # Setup logging
         logging.basicConfig(
@@ -143,8 +149,9 @@ class HeadlessServer:
         # Register streaming layer factory after render thread exists
         self._register_streaming_layer_factory()
         
-        # Start WebSocket servers as coroutines
+        # Start WebSocket servers and metrics endpoint as coroutines
         asyncio.create_task(self._start_websocket_servers())
+        asyncio.create_task(self._start_metrics_server())
         
         # Run unified Qt/asyncio event loop
         logger.info("Starting unified Qt/asyncio event loop...")
@@ -242,11 +249,30 @@ class HeadlessServer:
         
         # Keep servers running
         await asyncio.Future()
+
+    async def _start_metrics_server(self):
+        """Serve Prometheus metrics on /metrics via aiohttp."""
+        from aiohttp import web
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        app = web.Application()
+
+        async def handle_metrics(request):
+            body = generate_latest(self.metrics.registry)
+            return web.Response(body=body, content_type=CONTENT_TYPE_LATEST)
+
+        app.add_routes([web.get('/metrics', handle_metrics)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.metrics_port)
+        await site.start()
+        logger.info(f"Metrics endpoint started on {self.host}:{self.metrics_port}/metrics")
     
     async def _handle_state_client(self, websocket, path):
         """Handle state synchronization client."""
         logger.info(f"State client connected: {websocket.remote_address}")
         self.state_clients.add(websocket)
+        self.metrics.set('napari_cuda_state_clients', float(len(self.state_clients)))
+        self.metrics.inc('napari_cuda_state_connects')
         
         try:
             async for message in websocket:
@@ -257,11 +283,14 @@ class HeadlessServer:
             logger.info("State client disconnected")
         finally:
             self.state_clients.discard(websocket)
+            self.metrics.set('napari_cuda_state_clients', float(len(self.state_clients)))
     
     async def _handle_pixel_client(self, websocket, path):
         """Handle pixel stream client."""
         logger.info(f"Pixel client connected: {websocket.remote_address}")
         self.pixel_clients.add(websocket)
+        self.metrics.set('napari_cuda_pixel_clients', float(len(self.pixel_clients)))
+        self.metrics.inc('napari_cuda_pixel_connects')
         
         try:
             await websocket.wait_closed()
@@ -269,6 +298,7 @@ class HeadlessServer:
             logger.info("Pixel client disconnected")
         finally:
             self.pixel_clients.discard(websocket)
+            self.metrics.set('napari_cuda_pixel_clients', float(len(self.pixel_clients)))
     
     async def _process_state_command(self, command):
         """Process state command from client."""
@@ -321,6 +351,8 @@ class HeadlessServer:
     async def broadcast_frame(self, frame_data):
         """Broadcast encoded frame to all pixel clients."""
         if self.pixel_clients:
+            self.metrics.inc('napari_cuda_frames_total')
+            self.metrics.inc('napari_cuda_bytes_total', len(frame_data))
             await asyncio.gather(*[
                 client.send(frame_data)
                 for client in self.pixel_clients
@@ -355,12 +387,90 @@ class HeadlessServer:
         logger.info("HeadlessServer stopped")
 
 
+def main():
+    """Command-line entry point for napari-cuda server."""
+    import argparse
+    from dotenv import load_dotenv
+    
+    # Load environment configuration
+    load_dotenv('.env.hpc')
+    
+    parser = argparse.ArgumentParser(
+        description='napari-cuda GPU-accelerated streaming server'
+    )
+    
+    parser.add_argument(
+        'dataset',
+        nargs='?',
+        default=None,
+        help='Path to numpy array or image to load'
+    )
+    
+    parser.add_argument(
+        '--host',
+        default=os.getenv('NAPARI_CUDA_HOST', '127.0.0.1'),
+        help='Host address for WebSocket servers (default: 127.0.0.1)'
+    )
+    
+    parser.add_argument(
+        '--state-port',
+        type=int,
+        default=int(os.getenv('NAPARI_CUDA_STATE_PORT', '8081')),
+        help='Port for state synchronization (default: 8081)'
+    )
+    
+    parser.add_argument(
+        '--pixel-port',
+        type=int,
+        default=int(os.getenv('NAPARI_CUDA_PIXEL_PORT', '8082')),
+        help='Port for pixel stream (default: 8082)'
+    )
+    
+    parser.add_argument(
+        '--metrics-port',
+        type=int,
+        default=int(os.getenv('NAPARI_CUDA_METRICS_PORT', '8083')),
+        help='Port for Prometheus metrics (default: 8083)'
+    )
+    
+    parser.add_argument(
+        '--no-cuda',
+        action='store_true',
+        help='Disable CUDA acceleration (CPU fallback)'
+    )
+    
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug logging'
+    )
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Create and start server
+    server = HeadlessServer(
+        dataset_path=args.dataset,
+        host=args.host,
+        state_port=args.state_port,
+        pixel_port=args.pixel_port,
+        metrics_port=args.metrics_port,
+        enable_cuda=not args.no_cuda
+    )
+    
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested via Ctrl+C")
+    finally:
+        server.stop()
+
+
 if __name__ == "__main__":
-    import sys
-    
-    # Parse arguments
-    dataset = sys.argv[1] if len(sys.argv) > 1 else None
-    
-    # Create and run server
-    server = HeadlessServer(dataset_path=dataset)
-    server.start()
+    main()

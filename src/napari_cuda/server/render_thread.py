@@ -132,6 +132,11 @@ class CUDARenderThread(QThread):
                 try:
                     # Wait for capture request (timeout for checking running flag)
                     request = self.capture_queue.get(timeout=0.1)
+                    try:
+                        if hasattr(self.pixel_stream, 'metrics'):
+                            self.pixel_stream.metrics.set('napari_cuda_capture_queue_depth', float(self.capture_queue.qsize()))
+                    except Exception:
+                        pass
                     
                     # Capture and encode
                     encoded_frame = self._capture_and_encode(request)
@@ -241,22 +246,76 @@ class CUDARenderThread(QThread):
                 
                 # Map texture to CUDA (outside texture lock but inside CUDA lock)
                 try:
+                    import time
+                    t0 = time.perf_counter_ns()
                     reg_image.map()
                     cuda_array = reg_image.get_mapped_array(0, 0)
+                    t1 = time.perf_counter_ns()
                     
                     # Encode with NVENC
                     if self.nvenc_encoder:
+                        t2 = time.perf_counter_ns()
                         encoded = self.nvenc_encoder.encode_surface(cuda_array)
                     else:
-                        # Fallback: Just send a placeholder
-                        encoded = b'FRAME_%d' % frame_num
+                        # MVP fallback: copy to host and JPEG-encode
+                        try:
+                            import cupy as cp  # requires CUDA-capable environment
+                            import cv2
+
+                            # Query texture size from OpenGL
+                            GL.glBindTexture(GL.GL_TEXTURE_2D, int(texture_id))
+                            width = int(GL.glGetTexLevelParameteriv(GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_WIDTH))
+                            height = int(GL.glGetTexLevelParameteriv(GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_HEIGHT))
+
+                            # Allocate device buffer (assume GL_RGBA8 -> 4 channels)
+                            dev_frame = cp.empty((height, width, 4), dtype=cp.uint8)
+
+                            # Copy CUDA array -> device buffer
+                            m = cuda.Memcpy2D()
+                            m.set_src_array(cuda_array)
+                            m.set_dst_device(int(dev_frame.data.ptr))
+                            m.width_in_bytes = width * 4
+                            m.height = height
+                            m()
+
+                            # Move to host and encode JPEG (best-effort color conversion)
+                            t2 = time.perf_counter_ns()
+                            host_frame = cp.asnumpy(dev_frame)
+                            try:
+                                bgr = cv2.cvtColor(host_frame, cv2.COLOR_RGBA2BGR)
+                            except Exception:
+                                bgr = host_frame[..., :3]
+                            ok, jpeg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                            encoded = jpeg.tobytes() if ok else None
+                        except Exception as e:
+                            logger.error(f"JPEG fallback failed: {e}")
+                            # Last-resort placeholder to keep pipeline alive
+                            encoded = b'FRAME_%d' % frame_num
                     
                     reg_image.unmap()
+                    t3 = time.perf_counter_ns()
+
+                    # metrics
+                    try:
+                        if hasattr(self.pixel_stream, 'metrics'):
+                            ms = 1e-6
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_capture_ms', (t1 - t0) * ms)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_encode_ms', (t3 - t2) * ms)
+                            ts_ns = request.get('ts_ns')
+                            if ts_ns is not None:
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_end_to_end_ms', (t3 - ts_ns) * ms)
+                    except Exception:
+                        pass
                     
                     return encoded
                     
                 except Exception as e:
                     logger.error(f"Failed to capture/encode frame: {e}")
+                    try:
+                        if hasattr(self.pixel_stream, 'metrics'):
+                            self.pixel_stream.metrics.inc('napari_cuda_encode_errors')
+                    except Exception:
+                        pass
                     try:
                         reg_image.unmap()
                     except:
@@ -272,13 +331,17 @@ class CUDARenderThread(QThread):
         request = {
             'texture_id': texture_id,
             'frame_num': metadata.get('frame_num', 0) if metadata else 0,
-            'timestamp': metadata.get('timestamp') if metadata else None
+            'ts_ns': metadata.get('ts_ns') if metadata else None
         }
         
         try:
             self.capture_queue.put_nowait(request)
+            if hasattr(self.pixel_stream, 'metrics'):
+                self.pixel_stream.metrics.set('napari_cuda_capture_queue_depth', float(self.capture_queue.qsize()))
         except queue.Full:
             logger.warning("Capture queue full, dropping frame")
+            if hasattr(self.pixel_stream, 'metrics'):
+                self.pixel_stream.metrics.inc('napari_cuda_frames_dropped')
     
     def stop(self):
         """Stop the render thread."""

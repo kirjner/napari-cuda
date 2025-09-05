@@ -15,6 +15,11 @@ import napari
 import qasync
 from qtpy.QtWidgets import QApplication
 from napari.components.viewer_model import ViewerModel
+try:
+    # pydantic v1 compatibility (used by napari EventedModel)
+    from pydantic.v1 import PrivateAttr
+except Exception:  # pragma: no cover
+    from pydantic import PrivateAttr  # type: ignore
 from napari.components import LayerList, Dims, Camera
 
 if TYPE_CHECKING:
@@ -39,6 +44,13 @@ class ProxyViewer(ViewerModel):
     The Window and QtViewer will be created separately by the launcher.
     """
     
+    # Private attributes (not part of the pydantic/EventedModel schema)
+    _server_host: str = PrivateAttr(default='localhost')
+    _server_port: int = PrivateAttr(default=8081)
+    _state_websocket = PrivateAttr(default=None)
+    _window = PrivateAttr(default=None)
+    _connection_pending: bool = PrivateAttr(default=False)
+
     def __init__(self, server_host='localhost', server_port=8081, **kwargs):
         """
         Initialize proxy viewer connected to remote server.
@@ -53,11 +65,12 @@ class ProxyViewer(ViewerModel):
         # Initialize ViewerModel without creating a Window
         super().__init__(**kwargs)
         
-        self.server_host = server_host
-        self.server_port = server_port
+        # Initialize private attributes (avoid pydantic field errors)
+        self._server_host = server_host
+        self._server_port = server_port
         self._state_websocket = None
-        self._window: Optional['Window'] = None  # Will be set by launcher
-        self._connection_pending = False  # Flag for deferred connection
+        self._window = None  # type: ignore[assignment]
+        self._connection_pending = False
         
         # Connect local events to forward to server
         self.camera.events.center.connect(self._on_camera_change)
@@ -70,6 +83,24 @@ class ProxyViewer(ViewerModel):
         self._connect_to_server()
         
         logger.info(f"ProxyViewer initialized for {server_host}:{server_port}")
+
+    # Expose read-only properties for host/port
+    @property
+    def server_host(self) -> str:
+        return self._server_host
+
+    @property
+    def server_port(self) -> int:
+        return self._server_port
+
+    # Provide explicit property for window so launcher can set it
+    @property
+    def window(self):
+        return self._window
+
+    @window.setter
+    def window(self, value):  # value: 'Window'
+        self._window = value
     
     def _connect_to_server(self):
         """Establish WebSocket connection to server."""

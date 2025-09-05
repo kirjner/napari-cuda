@@ -8,7 +8,6 @@ and streams it to the client without CPU involvement.
 from napari._vispy.layers.scalar_field import VispyScalarFieldBaseLayer
 from napari._vispy.utils.gl import fix_data_dtype
 import numpy as np
-import queue
 import logging
 
 logger = logging.getLogger(__name__)
@@ -49,8 +48,7 @@ class CudaStreamingLayer(VispyScalarFieldBaseLayer):
         self.registered_textures = {}
         self.frame_counter = 0
         
-        # Queue for passing frames to encoding thread
-        self.encode_queue = queue.Queue(maxsize=2)
+        # Note: Frames are now queued directly on render_thread.capture_queue
         
         logger.info(f"CudaStreamingLayer initialized for layer: {layer.name}")
     
@@ -88,16 +86,19 @@ class CudaStreamingLayer(VispyScalarFieldBaseLayer):
         logger.debug(f"Capturing frame {self.frame_counter}, texture handle: {texture_handle}")
         
         if self.render_thread:
-            # Queue capture request to render thread
-            # (must happen on thread with GL context)
+            # Queue capture request to the CUDA render thread
+            # (must happen on the thread owning the GL/CUDA contexts)
             try:
-                self.encode_queue.put_nowait({
-                    'texture_id': texture_handle,
-                    'frame_num': self.frame_counter,
-                    'timestamp': np.datetime64('now')
-                })
-            except queue.Full:
-                logger.warning("Encode queue full, dropping frame")
+                self.render_thread.queue_capture(
+                    texture_handle,
+                    metadata={
+                        'frame_num': self.frame_counter,
+                        # monotonic timestamp for end-to-end timing
+                        'ts_ns': __import__('time').perf_counter_ns(),
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to queue capture on render thread: {e}")
     
     def _get_texture_handle(self):
         """
