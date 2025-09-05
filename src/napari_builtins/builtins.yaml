@@ -1,5 +1,5 @@
 display_name: napari builtins
-name: napari
+name: napari-cuda
 
 contributions:
   commands:

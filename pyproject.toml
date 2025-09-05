@@ -6,10 +6,11 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "napari"
-description = "n-dimensional array viewer in Python"
+name = "napari-cuda"
+description = "CUDA acceleration for napari on NVIDIA GPUs"
 authors = [
     { name = "napari team", email = "napari-steering-council@googlegroups.com" },
+    { name = "napari-engine contributors" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -71,6 +72,7 @@ dependencies = [
     "typing_extensions>=4.12",
     "vispy>=0.15.2,<0.16",
     "wrapt>=1.13.3",
+    "pyqt5>=5.15.11",
 ]
 dynamic = [
     "version",
@@ -136,6 +138,23 @@ partsegcore = [
 ]
 all_optional = [
     "napari[optional,partsegcore]"
+]
+# napari-engine specific dependencies
+engine = [
+    "websockets>=12.0",
+    "msgpack>=1.0.5",
+    "pyzmq>=25.1.0",
+    "aiofiles>=23.1.0",
+    "pillow>=10.0.0",  # for image compression
+    "lz4>=4.3.2",  # fast compression
+]
+engine-server = [
+    "napari-cuda[engine]",
+    "uvloop>=0.19.0 ; platform_system != 'Windows'",
+    "xvfbwrapper>=0.2.9 ; platform_system == 'Linux'",  # virtual display on Linux
+]
+engine-client = [
+    "napari-cuda[engine]",
 ]
 testing = [
     "napari[gallery]",
@@ -233,6 +252,9 @@ napari_builtins = "napari_builtins:builtins.yaml"
 
 [project.scripts]
 napari = "napari.__main__:main"
+napari-cuda-server = "napari_cuda.server:main"
+napari-cuda-client = "napari_cuda.client:main"
+napari-cuda = "napari_cuda.cli:main"
 
 [tool.setuptools]
 zip-safe = false
