@@ -45,35 +45,47 @@ def launch_streaming_client(server_host='localhost',
     
     logger.info(f"Launching streaming client for {server_host}")
     
-    # CRITICAL: Handle ProxyViewer initialization carefully
-    
-    # Option A: Create ProxyViewer without Window
+    # Create ProxyViewer (inherits from ViewerModel, no Window created)
     proxy_viewer = ProxyViewer(
         server_host=server_host,
         server_port=state_port
     )
     
-    # Create Qt components with custom canvas
-    qt_viewer = QtViewer(
+    # Create Window manually with our ProxyViewer
+    # The Window constructor expects a Viewer, but ViewerModel works too
+    window = Window(proxy_viewer, show=False)
+    
+    # Store window reference in the ProxyViewer
+    proxy_viewer.window = window
+    
+    # Replace the canvas with our streaming canvas
+    qt_viewer = window._qt_viewer
+    
+    # Create streaming canvas
+    streaming_canvas = StreamingCanvas(
         proxy_viewer,
-        canvas_class=lambda viewer, **kwargs: StreamingCanvas(
-            viewer,
-            server_host=server_host,
-            server_port=pixel_port,
-            **kwargs
-        )
+        server_host=server_host,
+        server_port=pixel_port,
+        parent=qt_viewer
     )
     
-    # Create window manually
-    window = Window(qt_viewer, show=True)
+    # Replace the default canvas with streaming canvas
+    old_canvas = qt_viewer.canvas
+    qt_viewer.canvas = streaming_canvas
     
-    # Store reference (some parts of napari expect this)
-    proxy_viewer._window = window
+    # Replace in the canvas splitter widget
+    if hasattr(qt_viewer, 'canvas_splitter'):
+        # Find the old canvas widget index
+        for i in range(qt_viewer.canvas_splitter.count()):
+            if qt_viewer.canvas_splitter.widget(i) == old_canvas.native:
+                qt_viewer.canvas_splitter.replaceWidget(i, streaming_canvas.native)
+                break
     
-    # Option B: Surgical replacement approach
-    # viewer = napari.Viewer(show=False)
-    # viewer._window.qt_viewer.canvas = StreamingCanvas(...)
-    # ... replace viewer internals with proxy ...
+    # Clean up old canvas
+    old_canvas.close()
+    
+    # Now show the window
+    window.show()
     
     logger.info("Client launched successfully")
     

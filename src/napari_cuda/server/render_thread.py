@@ -7,6 +7,8 @@ happen on the correct thread.
 
 import logging
 import queue
+import threading
+import contextlib
 from qtpy.QtCore import QThread, pyqtSignal
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,45 @@ try:
 except ImportError:
     HAS_CUDA = False
     logger.warning("CUDA libraries not available")
+
+# Thread-local storage for CUDA contexts
+_thread_local = threading.local()
+
+@contextlib.contextmanager
+def cuda_context_guard(context):
+    """
+    Context manager for safe CUDA context operations.
+    
+    Ensures that CUDA operations happen with the correct context
+    and handles context cleanup properly.
+    """
+    if not HAS_CUDA or context is None:
+        yield
+        return
+    
+    # Get current context
+    old_context = None
+    try:
+        old_context = cuda.Context.get_current()
+    except cuda.LogicError:
+        # No context is current
+        pass
+    
+    try:
+        # Push our context if it's different
+        if old_context != context:
+            context.push()
+        
+        yield
+        
+    finally:
+        # Restore previous context
+        try:
+            if old_context != context and old_context is not None:
+                context.pop()
+        except cuda.LogicError:
+            # Context was already popped or invalid
+            pass
 
 
 class CUDARenderThread(QThread):
@@ -56,14 +97,18 @@ class CUDARenderThread(QThread):
         self.cuda_context = None
         self.nvenc_encoder = None
         
-        # Registered textures cache
+        # Registered textures cache (thread-safe access needed)
         self.registered_textures = {}
+        self._texture_lock = threading.RLock()
         
         # Queue for capture requests from main thread
         self.capture_queue = queue.Queue()
         
         # Control flag
         self.running = True
+        
+        # CUDA context lock for thread safety
+        self._cuda_lock = threading.RLock()
         
         logger.info("CUDARenderThread initialized")
     
@@ -174,40 +219,49 @@ class CUDARenderThread(QThread):
         
         logger.debug(f"Capturing texture {texture_id} (frame {frame_num})")
         
-        # Register texture with CUDA if not already done
-        if texture_id not in self.registered_textures:
-            try:
-                self.registered_textures[texture_id] = RegisteredImage(
-                    int(texture_id),
-                    GL.GL_TEXTURE_2D,
-                    graphics_map_flags.READ_ONLY
-                )
-                logger.debug(f"Registered texture {texture_id} with CUDA")
-            except Exception as e:
-                logger.error(f"Failed to register texture: {e}")
-                return None
-        
-        # Map texture to CUDA
-        reg_image = self.registered_textures[texture_id]
-        
-        try:
-            reg_image.map()
-            cuda_array = reg_image.get_mapped_array(0, 0)
-            
-            # Encode with NVENC
-            if self.nvenc_encoder:
-                encoded = self.nvenc_encoder.encode_surface(cuda_array)
-            else:
-                # Fallback: Just send a placeholder
-                encoded = b'FRAME_%d' % frame_num
-            
-            reg_image.unmap()
-            
-            return encoded
-            
-        except Exception as e:
-            logger.error(f"Failed to capture/encode frame: {e}")
-            return None
+        # Use thread safety for all CUDA operations
+        with self._cuda_lock:
+            with cuda_context_guard(self.cuda_context):
+                # Register texture with CUDA if not already done
+                with self._texture_lock:
+                    if texture_id not in self.registered_textures:
+                        try:
+                            self.registered_textures[texture_id] = RegisteredImage(
+                                int(texture_id),
+                                GL.GL_TEXTURE_2D,
+                                graphics_map_flags.READ_ONLY
+                            )
+                            logger.debug(f"Registered texture {texture_id} with CUDA")
+                        except Exception as e:
+                            logger.error(f"Failed to register texture: {e}")
+                            return None
+                    
+                    # Get registered image
+                    reg_image = self.registered_textures[texture_id]
+                
+                # Map texture to CUDA (outside texture lock but inside CUDA lock)
+                try:
+                    reg_image.map()
+                    cuda_array = reg_image.get_mapped_array(0, 0)
+                    
+                    # Encode with NVENC
+                    if self.nvenc_encoder:
+                        encoded = self.nvenc_encoder.encode_surface(cuda_array)
+                    else:
+                        # Fallback: Just send a placeholder
+                        encoded = b'FRAME_%d' % frame_num
+                    
+                    reg_image.unmap()
+                    
+                    return encoded
+                    
+                except Exception as e:
+                    logger.error(f"Failed to capture/encode frame: {e}")
+                    try:
+                        reg_image.unmap()
+                    except:
+                        pass
+                    return None
     
     def queue_capture(self, texture_id, metadata=None):
         """

@@ -12,39 +12,20 @@ import os
 import queue
 import numpy as np
 from pathlib import Path
-from threading import Thread
 
 import napari
-from qtpy.QtCore import QThread
+import qasync
 import websockets
+from qtpy.QtWidgets import QApplication
+from napari._vispy.utils.visual import layer_to_visual
+from napari._vispy.layers.image import VispyImageLayer
+from napari.layers import Image
 
 from .cuda_streaming_layer import CudaStreamingLayer
 from .render_thread import CUDARenderThread
 from ..protocol.messages import StateMessage, FrameMessage
 
 logger = logging.getLogger(__name__)
-
-
-class AsyncioThread(QThread):
-    """Thread to run asyncio event loop alongside Qt."""
-    
-    def __init__(self):
-        super().__init__()
-        self.loop = None
-        self.running = False
-    
-    def run(self):
-        """Run asyncio event loop in this thread."""
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.running = True
-        self.loop.run_forever()
-    
-    def stop(self):
-        """Stop the event loop."""
-        if self.loop and self.running:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.running = False
 
 
 class HeadlessServer:
@@ -87,7 +68,6 @@ class HeadlessServer:
         self.viewer = None
         self.cuda_layer = None
         self.render_thread = None
-        self.asyncio_thread = None
         
         # WebSocket clients
         self.state_clients = set()
@@ -101,6 +81,46 @@ class HeadlessServer:
         
         logger.info(f"HeadlessServer initialized - CUDA: {enable_cuda}")
     
+    def _register_streaming_layer_factory(self):
+        """
+        Register CudaStreamingLayer as the factory for Image layers.
+        
+        This is the "napari-native" way to replace layer visuals - by modifying
+        the global layer_to_visual dictionary that napari uses to create visuals.
+        """
+        if not self.enable_cuda:
+            logger.info("CUDA disabled - skipping streaming layer registration")
+            return
+        
+        # Store original factory for fallback
+        self._original_image_factory = layer_to_visual.get(Image, VispyImageLayer)
+        
+        def create_streaming_layer(layer, *args, **kwargs):
+            """Factory function that creates our streaming layer."""
+            # Check if render thread is ready
+            if not self.render_thread:
+                logger.warning(f"Render thread not ready for layer {layer.name}, using fallback")
+                return self._original_image_factory(layer, *args, **kwargs)
+            
+            logger.debug(f"Creating CudaStreamingLayer for layer: {layer.name}")
+            try:
+                return CudaStreamingLayer(
+                    layer, 
+                    render_thread=self.render_thread,
+                    pixel_stream=self,
+                    *args, 
+                    **kwargs
+                )
+            except Exception as e:
+                logger.error(f"Failed to create CudaStreamingLayer: {e}")
+                # Fallback to original
+                return self._original_image_factory(layer, *args, **kwargs)
+        
+        # Replace the Image layer factory globally
+        layer_to_visual[Image] = create_streaming_layer
+        
+        logger.info("Registered CudaStreamingLayer factory for Image layers")
+    
     def start(self):
         """Start the server with all components."""
         logger.info("Starting HeadlessServer...")
@@ -108,36 +128,76 @@ class HeadlessServer:
         # Set headless environment
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         
-        # Start asyncio thread for WebSocket servers
-        self.asyncio_thread = AsyncioThread()
-        self.asyncio_thread.start()
+        # Create Qt application if not already exists
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
         
-        # Wait for asyncio loop to be ready
-        while self.asyncio_thread.loop is None:
-            QThread.msleep(10)
+        # Create qasync event loop for Qt/asyncio integration
+        loop = qasync.QEventLoop(app)
+        asyncio.set_event_loop(loop)
         
-        # Start WebSocket servers in asyncio thread
-        asyncio.run_coroutine_threadsafe(
-            self._start_websocket_servers(),
-            self.asyncio_thread.loop
-        )
+        # Create and setup napari viewer (this will create the render thread)
+        self._setup_viewer()
         
-        # Create and run napari in main thread
-        with napari.gui_qt(visible=False):
-            self._setup_viewer()
-            logger.info("Starting napari event loop...")
-            napari.run()
+        # Register streaming layer factory after render thread exists
+        self._register_streaming_layer_factory()
+        
+        # Start WebSocket servers as coroutines
+        asyncio.create_task(self._start_websocket_servers())
+        
+        # Run unified Qt/asyncio event loop
+        logger.info("Starting unified Qt/asyncio event loop...")
+        with loop:
+            loop.run_forever()
         
         # Cleanup on exit
         self.stop()
     
     def _setup_viewer(self):
-        """Set up the napari viewer with test data."""
+        """Set up the napari viewer without adding data yet."""
         logger.info("Setting up napari viewer...")
         
-        # Create viewer
+        # Create viewer without data
         self.viewer = napari.Viewer(show=False)
         
+        # Setup CUDA streaming infrastructure if enabled
+        if self.enable_cuda:
+            self._setup_render_thread()
+        
+        # Now add test data (will use our custom layer factory)
+        self._add_test_data()
+        
+        # Connect viewer events to send state updates
+        self.viewer.camera.events.center.connect(self._on_camera_change)
+        self.viewer.camera.events.zoom.connect(self._on_camera_change)
+        self.viewer.dims.events.current_step.connect(self._on_dims_change)
+        
+        logger.info("Viewer setup complete")
+    
+    def _setup_render_thread(self):
+        """Initialize the CUDA render thread."""
+        logger.info("Setting up CUDA render thread...")
+        
+        try:
+            from .render_thread import CUDARenderThread
+            canvas = self.viewer.window._qt_viewer.canvas
+            gl_context = canvas.native.context()
+            
+            self.render_thread = CUDARenderThread(
+                gl_context=gl_context,
+                pixel_stream=self
+            )
+            self.render_thread.start()
+            
+            logger.info("CUDA render thread started")
+            
+        except Exception as e:
+            logger.error(f"Failed to setup CUDA render thread: {e}")
+            self.render_thread = None
+    
+    def _add_test_data(self):
+        """Add test data to the viewer."""
         # Load dataset
         if self.dataset_path and self.dataset_path.exists():
             logger.info(f"Loading dataset from {self.dataset_path}")
@@ -152,54 +212,14 @@ class HeadlessServer:
             data = np.stack([Z * np.roll(np.eye(3), i, axis=0).sum() 
                            for i in range(10)])
         
-        # Add layer
+        # Add layer (will use our custom factory if registered)
         layer = self.viewer.add_image(
             data,
             name='remote_data',
             colormap='viridis'
         )
         
-        if self.enable_cuda:
-            self._setup_cuda_streaming(layer)
-        
-        # Connect viewer events to send state updates
-        self.viewer.camera.events.center.connect(self._on_camera_change)
-        self.viewer.camera.events.zoom.connect(self._on_camera_change)
-        self.viewer.dims.events.current_step.connect(self._on_dims_change)
-        
-        logger.info("Viewer setup complete")
-    
-    def _setup_cuda_streaming(self, layer):
-        """Replace normal layer with CUDA streaming layer."""
-        logger.info("Setting up CUDA streaming...")
-        
-        try:
-            # Start render thread for CUDA operations
-            from .render_thread import CUDARenderThread
-            canvas = self.viewer.window._qt_viewer.canvas
-            gl_context = canvas.native.context()
-            
-            self.render_thread = CUDARenderThread(
-                gl_context=gl_context,
-                pixel_stream=self
-            )
-            self.render_thread.start()
-            
-            # Replace vispy layer with streaming version
-            self.cuda_layer = CudaStreamingLayer(
-                layer,
-                render_thread=self.render_thread,
-                pixel_stream=self
-            )
-            
-            # Inject into canvas
-            canvas.layer_to_visual[layer] = self.cuda_layer
-            
-            logger.info("CUDA streaming layer installed")
-            
-        except Exception as e:
-            logger.error(f"Failed to setup CUDA streaming: {e}")
-            logger.info("Falling back to CPU mode")
+        logger.info(f"Added test data layer: {layer.name}")
     
     async def _start_websocket_servers(self):
         """Start both WebSocket servers for state and pixel streams."""
@@ -270,28 +290,24 @@ class HeadlessServer:
     
     def _on_camera_change(self, event=None):
         """Send camera update to clients."""
-        if self.asyncio_thread and self.asyncio_thread.loop:
-            state = {
-                'type': 'camera_update',
-                'center': list(self.viewer.camera.center),
-                'zoom': float(self.viewer.camera.zoom)
-            }
-            asyncio.run_coroutine_threadsafe(
-                self.broadcast_state(state),
-                self.asyncio_thread.loop
-            )
+        state = {
+            'type': 'camera_update',
+            'center': list(self.viewer.camera.center),
+            'zoom': float(self.viewer.camera.zoom)
+        }
+        # Schedule coroutine on the qasync event loop
+        # Using asyncio.create_task since qasync integrates with the standard asyncio API
+        asyncio.create_task(self.broadcast_state(state))
     
     def _on_dims_change(self, event=None):
         """Send dimensions update to clients."""
-        if self.asyncio_thread and self.asyncio_thread.loop:
-            state = {
-                'type': 'dims_update',
-                'current_step': list(self.viewer.dims.current_step)
-            }
-            asyncio.run_coroutine_threadsafe(
-                self.broadcast_state(state),
-                self.asyncio_thread.loop
-            )
+        state = {
+            'type': 'dims_update',
+            'current_step': list(self.viewer.dims.current_step)
+        }
+        # Schedule coroutine on the qasync event loop
+        # Using asyncio.create_task since qasync integrates with the standard asyncio API
+        asyncio.create_task(self.broadcast_state(state))
     
     async def broadcast_state(self, state):
         """Broadcast state to all connected clients."""
@@ -312,19 +328,17 @@ class HeadlessServer:
     
     def send_frame(self, frame_data):
         """Called by CUDA thread to send frame."""
-        if self.asyncio_thread and self.asyncio_thread.loop:
-            asyncio.run_coroutine_threadsafe(
-                self.broadcast_frame(frame_data),
-                self.asyncio_thread.loop
-            )
+        # With qasync, we can schedule coroutines directly on the main loop
+        asyncio.create_task(self.broadcast_frame(frame_data))
     
     def stop(self):
         """Stop the server and clean up."""
         logger.info("Stopping HeadlessServer...")
         
-        if self.asyncio_thread:
-            self.asyncio_thread.stop()
-            self.asyncio_thread.wait()
+        # Restore original layer factory
+        if hasattr(self, '_original_image_factory'):
+            layer_to_visual[Image] = self._original_image_factory
+            logger.info("Restored original Image layer factory")
         
         if self.render_thread:
             self.render_thread.stop()
@@ -332,6 +346,11 @@ class HeadlessServer:
         
         if self.cuda_layer:
             self.cuda_layer.close()
+        
+        # Stop qasync event loop
+        loop = asyncio.get_event_loop()
+        if loop and not loop.is_closed():
+            loop.stop()
         
         logger.info("HeadlessServer stopped")
 

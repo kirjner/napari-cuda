@@ -9,30 +9,39 @@ import asyncio
 import json
 import logging
 import websockets
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import napari
-from napari.viewer import Viewer
+import qasync
+from qtpy.QtWidgets import QApplication
+from napari.components.viewer_model import ViewerModel
 from napari.components import LayerList, Dims, Camera
+
+if TYPE_CHECKING:
+    # This import reveals napari's intentional architectural coupling between
+    # Viewer and Window. While theoretically the model shouldn't know about
+    # the GUI, napari deliberately couples them for a cohesive application.
+    # This coupling is actually beneficial for our proxy pattern - it means
+    # ViewerModel already has the exact "shape" the GUI expects, making our
+    # ProxyViewer a perfect drop-in replacement that can intercept all 
+    # viewer operations while maintaining API compatibility.
+    from napari._qt.qt_main_window import Window
 
 logger = logging.getLogger(__name__)
 
 
-class ProxyViewer(Viewer):
+class ProxyViewer(ViewerModel):
     """
     A viewer that forwards all commands to a remote server instead of 
     rendering locally.
     
-    This is the critical client-side component that maintains the napari
-    API while preventing local rendering.
+    This inherits from ViewerModel (not Viewer) to avoid creating a Window.
+    The Window and QtViewer will be created separately by the launcher.
     """
     
     def __init__(self, server_host='localhost', server_port=8081, **kwargs):
         """
         Initialize proxy viewer connected to remote server.
-        
-        Critical: We must carefully handle initialization to prevent
-        creating a local Window.
         
         Parameters
         ----------
@@ -41,71 +50,51 @@ class ProxyViewer(Viewer):
         server_port : int
             Remote server state sync port
         """
+        # Initialize ViewerModel without creating a Window
+        super().__init__(**kwargs)
+        
         self.server_host = server_host
         self.server_port = server_port
         self._state_websocket = None
+        self._window: Optional['Window'] = None  # Will be set by launcher
+        self._connection_pending = False  # Flag for deferred connection
         
-        # CRITICAL: Two approaches to prevent Window creation:
-        
-        # Option A: Don't call super().__init__ at all
-        # Instead manually initialize only what we need
-        self._init_without_window()
-        
-        # Option B: Call super() with special flag (would require napari changes)
-        # super().__init__(create_window=False, **kwargs)
+        # Connect local events to forward to server
+        self.camera.events.center.connect(self._on_camera_change)
+        self.camera.events.zoom.connect(self._on_camera_change)
+        self.camera.events.angles.connect(self._on_camera_change)
+        self.dims.events.current_step.connect(self._on_dims_change)
+        self.dims.events.ndisplay.connect(self._on_dims_change)
         
         # Connect to server
         self._connect_to_server()
         
         logger.info(f"ProxyViewer initialized for {server_host}:{server_port}")
     
-    def _init_without_window(self):
-        """
-        Initialize viewer components without creating a Window.
-        
-        This manually sets up the minimal components needed for the
-        viewer to function as a proxy.
-        """
-        # Initialize base components that don't require rendering
-        self.layers = LayerList()
-        self.dims = Dims()
-        self.camera = Camera()
-        
-        # Set window to None explicitly
-        self._window = None
-        self._overlays = {}
-        
-        # Initialize events (needed for Qt connections)
-        from napari.utils.events import EmitterGroup
-        self.events = EmitterGroup(
-            source=self,
-            auto_connect=True,
-            status=None,
-            help=None,
-            title=None,
-            theme=None,
-            reset=None,
-        )
-        
-        # Connect local events to forward to server
-        self.camera.events.center.connect(self._on_camera_change)
-        self.camera.events.zoom.connect(self._on_camera_change)
-        self.dims.events.current_step.connect(self._on_dims_change)
-        
-        # Disable layer modifications
-        self.layers.events.disconnect()
-    
     def _connect_to_server(self):
         """Establish WebSocket connection to server."""
-        # Create asyncio task for connection
+        # Get or create qasync event loop (we require qasync)
         try:
             loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            app = QApplication.instance()
+            if app:
+                # Create qasync event loop for Qt/asyncio integration
+                loop = qasync.QEventLoop(app)
+                asyncio.set_event_loop(loop)
+            else:
+                # This shouldn't happen in normal usage
+                raise RuntimeError("No Qt application found - ProxyViewer requires Qt context")
         
         # Start connection in background
-        asyncio.create_task(self._maintain_connection())
+        try:
+            asyncio.create_task(self._maintain_connection())
+        except RuntimeError as e:
+            logger.error(f"Failed to create connection task: {e}")
+            # Set flag to retry later when event loop is ready
+            self._connection_pending = True
     
     async def _maintain_connection(self):
         """Maintain persistent connection to server."""
@@ -208,11 +197,18 @@ class ProxyViewer(Viewer):
     
     @property
     def window(self):
-        """Return None as we have no local window."""
+        """Return the window if set by launcher."""
         return self._window
     
+    @window.setter
+    def window(self, value):
+        """Allow launcher to set the window."""
+        self._window = value
+    
     def close(self):
-        """Close connection to server."""
+        """Close connection to server and window if exists."""
         if self._state_websocket:
             asyncio.create_task(self._state_websocket.close())
+        if self._window:
+            self._window.close()
         logger.info("ProxyViewer closed")
