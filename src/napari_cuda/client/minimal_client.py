@@ -61,6 +61,12 @@ class MinimalClient(QtCore.QObject):
         self.pixel_port = pixel_port
         self._decoder = av.codec.CodecContext.create('h264', 'r')  # default to H.264
         self._running = True
+        # Log a few header fields on startup for sanity (seq/flags/size)
+        try:
+            import os as _os
+            self._log_headers_remaining = int(_os.getenv('NAPARI_CUDA_LOG_HEADERS', '5'))
+        except Exception:
+            self._log_headers_remaining = 5
 
     async def run(self) -> None:
         # Launch both connections
@@ -79,12 +85,21 @@ class MinimalClient(QtCore.QObject):
                         if len(data) <= HEADER_STRUCT.size:
                             continue
                         header = parse_header(data[:HEADER_STRUCT.size])
+                        # Optional brief header logging for startup sanity
+                        if self._log_headers_remaining > 0:
+                            logger.info(
+                                "Pixel header: seq=%d flags=0x%02x size=%dx%d",
+                                header.seq, header.flags, header.width, header.height,
+                            )
+                            self._log_headers_remaining -= 1
                         payload = memoryview(data)[HEADER_STRUCT.size:]
                         # Wait for keyframe before feeding decoder to avoid mid-GOP starts
                         if not seen_keyframe:
                             if header.flags & 0x01:
                                 seen_keyframe = True
                             else:
+                                if self._log_headers_remaining > 0:
+                                    logger.info("Waiting for keyframe before decoding...")
                                 continue
                         # Decode payload
                         packet = av.Packet(bytes(payload))
