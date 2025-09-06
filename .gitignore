@@ -1,5 +1,6 @@
 docs
 tmp
+vendor/gl/
 # Byte-compiled / optimized / DLL files
 tools/vendored_modules.txt
 tools/matplotlib
@@ -76,6 +77,9 @@ docs/source/release/
 docs/source/releases.rst
 docs/build/
 docs/_tags
+
+# Environments
+.env
 
 # PyBuilder
 target/
@@ -179,3 +183,10 @@ src/napari/resources/icons/_themes/
 tools/perfmon/*/traces-*.json
 
 github_cache.sqlite
+
+# Project-specific artifacts
+benchmarks/
+egl_worker_results.json
+napari_cuda_perf_*.csv
+testdata/
+.env.hpc
