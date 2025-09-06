@@ -233,7 +233,8 @@ class EGLHeadlessServer:
         app = web.Application()
         async def handle_metrics(request):
             body = generate_latest(self.metrics.registry)
-            return web.Response(body=body, content_type=CONTENT_TYPE_LATEST)
+            # aiohttp treats content_type as media-type only; set full header explicitly
+            return web.Response(body=body, headers={'Content-Type': CONTENT_TYPE_LATEST})
         app.add_routes([web.get('/metrics', handle_metrics)])
         runner = web.AppRunner(app)
         await runner.setup()
