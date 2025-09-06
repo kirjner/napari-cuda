@@ -78,11 +78,11 @@ class EGLHeadlessServer:
             self._stop_worker()
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
-        def on_frame(pkt: Optional[bytes]) -> None:
+        def on_frame(pkt: Optional[bytes], flags: int) -> None:
             if not pkt:
                 return
             ts = time.time()
-            header = pack_header(self._seq, ts, self.width, self.height, self.cfg.codec, 0)
+            header = pack_header(self._seq, ts, self.width, self.height, self.cfg.codec, flags)
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             data = header + pkt
             try:
@@ -111,7 +111,7 @@ class EGLHeadlessServer:
                 next_t = time.perf_counter()
                 while not self._stop.is_set():
                     self._worker.apply_state(self._latest_state)
-                    timings, pkt = self._worker.capture_and_encode_packet()
+                    timings, pkt, flags = self._worker.capture_and_encode_packet()
                     # Observe timings (ms)
                     try:
                         self.metrics.observe_ms('napari_cuda_render_ms', timings.render_ms)
@@ -123,7 +123,7 @@ class EGLHeadlessServer:
                         self.metrics.observe_ms('napari_cuda_total_ms', timings.total_ms)
                     except Exception:
                         pass
-                    on_frame(pkt)
+                    on_frame(pkt, flags)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
                     if sleep > 0:
