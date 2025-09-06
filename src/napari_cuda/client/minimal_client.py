@@ -71,6 +71,7 @@ class MinimalClient(QtCore.QObject):
                 # Optional: keep a lightweight state WS for ping; don't fail if not available
                 state_task = asyncio.create_task(self._state_pinger(state_uri))
                 try:
+                    seen_keyframe = False
                     while self._running:
                         data = await pixel_ws.recv()
                         if not isinstance(data, (bytes, bytearray)):
@@ -79,6 +80,12 @@ class MinimalClient(QtCore.QObject):
                             continue
                         header = parse_header(data[:HEADER_STRUCT.size])
                         payload = memoryview(data)[HEADER_STRUCT.size:]
+                        # Wait for keyframe before feeding decoder to avoid mid-GOP starts
+                        if not seen_keyframe:
+                            if header.flags & 0x01:
+                                seen_keyframe = True
+                            else:
+                                continue
                         # Decode payload
                         packet = av.Packet(bytes(payload))
                         frames = self._decoder.decode(packet)
@@ -146,4 +153,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
