@@ -56,6 +56,13 @@ class EGLHeadlessServer:
         self._worker: Optional[EGLRendererWorker] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._latest_state = ServerSceneState()
+        # Optional bitstream dump for validation
+        try:
+            self._dump_remaining = int(os.getenv('NAPARI_CUDA_DUMP_BITSTREAM', '0'))
+        except Exception:
+            self._dump_remaining = 0
+        self._dump_dir = os.getenv('NAPARI_CUDA_DUMP_DIR', 'benchmarks/bitstreams')
+        self._dump_path: Optional[str] = None
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO,
@@ -81,6 +88,20 @@ class EGLHeadlessServer:
         def on_frame(pkt: Optional[bytes], flags: int) -> None:
             if not pkt:
                 return
+            # Optional payload dump (Annex B payload only)
+            if self._dump_remaining > 0:
+                try:
+                    os.makedirs(self._dump_dir, exist_ok=True)
+                    if not self._dump_path:
+                        ts = int(time.time())
+                        self._dump_path = os.path.join(self._dump_dir, f"dump_{self.width}x{self.height}_{ts}.h264")
+                    with open(self._dump_path, 'ab') as f:
+                        f.write(pkt)
+                    self._dump_remaining -= 1
+                    if self._dump_remaining == 0:
+                        logger.info("Bitstream dump complete: %s", self._dump_path)
+                except Exception as e:
+                    logger.debug("Bitstream dump error: %s", e)
             ts = time.time()
             header = pack_header(self._seq, ts, self.width, self.height, self.cfg.codec, flags)
             self._seq = (self._seq + 1) & 0xFFFFFFFF
