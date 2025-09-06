@@ -230,12 +230,25 @@ class EGLRendererWorker:
             'preset': 'P3',
             'bf': 0,
             'repeatspspps': 1,
+            'idrperiod': 60,
         }
         try:
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ABGR", usecpuinputbuffer=False, **kwargs)
         except Exception:
             # Fallback if kwargs unsupported by this binding version
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ABGR", usecpuinputbuffer=False)
+
+    def force_idr(self) -> None:
+        """Best-effort request to force next frame as IDR via Reconfigure."""
+        try:
+            if hasattr(self._encoder, 'GetEncodeReconfigureParams') and hasattr(self._encoder, 'Reconfigure'):
+                params = self._encoder.GetEncodeReconfigureParams()
+                # Some bindings expose forceIDR; ignore if not present
+                if hasattr(params, 'forceIDR'):
+                    setattr(params, 'forceIDR', 1)
+                self._encoder.Reconfigure(params)
+        except Exception as e:
+            logger.debug("force_idr not supported: %s", e)
 
     def render_frame(self, azimuth_deg: Optional[float] = None) -> None:
         if azimuth_deg is not None and hasattr(self.view, "camera"):

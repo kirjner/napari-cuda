@@ -132,6 +132,12 @@ class EGLHeadlessServer:
                 next_t = time.perf_counter()
                 while not self._stop.is_set():
                     self._worker.apply_state(self._latest_state)
+                    if self._request_idr:
+                        try:
+                            self._worker.force_idr()
+                        except Exception:
+                            pass
+                        self._request_idr = False
                     timings, pkt, flags = self._worker.capture_and_encode_packet()
                     # Observe timings (ms)
                     try:
@@ -219,6 +225,8 @@ class EGLHeadlessServer:
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
         self._update_client_gauges()
+        # Request an IDR for new client to speed up start-of-stream decode
+        self._request_idr = True
         try:
             await ws.wait_closed()
         finally:
