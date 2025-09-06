@@ -214,12 +214,6 @@ testing = [
     "napari[optional-base]",
 ]
 testing_extra = []
-
-# Lightweight dev/test dependencies (avoid pulling large stacks)
-dev = [
-    "pytest>=8.2",
-    "pytest-asyncio>=0.23.0",
-]
 # needed for gallery examples
 gallery = [
     "glasbey",
@@ -274,6 +268,8 @@ dev = [
     "tox",
     "tox-min-req",
     "napari[testing]",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23.0",
 ]
 build = [
     "ruff",
