@@ -167,6 +167,7 @@ video = [
 server = [
     "napari-cuda[streaming]",
     "napari-cuda[video]",
+    "napari-cuda[cuda]",  # include CUDA bindings by default on server
     "xvfbwrapper>=0.2.9 ; platform_system == 'Linux'",  # virtual display
     "uvloop>=0.19.0 ; platform_system != 'Windows'",  # faster event loop
     "prometheus-client>=0.20.0",
