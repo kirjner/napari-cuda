@@ -230,7 +230,7 @@ class EGLRendererWorker:
             'preset': 'P3',
             'bf': 0,
             'repeatspspps': 1,
-            'idrperiod': 60,
+            'idrperiod': 30,
         }
         try:
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ABGR", usecpuinputbuffer=False, **kwargs)

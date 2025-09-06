@@ -217,6 +217,9 @@ class EGLHeadlessServer:
                     )
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
+                elif t == 'request_keyframe':
+                    # Client explicitly requests an IDR; honor on next frame
+                    self._request_idr = True
         finally:
             try:
                 await ws.close()

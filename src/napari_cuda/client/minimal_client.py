@@ -75,7 +75,7 @@ class MinimalClient(QtCore.QObject):
         try:
             async with websockets.connect(pixel_uri, max_size=None) as pixel_ws:
                 # Optional: keep a lightweight state WS for ping; don't fail if not available
-                state_task = asyncio.create_task(self._state_pinger(state_uri))
+                state_task = asyncio.create_task(self._state_pinger(state_uri, kick_keyframe=True))
                 try:
                     seen_keyframe = False
                     while self._running:
@@ -114,9 +114,14 @@ class MinimalClient(QtCore.QObject):
         except Exception as e:
             logger.exception("Client error: %s", e)
 
-    async def _state_pinger(self, uri: str) -> None:
+    async def _state_pinger(self, uri: str, kick_keyframe: bool = False) -> None:
         try:
             async with websockets.connect(uri) as ws:
+                if kick_keyframe:
+                    try:
+                        await ws.send('{"type":"request_keyframe"}')
+                    except Exception:
+                        pass
                 while self._running:
                     await ws.send('{"type":"ping"}')
                     await asyncio.sleep(2.0)
