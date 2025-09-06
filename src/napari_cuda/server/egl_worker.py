@@ -16,7 +16,7 @@ import time
 import logging
 import ctypes
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional
 import threading
 
 import numpy as np
@@ -33,6 +33,7 @@ import pycuda.gl  # type: ignore
 from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
 import PyNvVideoCodec as pnvc  # type: ignore
+from .bitstream import pack_to_annexb, ParamCache
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +107,7 @@ class EGLRendererWorker:
         self._init_cuda_interop()
         self._init_encoder()
         # Cached parameter sets for robust streaming
-        self._cached_sps: Optional[bytes] = None
-        self._cached_pps: Optional[bytes] = None
-        self._cached_vps: Optional[bytes] = None
+        self._param_cache = ParamCache()
 
     def _init_egl(self) -> None:
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
@@ -424,7 +423,7 @@ class EGLRendererWorker:
         mapping.unmap()
         t_e0 = time.perf_counter()
         pkt_obj = self._encoder.Encode(self._torch_frame)
-        pkt, is_key = self._pack_to_annexb(pkt_obj)
+        pkt, is_key = pack_to_annexb(pkt_obj, self._param_cache)
         t_e1 = time.perf_counter()
         encode_ms = (t_e1 - t_e0) * 1000.0
         total_ms = (time.perf_counter() - t0) * 1000.0
@@ -433,117 +432,7 @@ class EGLRendererWorker:
         flags = 0x01 if is_key else 0
         return timings, (pkt if pkt else None), flags
 
-    def _pack_to_annexb(self, packets) -> Tuple[Optional[bytes], bool]:
-        """Normalize encoder output to Annex B and detect keyframe.
-
-        Accepts bytes or a list/tuple of bytes. Handles AVCC length-prefixed NALs.
-        Returns (payload bytes or None, is_keyframe).
-        """
-        if packets is None:
-            return None, False
-        chunks: List[bytes] = []
-        if isinstance(packets, (bytes, bytearray, memoryview)):
-            chunks = [bytes(packets)]
-        elif isinstance(packets, (list, tuple)):
-            for p in packets:
-                if p is None:
-                    continue
-                chunks.append(bytes(p))
-        else:
-            try:
-                chunks = [bytes(packets)]
-            except Exception:
-                return None, False
-
-        def is_annexb(buf: bytes) -> bool:
-            return buf.startswith(b"\x00\x00\x01") or buf.startswith(b"\x00\x00\x00\x01")
-
-        def parse_nals(buf: bytes) -> List[bytes]:
-            nals: List[bytes] = []
-            if not buf:
-                return nals
-            if is_annexb(buf):
-                i = 0
-                l = len(buf)
-                idx: List[int] = []
-                while i < l - 3:
-                    if buf[i:i+3] == b"\x00\x00\x01":
-                        idx.append(i); i += 3
-                    elif i < l - 4 and buf[i:i+4] == b"\x00\x00\x00\x01":
-                        idx.append(i); i += 4
-                    else:
-                        i += 1
-                if not idx:
-                    return [buf]
-                idx.append(l)
-                for a, b in zip(idx, idx[1:]):
-                    j = a
-                    while j < b and buf[j] == 0:
-                        j += 1
-                    if j < b and buf[j] == 1:
-                        j += 1
-                    nal = buf[j:b]
-                    if nal:
-                        nals.append(nal)
-                return nals
-            else:
-                # AVCC: 4-byte big-endian length prefixes
-                i = 0
-                l = len(buf)
-                while i + 4 <= l:
-                    ln = int.from_bytes(buf[i:i+4], 'big'); i += 4
-                    if ln <= 0 or i + ln > l:
-                        return [buf]
-                    nals.append(buf[i:i+ln]); i += ln
-                return nals if nals else [buf]
-
-        nal_units: List[bytes] = []
-        for c in chunks:
-            nal_units.extend(parse_nals(c))
-
-        def t264(b0: int) -> int: return b0 & 0x1F
-        def t265(b0: int) -> int: return (b0 >> 1) & 0x3F
-
-        is_key = False
-        saw_sps = saw_pps = saw_vps = False
-        for nal in nal_units:
-            if not nal:
-                continue
-            b0 = nal[0]
-            n264 = t264(b0)
-            n265 = t265(b0)
-            if n264 == 7:  # SPS
-                saw_sps = True; self._cached_sps = nal
-            elif n264 == 8:  # PPS
-                saw_pps = True; self._cached_pps = nal
-            elif n264 == 5:  # IDR
-                is_key = True
-            if n265 == 32:  # VPS
-                saw_vps = True; self._cached_vps = nal
-            elif n265 == 33:  # SPS
-                saw_sps = True; self._cached_sps = nal
-            elif n265 == 34:  # PPS
-                saw_pps = True; self._cached_pps = nal
-            elif n265 in (19, 20, 21):  # IDR/CRA
-                is_key = True
-
-        out: List[bytes] = []
-        if is_key:
-            if self._cached_vps and not saw_vps:
-                out.append(self._cached_vps)
-            if self._cached_sps and not saw_sps:
-                out.append(self._cached_sps)
-            if self._cached_pps and not saw_pps:
-                out.append(self._cached_pps)
-        out.extend(nal_units)
-        if not out:
-            return None, False
-        ba = bytearray()
-        first = True
-        for nal in out:
-            ba.extend(b"\x00\x00\x00\x01" if first else b"\x00\x00\x01"); first = False
-            ba.extend(nal)
-        return bytes(ba), is_key
+    # (packer is now provided by bitstream.py)
 
     @staticmethod
     def _torch_from_cupy(arr: cp.ndarray):
