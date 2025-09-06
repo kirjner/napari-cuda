@@ -360,7 +360,15 @@ class EGLRendererWorker:
         copy_ms = start_evt.time_till(end_evt)
         mapping.unmap()
         t_e0 = time.perf_counter()
-        pkt = self._encoder.Encode(self._torch_frame)
+        pkt_obj = self._encoder.Encode(self._torch_frame)
+        # PyNvVideoCodec may return a list of packets (e.g., SPS/PPS + frame)
+        if isinstance(pkt_obj, (list, tuple)):
+            try:
+                pkt = b"".join(bytes(p) for p in pkt_obj)
+            except Exception:
+                pkt = None
+        else:
+            pkt = pkt_obj
         t_e1 = time.perf_counter()
         encode_ms = (t_e1 - t_e0) * 1000.0
         total_ms = (time.perf_counter() - t0) * 1000.0
