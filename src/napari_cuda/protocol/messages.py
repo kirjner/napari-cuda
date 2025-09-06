@@ -85,7 +85,7 @@ class Command(StateMessage):
 class Response(StateMessage):
     """Generic response from server to client."""
     type: str
-    success: bool
+    success: bool = True
     payload: dict = None
     error: str = None
 

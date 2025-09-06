@@ -9,7 +9,7 @@ import logging
 import queue
 import threading
 import contextlib
-from qtpy.QtCore import QThread, pyqtSignal
+from qtpy.QtCore import QThread, Signal as pyqtSignal
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,11 @@ class CUDARenderThread(QThread):
         # CUDA context lock for thread safety
         self._cuda_lock = threading.RLock()
         
+        # EGL objects (if created)
+        self.egl_display = None
+        self.egl_context = None
+        self.egl_surface = None
+        
         logger.info("CUDARenderThread initialized")
     
     def run(self):
@@ -159,12 +164,7 @@ class CUDARenderThread(QThread):
         """Initialize OpenGL and CUDA contexts on this thread."""
         logger.info("Setting up OpenGL/CUDA contexts...")
         
-        # Make OpenGL context current on this thread
-        if self.gl_context:
-            self.gl_context.makeCurrent()
-            logger.info("OpenGL context made current")
-        
-        # Initialize CUDA
+        # Initialize CUDA first
         cuda.init()
         device_count = cuda.Device.count()
         logger.info(f"Found {device_count} CUDA devices")
@@ -178,14 +178,116 @@ class CUDARenderThread(QThread):
         
         logger.info(f"CUDA context created on device: {device.name()}")
         
-        # Enable OpenGL interop
-        import pycuda.gl
-        pycuda.gl.init()
+        # Try to use provided GL context, or create EGL context for headless
+        if self.gl_context:
+            try:
+                self.gl_context.makeCurrent()
+                logger.info("Qt OpenGL context made current")
+            except Exception as e:
+                logger.warning(f"Could not make Qt context current: {e}")
+                self.gl_context = None
         
-        logger.info("CUDA-OpenGL interop initialized")
+        if not self.gl_context:
+            # Create headless EGL context
+            logger.info("Creating headless EGL context...")
+            try:
+                import os
+                os.environ['PYOPENGL_PLATFORM'] = 'egl'
+                
+                from OpenGL import EGL
+                from OpenGL import GL
+                
+                # Get EGL display
+                egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
+                if egl_display == EGL.EGL_NO_DISPLAY:
+                    raise RuntimeError("Failed to get EGL display")
+                
+                # Initialize EGL
+                major = EGL.EGLint()
+                minor = EGL.EGLint()
+                if not EGL.eglInitialize(egl_display, major, minor):
+                    raise RuntimeError("Failed to initialize EGL")
+                
+                logger.info(f"EGL initialized: {major.value}.{minor.value}")
+                
+                # Choose config
+                config_attribs = [
+                    EGL.EGL_SURFACE_TYPE, EGL.EGL_PBUFFER_BIT,
+                    EGL.EGL_RENDERABLE_TYPE, EGL.EGL_OPENGL_BIT,
+                    EGL.EGL_RED_SIZE, 8,
+                    EGL.EGL_GREEN_SIZE, 8,
+                    EGL.EGL_BLUE_SIZE, 8,
+                    EGL.EGL_ALPHA_SIZE, 8,
+                    EGL.EGL_NONE
+                ]
+                
+                num_configs = EGL.EGLint()
+                configs = (EGL.EGLConfig * 1)()
+                if not EGL.eglChooseConfig(egl_display, config_attribs, configs, 1, num_configs):
+                    raise RuntimeError("Failed to choose EGL config")
+                
+                # Create context
+                EGL.eglBindAPI(EGL.EGL_OPENGL_API)
+                context_attribs = [EGL.EGL_NONE]
+                egl_context = EGL.eglCreateContext(egl_display, configs[0], EGL.EGL_NO_CONTEXT, context_attribs)
+                if egl_context == EGL.EGL_NO_CONTEXT:
+                    raise RuntimeError("Failed to create EGL context")
+                
+                # Create pbuffer surface
+                pbuffer_attribs = [
+                    EGL.EGL_WIDTH, 1920,
+                    EGL.EGL_HEIGHT, 1080,
+                    EGL.EGL_NONE
+                ]
+                egl_surface = EGL.eglCreatePbufferSurface(egl_display, configs[0], pbuffer_attribs)
+                if egl_surface == EGL.EGL_NO_SURFACE:
+                    raise RuntimeError("Failed to create EGL surface")
+                
+                # Make current
+                if not EGL.eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context):
+                    raise RuntimeError("Failed to make EGL context current")
+                
+                # Store EGL objects for cleanup
+                self.egl_display = egl_display
+                self.egl_context = egl_context
+                self.egl_surface = egl_surface
+                
+                logger.info("EGL context created and made current")
+                
+            except Exception as e:
+                logger.error(f"Failed to create EGL context: {e}")
+                raise
+        
+        # Enable OpenGL interop - should work now with valid GL context
+        try:
+            import pycuda.gl
+            pycuda.gl.init()
+            logger.info("CUDA-OpenGL interop initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize CUDA-GL interop: {e}")
+            raise
     
     def _setup_nvenc(self):
         """Initialize NVENC encoder."""
+        # Try PyNvVideoCodec first (NVIDIA's official Python bindings)
+        try:
+            from ..cuda.pynv_encoder import PyNvEncoder
+            
+            if PyNvEncoder.is_available():
+                self.nvenc_encoder = PyNvEncoder(
+                    width=1920,
+                    height=1080,
+                    fps=60,
+                    bitrate=10000000  # 10 Mbps
+                )
+                logger.info("PyNvVideoCodec NVENC encoder initialized")
+                return
+        except ImportError:
+            logger.debug("PyNvVideoCodec not available")
+        except Exception as e:
+            logger.warning(f"Failed to initialize PyNvVideoCodec: {e}")
+        
+        # Fallback: Try legacy NVENC wrapper if it exists
         try:
             from ..cuda.nvenc_wrapper import NVENCEncoder
             
@@ -196,10 +298,10 @@ class CUDARenderThread(QThread):
                 bitrate=10000000  # 10 Mbps
             )
             
-            logger.info("NVENC encoder initialized")
+            logger.info("Legacy NVENC encoder initialized")
             
         except ImportError:
-            logger.warning("NVENC wrapper not available, using fallback encoding")
+            logger.warning("No NVENC encoder available, using fallback encoding")
             self.nvenc_encoder = None
         except Exception as e:
             logger.error(f"Failed to initialize NVENC: {e}")
@@ -219,43 +321,73 @@ class CUDARenderThread(QThread):
         bytes
             Encoded H.264 frame
         """
+        import time
+        
         texture_id = request['texture_id']
         frame_num = request.get('frame_num', 0)
+        ts_request = request.get('ts_ns')
+        
+        # Track when request was dequeued
+        t_dequeue = time.perf_counter_ns()
         
         logger.debug(f"Capturing texture {texture_id} (frame {frame_num})")
         
         # Use thread safety for all CUDA operations
         with self._cuda_lock:
+            t_cuda_lock = time.perf_counter_ns()
+            
             with cuda_context_guard(self.cuda_context):
+                t_context_current = time.perf_counter_ns()
+                
                 # Register texture with CUDA if not already done
                 with self._texture_lock:
+                    t_texture_lock = time.perf_counter_ns()
+                    
                     if texture_id not in self.registered_textures:
                         try:
+                            t_register_start = time.perf_counter_ns()
                             self.registered_textures[texture_id] = RegisteredImage(
                                 int(texture_id),
                                 GL.GL_TEXTURE_2D,
                                 graphics_map_flags.READ_ONLY
                             )
+                            t_register_end = time.perf_counter_ns()
                             logger.debug(f"Registered texture {texture_id} with CUDA")
+                            
+                            # Track registration time
+                            if hasattr(self.pixel_stream, 'metrics'):
+                                ms = 1e-6
+                                self.pixel_stream.metrics.observe_ms(
+                                    'napari_cuda_register_texture_ms', 
+                                    (t_register_end - t_register_start) * ms
+                                )
                         except Exception as e:
                             logger.error(f"Failed to register texture: {e}")
                             return None
                     
                     # Get registered image
                     reg_image = self.registered_textures[texture_id]
+                    t_texture_unlock = time.perf_counter_ns()
                 
                 # Map texture to CUDA (outside texture lock but inside CUDA lock)
                 try:
-                    import time
-                    t0 = time.perf_counter_ns()
+                    t_map_start = time.perf_counter_ns()
                     reg_image.map()
+                    t_map_done = time.perf_counter_ns()
+                    
                     cuda_array = reg_image.get_mapped_array(0, 0)
-                    t1 = time.perf_counter_ns()
+                    t_array_get = time.perf_counter_ns()
                     
                     # Encode with NVENC
                     if self.nvenc_encoder:
-                        t2 = time.perf_counter_ns()
-                        encoded = self.nvenc_encoder.encode_surface(cuda_array)
+                        t_encode_start = time.perf_counter_ns()
+                        # Check if it's our PyNvEncoder
+                        if hasattr(self.nvenc_encoder, 'encode_cuda_array'):
+                            encoded = self.nvenc_encoder.encode_cuda_array(cuda_array)
+                        else:
+                            # Legacy encoder
+                            encoded = self.nvenc_encoder.encode_surface(cuda_array)
+                        t_encode_end = time.perf_counter_ns()
                     else:
                         # MVP fallback: copy to host and JPEG-encode
                         try:
@@ -263,47 +395,83 @@ class CUDARenderThread(QThread):
                             import cv2
 
                             # Query texture size from OpenGL
+                            t_gl_query_start = time.perf_counter_ns()
                             GL.glBindTexture(GL.GL_TEXTURE_2D, int(texture_id))
                             width = int(GL.glGetTexLevelParameteriv(GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_WIDTH))
                             height = int(GL.glGetTexLevelParameteriv(GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_HEIGHT))
+                            t_gl_query_end = time.perf_counter_ns()
 
                             # Allocate device buffer (assume GL_RGBA8 -> 4 channels)
+                            t_alloc_start = time.perf_counter_ns()
                             dev_frame = cp.empty((height, width, 4), dtype=cp.uint8)
+                            t_alloc_end = time.perf_counter_ns()
 
                             # Copy CUDA array -> device buffer
+                            t_memcpy_start = time.perf_counter_ns()
                             m = cuda.Memcpy2D()
                             m.set_src_array(cuda_array)
                             m.set_dst_device(int(dev_frame.data.ptr))
                             m.width_in_bytes = width * 4
                             m.height = height
                             m()
+                            t_memcpy_end = time.perf_counter_ns()
 
                             # Move to host and encode JPEG (best-effort color conversion)
-                            t2 = time.perf_counter_ns()
+                            t_encode_start = time.perf_counter_ns()
                             host_frame = cp.asnumpy(dev_frame)
+                            t_host_copy = time.perf_counter_ns()
+                            
                             try:
                                 bgr = cv2.cvtColor(host_frame, cv2.COLOR_RGBA2BGR)
                             except Exception:
                                 bgr = host_frame[..., :3]
                             ok, jpeg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                             encoded = jpeg.tobytes() if ok else None
+                            t_encode_end = time.perf_counter_ns()
+                            
+                            # Track fallback metrics
+                            if hasattr(self.pixel_stream, 'metrics'):
+                                ms = 1e-6
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_gl_query_ms', (t_gl_query_end - t_gl_query_start) * ms)
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_alloc_ms', (t_alloc_end - t_alloc_start) * ms)
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_memcpy_ms', (t_memcpy_end - t_memcpy_start) * ms)
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_host_copy_ms', (t_host_copy - t_encode_start) * ms)
                         except Exception as e:
                             logger.error(f"JPEG fallback failed: {e}")
                             # Last-resort placeholder to keep pipeline alive
                             encoded = b'FRAME_%d' % frame_num
+                            t_encode_end = time.perf_counter_ns()
                     
+                    t_unmap_start = time.perf_counter_ns()
                     reg_image.unmap()
-                    t3 = time.perf_counter_ns()
+                    t_unmap_end = time.perf_counter_ns()
 
-                    # metrics
+                    # Comprehensive metrics
                     try:
                         if hasattr(self.pixel_stream, 'metrics'):
                             ms = 1e-6
-                            self.pixel_stream.metrics.observe_ms('napari_cuda_capture_ms', (t1 - t0) * ms)
-                            self.pixel_stream.metrics.observe_ms('napari_cuda_encode_ms', (t3 - t2) * ms)
-                            ts_ns = request.get('ts_ns')
-                            if ts_ns is not None:
-                                self.pixel_stream.metrics.observe_ms('napari_cuda_end_to_end_ms', (t3 - ts_ns) * ms)
+                            
+                            # Queue wait time (if request timestamp available)
+                            if ts_request is not None:
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_queue_wait_ms', (t_dequeue - ts_request) * ms)
+                            
+                            # Lock acquisition times
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_cuda_lock_ms', (t_cuda_lock - t_dequeue) * ms)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_context_ms', (t_context_current - t_cuda_lock) * ms)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_texture_lock_ms', (t_texture_lock - t_context_current) * ms)
+                            
+                            # Core GPU operations
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_map_ms', (t_map_done - t_map_start) * ms)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_array_get_ms', (t_array_get - t_map_done) * ms)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_encode_ms', (t_encode_end - t_encode_start) * ms)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_unmap_ms', (t_unmap_end - t_unmap_start) * ms)
+                            
+                            # Total GPU time (map to unmap)
+                            self.pixel_stream.metrics.observe_ms('napari_cuda_total_gpu_ms', (t_unmap_end - t_map_start) * ms)
+                            
+                            # End-to-end time
+                            if ts_request is not None:
+                                self.pixel_stream.metrics.observe_ms('napari_cuda_end_to_end_ms', (t_unmap_end - ts_request) * ms)
                     except Exception:
                         pass
                     

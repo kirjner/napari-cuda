@@ -149,13 +149,13 @@ class HeadlessServer:
         # Register streaming layer factory after render thread exists
         self._register_streaming_layer_factory()
         
-        # Start WebSocket servers and metrics endpoint as coroutines
-        asyncio.create_task(self._start_websocket_servers())
-        asyncio.create_task(self._start_metrics_server())
-        
         # Run unified Qt/asyncio event loop
         logger.info("Starting unified Qt/asyncio event loop...")
         with loop:
+            # Schedule coroutines to run once loop starts
+            loop.create_task(self._start_websocket_servers())
+            loop.create_task(self._start_metrics_server())
+            
             loop.run_forever()
         
         # Cleanup on exit
@@ -258,7 +258,7 @@ class HeadlessServer:
 
         async def handle_metrics(request):
             body = generate_latest(self.metrics.registry)
-            return web.Response(body=body, content_type=CONTENT_TYPE_LATEST)
+            return web.Response(body=body, content_type='text/plain')
 
         app.add_routes([web.get('/metrics', handle_metrics)])
         runner = web.AppRunner(app)
@@ -267,7 +267,7 @@ class HeadlessServer:
         await site.start()
         logger.info(f"Metrics endpoint started on {self.host}:{self.metrics_port}/metrics")
     
-    async def _handle_state_client(self, websocket, path):
+    async def _handle_state_client(self, websocket):
         """Handle state synchronization client."""
         logger.info(f"State client connected: {websocket.remote_address}")
         self.state_clients.add(websocket)
@@ -285,7 +285,7 @@ class HeadlessServer:
             self.state_clients.discard(websocket)
             self.metrics.set('napari_cuda_state_clients', float(len(self.state_clients)))
     
-    async def _handle_pixel_client(self, websocket, path):
+    async def _handle_pixel_client(self, websocket):
         """Handle pixel stream client."""
         logger.info(f"Pixel client connected: {websocket.remote_address}")
         self.pixel_clients.add(websocket)
@@ -408,8 +408,8 @@ def main():
     
     parser.add_argument(
         '--host',
-        default=os.getenv('NAPARI_CUDA_HOST', '127.0.0.1'),
-        help='Host address for WebSocket servers (default: 127.0.0.1)'
+        default=os.getenv('NAPARI_CUDA_HOST', '0.0.0.0'),
+        help='Host address for WebSocket servers (default: 0.0.0.0 for HPC access)'
     )
     
     parser.add_argument(
@@ -445,6 +445,19 @@ def main():
         help='Enable debug logging'
     )
     
+    parser.add_argument(
+        '--perf',
+        action='store_true',
+        help='Enable real-time performance monitoring in terminal'
+    )
+    
+    parser.add_argument(
+        '--perf-interval',
+        type=float,
+        default=1.0,
+        help='Performance monitor update interval in seconds (default: 1.0)'
+    )
+    
     args = parser.parse_args()
     
     # Configure logging
@@ -464,11 +477,30 @@ def main():
         enable_cuda=not args.no_cuda
     )
     
+    # Start performance monitor if requested
+    perf_monitor = None
+    if args.perf:
+        from .perf_monitor import PerfMonitor
+        
+        # Create log file with timestamp
+        import time
+        log_file = f"napari_cuda_perf_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        perf_monitor = PerfMonitor(
+            server.metrics, 
+            update_interval=args.perf_interval,
+            log_file=log_file
+        )
+        logger.info(f"Starting performance monitor (logging to {log_file})...")
+        perf_monitor.start()
+    
     try:
         server.start()
     except KeyboardInterrupt:
         logger.info("Shutdown requested via Ctrl+C")
     finally:
+        if perf_monitor:
+            perf_monitor.stop()
         server.stop()
 
 

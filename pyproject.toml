@@ -144,8 +144,8 @@ all_optional = [
 # CUDA Python bindings - requires system CUDA runtime
 cuda = [
     "pycuda>=2022.1",
-    # CuPy version must be installed based on system CUDA version
-    # See setup_hpc.sh for dynamic installation
+    "cupy-cuda12x>=12.0.0",  # CuPy for CUDA 12.x (matches system CUDA 12.4)
+    "pynvvideocodec>=2.0.0",  # NVIDIA's official video codec SDK for NVENC
 ]
 
 # Streaming and networking

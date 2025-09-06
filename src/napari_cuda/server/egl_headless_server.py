@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import Optional, Set
 
 import websockets
+from aiohttp import web
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .egl_worker import EGLRendererWorker, ServerSceneState
 from .metrics import Metrics
@@ -63,6 +65,7 @@ class EGLHeadlessServer:
         self._start_worker(loop)
         state_server = await websockets.serve(self._handle_state, self.host, self.state_port)
         pixel_server = await websockets.serve(self._handle_pixel, self.host, self.pixel_port)
+        metrics_server = await self._start_metrics_server()
         logger.info("WS listening on %s:%d (state), %s:%d (pixel)", self.host, self.state_port, self.host, self.pixel_port)
         broadcaster = asyncio.create_task(self._broadcast_loop())
         try:
@@ -71,6 +74,7 @@ class EGLHeadlessServer:
             broadcaster.cancel()
             state_server.close(); await state_server.wait_closed()
             pixel_server.close(); await pixel_server.wait_closed()
+            await self._stop_metrics_server(metrics_server)
             self._stop_worker()
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -83,11 +87,22 @@ class EGLHeadlessServer:
             data = header + pkt
             try:
                 loop.call_soon_threadsafe(self._frame_q.put_nowait, data)
+                # Metrics: count and bytes
+                try:
+                    self.metrics.inc('napari_cuda_frames_total')
+                    self.metrics.inc('napari_cuda_bytes_total', len(pkt))
+                    self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
+                except Exception:
+                    pass
             except asyncio.QueueFull:
                 try:
                     loop.call_soon_threadsafe(self._drain_and_put, data)
                 except Exception as e:
                     logger.debug("Failed to drain and enqueue frame: %s", e)
+                try:
+                    self.metrics.inc('napari_cuda_frames_dropped')
+                except Exception:
+                    pass
 
         def worker_loop() -> None:
             try:
@@ -97,6 +112,17 @@ class EGLHeadlessServer:
                 while not self._stop.is_set():
                     self._worker.apply_state(self._latest_state)
                     timings, pkt = self._worker.capture_and_encode_packet()
+                    # Observe timings (ms)
+                    try:
+                        self.metrics.observe_ms('napari_cuda_render_ms', timings.render_ms)
+                        if timings.blit_gpu_ns is not None:
+                            self.metrics.observe_ms('napari_cuda_capture_blit_ms', timings.blit_gpu_ns / 1e6)
+                        self.metrics.observe_ms('napari_cuda_map_ms', timings.map_ms)
+                        self.metrics.observe_ms('napari_cuda_copy_ms', timings.copy_ms)
+                        self.metrics.observe_ms('napari_cuda_encode_ms', timings.encode_ms)
+                        self.metrics.observe_ms('napari_cuda_total_ms', timings.total_ms)
+                    except Exception:
+                        pass
                     on_frame(pkt)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
@@ -135,6 +161,7 @@ class EGLHeadlessServer:
     async def _handle_state(self, ws: websockets.WebSocketServerProtocol):
         self.metrics.inc('napari_cuda_state_connects')
         try:
+            self._update_client_gauges()
             async for msg in ws:
                 try:
                     data = json.loads(msg)
@@ -166,13 +193,16 @@ class EGLHeadlessServer:
                 await ws.close()
             except Exception as e:
                 logger.debug("State WS close error: %s", e)
+            self._update_client_gauges()
 
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
+        self._update_client_gauges()
         try:
             await ws.wait_closed()
         finally:
             self._clients.discard(ws)
+            self._update_client_gauges()
 
     async def _broadcast_loop(self) -> None:
         while True:
@@ -191,6 +221,32 @@ class EGLHeadlessServer:
             except Exception as e2:
                 logger.debug("Pixel WS close error: %s", e2)
             self._clients.discard(ws)
+
+    def _update_client_gauges(self) -> None:
+        try:
+            self.metrics.set('napari_cuda_pixel_clients', float(len(self._clients)))
+            # We could track state clients separately if desired; here we reuse pixel_clients for demo
+        except Exception:
+            pass
+
+    async def _start_metrics_server(self):
+        app = web.Application()
+        async def handle_metrics(request):
+            body = generate_latest(self.metrics.registry)
+            return web.Response(body=body, content_type=CONTENT_TYPE_LATEST)
+        app.add_routes([web.get('/metrics', handle_metrics)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, int(os.getenv('NAPARI_CUDA_METRICS_PORT', '8083')))
+        await site.start()
+        logger.info("Metrics endpoint started on %s:%s/metrics", self.host, os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'))
+        return runner
+
+    async def _stop_metrics_server(self, runner: web.AppRunner):
+        try:
+            await runner.cleanup()
+        except Exception as e:
+            logger.debug("Metrics server cleanup error: %s", e)
 
 
 def main() -> None:
