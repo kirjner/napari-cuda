@@ -63,6 +63,8 @@ class EGLHeadlessServer:
             self._dump_remaining = 0
         self._dump_dir = os.getenv('NAPARI_CUDA_DUMP_DIR', 'benchmarks/bitstreams')
         self._dump_path: Optional[str] = None
+        # IDR request flag (set on pixel client connect)
+        self._request_idr = False
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO,
