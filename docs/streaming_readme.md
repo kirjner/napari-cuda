@@ -33,6 +33,7 @@ Client
 - Recommendations for 2D demos
   - Use low-frequency or structured 2D patterns (gradient, color bars, checkerboard) or real image data rather than random noise.
   - Select pattern via `NAPARI_CUDA_2D_PATTERN=gradient|bars|checker|noise` (default: `gradient`).
+  - To show a custom image (e.g., a cat), set `NAPARI_CUDA_2D_PATTERN=image` and provide `NAPARI_CUDA_2D_IMAGE=/path/to/your.png`.
   - If random/noisy 2D inputs are important, consider slightly higher bitrate or a higher-quality preset.
   - Keep YUV444 when color fidelity is important; NV12 (4:2:0) is fine for most content and typically compresses more efficiently, but with subsampled chroma.
 
