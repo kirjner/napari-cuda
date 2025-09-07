@@ -116,28 +116,30 @@ class EGLHeadlessServer:
             header = self._pack_header(self._seq, ts, self.width, self.height, self.cfg.codec, flags)
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             data = header + pkt
-            try:
-                loop.call_soon_threadsafe(self._frame_q.put_nowait, data)
-                # Metrics: count and bytes
+            # Enqueue via callback that handles QueueFull inside the event loop thread
+            def _enqueue():
                 try:
-                    self.metrics.inc('napari_cuda_frames_total')
-                    self.metrics.inc('napari_cuda_bytes_total', len(pkt))
-                    self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
-                    if flags & 0x01:
-                        self.metrics.inc('napari_cuda_keyframes_total')
-                        self._last_key_seq = (self._seq - 1) & 0xFFFFFFFF
-                        self._last_key_ts = ts
-                except Exception:
-                    pass
-            except asyncio.QueueFull:
-                try:
-                    loop.call_soon_threadsafe(self._drain_and_put, data)
-                except Exception as e:
-                    logger.debug("Failed to drain and enqueue frame: %s", e)
-                try:
-                    self.metrics.inc('napari_cuda_frames_dropped')
-                except Exception:
-                    pass
+                    self._frame_q.put_nowait(data)
+                    try:
+                        self.metrics.inc('napari_cuda_frames_total')
+                        self.metrics.inc('napari_cuda_bytes_total', len(pkt))
+                        self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
+                        if flags & 0x01:
+                            self.metrics.inc('napari_cuda_keyframes_total')
+                            self._last_key_seq = (self._seq - 1) & 0xFFFFFFFF
+                            self._last_key_ts = ts
+                    except Exception:
+                        pass
+                except asyncio.QueueFull:
+                    try:
+                        self._drain_and_put(data)
+                        try:
+                            self.metrics.inc('napari_cuda_frames_dropped')
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.debug("Failed to drain and enqueue frame: %s", e)
+            loop.call_soon_threadsafe(_enqueue)
 
         def worker_loop() -> None:
             try:
