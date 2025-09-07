@@ -61,8 +61,6 @@ class EGLHeadlessServer:
         self._worker: Optional[EGLRendererWorker] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._latest_state = ServerSceneState()
-        # Last advertised header color to avoid spamming logs
-        self._last_color_reserved: Optional[int] = None
         # Optional bitstream dump for validation
         try:
             self._dump_remaining = int(os.getenv('NAPARI_CUDA_DUMP_BITSTREAM', '0'))
@@ -113,7 +111,7 @@ class EGLHeadlessServer:
                 except Exception as e:
                     logger.debug("Bitstream dump error: %s", e)
             ts = time.time()
-            header = self._pack_header(self._seq, ts, self.width, self.height, self.cfg.codec, flags)
+            header = struct.pack('!IdIIBBH', self._seq, ts, self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             data = header + pkt
             # Enqueue via callback that handles QueueFull inside the event loop thread
@@ -191,37 +189,7 @@ class EGLHeadlessServer:
         self._worker_thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
         self._worker_thread.start()
 
-    def _pack_color_reserved(self) -> int:
-        """Pack color hints into the 16-bit reserved field of the header.
-
-        Layout: [15..10 unused][9..8 chroma][7..4 range][3..0 space]
-        - space: 0=unspec, 1=BT601, 2=BT709
-        - range: 0=unspec, 1=limited(MPEG), 2=full(JPEG)
-        - chroma: 0=unspec, 1=NV12(420), 2=YUV444, 3=RGB
-        Defaults assume H.264 default chroma (420/NV12) and HD matrix (BT709) with limited range.
-        Values are selectable via env overrides for development.
-        """
-        space_map = {'UNSPEC': 0, 'BT601': 1, 'BT_601': 1, '601': 1, 'BT709': 2, 'BT_709': 2, '709': 2}
-        range_map = {'UNSPEC': 0, 'LIMITED': 1, 'MPEG': 1, 'FULL': 2, 'JPEG': 2}
-        chroma_map = {'UNSPEC': 0, 'NV12': 1, '420': 1, 'YUV444': 2, '444': 2, 'RGB': 3}
-        space_s = os.getenv('NAPARI_CUDA_HEADER_COLOR_SPACE', 'BT709').upper()
-        range_s = os.getenv('NAPARI_CUDA_HEADER_COLOR_RANGE', 'LIMITED').upper()
-        chroma_s = os.getenv('NAPARI_CUDA_HEADER_CHROMA', 'NV12').upper()
-        space = space_map.get(space_s, 2)
-        rng = range_map.get(range_s, 1)
-        chroma = chroma_map.get(chroma_s, 1)
-        reserved = ((chroma & 0x3) << 8) | ((rng & 0xF) << 4) | (space & 0xF)
-        if self._last_color_reserved != reserved:
-            self._last_color_reserved = reserved
-            try:
-                logger.info("Header color hints: space=%s(%d) range=%s(%d) chroma=%s(%d)", space_s, space, range_s, rng, chroma_s, chroma)
-            except Exception as e:
-                logger.debug("Header color hints log failed: %s", e)
-        return reserved
-
-    def _pack_header(self, seq: int, ts: float, w: int, h: int, codec: int, flags: int) -> bytes:
-        reserved = self._pack_color_reserved()
-        return struct.pack('!IdIIBBH', seq, ts, w, h, codec & 0xFF, flags & 0xFF, reserved & 0xFFFF)
+    # No per-frame header color hints; reserved set to 0
 
     def _stop_worker(self) -> None:
         self._stop.set()
