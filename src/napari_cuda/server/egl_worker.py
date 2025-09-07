@@ -35,6 +35,7 @@ from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
 import PyNvVideoCodec as pnvc  # type: ignore
 from .bitstream import pack_to_annexb, ParamCache
+from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
 
 logger = logging.getLogger(__name__)
@@ -220,56 +221,7 @@ class EGLRendererWorker:
         else:
             # 2D image: orthographic view that fills the frame (no trapezoid)
             view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            # Generate a structured test pattern instead of random noise to avoid
-            # blocky artifacts with H.264 on high-entropy inputs.
-            pat = os.getenv('NAPARI_CUDA_2D_PATTERN', 'gradient').lower()
-            H, W = self.height, self.width
-            if pat == 'bars':
-                # Simple horizontal color bars (8 colors)
-                colors = [
-                    (255, 255, 255),  # white
-                    (255, 255,   0),  # yellow
-                    (  0, 255, 255),  # cyan
-                    (  0, 255,   0),  # green
-                    (255,   0, 255),  # magenta
-                    (255,   0,   0),  # red
-                    (  0,   0, 255),  # blue
-                    ( 32,  32,  32),  # dark gray
-                ]
-                image = np.zeros((H, W, 4), dtype=np.uint8)
-                bw = max(1, W // len(colors))
-                for i, (r, g, b) in enumerate(colors):
-                    x0 = i * bw
-                    x1 = W if i == len(colors) - 1 else (i + 1) * bw
-                    image[:, x0:x1, 0] = r
-                    image[:, x0:x1, 1] = g
-                    image[:, x0:x1, 2] = b
-                image[..., 3] = 255
-            elif pat == 'checker':
-                # Checkerboard pattern
-                tile = 32
-                yy, xx = np.mgrid[0:H, 0:W]
-                check = (((yy // tile) + (xx // tile)) % 2).astype(np.uint8)
-                image = np.zeros((H, W, 4), dtype=np.uint8)
-                image[..., 0] = np.where(check == 1, 220, 50)
-                image[..., 1] = np.where(check == 1, 220, 50)
-                image[..., 2] = np.where(check == 1, 220, 50)
-                image[..., 3] = 255
-            elif pat == 'noise':
-                # Fallback: random noise (not recommended for streaming demos)
-                image = np.random.randint(0, 255, (H, W, 4), dtype=np.uint8)
-            else:
-                # Default gradient: horizontal RGB ramps, vertical luminance ramp
-                x = np.linspace(0, 1, W, dtype=np.float32)
-                y = np.linspace(0, 1, H, dtype=np.float32)[:, None]
-                r = x[None, :]
-                g = 1.0 - x[None, :]
-                b = 0.5 * np.ones_like(r)
-                l = y  # luminance ramp
-                R = np.clip((0.5 * r + 0.5 * l) * 255.0, 0, 255).astype(np.uint8)
-                G = np.clip((0.5 * g + 0.5 * l) * 255.0, 0, 255).astype(np.uint8)
-                B = np.clip((0.5 * b + 0.5 * l) * 255.0, 0, 255).astype(np.uint8)
-                image = np.stack([R, G, B, np.full((H, W), 255, dtype=np.uint8)], axis=-1)
+            image = make_rgba_image(self.width, self.height)
             visual = scene.visuals.Image(image, parent=view.scene)
             # Ensure the full image extents are visible without perspective distortion
             try:
