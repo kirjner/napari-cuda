@@ -23,6 +23,9 @@ from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
+# Cache last advertised color hints to avoid logging every frame
+_LAST_COLOR_RESERVED: int | None = None
+
 
 @dataclass
 class EncodeConfig:
@@ -73,10 +76,14 @@ def _pack_color_reserved() -> int:
     rng = range_map.get(range_s, 1)
     chroma = chroma_map.get(chroma_s, 1)
     reserved = ((chroma & 0x3) << 8) | ((rng & 0xF) << 4) | (space & 0xF)
-    try:
-        logger.info("Header color hints: space=%s(%d) range=%s(%d) chroma=%s(%d)", space_s, space, range_s, rng, chroma_s, chroma)
-    except Exception as e:
-        logger.debug("Header color hints log failed: %s", e)
+    # Log only when value changes to avoid per-frame spam
+    global _LAST_COLOR_RESERVED
+    if _LAST_COLOR_RESERVED != reserved:
+        _LAST_COLOR_RESERVED = reserved
+        try:
+            logger.info("Header color hints: space=%s(%d) range=%s(%d) chroma=%s(%d)", space_s, space, range_s, rng, chroma_s, chroma)
+        except Exception as e:
+            logger.debug("Header color hints log failed: %s", e)
     return reserved
 
 
