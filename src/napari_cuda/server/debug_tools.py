@@ -38,8 +38,11 @@ class DebugConfig:
 
     @staticmethod
     def from_env() -> "DebugConfig":
-        frames_s = os.getenv("NAPARI_CUDA_DEBUG_FRAMES", "0")
-        out_dir = os.getenv("NAPARI_CUDA_DUMP_DIR", "benchmarks/frames")
+        # Single switch: NAPARI_CUDA_DEBUG=1 enables dumps.
+        # Optional: NAPARI_CUDA_DEBUG_FRAMES (default 3), NAPARI_CUDA_DUMP_DIR.
+        enabled = os.getenv("NAPARI_CUDA_DEBUG", "0") in ("1", "true", "TRUE")
+        frames_s = os.getenv("NAPARI_CUDA_DEBUG_FRAMES", "3") if enabled else "0"
+        out_dir = os.getenv("NAPARI_CUDA_DUMP_DIR", "logs/napari_cuda_frames")
         flip_s = os.getenv("NAPARI_CUDA_DEBUG_FLIP_CUDA", "0")
         try:
             frames = int(frames_s)
@@ -56,7 +59,7 @@ class DebugConfig:
         except Exception:
             have_iio = False
         return DebugConfig(
-            enabled=frames > 0,
+            enabled=enabled and frames > 0,
             frames_remaining=max(0, frames),
             out_dir=out_dir,
             flip_cuda_for_view=flip,
@@ -87,7 +90,6 @@ class DebugDumper:
     def ensure_out_dir(self) -> None:
         try:
             os.makedirs(self.cfg.out_dir, exist_ok=True)
-            logger.info("Debug dumps to: %s", self.cfg.out_dir)
         except Exception as e:
             logger.warning("Failed to create debug out_dir %s: %s", self.cfg.out_dir, e)
 

@@ -111,13 +111,7 @@ class StreamingCanvas(VispyCanvas):
                         if isinstance(message, bytes):
                             if len(message) > HEADER_STRUCT.size:
                                 # Optionally log a few headers for sanity
-                                if not hasattr(self, '_logged_headers'):
-                                    try:
-                                        seq, ts, w, h, codec, flags, _ = HEADER_STRUCT.unpack_from(message, 0)
-                                        logger.info(f"Pixel header: seq={seq} flags=0x{flags:02x} size={w}x{h}")
-                                    except Exception:
-                                        pass
-                                    setattr(self, '_logged_headers', True)
+                                # Strip header; no per-frame header logs
                                 payload = memoryview(message)[HEADER_STRUCT.size:]
                             else:
                                 payload = message
@@ -149,27 +143,14 @@ class StreamingCanvas(VispyCanvas):
                     except Exception:
                         pf = 'rgb24'
                     self.pixfmt = pf if pf in {'rgb24', 'bgr24'} else 'rgb24'
-                    try:
-                        logger.info("Client(PyAV) env: NAPARI_CUDA_CLIENT_PIXEL_FMT=%s, NAPARI_CUDA_CLIENT_SWAP_RB=%s",
-                                    self.pixfmt, str(int(self.swap_rb)))
-                    except Exception:
-                        pass
+                    # Reduce logging noise
 
                 def decode(self, data):
                     packet = av.Packet(data)
                     frames = self.codec.decode(packet)
                     for frame in frames:
                         # Log frame color metadata once if available
-                        if not hasattr(self, '_logged_colorspace'):
-                            try:
-                                cs = getattr(frame, 'color_space', None)
-                                cr = getattr(frame, 'color_range', None)
-                                cp = getattr(frame, 'color_primaries', None)
-                                ct = getattr(frame, 'color_trc', None)
-                                logger.info("Decoder frame color: space=%s range=%s primaries=%s trc=%s", cs, cr, cp, ct)
-                            except Exception:
-                                pass
-                            setattr(self, '_logged_colorspace', True)
+                        # No color metadata logs
                         arr = frame.to_ndarray(format=self.pixfmt)
                         # Ensure the GL texture sees RGB ordering
                         if self.pixfmt == 'bgr24':
@@ -187,7 +168,6 @@ class StreamingCanvas(VispyCanvas):
                     return None
             
             self.decoder = PyAVDecoder()
-            logger.info("Using PyAV decoder")
             
         except ImportError:
             # Fallback to OpenCV

@@ -140,11 +140,11 @@ class EGLRendererWorker:
         # Log format/size once for clarity
         try:
             logger.info(
-                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=ARGB, fps=%d, animate=%s",
-                self.width, self.height, self.fps, self._animate,
+                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s",
+                self.width, self.height, getattr(self, '_enc_input_fmt', 'unknown'), self.fps, self._animate,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Init info log failed: %s", e)
 
     def _init_egl(self) -> None:
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
@@ -304,18 +304,12 @@ class EGLRendererWorker:
                 logger.debug("Odd-dimension warn log failed: %s", e)
 
     def _init_encoder(self) -> None:
-        # Allow experimenting with encoder input format to diagnose channel order issues.
-        # Supported by PyNvVideoCodec: ARGB, ABGR (among others). Default: ARGB.
-        self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'ARGB').upper()
-        if self._enc_input_fmt not in {'ARGB', 'ABGR', 'YUV444'}:
-            bad = self._enc_input_fmt
-            self._enc_input_fmt = 'ARGB'
-            try:
-                logger.warning("Invalid NAPARI_CUDA_ENCODER_INPUT_FMT=%r; defaulting to %s", bad, self._enc_input_fmt)
-            except Exception as e:
-                logger.debug("Encoder fmt warning log failed: %s", e)
+        # Encoder input format: YUV444 by default for correct colors. (Can override via env if needed.)
+        self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'YUV444').upper()
+        if self._enc_input_fmt not in {'YUV444'}:
+            self._enc_input_fmt = 'YUV444'
         try:
-            logger.info("Encoder input format selected via env: NAPARI_CUDA_ENCODER_INPUT_FMT=%s", self._enc_input_fmt)
+            logger.info("Encoder input format: %s", self._enc_input_fmt)
         except Exception as e:
             logger.debug("Encoder fmt info log failed: %s", e)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
@@ -568,64 +562,27 @@ class EGLRendererWorker:
                 os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as e:
                 logger.debug("Pre-encode raw dump failed: %s", e)
-        # Convert RGBA (GL) -> encoder input (ARGB/ABGR/YUV444) on GPU
+        # Convert RGBA (GL) -> YUV444 planar (BT.709 limited) on GPU
         src = self._torch_frame
-        enc_fmt = getattr(self, '_enc_input_fmt', 'ARGB')
-        if enc_fmt in ('ARGB', 'ABGR'):
-            dst = self._torch_frame_argb
-            if dst is None:
-                dst = torch.empty_like(src)
-            try:
-                # Log once on first conversion to confirm branch
-                if not hasattr(self, '_logged_swizzle'):
-                    logger.info("Pre-encode swizzle: RGBA -> %s", enc_fmt)
-                    setattr(self, '_logged_swizzle', True)
-                # One-time quick per-channel mean to validate mapping visually
-                if not hasattr(self, '_logged_channel_means'):
-                    means_rgba = [float(src[..., i].float().mean().item()) for i in range(4)]
-                    logger.info("Source RGBA means: R=%.1f G=%.1f B=%.1f A=%.1f",
-                                means_rgba[0], means_rgba[1], means_rgba[2], means_rgba[3])
-                if enc_fmt == 'ARGB':
-                    # A,R,G,B
-                    dst[..., 0].copy_(src[..., 3])
-                    dst[..., 1:4].copy_(src[..., 0:3])
-                else:
-                    # ABGR: A,B,G,R
-                    dst[..., 0].copy_(src[..., 3])
-                    dst[..., 1].copy_(src[..., 2])
-                    dst[..., 2].copy_(src[..., 1])
-                    dst[..., 3].copy_(src[..., 0])
-                if not hasattr(self, '_logged_channel_means'):
-                    means_argbx = [float(dst[..., i].float().mean().item()) for i in range(4)]
-                    logger.info("Encoder %s means: A=%.1f C1=%.1f C2=%.1f C3=%.1f",
-                                enc_fmt, means_argbx[0], means_argbx[1], means_argbx[2], means_argbx[3])
-                    setattr(self, '_logged_channel_means', True)
-            except Exception as e:
-                logger.debug("Swizzle to %s failed, using view(): %s", enc_fmt, e)
-                if enc_fmt == 'ARGB':
-                    dst = src[..., [3, 0, 1, 2]]
-                else:
-                    dst = src[..., [3, 2, 1, 0]]
-        else:
-            # YUV444: compute BT.709 limited-range on device
-            try:
-                if not hasattr(self, '_logged_swizzle'):
-                    logger.info("Pre-encode swizzle: RGBA -> YUV444 (BT709 LIMITED)")
-                    setattr(self, '_logged_swizzle', True)
-                r = src[..., 0].float() / 255.0
-                g = src[..., 1].float() / 255.0
-                b = src[..., 2].float() / 255.0
-                y_n = 0.2126 * r + 0.7152 * g + 0.0722 * b
-                y = torch.clamp(16.0 + 219.0 * y_n, 0.0, 255.0)
-                cb = torch.clamp(128.0 + 224.0 * (b - y_n) / 1.8556, 0.0, 255.0)
-                cr = torch.clamp(128.0 + 224.0 * (r - y_n) / 1.5748, 0.0, 255.0)
-                dst = torch.empty((self.height, self.width, 3), dtype=torch.uint8, device=src.device)
-                dst[..., 0] = y.to(torch.uint8)
-                dst[..., 1] = cb.to(torch.uint8)
-                dst[..., 2] = cr.to(torch.uint8)
-            except Exception as e:
-                logger.exception("YUV444 conversion failed: %s", e)
-                dst = src[..., [3, 0, 1, 2]]
+        try:
+            if not hasattr(self, '_logged_swizzle'):
+                logger.info("Pre-encode swizzle: RGBA -> YUV444 (BT709 LIMITED, planar)")
+                setattr(self, '_logged_swizzle', True)
+            r = src[..., 0].float() / 255.0
+            g = src[..., 1].float() / 255.0
+            b = src[..., 2].float() / 255.0
+            y_n = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            y = torch.clamp(16.0 + 219.0 * y_n, 0.0, 255.0)
+            cb = torch.clamp(128.0 + 224.0 * (b - y_n) / 1.8556, 0.0, 255.0)
+            cr = torch.clamp(128.0 + 224.0 * (r - y_n) / 1.5748, 0.0, 255.0)
+            H, W = self.height, self.width
+            dst = torch.empty((H * 3, W), dtype=torch.uint8, device=src.device)
+            dst[0:H, :] = y.to(torch.uint8)
+            dst[H:2*H, :] = cb.to(torch.uint8)
+            dst[2*H:3*H, :] = cr.to(torch.uint8)
+        except Exception as e:
+            logger.exception("YUV444 conversion failed: %s", e)
+            dst = src[..., [3, 0, 1, 2]]
         with self._enc_lock:
             enc = self._encoder
         if enc is None:

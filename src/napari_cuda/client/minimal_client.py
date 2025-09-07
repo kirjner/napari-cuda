@@ -108,8 +108,7 @@ class MinimalClient(QtCore.QObject):
                             if header.flags & 0x01:
                                 seen_keyframe = True
                             else:
-                                if self._log_headers_remaining > 0:
-                                    logger.info("Waiting for keyframe before decoding...")
+                                # Keep quiet; rely on first-frame header log above
                                 continue
                         # Decode payload
                         packet = av.Packet(bytes(payload))
@@ -119,17 +118,7 @@ class MinimalClient(QtCore.QObject):
                             pixfmt = os.getenv('NAPARI_CUDA_CLIENT_PIXEL_FMT', 'rgb24').lower()
                             if pixfmt not in {'rgb24', 'bgr24'}:
                                 pixfmt = 'rgb24'
-                            # Log frame color metadata once if available
-                            if not hasattr(self, '_logged_colorspace'):
-                                try:
-                                    cs = getattr(f, 'color_space', None)
-                                    cr = getattr(f, 'color_range', None)
-                                    cp = getattr(f, 'color_primaries', None)
-                                    ct = getattr(f, 'color_trc', None)
-                                    logger.info("Decoder frame color: space=%s range=%s primaries=%s trc=%s", cs, cr, cp, ct)
-                                except Exception:
-                                    pass
-                                setattr(self, '_logged_colorspace', True)
+                            # No color metadata logs
                             try:
                                 arr = f.to_ndarray(format=pixfmt)
                                 pixfmt_eff = pixfmt
