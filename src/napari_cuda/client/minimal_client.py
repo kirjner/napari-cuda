@@ -116,6 +116,17 @@ class MinimalClient(QtCore.QObject):
                             pixfmt = os.getenv('NAPARI_CUDA_CLIENT_PIXEL_FMT', 'rgb24').lower()
                             if pixfmt not in {'rgb24', 'bgr24'}:
                                 pixfmt = 'rgb24'
+                            # Log frame color metadata once if available
+                            if not hasattr(self, '_logged_colorspace'):
+                                try:
+                                    cs = getattr(f, 'color_space', None)
+                                    cr = getattr(f, 'color_range', None)
+                                    cp = getattr(f, 'color_primaries', None)
+                                    ct = getattr(f, 'color_trc', None)
+                                    logger.info("Decoder frame color: space=%s range=%s primaries=%s trc=%s", cs, cr, cp, ct)
+                                except Exception:
+                                    pass
+                                setattr(self, '_logged_colorspace', True)
                             try:
                                 arr = f.to_ndarray(format=pixfmt)
                                 h, w, c = arr.shape

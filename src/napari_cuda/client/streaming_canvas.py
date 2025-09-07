@@ -159,6 +159,17 @@ class StreamingCanvas(VispyCanvas):
                     packet = av.Packet(data)
                     frames = self.codec.decode(packet)
                     for frame in frames:
+                        # Log frame color metadata once if available
+                        if not hasattr(self, '_logged_colorspace'):
+                            try:
+                                cs = getattr(frame, 'color_space', None)
+                                cr = getattr(frame, 'color_range', None)
+                                cp = getattr(frame, 'color_primaries', None)
+                                ct = getattr(frame, 'color_trc', None)
+                                logger.info("Decoder frame color: space=%s range=%s primaries=%s trc=%s", cs, cr, cp, ct)
+                            except Exception:
+                                pass
+                            setattr(self, '_logged_colorspace', True)
                         arr = frame.to_ndarray(format=self.pixfmt)
                         # Ensure the GL texture sees RGB ordering
                         if self.pixfmt == 'bgr24':

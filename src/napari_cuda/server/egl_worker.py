@@ -327,17 +327,44 @@ class EGLRendererWorker:
             'repeatspspps': 1,
             'idrperiod': 30,
         }
+        # Optional color controls: space/range/output type via env if supported by bindings
+        enc_color_kwargs = {}
+        try:
+            import PyNvVideoCodec as _pnvc
+            cs_env = os.getenv('NAPARI_CUDA_COLOR_SPACE', '').upper().replace('-', '').replace('_', '')
+            if cs_env in {'BT709', 'BT_709', '709'}:
+                enc_color_kwargs['colorSpace'] = _pnvc.ColorSpace.BT_709
+            elif cs_env in {'BT601', 'BT_601', '601'}:
+                enc_color_kwargs['colorSpace'] = _pnvc.ColorSpace.BT_601
+            cr_env = os.getenv('NAPARI_CUDA_COLOR_RANGE', '').upper()
+            if cr_env in {'JPEG', 'FULL'}:
+                enc_color_kwargs['colorRange'] = _pnvc.ColorRange.JPEG
+            elif cr_env in {'MPEG', 'LIMITED'}:
+                enc_color_kwargs['colorRange'] = _pnvc.ColorRange.MPEG
+            oc_env = os.getenv('NAPARI_CUDA_OUTPUT_COLOR_TYPE', '').upper()
+            if oc_env in {'RGB', 'NATIVE', 'RGBP'}:
+                enc_color_kwargs['outputColorType'] = getattr(_pnvc.OutputColorType, oc_env)
+            if enc_color_kwargs:
+                try:
+                    logger.info(
+                        "Encoder color cfg: %s",
+                        {k: str(v) for k, v in enc_color_kwargs.items()},
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("Color env parsing failed: %s", e)
         try:
             # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
             # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
+            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs, **enc_color_kwargs)
             try:
                 logger.info("NVENC encoder created: %dx%d fmt=%s (low-latency)", self.width, self.height, self._enc_input_fmt)
             except Exception as e:
                 logger.debug("Encoder info log failed: %s", e)
         except Exception:
             # Fallback if kwargs unsupported by this binding version
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
+            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **enc_color_kwargs)
             try:
                 logger.warning("NVENC encoder created without tuning kwargs; GOP cadence may vary")
             except Exception as e:
