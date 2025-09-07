@@ -312,12 +312,12 @@ class EGLRendererWorker:
             self._enc_input_fmt = 'ARGB'
             try:
                 logger.warning("Invalid NAPARI_CUDA_ENCODER_INPUT_FMT=%r; defaulting to %s", bad, self._enc_input_fmt)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Encoder fmt warning log failed: %s", e)
         try:
             logger.info("Encoder input format selected via env: NAPARI_CUDA_ENCODER_INPUT_FMT=%s", self._enc_input_fmt)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Encoder fmt info log failed: %s", e)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
         kwargs = {
             'codec': 'h264',
@@ -350,8 +350,8 @@ class EGLRendererWorker:
                         "Encoder color cfg: %s",
                         {k: str(v) for k, v in enc_color_kwargs.items()},
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Encoder color cfg log failed: %s", e)
         except Exception as e:
             logger.debug("Color env parsing failed: %s", e)
         try:
@@ -380,8 +380,8 @@ class EGLRendererWorker:
                 if self._encoder is not None:
                     try:
                         self._encoder.EndEncode()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("EndEncode failed during reset: %s", e)
             finally:
                 self._encoder = None
             try:

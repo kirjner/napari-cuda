@@ -82,8 +82,8 @@ class MinimalClient(QtCore.QObject):
             p = os.getenv('NAPARI_CUDA_CLIENT_PIXEL_FMT', 'rgb24').lower()
             s = os.getenv('NAPARI_CUDA_CLIENT_SWAP_RB', '0')
             logger.info("Client env: NAPARI_CUDA_CLIENT_PIXEL_FMT=%s, NAPARI_CUDA_CLIENT_SWAP_RB=%s", p, s)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Client env log failed: %s", e)
         # No client-side color matrix forcing; rely on bitstream VUI
 
     async def run(self) -> None:
@@ -187,8 +187,8 @@ class MinimalClient(QtCore.QObject):
                 if kick_keyframe:
                     try:
                         await ws.send('{"type":"request_keyframe"}')
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("request_keyframe send failed: %s", e)
                 while self._running:
                     await ws.send('{"type":"ping"}')
                     await asyncio.sleep(2.0)

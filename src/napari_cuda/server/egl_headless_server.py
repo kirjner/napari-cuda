@@ -75,8 +75,8 @@ def _pack_color_reserved() -> int:
     reserved = ((chroma & 0x3) << 8) | ((rng & 0xF) << 4) | (space & 0xF)
     try:
         logger.info("Header color hints: space=%s(%d) range=%s(%d) chroma=%s(%d)", space_s, space, range_s, rng, chroma_s, chroma)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Header color hints log failed: %s", e)
     return reserved
 
 
