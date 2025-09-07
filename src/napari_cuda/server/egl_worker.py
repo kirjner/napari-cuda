@@ -304,6 +304,11 @@ class EGLRendererWorker:
                 logger.debug("Odd-dimension warn log failed: %s", e)
 
     def _init_encoder(self) -> None:
+        # Allow experimenting with encoder input format to diagnose channel order issues.
+        # Supported by PyNvVideoCodec: ARGB, ABGR (among others). Default: ARGB.
+        self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'ARGB').upper()
+        if self._enc_input_fmt not in {'ARGB', 'ABGR'}:
+            self._enc_input_fmt = 'ARGB'
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
         kwargs = {
             'codec': 'h264',
@@ -315,15 +320,15 @@ class EGLRendererWorker:
         }
         try:
             # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
-            # We feed ARGB and convert from RGBA on-GPU before Encode.
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ARGB", usecpuinputbuffer=False, **kwargs)
+            # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
+            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
             try:
-                logger.info("NVENC encoder created: %dx%d fmt=ARGB (low-latency)", self.width, self.height)
+                logger.info("NVENC encoder created: %dx%d fmt=%s (low-latency)", self.width, self.height, self._enc_input_fmt)
             except Exception as e:
                 logger.debug("Encoder info log failed: %s", e)
         except Exception:
             # Fallback if kwargs unsupported by this binding version
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ARGB", usecpuinputbuffer=False)
+            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
             try:
                 logger.warning("NVENC encoder created without tuning kwargs; GOP cadence may vary")
             except Exception as e:
@@ -554,16 +559,27 @@ class EGLRendererWorker:
                 os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as e:
                 logger.debug("Pre-encode raw dump failed: %s", e)
-        # Convert RGBA (GL) -> ARGB (NVENC input) on GPU
+        # Convert RGBA (GL) -> encoder input (ARGB or ABGR) on GPU
         src = self._torch_frame
         dst = self._torch_frame_argb
         if dst is None:
             dst = torch.empty_like(src)
         try:
-            dst[..., 0].copy_(src[..., 3])
-            dst[..., 1:4].copy_(src[..., 0:3])
+            if getattr(self, '_enc_input_fmt', 'ARGB') == 'ARGB':
+                # A,R,G,B
+                dst[..., 0].copy_(src[..., 3])
+                dst[..., 1:4].copy_(src[..., 0:3])
+            else:
+                # ABGR: A,B,G,R
+                dst[..., 0].copy_(src[..., 3])
+                dst[..., 1].copy_(src[..., 2])
+                dst[..., 2].copy_(src[..., 1])
+                dst[..., 3].copy_(src[..., 0])
         except Exception:
-            dst = src[..., [3, 0, 1, 2]]
+            if getattr(self, '_enc_input_fmt', 'ARGB') == 'ARGB':
+                dst = src[..., [3, 0, 1, 2]]
+            else:
+                dst = src[..., [3, 2, 1, 0]]
         with self._enc_lock:
             enc = self._encoder
         if enc is None:
