@@ -21,3 +21,6 @@ recursive-exclude binder *
 recursive-exclude examples *
 exclude dockerfile
 exclude EULA.md
+
+# include napari-cuda server web assets
+recursive-include src/napari_cuda/web *.html *.css *.js

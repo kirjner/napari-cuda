@@ -15,8 +15,7 @@ from dataclasses import dataclass
 from typing import Optional, Set
 
 import websockets
-from aiohttp import web
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+import importlib.resources as ilr
 
 from .egl_worker import EGLRendererWorker, ServerSceneState
 from .metrics import Metrics
@@ -54,7 +53,11 @@ class EGLHeadlessServer:
 
         self.metrics = Metrics()
         self._clients: Set[websockets.WebSocketServerProtocol] = set()
-        self._frame_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=4)
+        try:
+            qsize = int(os.getenv('NAPARI_CUDA_FRAME_QUEUE', '4'))
+        except Exception:
+            qsize = 4
+        self._frame_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=max(1, qsize))
         self._seq = 0
         self._stop = threading.Event()
 
@@ -78,10 +81,21 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._start_worker(loop)
+        # Start websocket servers with default buffering to prioritize smoothness
         state_server = await websockets.serve(self._handle_state, self.host, self.state_port)
         pixel_server = await websockets.serve(self._handle_pixel, self.host, self.pixel_port)
         metrics_server = await self._start_metrics_server()
-        logger.info("WS listening on %s:%d (state), %s:%d (pixel)", self.host, self.state_port, self.host, self.pixel_port)
+        logger.info(
+            "WS listening on %s:%d (state), %s:%d (pixel) | Dashboard: http://%s:%s/dash/ JSON: http://%s:%s/metrics.json",
+            self.host,
+            self.state_port,
+            self.host,
+            self.pixel_port,
+            self.host,
+            os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'),
+            self.host,
+            os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'),
+        )
         broadcaster = asyncio.create_task(self._broadcast_loop())
         try:
             await asyncio.Future()
@@ -266,8 +280,16 @@ class EGLHeadlessServer:
             self._update_client_gauges()
 
     async def _broadcast_loop(self) -> None:
+        coalesce = os.getenv('NAPARI_CUDA_BROADCAST_LATEST', '0') in ('1', 'true', 'True')
         while True:
             data = await self._frame_q.get()
+            if coalesce:
+                # Drain queue; keep only the latest frame to avoid bursts and reduce stutter
+                while True:
+                    try:
+                        data = self._frame_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
             if not self._clients:
                 continue
             await asyncio.gather(*(self._safe_send(c, data) for c in list(self._clients)), return_exceptions=True)
@@ -291,24 +313,27 @@ class EGLHeadlessServer:
             pass
 
     async def _start_metrics_server(self):
-        app = web.Application()
-        async def handle_metrics(request):
-            body = generate_latest(self.metrics.registry)
-            # aiohttp treats content_type as media-type only; set full header explicitly
-            return web.Response(body=body, headers={'Content-Type': CONTENT_TYPE_LATEST})
-        
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, self.host, int(os.getenv('NAPARI_CUDA_METRICS_PORT', '8083')))
-        await site.start()
-        logger.info("Metrics endpoint started on %s:%s/metrics", self.host, os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'))
-        return runner
-
-    async def _stop_metrics_server(self, runner: web.AppRunner):
+        # Start Dash/Plotly dashboard on a background thread with a Flask server.
         try:
-            await runner.cleanup()
+            port = int(os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'))
+        except Exception:
+            port = 8083
+        try:
+            refresh_ms = int(os.getenv('NAPARI_CUDA_METRICS_REFRESH_MS', '1000'))
+        except Exception:
+            refresh_ms = 1000
+        try:
+            # Import here to allow running without dash installed (graceful fallback)
+            from .dash_dashboard import start_dash_dashboard  # type: ignore
+            th = start_dash_dashboard(self.host, port, self.metrics, refresh_ms)
+            return th
         except Exception as e:
-            logger.debug("Metrics server cleanup error: %s", e)
+            logger.error("Dashboard init failed; continuing without UI: %s", e)
+            return None
+
+    async def _stop_metrics_server(self, runner):
+        # Dash thread is daemonized; nothing to stop cleanly at shutdown.
+        return None
 
 
 def main() -> None:

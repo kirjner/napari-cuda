@@ -1,0 +1,30 @@
+:root {
+  --bg: #0b0f19;
+  --fg: #e5e7eb;
+  --muted: #9ca3af;
+  --tile-bg: #111827;
+  --accent: #4f46e5;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; }
+.page { max-width: 1200px; margin: 0 auto; padding: 20px; }
+h1 { margin: 0 0 10px; font-size: 22px; }
+.meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+.meta .sep { margin: 0 8px; }
+
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+.tile { background: var(--tile-bg); border-radius: 10px; padding: 14px; min-height: 96px; display: flex; flex-direction: column; justify-content: center; }
+.tile .label { color: var(--muted); font-size: 13px; }
+.tile .value { font-size: 36px; font-weight: 700; margin-top: 6px; line-height: 1.0; }
+.tile .unit { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+.charts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.chart { background: var(--tile-bg); border-radius: 10px; padding: 12px; }
+.chart-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+canvas { width: 100%; height: auto; display: block; }
+
+@media (max-width: 980px) {
+  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .charts { grid-template-columns: 1fr; }
+}

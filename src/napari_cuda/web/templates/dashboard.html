@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>napari-cuda Dashboard</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css" />
+</head>
+<body>
+  <div class="page">
+    <h1>napari-cuda Dashboard</h1>
+    <div class="meta">
+      <span id="updated">—</span>
+      <span class="sep">•</span>
+      <span>Refresh: <span id="refreshMs">1000</span> ms</span>
+    </div>
+
+    <section class="tiles" id="tiles">
+      <div class="tile">
+        <div class="label">FPS</div>
+        <div class="value" id="fps">—</div>
+        <div class="unit">frames/sec</div>
+      </div>
+      <div class="tile">
+        <div class="label">Queue Depth</div>
+        <div class="value" id="queueDepth">—</div>
+        <div class="unit">items</div>
+      </div>
+      <div class="tile">
+        <div class="label">Frames</div>
+        <div class="value" id="frames">—</div>
+        <div class="unit">count</div>
+      </div>
+      <div class="tile">
+        <div class="label">Data</div>
+        <div class="value" id="dataMB">—</div>
+        <div class="unit">MB</div>
+      </div>
+      <div class="tile">
+        <div class="label">Dropped</div>
+        <div class="value" id="dropped">—</div>
+        <div class="unit">frames</div>
+      </div>
+      <div class="tile">
+        <div class="label">Errors</div>
+        <div class="value" id="errors">—</div>
+        <div class="unit">count</div>
+      </div>
+      <div class="tile">
+        <div class="label">Pixel Clients</div>
+        <div class="value" id="pixelClients">—</div>
+        <div class="unit">clients</div>
+      </div>
+    </section>
+
+    <section class="charts">
+      <div class="chart">
+        <div class="chart-title">Total GPU (ms)</div>
+        <canvas id="chart_total" width="480" height="120"></canvas>
+      </div>
+      <div class="chart">
+        <div class="chart-title">Encode (ms)</div>
+        <canvas id="chart_encode" width="480" height="120"></canvas>
+      </div>
+      <div class="chart">
+        <div class="chart-title">Map (ms)</div>
+        <canvas id="chart_map" width="480" height="120"></canvas>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/js/dashboard.js" data-refresh-ms="1000"></script>
+  <noscript>
+    <p>This dashboard requires JavaScript. You can still curl /metrics.json.</p>
+  </noscript>
+</body>
+<!--
+  This dashboard intentionally uses no external libraries for portability.
+-->
+</html>

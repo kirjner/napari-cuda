@@ -63,7 +63,9 @@ Then launch the client:
 uv run napari-cuda-client --host 127.0.0.1 --state-port 8081 --pixel-port 8082
 ```
 
-Metrics: `curl http://127.0.0.1:8083/metrics` (Prometheus format).
+Metrics:
+- JSON: `curl http://127.0.0.1:8083/metrics.json`
+- Dashboard: open `http://127.0.0.1:8083/dashboard` in your browser
 
 ## Tips & Troubleshooting
 - Interop test fails: verify CUDA module, EGL env vars, and that you’re on a GPU node.

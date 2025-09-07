@@ -10,7 +10,7 @@ import json
 import time
 import websockets
 import requests
-from typing import Dict
+from typing import Dict, Any
 
 async def trigger_frames(state_uri: str, pixel_uri: str, num_frames: int = 50):
     """
@@ -66,57 +66,20 @@ async def trigger_frames(state_uri: str, pixel_uri: str, num_frames: int = 50):
         print(f"Average FPS: {frames_received/total_time:.1f}")
 
 
-def fetch_metrics(metrics_url: str) -> Dict[str, float]:
-    """
-    Fetch and parse Prometheus metrics.
-    
-    Parameters
-    ----------
-    metrics_url : str
-        URL of metrics endpoint
-        
-    Returns
-    -------
-    Dict[str, float]
-        Parsed metrics
-    """
+def fetch_metrics_json(metrics_url: str) -> Dict[str, Any]:
+    """Fetch JSON metrics snapshot."""
     try:
-        response = requests.get(metrics_url, timeout=5)
-        if response.status_code != 200:
-            print(f"Failed to fetch metrics: HTTP {response.status_code}")
+        r = requests.get(metrics_url, timeout=5)
+        if r.status_code != 200:
+            print(f"Failed to fetch metrics: HTTP {r.status_code}")
             return {}
-        
-        # Parse Prometheus format
-        metrics = {}
-        for line in response.text.split('\n'):
-            if line.startswith('napari_cuda_'):
-                # Handle histogram summaries
-                if '_sum{' in line or '_sum ' in line:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        key = parts[0].split('{')[0].replace('_sum', '')
-                        try:
-                            value = float(parts[-1])
-                            metrics[key] = value
-                        except ValueError:
-                            pass
-                # Handle counters and gauges
-                elif '{' not in line and ' ' in line:
-                    parts = line.split()
-                    if len(parts) == 2:
-                        try:
-                            metrics[parts[0]] = float(parts[1])
-                        except ValueError:
-                            pass
-        
-        return metrics
-        
+        return r.json()
     except Exception as e:
         print(f"Error fetching metrics: {e}")
         return {}
 
 
-def print_metrics_summary(metrics: Dict[str, float]):
+def print_metrics_summary(delta_counters: Dict[str, float], snapshot: Dict[str, Any]):
     """
     Print a summary of collected metrics.
     
@@ -130,8 +93,8 @@ def print_metrics_summary(metrics: Dict[str, float]):
     print("=" * 70)
     
     # Frame metrics
-    frames = metrics.get('napari_cuda_frames_total', 0)
-    bytes_total = metrics.get('napari_cuda_bytes_total', 0)
+    frames = int(delta_counters.get('napari_cuda_frames_total', 0))
+    bytes_total = float(delta_counters.get('napari_cuda_bytes_total', 0.0))
     
     if frames > 0:
         print(f"\n📊 Frame Statistics:")
@@ -141,28 +104,24 @@ def print_metrics_summary(metrics: Dict[str, float]):
     
     # Pipeline timing metrics
     timing_metrics = [
-        ('napari_cuda_queue_wait_ms', 'Queue wait'),
-        ('napari_cuda_cuda_lock_ms', 'CUDA lock'),
         ('napari_cuda_map_ms', 'Texture mapping'),
         ('napari_cuda_copy_ms', 'Data copy'),
         ('napari_cuda_encode_ms', 'H.264 encoding'),
-        ('napari_cuda_send_ms', 'Network send'),
         ('napari_cuda_total_ms', 'Total pipeline')
     ]
     
     print(f"\n⏱️  Pipeline Stage Timing (per frame):")
-    total_tracked = 0
+    h = snapshot.get('histograms', {})
     for metric_key, label in timing_metrics:
-        if metric_key in metrics and frames > 0:
-            avg_time = metrics[metric_key] / frames
+        stat = h.get(metric_key)
+        if stat:
+            avg_time = float(stat.get('mean_ms', 0.0))
             print(f"  {label:20s}: {avg_time:>8.3f} ms")
-            if 'total' not in metric_key:
-                total_tracked += avg_time
     
     # Calculate theoretical max FPS
-    if 'napari_cuda_total_ms' in metrics and frames > 0:
-        avg_total = metrics['napari_cuda_total_ms'] / frames
-        max_fps = 1000 / avg_total
+    if 'napari_cuda_total_ms' in h:
+        avg_total = float(h['napari_cuda_total_ms'].get('mean_ms', 0.0))
+        max_fps = 1000.0 / avg_total if avg_total > 0 else 0.0
         print(f"\n🚀 Theoretical max FPS: {max_fps:.1f}")
         
         # Compare to CPU baseline (approximate)
@@ -187,7 +146,7 @@ async def main():
     # Build URIs
     state_uri = f"ws://{args.host}:{args.state_port}"
     pixel_uri = f"ws://{args.host}:{args.pixel_port}"
-    metrics_url = f"http://{args.host}:{args.metrics_port}/metrics"
+    metrics_url = f"http://{args.host}:{args.metrics_port}/metrics.json"
     
     print("🎯 napari-cuda Server Performance Test")
     print(f"Server: {args.host}")
@@ -195,7 +154,7 @@ async def main():
     
     # Fetch initial metrics
     print("\nFetching initial metrics...")
-    initial_metrics = fetch_metrics(metrics_url)
+    initial_snapshot = fetch_metrics_json(metrics_url)
     
     # Trigger frame captures
     await trigger_frames(state_uri, pixel_uri, args.frames)
@@ -205,18 +164,21 @@ async def main():
     
     # Fetch final metrics
     print("\nFetching final metrics...")
-    final_metrics = fetch_metrics(metrics_url)
+    final_snapshot = fetch_metrics_json(metrics_url)
     
     # Calculate deltas
-    delta_metrics = {}
-    for key in final_metrics:
-        if key in initial_metrics:
-            delta_metrics[key] = final_metrics[key] - initial_metrics[key]
-        else:
-            delta_metrics[key] = final_metrics[key]
+    # Compute deltas for counters only
+    delta_counters: Dict[str, float] = {}
+    init_c = (initial_snapshot or {}).get('counters', {})
+    final_c = (final_snapshot or {}).get('counters', {})
+    for key, v in final_c.items():
+        try:
+            delta_counters[key] = float(v) - float(init_c.get(key, 0.0))
+        except Exception:
+            pass
     
     # Print summary
-    print_metrics_summary(delta_metrics)
+    print_metrics_summary(delta_counters, final_snapshot or {})
 
 
 if __name__ == "__main__":

@@ -270,12 +270,15 @@ class EGLRendererWorker:
             self._torch_frame = self._torch_frame.contiguous()
         except Exception as e:
             logger.debug("Making torch frame contiguous failed (continuing): %s", e)
-        # Pre-allocate a second device tensor for ARGB channel order (encoder input)
+        # Pre-allocate auxiliary buffers for conversions to avoid per-frame alloc jitter
         try:
             self._torch_frame_argb = torch.empty_like(self._torch_frame)
         except Exception:
-            # As a fallback, we will construct on demand (will cost per-frame alloc)
             self._torch_frame_argb = None  # type: ignore[attr-defined]
+        try:
+            self._yuv444 = torch.empty((self.height * 3, self.width), dtype=torch.uint8, device=self._torch_frame.device)
+        except Exception:
+            self._yuv444 = None  # type: ignore[attr-defined]
         # Compute pitch (bytes per row) from Torch tensor stride
         self._dst_pitch_bytes = int(self._torch_frame.stride(0) * self._torch_frame.element_size())
         row_bytes = int(self.width * 4)
@@ -314,20 +317,31 @@ class EGLRendererWorker:
         except Exception as e:
             logger.debug("Encoder fmt info log failed: %s", e)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
+        try:
+            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '120'))
+        except Exception:
+            idr_period = 120
         kwargs = {
             'codec': 'h264',
             'tuning_info': 'low_latency',
             'preset': 'P3',
             'bf': 0,
             'repeatspspps': 1,
-            'idrperiod': 30,
+            'idrperiod': idr_period,
         }
         try:
             # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
             # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
             try:
-                logger.info("NVENC encoder created: %dx%d fmt=%s (low-latency)", self.width, self.height, self._enc_input_fmt)
+                logger.info(
+                    "NVENC encoder created: %dx%d fmt=%s (low-latency)",
+                    self.width, self.height, self._enc_input_fmt,
+                )
+                logger.info(
+                    "Encoder config: codec=%s preset=%s tuning=%s bf=%d idrperiod=%d repeatspspps=%d color_space=BT709 range=LIMITED layout=planar",
+                    kwargs['codec'], kwargs['preset'], kwargs['tuning_info'], kwargs['bf'], kwargs['idrperiod'], kwargs['repeatspspps'],
+                )
             except Exception as e:
                 logger.debug("Encoder info log failed: %s", e)
         except Exception:
@@ -576,6 +590,21 @@ class EGLRendererWorker:
             y = torch.clamp(16.0 + 219.0 * y_n, 0.0, 255.0)
             cb = torch.clamp(128.0 + 224.0 * (b - y_n) / 1.8556, 0.0, 255.0)
             cr = torch.clamp(128.0 + 224.0 * (r - y_n) / 1.5748, 0.0, 255.0)
+            try:
+                if not hasattr(self, '_logged_swizzle_stats'):
+                    rm = float(r.mean().item())
+                    gm = float(g.mean().item())
+                    bm = float(b.mean().item())
+                    ym = float(y.mean().item())
+                    cbm = float(cb.mean().item())
+                    crm = float(cr.mean().item())
+                    logger.info(
+                        "Pre-encode channel means: R=%.3f G=%.3f B=%.3f | Y=%.3f Cb=%.3f Cr=%.3f",
+                        rm, gm, bm, ym, cbm, crm,
+                    )
+                    setattr(self, '_logged_swizzle_stats', True)
+            except Exception as e:
+                logger.debug("Swizzle stats log failed: %s", e)
             H, W = self.height, self.width
             dst = torch.empty((H * 3, W), dtype=torch.uint8, device=src.device)
             dst[0:H, :] = y.to(torch.uint8)
