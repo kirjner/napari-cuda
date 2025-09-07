@@ -33,8 +33,9 @@ def _check_cuda():
         if os.environ.get('NAPARI_CUDA_REQUIRED'):
             raise ImportError("CUDA required but not available") from e
         else:
-            # Only warn when actually trying to use CUDA
-            pass
+            # Only warn when actually trying to use CUDA; record reason at debug level
+            import logging
+            logging.getLogger(__name__).debug("CUDA check failed (will warn on use): %s", e)
     
     return HAS_CUDA
 
