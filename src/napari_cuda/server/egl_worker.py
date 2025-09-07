@@ -18,6 +18,7 @@ import ctypes
 from dataclasses import dataclass
 from typing import Optional
 import threading
+import math
 
 import numpy as np
 
@@ -34,6 +35,7 @@ from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
 import PyNvVideoCodec as pnvc  # type: ignore
 from .bitstream import pack_to_annexb, ParamCache
+from .debug_tools import DebugConfig, DebugDumper
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,8 @@ class EGLRendererWorker:
     """Headless VisPy renderer using EGL with CUDA interop and NVENC."""
 
     def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False, fps: int = 60,
-                 volume_depth: int = 64, volume_dtype: str = "float32", volume_relative_step: Optional[float] = None) -> None:
+                 volume_depth: int = 64, volume_dtype: str = "float32", volume_relative_step: Optional[float] = None,
+                 animate: bool = False, animate_dps: float = 30.0) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -70,6 +73,14 @@ class EGLRendererWorker:
         self.volume_depth = int(volume_depth)
         self.volume_dtype = str(volume_dtype)
         self.volume_relative_step = volume_relative_step
+        # Optional simple turntable animation
+        self._animate = bool(animate)
+        try:
+            self._animate_dps = float(animate_dps)
+        except Exception as e:
+            logger.debug("Invalid animate_dps=%r; using default 30.0: %s", animate_dps, e)
+            self._animate_dps = 30.0
+        self._anim_start = time.perf_counter()
 
         self.egl_display = None
         self.egl_context = None
@@ -96,18 +107,44 @@ class EGLRendererWorker:
         self._query_idx = 0
         self._query_started = False
 
+        # Encoder access synchronization (reset vs encode across threads)
+        self._enc_lock = threading.Lock()
+
         # Atomic state application
         self._state_lock = threading.Lock()
         self._pending_state: Optional[ServerSceneState] = None
 
-        self._init_egl()
-        self._init_cuda()
-        self._init_vispy_scene()
-        self._init_capture()
-        self._init_cuda_interop()
-        self._init_encoder()
+        # Ensure partial initialization is cleaned up if any step fails
+        try:
+            self._init_egl()
+            self._init_cuda()
+            self._init_vispy_scene()
+            self._init_capture()
+            self._init_cuda_interop()
+            self._init_encoder()
+        except Exception as e:
+            # Best-effort cleanup of resources allocated so far
+            logger.warning("Initialization failed; attempting cleanup: %s", e, exc_info=True)
+            try:
+                self.cleanup()
+            except Exception as e2:
+                logger.debug("Cleanup after failed init also failed: %s", e2)
+            raise
         # Cached parameter sets for robust streaming
         self._param_cache = ParamCache()
+        # Debug configuration (single place)
+        self._debug = DebugDumper(DebugConfig.from_env())
+        if self._debug.cfg.enabled:
+            self._debug.log_env_once()
+            self._debug.ensure_out_dir()
+        # Log format/size once for clarity
+        try:
+            logger.info(
+                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=ARGB, fps=%d, animate=%s",
+                self.width, self.height, self.fps, self._animate,
+            )
+        except Exception:
+            pass
 
     def _init_egl(self) -> None:
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
@@ -162,8 +199,9 @@ class EGLRendererWorker:
     def _init_vispy_scene(self) -> None:
         canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
         view = canvas.central_widget.add_view()
-        view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60, distance=500)
+        # Use a 3D camera for volumes, but a 2D PanZoom camera for images to avoid perspective skew
         if self.use_volume:
+            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60, distance=500)
             # Full XY resolution for apples-to-apples comparison with Image
             if self.volume_dtype == "float16":
                 dtype = np.float16
@@ -177,11 +215,18 @@ class EGLRendererWorker:
             try:
                 if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
                     visual.relative_step_size = float(self.volume_relative_step)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Set volume relative_step_size failed: %s", e)
         else:
+            # 2D image: orthographic view that fills the frame (no trapezoid)
+            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
             image = np.random.randint(0, 255, (self.height, self.width, 4), dtype=np.uint8)
             visual = scene.visuals.Image(image, parent=view.scene)
+            # Ensure the full image extents are visible without perspective distortion
+            try:
+                view.camera.set_range(x=(0, self.width), y=(0, self.height))
+            except Exception as e:
+                logger.debug("PanZoom set_range failed: %s", e)
         canvas.render()
         self.canvas = canvas
         self.view = view
@@ -219,8 +264,44 @@ class EGLRendererWorker:
         else:
             self._torch_frame = torch.utils.dlpack.from_dlpack(dev_cp)
         del dev_cp  # do not use the CuPy array after handoff
+        # Force contiguous layout (tight packing) and compute pitch
+        try:
+            self._torch_frame = self._torch_frame.contiguous()
+        except Exception as e:
+            logger.debug("Making torch frame contiguous failed (continuing): %s", e)
+        # Pre-allocate a second device tensor for ARGB channel order (encoder input)
+        try:
+            self._torch_frame_argb = torch.empty_like(self._torch_frame)
+        except Exception:
+            # As a fallback, we will construct on demand (will cost per-frame alloc)
+            self._torch_frame_argb = None  # type: ignore[attr-defined]
         # Compute pitch (bytes per row) from Torch tensor stride
         self._dst_pitch_bytes = int(self._torch_frame.stride(0) * self._torch_frame.element_size())
+        row_bytes = int(self.width * 4)
+        # Optional override to force tight pitch (debug/testing)
+        try:
+            if int(os.getenv('NAPARI_CUDA_FORCE_TIGHT_PITCH', '0')):
+                self._dst_pitch_bytes = row_bytes
+        except Exception as e:
+            logger.debug("Reading NAPARI_CUDA_FORCE_TIGHT_PITCH failed: %s", e)
+        try:
+            logger.info("CUDA dst pitch: %d bytes (expected %d)", self._dst_pitch_bytes, row_bytes)
+        except Exception as e:
+            logger.debug("Pitch info log failed: %s", e)
+        if self._dst_pitch_bytes != row_bytes:
+            try:
+                logger.warning(
+                    "Non-tight pitch: dst_pitch=%d, expected=%d (width*4). This may cause right-edge artifacts.",
+                    self._dst_pitch_bytes, row_bytes,
+                )
+            except Exception as e:
+                logger.debug("Pitch warn log failed: %s", e)
+        # Warn on odd dimensions which can cause crop issues in H.264 4:2:0
+        if (self.width % 2) or (self.height % 2):
+            try:
+                logger.warning("Odd dimensions %dx%d may reveal right/bottom padding without SPS cropping.", self.width, self.height)
+            except Exception as e:
+                logger.debug("Odd-dimension warn log failed: %s", e)
 
     def _init_encoder(self) -> None:
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
@@ -233,10 +314,40 @@ class EGLRendererWorker:
             'idrperiod': 30,
         }
         try:
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ABGR", usecpuinputbuffer=False, **kwargs)
+            # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
+            # We feed ARGB and convert from RGBA on-GPU before Encode.
+            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ARGB", usecpuinputbuffer=False, **kwargs)
+            try:
+                logger.info("NVENC encoder created: %dx%d fmt=ARGB (low-latency)", self.width, self.height)
+            except Exception as e:
+                logger.debug("Encoder info log failed: %s", e)
         except Exception:
             # Fallback if kwargs unsupported by this binding version
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ABGR", usecpuinputbuffer=False)
+            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt="ARGB", usecpuinputbuffer=False)
+            try:
+                logger.warning("NVENC encoder created without tuning kwargs; GOP cadence may vary")
+            except Exception as e:
+                logger.debug("Encoder warn log failed: %s", e)
+
+    def reset_encoder(self) -> None:
+        """Tear down and recreate the encoder to force a new GOP/IDR.
+
+        Guarded by a lock to avoid races with concurrent Encode() calls.
+        """
+        with self._enc_lock:
+            try:
+                if self._encoder is not None:
+                    try:
+                        self._encoder.EndEncode()
+                    except Exception:
+                        pass
+            finally:
+                self._encoder = None
+            try:
+                self._init_encoder()
+                logger.info("NVENC encoder reset; next frame should include IDR")
+            except Exception as e:
+                logger.exception("Failed to reset NVENC encoder: %s", e)
 
     def force_idr(self) -> None:
         """Best-effort request to force next frame as IDR via Reconfigure."""
@@ -279,18 +390,18 @@ class EGLRendererWorker:
             if state.center is not None and hasattr(cam, 'center'):
                 try:
                     cam.center = state.center  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Apply center failed: %s", e)
             if state.zoom is not None and hasattr(cam, 'zoom'):
                 try:
                     cam.zoom = state.zoom  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Apply zoom failed: %s", e)
             if state.angles is not None and hasattr(cam, 'angles'):
                 try:
                     cam.angles = state.angles  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Apply angles failed: %s", e)
         except Exception as e:
             logger.debug("Apply state failed: %s", e)
 
@@ -360,56 +471,46 @@ class EGLRendererWorker:
                 logger.debug("Blit fallback failed: %s", e2)
             return None
 
-    def capture_and_encode(self) -> FrameTimings:
-        t0 = time.perf_counter()
-        t_r0 = time.perf_counter()
-        self._apply_pending_state()
-        self.canvas.render()
-        t_r1 = time.perf_counter()
-        render_ms = (t_r1 - t_r0) * 1000.0
-        blit_gpu_ns = self._capture_blit_gpu_ns()
-        t_m0 = time.perf_counter()
-        mapping = self._registered_tex.map()
-        cuda_array = mapping.array(0, 0)
-        t_m1 = time.perf_counter()
-        map_ms = (t_m1 - t_m0) * 1000.0
-        start_evt = cuda.Event()
-        end_evt = cuda.Event()
-        start_evt.record()
-        m = cuda.Memcpy2D()
-        m.set_src_array(cuda_array)
-        m.set_dst_device(int(self._torch_frame.data_ptr()))
-        m.width_in_bytes = self.width * 4
-        m.height = self.height
-        m.dst_pitch = self._dst_pitch_bytes if self._dst_pitch_bytes is not None else (self.width * 4)
-        m(aligned=True)
-        end_evt.record()
-        end_evt.synchronize()
-        copy_ms = start_evt.time_till(end_evt)
-        mapping.unmap()
-        t_e0 = time.perf_counter()
-        pkt_obj = self._encoder.Encode(self._torch_frame)
-        # PyNvVideoCodec may return a list of packets (e.g., SPS/PPS + frame)
-        if isinstance(pkt_obj, (list, tuple)):
-            try:
-                pkt = b"".join(bytes(p) for p in pkt_obj)
-            except Exception:
-                pkt = None
-        else:
-            pkt = pkt_obj
-        t_e1 = time.perf_counter()
-        encode_ms = (t_e1 - t_e0) * 1000.0
-        total_ms = (time.perf_counter() - t0) * 1000.0
-        pkt_bytes = len(pkt) if pkt else None
-        return FrameTimings(render_ms, blit_gpu_ns, map_ms, copy_ms, encode_ms, total_ms, pkt_bytes)
 
     def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int]:
         """Same as capture_and_encode, but also returns the packet and flags.
 
         Flags bit 0x01 indicates keyframe (IDR/CRA).
         """
+        # Debug env is logged once at init by DebugDumper
         t0 = time.perf_counter()
         t_r0 = time.perf_counter()
+        # Optional animation
+        if self._animate and hasattr(self.view, "camera"):
+            t = time.perf_counter() - self._anim_start
+            cam = self.view.camera
+            # 3D: simple turntable
+            try:
+                from vispy.scene.cameras import TurntableCamera  # type: ignore
+                if isinstance(cam, TurntableCamera):
+                    try:
+                        cam.azimuth = (self._animate_dps * t) % 360.0
+                    except Exception as e:
+                        logger.debug("Animate(3D) failed: %s", e)
+                else:
+                    # 2D PanZoom: gentle pan + zoom pulse around center
+                    try:
+                        cx = self.width * 0.5
+                        cy = self.height * 0.5
+                        pan_ax = self.width * 0.05
+                        pan_ay = self.height * 0.05
+                        ox = pan_ax * math.sin(0.6 * t)
+                        oy = pan_ay * math.cos(0.4 * t)
+                        s = 1.0 + 0.08 * math.sin(0.8 * t)
+                        half_w = (self.width * 0.5) / max(1e-6, s)
+                        half_h = (self.height * 0.5) / max(1e-6, s)
+                        x_rng = (cx + ox - half_w, cx + ox + half_w)
+                        y_rng = (cy + oy - half_h, cy + oy + half_h)
+                        cam.set_range(x=x_rng, y=y_rng)
+                    except Exception as e:
+                        logger.debug("Animate(2D) failed: %s", e)
+            except Exception as e:
+                logger.debug("Animate(camera) failed to classify: %s", e)
         self._apply_pending_state()
         self.canvas.render()
         t_r1 = time.perf_counter()
@@ -433,10 +534,44 @@ class EGLRendererWorker:
         end_evt.record()
         end_evt.synchronize()
         copy_ms = start_evt.time_till(end_evt)
-        mapping.unmap()
+        try:
+            # Optional deep debug: unified triplet dump
+            if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
+                self._debug.dump_triplet(int(self._texture), self.width, self.height, self._torch_frame)
+        except Exception as e:
+            logger.warning("Debug triplet failed: %s", e, exc_info=True)
+        finally:
+            mapping.unmap()
         t_e0 = time.perf_counter()
-        pkt_obj = self._encoder.Encode(self._torch_frame)
-        pkt, is_key = pack_to_annexb(pkt_obj, self._param_cache)
+        # Optional pre-encode raw dump (RGBA) for isolation
+        try:
+            dump_raw = int(os.getenv('NAPARI_CUDA_DUMP_RAW', '0'))
+        except Exception:
+            dump_raw = 0
+        if dump_raw > 0:
+            try:
+                self._debug.dump_cuda_rgba(self._torch_frame, self.width, self.height, prefix="raw")
+                os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
+            except Exception as e:
+                logger.debug("Pre-encode raw dump failed: %s", e)
+        # Convert RGBA (GL) -> ARGB (NVENC input) on GPU
+        src = self._torch_frame
+        dst = self._torch_frame_argb
+        if dst is None:
+            dst = torch.empty_like(src)
+        try:
+            dst[..., 0].copy_(src[..., 3])
+            dst[..., 1:4].copy_(src[..., 0:3])
+        except Exception:
+            dst = src[..., [3, 0, 1, 2]]
+        with self._enc_lock:
+            enc = self._encoder
+        if enc is None:
+            pkt = None
+            is_key = False
+        else:
+            pkt_obj = enc.Encode(dst)
+            pkt, is_key = pack_to_annexb(pkt_obj, self._param_cache)
         t_e1 = time.perf_counter()
         encode_ms = (t_e1 - t_e0) * 1000.0
         total_ms = (time.perf_counter() - t0) * 1000.0
@@ -473,11 +608,12 @@ class EGLRendererWorker:
             logger.debug("Cleanup: delete texture failed: %s", e)
         self._texture = None
         try:
-            if self._encoder is not None:
-                self._encoder.EndEncode()
+            with self._enc_lock:
+                if self._encoder is not None:
+                    self._encoder.EndEncode()
+                self._encoder = None
         except Exception as e:
             logger.debug("Cleanup: encoder EndEncode failed: %s", e)
-        self._encoder = None
         try:
             if self.cuda_ctx is not None:
                 self.cuda_ctx.pop()

@@ -20,6 +20,10 @@ LOGIN_HOST=login.cluster.mit.edu # Adjust to your login node
 ## 1) Configure Your Cluster
 - Copy the sample config: `cp .env.hpc.example .env.hpc` and edit values (partition, memory/CPUs, login host).
 - Required env on compute node: `QT_QPA_PLATFORM=offscreen`, `PYOPENGL_PLATFORM=egl`.
+- If you built a local PyCUDA wheel with OpenGL interop, install it after syncing server deps:
+  - `uv pip install build/wheelhouse/pycuda-*.whl`
+  - or `uv pip install --no-index --find-links build/wheelhouse pycuda`
+  This ensures `pycuda.gl` is available for CUDA–OpenGL interop.
 - Ensure CUDA module is available (e.g., `module load nvhpc/24.5`).
 
 ## 2) Submit a GPU Job
@@ -66,4 +70,3 @@ Metrics: `curl http://127.0.0.1:8083/metrics` (Prometheus format).
 - No frames: ensure both 8081 (state) and 8082 (pixels) are forwarded; check server logs.
 - Slow I/O: place datasets on node-local scratch if available.
 - Security: server binds to `127.0.0.1` by default; use SSH tunnels rather than exposing ports.
-

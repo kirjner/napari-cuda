@@ -38,7 +38,8 @@ def pack_header(seq: int, ts: float, w: int, h: int, codec: int, flags: int) -> 
 
 class EGLHeadlessServer:
     def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False,
-                 host: str = '0.0.0.0', state_port: int = 8081, pixel_port: int = 8082, fps: int = 60) -> None:
+                 host: str = '0.0.0.0', state_port: int = 8081, pixel_port: int = 8082, fps: int = 60,
+                 animate: bool = False, animate_dps: float = 30.0) -> None:
         self.width = width
         self.height = height
         self.use_volume = use_volume
@@ -46,6 +47,11 @@ class EGLHeadlessServer:
         self.state_port = state_port
         self.pixel_port = pixel_port
         self.cfg = EncodeConfig(fps=fps)
+        self._animate = bool(animate)
+        try:
+            self._animate_dps = float(animate_dps)
+        except Exception:
+            self._animate_dps = 30.0
 
         self.metrics = Metrics()
         self._clients: Set[websockets.WebSocketServerProtocol] = set()
@@ -63,8 +69,9 @@ class EGLHeadlessServer:
             self._dump_remaining = 0
         self._dump_dir = os.getenv('NAPARI_CUDA_DUMP_DIR', 'benchmarks/bitstreams')
         self._dump_path: Optional[str] = None
-        # IDR request flag (set on pixel client connect)
-        self._request_idr = False
+        # Track last keyframe for metrics only
+        self._last_key_seq: Optional[int] = None
+        self._last_key_ts: Optional[float] = None
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO,
@@ -115,6 +122,10 @@ class EGLHeadlessServer:
                     self.metrics.inc('napari_cuda_frames_total')
                     self.metrics.inc('napari_cuda_bytes_total', len(pkt))
                     self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
+                    if flags & 0x01:
+                        self.metrics.inc('napari_cuda_keyframes_total')
+                        self._last_key_seq = (self._seq - 1) & 0xFFFFFFFF
+                        self._last_key_ts = ts
                 except Exception:
                     pass
             except asyncio.QueueFull:
@@ -129,17 +140,18 @@ class EGLHeadlessServer:
 
         def worker_loop() -> None:
             try:
-                self._worker = EGLRendererWorker(width=self.width, height=self.height, use_volume=self.use_volume)
+                self._worker = EGLRendererWorker(
+                    width=self.width,
+                    height=self.height,
+                    use_volume=self.use_volume,
+                    fps=self.cfg.fps,
+                    animate=self._animate,
+                    animate_dps=self._animate_dps,
+                )
                 tick = 1.0 / max(1, self.cfg.fps)
                 next_t = time.perf_counter()
                 while not self._stop.is_set():
                     self._worker.apply_state(self._latest_state)
-                    if self._request_idr:
-                        try:
-                            self._worker.force_idr()
-                        except Exception:
-                            pass
-                        self._request_idr = False
                     timings, pkt, flags = self._worker.capture_and_encode_packet()
                     # Observe timings (ms)
                     try:
@@ -152,6 +164,10 @@ class EGLHeadlessServer:
                         self.metrics.observe_ms('napari_cuda_total_ms', timings.total_ms)
                     except Exception:
                         pass
+                    # Track last keyframe timestamp/seq for metrics if needed
+                    if flags & 0x01:
+                        self._last_key_seq = self._seq
+                        self._last_key_ts = time.time()
                     on_frame(pkt, flags)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
@@ -217,9 +233,7 @@ class EGLHeadlessServer:
                     )
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
-                elif t == 'request_keyframe':
-                    # Client explicitly requests an IDR; honor on next frame
-                    self._request_idr = True
+                # request_keyframe is ignored in simplified mode; encoder resets on client connect
         finally:
             try:
                 await ws.close()
@@ -230,8 +244,17 @@ class EGLHeadlessServer:
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
         self._update_client_gauges()
-        # Request an IDR for new client to speed up start-of-stream decode
-        self._request_idr = True
+        # Reset encoder on new client to guarantee an immediate keyframe
+        try:
+            if self._worker is not None:
+                logger.info("Resetting encoder for new pixel client to force keyframe")
+                self._worker.reset_encoder()
+                try:
+                    self.metrics.inc('napari_cuda_encoder_resets')
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("Encoder reset on client connect failed: %s", e)
         try:
             await ws.wait_closed()
         finally:
@@ -269,7 +292,94 @@ class EGLHeadlessServer:
             body = generate_latest(self.metrics.registry)
             # aiohttp treats content_type as media-type only; set full header explicitly
             return web.Response(body=body, headers={'Content-Type': CONTENT_TYPE_LATEST})
-        app.add_routes([web.get('/metrics', handle_metrics)])
+        async def metrics_ui(request: web.Request):
+            html = f"""
+<!doctype html>
+<html>
+  <head>
+    <meta charset=\"utf-8\" />
+    <title>napari-cuda Metrics</title>
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <style>
+      body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 1rem; }}
+      .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }}
+      .card {{ border: 1px solid #ddd; border-radius: 8px; padding: 12px; }}
+      .title {{ font-size: 14px; color: #666; margin-bottom: 6px; }}
+      .value {{ font-size: 20px; font-weight: 600; }}
+      pre {{ background: #f8f8f8; padding: 8px; border-radius: 6px; overflow: auto; }}
+    </style>
+  </head>
+  <body>
+    <h2>napari-cuda Metrics</h2>
+    <div class=\"grid\">
+      <div class=\"card\"><div class=\"title\">FPS (approx)</div><div id=\"fps\" class=\"value\">–</div></div>
+      <div class=\"card\"><div class=\"title\">Avg render ms</div><div id=\"render_ms\" class=\"value\">–</div></div>
+      <div class=\"card\"><div class=\"title\">Avg encode ms</div><div id=\"encode_ms\" class=\"value\">–</div></div>
+      <div class=\"card\"><div class=\"title\">Frames</div><div id=\"frames\" class=\"value\">–</div></div>
+      <div class=\"card\"><div class=\"title\">Bytes sent</div><div id=\"bytes\" class=\"value\">–</div></div>
+      <div class=\"card\"><div class=\"title\">Queue depth</div><div id=\"qdepth\" class=\"value\">–</div></div>
+    </div>
+    <h3>Raw Exposition</h3>
+    <pre id=\"raw\">Loading…</pre>
+    <script>
+      async function fetchMetrics() {{
+        try {{
+          const res = await fetch('/metrics');
+          const text = await res.text();
+          document.getElementById('raw').textContent = text;
+          // crude parse for a few series
+          function getVal(name) {{
+            const m = text.match(new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' (.+)$', 'm'));
+            return m ? parseFloat(m[1]) : NaN;
+          }}
+          // histograms: use _sum/_count to compute avg
+          function getAvg(prefix) {{
+            const sum = getVal(prefix + '_sum');
+            const cnt = getVal(prefix + '_count');
+            return (isFinite(sum) && isFinite(cnt) && cnt > 0) ? (sum / cnt) : NaN;
+          }}
+          const avgRender = getAvg('napari_cuda_render_ms');
+          const avgEncode = getAvg('napari_cuda_encode_ms');
+          const frames = getVal('napari_cuda_frames_total');
+          const bytes = getVal('napari_cuda_bytes_total');
+          const qdepth = getVal('napari_cuda_frame_queue_depth');
+          // FPS approx: 1000 / avg total ms
+          const avgTotal = getAvg('napari_cuda_total_ms');
+          const fps = isFinite(avgTotal) && avgTotal > 0 ? (1000.0 / avgTotal) : NaN;
+          function fmt(n, unit) {{
+            if (!isFinite(n)) return '–';
+            if (unit === 'ms') return n.toFixed(2) + ' ms';
+            if (unit === 'fps') return n.toFixed(1) + ' fps';
+            if (unit === 'bytes') {{
+              const units = ['B','KB','MB','GB'];
+              let v=n, i=0; while (v>1024 && i<units.length-1) {{ v/=1024; i++; }}
+              return v.toFixed(2)+' '+units[i];
+            }}
+            return String(n);
+          }}
+          document.getElementById('render_ms').textContent = fmt(avgRender, 'ms');
+          document.getElementById('encode_ms').textContent = fmt(avgEncode, 'ms');
+          document.getElementById('frames').textContent = isFinite(frames) ? frames.toFixed(0) : '–';
+          document.getElementById('bytes').textContent = fmt(bytes, 'bytes');
+          document.getElementById('qdepth').textContent = isFinite(qdepth) ? qdepth.toFixed(0) : '–';
+          document.getElementById('fps').textContent = fmt(fps, 'fps');
+        }} catch (e) {{
+          document.getElementById('raw').textContent = 'Failed to load metrics: ' + e;
+        }}
+      }}
+      fetchMetrics();
+      setInterval(fetchMetrics, 1000);
+    </script>
+  </body>
+  </html>
+            """
+            return web.Response(text=html, content_type='text/html')
+
+        app.add_routes([
+            web.get('/metrics', handle_metrics),
+            web.get('/metrics/', handle_metrics),  # allow trailing slash
+            web.get('/metrics/ui', metrics_ui),
+        ])
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, self.host, int(os.getenv('NAPARI_CUDA_METRICS_PORT', '8083')))
@@ -293,12 +403,16 @@ def main() -> None:
     parser.add_argument('--width', type=int, default=1920)
     parser.add_argument('--height', type=int, default=1080)
     parser.add_argument('--fps', type=int, default=60)
+    parser.add_argument('--animate', action='store_true', help='Enable simple turntable camera animation')
+    parser.add_argument('--animate-dps', type=float, default=float(os.getenv('NAPARI_CUDA_TURNTABLE_DPS', '30.0')),
+                        help='Turntable speed in degrees per second (default 30)')
     parser.add_argument('--volume', action='store_true', help='Use 3D volume visual')
     args = parser.parse_args()
 
     async def run():
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
-                                host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps)
+                                host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
+                                animate=args.animate, animate_dps=args.animate_dps)
         await srv.start()
 
     asyncio.run(run())
