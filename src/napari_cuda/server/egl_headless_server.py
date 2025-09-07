@@ -32,8 +32,57 @@ class EncodeConfig:
     keyint: int = 120
 
 
+def _pack_color_reserved() -> int:
+    """Pack color hints into the 16-bit reserved field of the header.
+
+    Layout: [15..10 unused][9..8 chroma][7..4 range][3..0 space]
+    - space: 0=unspec, 1=BT601, 2=BT709
+    - range: 0=unspec, 1=limited(MPEG), 2=full(JPEG)
+    - chroma: 0=unspec, 1=NV12(420), 2=YUV444, 3=RGB
+    Values are selectable via env overrides for development.
+    Defaults assume H.264 default chroma (420/NV12) and HD matrix (BT709) with limited range.
+    """
+    space_map = {
+        'UNSPEC': 0,
+        'BT601': 1,
+        'BT_601': 1,
+        '601': 1,
+        'BT709': 2,
+        'BT_709': 2,
+        '709': 2,
+    }
+    range_map = {
+        'UNSPEC': 0,
+        'LIMITED': 1,
+        'MPEG': 1,
+        'FULL': 2,
+        'JPEG': 2,
+    }
+    chroma_map = {
+        'UNSPEC': 0,
+        'NV12': 1,
+        '420': 1,
+        'YUV444': 2,
+        '444': 2,
+        'RGB': 3,
+    }
+    space_s = os.getenv('NAPARI_CUDA_HEADER_COLOR_SPACE', 'BT709').upper()
+    range_s = os.getenv('NAPARI_CUDA_HEADER_COLOR_RANGE', 'LIMITED').upper()
+    chroma_s = os.getenv('NAPARI_CUDA_HEADER_CHROMA', 'NV12').upper()
+    space = space_map.get(space_s, 2)
+    rng = range_map.get(range_s, 1)
+    chroma = chroma_map.get(chroma_s, 1)
+    reserved = ((chroma & 0x3) << 8) | ((rng & 0xF) << 4) | (space & 0xF)
+    try:
+        logger.info("Header color hints: space=%s(%d) range=%s(%d) chroma=%s(%d)", space_s, space, range_s, rng, chroma_s, chroma)
+    except Exception:
+        pass
+    return reserved
+
+
 def pack_header(seq: int, ts: float, w: int, h: int, codec: int, flags: int) -> bytes:
-    return struct.pack('!IdIIBBH', seq, ts, w, h, codec & 0xFF, flags & 0xFF, 0)
+    reserved = _pack_color_reserved()
+    return struct.pack('!IdIIBBH', seq, ts, w, h, codec & 0xFF, flags & 0xFF, reserved & 0xFFFF)
 
 
 class EGLHeadlessServer:

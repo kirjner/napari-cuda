@@ -33,11 +33,21 @@ class FrameHeader:
     height: int
     codec: int
     flags: int
+    reserved: int
+
+    # Derived color hints (packed in reserved)
+    color_space: int = 0   # 0=unspec, 1=BT601, 2=BT709
+    color_range: int = 0   # 0=unspec, 1=limited, 2=full
+    chroma: int = 0        # 0=unspec, 1=NV12, 2=YUV444, 3=RGB
 
 
 def parse_header(b: bytes) -> FrameHeader:
-    seq, ts, w, h, codec, flags, _ = HEADER_STRUCT.unpack(b)
-    return FrameHeader(seq=seq, ts=ts, width=w, height=h, codec=codec, flags=flags)
+    seq, ts, w, h, codec, flags, reserved = HEADER_STRUCT.unpack(b)
+    cs = reserved & 0xF
+    cr = (reserved >> 4) & 0xF
+    ch = (reserved >> 8) & 0x3
+    return FrameHeader(seq=seq, ts=ts, width=w, height=h, codec=codec, flags=flags,
+                       reserved=reserved, color_space=cs, color_range=cr, chroma=ch)
 
 
 class VideoWidget(QtWidgets.QLabel):
@@ -129,11 +139,28 @@ class MinimalClient(QtCore.QObject):
                                     pass
                                 setattr(self, '_logged_colorspace', True)
                             try:
-                                arr = f.to_ndarray(format=pixfmt)
+                                # If decoder did not set colors and server provided hints via header,
+                                # decode to YUV444 and apply RGB matrix using header values.
+                                use_header_matrix = False
+                                if getattr(f, 'color_space', None) is None:
+                                    # Look back at the last parsed header from this packet
+                                    # We still have 'header' in scope above; safe in loop body
+                                    if header.chroma in (1, 2) and header.color_space in (1, 2) and header.color_range in (1, 2):
+                                        use_header_matrix = True
+                                if use_header_matrix:
+                                    yuv = f.to_ndarray(format='yuv444p')
+                                    matrix = 'BT709' if header.color_space == 2 else 'BT601'
+                                    rng = 'FULL' if header.color_range == 2 else 'LIMITED'
+                                    arr = self._yuv444_to_rgb(yuv, matrix=matrix, rng=rng)
+                                    # Force RGB path for QImage
+                                    pixfmt_eff = 'rgb24'
+                                else:
+                                    arr = f.to_ndarray(format=pixfmt)
+                                    pixfmt_eff = pixfmt
                                 h, w, c = arr.shape
                                 if c != 3:
                                     raise ValueError(f'Unexpected channels in {pixfmt}: {c}')
-                                if pixfmt == 'rgb24':
+                                if pixfmt_eff == 'rgb24':
                                     qfmt = QtGui.QImage.Format_RGB888
                                 else:
                                     qfmt = QtGui.QImage.Format_BGR888
@@ -177,6 +204,38 @@ class MinimalClient(QtCore.QObject):
         data = img.tobytes()
         qimg = QtGui.QImage(data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
         return qimg.copy()  # deep copy since data is ephemeral
+
+    @staticmethod
+    def _yuv444_to_rgb(yuv, matrix: str, rng: str):
+        import numpy as np
+        # yuv444p from PyAV is typically shape (3, H, W)
+        if yuv.ndim == 3 and yuv.shape[0] == 3:
+            Y = yuv[0].astype(np.float32)
+            U = yuv[1].astype(np.float32)
+            V = yuv[2].astype(np.float32)
+        else:
+            Y = yuv[..., 0].astype(np.float32)
+            U = yuv[..., 1].astype(np.float32)
+            V = yuv[..., 2].astype(np.float32)
+        if rng.upper() in ('FULL', 'JPEG'):
+            y = Y / 255.0
+            cb = (U - 128.0) / 255.0
+            cr = (V - 128.0) / 255.0
+        else:
+            y = (Y - 16.0) / 219.0
+            cb = (U - 128.0) / 224.0
+            cr = (V - 128.0) / 224.0
+        if matrix.upper() == 'BT709':
+            r = y + 1.5748 * cr
+            g = y - 0.1873 * cb - 0.4681 * cr
+            b = y + 1.8556 * cb
+        else:  # BT601
+            r = y + 1.4020 * cr
+            g = y - 0.344136 * cb - 0.714136 * cr
+            b = y + 1.7720 * cb
+        rgb = np.stack([r, g, b], axis=-1)
+        rgb = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+        return rgb
 
     # No client-side YUV->RGB override; rely on decoder defaults
 
