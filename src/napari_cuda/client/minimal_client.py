@@ -105,10 +105,27 @@ class MinimalClient(QtCore.QObject):
                         packet = av.Packet(bytes(payload))
                         frames = self._decoder.decode(packet)
                         for f in frames:
-                            img = f.to_image()
-                            # Convert PIL Image to QImage
-                            qimg = self._pil_to_qimage(img)
-                            self.frame_ready.emit(qimg)
+                            # Prefer a deterministic ndarray conversion to control channel order
+                            pixfmt = os.getenv('NAPARI_CUDA_CLIENT_PIXEL_FMT', 'rgb24').lower()
+                            if pixfmt not in {'rgb24', 'bgr24'}:
+                                pixfmt = 'rgb24'
+                            try:
+                                arr = f.to_ndarray(format=pixfmt)
+                                h, w, c = arr.shape
+                                if c != 3:
+                                    raise ValueError(f'Unexpected channels in {pixfmt}: {c}')
+                                if pixfmt == 'rgb24':
+                                    qfmt = QtGui.QImage.Format_RGB888
+                                else:
+                                    qfmt = QtGui.QImage.Format_BGR888
+                                qimg = QtGui.QImage(arr.data, w, h, 3 * w, qfmt)
+                                # Deep copy because arr will be released after loop
+                                self.frame_ready.emit(qimg.copy())
+                            except Exception:
+                                # Fallback: use PIL conversion
+                                img = f.to_image()
+                                qimg = self._pil_to_qimage(img)
+                                self.frame_ready.emit(qimg)
                 finally:
                     state_task.cancel()
         except Exception as e:

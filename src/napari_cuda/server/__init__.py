@@ -1,8 +1,9 @@
 """napari-cuda server components for GPU-accelerated streaming.
 
-Avoid importing heavy modules at package import time; import these explicitly:
-- napari_cuda.server.headless_server: legacy Qt-based server
+Active server entrypoint:
 - napari_cuda.server.egl_headless_server: asyncio EGL server (no Qt)
+
+Legacy/experimental Qt-based server modules have been archived under `archive/legacy_server`.
 """
 
-__all__ = ["CudaStreamingLayer", "HeadlessServer"]
+__all__ = []
