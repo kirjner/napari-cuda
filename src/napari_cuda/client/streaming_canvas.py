@@ -121,12 +121,30 @@ class StreamingCanvas(VispyCanvas):
             class PyAVDecoder:
                 def __init__(self):
                     self.codec = av.CodecContext.create('h264', 'r')
-                    
+                    # Optional channel swap to diagnose R/B confusion
+                    import os as _os
+                    try:
+                        self.swap_rb = bool(int(_os.getenv('NAPARI_CUDA_CLIENT_SWAP_RB', '0')))
+                    except Exception:
+                        self.swap_rb = False
+                    # Optional explicit pixel fmt (rgb24 or bgr24); default rgb24
+                    try:
+                        pf = _os.getenv('NAPARI_CUDA_CLIENT_PIXEL_FMT', 'rgb24').lower()
+                    except Exception:
+                        pf = 'rgb24'
+                    self.pixfmt = pf if pf in {'rgb24', 'bgr24'} else 'rgb24'
+
                 def decode(self, data):
                     packet = av.Packet(data)
                     frames = self.codec.decode(packet)
                     for frame in frames:
-                        return frame.to_ndarray(format='rgb24')
+                        arr = frame.to_ndarray(format=self.pixfmt)
+                        # Ensure the GL texture sees RGB ordering
+                        if self.pixfmt == 'bgr24':
+                            arr = arr[..., ::-1].copy()
+                        if self.swap_rb:
+                            arr = arr[..., ::-1].copy()
+                        return arr
                     return None
             
             self.decoder = PyAVDecoder()
