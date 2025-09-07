@@ -84,6 +84,11 @@ class MinimalClient(QtCore.QObject):
             logger.info("Client env: NAPARI_CUDA_CLIENT_PIXEL_FMT=%s, NAPARI_CUDA_CLIENT_SWAP_RB=%s", p, s)
         except Exception as e:
             logger.debug("Client env log failed: %s", e)
+        # Header-matrix path is off by default; can be forced for debugging
+        try:
+            self._force_header_matrix = bool(int(os.getenv('NAPARI_CUDA_CLIENT_FORCE_HEADER_MATRIX', '0')))
+        except Exception:
+            self._force_header_matrix = False
         # No client-side color matrix forcing; rely on bitstream VUI
 
     async def run(self) -> None:
@@ -142,7 +147,7 @@ class MinimalClient(QtCore.QObject):
                                 # If decoder did not set colors and server provided hints via header,
                                 # decode to YUV444 and apply RGB matrix using header values.
                                 use_header_matrix = False
-                                if getattr(f, 'color_space', None) is None:
+                                if getattr(f, 'color_space', None) is None and self._force_header_matrix:
                                     # Look back at the last parsed header from this packet
                                     # We still have 'header' in scope above; safe in loop body
                                     if header.chroma in (1, 2) and header.color_space in (1, 2) and header.color_range in (1, 2):
@@ -151,6 +156,9 @@ class MinimalClient(QtCore.QObject):
                                     yuv = f.to_ndarray(format='yuv444p')
                                     matrix = 'BT709' if header.color_space == 2 else 'BT601'
                                     rng = 'FULL' if header.color_range == 2 else 'LIMITED'
+                                    if not hasattr(self, '_logged_header_matrix'):
+                                        logger.info("Using header color hints: matrix=%s range=%s", matrix, rng)
+                                        setattr(self, '_logged_header_matrix', True)
                                     arr = self._yuv444_to_rgb(yuv, matrix=matrix, rng=rng)
                                     # Force RGB path for QImage
                                     pixfmt_eff = 'rgb24'

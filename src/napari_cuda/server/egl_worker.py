@@ -307,7 +307,7 @@ class EGLRendererWorker:
         # Allow experimenting with encoder input format to diagnose channel order issues.
         # Supported by PyNvVideoCodec: ARGB, ABGR (among others). Default: ARGB.
         self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'ARGB').upper()
-        if self._enc_input_fmt not in {'ARGB', 'ABGR'}:
+        if self._enc_input_fmt not in {'ARGB', 'ABGR', 'YUV444'}:
             bad = self._enc_input_fmt
             self._enc_input_fmt = 'ARGB'
             try:
@@ -595,51 +595,64 @@ class EGLRendererWorker:
                 os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as e:
                 logger.debug("Pre-encode raw dump failed: %s", e)
-        # Convert RGBA (GL) -> encoder input (ARGB or ABGR) on GPU
+        # Convert RGBA (GL) -> encoder input (ARGB/ABGR/YUV444) on GPU
         src = self._torch_frame
-        dst = self._torch_frame_argb
-        if dst is None:
-            dst = torch.empty_like(src)
-        try:
-            enc_fmt = getattr(self, '_enc_input_fmt', 'ARGB')
-            # Log once on first conversion to confirm branch
-            if not hasattr(self, '_logged_swizzle'):
-                try:
+        enc_fmt = getattr(self, '_enc_input_fmt', 'ARGB')
+        if enc_fmt in ('ARGB', 'ABGR'):
+            dst = self._torch_frame_argb
+            if dst is None:
+                dst = torch.empty_like(src)
+            try:
+                # Log once on first conversion to confirm branch
+                if not hasattr(self, '_logged_swizzle'):
                     logger.info("Pre-encode swizzle: RGBA -> %s", enc_fmt)
-                except Exception:
-                    pass
-                setattr(self, '_logged_swizzle', True)
-            # One-time quick per-channel mean to validate mapping visually
-            if not hasattr(self, '_logged_channel_means'):
-                try:
+                    setattr(self, '_logged_swizzle', True)
+                # One-time quick per-channel mean to validate mapping visually
+                if not hasattr(self, '_logged_channel_means'):
                     means_rgba = [float(src[..., i].float().mean().item()) for i in range(4)]
                     logger.info("Source RGBA means: R=%.1f G=%.1f B=%.1f A=%.1f",
                                 means_rgba[0], means_rgba[1], means_rgba[2], means_rgba[3])
-                except Exception as e:
-                    logger.debug("RGBA mean log failed: %s", e)
-            if enc_fmt == 'ARGB':
-                # A,R,G,B
-                dst[..., 0].copy_(src[..., 3])
-                dst[..., 1:4].copy_(src[..., 0:3])
-            else:
-                # ABGR: A,B,G,R
-                dst[..., 0].copy_(src[..., 3])
-                dst[..., 1].copy_(src[..., 2])
-                dst[..., 2].copy_(src[..., 1])
-                dst[..., 3].copy_(src[..., 0])
-            if not hasattr(self, '_logged_channel_means'):
-                try:
+                if enc_fmt == 'ARGB':
+                    # A,R,G,B
+                    dst[..., 0].copy_(src[..., 3])
+                    dst[..., 1:4].copy_(src[..., 0:3])
+                else:
+                    # ABGR: A,B,G,R
+                    dst[..., 0].copy_(src[..., 3])
+                    dst[..., 1].copy_(src[..., 2])
+                    dst[..., 2].copy_(src[..., 1])
+                    dst[..., 3].copy_(src[..., 0])
+                if not hasattr(self, '_logged_channel_means'):
                     means_argbx = [float(dst[..., i].float().mean().item()) for i in range(4)]
                     logger.info("Encoder %s means: A=%.1f C1=%.1f C2=%.1f C3=%.1f",
                                 enc_fmt, means_argbx[0], means_argbx[1], means_argbx[2], means_argbx[3])
-                except Exception as e:
-                    logger.debug("ENC mean log failed: %s", e)
-                setattr(self, '_logged_channel_means', True)
-        except Exception:
-            if getattr(self, '_enc_input_fmt', 'ARGB') == 'ARGB':
+                    setattr(self, '_logged_channel_means', True)
+            except Exception as e:
+                logger.debug("Swizzle to %s failed, using view(): %s", enc_fmt, e)
+                if enc_fmt == 'ARGB':
+                    dst = src[..., [3, 0, 1, 2]]
+                else:
+                    dst = src[..., [3, 2, 1, 0]]
+        else:
+            # YUV444: compute BT.709 limited-range on device
+            try:
+                if not hasattr(self, '_logged_swizzle'):
+                    logger.info("Pre-encode swizzle: RGBA -> YUV444 (BT709 LIMITED)")
+                    setattr(self, '_logged_swizzle', True)
+                r = src[..., 0].float() / 255.0
+                g = src[..., 1].float() / 255.0
+                b = src[..., 2].float() / 255.0
+                y_n = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                y = torch.clamp(16.0 + 219.0 * y_n, 0.0, 255.0)
+                cb = torch.clamp(128.0 + 224.0 * (b - y_n) / 1.8556, 0.0, 255.0)
+                cr = torch.clamp(128.0 + 224.0 * (r - y_n) / 1.5748, 0.0, 255.0)
+                dst = torch.empty((self.height, self.width, 3), dtype=torch.uint8, device=src.device)
+                dst[..., 0] = y.to(torch.uint8)
+                dst[..., 1] = cb.to(torch.uint8)
+                dst[..., 2] = cr.to(torch.uint8)
+            except Exception as e:
+                logger.exception("YUV444 conversion failed: %s", e)
                 dst = src[..., [3, 0, 1, 2]]
-            else:
-                dst = src[..., [3, 2, 1, 0]]
         with self._enc_lock:
             enc = self._encoder
         if enc is None:
