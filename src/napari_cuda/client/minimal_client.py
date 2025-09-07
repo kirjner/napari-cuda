@@ -67,6 +67,13 @@ class MinimalClient(QtCore.QObject):
             self._log_headers_remaining = int(_os.getenv('NAPARI_CUDA_LOG_HEADERS', '5'))
         except Exception:
             self._log_headers_remaining = 5
+        # Log client pixel format env at startup
+        try:
+            p = os.getenv('NAPARI_CUDA_CLIENT_PIXEL_FMT', 'rgb24').lower()
+            s = os.getenv('NAPARI_CUDA_CLIENT_SWAP_RB', '0')
+            logger.info("Client env: NAPARI_CUDA_CLIENT_PIXEL_FMT=%s, NAPARI_CUDA_CLIENT_SWAP_RB=%s", p, s)
+        except Exception:
+            pass
 
     async def run(self) -> None:
         # Launch both connections
@@ -118,6 +125,10 @@ class MinimalClient(QtCore.QObject):
                                     qfmt = QtGui.QImage.Format_RGB888
                                 else:
                                     qfmt = QtGui.QImage.Format_BGR888
+                                # Log once to confirm active pixel format branch
+                                if not hasattr(self, '_logged_pixfmt'):
+                                    logger.info("Client decode pixfmt=%s -> QImage fmt=%s (%dx%d)", pixfmt, qfmt, w, h)
+                                    setattr(self, '_logged_pixfmt', True)
                                 qimg = QtGui.QImage(arr.data, w, h, 3 * w, qfmt)
                                 # Deep copy because arr will be released after loop
                                 self.frame_ready.emit(qimg.copy())

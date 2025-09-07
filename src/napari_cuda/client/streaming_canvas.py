@@ -12,6 +12,7 @@ import numpy as np
 from threading import Thread
 
 import websockets
+import struct
 from napari._vispy.canvas import VispyCanvas
 from vispy.gloo import Texture2D, Program
 
@@ -37,6 +38,9 @@ void main() {
     gl_FragColor = texture2D(texture, v_texcoord);
 }
 """
+
+# Server prepends a fixed header before Annex B bitstream
+HEADER_STRUCT = struct.Struct('!IdIIBBH')  # seq:uint32, ts:double, w:uint32, h:uint32, codec:uint8, flags:uint8, reserved:uint16
 
 
 class StreamingCanvas(VispyCanvas):
@@ -103,9 +107,21 @@ class StreamingCanvas(VispyCanvas):
                     self._init_decoder()
                     
                     async for message in websocket:
-                        # Message is binary H.264 frame
+                        # Message is header + Annex B H.264 frame
                         if isinstance(message, bytes):
-                            self._decode_frame(message)
+                            if len(message) > HEADER_STRUCT.size:
+                                # Optionally log a few headers for sanity
+                                if not hasattr(self, '_logged_headers'):
+                                    try:
+                                        seq, ts, w, h, codec, flags, _ = HEADER_STRUCT.unpack_from(message, 0)
+                                        logger.info(f"Pixel header: seq={seq} flags=0x{flags:02x} size={w}x{h}")
+                                    except Exception:
+                                        pass
+                                    setattr(self, '_logged_headers', True)
+                                payload = memoryview(message)[HEADER_STRUCT.size:]
+                            else:
+                                payload = message
+                            self._decode_frame(payload)
                             
             except Exception as e:
                 logger.error(f"Stream connection lost: {e}")
@@ -133,6 +149,11 @@ class StreamingCanvas(VispyCanvas):
                     except Exception:
                         pf = 'rgb24'
                     self.pixfmt = pf if pf in {'rgb24', 'bgr24'} else 'rgb24'
+                    try:
+                        logger.info("Client(PyAV) env: NAPARI_CUDA_CLIENT_PIXEL_FMT=%s, NAPARI_CUDA_CLIENT_SWAP_RB=%s",
+                                    self.pixfmt, str(int(self.swap_rb)))
+                    except Exception:
+                        pass
 
                 def decode(self, data):
                     packet = av.Packet(data)
@@ -144,6 +165,13 @@ class StreamingCanvas(VispyCanvas):
                             arr = arr[..., ::-1].copy()
                         if self.swap_rb:
                             arr = arr[..., ::-1].copy()
+                        if not hasattr(self, '_logged_once'):
+                            try:
+                                h, w, c = arr.shape
+                                logger.info("Client(PyAV) decode to %s -> RGB array (%dx%d)", self.pixfmt, w, h)
+                            except Exception:
+                                pass
+                            setattr(self, '_logged_once', True)
                         return arr
                     return None
             

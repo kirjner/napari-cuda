@@ -308,7 +308,16 @@ class EGLRendererWorker:
         # Supported by PyNvVideoCodec: ARGB, ABGR (among others). Default: ARGB.
         self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'ARGB').upper()
         if self._enc_input_fmt not in {'ARGB', 'ABGR'}:
+            bad = self._enc_input_fmt
             self._enc_input_fmt = 'ARGB'
+            try:
+                logger.warning("Invalid NAPARI_CUDA_ENCODER_INPUT_FMT=%r; defaulting to %s", bad, self._enc_input_fmt)
+            except Exception:
+                pass
+        try:
+            logger.info("Encoder input format selected via env: NAPARI_CUDA_ENCODER_INPUT_FMT=%s", self._enc_input_fmt)
+        except Exception:
+            pass
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
         kwargs = {
             'codec': 'h264',
@@ -565,7 +574,23 @@ class EGLRendererWorker:
         if dst is None:
             dst = torch.empty_like(src)
         try:
-            if getattr(self, '_enc_input_fmt', 'ARGB') == 'ARGB':
+            enc_fmt = getattr(self, '_enc_input_fmt', 'ARGB')
+            # Log once on first conversion to confirm branch
+            if not hasattr(self, '_logged_swizzle'):
+                try:
+                    logger.info("Pre-encode swizzle: RGBA -> %s", enc_fmt)
+                except Exception:
+                    pass
+                setattr(self, '_logged_swizzle', True)
+            # One-time quick per-channel mean to validate mapping visually
+            if not hasattr(self, '_logged_channel_means'):
+                try:
+                    means_rgba = [float(src[..., i].float().mean().item()) for i in range(4)]
+                    logger.info("Source RGBA means: R=%.1f G=%.1f B=%.1f A=%.1f",
+                                means_rgba[0], means_rgba[1], means_rgba[2], means_rgba[3])
+                except Exception as e:
+                    logger.debug("RGBA mean log failed: %s", e)
+            if enc_fmt == 'ARGB':
                 # A,R,G,B
                 dst[..., 0].copy_(src[..., 3])
                 dst[..., 1:4].copy_(src[..., 0:3])
@@ -575,6 +600,14 @@ class EGLRendererWorker:
                 dst[..., 1].copy_(src[..., 2])
                 dst[..., 2].copy_(src[..., 1])
                 dst[..., 3].copy_(src[..., 0])
+            if not hasattr(self, '_logged_channel_means'):
+                try:
+                    means_argbx = [float(dst[..., i].float().mean().item()) for i in range(4)]
+                    logger.info("Encoder %s means: A=%.1f C1=%.1f C2=%.1f C3=%.1f",
+                                enc_fmt, means_argbx[0], means_argbx[1], means_argbx[2], means_argbx[3])
+                except Exception as e:
+                    logger.debug("ENC mean log failed: %s", e)
+                setattr(self, '_logged_channel_means', True)
         except Exception:
             if getattr(self, '_enc_input_fmt', 'ARGB') == 'ARGB':
                 dst = src[..., [3, 0, 1, 2]]
