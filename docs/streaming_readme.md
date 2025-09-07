@@ -23,3 +23,27 @@ Server
 
 Client
   uv run python -m napari_cuda.client.minimal_client --host 127.0.0.1 --state-port 8081 --pixel-port 8082
+
+2D Content And Artifacts
+
+- Why random noise looks “patchy/filmy”
+  - H.264 is block-based and optimized for natural images. A fully random 2D texture has high spatial entropy and triggers macroblock artifacts during motion (pan/zoom). You may see boxes popping in/out as prediction updates.
+  - Volumetric MIP tends to be low frequency and compresses smoothly, so it looks “clean” at the same bitrate.
+
+- Recommendations for 2D demos
+  - Use low-frequency or structured 2D patterns (gradient, color bars, checkerboard) or real image data rather than random noise.
+  - Select pattern via `NAPARI_CUDA_2D_PATTERN=gradient|bars|checker|noise` (default: `gradient`).
+  - If random/noisy 2D inputs are important, consider slightly higher bitrate or a higher-quality preset.
+  - Keep YUV444 when color fidelity is important; NV12 (4:2:0) is fine for most content and typically compresses more efficiently, but with subsampled chroma.
+
+- Practical tips
+  - Bitrate: start around 8–10 MB/s at 1080p60 and adjust by eye.
+  - Preset/tuning: keep `tuning_info=low_latency` for responsiveness; bump preset quality if needed.
+  - Dimensions: prefer even width/height for best encoder compatibility.
+
+Notes On Formats
+
+- YUV444 vs NV12
+  - YUV444 keeps full chroma detail. Slightly more bandwidth and decode cost, but simplest to guarantee color correctness.
+  - NV12 (4:2:0) halves chroma samples (interleaved UV plane). Generally a bit faster and more compressible at similar perceptual quality; minimal color difference on most content.
+  - Both can produce correct colors as long as the server’s RGB->YUV uses the intended matrix/range (we use BT.709 limited for 1080p).
