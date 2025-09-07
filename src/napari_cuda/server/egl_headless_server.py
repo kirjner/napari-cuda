@@ -185,8 +185,9 @@ class EGLHeadlessServer:
                 except Exception as e:
                     logger.debug("Worker cleanup error: %s", e)
 
-            self._worker_thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
-            self._worker_thread.start()
+        # Start render thread outside of worker_loop definition
+        self._worker_thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
+        self._worker_thread.start()
 
     def _pack_color_reserved(self) -> int:
         """Pack color hints into the 16-bit reserved field of the header.
