@@ -74,6 +74,7 @@ class MinimalClient(QtCore.QObject):
             logger.info("Client env: NAPARI_CUDA_CLIENT_PIXEL_FMT=%s, NAPARI_CUDA_CLIENT_SWAP_RB=%s", p, s)
         except Exception:
             pass
+        # No client-side color matrix forcing; rely on bitstream VUI
 
     async def run(self) -> None:
         # Launch both connections
@@ -176,6 +177,8 @@ class MinimalClient(QtCore.QObject):
         data = img.tobytes()
         qimg = QtGui.QImage(data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
         return qimg.copy()  # deep copy since data is ephemeral
+
+    # No client-side YUV->RGB override; rely on decoder defaults
 
 
 def main() -> None:

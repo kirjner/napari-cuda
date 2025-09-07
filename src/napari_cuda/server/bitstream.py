@@ -6,6 +6,8 @@ Independent of GL/CUDA/torch for easy testing.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import logging
 from typing import List, Optional, Tuple, Sequence, Union
 
 
@@ -94,6 +96,8 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
 
     is_key = False
     saw_sps = saw_pps = saw_vps = False
+    log_sps = bool(int(os.getenv('NAPARI_CUDA_LOG_SPS', '0') or '0'))
+    logger = logging.getLogger(__name__)
     for nal in nal_units:
         if not nal:
             continue
@@ -102,6 +106,11 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
         n265 = t265(b0)
         if n264 == 7:  # SPS
             saw_sps = True; cache.sps = nal
+            if log_sps:
+                try:
+                    logger.info("H264 SPS len=%d first16=%s", len(nal), nal[:16].hex())
+                except Exception:
+                    pass
         elif n264 == 8:  # PPS
             saw_pps = True; cache.pps = nal
         elif n264 == 5:  # IDR
@@ -110,6 +119,11 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
             saw_vps = True; cache.vps = nal
         elif n265 == 33:  # SPS
             saw_sps = True; cache.sps = nal
+            if log_sps:
+                try:
+                    logger.info("H265 SPS len=%d first16=%s", len(nal), nal[:16].hex())
+                except Exception:
+                    pass
         elif n265 == 34:  # PPS
             saw_pps = True; cache.pps = nal
         elif n265 in (19, 20, 21):  # IDR/CRA
@@ -132,4 +146,3 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
         ba.extend(b"\x00\x00\x00\x01" if first else b"\x00\x00\x01"); first = False
         ba.extend(nal)
     return bytes(ba), is_key
-
