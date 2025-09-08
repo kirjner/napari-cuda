@@ -22,6 +22,11 @@ import qasync
 
 logger = logging.getLogger(__name__)
 
+try:
+    # Lightweight AVCC → AnnexB shim for PyAV
+    from napari_cuda.client.avcc_shim import normalize_to_annexb  # type: ignore
+except Exception:  # pragma: no cover - optional import for older snapshots
+    normalize_to_annexb = None  # type: ignore
 
 HEADER_STRUCT = struct.Struct('!IdIIBBH')  # seq:uint32, ts:double, w:uint32, h:uint32, codec:uint8, flags:uint8, reserved:uint16
 
@@ -128,8 +133,17 @@ class MinimalClient(QtCore.QObject):
                             else:
                                 # Keep quiet; rely on first-frame header log above
                                 continue
-                        # Decode payload
-                        packet = av.Packet(bytes(payload))
+                        # Decode payload (convert AVCC → Annex B if needed)
+                        if normalize_to_annexb is not None:
+                            annexb, converted = normalize_to_annexb(payload)
+                            # Log once to clarify input format
+                            if not hasattr(self, '_logged_payload_format'):
+                                fmt = 'AVCC' if converted else 'AnnexB'
+                                logger.info("Client bitstream detected: %s", fmt)
+                                setattr(self, '_logged_payload_format', True)
+                            packet = av.Packet(annexb)
+                        else:
+                            packet = av.Packet(bytes(payload))
                         frames = self._decoder.decode(packet)
                         for f in frames:
                             # Prefer a deterministic ndarray conversion to control channel order
