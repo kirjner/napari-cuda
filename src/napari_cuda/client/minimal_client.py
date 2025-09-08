@@ -12,7 +12,8 @@ import struct
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Deque, Tuple
+from collections import deque
 
 import av  # PyAV for decoding
 import websockets
@@ -77,6 +78,23 @@ class MinimalClient(QtCore.QObject):
             logger.debug("Client env log failed: %s", e)
         # No client-side color correction; rely on decoder
         # No client-side color matrix forcing; rely on bitstream VUI
+        # Jitter buffer and display pacing
+        try:
+            self._display_fps = float(os.getenv('NAPARI_CUDA_CLIENT_DISPLAY_FPS', '60'))
+        except Exception:
+            self._display_fps = 60.0
+        try:
+            buf_n = int(os.getenv('NAPARI_CUDA_CLIENT_BUFFER_FRAMES', '3'))
+        except Exception:
+            buf_n = 3
+        self._buffer: Deque[Tuple[QtGui.QImage, float]] = deque(maxlen=max(1, buf_n))
+        self._last_qimg: Optional[QtGui.QImage] = None
+        self._display_timer = QtCore.QTimer(self)
+        self._display_timer.setTimerType(QtCore.Qt.PreciseTimer)
+        interval_ms = max(1, int(round(1000.0 / max(1.0, self._display_fps))))
+        self._display_timer.setInterval(interval_ms)
+        self._display_timer.timeout.connect(self._on_display_tick)
+        self._display_timer.start()
 
     async def run(self) -> None:
         # Launch both connections
@@ -133,14 +151,14 @@ class MinimalClient(QtCore.QObject):
                                 if not hasattr(self, '_logged_pixfmt'):
                                     logger.info("Client decode pixfmt=%s -> QImage fmt=%s (%dx%d)", pixfmt, qfmt, w, h)
                                     setattr(self, '_logged_pixfmt', True)
-                                qimg = QtGui.QImage(arr.data, w, h, 3 * w, qfmt)
-                                # Deep copy because arr will be released after loop
-                                self.frame_ready.emit(qimg.copy())
+                                qimg = QtGui.QImage(arr.data, w, h, 3 * w, qfmt).copy()
+                                # Push to jitter buffer with server timestamp
+                                self._buffer.append((qimg, header.ts))
                             except Exception:
                                 # Fallback: use PIL conversion
                                 img = f.to_image()
                                 qimg = self._pil_to_qimage(img)
-                                self.frame_ready.emit(qimg)
+                                self._buffer.append((qimg, header.ts))
                 finally:
                     state_task.cancel()
         except Exception as e:
@@ -173,6 +191,20 @@ class MinimalClient(QtCore.QObject):
     # No client-side YUV->RGB override
 
     # No client-side YUV->RGB override; rely on decoder defaults
+
+    @QtCore.Slot()
+    def _on_display_tick(self) -> None:
+        # Drain buffer and present the newest frame
+        try:
+            latest: Optional[Tuple[QtGui.QImage, float]] = None
+            while self._buffer:
+                latest = self._buffer.pop()
+            if latest is not None:
+                self._last_qimg = latest[0]
+            if self._last_qimg is not None:
+                self.frame_ready.emit(self._last_qimg)
+        except Exception as e:
+            logger.debug("display tick error: %s", e)
 
 
 def main() -> None:

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import queue
 import numpy as np
+from qtpy import QtCore
 from threading import Thread
 
 import websockets
@@ -67,8 +68,12 @@ class StreamingCanvas(VispyCanvas):
         self.server_host = server_host
         self.server_port = server_port
         
-        # Queue for decoded frames
-        self.frame_queue = queue.Queue(maxsize=3)
+        # Queue for decoded frames (latest-wins draining in draw)
+        try:
+            buf_n = int(os.getenv('NAPARI_CUDA_CLIENT_BUFFER_FRAMES', '3'))
+        except Exception:
+            buf_n = 3
+        self.frame_queue = queue.Queue(maxsize=max(1, buf_n))
         
         # Video display resources
         self._video_texture = None
@@ -85,6 +90,16 @@ class StreamingCanvas(VispyCanvas):
         # Override draw to show video instead
         self._scene_canvas.events.draw.disconnect()
         self._scene_canvas.events.draw.connect(self._draw_video_frame)
+        # Timer-driven display at target fps
+        try:
+            fps = float(os.getenv('NAPARI_CUDA_CLIENT_DISPLAY_FPS', '60'))
+        except Exception:
+            fps = 60.0
+        self._display_timer = QtCore.QTimer()
+        self._display_timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self._display_timer.setInterval(max(1, int(round(1000.0 / max(1.0, fps)))))
+        self._display_timer.timeout.connect(lambda: self._scene_canvas.update())
+        self._display_timer.start()
         
         logger.info(f"StreamingCanvas initialized for {server_host}:{server_port}")
     
@@ -211,9 +226,7 @@ class StreamingCanvas(VispyCanvas):
                         pass
                 
                 self.frame_queue.put(frame)
-                
-                # Trigger redraw
-                self._scene_canvas.update()
+                # Display is timer-driven; avoid redraw on every arrival
     
     def _draw_video_frame(self, event):
         """Draw the latest video frame instead of scene content."""

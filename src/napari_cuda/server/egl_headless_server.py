@@ -75,6 +75,8 @@ class EGLHeadlessServer:
         # Track last keyframe for metrics only
         self._last_key_seq: Optional[int] = None
         self._last_key_ts: Optional[float] = None
+        # Broadcaster pacing: bypass once until keyframe for immediate start
+        self._bypass_until_key: bool = False
         
 
     async def start(self) -> None:
@@ -273,6 +275,8 @@ class EGLHeadlessServer:
             if self._worker is not None:
                 logger.info("Resetting encoder for new pixel client to force keyframe")
                 self._worker.reset_encoder()
+                # Allow immediate send of the first keyframe when pacing is enabled
+                self._bypass_until_key = True
                 try:
                     self.metrics.inc('napari_cuda_encoder_resets')
                 except Exception:
@@ -286,19 +290,60 @@ class EGLHeadlessServer:
             self._update_client_gauges()
 
     async def _broadcast_loop(self) -> None:
-        coalesce = os.getenv('NAPARI_CUDA_BROADCAST_LATEST', '0') in ('1', 'true', 'True')
-        while True:
-            data = await self._frame_q.get()
-            if coalesce:
-                # Drain queue; keep only the latest frame to avoid bursts and reduce stutter
+        # Always use paced broadcasting with latest-wins coalescing for smooth delivery
+        try:
+            target_fps = float(os.getenv('NAPARI_CUDA_BROADCAST_FPS', str(self.cfg.fps)))
+        except Exception:
+            target_fps = float(self.cfg.fps)
+        loop = asyncio.get_running_loop()
+        tick = 1.0 / max(1.0, target_fps)
+        next_t = loop.time()
+        latest: Optional[bytes] = None
+
+        async def _fill_until(deadline: float) -> None:
+            nonlocal latest
+            remaining = max(0.0, deadline - loop.time())
+            try:
+                item = await asyncio.wait_for(self._frame_q.get(), timeout=remaining if remaining > 0 else 1e-6)
+                latest = item
+                # Drain rest without waiting; keep the newest only
                 while True:
                     try:
-                        data = self._frame_q.get_nowait()
+                        latest = self._frame_q.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-            if not self._clients:
-                continue
-            await asyncio.gather(*(self._safe_send(c, data) for c in list(self._clients)), return_exceptions=True)
+            except asyncio.TimeoutError:
+                return
+
+        while True:
+            # Immediate keyframe bypass for new clients
+            if self._bypass_until_key:
+                await _fill_until(loop.time() + 0.050)
+                if latest is not None and len(latest) >= struct.calcsize('!IdIIBBH'):
+                    try:
+                        _seq, _ts, _w, _h, _codec, _flags, _res = struct.unpack('!IdIIBBH', latest[:struct.calcsize('!IdIIBBH')])
+                        if (_flags & 0x01) != 0:
+                            if self._clients:
+                                await asyncio.gather(*(self._safe_send(c, latest) for c in list(self._clients)), return_exceptions=True)
+                            latest = None
+                            self._bypass_until_key = False
+                            next_t = loop.time() + tick
+                            continue
+                    except Exception:
+                        self._bypass_until_key = False
+
+            now = loop.time()
+            if now < next_t:
+                await _fill_until(next_t)
+            else:
+                missed = int((now - next_t) // tick) + 1
+                next_t += missed * tick
+
+            if latest is not None:
+                if self._clients:
+                    await asyncio.gather(*(self._safe_send(c, latest) for c in list(self._clients)), return_exceptions=True)
+                latest = None
+            next_t += tick
 
     async def _safe_send(self, ws: websockets.WebSocketServerProtocol, data: bytes) -> None:
         try:
