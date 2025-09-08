@@ -21,10 +21,8 @@ classifiers = [
     "Programming Language :: C",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
+    # Project restricted to Python 3.12 for VT (PyObjC) compatibility on macOS
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Visualization",
     "Topic :: Scientific/Engineering :: Information Analysis",
@@ -35,7 +33,7 @@ classifiers = [
     "Operating System :: Unix",
     "Operating System :: MacOS",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "appdirs>=1.4.4",
     "app-model>=0.4.0,<0.5.0",
@@ -176,19 +174,23 @@ server = [
     "plotly>=5.18.0",
 ]
 
-# Client dependencies (for local machine)
+# Client dependencies (for local machine) — includes dashboard by default
 client = [
     "napari-cuda[streaming]",
     "napari-cuda[video]",
+    "dash>=2.16.1",
+    "plotly>=5.18.0",
 ]
 
-# Client with VideoToolbox hardware decode (macOS only)
-client-vt = [
+# VT client (macOS): everything in `client` plus VideoToolbox support
+vt-client = [
     "napari-cuda[client]",
-    "pyobjc-framework-VideoToolbox>=10.1 ; sys_platform == 'darwin'",
-    "pyobjc-framework-CoreMedia>=10.1 ; sys_platform == 'darwin'",
-    "pyobjc-framework-CoreVideo>=10.1 ; sys_platform == 'darwin'",
-    "pyobjc-framework-AVFoundation>=10.1 ; sys_platform == 'darwin'",
+    # Use meta-distribution to bring in required frameworks (and pyobjc-core)
+    "pyobjc>=10.0 ; sys_platform == 'darwin'",
+    # Ensure critical VT frameworks are present
+    "pyobjc-framework-CoreMedia ; sys_platform == 'darwin'",
+    "pyobjc-framework-VideoToolbox ; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation ; sys_platform == 'darwin'",
 ]
 
 # Complete development environment

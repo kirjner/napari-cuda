@@ -119,10 +119,11 @@ class ProxyViewer(ViewerModel):
                 # This shouldn't happen in normal usage
                 raise RuntimeError("No Qt application found - ProxyViewer requires Qt context")
         
-        # Start connection in background
+        # Start connection in background; prefer loop.create_task to avoid requiring a running loop
         try:
-            asyncio.create_task(self._maintain_connection())
-        except RuntimeError as e:
+            loop.create_task(self._maintain_connection())
+            self._connection_pending = False
+        except Exception as e:
             logger.error(f"Failed to create connection task: {e}")
             # Set flag to retry later when event loop is ready
             self._connection_pending = True

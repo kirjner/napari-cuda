@@ -11,6 +11,7 @@ import asyncio
 import struct
 import logging
 import os
+import json
 from dataclasses import dataclass
 from typing import Optional, Deque, Tuple
 from collections import deque
@@ -68,8 +69,10 @@ class MinimalClient(QtCore.QObject):
         self.state_port = state_port
         self.pixel_port = pixel_port
         self._decoder = av.codec.CodecContext.create('h264', 'r')  # default to H.264
-        self._vt_decoder = None  # VideoToolbox decoder instance when enabled/initialized
+        # VT is intentionally not supported in minimal_client; keep PyAV-only.
+        self._vt_decoder = None
         self._vt_enabled = False
+        self._vt_cfg_key: Optional[tuple[int, int, bytes]] = None
         self._running = True
         # Log a few header fields on startup for sanity (seq/flags/size)
         try:
@@ -91,13 +94,16 @@ class MinimalClient(QtCore.QObject):
             self._display_fps = float(os.getenv('NAPARI_CUDA_CLIENT_DISPLAY_FPS', '60'))
         except Exception:
             self._display_fps = 60.0
-        # VT toggle (opt-in)
+        # VT toggle is ignored in minimal_client. Keep a user-facing note if set.
         try:
-            self._vt_enabled = (sys.platform == 'darwin') and bool(int(os.getenv('NAPARI_CUDA_USE_VT', '0')))
-            if self._vt_enabled:
-                logger.info("Client: VideoToolbox path requested (NAPARI_CUDA_USE_VT=1)")
+            vt_req = (sys.platform == 'darwin') and bool(int(os.getenv('NAPARI_CUDA_USE_VT', '0')))
+            if vt_req:
+                logger.warning(
+                    "VideoToolbox is not supported in minimal_client. "
+                    "Please use the StreamingCanvas client for VT decode."
+                )
         except Exception:
-            self._vt_enabled = False
+            pass
         try:
             buf_n = int(os.getenv('NAPARI_CUDA_CLIENT_BUFFER_FRAMES', '3'))
         except Exception:
@@ -110,6 +116,15 @@ class MinimalClient(QtCore.QObject):
         self._display_timer.setInterval(interval_ms)
         self._display_timer.timeout.connect(self._on_display_tick)
         self._display_timer.start()
+        # Lightweight counters for observability
+        try:
+            self._log_every = max(1, int(os.getenv('NAPARI_CUDA_CLIENT_LOG_EVERY', '300')))
+        except Exception:
+            self._log_every = 300
+        self._vt_decoded = 0
+        self._pyav_decoded = 0
+        self._presented = 0
+        self._last_fmt_str: Optional[str] = None
 
     async def run(self) -> None:
         # Launch both connections
@@ -143,17 +158,7 @@ class MinimalClient(QtCore.QObject):
                             else:
                                 # Keep quiet; rely on first-frame header log above
                                 continue
-                        # Decode via VideoToolbox if enabled and initialized
-                        if self._vt_enabled and self._vt_decoder is not None:
-                            try:
-                                qimg = self._decode_vt_to_qimage(bytes(payload))
-                                if qimg is not None:
-                                    self._buffer.append((qimg, header.ts))
-                                    continue
-                            except Exception as e:
-                                logger.error("VT decode error; falling back to PyAV: %s", e, exc_info=True)
-                                self._vt_enabled = False
-                                self._vt_decoder = None
+                        # VT path is intentionally disabled in minimal_client
                         # PyAV path (AVCC→AnnexB shim if available)
                         if normalize_to_annexb is not None:
                             annexb, converted = normalize_to_annexb(payload)
@@ -182,10 +187,12 @@ class MinimalClient(QtCore.QObject):
                                     setattr(self, '_logged_pixfmt', True)
                                 qimg = QtGui.QImage(arr.data, w, h, 3 * w, qfmt).copy()
                                 self._buffer.append((qimg, header.ts))
+                                self._pyav_decoded += 1
                             except Exception:
                                 img = f.to_image()
                                 qimg = self._pil_to_qimage(img)
                                 self._buffer.append((qimg, header.ts))
+                                self._pyav_decoded += 1
                 finally:
                     state_task.cancel()
         except Exception as e:
@@ -225,8 +232,7 @@ class MinimalClient(QtCore.QObject):
                                 width = int(data.get('width') or 0)
                                 height = int(data.get('height') or 0)
                                 avcc_b64 = data.get('data')
-                                if width > 0 and height > 0:
-                                    self._init_vt_if_possible(avcc_b64, width, height)
+                                # minimal_client ignores VT init; StreamingCanvas handles VT
                             except Exception as e:
                                 logger.debug("video_config parse failed: %s", e)
                 finally:
@@ -254,59 +260,28 @@ class MinimalClient(QtCore.QObject):
         try:
             latest: Optional[Tuple[QtGui.QImage, float]] = None
             while self._buffer:
-                latest = self._buffer.pop()
+                cand = self._buffer.pop()
+                latest = cand
             if latest is not None:
                 self._last_qimg = latest[0]
             if self._last_qimg is not None:
                 self.frame_ready.emit(self._last_qimg)
+                self._presented += 1
+                if (self._presented % self._log_every) == 0:
+                    try:
+                        logger.info(
+                            "Client stats: presented=%d vt_decoded=%d pyav_decoded=%d qimg_fmt=%s",
+                            self._presented,
+                            self._vt_decoded,
+                            self._pyav_decoded,
+                            self._last_fmt_str or '?',
+                        )
+                    except Exception:
+                        pass
         except Exception as e:
             logger.debug("display tick error: %s", e)
 
-    def _init_vt_if_possible(self, avcc_b64: Optional[str], width: int, height: int) -> None:
-        if not self._vt_enabled:
-            return
-        if not avcc_b64:
-            logger.warning("VT requested but missing avcC in video_config; skipping VT init")
-            return
-        try:
-            import base64
-            avcc = base64.b64decode(avcc_b64)
-            from napari_cuda.client.vt_decoder import VideoToolboxDecoder, is_vt_available  # type: ignore
-            if not is_vt_available():
-                logger.warning("VideoToolbox frameworks not available; install PyObjC frameworks to enable VT")
-                return
-            self._vt_decoder = VideoToolboxDecoder(avcc, width, height)
-            logger.info("VideoToolbox decoder initialized: %dx%d BGRA output", width, height)
-        except Exception as e:
-            logger.error("VT init failed; falling back to PyAV: %s", e, exc_info=True)
-            self._vt_decoder = None
-            self._vt_enabled = False
-
-    def _decode_vt_to_qimage(self, avcc_au: bytes) -> Optional[QtGui.QImage]:
-        if not self._vt_decoder:
-            return None
-        try:
-            img_buf = self._vt_decoder.decode(avcc_au)
-            if img_buf is None:
-                return None
-            # Map CVPixelBuffer to QImage with a copy (safer for first integration)
-            import CoreVideo  # type: ignore
-            CoreVideo.CVPixelBufferLockBaseAddress(img_buf, 0)
-            try:
-                w = CoreVideo.CVPixelBufferGetWidth(img_buf)
-                h = CoreVideo.CVPixelBufferGetHeight(img_buf)
-                bpr = CoreVideo.CVPixelBufferGetBytesPerRow(img_buf)
-                base = CoreVideo.CVPixelBufferGetBaseAddress(img_buf)
-                import ctypes
-                buf_len = int(bpr) * int(h)
-                raw = ctypes.string_at(base, buf_len)
-                qimg = QtGui.QImage(raw, int(w), int(h), int(bpr), QtGui.QImage.Format_ARGB32).copy()
-                return qimg
-            finally:
-                CoreVideo.CVPixelBufferUnlockBaseAddress(img_buf, 0)
-        except Exception as e:
-            logger.debug("VT map/QImage failed: %s", e)
-            return None
+    # VT-specific helpers removed for minimal_client
 
 
 def main() -> None:

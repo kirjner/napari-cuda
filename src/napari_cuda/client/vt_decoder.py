@@ -12,6 +12,7 @@ not be usable; callers should detect availability and fall back.
 """
 
 from typing import List, Tuple, Optional
+import ctypes
 import logging
 import sys
 
@@ -73,7 +74,7 @@ def is_vt_available() -> bool:
         import objc  # noqa: F401
         import VideoToolbox  # type: ignore  # noqa: F401
         import CoreMedia  # type: ignore  # noqa: F401
-        import CoreVideo  # type: ignore  # noqa: F401
+        from Quartz import CoreVideo as _CV  # type: ignore  # noqa: F401
         return True
     except Exception as e:
         logger.debug("VideoToolbox not available: %s", e)
@@ -89,6 +90,7 @@ class VideoToolboxDecoder:
     """
 
     def __init__(self, avcc: bytes, width: int, height: int) -> None:
+        logger.info("VT decoder init: width=%d height=%d avcc_len=%d", width, height, len(avcc))
         if not is_vt_available():
             raise RuntimeError(
                 "VideoToolbox is not available. On macOS, install PyObjC frameworks:\n"
@@ -98,102 +100,177 @@ class VideoToolboxDecoder:
         import objc  # type: ignore
         import CoreMedia  # type: ignore
         import VideoToolbox  # type: ignore
-        import CoreVideo  # type: ignore
+        from Quartz import CoreVideo as CV  # type: ignore
         from CoreFoundation import CFAllocatorGetDefault  # type: ignore
 
         self._objc = objc
         self._cm = CoreMedia
         self._vt = VideoToolbox
-        self._cv = CoreVideo
+        self._cv = CV
         self._width = int(width)
         self._height = int(height)
 
         # Parse SPS/PPS from avcC and create CMFormatDescription
-        sps_list, pps_list, nal_len_size = parse_avcc_sps_pps(avcc)
+        try:
+            sps_list, pps_list, nal_len_size = parse_avcc_sps_pps(avcc)
+            logger.info("Parsed avcC: %d SPS, %d PPS, nal_len_size=%d", len(sps_list), len(pps_list), nal_len_size)
+        except Exception as e:
+            logger.error("Failed to parse avcC: %s", e)
+            raise
         self._nal_length_size = nal_len_size
-        # CMVideoFormatDescriptionCreateFromH264ParameterSets expects a list of parameter sets
-        ps = sps_list + pps_list
+        # CMVideoFormatDescriptionCreateFromH264ParameterSets expects a tuple of buffers
+        ps = tuple(sps_list + pps_list)
         num_sets = len(ps)
-        # Build a tuple of bytes objects acceptable to PyObjC; lengths as a list
-        parameter_set_pointers = ps
-        parameter_set_sizes = [len(x) for x in ps]
+        parameter_set_pointers = tuple(ps)
+        parameter_set_sizes = tuple(len(x) for x in ps)
+        try:
+            logger.debug(
+                "VT avcC parse: sps=%d pps=%d nal_len_size=%d sizes=%s",
+                len(sps_list), len(pps_list), nal_len_size, list(parameter_set_sizes),
+            )
+        except Exception:
+            pass
         fmt_out = self._objc.nil
-        status, fmt_desc = self._cm.CMVideoFormatDescriptionCreateFromH264ParameterSets(
-            CFAllocatorGetDefault(),
-            num_sets,
-            parameter_set_pointers,
-            parameter_set_sizes,
-            nal_len_size,
-            None,
-        )
-        if status != 0:
-            raise RuntimeError(f"CMVideoFormatDescriptionCreateFromH264ParameterSets failed: {status}")
-        self._fmt_desc = fmt_desc
+        try:
+            status, fmt_desc = self._cm.CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                CFAllocatorGetDefault(),
+                num_sets,
+                parameter_set_pointers,
+                parameter_set_sizes,
+                nal_len_size,
+                None,
+            )
+            logger.info("CMVideoFormatDescriptionCreate: status=%s", status)
+            if status != 0:
+                raise RuntimeError(f"CMVideoFormatDescriptionCreateFromH264ParameterSets failed: {status}")
+            self._fmt_desc = fmt_desc
+        except Exception as e:
+            logger.error("Failed to create format description: %s", e)
+            raise
 
         # Create VTDecompressionSession with BGRA output
-        pix_attrs = {self._cv.kCVPixelBufferPixelFormatTypeKey: self._cv.kCVPixelFormatType_32BGRA}
+        pix_attrs = {
+            self._cv.kCVPixelBufferPixelFormatTypeKey: self._cv.kCVPixelFormatType_32BGRA,
+        }
+        # Prefer IOSurface-backed buffers and GL compatibility when available
+        try:
+            pix_attrs[self._cv.kCVPixelBufferIOSurfacePropertiesKey] = {}
+        except Exception as e:
+            logger.debug("IOSurfacePropertiesKey not set: %s", e)
+        try:
+            pix_attrs[self._cv.kCVPixelBufferOpenGLCompatibilityKey] = True
+        except Exception as e:
+            logger.debug("OpenGLCompatibilityKey not set: %s", e)
 
         # Output callback stores the most recent CVPixelBuffer
         self._last_image_buffer = None
+        self._out_count = 0
 
-        def _output_callback(_refcon, _source_frame_refcon, _status, _info_flags, image_buffer, _pts, _duration):
+        def _output_callback(_refcon, _source_frame_refcon, status_cb, info_flags, image_buffer, pts, duration):
             # image_buffer is a CVPixelBufferRef (PyObjC proxy)
-            self._last_image_buffer = image_buffer
+            try:
+                if status_cb != 0:
+                    logger.error("VT output callback: decode error status=%s", status_cb)
+                    return
+                if image_buffer is None:
+                    logger.warning("VT output callback: null image buffer")
+                    return
+                self._last_image_buffer = image_buffer
+                self._out_count += 1
+                logger.debug("VT output: status=%s flags=0x%x out_count=%d", status_cb, int(info_flags or 0), self._out_count)
+            except Exception as e:
+                logger.exception("VT output callback error: %s", e)
 
-        cb = self._vt.VTDecompressionOutputCallbackRecord(
-            decompressionOutputCallback=_output_callback, decompressionOutputRefCon=0
-        )
-        status, session = self._vt.VTDecompressionSessionCreate(
-            CFAllocatorGetDefault(),
-            self._fmt_desc,
-            None,
-            pix_attrs,
-            cb,
-        )
-        if status != 0:
-            raise RuntimeError(f"VTDecompressionSessionCreate failed: {status}")
-        self._session = session
+        # In PyObjC, pass (callback, refcon) tuple instead of a C record struct
+        cb = (_output_callback, 0)
+        try:
+            status, session = self._vt.VTDecompressionSessionCreate(
+                CFAllocatorGetDefault(),
+                self._fmt_desc,
+                None,
+                pix_attrs,
+                cb,
+                None,
+            )
+            logger.info("VTDecompressionSessionCreate: status=%s", status)
+            if status != 0:
+                raise RuntimeError(f"VTDecompressionSessionCreate failed: {status}")
+            self._session = session
+            logger.info("VT decoder initialized successfully")
+        except Exception as e:
+            logger.error("Failed to create VT session: %s", e)
+            raise
 
     def close(self) -> None:
         try:
             if self._session is not None:
                 self._vt.VTDecompressionSessionInvalidate(self._session)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("VT session invalidate failed: %s", e)
 
     def decode(self, avcc_au: bytes) -> Optional[object]:
         """Decode one AVCC access unit. Returns a CVPixelBufferRef or None."""
+        logger.debug("VT decode: input len=%d, first bytes=%s", len(avcc_au), avcc_au[:8].hex() if avcc_au else "empty")
         # Build CMBlockBuffer from raw bytes and then CMSampleBuffer associated with our format description
         from CoreFoundation import CFAllocatorGetDefault  # type: ignore
-        status, bb = self._cm.CMBlockBufferCreateWithMemoryBlock(
-            CFAllocatorGetDefault(),
-            avcc_au,
-            len(avcc_au),
-            CFAllocatorGetDefault(),
-            None,
-            0,
-            len(avcc_au),
-            0,
-            None,
-        )
-        if status != 0:
-            logger.debug("CMBlockBufferCreateWithMemoryBlock failed: %s", status)
+        try:
+            status, bb = self._cm.CMBlockBufferCreateWithMemoryBlock(
+                CFAllocatorGetDefault(),
+                avcc_au,
+                len(avcc_au),
+                CFAllocatorGetDefault(),
+                None,
+                0,
+                len(avcc_au),
+                0,
+                None,
+            )
+            if status != 0:
+                logger.error("CMBlockBufferCreateWithMemoryBlock failed: %s (len=%d)", status, len(avcc_au))
+                return None
+            logger.debug("CMBlockBuffer created successfully")
+        except Exception as e:
+            logger.exception("CMBlockBuffer creation exception: %s", e)
             return None
-        sample_sizes = [len(avcc_au)]
+        # Provide a ctypes c_size_t array for sample sizes (PyObjC-friendly)
+        sample_sizes = (ctypes.c_size_t * 1)(len(avcc_au))
         timing = None  # Let VT derive timing; server ts is used only for playout
-        status, sbuf = self._cm.CMSampleBufferCreateReady(
-            CFAllocatorGetDefault(), bb, self._fmt_desc, 1, 0, None, 1, sample_sizes, None
-        )
-        if status != 0:
-            logger.debug("CMSampleBufferCreateReady failed: %s", status)
+        # Provide a single CMSampleTimingInfo entry; use kCMTimeInvalid for unknown timing
+        try:
+            timing = ((self._cm.kCMTimeInvalid, self._cm.kCMTimeInvalid, self._cm.kCMTimeInvalid),)
+            sample_sizes = (len(avcc_au),)
+            logger.debug("Creating CMSampleBuffer with timing=%s, sizes=%s", timing, sample_sizes)
+            status, sbuf = self._cm.CMSampleBufferCreateReady(
+                CFAllocatorGetDefault(), bb, self._fmt_desc, 1, 1, timing, 1, sample_sizes, None
+            )
+            if status != 0:
+                logger.error("CMSampleBufferCreateReady failed: %s", status)
+                return None
+            logger.debug("CMSampleBuffer created successfully")
+        except Exception as e:
+            logger.exception("CMSampleBuffer creation exception: %s", e)
             return None
-        flags_out = self._objc.nil
-        status = self._vt.VTDecompressionSessionDecodeFrame(
-            self._session, sbuf, 0, None, flags_out
-        )
-        if status != 0:
-            logger.debug("VTDecompressionSessionDecodeFrame failed: %s", status)
+        # infoFlagsOut can be None; PyObjC returns status directly
+        try:
+            logger.debug("Calling VTDecompressionSessionDecodeFrame")
+            status = self._vt.VTDecompressionSessionDecodeFrame(
+                self._session, sbuf, 0, None, None
+            )
+            if status != 0:
+                logger.error("VTDecompressionSessionDecodeFrame failed: %s", status)
+                return None
+            logger.debug("VTDecompressionSessionDecodeFrame succeeded")
+        except Exception as e:
+            logger.exception("VTDecompressionSessionDecodeFrame exception: %s", e)
             return None
+        # Ensure asynchronous frames are delivered before returning
+        try:
+            logger.debug("Waiting for async frames")
+            self._vt.VTDecompressionSessionWaitForAsynchronousFrames(self._session)
+            logger.debug("Async frames wait completed")
+        except Exception as e:
+            logger.warning("VT wait for async frames error: %s", e)
         # Output callback sets _last_image_buffer
-        return self._last_image_buffer
-
+        result = self._last_image_buffer
+        logger.debug("VT decode returning: %s (out_count=%d)", "image" if result else "None", self._out_count)
+        return result
