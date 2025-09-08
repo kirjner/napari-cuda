@@ -319,36 +319,13 @@ class EGLRendererWorker:
             logger.info("Encoder input format: %s", self._enc_input_fmt)
         except Exception as e:
             logger.debug("Encoder fmt info log failed: %s", e)
-        # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
+        # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes.
+        # Drop RC/AQ/lookahead/temporalAQ/CBR knobs; keep simple low-latency defaults.
         try:
-            # Longer default GOP to avoid periodic IDR spikes aligning with motion angles
             idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600'))
         except Exception:
             idr_period = 120
         preset = os.getenv('NAPARI_CUDA_PRESET', 'P3')
-        # Optional bitrate control for low-jitter CBR; if unsupported, fallback path below will be used
-        try:
-            bitrate = int(os.getenv('NAPARI_CUDA_BITRATE', '10000000'))
-        except Exception:
-            bitrate = None  # type: ignore[assignment]
-        # Low-jitter CBR and low-latency settings
-        rc_mode = os.getenv('NAPARI_CUDA_RC', 'cbr').lower()
-        try:
-            lookahead = int(os.getenv('NAPARI_CUDA_LOOKAHEAD', '0'))
-        except Exception:
-            lookahead = 0
-        try:
-            aq = int(os.getenv('NAPARI_CUDA_AQ', '0'))
-        except Exception:
-            aq = 0
-        try:
-            temporalaq = int(os.getenv('NAPARI_CUDA_TEMPORALAQ', '0'))
-        except Exception:
-            temporalaq = 0
-        try:
-            ldkfs = int(os.getenv('NAPARI_CUDA_LDKFS', '0'))
-        except Exception:
-            ldkfs = 0
         kwargs = {
             'codec': 'h264',
             'tuning_info': 'low_latency',
@@ -356,38 +333,29 @@ class EGLRendererWorker:
             'bf': 0,
             'repeatspspps': 1,
             'idrperiod': idr_period,
-            'rc': rc_mode,
-            'lookahead': lookahead,
-            'aq': aq,
-            'temporalaq': temporalaq,
-            'ldkfs': ldkfs,
-            'fps': self.fps,
         }
-        if bitrate and bitrate > 0:
-            kwargs['bitrate'] = bitrate
-            kwargs['maxbitrate'] = bitrate
-        # GOP can mirror IDR cadence for simplicity
+        # Mirror GOP cadence to IDR period for simplicity
         kwargs['gop'] = idr_period
         # Colorspace hint for packed RGB inputs
         if self._enc_input_fmt in ('ARGB', 'ABGR'):
             kwargs['colorspace'] = 'bt709'
         try:
-            # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
-            # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
+            self._encoder = pnvc.CreateEncoder(
+                width=self.width,
+                height=self.height,
+                fmt=self._enc_input_fmt,
+                usecpuinputbuffer=False,
+                **kwargs,
+            )
             try:
-                logger.info(
-                    "NVENC encoder created: %dx%d fmt=%s (low-latency)",
-                    self.width, self.height, self._enc_input_fmt,
-                )
                 layout = (
                     'semi-planar' if self._enc_input_fmt == 'NV12' else (
                         'planar' if self._enc_input_fmt == 'YUV444' else 'packed'
                     )
                 )
                 logger.info(
-                    "Encoder config: codec=%s preset=%s tuning=%s bf=%d idrperiod=%d repeatspspps=%d color_space=BT709 range=LIMITED layout=%s",
-                    kwargs['codec'], kwargs['preset'], kwargs['tuning_info'], kwargs['bf'], kwargs['idrperiod'], kwargs['repeatspspps'], layout,
+                    "NVENC encoder created: %dx%d fmt=%s (preset=%s, idr=%d, repeatspspps=1, layout=%s)",
+                    self.width, self.height, self._enc_input_fmt, kwargs['preset'], kwargs['idrperiod'], layout,
                 )
             except Exception as e:
                 logger.debug("Encoder info log failed: %s", e)
