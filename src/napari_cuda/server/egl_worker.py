@@ -322,7 +322,8 @@ class EGLRendererWorker:
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes.
         # Drop RC/AQ/lookahead/temporalAQ/CBR knobs; keep simple low-latency defaults.
         try:
-            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600'))
+            # Longer default GOP/IDR to reduce periodic keyframe spikes (stutter)
+            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '3600'))
         except Exception:
             idr_period = 120
         preset = os.getenv('NAPARI_CUDA_PRESET', 'P3')
