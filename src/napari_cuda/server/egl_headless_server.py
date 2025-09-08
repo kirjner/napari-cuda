@@ -331,7 +331,33 @@ class EGLHeadlessServer:
                     )
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
-                # request_keyframe is ignored in simplified mode; encoder resets on client connect
+                elif t in ('request_keyframe', 'force_idr'):
+                    try:
+                        if self._worker is not None:
+                            try:
+                                # Try lightweight IDR request first
+                                self._worker.force_idr()
+                            except Exception:
+                                # Fallback to full encoder reset
+                                self._worker.reset_encoder()
+                            # Bypass pacing once to deliver next keyframe immediately
+                            self._bypass_until_key = True
+                            # Re-broadcast current video config if known to tighten init window
+                            if self._last_avcc is not None:
+                                msg = {
+                                    'type': 'video_config',
+                                    'codec': 'h264',
+                                    'format': 'avcc',
+                                    'data': base64.b64encode(self._last_avcc).decode('ascii'),
+                                    'width': self.width,
+                                    'height': self.height,
+                                    'fps': self.cfg.fps,
+                                }
+                                await self._broadcast_state_json(msg)
+                            else:
+                                self._needs_config = True
+                    except Exception as e:
+                        logger.debug("request_keyframe handling failed: %s", e)
         finally:
             try:
                 await ws.close()
@@ -359,6 +385,21 @@ class EGLHeadlessServer:
                 self._bypass_until_key = True
                 # Request re-send of video configuration for new clients
                 self._needs_config = True
+                # If we already have a cached avcC, proactively re-broadcast on state channel
+                if self._last_avcc is not None:
+                    try:
+                        msg = {
+                            'type': 'video_config',
+                            'codec': 'h264',
+                            'format': 'avcc',
+                            'data': base64.b64encode(self._last_avcc).decode('ascii'),
+                            'width': self.width,
+                            'height': self.height,
+                            'fps': self.cfg.fps,
+                        }
+                        await self._broadcast_state_json(msg)
+                    except Exception as e:
+                        logger.debug("Proactive video_config broadcast failed: %s", e)
                 try:
                     self.metrics.inc('napari_cuda_encoder_resets')
                 except Exception:

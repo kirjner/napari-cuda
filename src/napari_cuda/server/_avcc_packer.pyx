@@ -18,7 +18,7 @@ should be configured to repeat SPS/PPS on keyframes (repeatspspps=1).
 """
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from libc.string cimport memcmp, memcpy
 from libc.stdint cimport uint8_t, uint32_t
 cimport cython
@@ -82,6 +82,8 @@ cdef bytes _annexb_to_avcc(const uint8_t* data, Py_ssize_t n, object cache, bint
     cdef uint8_t* out2 = NULL
     cdef uint8_t* w = NULL
     cdef Py_ssize_t ln = 0
+    cdef Py_ssize_t end = 0
+    cdef object py = None
 
     p = <uint8_t*>data
 
@@ -113,51 +115,60 @@ cdef bytes _annexb_to_avcc(const uint8_t* data, Py_ssize_t n, object cache, bint
         finally:
             PyMem_Free(out)
 
-    # Compute total output size and allocate
+    # Compute total output size based on true NAL boundaries (exclude next startcode)
     total = 0
-    # Convert list to C-friendly access
     cdef Py_ssize_t m = len(starts)
     for k in range(m - 1):
         start = starts[k]
         next_start = starts[k + 1]
-        # Strip preceding zeros before start
-        prev = start
-        # The payload is between start..next_start with any trailing zeros excluded
-        # Trim trailing zeros from [start, next_start)
-        while next_start > start and p[next_start - 1] == 0:
-            next_start -= 1
-        if next_start <= start:
-            continue
-        total += 4 + (next_start - start)
+        if k + 1 < m - 0:  # have next start
+            # Determine the preceding start-code length (3 or 4) before next payload start
+            if next_start >= 4 and p[next_start - 4] == 0 and p[next_start - 3] == 0 and p[next_start - 2] == 0 and p[next_start - 1] == 1:
+                end = next_start - 4
+            elif next_start >= 3 and p[next_start - 3] == 0 and p[next_start - 2] == 0 and p[next_start - 1] == 1:
+                end = next_start - 3
+            else:
+                end = next_start
+        else:
+            end = n
+        if end > start:
+            total += 4 + (end - start)
 
-    out2 = <uint8_t*>PyMem_Malloc(total)
-    if out2 == NULL:
+    if total <= 0:
+        return PyBytes_FromStringAndSize(NULL, 0)
+
+    # Allocate final Python bytes and fill directly to avoid extra copy
+    py = PyBytes_FromStringAndSize(NULL, total)
+    if py is None:
         raise MemoryError()
-    w = out2
+    w = <uint8_t*>PyBytes_AS_STRING(py)
 
     # Second pass: write length-prefixed NALs
     for k in range(m - 1):
         start = starts[k]
         next_start = starts[k + 1]
-        # Trim trailing zeros
-        while next_start > start and p[next_start - 1] == 0:
-            next_start -= 1
-        if next_start <= start:
+        if k + 1 < m - 0:
+            if next_start >= 4 and p[next_start - 4] == 0 and p[next_start - 3] == 0 and p[next_start - 2] == 0 and p[next_start - 1] == 1:
+                end = next_start - 4
+            elif next_start >= 3 and p[next_start - 3] == 0 and p[next_start - 2] == 0 and p[next_start - 1] == 1:
+                end = next_start - 3
+            else:
+                end = next_start
+        else:
+            end = n
+        if end <= start:
             continue
-        ln = next_start - start
+        ln = end - start
         _write_be32(w, <uint32_t>ln)
         memcpy(w + 4, p + start, ln)
         _update_cache_and_key(p + start, ln, cache, is_key)
         w += 4 + ln
 
-    try:
-        return PyBytes_FromStringAndSize(<const char*>out2, total)
-    finally:
-        PyMem_Free(out2)
+    return <bytes>py
 
 
 @cython.cfunc
-cdef bytes _avcc_scan_and_concat(const uint8_t* data, Py_ssize_t n, object cache, bint *is_key):
+cdef void _avcc_scan(const uint8_t* data, Py_ssize_t n, object cache, bint *is_key):
     # Validate length prefixes and scan for keyframe and cache VPS/SPS/PPS.
     cdef Py_ssize_t i = 0
     cdef uint32_t ln
@@ -169,8 +180,6 @@ cdef bytes _avcc_scan_and_concat(const uint8_t* data, Py_ssize_t n, object cache
             break
         _update_cache_and_key(p + i, ln, cache, is_key)
         i += ln
-    # Return original bytes (concatenate handled by caller)
-    return PyBytes_FromStringAndSize(<const char*>data, n)
 
 
 cpdef tuple pack_to_avcc_fast(object packets, object cache):
@@ -205,7 +214,7 @@ cpdef tuple pack_to_avcc_fast(object packets, object cache):
             out = _annexb_to_avcc(d, n, cache, &is_key)
             return out, bool(is_key)
         else:
-            _ = _avcc_scan_and_concat(d, n, cache, &is_key)
+            _avcc_scan(d, n, cache, &is_key)
             return buf, bool(is_key)
 
     # Multi-chunk: process each and concatenate
@@ -216,5 +225,6 @@ cpdef tuple pack_to_avcc_fast(object packets, object cache):
         if _is_annexb(d, n):
             outs.append(_annexb_to_avcc(d, n, cache, &is_key))
         else:
-            outs.append(_avcc_scan_and_concat(d, n, cache, &is_key))
+            _avcc_scan(d, n, cache, &is_key)
+            outs.append(buf)
     return b''.join(outs), bool(is_key)
