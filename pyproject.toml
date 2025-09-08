@@ -182,6 +182,15 @@ client = [
     "napari-cuda[video]",
 ]
 
+# Client with VideoToolbox hardware decode (macOS only)
+client-vt = [
+    "napari-cuda[client]",
+    "pyobjc-framework-VideoToolbox>=10.1 ; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreMedia>=10.1 ; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreVideo>=10.1 ; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation>=10.1 ; sys_platform == 'darwin'",
+]
+
 # Complete development environment
 cuda-dev = [
     "napari-cuda[server]",
