@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import os
 from collections import deque
 from typing import Deque, Dict, Tuple
 
@@ -27,7 +28,10 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
     # Reduce werkzeug request logs
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-    app = dash.Dash(__name__, url_base_pathname='/dash/')
+    # Serve dashboard at a stable path; hard-refresh to clear client cache
+    base_path = "/dash/"
+    app = dash.Dash(__name__, url_base_pathname=base_path)
+    app.config.suppress_callback_exceptions = True
     app.index_string = (
         """
         <!DOCTYPE html>
@@ -44,7 +48,8 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
                 .label { color:#9ca3af; font-size:12px; }
                 .value { font-size:36px; font-weight:700; margin-top:6px; line-height:1.0; }
                 .unit { color:#9ca3af; font-size:12px; margin-top:6px; }
-                .charts { display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; margin-top:16px; }
+                .charts { display:grid; grid-template-columns: repeat(5, 1fr); gap:14px; margin-top:16px; }
+                .sumrow { margin-top:16px; }
             </style>
         </head>
         <body>
@@ -59,6 +64,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         """
     )
     server = app.server  # Flask
+    logging.getLogger(__name__).info("Dash dashboard path: %s (port %s)", base_path, port)
 
     # Flask route for JSON snapshot
     @server.route('/metrics.json')
@@ -79,6 +85,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
                 margin={'l': 30, 'r': 10, 't': 28, 'b': 24},
                 height=220,
                 template='plotly_dark',
+                uirevision='dash-metrics-v1',  # preserve zoom/pan/legend state across updates
             ),
         )
         if budget_ms is not None:
@@ -99,6 +106,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
 
     app.layout = html.Div([
         html.H2('napari-cuda Dashboard'),
+        html.Div(id='heartbeat', className='meta'),
         html.Div([
             html.Div([
                 html.Div('FPS', className='label'),
@@ -135,13 +143,30 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
             dcc.Graph(id='g_total'),
             dcc.Graph(id='g_encode'),
             dcc.Graph(id='g_map'),
+            dcc.Graph(id='g_convert'),
+            dcc.Graph(id='g_bitrate'),
         ], className='charts'),
+        html.Div([
+            dcc.Graph(id='g_sumcheck'),
+        ], className='sumrow'),
         dcc.Store(id='store_total', data=[]),
         dcc.Store(id='store_encode', data=[]),
         dcc.Store(id='store_map', data=[]),
+        dcc.Store(id='store_convert', data=[]),
+        dcc.Store(id='store_render', data=[]),
+        dcc.Store(id='store_blitcpu', data=[]),
+        dcc.Store(id='store_copy', data=[]),
+        dcc.Store(id='store_pack', data=[]),
+        dcc.Store(id='store_bitrate', data=[]),
         dcc.Store(id='store_meta', data={'last_b': 0, 'last_ts': 0.0}),
         dcc.Interval(id='tick', interval=refresh_ms, n_intervals=0),
     ])
+
+    # Simple heartbeat to verify callbacks are running
+    @app.callback(Output('heartbeat', 'children'), Input('tick', 'n_intervals'))
+    def _hb(n):  # type: ignore
+        import time as _t
+        return f"Updated: {_t.strftime('%H:%M:%S')}"
 
     @app.callback(
         Output('fps', 'children'),
@@ -154,13 +179,25 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         Output('store_encode', 'data'),
         Output('store_map', 'data'),
         Output('store_meta', 'data'),
+        Output('store_convert', 'data'),
+        Output('store_render', 'data'),
+        Output('store_blitcpu', 'data'),
+        Output('store_copy', 'data'),
+        Output('store_pack', 'data'),
+        Output('store_bitrate', 'data'),
         Input('tick', 'n_intervals'),
         State('store_total', 'data'),
         State('store_encode', 'data'),
         State('store_map', 'data'),
         State('store_meta', 'data'),
+        State('store_convert', 'data'),
+        State('store_render', 'data'),
+        State('store_blitcpu', 'data'),
+        State('store_copy', 'data'),
+        State('store_pack', 'data'),
+        State('store_bitrate', 'data'),
     )
-    def on_tick(_n, s_total, s_encode, s_map, s_meta):  # type: ignore
+    def on_tick(_n, s_total, s_encode, s_map, s_meta, s_convert, s_render, s_blit, s_copy, s_pack, s_bitrate):  # type: ignore
         snap = metrics.snapshot()
         g = snap.get('gauges', {})
         c = snap.get('counters', {})
@@ -177,10 +214,20 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         total = (h.get('napari_cuda_total_ms') or h.get('napari_cuda_end_to_end_ms') or {}).get('mean_ms', 0.0)
         encode = (h.get('napari_cuda_encode_ms') or {}).get('mean_ms', 0.0)
         map_ms = (h.get('napari_cuda_map_ms') or {}).get('mean_ms', 0.0)
+        conv = (h.get('napari_cuda_convert_ms') or {}).get('mean_ms', 0.0)
+        rend = (h.get('napari_cuda_render_ms') or {}).get('mean_ms', 0.0)
+        blitc = (h.get('napari_cuda_capture_blit_cpu_ms') or {}).get('mean_ms', 0.0)
+        copy = (h.get('napari_cuda_copy_ms') or {}).get('mean_ms', 0.0)
+        pack = (h.get('napari_cuda_pack_ms') or {}).get('mean_ms', 0.0)
 
         s_total = _append(s_total, total)
         s_encode = _append(s_encode, encode)
         s_map = _append(s_map, map_ms)
+        s_convert = _append(s_convert, conv)
+        s_render = _append(s_render, rend)
+        s_blit = _append(s_blit, blitc)
+        s_copy = _append(s_copy, copy)
+        s_pack = _append(s_pack, pack)
 
         fps = float(d.get('fps', 0.0))
         qd = float(g.get('napari_cuda_frame_queue_depth', g.get('napari_cuda_capture_queue_depth', 0.0)))
@@ -197,6 +244,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         delta_b = max(0.0, bytes_total - last_b) if last_ts else 0.0
         mbps = (delta_b * 8.0) / (1e6 * dt) if dt > 0 else 0.0
         s_meta = {'last_b': bytes_total, 'last_ts': ts}
+        s_bitrate = _append(s_bitrate, mbps)
 
         def fmt_int(v):
             try:
@@ -221,22 +269,78 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
             s_encode,
             s_map,
             s_meta,
+            s_convert,
+            s_render,
+            s_blit,
+            s_copy,
+            s_pack,
+            s_bitrate,
         )
+
+    # Note: a previous compatibility callback duplicated Outputs and blocked updates.
+    # We removed it to ensure a single source of truth for all tiles and stores.
 
     @app.callback(
         Output('g_total', 'figure'),
         Output('g_encode', 'figure'),
         Output('g_map', 'figure'),
+        Output('g_convert', 'figure'),
+        Output('g_bitrate', 'figure'),
+        Output('g_sumcheck', 'figure'),
         Input('store_total', 'data'),
         Input('store_encode', 'data'),
         Input('store_map', 'data'),
+        Input('store_convert', 'data'),
+        Input('store_render', 'data'),
+        Input('store_blitcpu', 'data'),
+        Input('store_copy', 'data'),
+        Input('store_pack', 'data'),
+        Input('store_bitrate', 'data'),
     )
-    def update_figs(s_total, s_encode, s_map):  # type: ignore
+    def update_figs(s_total, s_encode, s_map, s_convert, s_render, s_blit, s_copy, s_pack, s_bitrate):  # type: ignore
         budget = 1000.0 / 60.0  # 16.7 ms target for 60 FPS
+        # Build sum check stacked area vs total line
+        def make_sum_fig():
+            x = list(range(len(s_total or [])))
+            comp = [
+                ('Render', s_render or [], '#60a5fa'),
+                ('BlitCPU', s_blit or [], '#93c5fd'),
+                ('Map', s_map or [], '#22d3ee'),
+                ('Copy', s_copy or [], '#10b981'),
+                ('Convert', s_convert or [], '#f59e0b'),
+                ('Encode', s_encode or [], '#16a34a'),
+                ('Pack', s_pack or [], '#d946ef'),
+            ]
+            fig = go.Figure()
+            cum = None
+            for i, (name, y, color) in enumerate(comp):
+                if not y:
+                    y = []
+                fig.add_trace(go.Scatter(
+                    x=x, y=y, mode='lines', name=name,
+                    line={'width': 1.5, 'color': color},
+                    fill='tonexty' if i > 0 else 'none',
+                    stackgroup='one',
+                ))
+            # Total overlay
+            fig.add_trace(go.Scatter(
+                x=x, y=(s_total or []), mode='lines', name='Total',
+                line={'width': 2, 'color': '#ffffff'},
+            ))
+            fig.update_layout(
+                title='Sum vs Total (ms)', template='plotly_dark', height=260,
+                margin={'l': 30, 'r': 10, 't': 28, 'b': 24},
+                uirevision='dash-metrics-v1',  # preserve UI state across updates
+            )
+            return fig
+
         return (
             make_fig(s_total or [], 'Total GPU (ms)', '#4f46e5', budget),
             make_fig(s_encode or [], 'Encode (ms)', '#16a34a'),
             make_fig(s_map or [], 'Map (ms)', '#dc2626'),
+            make_fig(s_convert or [], 'Convert (ms)', '#f59e0b'),
+            make_fig(s_bitrate or [], 'Bitrate (Mbps)', '#22c55e'),
+            make_sum_fig(),
         )
 
     def _run():

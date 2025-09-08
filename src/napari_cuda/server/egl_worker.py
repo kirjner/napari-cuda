@@ -33,6 +33,7 @@ import pycuda.driver as cuda  # type: ignore
 import pycuda.gl  # type: ignore
 from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
+import torch.nn.functional as F  # type: ignore
 import PyNvVideoCodec as pnvc  # type: ignore
 from .bitstream import pack_to_annexb, ParamCache
 from .patterns import make_rgba_image
@@ -45,9 +46,12 @@ logger = logging.getLogger(__name__)
 class FrameTimings:
     render_ms: float
     blit_gpu_ns: Optional[int]
+    blit_cpu_ms: float
     map_ms: float
     copy_ms: float
+    convert_ms: float
     encode_ms: float
+    pack_ms: float
     total_ms: float
     packet_bytes: Optional[int]
 
@@ -308,9 +312,9 @@ class EGLRendererWorker:
                 logger.debug("Odd-dimension warn log failed: %s", e)
 
     def _init_encoder(self) -> None:
-        # Encoder input format: YUV444 by default for correct colors. (Can override via env if needed.)
+        # Encoder input format: allow YUV444 (default), NV12 (4:2:0), or ARGB/ABGR (packed RGB)
         self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'YUV444').upper()
-        if self._enc_input_fmt not in {'YUV444'}:
+        if self._enc_input_fmt not in {'YUV444', 'NV12', 'ARGB', 'ABGR'}:
             self._enc_input_fmt = 'YUV444'
         try:
             logger.info("Encoder input format: %s", self._enc_input_fmt)
@@ -318,13 +322,15 @@ class EGLRendererWorker:
             logger.debug("Encoder fmt info log failed: %s", e)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
         try:
-            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '120'))
+            # Longer default GOP to avoid periodic IDR spikes aligning with motion angles
+            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600'))
         except Exception:
             idr_period = 120
+        preset = os.getenv('NAPARI_CUDA_PRESET', 'P3')
         kwargs = {
             'codec': 'h264',
             'tuning_info': 'low_latency',
-            'preset': 'P3',
+            'preset': preset,
             'bf': 0,
             'repeatspspps': 1,
             'idrperiod': idr_period,
@@ -338,9 +344,14 @@ class EGLRendererWorker:
                     "NVENC encoder created: %dx%d fmt=%s (low-latency)",
                     self.width, self.height, self._enc_input_fmt,
                 )
+                layout = (
+                    'semi-planar' if self._enc_input_fmt == 'NV12' else (
+                        'planar' if self._enc_input_fmt == 'YUV444' else 'packed'
+                    )
+                )
                 logger.info(
-                    "Encoder config: codec=%s preset=%s tuning=%s bf=%d idrperiod=%d repeatspspps=%d color_space=BT709 range=LIMITED layout=planar",
-                    kwargs['codec'], kwargs['preset'], kwargs['tuning_info'], kwargs['bf'], kwargs['idrperiod'], kwargs['repeatspspps'],
+                    "Encoder config: codec=%s preset=%s tuning=%s bf=%d idrperiod=%d repeatspspps=%d color_space=BT709 range=LIMITED layout=%s",
+                    kwargs['codec'], kwargs['preset'], kwargs['tuning_info'], kwargs['bf'], kwargs['idrperiod'], kwargs['repeatspspps'], layout,
                 )
             except Exception as e:
                 logger.debug("Encoder info log failed: %s", e)
@@ -538,7 +549,11 @@ class EGLRendererWorker:
         self.canvas.render()
         t_r1 = time.perf_counter()
         render_ms = (t_r1 - t_r0) * 1000.0
+        # Blit timing (GPU + CPU)
+        t_b0 = time.perf_counter()
         blit_gpu_ns = self._capture_blit_gpu_ns()
+        t_b1 = time.perf_counter()
+        blit_cpu_ms = (t_b1 - t_b0) * 1000.0
         t_m0 = time.perf_counter()
         mapping = self._registered_tex.map()
         cuda_array = mapping.array(0, 0)
@@ -565,7 +580,8 @@ class EGLRendererWorker:
             logger.warning("Debug triplet failed: %s", e, exc_info=True)
         finally:
             mapping.unmap()
-        t_e0 = time.perf_counter()
+        # Measure color conversion (swizzle) and NVENC separately
+        t_c0 = time.perf_counter()
         # Optional pre-encode raw dump (RGBA) for isolation
         try:
             dump_raw = int(os.getenv('NAPARI_CUDA_DUMP_RAW', '0'))
@@ -577,12 +593,9 @@ class EGLRendererWorker:
                 os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as e:
                 logger.debug("Pre-encode raw dump failed: %s", e)
-        # Convert RGBA (GL) -> YUV444 planar (BT.709 limited) on GPU
+        # Convert RGBA (GL) -> encoder input format (BT.709 limited) on GPU
         src = self._torch_frame
         try:
-            if not hasattr(self, '_logged_swizzle'):
-                logger.info("Pre-encode swizzle: RGBA -> YUV444 (BT709 LIMITED, planar)")
-                setattr(self, '_logged_swizzle', True)
             r = src[..., 0].float() / 255.0
             g = src[..., 1].float() / 255.0
             b = src[..., 2].float() / 255.0
@@ -606,26 +619,68 @@ class EGLRendererWorker:
             except Exception as e:
                 logger.debug("Swizzle stats log failed: %s", e)
             H, W = self.height, self.width
-            dst = torch.empty((H * 3, W), dtype=torch.uint8, device=src.device)
-            dst[0:H, :] = y.to(torch.uint8)
-            dst[H:2*H, :] = cb.to(torch.uint8)
-            dst[2*H:3*H, :] = cr.to(torch.uint8)
+            if self._enc_input_fmt == 'YUV444':
+                if not hasattr(self, '_logged_swizzle'):
+                    logger.info("Pre-encode swizzle: RGBA -> YUV444 (BT709 LIMITED, planar)")
+                    setattr(self, '_logged_swizzle', True)
+                dst = torch.empty((H * 3, W), dtype=torch.uint8, device=src.device)
+                dst[0:H, :] = y.to(torch.uint8)
+                dst[H:2*H, :] = cb.to(torch.uint8)
+                dst[2*H:3*H, :] = cr.to(torch.uint8)
+            elif self._enc_input_fmt in ('ARGB', 'ABGR'):
+                if not hasattr(self, '_logged_swizzle'):
+                    logger.info("Pre-encode swizzle: RGBA -> %s (packed)", self._enc_input_fmt)
+                    setattr(self, '_logged_swizzle', True)
+                # Reorder channels only; keep interleaved 4-channel layout
+                if self._enc_input_fmt == 'ARGB':
+                    dst = src[..., [3, 0, 1, 2]].contiguous()
+                else:
+                    # ABGR
+                    dst = src[..., [3, 2, 1, 0]].contiguous()
+            else:
+                # NV12 (4:2:0): Y plane HxW + interleaved UV plane (H/2 x W)
+                if not hasattr(self, '_logged_swizzle'):
+                    logger.info("Pre-encode swizzle: RGBA -> NV12 (BT709 LIMITED, 4:2:0 UV interleaved)")
+                    setattr(self, '_logged_swizzle', True)
+                # Average pool Cb/Cr over 2x2 blocks
+                cb2 = F.avg_pool2d(cb.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2).squeeze()
+                cr2 = F.avg_pool2d(cr.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2).squeeze()
+                H2, W2 = cb2.shape
+                dst = torch.empty((H + H2, W), dtype=torch.uint8, device=src.device)
+                dst[0:H, :] = y.to(torch.uint8)
+                uv = dst[H:, :]
+                # Interleave subsampled chroma: U at even columns, V at odd columns
+                uv[:, 0::2] = cb2.to(torch.uint8)
+                uv[:, 1::2] = cr2.to(torch.uint8)
         except Exception as e:
-            logger.exception("YUV444 conversion failed: %s", e)
+            logger.exception("Pre-encode color conversion failed: %s", e)
             dst = src[..., [3, 0, 1, 2]]
+        # Ensure GPU kernels complete before timing conversion cost
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception:
+            pass
+        t_c1 = time.perf_counter()
+        convert_ms = (t_c1 - t_c0) * 1000.0
         with self._enc_lock:
             enc = self._encoder
         if enc is None:
             pkt = None
             is_key = False
         else:
+            t_e0 = time.perf_counter()
             pkt_obj = enc.Encode(dst)
+            t_e1 = time.perf_counter()
+            t_p0 = time.perf_counter()
             pkt, is_key = pack_to_annexb(pkt_obj, self._param_cache)
-        t_e1 = time.perf_counter()
-        encode_ms = (t_e1 - t_e0) * 1000.0
-        total_ms = (time.perf_counter() - t0) * 1000.0
+            t_p1 = time.perf_counter()
+        # If encoder wasn't available, set NVENC time to 0
+        encode_ms = ((t_e1 - t_e0) * 1000.0) if enc is not None else 0.0
+        pack_ms = ((t_p1 - t_p0) * 1000.0) if enc is not None else 0.0
+        total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
         pkt_bytes = len(pkt) if pkt else None
-        timings = FrameTimings(render_ms, blit_gpu_ns, map_ms, copy_ms, encode_ms, total_ms, pkt_bytes)
+        timings = FrameTimings(render_ms, blit_gpu_ns, blit_cpu_ms, map_ms, copy_ms, convert_ms, encode_ms, pack_ms, total_ms, pkt_bytes)
         flags = 0x01 if is_key else 0
         return timings, (pkt if pkt else None), flags
 

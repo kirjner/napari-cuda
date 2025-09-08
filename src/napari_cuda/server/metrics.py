@@ -70,7 +70,7 @@ class _Hist:
                 "max_ms": 0.0,
             }
         mean = (self.total / n) if n else 0.0
-        # compute percentiles from current window snapshot
+        # Full stats: compute percentiles from current window snapshot
         arr: List[float] = sorted(self.values)
         def q(p: float) -> float:
             if n == 0:
@@ -141,4 +141,3 @@ class Metrics:
                 "fps": self._last_fps,
             },
         }
-

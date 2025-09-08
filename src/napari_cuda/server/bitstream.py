@@ -14,6 +14,11 @@ from typing import List, Optional, Tuple, Sequence, Union
 BytesLike = Union[bytes, bytearray, memoryview]
 
 
+def _is_annexb(buf: bytes) -> bool:
+    """Return True if `buf` starts with an Annex B start code."""
+    return buf.startswith(b"\x00\x00\x01") or buf.startswith(b"\x00\x00\x00\x01")
+
+
 @dataclass
 class ParamCache:
     vps: Optional[bytes] = None
@@ -31,28 +36,52 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
     """
     if packets is None:
         return None, False
-    chunks: List[bytes] = []
+    # Fast path: single Annex B byte buffer → return as-is with quick keyframe detection
     if isinstance(packets, (bytes, bytearray, memoryview)):
-        chunks = [bytes(packets)]
-    elif isinstance(packets, (list, tuple)):
-        for p in packets:
-            if p is None:
-                continue
-            chunks.append(bytes(p))
+        buf = bytes(packets)
+        if _is_annexb(buf):
+            # Quick scan for keyframe NAL types without rebuilding
+            i = 0
+            is_key = False
+            l = len(buf)
+            while i < l:
+                p3 = buf.find(b"\x00\x00\x01", i)
+                p4 = buf.find(b"\x00\x00\x00\x01", i)
+                if p3 == -1 and p4 == -1:
+                    break
+                if p3 == -1 or (p4 != -1 and p4 < p3):
+                    j = p4 + 4
+                    i = j
+                else:
+                    j = p3 + 3
+                    i = j
+                if j < l:
+                    b0 = buf[j]
+                    n264 = b0 & 0x1F
+                    n265 = (b0 >> 1) & 0x3F
+                    if n264 == 5 or n265 in (19, 20, 21):
+                        is_key = True
+                        break
+            return buf, is_key
+        chunks = [buf]
     else:
-        try:
-            chunks = [bytes(packets)]
-        except Exception:
-            return None, False
-
-    def is_annexb(buf: bytes) -> bool:
-        return buf.startswith(b"\x00\x00\x01") or buf.startswith(b"\x00\x00\x00\x01")
+        chunks: List[bytes] = []
+        if isinstance(packets, (list, tuple)):
+            for p in packets:
+                if p is None:
+                    continue
+                chunks.append(bytes(p))
+        else:
+            try:
+                chunks = [bytes(packets)]
+            except Exception:
+                return None, False
 
     def parse_nals(buf: bytes) -> List[bytes]:
         nals: List[bytes] = []
         if not buf:
             return nals
-        if is_annexb(buf):
+        if _is_annexb(buf):
             i = 0
             l = len(buf)
             idx: List[int] = []

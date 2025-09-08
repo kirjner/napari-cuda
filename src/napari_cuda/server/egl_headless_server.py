@@ -60,6 +60,7 @@ class EGLHeadlessServer:
         self._frame_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=max(1, qsize))
         self._seq = 0
         self._stop = threading.Event()
+        
 
         self._worker: Optional[EGLRendererWorker] = None
         self._worker_thread: Optional[threading.Thread] = None
@@ -74,6 +75,7 @@ class EGLHeadlessServer:
         # Track last keyframe for metrics only
         self._last_key_seq: Optional[int] = None
         self._last_key_ts: Optional[float] = None
+        
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO,
@@ -173,9 +175,13 @@ class EGLHeadlessServer:
                         self.metrics.observe_ms('napari_cuda_render_ms', timings.render_ms)
                         if timings.blit_gpu_ns is not None:
                             self.metrics.observe_ms('napari_cuda_capture_blit_ms', timings.blit_gpu_ns / 1e6)
+                        # CPU wall time for blit (adds to additivity)
+                        self.metrics.observe_ms('napari_cuda_capture_blit_cpu_ms', getattr(timings, 'blit_cpu_ms', 0.0))
                         self.metrics.observe_ms('napari_cuda_map_ms', timings.map_ms)
                         self.metrics.observe_ms('napari_cuda_copy_ms', timings.copy_ms)
+                        self.metrics.observe_ms('napari_cuda_convert_ms', getattr(timings, 'convert_ms', 0.0))
                         self.metrics.observe_ms('napari_cuda_encode_ms', timings.encode_ms)
+                        self.metrics.observe_ms('napari_cuda_pack_ms', getattr(timings, 'pack_ms', 0.0))
                         self.metrics.observe_ms('napari_cuda_total_ms', timings.total_ms)
                     except Exception:
                         pass
