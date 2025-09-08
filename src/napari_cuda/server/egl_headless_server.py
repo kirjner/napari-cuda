@@ -325,6 +325,18 @@ class EGLHeadlessServer:
                     )
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
+                elif t == 'request_keyframe':
+                    try:
+                        if self._worker is not None:
+                            logger.info("State: request_keyframe received; resetting encoder")
+                            self._worker.reset_encoder()
+                            self._bypass_until_key = True
+                            try:
+                                self.metrics.inc('napari_cuda_encoder_resets')
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.debug("Keyframe request handling failed: %s", e)
                 # request_keyframe is ignored in simplified mode; encoder resets on client connect
         finally:
             try:
