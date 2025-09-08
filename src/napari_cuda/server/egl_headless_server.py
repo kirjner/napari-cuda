@@ -17,6 +17,7 @@ from typing import Optional, Set
 
 import websockets
 import importlib.resources as ilr
+import socket
 
 from .egl_worker import EGLRendererWorker, ServerSceneState
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
@@ -97,9 +98,13 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._start_worker(loop)
-        # Start websocket servers with default buffering to prioritize smoothness
-        state_server = await websockets.serve(self._handle_state, self.host, self.state_port)
-        pixel_server = await websockets.serve(self._handle_pixel, self.host, self.pixel_port)
+        # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
+        state_server = await websockets.serve(
+            self._handle_state, self.host, self.state_port, compression=None
+        )
+        pixel_server = await websockets.serve(
+            self._handle_pixel, self.host, self.pixel_port, compression=None
+        )
         metrics_server = await self._start_metrics_server()
         logger.info(
             "WS listening on %s:%d (state), %s:%d (pixel) | Dashboard: http://%s:%s/dash/ JSON: http://%s:%s/metrics.json",
@@ -272,6 +277,13 @@ class EGLHeadlessServer:
         self.metrics.inc('napari_cuda_state_connects')
         try:
             self._update_client_gauges()
+            # Reduce latency: disable Nagle for control channel
+            try:
+                sock = ws.transport.get_extra_info('socket')  # type: ignore[attr-defined]
+                if sock is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
             # Send latest video config if available
             try:
                 if self._last_avcc is not None:
@@ -325,6 +337,13 @@ class EGLHeadlessServer:
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
         self._update_client_gauges()
+        # Reduce latency: disable Nagle for binary pixel stream
+        try:
+            sock = ws.transport.get_extra_info('socket')  # type: ignore[attr-defined]
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         # Reset encoder on new client to guarantee an immediate keyframe
         try:
             if self._worker is not None:

@@ -349,6 +349,15 @@ class EGLRendererWorker:
             ldkfs = int(os.getenv('NAPARI_CUDA_LDKFS', '0'))
         except Exception:
             ldkfs = 0
+        # VBV sizing: approx per-frame budget (bitrate/fps). Some bindings apply these mainly to VBR; harmless for CBR.
+        try:
+            vbv_frames = float(os.getenv('NAPARI_CUDA_VBV_FRAMES', '1.0'))
+        except Exception:
+            vbv_frames = 1.0
+        vbv_size = None
+        if bitrate and bitrate > 0 and self.fps > 0:
+            vbv_size = max(1, int((bitrate // max(1, self.fps)) * vbv_frames))
+
         kwargs = {
             'codec': 'h264',
             'tuning_info': 'low_latency',
@@ -366,6 +375,9 @@ class EGLRendererWorker:
         if bitrate and bitrate > 0:
             kwargs['bitrate'] = bitrate
             kwargs['maxbitrate'] = bitrate
+        if vbv_size is not None:
+            kwargs['vbvbufsize'] = vbv_size
+            kwargs['vbvinit'] = vbv_size
         # GOP can mirror IDR cadence for simplicity
         kwargs['gop'] = idr_period
         # Colorspace hint for packed RGB inputs
