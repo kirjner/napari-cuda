@@ -24,3 +24,4 @@ exclude EULA.md
 
 # include napari-cuda server web assets
 recursive-include src/napari_cuda/web *.html *.css *.js
+recursive-include src/napari_cuda *.pyx

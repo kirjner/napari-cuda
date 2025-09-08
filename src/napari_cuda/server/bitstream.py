@@ -16,6 +16,22 @@ import os
 import logging
 from typing import List, Optional, Tuple, Sequence, Union
 
+# Optional Cython fast packer; default is to require it on server
+_FAST_PACK = None
+try:
+    from ._avcc_packer import pack_to_avcc_fast as _FAST_PACK  # type: ignore
+except Exception:
+    # Try runtime build via pyximport if Cython is available (enabled by default)
+    try:
+        if os.getenv('NAPARI_CUDA_BUILD_CYTHON', '1') != '0':
+            import pyximport  # type: ignore
+            pyximport.install(language_level=3, inplace=True)  # type: ignore
+            from ._avcc_packer import pack_to_avcc_fast as _FAST_PACK  # type: ignore
+        else:
+            _FAST_PACK = None
+    except Exception:
+        _FAST_PACK = None
+
 
 BytesLike = Union[bytes, bytearray, memoryview]
 
@@ -198,6 +214,24 @@ def pack_to_avcc(packets: Union[BytesLike, Sequence[BytesLike], None], cache: Pa
     - Does NOT inject cached SPS/PPS; rely on encoder's "repeat SPS/PPS on IDR"
     - Returns (payload bytes or None, is_keyframe)
     """
+    # If Cython fast path is available, use it; by default, Python fallback is disabled
+    allow_fallback = os.getenv('NAPARI_CUDA_ALLOW_PY_FALLBACK', '0') != '0'
+    if _FAST_PACK is None and not allow_fallback:
+        raise RuntimeError(
+            "Cython packer not available. Install with 'napari-cuda[server]' (includes Cython) "
+            "or set NAPARI_CUDA_ALLOW_PY_FALLBACK=1 to enable the Python implementation."
+        )
+    if _FAST_PACK is not None:
+        try:
+            return _FAST_PACK(packets, cache)  # type: ignore[misc]
+        except Exception as e:
+            # If Cython fails and fallback is not allowed, fail fast
+            if not allow_fallback:
+                raise RuntimeError(
+                    "Cython packer failed. Ensure 'napari-cuda[server]' is installed or set "
+                    "NAPARI_CUDA_ALLOW_PY_FALLBACK=1 to use the Python implementation."
+                ) from e
+            # else fall through to Python path
     if packets is None:
         return None, False
     # Gather chunks as bytes

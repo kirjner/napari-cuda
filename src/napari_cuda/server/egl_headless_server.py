@@ -129,8 +129,14 @@ class EGLHeadlessServer:
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
         def on_frame(payload_obj, _flags: int) -> None:
-            # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe
+            # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
+            t_p0 = time.perf_counter()
             avcc_pkt, is_key = pack_to_avcc(payload_obj, self._param_cache)
+            t_p1 = time.perf_counter()
+            try:
+                self.metrics.observe_ms('napari_cuda_pack_ms', (t_p1 - t_p0) * 1000.0)
+            except Exception:
+                pass
             if not avcc_pkt:
                 return
             # Build and send video_config if needed or changed
