@@ -47,9 +47,26 @@ class VideoWidget(QtWidgets.QLabel):
         super().__init__()
         self.setAlignment(QtCore.Qt.AlignCenter)
         self.setMinimumSize(320, 240)
+        # Ensure full overwrite (no blending against previous content)
+        try:
+            self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, True)
+            self.setAutoFillBackground(True)
+            pal = self.palette()
+            pal.setColor(self.backgroundRole(), QtGui.QColor(0, 0, 0))
+            self.setPalette(pal)
+            self.setScaledContents(False)  # avoid smoothing/scale artifacts
+        except Exception:
+            pass
 
     @QtCore.Slot(object)
     def set_frame(self, image: QtGui.QImage) -> None:
+        # On first frame, snap widget size to the video size to avoid scaling smear
+        try:
+            if not hasattr(self, '_video_size_set'):
+                self._video_size_set = True
+                self.setFixedSize(image.width(), image.height())
+        except Exception:
+            pass
         self.setPixmap(QtGui.QPixmap.fromImage(image))
 
 
