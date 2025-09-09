@@ -184,16 +184,6 @@ client = [
     "plotly>=5.18.0",
 ]
 
-# VT client (macOS): everything in `client` plus VideoToolbox support
-vt-client = [
-    "napari-cuda[client]",
-    # Use meta-distribution to bring in required frameworks (and pyobjc-core)
-    "pyobjc>=10.0 ; sys_platform == 'darwin'",
-    # Ensure critical VT frameworks are present
-    "pyobjc-framework-CoreMedia ; sys_platform == 'darwin'",
-    "pyobjc-framework-VideoToolbox ; sys_platform == 'darwin'",
-    "pyobjc-framework-AVFoundation ; sys_platform == 'darwin'",
-]
 
 # Complete development environment
 cuda-dev = [

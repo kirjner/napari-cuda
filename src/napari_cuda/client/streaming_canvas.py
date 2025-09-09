@@ -198,16 +198,8 @@ class StreamingCanvas(VispyCanvas):
         
         logger.info(f"StreamingCanvas initialized for {server_host}:{server_port}")
 
-        # Timestamp handling for VT scheduling (robust env parsing)
-        _ts_env = (
-            os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE')
-            or os.getenv('NAPARI_CUDA_CLINT_VT_TS_MODE')  # tolerate common typo
-            or os.getenv('NAPARI_CUDA_VT_TS_MODE')
-            or 'server'
-        )
-        self._vt_ts_mode = str(_ts_env).lower()
-        if self._vt_ts_mode not in ('arrival', 'server'):
-            self._vt_ts_mode = 'arrival'
+        # Timestamp handling for VT scheduling
+        self._vt_ts_mode = (os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or 'server').lower()
         self._vt_ts_offset = None  # server_ts -> local_now offset (seconds)
         # Keyframe request throttling while VT waits for sync
         self._vt_last_key_req: float | None = None
