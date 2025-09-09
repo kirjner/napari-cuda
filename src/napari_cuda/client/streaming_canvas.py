@@ -14,6 +14,8 @@ import io
 import ctypes
 import json
 import base64
+import time
+import sys
 from fractions import Fraction
 from qtpy import QtCore
 from threading import Thread
@@ -22,6 +24,11 @@ import websockets
 import struct
 from napari._vispy.canvas import VispyCanvas
 from vispy.gloo import Texture2D, Program
+from vispy import app as vispy_app
+
+# Silence VisPy warnings about copying discontiguous data
+vispy_logger = logging.getLogger('vispy')
+vispy_logger.setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +121,45 @@ class StreamingCanvas(VispyCanvas):
         self._vt_decoder = None
         self._vt_cfg_key = None
         self._vt_errors = 0
+        # Gate VT decode until we see a keyframe after (re)initialization
+        self._vt_wait_keyframe = False
+        self._vt_gate_lift_time: float | None = None
+        # VT presenter jitter buffer + latency target
+        try:
+            self._vt_latency_s = max(0.0, float(os.getenv('NAPARI_CUDA_CLIENT_VT_LATENCY_MS', '80')) / 1000.0)
+        except Exception:
+            self._vt_latency_s = 0.08
+        try:
+            self._vt_buffer_limit = int(os.getenv('NAPARI_CUDA_CLIENT_VT_BUFFER', '3'))
+        except Exception:
+            self._vt_buffer_limit = 3
+        self._vt_present: list[tuple[float, object]] = []
+        # VT diagnostics
+        self._vt_last_stats_log: float = 0.0
+        self._vt_last_submit_count: int = 0
+        self._vt_last_out_count: int = 0
+        # VT submission decoupling: queue + worker to avoid blocking asyncio recv loop
+        # Larger input queue to avoid backpressure on websocket when VT is momentarily slow
+        self._vt_in_q: "queue.Queue[tuple[bytes, float|None]]" = queue.Queue(maxsize=64)
+        self._vt_enqueued = 0
+        # Backlog handling: if queue builds up, resync on next keyframe to avoid smear
+        try:
+            self._vt_backlog_trigger = int(os.getenv('NAPARI_CUDA_CLIENT_VT_BACKLOG_TRIGGER', '16'))
+        except Exception:
+            self._vt_backlog_trigger = 16
+        def _vt_submit_worker():
+            while True:
+                try:
+                    data, ts = self._vt_in_q.get()
+                except Exception:
+                    continue
+                try:
+                    # Submit to VT (may log failures internally)
+                    self._decode_vt_live(data, ts)
+                except Exception as e:
+                    logger.debug("VT submit worker error: %s", e)
+        self._vt_submit_thread = Thread(target=_vt_submit_worker, daemon=True)
+        self._vt_submit_thread.start()
         
         # Start streaming or offline VT smoke thread
         if self._vt_smoke:
@@ -130,18 +176,42 @@ class StreamingCanvas(VispyCanvas):
         # Override draw to show video instead
         self._scene_canvas.events.draw.disconnect()
         self._scene_canvas.events.draw.connect(self._draw_video_frame)
-        # Timer-driven display at target fps
+        # Timer-driven display at target fps (use VisPy app timer to ensure GUI-thread delivery)
         try:
             fps = float(os.getenv('NAPARI_CUDA_CLIENT_DISPLAY_FPS', '60'))
         except Exception:
             fps = 60.0
-        self._display_timer = QtCore.QTimer()
-        self._display_timer.setTimerType(QtCore.Qt.PreciseTimer)
-        self._display_timer.setInterval(max(1, int(round(1000.0 / max(1.0, fps)))))
-        self._display_timer.timeout.connect(lambda: self._scene_canvas.update())
-        self._display_timer.start()
+        # Default to Qt timer for napari/Qt integration; enable vispy timer only if requested
+        use_vispy_timer = True if os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER', '0') == '1' else False
+        interval = max(1.0 / max(1.0, fps), 1.0 / 120.0)
+        if use_vispy_timer:
+            self._display_timer = vispy_app.Timer(interval=interval, connect=lambda ev: self._scene_canvas.update(), start=True)
+            logger.info("Video display initialized (vispy.Timer @ %.1f fps)", 1.0/interval)
+        else:
+            # Fallback to Qt timer, ensure it belongs to the canvas' GUI thread
+            self._display_timer = QtCore.QTimer(self._scene_canvas.native)
+            self._display_timer.setTimerType(QtCore.Qt.PreciseTimer)
+            self._display_timer.setInterval(max(1, int(round(1000.0 / max(1.0, fps)))))
+            self._display_timer.timeout.connect(self._scene_canvas.native.update)
+            self._display_timer.start()
+            logger.info("Video display initialized (Qt QTimer @ %.1f fps)", fps)
         
         logger.info(f"StreamingCanvas initialized for {server_host}:{server_port}")
+
+        # Timestamp handling for VT scheduling
+        self._vt_ts_mode = (os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or 'server').lower()
+        self._vt_ts_offset = None  # server_ts -> local_now offset (seconds)
+        # Keyframe request throttling while VT waits for sync
+        self._vt_last_key_req: float | None = None
+
+        # VT stats logging level control (default: disabled)
+        stats_env = (os.getenv('NAPARI_CUDA_VT_STATS') or '').lower()
+        if stats_env in ('1', 'true', 'yes', 'info'):
+            self._vt_stats_level = logging.INFO
+        elif stats_env in ('debug', 'dbg'):
+            self._vt_stats_level = logging.DEBUG
+        else:
+            self._vt_stats_level = None
 
     def _state_worker(self):
         asyncio.set_event_loop(asyncio.new_event_loop())
@@ -160,6 +230,11 @@ class StreamingCanvas(VispyCanvas):
                             break
                         await asyncio.sleep(2.0)
                 ping_task = asyncio.create_task(_pinger())
+                # Request a keyframe on connect to ensure VT has a sync point
+                try:
+                    await ws.send('{"type":"request_keyframe"}')
+                except Exception:
+                    pass
                 try:
                     async for msg in ws:
                         try:
@@ -173,29 +248,50 @@ class StreamingCanvas(VispyCanvas):
                                 fps = float(data.get('fps') or 0.0)
                                 avcc_b64 = data.get('data')
                                 if fps > 0:
-                                    logger.info("Client video_config: fps=%.3f", fps)
+                                    logger.debug("Client video_config: fps=%.3f", fps)
                                 if width > 0 and height > 0 and avcc_b64:
                                     self._init_vt_from_avcc(avcc_b64, width, height)
                             except Exception as e:
-                                logger.warning("video_config parse failed: %s", e)
+                                logger.debug("video_config parse failed: %s", e)
                 finally:
                     ping_task.cancel()
         except Exception as e:
             logger.debug("State channel ended: %s", e)
+
+    async def _request_keyframe_once(self):
+        """Best-effort request for a keyframe via state channel (throttled)."""
+        now = time.time()
+        if self._vt_last_key_req is not None and (now - self._vt_last_key_req) < 0.5:
+            return
+        self._vt_last_key_req = now
+        url = f"ws://{self.server_host}:{self.state_port}"
+        try:
+            async with websockets.connect(url) as ws:
+                await ws.send('{"type":"request_keyframe"}')
+        except Exception:
+            pass
 
     def _init_vt_from_avcc(self, avcc_b64: str, width: int, height: int) -> None:
         try:
             avcc = base64.b64decode(avcc_b64)
             cfg_key = (int(width), int(height), avcc)
             if self._vt_decoder is not None and self._vt_cfg_key == cfg_key:
-                logger.info("VT already initialized; ignoring duplicate video_config")
+                logger.debug("VT already initialized; ignoring duplicate video_config")
                 return
-            from napari_cuda.client.vt_decoder import VideoToolboxDecoder, is_vt_available
-            if not is_vt_available():
-                logger.warning("VideoToolbox not available; cannot init VT")
-                return
-            self._vt_decoder = VideoToolboxDecoder(avcc, width, height)
+            # Prefer native shim on macOS; fallback to PyAV only (PyObjC VT retired)
+            backend = (os.getenv('NAPARI_CUDA_VT_BACKEND', 'shim') or 'shim').lower()
+            self._vt_backend = None
+            if sys.platform == 'darwin' and backend != 'off':
+                try:
+                    from napari_cuda.client.vt_shim import VTShimDecoder  # type: ignore
+                    self._vt_decoder = VTShimDecoder(avcc, width, height)
+                    self._vt_backend = 'shim'
+                except Exception as e:
+                    logger.warning("VT shim unavailable: %s; falling back to PyAV", e)
+                    self._vt_decoder = None
             self._vt_cfg_key = cfg_key
+            # Require a fresh keyframe before decoding with VT to ensure sync
+            self._vt_wait_keyframe = True
             logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
         except Exception as e:
             logger.error("VT live init failed: %s", e)
@@ -214,7 +310,7 @@ class StreamingCanvas(VispyCanvas):
         seconds = float(os.getenv('NAPARI_CUDA_VT_SMOKE_SECS', '3'))
         fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
         nframes = max(1, int(seconds * fps))
-        logger.info("VT smoke: generating %d frames at %dx%d @ %.1ffps", nframes, width, height, fps)
+        logger.debug("VT smoke: generating %d frames at %dx%d @ %.1ffps", nframes, width, height, fps)
 
         # Encode synthetic frames to raw AnnexB and feed VT by converting to AVCC
         try:
@@ -502,7 +598,7 @@ class StreamingCanvas(VispyCanvas):
                     self._decoded_to_queue(rgb)
                     decoded2 += 1
                 inp.close()
-                logger.info("VT smoke: fallback decoded %d frames", decoded2)
+                logger.debug("VT smoke: fallback decoded %d frames", decoded2)
             except Exception as e:
                 logger.error("VT smoke fallback failed: %s", e)
     
@@ -516,6 +612,7 @@ class StreamingCanvas(VispyCanvas):
         url = f"ws://{self.server_host}:{self.server_port}"
         logger.info(f"Connecting to pixel stream at {url}")
         
+        seen_keyframe = False
         while True:
             try:
                 async with websockets.connect(url) as websocket:
@@ -528,13 +625,91 @@ class StreamingCanvas(VispyCanvas):
                         # Message is header + Annex B H.264 frame
                         if isinstance(message, bytes):
                             if len(message) > HEADER_STRUCT.size:
-                                header = message[:HEADER_STRUCT.size]
+                                hdr = message[:HEADER_STRUCT.size]
                                 payload = memoryview(message)[HEADER_STRUCT.size:]
+                                try:
+                                    # Unpack flags to gate until first keyframe
+                                    seq, ts, w, h, codec, flags, _ = HEADER_STRUCT.unpack(hdr)
+                                    # Global initial gate (first frame must be keyframe)
+                                    if not seen_keyframe:
+                                        if flags & 0x01:
+                                            seen_keyframe = True
+                                        else:
+                                            # Skip frames until first keyframe
+                                            continue
+                                    # VT-specific gate: after VT (re)init, require a fresh keyframe
+                                    if self._vt_decoder is not None and self._vt_wait_keyframe:
+                                        if flags & 0x01:
+                                            self._vt_wait_keyframe = False
+                                            self._vt_gate_lift_time = time.time()
+                                            # Establish server->client clock offset for scheduling
+                                            try:
+                                                self._vt_ts_offset = float(self._vt_gate_lift_time - float(ts))
+                                            except Exception:
+                                                self._vt_ts_offset = None
+                                            logger.info("VT gate lifted on keyframe (seq=%d)", seq)
+                                        else:
+                                            # While waiting for VT keyframe, keep PyAV display alive
+                                            try:
+                                                self._decode_frame(payload)
+                                            except Exception:
+                                                pass
+                                            # Nudge server for a fresh keyframe (best-effort, throttled)
+                                            try:
+                                                asyncio.create_task(self._request_keyframe_once())
+                                            except Exception:
+                                                pass
+                                            continue
+                                except Exception:
+                                    pass
                             else:
                                 payload = message
-                            # If VT live decoder ready, prefer it
-                            if self._vt_decoder is not None:
-                                self._decode_vt_live(bytes(payload))
+                            # If VT live decoder ready and not waiting for keyframe, prefer it
+                            if self._vt_decoder is not None and not self._vt_wait_keyframe:
+                                # Pass server timestamp through for scheduling
+                                try:
+                                    ts_float = float(ts)
+                                except Exception:
+                                    ts_float = None
+                                # Enqueue to VT worker to keep websocket recv non-blocking
+                                b = bytes(payload)
+                                try:
+                                    # If backlog builds, resync: request keyframe and gate until it arrives
+                                    if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
+                                        self._vt_wait_keyframe = True
+                                        logger.info("VT backlog detected (q=%d); requesting keyframe and resync", self._vt_in_q.qsize())
+                                        try:
+                                            asyncio.create_task(self._request_keyframe_once())
+                                        except Exception:
+                                            pass
+                                        # Drain queued items; we'll resume on next keyframe
+                                        try:
+                                            while self._vt_in_q.qsize() > 0:
+                                                _ = self._vt_in_q.get_nowait()
+                                        except Exception:
+                                            pass
+                                        # Also drop any pending presented frames
+                                        try:
+                                            from napari_cuda import _vt as vt  # type: ignore
+                                            for _, cap in self._vt_present:
+                                                try:
+                                                    vt.release_frame(cap)
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            pass
+                                        self._vt_present.clear()
+                                    self._vt_in_q.put_nowait((b, ts_float))
+                                    self._vt_enqueued += 1
+                                    if self._vt_enqueued <= 3:
+                                        logger.debug("VT enqueued #%d (seq=%d, %d bytes)", self._vt_enqueued, int(seq), len(b))
+                                except queue.Full:
+                                    # Queue full: enter resync mode; drop until keyframe
+                                    self._vt_wait_keyframe = True
+                                    try:
+                                        asyncio.create_task(self._request_keyframe_once())
+                                    except Exception:
+                                        pass
                             else:
                                 self._decode_frame(payload)
                             
@@ -567,7 +742,13 @@ class StreamingCanvas(VispyCanvas):
                     # Reduce logging noise
 
                 def decode(self, data):
-                    packet = av.Packet(data)
+                    # Ensure AnnexB for PyAV: convert from AVCC if needed
+                    try:
+                        from napari_cuda.client.avcc_shim import normalize_to_annexb  # type: ignore
+                        annexb, _ = normalize_to_annexb(data)
+                        packet = av.Packet(annexb)
+                    except Exception:
+                        packet = av.Packet(data)
                     frames = self.codec.decode(packet)
                     for frame in frames:
                         # Log frame color metadata once if available
@@ -626,48 +807,54 @@ class StreamingCanvas(VispyCanvas):
         AVCC uses 4-byte length prefixes.
         """
         out = bytearray()
-        i = 0
         n = len(data)
-        nalus_found = 0
-        
-        while i < n:
-            # Find next start code
-            next_start = n  # default to end
-            j = i
-            
-            # Skip current start code if at one
-            if j + 3 <= n and data[j:j+3] == b'\x00\x00\x01':
+        # Collect all start-code indices
+        idx: list[int] = []
+        i = 0
+        while i + 3 <= n:
+            if data[i:i+3] == b"\x00\x00\x01":
+                idx.append(i)
                 i += 3
-            elif j + 4 <= n and data[j:j+4] == b'\x00\x00\x00\x01':
+            elif i + 4 <= n and data[i:i+4] == b"\x00\x00\x00\x01":
+                idx.append(i)
                 i += 4
             else:
-                # Not at start code, find next one
-                while j < n - 2:
-                    if data[j:j+3] == b'\x00\x00\x01':
-                        next_start = j
-                        break
-                    if j < n - 3 and data[j:j+4] == b'\x00\x00\x00\x01':
-                        next_start = j
-                        break
-                    j += 1
-            
-            if i < next_start:
-                # Extract NALU between i and next_start
-                nalu = data[i:next_start]
-                if nalu:  # Skip empty NALUs
-                    out.extend(len(nalu).to_bytes(4, 'big'))
-                    out.extend(nalu)
-                    nalus_found += 1
-                    if nalus_found <= 2:
-                        logger.debug("NALU #%d: len=%d, type=0x%02x", nalus_found, len(nalu), nalu[0] & 0x1f if nalu else 0)
-            
-            i = next_start
-        
+                i += 1
+        idx.append(n)
+
+        nalus_found = 0
+        for a, b in zip(idx, idx[1:]):
+            # Trim leading zeros
+            j = a
+            while j < b and data[j] == 0:
+                j += 1
+            # Skip the start code itself
+            if j + 3 <= b and data[j:j+3] == b"\x00\x00\x01":
+                j += 3
+            elif j + 4 <= b and data[j:j+4] == b"\x00\x00\x00\x01":
+                j += 4
+            # Extract NAL payload
+            nal = data[j:b]
+            if not nal:
+                continue
+            out.extend(len(nal).to_bytes(4, "big"))
+            out.extend(nal)
+            nalus_found += 1
+            if nalus_found <= 3:
+                try:
+                    ntype = nal[0] & 0x1F
+                except Exception:
+                    ntype = -1
+                logger.debug("AnnexB→AVCC NAL #%d: len=%d type=%s", nalus_found, len(nal), ntype)
+
         result = bytes(out)
-        logger.debug("AnnexB→AVCC: input %d bytes → %d NALUs → output %d bytes", len(data), nalus_found, len(result))
+        logger.debug(
+            "AnnexB→AVCC: input %d bytes → %d NALs → output %d bytes",
+            len(data), nalus_found, len(result)
+        )
         return result
 
-    def _decode_vt_live(self, data: bytes) -> None:
+    def _decode_vt_live(self, data: bytes, ts: float | None) -> None:
         try:
             if not data:
                 logger.debug("VT decode skipped: empty data")
@@ -678,39 +865,43 @@ class StreamingCanvas(VispyCanvas):
             logger.debug("VT input: %d bytes, format=%s, first bytes=%s", 
                         len(data), "AnnexB" if is_annexb else "AVCC", data[:8].hex())
             
+            # Normalize to AVCC once per AU and feed as-is (including SPS/PPS/SEI)
             avcc_au = self._annexb_to_avcc(data) if is_annexb else data
-            
-            # Validate AVCC format
-            if len(avcc_au) >= 4:
-                first_len = int.from_bytes(avcc_au[:4], 'big')
-                logger.debug("AVCC first NALU: len_field=%d, total_au=%d", first_len, len(avcc_au))
-                if first_len > len(avcc_au) - 4:
-                    logger.error("Invalid AVCC: first NALU length %d exceeds remaining data %d", 
-                                first_len, len(avcc_au) - 4)
-                    return
-            
-            img_buf = self._vt_decoder.decode(avcc_au)
-            if img_buf is None:
-                self._vt_errors += 1
-                if self._vt_errors % 10 == 0:
-                    logger.warning("VT decode returned None repeatedly (%d)", self._vt_errors)
-                return
-            # Map BGRA and copy to RGB for GL upload (temporary until zero-copy)
-            from Quartz import CoreVideo as CV  # type: ignore
-            CV.CVPixelBufferLockBaseAddress(img_buf, 0)
+            # Log composition of the first couple of AUs for diagnostics
             try:
-                w = int(CV.CVPixelBufferGetWidth(img_buf))
-                h = int(CV.CVPixelBufferGetHeight(img_buf))
-                bpr = int(CV.CVPixelBufferGetBytesPerRow(img_buf))
-                base = CV.CVPixelBufferGetBaseAddress(img_buf)
-                size = bpr * h
-                raw = ctypes.string_at(int(base), size)
-                bgra = np.frombuffer(raw, dtype=np.uint8).reshape((h, bpr // 4, 4))
-                rgb = bgra[:, :w, [2, 1, 0]].copy()
-            finally:
-                CV.CVPixelBufferUnlockBaseAddress(img_buf, 0)
-            self._decoded_to_queue(rgb)
+                if self._vt_enqueued < 2:
+                    off = 0
+                    total = len(avcc_au)
+                    cnt = {1:0,5:0,6:0,7:0,8:0,9:0}
+                    while off + 4 <= total:
+                        ln = int.from_bytes(avcc_au[off:off+4], 'big'); off += 4
+                        if ln <= 0 or off + ln > total:
+                            break
+                        ntype = avcc_au[off] & 0x1F
+                        if ntype in cnt:
+                            cnt[ntype] += 1
+                        off += ln
+                    logger.debug(
+                        "VT AU pre-submit composition: AUD=%d SPS=%d PPS=%d SEI=%d IDR=%d NONIDR=%d",
+                        cnt.get(9,0), cnt.get(7,0), cnt.get(8,0), cnt.get(6,0), cnt.get(5,0), cnt.get(1,0)
+                    )
+            except Exception:
+                pass
+            ok = self._vt_decoder.decode(avcc_au, ts)
+            if not ok:
+                self._vt_errors += 1
+                # Be chatty on the first few failures, then throttle
+                if self._vt_errors <= 3 or (self._vt_errors % 50 == 0):
+                    logger.warning("VT decode submit failed (errors=%d)", self._vt_errors)
+                return
+            # Asynchronous output; presenter will map/display when due
             self._vt_errors = 0
+            # For the first couple of frames, nudge delivery to confirm callback path
+            try:
+                if self._vt_enqueued <= 3:
+                    self._vt_decoder.flush()
+            except Exception:
+                pass
         except Exception as e:
             self._vt_errors += 1
             logger.exception("VT live decode/map failed (%d): %s", self._vt_errors, e)
@@ -718,6 +909,44 @@ class StreamingCanvas(VispyCanvas):
                 logger.error("Disabling VT after repeated errors; falling back to PyAV")
                 self._vt_decoder = None
             return
+
+    def _pixelbuffer_to_rgb(self, img_buf) -> np.ndarray:
+        from Quartz import CoreVideo as CV  # type: ignore
+        CV.CVPixelBufferLockBaseAddress(img_buf, 0)
+        try:
+            w = int(CV.CVPixelBufferGetWidth(img_buf))
+            h = int(CV.CVPixelBufferGetHeight(img_buf))
+            pf = int(CV.CVPixelBufferGetPixelFormatType(img_buf))
+            if pf == getattr(CV, 'kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange', 0):
+                y_bpr = int(CV.CVPixelBufferGetBytesPerRowOfPlane(img_buf, 0))
+                uv_bpr = int(CV.CVPixelBufferGetBytesPerRowOfPlane(img_buf, 1))
+                y_base = CV.CVPixelBufferGetBaseAddressOfPlane(img_buf, 0)
+                uv_base = CV.CVPixelBufferGetBaseAddressOfPlane(img_buf, 1)
+                y_raw = ctypes.string_at(int(y_base), y_bpr * h)
+                uv_raw = ctypes.string_at(int(uv_base), uv_bpr * (h // 2))
+                y = np.frombuffer(y_raw, dtype=np.uint8).reshape((h, y_bpr))[:, :w].astype(np.int16)
+                uv = np.frombuffer(uv_raw, dtype=np.uint8).reshape((h // 2, uv_bpr))[:, : (w // 1)]
+                u = uv[:, :w:2].astype(np.int16)
+                v = uv[:, 1:w:2].astype(np.int16)
+                u_up = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)[:h, :w]
+                v_up = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)[:h, :w]
+                c = y - 16
+                d = u_up - 128
+                e = v_up - 128
+                r = (298 * c + 409 * e + 128) >> 8
+                g = (298 * c - 100 * d - 208 * e + 128) >> 8
+                b = (298 * c + 516 * d + 128) >> 8
+                rgb = np.stack([np.clip(r, 0, 255), np.clip(g, 0, 255), np.clip(b, 0, 255)], axis=-1).astype(np.uint8)
+            else:
+                bpr = int(CV.CVPixelBufferGetBytesPerRow(img_buf))
+                base = CV.CVPixelBufferGetBaseAddress(img_buf)
+                size = bpr * h
+                raw = ctypes.string_at(int(base), size)
+                bgra = np.frombuffer(raw, dtype=np.uint8).reshape((h, bpr // 4, 4))
+                rgb = bgra[:, :w, [2, 1, 0]].copy()
+            return rgb
+        finally:
+            CV.CVPixelBufferUnlockBaseAddress(img_buf, 0)
     
     def _decode_frame(self, h264_data):
         """Decode H.264 frame and add to queue."""
@@ -740,6 +969,132 @@ class StreamingCanvas(VispyCanvas):
     def _draw_video_frame(self, event):
         """Draw the latest video frame instead of scene content."""
         try:
+            # Presenter: drain VT frames, schedule by server ts + latency
+            if self._vt_decoder is not None and self._vt_backend == 'shim':
+                now = time.time()
+                # Periodic diagnostics about VT submits/outputs
+                try:
+                    if now - self._vt_last_stats_log >= 1.0:
+                        try:
+                            sub, out, qlen = self._vt_decoder.counts()
+                        except Exception:
+                            sub = out = 0
+                            qlen = -1
+                        # Emit once-per-second INFO to confirm decode/present activity
+                        # Emit VT stats if enabled
+                        lvl = getattr(self, '_vt_stats_level', None)
+                        if lvl is not None:
+                            try:
+                                logger.log(
+                                    lvl,
+                                    "VT stats: submits=%d outputs=%d shim_q=%d present_buf=%d mode=%s lat_ms=%d",
+                                    sub, out, qlen, len(self._vt_present),
+                                    getattr(self, '_vt_ts_mode', 'server'),
+                                    int(round(self._vt_latency_s * 1000.0)),
+                                )
+                            except Exception:
+                                pass
+                        # Warn if we've submitted but not received any outputs shortly after gate lift
+                        if (
+                            self._vt_gate_lift_time is not None
+                            and (now - self._vt_gate_lift_time) > 1.0
+                            and sub > 0
+                            and out == 0
+                        ):
+                            logger.warning(
+                                "VT stalled? submits=%d outputs=%d latency_ms=%d present_buf=%d shim_q=%d",
+                                sub, out, int(round(self._vt_latency_s * 1000.0)), len(self._vt_present), qlen,
+                            )
+                            # Nudge VT to deliver any pending frames
+                            try:
+                                self._vt_decoder.flush()
+                            except Exception:
+                                pass
+                        self._vt_last_stats_log = now
+                        self._vt_last_submit_count = sub
+                        self._vt_last_out_count = out
+                except Exception:
+                    pass
+                while True:
+                    item = self._vt_decoder.get_frame_nowait()
+                    if not item:
+                        break
+                    img_buf, pts = item
+                    # Compute due time based on configured mode
+                    if self._vt_ts_mode == 'arrival' or pts is None:
+                        due = now + self._vt_latency_s
+                    else:
+                        # Use server timestamp with measured offset; fallback if unreasonable
+                        if self._vt_ts_offset is None or abs(self._vt_ts_offset) > 5.0:
+                            due = now + self._vt_latency_s
+                        else:
+                            due = (pts + self._vt_ts_offset) + self._vt_latency_s
+                    # Keep a CF retain count from callback; store for later release
+                    self._vt_present.append((due, img_buf))
+                    # Request an immediate GUI wakeup to reduce perceived stalls
+                    try:
+                        QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
+                    except Exception:
+                        pass
+                    # Bound buffer size
+                    if len(self._vt_present) > max(1, self._vt_buffer_limit):
+                        self._vt_present.sort(key=lambda t: t[0])
+                        drop = self._vt_present[:-self._vt_buffer_limit]
+                        self._vt_present = self._vt_present[-self._vt_buffer_limit:]
+                        # Release dropped buffers via shim
+                        try:
+                            from napari_cuda import _vt as vt  # type: ignore
+                            for _, cap in drop:
+                                try:
+                                    vt.release_frame(cap)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                if self._vt_present:
+                    self._vt_present.sort(key=lambda t: t[0])
+                    due_now = [p for p in self._vt_present if p[0] <= now]
+                    if due_now:
+                        # Display the latest due frame (latest-wins)
+                        _, img_buf = due_now[-1]
+                        try:
+                            # Map capsule to contiguous RGB via shim helper
+                            from napari_cuda import _vt as vt  # type: ignore
+                            rgb_bytes, w, h = vt.map_to_rgb(img_buf)
+                            rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((int(h), int(w), 3))
+                            self._decoded_to_queue(rgb)
+                            # Release the consumed buffer now
+                            try:
+                                vt.release_frame(img_buf)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.debug("VT map/display error: %s", e)
+                        # Drop all due frames we just presented
+                        pending = [p for p in self._vt_present if p[0] > now]
+                        # Release all due frames (except the one we just released above)
+                        try:
+                            from napari_cuda import _vt as vt  # type: ignore
+                            for _, cap in due_now[:-1]:
+                                try:
+                                    vt.release_frame(cap)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        self._vt_present = pending
+                    else:
+                        # If no frames are due for a while (clock skew), show the latest to avoid visible stalls
+                        earliest_due = self._vt_present[0][0]
+                        if earliest_due - now > 0.2:  # 200ms guard
+                            _, img_buf = self._vt_present[-1]
+                            try:
+                                from napari_cuda import _vt as vt  # type: ignore
+                                rgb_bytes, w, h = vt.map_to_rgb(img_buf)
+                                rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((int(h), int(w), 3))
+                                self._decoded_to_queue(rgb)
+                            except Exception:
+                                pass
             # Get latest frame
             frame = None
             
@@ -761,18 +1116,24 @@ class StreamingCanvas(VispyCanvas):
     
     def _display_frame(self, frame):
         """Display frame using OpenGL."""
-        with self._scene_canvas.context:
-            # Initialize resources if needed
-            if self._video_program is None:
-                self._init_video_display()
-            
-            if frame is not None:
-                # Update texture with new frame
-                self._video_texture.set_data(frame)
-            
-            # Clear and draw
-            self._scene_canvas.context.clear('black')
-            self._video_program.draw('triangle_strip')
+        ctx = self._scene_canvas.context
+        # Initialize resources if needed
+        if self._video_program is None:
+            self._init_video_display()
+
+        if frame is not None:
+            # Ensure contiguous uint8 RGB before uploading to GL to avoid VisPy copies
+            try:
+                if frame.dtype != np.uint8 or not frame.flags.c_contiguous:
+                    frame = np.ascontiguousarray(frame, dtype=np.uint8)
+            except Exception:
+                pass
+            # Update texture with new frame
+            self._video_texture.set_data(frame)
+
+        # Clear and draw
+        ctx.clear('black')
+        self._video_program.draw('triangle_strip')
     
     def _init_video_display(self):
         """Initialize OpenGL resources for video display."""
@@ -791,11 +1152,12 @@ class StreamingCanvas(VispyCanvas):
             [ 1,  1, 1, 0],  # Top-right
         ], dtype=np.float32)
         
-        self._video_program['position'] = vertices[:, :2]
-        self._video_program['texcoord'] = vertices[:, 2:]
+        # Ensure contiguous attribute arrays to avoid VisPy copying warnings
+        self._video_program['position'] = np.ascontiguousarray(vertices[:, :2])
+        self._video_program['texcoord'] = np.ascontiguousarray(vertices[:, 2:])
         self._video_program['texture'] = self._video_texture
         
-        logger.info("Video display initialized")
+        logger.debug("Video display initialized")
     
     def screenshot(self, *args, **kwargs):
         """Get screenshot of current video frame."""

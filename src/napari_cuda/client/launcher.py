@@ -86,13 +86,36 @@ def launch_streaming_client(server_host='localhost',
         except Exception as e:
             logger.debug(f"Deferred server connect failed (will retry later): {e}")
     
-    # Replace in the canvas splitter widget
-    if hasattr(qt_viewer, 'canvas_splitter'):
-        # Find the old canvas widget index
-        for i in range(qt_viewer.canvas_splitter.count()):
-            if qt_viewer.canvas_splitter.widget(i) == old_canvas.native:
-                qt_viewer.canvas_splitter.replaceWidget(i, streaming_canvas.native)
-                break
+    # Replace canvas inside the QtViewer welcome overlay stack (current napari layout)
+    try:
+        ow = qt_viewer._welcome_widget  # QtWidgetOverlay(QStackedWidget)
+        # If the old canvas.native is present in the overlay, replace it with the new one
+        try:
+            for i in range(ow.count()):
+                if ow.widget(i) is old_canvas.native:
+                    # Remove the old widget and insert our streaming canvas at index 0
+                    ow.removeWidget(old_canvas.native)
+                    break
+        except Exception:
+            pass
+        # Ensure our streaming canvas is the primary widget in the overlay
+        try:
+            # Avoid duplicate insert if already present
+            present = any(ow.widget(i) is streaming_canvas.native for i in range(ow.count()))
+            if not present:
+                ow.insertWidget(0, streaming_canvas.native)
+        except Exception:
+            pass
+        # Hide the welcome screen so only the video canvas is visible
+        try:
+            qt_viewer.set_welcome_visible(False)
+        except Exception:
+            try:
+                ow.set_welcome_visible(False)
+            except Exception:
+                pass
+    except Exception:
+        pass
     
     # Clean up old canvas widget
     try:
