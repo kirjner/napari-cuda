@@ -31,7 +31,8 @@ class VTShimDecoder:
         self._w = int(width)
         self._h = int(height)
         pf_env = (os.getenv('NAPARI_CUDA_CLIENT_VT_PIXFMT') or '').upper()
-        pf = (pixfmt or pf_env or 'NV12').upper()
+        # Default to BGRA for broader compatibility and faster CPU mapping
+        pf = (pixfmt or pf_env or 'BGRA').upper()
         fourcc = 0x34323076 if pf in ('NV12', '420BIPLANAR') else 0x42475241  # 'NV12' or 'BGRA'
         self._sess = vt.create(avcc, self._w, self._h, fourcc)
         logger.info("VT shim session created: %dx%d pixfmt=%s", self._w, self._h, pf)

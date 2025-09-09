@@ -23,6 +23,14 @@
 - Naming: modules/functions `snake_case`, classes `PascalCase`, constants `UPPER_CASE`.
 - Docstrings use double quotes; keep public APIs typed.
 
+## Error Handling & Assertions
+- Prefer assertions for internal invariants within our code paths (e.g., required collaborators present, non-null results after initialization).
+- Keep defensive guards at subsystem boundaries only (e.g., WebSocket I/O, PyAV/FFmpeg decode, VT shim map/release) to avoid crashes from external/runtime variability.
+- Avoid broad `except Exception` blocks in the hot path; catch specific exceptions where feasible.
+- Normalize env var parsing via small helpers; do not sprinkle `try/except` per usage.
+- Resource lifecycles (e.g., VT pixel buffers) must be released in `finally` blocks when consumed.
+- Always log exceptions: use `logger.exception(...)` at subsystem boundaries; use `logger.debug(..., exc_info=True)` for hot-path recoverable cases.
+
 ## Testing Guidelines
 - Framework: `pytest` with config in `pyproject.toml` (strict markers, warnings-as-errors for napari).
 - Location: place tests next to code in `_tests/` packages; name files `test_*.py`.
