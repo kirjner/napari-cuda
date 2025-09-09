@@ -150,18 +150,32 @@ static PyObject* m_map_to_rgb_impl(PyObject* self, PyObject* args){
                 for (size_t i=0; i<w; i+=2){
                     int Y0 = yrow[i];
                     int Y1 = (i+1<w) ? yrow[i+1] : Y0;
-                    int U = uvrow[i & ~1];
-                    int V = uvrow[(i & ~1)+1];
-                    if (!full){ Y0 = Y0 - 16; Y1 = Y1 - 16; U -= 128; V -= 128; }
-                    int C0 = full ? (Y0 - 0) : Y0;
-                    int C1 = full ? (Y1 - 0) : Y1;
-                    int D = U; int E = V;
-                    int r0 = (298*C0 + 409*E + 128)>>8;
-                    int g0 = (298*C0 - 100*D - 208*E + 128)>>8;
-                    int b0 = (298*C0 + 516*D + 128)>>8;
-                    int r1 = (298*C1 + 409*E + 128)>>8;
-                    int g1 = (298*C1 - 100*D - 208*E + 128)>>8;
-                    int b1 = (298*C1 + 516*D + 128)>>8;
+                    // NV12 has interleaved U,V at even byte indices
+                    int U = uvrow[i & ~1] - 128;
+                    int V = uvrow[(i & ~1)+1] - 128;
+                    int r0, g0, b0, r1, g1, b1;
+                    if (full){
+                        // Full range (BT.709-ish integer approx): Y in [0..255], U/V offset already removed
+                        // Scale Y by 256 for fixed-point math
+                        int C0 = Y0;
+                        int C1 = Y1;
+                        r0 = (256*C0 + 358*V + 128) >> 8;
+                        g0 = (256*C0 -  88*U - 183*V + 128) >> 8;
+                        b0 = (256*C0 + 454*U + 128) >> 8;
+                        r1 = (256*C1 + 358*V + 128) >> 8;
+                        g1 = (256*C1 -  88*U - 183*V + 128) >> 8;
+                        b1 = (256*C1 + 454*U + 128) >> 8;
+                    } else {
+                        // Video range (16..235): C = Y - 16; use ITU-R BT.601/709 integer approx
+                        int C0 = Y0 - 16; if (C0 < 0) C0 = 0;
+                        int C1 = Y1 - 16; if (C1 < 0) C1 = 0;
+                        r0 = (298*C0 + 409*V + 128) >> 8;
+                        g0 = (298*C0 - 100*U - 208*V + 128) >> 8;
+                        b0 = (298*C0 + 516*U + 128) >> 8;
+                        r1 = (298*C1 + 409*V + 128) >> 8;
+                        g1 = (298*C1 - 100*U - 208*V + 128) >> 8;
+                        b1 = (298*C1 + 516*U + 128) >> 8;
+                    }
                     if (r0<0) r0=0; if (r0>255) r0=255;
                     if (g0<0) g0=0; if (g0>255) g0=255;
                     if (b0<0) b0=0; if (b0>255) b0=255;

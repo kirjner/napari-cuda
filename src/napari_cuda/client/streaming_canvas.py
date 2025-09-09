@@ -198,8 +198,16 @@ class StreamingCanvas(VispyCanvas):
         
         logger.info(f"StreamingCanvas initialized for {server_host}:{server_port}")
 
-        # Timestamp handling for VT scheduling
-        self._vt_ts_mode = (os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or 'server').lower()
+        # Timestamp handling for VT scheduling (robust env parsing)
+        _ts_env = (
+            os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE')
+            or os.getenv('NAPARI_CUDA_CLINT_VT_TS_MODE')  # tolerate common typo
+            or os.getenv('NAPARI_CUDA_VT_TS_MODE')
+            or 'server'
+        )
+        self._vt_ts_mode = str(_ts_env).lower()
+        if self._vt_ts_mode not in ('arrival', 'server'):
+            self._vt_ts_mode = 'arrival'
         self._vt_ts_offset = None  # server_ts -> local_now offset (seconds)
         # Keyframe request throttling while VT waits for sync
         self._vt_last_key_req: float | None = None
@@ -980,17 +988,16 @@ class StreamingCanvas(VispyCanvas):
                         except Exception:
                             sub = out = 0
                             qlen = -1
-                        # Emit once-per-second INFO to confirm decode/present activity
-                        # Emit VT stats if enabled
+                        # Emit once-per-second stats if enabled
                         lvl = getattr(self, '_vt_stats_level', None)
                         if lvl is not None:
                             try:
                                 logger.log(
                                     lvl,
-                                    "VT stats: submits=%d outputs=%d shim_q=%d present_buf=%d mode=%s lat_ms=%d",
+                                    "VT stats: submit=%d out=%d shim_q=%d present=%d mode=%s fixed_target=%.1fms",
                                     sub, out, qlen, len(self._vt_present),
                                     getattr(self, '_vt_ts_mode', 'server'),
-                                    int(round(self._vt_latency_s * 1000.0)),
+                                    self._vt_latency_s * 1000.0,
                                 )
                             except Exception:
                                 pass
@@ -1020,15 +1027,16 @@ class StreamingCanvas(VispyCanvas):
                     if not item:
                         break
                     img_buf, pts = item
-                    # Compute due time based on configured mode
+                    # Compute due time based on configured mode and fixed target
+                    now2 = time.time()
                     if self._vt_ts_mode == 'arrival' or pts is None:
-                        due = now + self._vt_latency_s
+                        due = now2 + self._vt_latency_s
                     else:
-                        # Use server timestamp with measured offset; fallback if unreasonable
-                        if self._vt_ts_offset is None or abs(self._vt_ts_offset) > 5.0:
-                            due = now + self._vt_latency_s
+                        offset = self._vt_ts_offset
+                        if offset is None or abs(offset) > 5.0:
+                            due = now2 + self._vt_latency_s
                         else:
-                            due = (pts + self._vt_ts_offset) + self._vt_latency_s
+                            due = (float(pts) + float(offset)) + self._vt_latency_s
                     # Keep a CF retain count from callback; store for later release
                     self._vt_present.append((due, img_buf))
                     # Request an immediate GUI wakeup to reduce perceived stalls
