@@ -16,8 +16,26 @@ BytesLike = Union[bytes, bytearray, memoryview]
 
 
 def _is_annexb(buf: bytes) -> bool:
-    # Common Annex B start codes: 0x000001 or 0x00000001
-    return buf.startswith(b"\x00\x00\x01") or buf.startswith(b"\x00\x00\x00\x01")
+    """Heuristically detect Annex B start code near the start of the buffer.
+
+    The stream may legally contain an arbitrary number of leading 0x00 bytes
+    before the first 0x000001 or 0x00000001 start code. Be tolerant of up to
+    32 leading zeros when checking. This avoids misclassifying Annex B as AVCC
+    when padding is present.
+    """
+    if not buf:
+        return False
+    i = 0
+    n = len(buf)
+    # Skip up to 32 leading zeros (padding before first start code)
+    limit = min(n, 32)
+    while i < limit and buf[i] == 0:
+        i += 1
+    if i + 3 <= n and buf[i:i+3] == b"\x00\x00\x01":
+        return True
+    if i + 4 <= n and buf[i:i+4] == b"\x00\x00\x00\x01":
+        return True
+    return False
 
 
 def avcc_to_annexb(avcc: BytesLike) -> bytes:
@@ -51,5 +69,7 @@ def normalize_to_annexb(buf: BytesLike) -> Tuple[bytes, bool]:
     b = bytes(buf)
     if _is_annexb(b):
         return b, False
-    return avcc_to_annexb(b), True
-
+    if _is_annexb(b):
+        return b, False
+    out = avcc_to_annexb(b)
+    return out, True

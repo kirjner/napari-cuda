@@ -32,6 +32,13 @@ vispy_logger.setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
+# Keep websockets client logs at WARNING to avoid debug noise
+try:
+    logging.getLogger('websockets.client').setLevel(logging.WARNING)
+    logging.getLogger('websockets.protocol').setLevel(logging.WARNING)
+except Exception:
+    pass
+
 # Simple shaders for displaying video texture
 VERTEX_SHADER = """
 attribute vec2 position;
@@ -124,6 +131,8 @@ class StreamingCanvas(VispyCanvas):
         # Gate VT decode until we see a keyframe after (re)initialization
         self._vt_wait_keyframe = False
         self._vt_gate_lift_time: float | None = None
+        # Active presentation source ('pyav' or 'vt') to prevent cross-talk
+        self._active_source: str = 'pyav'
         # VT presenter jitter buffer + latency target
         try:
             self._vt_latency_s = max(0.0, float(os.getenv('NAPARI_CUDA_CLIENT_VT_LATENCY_MS', '80')) / 1000.0)
@@ -160,7 +169,62 @@ class StreamingCanvas(VispyCanvas):
                     logger.debug("VT submit worker error: %s", e)
         self._vt_submit_thread = Thread(target=_vt_submit_worker, daemon=True)
         self._vt_submit_thread.start()
-        
+
+        # Expected bitstream format from server ('avcc' or 'annexb'); default to AVCC
+        self._stream_format = 'avcc'
+        self._stream_format_set = False
+
+        # PyAV decode decoupling and fixed-latency presenter (same policy as VT)
+        self._pyav_in_q: "queue.Queue[tuple[bytes, float|None]]" = queue.Queue(maxsize=64)
+        self._pyav_present: list[tuple[float, np.ndarray]] = []
+        self._pyav_enqueued = 0
+        self._pyav_ts_offset: float | None = None
+        try:
+            self._pyav_backlog_trigger = int(os.getenv('NAPARI_CUDA_CLIENT_PYAV_BACKLOG_TRIGGER', '16'))
+        except Exception:
+            self._pyav_backlog_trigger = 16
+        def _pyav_worker():
+            while True:
+                try:
+                    b, ts = self._pyav_in_q.get()
+                except Exception:
+                    continue
+                try:
+                    arr = None
+                    try:
+                        arr = self.decoder.decode(b) if self.decoder else None
+                    except Exception as e:
+                        logger.debug("PyAV worker decode error: %s", e)
+                        arr = None
+                    if arr is None:
+                        continue
+                    now2 = time.time()
+                    if self._vt_ts_mode == 'arrival' or ts is None:
+                        due = now2 + self._vt_latency_s
+                    else:
+                        if self._pyav_ts_offset is None:
+                            try:
+                                self._pyav_ts_offset = float(now2 - float(ts))
+                            except Exception:
+                                self._pyav_ts_offset = None
+                        off = self._pyav_ts_offset
+                        if off is None or abs(off) > 5.0:
+                            due = now2 + self._vt_latency_s
+                        else:
+                            due = (float(ts) + float(off)) + self._vt_latency_s
+                    self._pyav_present.append((due, arr))
+                    try:
+                        QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
+                    except Exception:
+                        pass
+                    if len(self._pyav_present) > max(1, self._vt_buffer_limit):
+                        self._pyav_present.sort(key=lambda t: t[0])
+                        self._pyav_present = self._pyav_present[-self._vt_buffer_limit:]
+                except Exception as e:
+                    logger.debug("PyAV worker error: %s", e)
+        self._pyav_thread = Thread(target=_pyav_worker, daemon=True)
+        self._pyav_thread.start()
+
         # Start streaming or offline VT smoke thread
         if self._vt_smoke:
             self._streaming_thread = Thread(target=self._vt_smoke_worker, daemon=True)
@@ -246,6 +310,10 @@ class StreamingCanvas(VispyCanvas):
                                 width = int(data.get('width') or 0)
                                 height = int(data.get('height') or 0)
                                 fps = float(data.get('fps') or 0.0)
+                                fmt = (data.get('format') or '').lower() or 'avcc'
+                                # Record expected stream format
+                                self._stream_format = 'annexb' if fmt.startswith('annex') else 'avcc'
+                                self._stream_format_set = True
                                 avcc_b64 = data.get('data')
                                 if fps > 0:
                                     logger.debug("Client video_config: fps=%.3f", fps)
@@ -647,7 +715,13 @@ class StreamingCanvas(VispyCanvas):
                                                 self._vt_ts_offset = float(self._vt_gate_lift_time - float(ts))
                                             except Exception:
                                                 self._vt_ts_offset = None
-                                            logger.info("VT gate lifted on keyframe (seq=%d)", seq)
+                                            # Switch authoritative presenter to VT and clear PyAV backlog
+                                            self._active_source = 'vt'
+                                            try:
+                                                self._pyav_present.clear()
+                                            except Exception:
+                                                pass
+                                            logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", seq)
                                         else:
                                             # While waiting for VT keyframe, keep PyAV display alive
                                             try:
@@ -711,7 +785,34 @@ class StreamingCanvas(VispyCanvas):
                                     except Exception:
                                         pass
                             else:
-                                self._decode_frame(payload)
+                                # Asynchronous PyAV path with fixed-latency presenter
+                                self._active_source = 'pyav'
+                                try:
+                                    ts_float = float(ts)
+                                except Exception:
+                                    ts_float = None
+                                b = bytes(payload)
+                                try:
+                                    if self._pyav_in_q.qsize() >= max(2, self._pyav_backlog_trigger - 1):
+                                        # Drain; latest-wins
+                                        try:
+                                            while self._pyav_in_q.qsize() > 0:
+                                                _ = self._pyav_in_q.get_nowait()
+                                        except Exception:
+                                            pass
+                                        self._pyav_present.clear()
+                                    self._pyav_in_q.put_nowait((b, ts_float))
+                                    self._pyav_enqueued += 1
+                                except queue.Full:
+                                    # Drop oldest by draining one
+                                    try:
+                                        _ = self._pyav_in_q.get_nowait()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        self._pyav_in_q.put_nowait((b, ts_float))
+                                    except Exception:
+                                        pass
                             
             except Exception as e:
                 logger.exception("Stream connection lost: %s", e)
@@ -725,8 +826,9 @@ class StreamingCanvas(VispyCanvas):
             import av
             
             class PyAVDecoder:
-                def __init__(self):
+                def __init__(self, stream_format: str = 'avcc'):
                     self.codec = av.CodecContext.create('h264', 'r')
+                    self.stream_format = 'annexb' if (stream_format or '').lower().startswith('annex') else 'avcc'
                     # Optional channel swap to diagnose R/B confusion
                     import os as _os
                     try:
@@ -742,11 +844,13 @@ class StreamingCanvas(VispyCanvas):
                     # Reduce logging noise
 
                 def decode(self, data):
-                    # Ensure AnnexB for PyAV: convert from AVCC if needed
+                    # PyAV expects Annex B; convert AVCC when expected
                     try:
-                        from napari_cuda.client.avcc_shim import normalize_to_annexb  # type: ignore
-                        annexb, _ = normalize_to_annexb(data)
-                        packet = av.Packet(annexb)
+                        if self.stream_format == 'avcc':
+                            from napari_cuda.client.avcc_shim import avcc_to_annexb  # type: ignore
+                            packet = av.Packet(avcc_to_annexb(data))
+                        else:
+                            packet = av.Packet(data)
                     except Exception:
                         packet = av.Packet(data)
                     frames = self.codec.decode(packet)
@@ -769,7 +873,7 @@ class StreamingCanvas(VispyCanvas):
                         return arr
                     return None
             
-            self.decoder = PyAVDecoder()
+            self.decoder = PyAVDecoder(getattr(self, '_stream_format', 'avcc'))
             
         except ImportError:
             # Fallback to OpenCV
@@ -860,13 +964,11 @@ class StreamingCanvas(VispyCanvas):
                 logger.debug("VT decode skipped: empty data")
                 return
             
-            # Detect format and convert if needed
-            is_annexb = data[:3] == b'\x00\x00\x01' or data[:4] == b'\x00\x00\x00\x01'
-            logger.debug("VT input: %d bytes, format=%s, first bytes=%s", 
-                        len(data), "AnnexB" if is_annexb else "AVCC", data[:8].hex())
-            
-            # Normalize to AVCC once per AU and feed as-is (including SPS/PPS/SEI)
-            avcc_au = self._annexb_to_avcc(data) if is_annexb else data
+            # Server is expected to send AVCC; convert only if format says AnnexB
+            if self._stream_format == 'annexb':
+                avcc_au = self._annexb_to_avcc(data)
+            else:
+                avcc_au = data
             # Log composition of the first couple of AUs for diagnostics
             try:
                 if self._vt_enqueued < 2:
@@ -951,7 +1053,14 @@ class StreamingCanvas(VispyCanvas):
     def _decode_frame(self, h264_data):
         """Decode H.264 frame and add to queue."""
         if self.decoder:
-            frame = self.decoder.decode(h264_data)
+            try:
+                frame = self.decoder.decode(h264_data)
+            except Exception as e:
+                try:
+                    logger.debug("PyAV decode error; skipping frame: %s", e)
+                except Exception:
+                    pass
+                frame = None
             
             if frame is not None:
                 self._decoded_to_queue(frame)
@@ -1095,6 +1204,28 @@ class StreamingCanvas(VispyCanvas):
                                 self._decoded_to_queue(rgb)
                             except Exception:
                                 pass
+            # PyAV presenter: schedule decoded RGB frames by fixed latency (only when active)
+            if self._active_source == 'pyav' and self._pyav_present:
+                now = time.time()
+                self._pyav_present.sort(key=lambda t: t[0])
+                due_now = [p for p in self._pyav_present if p[0] <= now]
+                if due_now:
+                    _, rgb = due_now[-1]
+                    try:
+                        self._decoded_to_queue(rgb)
+                    except Exception:
+                        pass
+                    # Keep only future frames
+                    self._pyav_present = [p for p in self._pyav_present if p[0] > now]
+                else:
+                    # If everything is far in the future, show the latest to prevent visible hold
+                    earliest_due = self._pyav_present[0][0]
+                    if earliest_due - now > 0.2 and self._pyav_present:
+                        _, rgb = self._pyav_present[-1]
+                        try:
+                            self._decoded_to_queue(rgb)
+                        except Exception:
+                            pass
             # Get latest frame
             frame = None
             
