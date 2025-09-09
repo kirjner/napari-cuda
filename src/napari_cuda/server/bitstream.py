@@ -1,7 +1,13 @@
 """
-Bitstream utilities for packaging encoder output into Annex B and detecting keyframes.
+Bitstream utilities for packaging encoder output and detecting keyframes.
 
 Independent of GL/CUDA/torch for easy testing.
+
+Provided helpers:
+- parse_nals(buf): split Annex B or AVCC buffers into NAL units (without startcodes/lengths)
+- pack_to_annexb(...): normalize to Annex B (existing path)
+- pack_to_avcc(...): normalize to AVCC (4-byte length-prefixed)
+- build_avcc_config(cache): build AVCDecoderConfigurationRecord (avcC) from cached SPS/PPS
 """
 from __future__ import annotations
 
@@ -9,6 +15,22 @@ from dataclasses import dataclass
 import os
 import logging
 from typing import List, Optional, Tuple, Sequence, Union
+
+# Optional Cython fast packer; default is to require it on server
+_FAST_PACK = None
+try:
+    from ._avcc_packer import pack_to_avcc_fast as _FAST_PACK  # type: ignore
+except Exception:
+    # Try runtime build via pyximport if Cython is available (enabled by default)
+    try:
+        if os.getenv('NAPARI_CUDA_BUILD_CYTHON', '1') != '0':
+            import pyximport  # type: ignore
+            pyximport.install(language_level=3, inplace=True)  # type: ignore
+            from ._avcc_packer import pack_to_avcc_fast as _FAST_PACK  # type: ignore
+        else:
+            _FAST_PACK = None
+    except Exception:
+        _FAST_PACK = None
 
 
 BytesLike = Union[bytes, bytearray, memoryview]
@@ -24,6 +46,52 @@ class ParamCache:
     vps: Optional[bytes] = None
     sps: Optional[bytes] = None
     pps: Optional[bytes] = None
+
+
+def parse_nals(buf: bytes) -> List[bytes]:
+    """Split a buffer into raw NAL units (no start codes / no length prefixes).
+
+    - If buffer uses Annex B start codes (0x000001 or 0x00000001), split on them.
+    - Otherwise, treat as AVCC: a sequence of 4-byte big-endian lengths.
+    - On malformed input, return the buffer as a single NAL for robustness.
+    """
+    nals: List[bytes] = []
+    if not buf:
+        return nals
+    if _is_annexb(buf):
+        i = 0
+        l = len(buf)
+        idx: List[int] = []
+        while i < l - 3:
+            if buf[i:i+3] == b"\x00\x00\x01":
+                idx.append(i); i += 3
+            elif i < l - 4 and buf[i:i+4] == b"\x00\x00\x00\x01":
+                idx.append(i); i += 4
+            else:
+                i += 1
+        if not idx:
+            return [buf]
+        idx.append(l)
+        for a, b in zip(idx, idx[1:]):
+            j = a
+            while j < b and buf[j] == 0:
+                j += 1
+            if j < b and buf[j] == 1:
+                j += 1
+            nal = buf[j:b]
+            if nal:
+                nals.append(nal)
+        return nals
+    else:
+        # AVCC: 4-byte big-endian length prefixes
+        i = 0
+        l = len(buf)
+        while i + 4 <= l:
+            ln = int.from_bytes(buf[i:i+4], 'big'); i += 4
+            if ln <= 0 or i + ln > l:
+                return [buf]
+            nals.append(buf[i:i+ln]); i += ln
+        return nals if nals else [buf]
 
 
 def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: ParamCache) -> Tuple[Optional[bytes], bool]:
@@ -76,45 +144,6 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
                 chunks = [bytes(packets)]
             except Exception:
                 return None, False
-
-    def parse_nals(buf: bytes) -> List[bytes]:
-        nals: List[bytes] = []
-        if not buf:
-            return nals
-        if _is_annexb(buf):
-            i = 0
-            l = len(buf)
-            idx: List[int] = []
-            while i < l - 3:
-                if buf[i:i+3] == b"\x00\x00\x01":
-                    idx.append(i); i += 3
-                elif i < l - 4 and buf[i:i+4] == b"\x00\x00\x00\x01":
-                    idx.append(i); i += 4
-                else:
-                    i += 1
-            if not idx:
-                return [buf]
-            idx.append(l)
-            for a, b in zip(idx, idx[1:]):
-                j = a
-                while j < b and buf[j] == 0:
-                    j += 1
-                if j < b and buf[j] == 1:
-                    j += 1
-                nal = buf[j:b]
-                if nal:
-                    nals.append(nal)
-            return nals
-        else:
-            # AVCC: 4-byte big-endian length prefixes
-            i = 0
-            l = len(buf)
-            while i + 4 <= l:
-                ln = int.from_bytes(buf[i:i+4], 'big'); i += 4
-                if ln <= 0 or i + ln > l:
-                    return [buf]
-                nals.append(buf[i:i+ln]); i += ln
-            return nals if nals else [buf]
 
     nal_units: List[bytes] = []
     for c in chunks:
@@ -175,3 +204,134 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
         ba.extend(b"\x00\x00\x00\x01" if first else b"\x00\x00\x01"); first = False
         ba.extend(nal)
     return bytes(ba), is_key
+
+
+def pack_to_avcc(packets: Union[BytesLike, Sequence[BytesLike], None], cache: ParamCache) -> Tuple[Optional[bytes], bool]:
+    """Normalize encoder output to AVCC (4-byte length-prefixed) and detect keyframe.
+
+    - Accepts bytes or list/tuple of byte-like objects (Annex B or AVCC)
+    - Caches VPS/SPS/PPS when present in the AU
+    - Does NOT inject cached SPS/PPS; rely on encoder's "repeat SPS/PPS on IDR"
+    - Returns (payload bytes or None, is_keyframe)
+    """
+    # If Cython fast path is available, use it; by default, Python fallback is disabled
+    allow_fallback = os.getenv('NAPARI_CUDA_ALLOW_PY_FALLBACK', '0') != '0'
+    if _FAST_PACK is None and not allow_fallback:
+        raise RuntimeError(
+            "Cython packer not available. Install with 'napari-cuda[server]' (includes Cython) "
+            "or set NAPARI_CUDA_ALLOW_PY_FALLBACK=1 to enable the Python implementation."
+        )
+    if _FAST_PACK is not None:
+        try:
+            return _FAST_PACK(packets, cache)  # type: ignore[misc]
+        except Exception as e:
+            # If Cython fails and fallback is not allowed, fail fast
+            if not allow_fallback:
+                raise RuntimeError(
+                    "Cython packer failed. Ensure 'napari-cuda[server]' is installed or set "
+                    "NAPARI_CUDA_ALLOW_PY_FALLBACK=1 to use the Python implementation."
+                ) from e
+            # else fall through to Python path
+    if packets is None:
+        return None, False
+    # Gather chunks as bytes
+    if isinstance(packets, (bytes, bytearray, memoryview)):
+        chunks: List[bytes] = [bytes(packets)]
+    elif isinstance(packets, (list, tuple)):
+        chunks = [bytes(p) for p in packets if p is not None]
+    else:
+        try:
+            chunks = [bytes(packets)]
+        except Exception:
+            return None, False
+
+    # Flatten into NAL units
+    nal_units: List[bytes] = []
+    for c in chunks:
+        nal_units.extend(parse_nals(c))
+
+    def t264(b0: int) -> int: return b0 & 0x1F
+    def t265(b0: int) -> int: return (b0 >> 1) & 0x3F
+
+    is_key = False
+    log_sps = bool(int(os.getenv('NAPARI_CUDA_LOG_SPS', '0') or '0'))
+    logger = logging.getLogger(__name__)
+    for nal in nal_units:
+        if not nal:
+            continue
+        b0 = nal[0]
+        n264 = t264(b0)
+        n265 = t265(b0)
+        if n264 == 7:  # SPS
+            cache.sps = nal
+            if log_sps:
+                try:
+                    logger.info("H264 SPS len=%d first16=%s", len(nal), nal[:16].hex())
+                except Exception:
+                    pass
+        elif n264 == 8:  # PPS
+            cache.pps = nal
+        elif n264 == 5:  # IDR
+            is_key = True
+        if n265 == 32:  # VPS
+            cache.vps = nal
+        elif n265 == 33:  # SPS
+            cache.sps = nal
+            if log_sps:
+                try:
+                    logger.info("H265 SPS len=%d first16=%s", len(nal), nal[:16].hex())
+                except Exception:
+                    pass
+        elif n265 == 34:  # PPS
+            cache.pps = nal
+        elif n265 in (19, 20, 21):  # IDR/CRA
+            is_key = True
+
+    if not nal_units:
+        return None, False
+
+    # Concatenate as 4-byte big-endian length prefixed NALs
+    out = bytearray()
+    for nal in nal_units:
+        out.extend(len(nal).to_bytes(4, 'big'))
+        out.extend(nal)
+    return bytes(out), is_key
+
+
+def build_avcc_config(cache: ParamCache) -> Optional[bytes]:
+    """Build AVCDecoderConfigurationRecord (avcC) from cached SPS/PPS.
+
+    Returns None if SPS/PPS are not yet available.
+
+    Notes:
+    - Profile/compat/level are read from SPS bytes [1], [2], [3] (after NAL header)
+    - lengthSizeMinusOne is set to 3 (4-byte lengths)
+    - Includes exactly one SPS and one PPS if available
+    """
+    sps = cache.sps
+    pps = cache.pps
+    if not sps or not pps or len(sps) < 4:
+        return None
+    profile_idc = sps[1]
+    profile_compat = sps[2]
+    level_idc = sps[3]
+    # Build avcC
+    ba = bytearray()
+    ba.append(1)  # configurationVersion
+    ba.append(profile_idc)  # AVCProfileIndication
+    ba.append(profile_compat)  # profile_compatibility (constraint flags)
+    ba.append(level_idc)  # AVCLevelIndication
+    ba.append(0xFF)  # 6 bits reserved (111111) + lengthSizeMinusOne (3)
+    # numOfSPS: 3 bits reserved (111) + 5-bit count
+    num_sps = 1 if sps else 0
+    ba.append(0xE0 | (num_sps & 0x1F))
+    if sps:
+        ba.extend(len(sps).to_bytes(2, 'big'))
+        ba.extend(sps)
+    # PPS count and data
+    num_pps = 1 if pps else 0
+    ba.append(num_pps & 0xFF)
+    if pps:
+        ba.extend(len(pps).to_bytes(2, 'big'))
+        ba.extend(pps)
+    return bytes(ba)

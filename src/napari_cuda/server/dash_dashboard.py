@@ -145,6 +145,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
             dcc.Graph(id='g_map'),
             dcc.Graph(id='g_convert'),
             dcc.Graph(id='g_bitrate'),
+            dcc.Graph(id='g_pack'),
         ], className='charts'),
         html.Div([
             dcc.Graph(id='g_sumcheck'),
@@ -287,6 +288,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         Output('g_convert', 'figure'),
         Output('g_bitrate', 'figure'),
         Output('g_sumcheck', 'figure'),
+        Output('g_pack', 'figure'),
         Input('store_total', 'data'),
         Input('store_encode', 'data'),
         Input('store_map', 'data'),
@@ -299,9 +301,27 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
     )
     def update_figs(s_total, s_encode, s_map, s_convert, s_render, s_blit, s_copy, s_pack, s_bitrate):  # type: ignore
         budget = 1000.0 / 60.0  # 16.7 ms target for 60 FPS
+        # Include repacking cost in displayed total by summing total + pack series
+        def _sum_series(a, b):
+            la = len(a or [])
+            lb = len(b or [])
+            if la == 0:
+                return list(b or [])
+            if lb == 0:
+                return list(a or [])
+            n = min(la, lb)
+            out = []
+            off_a = la - n
+            off_b = lb - n
+            for i in range(n):
+                va = float((a or [])[off_a + i])
+                vb = float((b or [])[off_b + i])
+                out.append(va + vb)
+            return out
+        s_total_eff = _sum_series(s_total, s_pack)
         # Build sum check stacked area vs total line
         def make_sum_fig():
-            x = list(range(len(s_total or [])))
+            x = list(range(len(s_total_eff or [])))
             comp = [
                 ('Render', s_render or [], '#60a5fa'),
                 ('BlitCPU', s_blit or [], '#93c5fd'),
@@ -324,7 +344,7 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
                 ))
             # Total overlay
             fig.add_trace(go.Scatter(
-                x=x, y=(s_total or []), mode='lines', name='Total',
+                x=x, y=(s_total_eff or []), mode='lines', name='Total',
                 line={'width': 2, 'color': '#ffffff'},
             ))
             fig.update_layout(
@@ -335,12 +355,13 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
             return fig
 
         return (
-            make_fig(s_total or [], 'Total GPU (ms)', '#4f46e5', budget),
+            make_fig(s_total_eff or [], 'Total GPU (ms)', '#4f46e5', budget),
             make_fig(s_encode or [], 'Encode (ms)', '#16a34a'),
             make_fig(s_map or [], 'Map (ms)', '#dc2626'),
             make_fig(s_convert or [], 'Convert (ms)', '#f59e0b'),
             make_fig(s_bitrate or [], 'Bitrate (Mbps)', '#22c55e'),
             make_sum_fig(),
+            make_fig(s_pack or [], 'Pack (ms)', '#d946ef'),
         )
 
     def _run():

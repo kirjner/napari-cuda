@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import base64
 import logging
 import os
 import struct
@@ -16,8 +17,10 @@ from typing import Optional, Set
 
 import websockets
 import importlib.resources as ilr
+import socket
 
 from .egl_worker import EGLRendererWorker, ServerSceneState
+from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -53,10 +56,12 @@ class EGLHeadlessServer:
 
         self.metrics = Metrics()
         self._clients: Set[websockets.WebSocketServerProtocol] = set()
+        self._state_clients: Set[websockets.WebSocketServerProtocol] = set()
         try:
-            qsize = int(os.getenv('NAPARI_CUDA_FRAME_QUEUE', '4'))
+            # Keep queue size at 1 for latest-wins, never-block behavior
+            qsize = int(os.getenv('NAPARI_CUDA_FRAME_QUEUE', '1'))
         except Exception:
-            qsize = 4
+            qsize = 1
         self._frame_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=max(1, qsize))
         self._seq = 0
         self._stop = threading.Event()
@@ -65,6 +70,10 @@ class EGLHeadlessServer:
         self._worker: Optional[EGLRendererWorker] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._latest_state = ServerSceneState()
+        # Bitstream parameter cache and config tracking (server-side)
+        self._param_cache = ParamCache()
+        self._needs_config = True
+        self._last_avcc: Optional[bytes] = None
         # Optional bitstream dump for validation
         try:
             self._dump_remaining = int(os.getenv('NAPARI_CUDA_DUMP_BITSTREAM', '0'))
@@ -77,6 +86,10 @@ class EGLHeadlessServer:
         self._last_key_ts: Optional[float] = None
         # Broadcaster pacing: bypass once until keyframe for immediate start
         self._bypass_until_key: bool = False
+        # Drop/send tracking
+        self._drops_total: int = 0
+        self._last_send_ts: Optional[float] = None
+        self._send_count: int = 0
         
 
     async def start(self) -> None:
@@ -85,9 +98,13 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._start_worker(loop)
-        # Start websocket servers with default buffering to prioritize smoothness
-        state_server = await websockets.serve(self._handle_state, self.host, self.state_port)
-        pixel_server = await websockets.serve(self._handle_pixel, self.host, self.pixel_port)
+        # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
+        state_server = await websockets.serve(
+            self._handle_state, self.host, self.state_port, compression=None
+        )
+        pixel_server = await websockets.serve(
+            self._handle_pixel, self.host, self.pixel_port, compression=None
+        )
         metrics_server = await self._start_metrics_server()
         logger.info(
             "WS listening on %s:%d (state), %s:%d (pixel) | Dashboard: http://%s:%s/dash/ JSON: http://%s:%s/metrics.json",
@@ -111,10 +128,40 @@ class EGLHeadlessServer:
             self._stop_worker()
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
-        def on_frame(pkt: Optional[bytes], flags: int) -> None:
-            if not pkt:
+        def on_frame(payload_obj, _flags: int) -> None:
+            # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
+            t_p0 = time.perf_counter()
+            avcc_pkt, is_key = pack_to_avcc(payload_obj, self._param_cache)
+            t_p1 = time.perf_counter()
+            try:
+                self.metrics.observe_ms('napari_cuda_pack_ms', (t_p1 - t_p0) * 1000.0)
+            except Exception:
+                pass
+            if not avcc_pkt:
                 return
-            # Optional payload dump (Annex B payload only)
+            # Build and send video_config if needed or changed
+            avcc_cfg = build_avcc_config(self._param_cache)
+            if avcc_cfg is not None and (self._needs_config or self._last_avcc != avcc_cfg):
+                try:
+                    msg = {
+                        'type': 'video_config',
+                        'codec': 'h264',
+                        'format': 'avcc',
+                        'data': base64.b64encode(avcc_cfg).decode('ascii'),
+                        'width': self.width,
+                        'height': self.height,
+                        'fps': self.cfg.fps,
+                    }
+                    loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_state_json(msg)))
+                    self._last_avcc = avcc_cfg
+                    self._needs_config = False
+                    try:
+                        self.metrics.inc('napari_cuda_video_config_sends')
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.debug("Failed to schedule video_config broadcast: %s", e)
+            # Optional payload dump (AVCC payload)
             if self._dump_remaining > 0:
                 try:
                     os.makedirs(self._dump_dir, exist_ok=True)
@@ -122,23 +169,24 @@ class EGLHeadlessServer:
                         ts = int(time.time())
                         self._dump_path = os.path.join(self._dump_dir, f"dump_{self.width}x{self.height}_{ts}.h264")
                     with open(self._dump_path, 'ab') as f:
-                        f.write(pkt)
+                        f.write(avcc_pkt)
                     self._dump_remaining -= 1
                     if self._dump_remaining == 0:
                         logger.info("Bitstream dump complete: %s", self._dump_path)
                 except Exception as e:
                     logger.debug("Bitstream dump error: %s", e)
             ts = time.time()
+            flags = 0x01 if is_key else 0
             header = struct.pack('!IdIIBBH', self._seq, ts, self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
             self._seq = (self._seq + 1) & 0xFFFFFFFF
-            data = header + pkt
+            data = header + avcc_pkt
             # Enqueue via callback that handles QueueFull inside the event loop thread
             def _enqueue():
                 try:
                     self._frame_q.put_nowait(data)
                     try:
                         self.metrics.inc('napari_cuda_frames_total')
-                        self.metrics.inc('napari_cuda_bytes_total', len(pkt))
+                        self.metrics.inc('napari_cuda_bytes_total', len(avcc_pkt))
                         self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
                         if flags & 0x01:
                             self.metrics.inc('napari_cuda_keyframes_total')
@@ -151,6 +199,9 @@ class EGLHeadlessServer:
                         self._drain_and_put(data)
                         try:
                             self.metrics.inc('napari_cuda_frames_dropped')
+                            self._drops_total += 1
+                            if (self._drops_total % 100) == 1:
+                                logger.info("Pixel queue full: dropped oldest (total drops=%d)", self._drops_total)
                         except Exception:
                             pass
                     except Exception as e:
@@ -188,9 +239,7 @@ class EGLHeadlessServer:
                     except Exception:
                         pass
                     # Track last keyframe timestamp/seq for metrics if needed
-                    if flags & 0x01:
-                        self._last_key_seq = self._seq
-                        self._last_key_ts = time.time()
+                    # Keyframe tracking is handled after AVCC packing in on_frame
                     on_frame(pkt, flags)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
@@ -230,9 +279,32 @@ class EGLHeadlessServer:
             logger.debug("Frame enqueue error: %s", e)
 
     async def _handle_state(self, ws: websockets.WebSocketServerProtocol):
+        self._state_clients.add(ws)
         self.metrics.inc('napari_cuda_state_connects')
         try:
             self._update_client_gauges()
+            # Reduce latency: disable Nagle for control channel
+            try:
+                sock = ws.transport.get_extra_info('socket')  # type: ignore[attr-defined]
+                if sock is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+            # Send latest video config if available
+            try:
+                if self._last_avcc is not None:
+                    msg = {
+                        'type': 'video_config',
+                        'codec': 'h264',
+                        'format': 'avcc',
+                        'data': base64.b64encode(self._last_avcc).decode('ascii'),
+                        'width': self.width,
+                        'height': self.height,
+                        'fps': self.cfg.fps,
+                    }
+                    await ws.send(json.dumps(msg))
+            except Exception as e:
+                logger.debug("Initial state config send failed: %s", e)
             async for msg in ws:
                 try:
                     data = json.loads(msg)
@@ -259,17 +331,51 @@ class EGLHeadlessServer:
                     )
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
-                # request_keyframe is ignored in simplified mode; encoder resets on client connect
+                elif t in ('request_keyframe', 'force_idr'):
+                    try:
+                        if self._worker is not None:
+                            try:
+                                # Try lightweight IDR request first
+                                self._worker.force_idr()
+                            except Exception:
+                                # Fallback to full encoder reset
+                                self._worker.reset_encoder()
+                            # Bypass pacing once to deliver next keyframe immediately
+                            self._bypass_until_key = True
+                            # Re-broadcast current video config if known to tighten init window
+                            if self._last_avcc is not None:
+                                msg = {
+                                    'type': 'video_config',
+                                    'codec': 'h264',
+                                    'format': 'avcc',
+                                    'data': base64.b64encode(self._last_avcc).decode('ascii'),
+                                    'width': self.width,
+                                    'height': self.height,
+                                    'fps': self.cfg.fps,
+                                }
+                                await self._broadcast_state_json(msg)
+                            else:
+                                self._needs_config = True
+                    except Exception as e:
+                        logger.debug("request_keyframe handling failed: %s", e)
         finally:
             try:
                 await ws.close()
             except Exception as e:
                 logger.debug("State WS close error: %s", e)
+            self._state_clients.discard(ws)
             self._update_client_gauges()
 
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
         self._update_client_gauges()
+        # Reduce latency: disable Nagle for binary pixel stream
+        try:
+            sock = ws.transport.get_extra_info('socket')  # type: ignore[attr-defined]
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         # Reset encoder on new client to guarantee an immediate keyframe
         try:
             if self._worker is not None:
@@ -277,6 +383,23 @@ class EGLHeadlessServer:
                 self._worker.reset_encoder()
                 # Allow immediate send of the first keyframe when pacing is enabled
                 self._bypass_until_key = True
+                # Request re-send of video configuration for new clients
+                self._needs_config = True
+                # If we already have a cached avcC, proactively re-broadcast on state channel
+                if self._last_avcc is not None:
+                    try:
+                        msg = {
+                            'type': 'video_config',
+                            'codec': 'h264',
+                            'format': 'avcc',
+                            'data': base64.b64encode(self._last_avcc).decode('ascii'),
+                            'width': self.width,
+                            'height': self.height,
+                            'fps': self.cfg.fps,
+                        }
+                        await self._broadcast_state_json(msg)
+                    except Exception as e:
+                        logger.debug("Proactive video_config broadcast failed: %s", e)
                 try:
                     self.metrics.inc('napari_cuda_encoder_resets')
                 except Exception:
@@ -342,6 +465,17 @@ class EGLHeadlessServer:
             if latest is not None:
                 if self._clients:
                     await asyncio.gather(*(self._safe_send(c, latest) for c in list(self._clients)), return_exceptions=True)
+                    # Simple send timing log for smoothing diagnostics
+                    try:
+                        now2 = loop.time()
+                        if self._last_send_ts is not None:
+                            dt = now2 - self._last_send_ts
+                            self._send_count += 1
+                            if (self._send_count % int(max(1, self.cfg.fps))) == 0:
+                                logger.info("Pixel send dt=%.3f s (target=%.3f), drops=%d", dt, 1.0/max(1, self.cfg.fps), self._drops_total)
+                        self._last_send_ts = now2
+                    except Exception:
+                        pass
                 latest = None
             next_t += tick
 
@@ -355,6 +489,29 @@ class EGLHeadlessServer:
             except Exception as e2:
                 logger.debug("Pixel WS close error: %s", e2)
             self._clients.discard(ws)
+
+    async def _broadcast_state_json(self, obj: dict) -> None:
+        data = json.dumps(obj)
+        if not self._state_clients:
+            return
+        coros = []
+        for c in list(self._state_clients):
+            coros.append(self._safe_state_send(c, data))
+        try:
+            await asyncio.gather(*coros, return_exceptions=True)
+        except Exception as e:
+            logger.debug("State broadcast error: %s", e)
+
+    async def _safe_state_send(self, ws: websockets.WebSocketServerProtocol, text: str) -> None:
+        try:
+            await ws.send(text)
+        except Exception as e:
+            logger.debug("State send error: %s", e)
+            try:
+                await ws.close()
+            except Exception as e2:
+                logger.debug("State WS close error: %s", e2)
+            self._state_clients.discard(ws)
 
     def _update_client_gauges(self) -> None:
         try:

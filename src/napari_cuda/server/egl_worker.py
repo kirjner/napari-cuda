@@ -35,7 +35,7 @@ from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
 import torch.nn.functional as F  # type: ignore
 import PyNvVideoCodec as pnvc  # type: ignore
-from .bitstream import pack_to_annexb, ParamCache
+# Bitstream packing happens in the server layer
 from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
 
@@ -135,8 +135,7 @@ class EGLRendererWorker:
             except Exception as e2:
                 logger.debug("Cleanup after failed init also failed: %s", e2)
             raise
-        # Cached parameter sets for robust streaming
-        self._param_cache = ParamCache()
+        # Bitstream parameter cache is maintained by the server (for avcC/hvcC)
         # Debug configuration (single place)
         self._debug = DebugDumper(DebugConfig.from_env())
         if self._debug.cfg.enabled:
@@ -327,6 +326,38 @@ class EGLRendererWorker:
         except Exception:
             idr_period = 120
         preset = os.getenv('NAPARI_CUDA_PRESET', 'P3')
+        # Optional bitrate control for low-jitter CBR; if unsupported, fallback path below will be used
+        try:
+            bitrate = int(os.getenv('NAPARI_CUDA_BITRATE', '10000000'))
+        except Exception:
+            bitrate = None  # type: ignore[assignment]
+        # Low-jitter CBR and low-latency settings
+        rc_mode = os.getenv('NAPARI_CUDA_RC', 'cbr').lower()
+        try:
+            lookahead = int(os.getenv('NAPARI_CUDA_LOOKAHEAD', '0'))
+        except Exception:
+            lookahead = 0
+        try:
+            aq = int(os.getenv('NAPARI_CUDA_AQ', '0'))
+        except Exception:
+            aq = 0
+        try:
+            temporalaq = int(os.getenv('NAPARI_CUDA_TEMPORALAQ', '0'))
+        except Exception:
+            temporalaq = 0
+        try:
+            ldkfs = int(os.getenv('NAPARI_CUDA_LDKFS', '0'))
+        except Exception:
+            ldkfs = 0
+        # VBV sizing: approx per-frame budget (bitrate/fps). Some bindings apply these mainly to VBR; harmless for CBR.
+        try:
+            vbv_frames = float(os.getenv('NAPARI_CUDA_VBV_FRAMES', '1.0'))
+        except Exception:
+            vbv_frames = 1.0
+        vbv_size = None
+        if bitrate and bitrate > 0 and self.fps > 0:
+            vbv_size = max(1, int((bitrate // max(1, self.fps)) * vbv_frames))
+
         kwargs = {
             'codec': 'h264',
             'tuning_info': 'low_latency',
@@ -334,7 +365,24 @@ class EGLRendererWorker:
             'bf': 0,
             'repeatspspps': 1,
             'idrperiod': idr_period,
+            'rc': rc_mode,
+            'lookahead': lookahead,
+            'aq': aq,
+            'temporalaq': temporalaq,
+            'ldkfs': ldkfs,
+            'fps': self.fps,
         }
+        if bitrate and bitrate > 0:
+            kwargs['bitrate'] = bitrate
+            kwargs['maxbitrate'] = bitrate
+        if vbv_size is not None:
+            kwargs['vbvbufsize'] = vbv_size
+            kwargs['vbvinit'] = vbv_size
+        # GOP can mirror IDR cadence for simplicity
+        kwargs['gop'] = idr_period
+        # Colorspace hint for packed RGB inputs
+        if self._enc_input_fmt in ('ARGB', 'ABGR'):
+            kwargs['colorspace'] = 'bt709'
         try:
             # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
             # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
@@ -666,23 +714,21 @@ class EGLRendererWorker:
         with self._enc_lock:
             enc = self._encoder
         if enc is None:
-            pkt = None
-            is_key = False
+            pkt_obj = None
         else:
             t_e0 = time.perf_counter()
             pkt_obj = enc.Encode(dst)
             t_e1 = time.perf_counter()
-            t_p0 = time.perf_counter()
-            pkt, is_key = pack_to_annexb(pkt_obj, self._param_cache)
-            t_p1 = time.perf_counter()
+            t_p0 = t_e1
+            t_p1 = t_e1
         # If encoder wasn't available, set NVENC time to 0
         encode_ms = ((t_e1 - t_e0) * 1000.0) if enc is not None else 0.0
         pack_ms = ((t_p1 - t_p0) * 1000.0) if enc is not None else 0.0
         total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
-        pkt_bytes = len(pkt) if pkt else None
+        pkt_bytes = None
         timings = FrameTimings(render_ms, blit_gpu_ns, blit_cpu_ms, map_ms, copy_ms, convert_ms, encode_ms, pack_ms, total_ms, pkt_bytes)
-        flags = 0x01 if is_key else 0
-        return timings, (pkt if pkt else None), flags
+        flags = 0
+        return timings, pkt_obj, flags
 
     # (packer is now provided by bitstream.py)
 

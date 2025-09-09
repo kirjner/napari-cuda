@@ -199,6 +199,8 @@ class ProxyViewer(ViewerModel):
                 await self._state_websocket.send(json.dumps(command))
             except Exception as e:
                 logger.error(f"Failed to send command: {e}")
+
+    
     
     # Override methods that would try to render locally
     def add_image(self, *args, **kwargs):
