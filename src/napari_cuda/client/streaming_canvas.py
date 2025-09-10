@@ -261,9 +261,8 @@ class StreamingCanvas(VispyCanvas):
             self._display_timer.setInterval(
                 max(1, int(round(1000.0 / max(1.0, fps))))
             )
-            self._display_timer.timeout.connect(
-                self._scene_canvas.native.update
-            )
+            # Schedule a paint event each tick; actual draw occurs in paint handler
+            self._display_timer.timeout.connect(self._scene_canvas.native.update)
             self._display_timer.start()
             logger.info(
                 'Video display initialized (Qt QTimer @ %.1f fps)', fps

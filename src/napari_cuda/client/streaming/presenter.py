@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
+from collections import deque
+import threading
 
 from napari_cuda.client.streaming.types import (
     ReadyFrame,
@@ -70,9 +72,11 @@ class FixedLatencyPresenter:
         # earliest due time is more than this guard ahead of now. Keep small
         # (about one frame at 60 Hz) to avoid visible stalls.
         self._preview_guard_s = max(0.0, float(preview_guard_s))
-        self._buf: Dict[Source, List[_BufItem]] = {Source.VT: [], Source.PYAV: []}
+        # Deque per source for O(1) append/pop from ends
+        self._buf: Dict[Source, Deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
         self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         self._out_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
+        self._lock = threading.Lock()
 
     def set_latency(self, latency_s: float) -> None:
         self.latency_s = float(max(0.0, latency_s))
@@ -88,32 +92,43 @@ class FixedLatencyPresenter:
 
     def submit(self, sf: SubmittedFrame) -> None:
         due = self.clock.compute_due(sf.arrival_ts, sf.server_ts, self.latency_s)
-        items = self._buf[sf.source]
-        items.append(
-            _BufItem(
-                due_ts=due,
-                payload=sf.payload,
-                release_cb=sf.release_cb,
-                server_ts=sf.server_ts,
-                arrival_ts=sf.arrival_ts,
+        to_release: List[_BufItem] = []
+        with self._lock:
+            items = self._buf[sf.source]
+            items.append(
+                _BufItem(
+                    due_ts=due,
+                    payload=sf.payload,
+                    release_cb=sf.release_cb,
+                    server_ts=sf.server_ts,
+                    arrival_ts=sf.arrival_ts,
+                )
             )
-        )
-        self._submit_count[sf.source] += 1
-        # Trim to buffer limit, keep most recent by due time
-        if len(items) > self.buffer_limit:
-            items.sort(key=lambda it: it.due_ts)
-            drop = items[:-self.buffer_limit]
-            self._release_many(drop)
-            del items[:-self.buffer_limit]
+            self._submit_count[sf.source] += 1
+            # Trim to buffer limit from the left (oldest first)
+            while len(items) > self.buffer_limit:
+                to_release.append(items.popleft())
+        for it in to_release:
+            cb = it.release_cb
+            if cb is not None:
+                try:
+                    cb(it.payload)  # type: ignore[misc]
+                except Exception:
+                    logger.debug("release_cb failed during buffer trim", exc_info=True)
 
     def clear(self, source: Optional[Source] = None) -> None:
         if source is None:
-            for src in list(self._buf.keys()):
-                self._release_many(self._buf[src])
-                self._buf[src].clear()
+            with self._lock:
+                to_rel = {src: list(self._buf[src]) for src in list(self._buf.keys())}
+                for src in list(self._buf.keys()):
+                    self._buf[src].clear()
+            for items in to_rel.values():
+                self._release_many(items)
             return
-        self._release_many(self._buf[source])
-        self._buf[source].clear()
+        with self._lock:
+            items = list(self._buf[source])
+            self._buf[source].clear()
+        self._release_many(items)
 
     def _release_many(self, items: List[_BufItem]) -> None:
         for it in items:
@@ -128,61 +143,55 @@ class FixedLatencyPresenter:
 
     def pop_due(self, now: Optional[float], active: Source) -> Optional[ReadyFrame]:
         n = float(now if now is not None else time.time())
-        items = self._buf[active]
-        if not items:
+        # Work on a single selected item and a list of items to release outside the lock
+        to_release: List[_BufItem] = []
+        sel: Optional[_BufItem] = None
+        with self._lock:
+            items = self._buf[active]
+            if not items:
+                return None
+            if self.clock.mode == TimestampMode.ARRIVAL:
+                while len(items) > 1:
+                    to_release.append(items.popleft())
+                sel = items.pop()
+                self._out_count[active] += 1
+            else:
+                last_due: Optional[_BufItem] = None
+                while items and items[0].due_ts <= n:
+                    if last_due is not None:
+                        to_release.append(last_due)
+                    last_due = items.popleft()
+                if last_due is not None:
+                    sel = last_due
+                    self._out_count[active] += 1
+                elif items and (items[0].due_ts - n) > self._preview_guard_s:
+                    while len(items) > 1:
+                        to_release.append(items.popleft())
+                    sel = items.pop()
+                    self._out_count[active] += 1
+                else:
+                    sel = None
+        # Release outside the lock
+        if to_release:
+            self._release_many(to_release)
+        if sel is None:
             return None
-        # Sort by due time ascending
-        items.sort(key=lambda it: it.due_ts)
-        due_now = [it for it in items if it.due_ts <= n]
-        if due_now:
-            sel = due_now[-1]
-            # Consume all <= now (they are late); release all but the selected one
-            for it in due_now[:-1]:
-                cb = it.release_cb
-                if cb is not None:
-                    try:
-                        cb(it.payload)  # type: ignore[misc]
-                    except Exception:
-                        logger.debug("release_cb failed for dropped due frame", exc_info=True)
-            # Remove consumed
-            remain: List[_BufItem] = [it for it in items if it.due_ts > n]
-            self._buf[active] = remain
-            self._out_count[active] += 1
-            return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=False)
-        # Nothing due yet
-        if self.clock.mode == TimestampMode.ARRIVAL:
-            # In ARRIVAL mode, favor smoothness: present and consume the latest frame
-            sel = items[-1]
-            # Drop all older frames
-            for it in items[:-1]:
-                cb = it.release_cb
-                if cb is not None:
-                    try:
-                        cb(it.payload)  # type: ignore[misc]
-                    except Exception:
-                        logger.debug("release_cb failed for dropped future frame", exc_info=True)
-            self._buf[active] = []
-            self._out_count[active] += 1
-            return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=False)
-        # In SERVER mode, allow a short preview window to avoid visible stalls
-        earliest_due = items[0].due_ts
-        if earliest_due - n > self._preview_guard_s:
-            sel = items[-1]
-            return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=True)
-        return None
+        return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=False)
 
     def stats(self) -> Dict[str, object]:
-        return {
-            "submit": {s.value: self._submit_count[s] for s in (Source.VT, Source.PYAV)},
-            "out": {s.value: self._out_count[s] for s in (Source.VT, Source.PYAV)},
-            "buf": {s.value: len(self._buf[s]) for s in (Source.VT, Source.PYAV)},
-            "latency_ms": int(round(self.latency_s * 1000.0)),
-            "mode": self.clock.mode.value,
-        }
+        with self._lock:
+            return {
+                "submit": {s.value: self._submit_count[s] for s in (Source.VT, Source.PYAV)},
+                "out": {s.value: self._out_count[s] for s in (Source.VT, Source.PYAV)},
+                "buf": {s.value: len(self._buf[s]) for s in (Source.VT, Source.PYAV)},
+                "latency_ms": int(round(self.latency_s * 1000.0)),
+                "mode": self.clock.mode.value,
+            }
 
     # Adaptive offset helper: compute median of (arrival - server_ts)
     def relearn_offset(self, source: Source) -> Optional[float]:
-        items = self._buf.get(source) or []
+        with self._lock:
+            items = list(self._buf.get(source) or [])
         diffs: List[float] = []
         for it in items[-20:]:  # last N samples
             if it.server_ts is not None:

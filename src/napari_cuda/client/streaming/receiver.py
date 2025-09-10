@@ -71,7 +71,8 @@ class PixelReceiver:
                             continue
                         try:
                             hdr = b[: HEADER_STRUCT.size]
-                            payload = b[HEADER_STRUCT.size :]
+                            # Use memoryview to avoid copying payload on the hot path
+                            payload = memoryview(b)[HEADER_STRUCT.size :]
                             seq, ts, w, h, codec, flags, _ = HEADER_STRUCT.unpack(hdr)
                         except Exception:
                             logger.debug("Invalid stream header", exc_info=True)

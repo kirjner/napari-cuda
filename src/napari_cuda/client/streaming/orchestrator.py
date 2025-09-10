@@ -193,7 +193,9 @@ class StreamManager:
 
         Thread(target=_vt_submit_worker, daemon=True).start()
 
-        # VT drain worker: decouple VT output from UI draw loop
+        # VT drain worker: decouple VT output and coalesce UI updates to ~60 Hz
+        _ui_last_update = 0.0
+        _ui_min_interval = 1.0 / 60.0
         def _vt_drain_worker() -> None:
             while True:
                 try:
@@ -218,22 +220,27 @@ class StreamManager:
                             continue
                         try:
                             from napari_cuda import _vt as vt  # type: ignore
+                            # Map to RGB off the UI thread and release the VT buffer here
+                            rgb_bytes, w, h = vt.map_to_rgb(img_buf)
+                            try:
+                                vt.release_frame(img_buf)
+                            except Exception:
+                                pass
+                            rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((int(h), int(w), 3))
                             self._presenter.submit(
                                 SubmittedFrame(
                                     source=Source.VT,
                                     server_ts=float(pts) if pts is not None else None,
                                     arrival_ts=time.time(),
-                                    payload=img_buf,
-                                    release_cb=vt.release_frame,
+                                    payload=rgb,
+                                    release_cb=None,
                                 )
                             )
                         except Exception:
                             logger.debug("Presenter submit (VT) failed", exc_info=True)
                     if drained:
-                        try:
-                            QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
-                        except Exception:
-                            pass
+                        # UI draw is driven by a dedicated timer; no extra updates here
+                        pass
                     if not drained:
                         time.sleep(0.002)
                 except Exception:
@@ -269,7 +276,6 @@ class StreamManager:
                         )
                     except Exception:
                         logger.debug("Presenter submit (PyAV) failed", exc_info=True)
-                    QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
                 except Exception:
                     logger.debug("PyAV worker error", exc_info=True)
 
@@ -287,63 +293,31 @@ class StreamManager:
 
             def _on_frame(pkt: Packet) -> None:
                 try:
-                    # Log keyframe detection to verify server behavior
+                    # Fast keyframe path: trust header flag; scan only when needed
+                    is_key = bool(int(pkt.flags) & 0x01)
+                    if not is_key and not self._stream_seen_keyframe:
+                        is_key = self._is_keyframe(pkt.payload, pkt.codec)
+                    if is_key:
+                        s = int(pkt.seq)
+                        if self._last_key_logged != s:
+                            logger.info("Keyframe detected (seq=%d)", s)
+                            self._last_key_logged = s
+                            self._keyframes_seen += 1
+                    # Sequence discontinuities are expected due to server coalescing.
+                    # Track for diagnostics only; do not gate on gaps.
                     try:
-                        if (pkt.flags & 0x01) != 0 or self._is_keyframe(pkt.payload, pkt.codec):
-                            s = int(pkt.seq)
-                            if self._last_key_logged != s:
-                                logger.info("Keyframe detected (seq=%d)", s)
-                                self._last_key_logged = s
-                                self._keyframes_seen += 1
+                        self._last_seq = int(pkt.seq)
                     except Exception:
-                        pass
-                    # Detect stream discontinuity by sequence number
-                    try:
-                        cur = int(pkt.seq)
-                        if self._last_seq is not None and not (self._vt_wait_keyframe or self._pyav_wait_keyframe):
-                            expected = (self._last_seq + 1) & 0xFFFFFFFF
-                            if cur != expected:
-                                # Log at most ~5 Hz to avoid spam
-                                now = time.time()
-                                if (now - self._last_disco_log) > 0.2:
-                                    logger.warning(
-                                        "Pixel stream discontinuity: expected=%d got=%d; gating until keyframe",
-                                        expected,
-                                        cur,
-                                    )
-                                    self._last_disco_log = now
-                                # Gate VT path
-                                if self._vt_decoder is not None:
-                                    self._vt_wait_keyframe = True
-                                    while self._vt_in_q.qsize() > 0:
-                                        _ = self._vt_in_q.get_nowait()
-                                    self._presenter.clear(Source.VT)
-                                    self._request_keyframe_once()
-                                # Gate PyAV path
-                                self._pyav_wait_keyframe = True
-                                while self._pyav_in_q.qsize() > 0:
-                                    _ = self._pyav_in_q.get_nowait()
-                                self._presenter.clear(Source.PYAV)
-                                try:
-                                    self._init_decoder()
-                                except Exception:
-                                    logger.debug("PyAV decoder reinit after discontinuity failed", exc_info=True)
-                                self._disco_gated = True
-                    finally:
-                        # Always update last_seq
-                        try:
-                            self._last_seq = int(pkt.seq)
-                        except Exception:
-                            self._last_seq = None
+                        self._last_seq = None
                     # Global initial gate (first frame must be keyframe)
                     if not self._stream_seen_keyframe:
-                        if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
+                        if is_key:
                             self._stream_seen_keyframe = True
                         else:
                             return
                     # VT-specific gate: after VT (re)init, require a fresh keyframe
                     if self._vt_decoder is not None and self._vt_wait_keyframe:
-                        if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
+                        if is_key:
                             self._vt_wait_keyframe = False
                             self._vt_gate_lift_time = time.time()
                             try:
@@ -389,42 +363,47 @@ class StreamManager:
                             ts_float = float(pkt.ts)
                         except Exception:
                             ts_float = None
-                        b = bytes(pkt.payload)
+                        # Pass through without copying; convert in worker if needed
+                        b = pkt.payload  # memoryview from receiver
                         try:
-                            if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
-                                self._vt_wait_keyframe = True
-                                logger.info("VT backlog detected (q=%d); requesting keyframe and resync", self._vt_in_q.qsize())
-                                self._request_keyframe_once()
-                                while self._vt_in_q.qsize() > 0:
-                                    _ = self._vt_in_q.get_nowait()
-                                self._presenter.clear(Source.VT)
-                            self._vt_in_q.put_nowait((b, ts_float))
+                            self._vt_in_q.put_nowait((bytes(b), ts_float))  # convert once here for decoder API
                             self._vt_enqueued += 1
                         except queue.Full:
+                            # Backlog: gate and resync on next keyframe
                             self._vt_wait_keyframe = True
                             self._request_keyframe_once()
+                            while True:
+                                try:
+                                    _ = self._vt_in_q.get_nowait()
+                                except queue.Empty:
+                                    break
+                            self._presenter.clear(Source.VT)
                     else:
                         # PyAV path with backlog-safe gating
                         try:
                             ts_float = float(pkt.ts)
                         except Exception:
                             ts_float = None
-                        b = bytes(pkt.payload)
+                        b = pkt.payload  # memoryview
                         # If backlog builds, reset decoder and wait for a fresh keyframe
-                        if self._pyav_in_q.qsize() >= max(2, self._pyav_backlog_trigger - 1):
+                        try:
+                            self._pyav_in_q.put_nowait((bytes(b), ts_float))
+                            self._pyav_enqueued += 1
+                        except queue.Full:
                             self._pyav_wait_keyframe = True
-                            # Drain queued items and clear presenter buffer for a clean start
-                            while self._pyav_in_q.qsize() > 0:
-                                _ = self._pyav_in_q.get_nowait()
+                            while True:
+                                try:
+                                    _ = self._pyav_in_q.get_nowait()
+                                except queue.Empty:
+                                    break
                             self._presenter.clear(Source.PYAV)
-                            # Recreate decoder fresh to drop reference history
                             try:
                                 self._init_decoder()
                             except Exception:
                                 logger.debug("PyAV decoder reinit failed after backlog", exc_info=True)
                         # If waiting for keyframe, skip until flags indicate a keyframe
                         if self._pyav_wait_keyframe:
-                            if not (self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01)):
+                            if not is_key:
                                 return
                             # Got keyframe: clear gate
                             self._pyav_wait_keyframe = False
@@ -434,20 +413,6 @@ class StreamManager:
                             except Exception:
                                 logger.debug("PyAV decoder reinit at keyframe failed", exc_info=True)
                             self._disco_gated = False
-                        # Enqueue for decode
-                        try:
-                            self._pyav_in_q.put_nowait((b, ts_float))
-                            self._pyav_enqueued += 1
-                        except queue.Full:
-                            # Best-effort: drop one and retry; if still full, drop this frame
-                            try:
-                                _ = self._pyav_in_q.get_nowait()
-                            except queue.Empty:
-                                pass
-                            try:
-                                self._pyav_in_q.put_nowait((b, ts_float))
-                            except queue.Full:
-                                logger.debug("PyAV queue full; dropping frame", exc_info=True)
                 except Exception:
                     logger.debug("stream frame handling failed", exc_info=True)
 
@@ -533,25 +498,8 @@ class StreamManager:
                             logger.info("VT adaptive fallback: SERVER mode restored")
                             self._arrival_logged = False
                     self._preview_streak = 0
-            if src_val == 'vt':
-                from napari_cuda import _vt as vt  # type: ignore
-                try:
-                    rgb_bytes, w, h = vt.map_to_rgb(ready.payload)
-                    rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((int(h), int(w), 3))
-                    self._enqueue_frame(rgb)
-                finally:
-                    if not ready.preview and ready.release_cb is not None:
-                        ready.release_cb(ready.payload)  # type: ignore[misc]
-            else:
-                self._enqueue_frame(ready.payload)
-
-        frame = None
-        while not self._frame_q.empty():
-            try:
-                frame = self._frame_q.get_nowait()
-            except queue.Empty:
-                break
-        self._renderer.draw(frame)
+            # Payloads are already RGB ndarrays for both VT and PyAV paths now
+            self._renderer.draw(ready.payload)
 
     def _log_stats(self) -> None:
         if self._stats_level is None:
