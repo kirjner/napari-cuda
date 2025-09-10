@@ -86,6 +86,7 @@ class EGLHeadlessServer:
         self._last_key_ts: Optional[float] = None
         # Broadcaster pacing: bypass once until keyframe for immediate start
         self._bypass_until_key: bool = False
+        
         # Drop/send tracking
         self._drops_total: int = 0
         self._last_send_ts: Optional[float] = None
@@ -130,6 +131,24 @@ class EGLHeadlessServer:
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
         def on_frame(payload_obj, _flags: int) -> None:
             # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
+            # Optional: raw NAL summary before packing for diagnostics
+            try:
+                if int(os.getenv('NAPARI_CUDA_LOG_NALS', '0')):
+                    from .bitstream import parse_nals
+                    raw_bytes: bytes
+                    if isinstance(payload_obj, (bytes, bytearray, memoryview)):
+                        raw_bytes = bytes(payload_obj)
+                    elif isinstance(payload_obj, (list, tuple)):
+                        raw_bytes = b''.join([bytes(x) for x in payload_obj if x is not None])
+                    else:
+                        raw_bytes = bytes(payload_obj) if payload_obj is not None else b''
+                    nals = parse_nals(raw_bytes)
+                    has_sps = any(((n[0] & 0x1F) == 7) or (((n[0] >> 1) & 0x3F) == 33) for n in nals if n)
+                    has_pps = any(((n[0] & 0x1F) == 8) or (((n[0] >> 1) & 0x3F) == 34) for n in nals if n)
+                    has_idr = any(((n[0] & 0x1F) == 5) or (((n[0] >> 1) & 0x3F) in (19, 20, 21)) for n in nals if n)
+                    logger.info("Raw NALs: count=%d sps=%s pps=%s idr=%s", len(nals), has_sps, has_pps, has_idr)
+            except Exception as e:
+                logger.debug("Raw NAL summary failed: %s", e)
             t_p0 = time.perf_counter()
             avcc_pkt, is_key = pack_to_avcc(payload_obj, self._param_cache)
             t_p1 = time.perf_counter()
@@ -137,6 +156,15 @@ class EGLHeadlessServer:
                 self.metrics.observe_ms('napari_cuda_pack_ms', (t_p1 - t_p0) * 1000.0)
             except Exception:
                 pass
+            try:
+                if int(os.getenv('NAPARI_CUDA_LOG_NALS', '0')) and avcc_pkt is not None:
+                    from .bitstream import parse_nals
+                    nals2 = parse_nals(avcc_pkt)
+                    has_idr2 = any(((n[0] & 0x1F) == 5) or (((n[0] >> 1) & 0x3F) in (19, 20, 21)) for n in nals2 if n)
+                    if bool(has_idr2) != bool(is_key):
+                        logger.warning("Keyframe detect mismatch: parse=%s is_key=%s nals_after=%d", has_idr2, is_key, len(nals2))
+            except Exception as e:
+                logger.debug("Post-pack NAL summary failed: %s", e)
             if not avcc_pkt:
                 return
             # Build and send video_config if needed or changed
@@ -180,6 +208,13 @@ class EGLHeadlessServer:
             header = struct.pack('!IdIIBBH', self._seq, ts, self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             data = header + avcc_pkt
+            # Optional keyframe logging for diagnostics
+            try:
+                if is_key:
+                    logger.info("Server: IDR sent (seq=%d)", (self._seq - 1) & 0xFFFFFFFF)
+            except Exception:
+                pass
+            
             # Enqueue via callback that handles QueueFull inside the event loop thread
             def _enqueue():
                 try:
@@ -192,6 +227,7 @@ class EGLHeadlessServer:
                             self.metrics.inc('napari_cuda_keyframes_total')
                             self._last_key_seq = (self._seq - 1) & 0xFFFFFFFF
                             self._last_key_ts = ts
+                            
                     except Exception:
                         pass
                 except asyncio.QueueFull:
@@ -220,8 +256,10 @@ class EGLHeadlessServer:
                 )
                 tick = 1.0 / max(1, self.cfg.fps)
                 next_t = time.perf_counter()
+                
                 while not self._stop.is_set():
                     self._worker.apply_state(self._latest_state)
+                    
                     timings, pkt, flags = self._worker.capture_and_encode_packet()
                     # Observe timings (ms)
                     try:
@@ -342,6 +380,21 @@ class EGLHeadlessServer:
                                 self._worker.reset_encoder()
                             # Bypass pacing once to deliver next keyframe immediately
                             self._bypass_until_key = True
+                            # Watchdog: if no keyframe arrives within 300 ms, reset encoder
+                            async def _kf_watchdog(last_key_seq: Optional[int]):
+                                try:
+                                    await asyncio.sleep(0.30)
+                                    # If no new keyframe observed, hard reset the encoder
+                                    if self._last_key_seq == last_key_seq and self._worker is not None:
+                                        logger.warning("Keyframe watchdog fired; resetting encoder")
+                                        self._worker.reset_encoder()
+                                        self._bypass_until_key = True
+                                except Exception as e:
+                                    logger.debug("Keyframe watchdog error: %s", e)
+                            try:
+                                asyncio.create_task(_kf_watchdog(self._last_key_seq))
+                            except Exception:
+                                pass
                             # Re-broadcast current video config if known to tighten init window
                             if self._last_avcc is not None:
                                 msg = {
@@ -438,22 +491,54 @@ class EGLHeadlessServer:
             except asyncio.TimeoutError:
                 return
 
+        async def _fill_and_find_key(deadline: float) -> Optional[bytes]:
+            """Drain queue up to deadline and return the FIRST keyframe seen (if any).
+
+            If no keyframe found, returns None and leaves `latest` pointing to the newest item.
+            """
+            nonlocal latest
+            found: Optional[bytes] = None
+            remaining = max(0.0, deadline - loop.time())
+            try:
+                item = await asyncio.wait_for(self._frame_q.get(), timeout=remaining if remaining > 0 else 1e-6)
+            except asyncio.TimeoutError:
+                return None
+            latest = item
+            buf = item
+            if len(buf) >= struct.calcsize('!IdIIBBH'):
+                try:
+                    _seq, _ts, _w, _h, _codec, _flags, _res = struct.unpack('!IdIIBBH', buf[:struct.calcsize('!IdIIBBH')])
+                    if (_flags & 0x01) != 0:
+                        found = buf
+                except Exception:
+                    pass
+            # Drain the rest without waiting, but capture the first keyframe encountered
+            while True:
+                try:
+                    buf = self._frame_q.get_nowait()
+                    latest = buf
+                    if found is None and len(buf) >= struct.calcsize('!IdIIBBH'):
+                        try:
+                            _seq, _ts, _w, _h, _codec, _flags, _res = struct.unpack('!IdIIBBH', buf[:struct.calcsize('!IdIIBBH')])
+                            if (_flags & 0x01) != 0:
+                                found = buf
+                        except Exception:
+                            pass
+                except asyncio.QueueEmpty:
+                    break
+            return found
+
         while True:
-            # Immediate keyframe bypass for new clients
+            # Immediate keyframe bypass for new clients or after keyframe request
             if self._bypass_until_key:
-                await _fill_until(loop.time() + 0.050)
-                if latest is not None and len(latest) >= struct.calcsize('!IdIIBBH'):
-                    try:
-                        _seq, _ts, _w, _h, _codec, _flags, _res = struct.unpack('!IdIIBBH', latest[:struct.calcsize('!IdIIBBH')])
-                        if (_flags & 0x01) != 0:
-                            if self._clients:
-                                await asyncio.gather(*(self._safe_send(c, latest) for c in list(self._clients)), return_exceptions=True)
-                            latest = None
-                            self._bypass_until_key = False
-                            next_t = loop.time() + tick
-                            continue
-                    except Exception:
-                        self._bypass_until_key = False
+                key_buf = await _fill_and_find_key(loop.time() + 0.050)
+                if key_buf is not None:
+                    if self._clients:
+                        await asyncio.gather(*(self._safe_send(c, key_buf) for c in list(self._clients)), return_exceptions=True)
+                    latest = None
+                    self._bypass_until_key = False
+                    next_t = loop.time() + tick
+                    continue
 
             now = loop.time()
             if now < next_t:
@@ -472,7 +557,7 @@ class EGLHeadlessServer:
                             dt = now2 - self._last_send_ts
                             self._send_count += 1
                             if (self._send_count % int(max(1, self.cfg.fps))) == 0:
-                                logger.info("Pixel send dt=%.3f s (target=%.3f), drops=%d", dt, 1.0/max(1, self.cfg.fps), self._drops_total)
+                                logger.debug("Pixel send dt=%.3f s (target=%.3f), drops=%d", dt, 1.0/max(1, self.cfg.fps), self._drops_total)
                         self._last_send_ts = now2
                     except Exception:
                         pass
@@ -501,6 +586,8 @@ class EGLHeadlessServer:
             await asyncio.gather(*coros, return_exceptions=True)
         except Exception as e:
             logger.debug("State broadcast error: %s", e)
+
+    
 
     async def _safe_state_send(self, ws: websockets.WebSocketServerProtocol, text: str) -> None:
         try:

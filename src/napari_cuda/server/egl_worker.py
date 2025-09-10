@@ -119,6 +119,14 @@ class EGLRendererWorker:
         self._state_lock = threading.Lock()
         self._pending_state: Optional[ServerSceneState] = None
 
+        # Encoding / instrumentation state
+        self._frame_index = 0
+        self._force_next_idr = False
+        try:
+            self._log_keyframes = bool(int(os.getenv('NAPARI_CUDA_LOG_KEYFRAMES', '0') or '0'))
+        except Exception:
+            self._log_keyframes = False
+
         # Ensure partial initialization is cleaned up if any step fails
         try:
             self._init_egl()
@@ -320,12 +328,6 @@ class EGLRendererWorker:
         except Exception as e:
             logger.debug("Encoder fmt info log failed: %s", e)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
-        try:
-            # Longer default GOP to avoid periodic IDR spikes aligning with motion angles
-            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600'))
-        except Exception:
-            idr_period = 120
-        preset = os.getenv('NAPARI_CUDA_PRESET', 'P3')
         # Optional bitrate control for low-jitter CBR; if unsupported, fallback path below will be used
         try:
             bitrate = int(os.getenv('NAPARI_CUDA_BITRATE', '10000000'))
@@ -345,10 +347,11 @@ class EGLRendererWorker:
             temporalaq = int(os.getenv('NAPARI_CUDA_TEMPORALAQ', '0'))
         except Exception:
             temporalaq = 0
+        # Non-ref P frames (low-delay) toggle
         try:
-            ldkfs = int(os.getenv('NAPARI_CUDA_LDKFS', '0'))
+            nonrefp = int(os.getenv('NAPARI_CUDA_NONREFP', '0'))
         except Exception:
-            ldkfs = 0
+            nonrefp = 0
         # VBV sizing: approx per-frame budget (bitrate/fps). Some bindings apply these mainly to VBR; harmless for CBR.
         try:
             vbv_frames = float(os.getenv('NAPARI_CUDA_VBV_FRAMES', '1.0'))
@@ -357,37 +360,46 @@ class EGLRendererWorker:
         vbv_size = None
         if bitrate and bitrate > 0 and self.fps > 0:
             vbv_size = max(1, int((bitrate // max(1, self.fps)) * vbv_frames))
-
+        # Map to PyNvVideoCodec-supported keys (lowerCamelCase or accepted lower-case variants)
+        # Avoid passing preset/tuning strings as this build rejects them. Let NVENC choose native keyframe cadence.
         kwargs = {
             'codec': 'h264',
-            'tuning_info': 'low_latency',
-            'preset': preset,
-            'bf': 0,
-            'repeatspspps': 1,
-            'idrperiod': idr_period,
-            'rc': rc_mode,
-            'lookahead': lookahead,
-            'aq': aq,
-            'temporalaq': temporalaq,
-            'ldkfs': ldkfs,
-            'fps': self.fps,
+            # Low-latency settings; do not override keyframe cadence (let NVENC defaults apply)
+            'frameIntervalP': 1,  # no B-frames
+            'repeatSPSPPS': 1,
+            # 'strictGOPTarget': 1,  # leave off without explicit gop/idr
+            'enablePTD': 1,
+            # Rate control
+            'rcMode': rc_mode.upper(),  # CBR/VBR/CONSTQP
+            'enableLookahead': int(bool(lookahead)),
+            'enableAQ': int(bool(aq)),
+            'enableTemporalAQ': int(bool(temporalaq)),
+            'enableNonRefP': int(bool(nonrefp)),
+            # Framerate
+            'frameRateNum': int(max(1, int(self.fps))),
+            'frameRateDen': 1,
+            # Refresh behavior
+            'enableIntraRefresh': 0,
+            # References
+            'maxNumRefFrames': 1,
         }
         if bitrate and bitrate > 0:
-            kwargs['bitrate'] = bitrate
-            kwargs['maxbitrate'] = bitrate
+            kwargs['bitrate'] = int(bitrate)
+            kwargs['maxBitrate'] = int(bitrate)
         if vbv_size is not None:
-            kwargs['vbvbufsize'] = vbv_size
-            kwargs['vbvinit'] = vbv_size
-        # GOP can mirror IDR cadence for simplicity
-        kwargs['gop'] = idr_period
-        # Colorspace hint for packed RGB inputs
-        if self._enc_input_fmt in ('ARGB', 'ABGR'):
-            kwargs['colorspace'] = 'bt709'
+            # Some builds expect lower-case variants; bindings accept both in many cases
+            kwargs['vbvBufferSize'] = int(vbv_size)
+            kwargs['vbvInitialDelay'] = int(vbv_size)
         try:
             # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
             # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
             try:
+                # Remember IDR cadence for verification/instrumentation
+                try:
+                    self._idr_period_cfg = int(kwargs.get('gopLength') or kwargs.get('idrPeriod') or idr_period)
+                except Exception:
+                    self._idr_period_cfg = idr_period
                 logger.info(
                     "NVENC encoder created: %dx%d fmt=%s (low-latency)",
                     self.width, self.height, self._enc_input_fmt,
@@ -398,8 +410,9 @@ class EGLRendererWorker:
                     )
                 )
                 logger.info(
-                    "Encoder config: codec=%s preset=%s tuning=%s bf=%d idrperiod=%d repeatspspps=%d color_space=BT709 range=LIMITED layout=%s",
-                    kwargs['codec'], kwargs['preset'], kwargs['tuning_info'], kwargs['bf'], kwargs['idrperiod'], kwargs['repeatspspps'], layout,
+                    "Encoder config: codec=%s fIntP=%d rc=%s lookahead=%d aq=%d tAQ=%d nonrefp=%d repeatSPSPPS=%d",
+                    kwargs.get('codec'), kwargs.get('frameIntervalP'), kwargs.get('rcMode'), kwargs.get('enableLookahead'),
+                    kwargs.get('enableAQ'), kwargs.get('enableTemporalAQ'), kwargs.get('enableNonRefP'), kwargs.get('repeatSPSPPS'),
                 )
             except Exception as e:
                 logger.debug("Encoder info log failed: %s", e)
@@ -410,6 +423,11 @@ class EGLRendererWorker:
                 logger.warning("NVENC encoder created without tuning kwargs; GOP cadence may vary")
             except Exception as e:
                 logger.debug("Encoder warn log failed: %s", e)
+        # Ensure we emit an IDR on the first frame after (re)initialization
+        try:
+            self._force_next_idr = True
+        except Exception:
+            pass
 
     def reset_encoder(self) -> None:
         """Tear down and recreate the encoder to force a new GOP/IDR.
@@ -433,6 +451,10 @@ class EGLRendererWorker:
 
     def force_idr(self) -> None:
         """Best-effort request to force next frame as IDR via Reconfigure."""
+        try:
+            logger.info("Requesting encoder force IDR")
+        except Exception:
+            pass
         try:
             if hasattr(self._encoder, 'GetEncodeReconfigureParams') and hasattr(self._encoder, 'Reconfigure'):
                 params = self._encoder.GetEncodeReconfigureParams()
@@ -717,10 +739,77 @@ class EGLRendererWorker:
             pkt_obj = None
         else:
             t_e0 = time.perf_counter()
-            pkt_obj = enc.Encode(dst)
+            # Force IDR on first frame after init/reset for decoder sync
+            pic_flags = 0
+            try:
+                if getattr(self, '_force_next_idr', False):
+                    pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.FORCEIDR)
+                    pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.OUTPUT_SPSPPS)
+                    self._force_next_idr = False
+            except Exception:
+                pass
+            if pic_flags:
+                pkt_obj = enc.Encode(dst, pic_flags)
+            else:
+                pkt_obj = enc.Encode(dst)
             t_e1 = time.perf_counter()
             t_p0 = t_e1
             t_p1 = t_e1
+            # Increment index and optional keyframe logging
+            try:
+                self._frame_index += 1
+                if self._log_keyframes:
+                    def _packet_is_keyframe(obj) -> bool:
+                        try:
+                            data = bytes(obj)
+                        except Exception:
+                            return False
+                        # Try Annex B (start codes)
+                        i = 0
+                        n = len(data)
+                        seen = False
+                        while i + 3 < n:
+                            if data[i] == 0 and data[i+1] == 0 and data[i+2] == 1:
+                                if i + 3 < n:
+                                    nal_type = data[i+3] & 0x1F
+                                    if nal_type == 5:
+                                        seen = True
+                                i += 3
+                            elif i + 4 < n and data[i] == 0 and data[i+1] == 0 and data[i+2] == 0 and data[i+3] == 1:
+                                if i + 4 < n:
+                                    nal_type = data[i+4] & 0x1F
+                                    if nal_type == 5:
+                                        seen = True
+                                i += 4
+                            else:
+                                i += 1
+                        if seen:
+                            return True
+                        # Try AVCC (length-prefixed)
+                        i = 0
+                        while i + 4 <= n:
+                            ln = int.from_bytes(data[i:i+4], 'big')
+                            i += 4
+                            if ln <= 0 or i + ln > n:
+                                break
+                            nal_type = data[i] & 0x1F if ln >= 1 else 0
+                            if nal_type == 5:
+                                return True
+                            i += ln
+                        return False
+
+                    keyframe = False
+                    if pkt_obj is not None:
+                        if isinstance(pkt_obj, (list, tuple)):
+                            for part in pkt_obj:
+                                if _packet_is_keyframe(part):
+                                    keyframe = True
+                                    break
+                        else:
+                            keyframe = _packet_is_keyframe(pkt_obj)
+                    logger.info("Encode frame %d: keyframe=%s", self._frame_index, bool(keyframe))
+            except Exception as e:
+                logger.debug("Keyframe instrumentation skipped: %s", e)
         # If encoder wasn't available, set NVENC time to 0
         encode_ms = ((t_e1 - t_e0) * 1000.0) if enc is not None else 0.0
         pack_ms = ((t_p1 - t_p0) * 1000.0) if enc is not None else 0.0
