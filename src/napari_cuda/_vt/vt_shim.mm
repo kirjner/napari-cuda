@@ -5,6 +5,9 @@
 #import <CoreVideo/CoreVideo.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <OpenGL/OpenGL.h>
+#import <OpenGL/gl.h>
+#import <CoreVideo/CVOpenGLTexture.h>
+#import <CoreVideo/CVOpenGLTextureCache.h>
 #import <pthread.h>
 
 #include "vt_shim.h"
@@ -29,6 +32,11 @@ struct vt_session {
     // counters
     uint32_t submits;
     uint32_t outputs;
+};
+
+// GL cache wrapper
+struct gl_cache {
+    CVOpenGLTextureCacheRef cache;
 };
 
 static void vt_output_cb(void *refcon,
@@ -276,6 +284,86 @@ void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* 
         *qlen = (uint32_t)s->qcount;
         pthread_mutex_unlock(&s->mu);
     }
+}
+
+// ---- OpenGL helpers ----
+gl_cache_t* gl_cache_init_for_current_context(void) {
+    CGLContextObj ctx = CGLGetCurrentContext();
+    if (!ctx) return NULL;
+    CGLPixelFormatObj pf = CGLGetPixelFormat(ctx);
+    if (!pf) return NULL;
+    CVOpenGLTextureCacheRef cache = NULL;
+    CVReturn rc = CVOpenGLTextureCacheCreate(kCFAllocatorDefault, NULL, ctx, pf, NULL, &cache);
+    if (rc != kCVReturnSuccess || !cache) return NULL;
+    gl_cache_t* g = (gl_cache_t*)calloc(1, sizeof(gl_cache_t));
+    if (!g) { if (cache) CFRelease(cache); return NULL; }
+    g->cache = cache;
+    return g;
+}
+
+void gl_cache_destroy(gl_cache_t* cache) {
+    if (!cache) return;
+    if (cache->cache) CFRelease(cache->cache);
+    free(cache);
+}
+
+void* alloc_pixelbuffer_bgra(int width, int height, int use_iosurface) {
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                                                            &kCFTypeDictionaryKeyCallBacks,
+                                                            &kCFTypeDictionaryValueCallBacks);
+    if (!attrs) return NULL;
+    uint32_t pf = kCVPixelFormatType_32BGRA;
+    CFNumberRef pfnum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pf);
+    CFDictionarySetValue(attrs, kCVPixelBufferPixelFormatTypeKey, pfnum);
+    CFRelease(pfnum);
+    CFNumberRef w = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &width);
+    CFNumberRef h = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &height);
+    CFDictionarySetValue(attrs, kCVPixelBufferWidthKey, w);
+    CFDictionarySetValue(attrs, kCVPixelBufferHeightKey, h);
+    CFRelease(w); CFRelease(h);
+    CFDictionarySetValue(attrs, kCVPixelBufferOpenGLCompatibilityKey, kCFBooleanTrue);
+    if (use_iosurface) {
+        CFMutableDictionaryRef empty = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                                                                 &kCFTypeDictionaryKeyCallBacks,
+                                                                 &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(attrs, kCVPixelBufferIOSurfacePropertiesKey, empty);
+        CFRelease(empty);
+    }
+    CVPixelBufferRef pb = NULL;
+    CVReturn rc = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs, &pb);
+    CFRelease(attrs);
+    if (rc != kCVReturnSuccess) return NULL;
+    return pb; // retained
+}
+
+unsigned int pixel_format(void* cvpixelbuffer) {
+    if (!cvpixelbuffer) return 0;
+    CVPixelBufferRef pb = (CVPixelBufferRef)cvpixelbuffer;
+    return (unsigned int)CVPixelBufferGetPixelFormatType(pb);
+}
+
+int gl_tex_from_cvpixelbuffer(gl_cache_t* cache, void* cvpixelbuffer, void** out_tex,
+                              unsigned int* out_name, unsigned int* out_target, int* out_w, int* out_h) {
+    if (!cache || !cache->cache || !cvpixelbuffer || !out_tex || !out_name || !out_target || !out_w || !out_h)
+        return 0;
+    CVPixelBufferRef pb = (CVPixelBufferRef)cvpixelbuffer;
+    CVOpenGLTextureRef tex = NULL;
+    // Create texture with default attributes (may be GL_TEXTURE_RECTANGLE)
+    CVReturn rc = CVOpenGLTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache->cache, pb, NULL, &tex);
+    if (rc != kCVReturnSuccess || !tex) return 0;
+    GLenum target = CVOpenGLTextureGetTarget(tex);
+    GLuint name = CVOpenGLTextureGetName(tex);
+    size_t w = CVPixelBufferGetWidth(pb);
+    size_t h = CVPixelBufferGetHeight(pb);
+    *out_tex = tex; // retained
+    *out_name = (unsigned int)name;
+    *out_target = (unsigned int)target;
+    *out_w = (int)w; *out_h = (int)h;
+    return 1;
+}
+
+void gl_release_tex(void* cvgltex) {
+    if (cvgltex) CFRelease((CFTypeRef)cvgltex);
 }
 
 #else

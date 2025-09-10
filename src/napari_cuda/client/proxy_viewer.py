@@ -51,7 +51,7 @@ class ProxyViewer(ViewerModel):
     _window = PrivateAttr(default=None)
     _connection_pending: bool = PrivateAttr(default=False)
 
-    def __init__(self, server_host='localhost', server_port=8081, **kwargs):
+    def __init__(self, server_host='localhost', server_port=8081, offline: bool = False, **kwargs):
         """
         Initialize proxy viewer connected to remote server.
         
@@ -79,8 +79,11 @@ class ProxyViewer(ViewerModel):
         self.dims.events.current_step.connect(self._on_dims_change)
         self.dims.events.ndisplay.connect(self._on_dims_change)
         
-        # Connect to server
-        self._connect_to_server()
+        # Connect to server unless offline
+        if not bool(offline):
+            self._connect_to_server()
+        else:
+            logger.info("ProxyViewer offline mode: skipping server connection")
         
         logger.info(f"ProxyViewer initialized for {server_host}:{server_port}")
 

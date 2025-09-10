@@ -31,6 +31,19 @@ Notes
 - VT backend expects AVCC from the server; the server sends AVCC and announces it via the state channel.
 - Fixed‑latency presenter is used for both VT and PyAV; arrival mode ignores server clocks and is most robust at very low latency.
 
+Offline smoke (no network)
+- `NAPARI_CUDA_VT_SMOKE=1` enables offline testing without a server.
+- `NAPARI_CUDA_VT_SMOKE_SOURCE={vt|encode}` selects the source:
+  - `vt` (default): synthetic CVPixelBuffer generator rendered zero‑copy.
+  - `encode`: PyAV H.264 encoder → VT decode → zero‑copy render.
+- Dimensions and cadence:
+  - `NAPARI_CUDA_VT_SMOKE_W` (default 1280)
+  - `NAPARI_CUDA_VT_SMOKE_H` (default 720)
+  - `NAPARI_CUDA_VT_SMOKE_FPS` (default 60)
+- Diagnostics:
+  - One‑time info logs for smoke start, VT init, and first zero‑copy draw.
+  - Presenter stats with `NAPARI_CUDA_VT_STATS=info|debug` (1 Hz).
+
 Troubleshooting
 - No picture after connect: wait for first keyframe; client auto‑requests one and logs on receipt.
 - Occasional “discontinuity” warnings: server dropped a frame (latest‑wins queue). Client will resync on next keyframe without stalling in arrival mode.

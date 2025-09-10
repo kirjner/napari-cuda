@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 typedef struct vt_session vt_session_t;
+typedef struct gl_cache gl_cache_t;
 
 // Create a VT decoding session from avcC + dimensions.
 // pixfmt: fourcc, e.g. 'NV12' or 'BGRA'. Returns NULL on failure.
@@ -39,7 +40,22 @@ void vt_release_frame(void* buf);
 // Diagnostics counters
 void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* qlen);
 
+// --- OpenGL / zero-copy helpers (macOS only) ---
+// Initialize a CVOpenGLTextureCache for the current OpenGL context. Returns NULL on failure.
+gl_cache_t* gl_cache_init_for_current_context(void);
+// Destroy a GL cache created above.
+void gl_cache_destroy(gl_cache_t* cache);
+// Allocate a BGRA CVPixelBuffer compatible with OpenGL. If use_iosurface is nonzero,
+// the buffer will be IOSurface-backed for optimal interop.
+void* alloc_pixelbuffer_bgra(int width, int height, int use_iosurface);
+// Return the CoreVideo pixel format type (OSType) for a CVPixelBufferRef capsule.
+unsigned int pixel_format(void* cvpixelbuffer);
+// Create a GL texture from a CVPixelBuffer using the cache. Returns a retained CVOpenGLTextureRef via out_tex,
+// and fills out_name, out_target, out_w, out_h. Returns 0 on failure.
+int gl_tex_from_cvpixelbuffer(gl_cache_t* cache, void* cvpixelbuffer, void** out_tex, unsigned int* out_name, unsigned int* out_target, int* out_w, int* out_h);
+// Release a CVOpenGLTextureRef obtained from gl_tex_from_cvpixelbuffer.
+void gl_release_tex(void* cvgltex);
+
 #ifdef __cplusplus
 }
 #endif
-

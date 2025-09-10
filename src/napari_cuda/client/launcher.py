@@ -52,7 +52,8 @@ def launch_streaming_client(server_host='localhost',
     # Create ProxyViewer (inherits from ViewerModel, no Window created)
     proxy_viewer = ProxyViewer(
         server_host=server_host,
-        server_port=state_port
+        server_port=state_port,
+        offline=bool(vt_smoke),
     )
     
     # Create Window manually with our ProxyViewer

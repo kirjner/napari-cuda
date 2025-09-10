@@ -204,8 +204,8 @@ class StreamingCanvas(VispyCanvas):
         )
         # PyAV worker is managed by StreamManager when enabled
 
-        # Orchestrate with StreamManager unless in VT smoke mode
-        self._use_manager = not self._vt_smoke
+        # Orchestrate with StreamManager (it handles vt_smoke internally)
+        self._use_manager = True
         if self._use_manager:
             from napari_cuda.client.streaming import StreamManager
 
@@ -227,12 +227,7 @@ class StreamingCanvas(VispyCanvas):
             )
             self._manager.start()
         else:
-            # VT smoke thread (offline)
-            self._streaming_thread = Thread(
-                target=self._vt_smoke_worker, daemon=True
-            )
-            logger.info('StreamingCanvas in VT smoke test mode (offline)')
-            self._streaming_thread.start()
+            pass
 
         # Override draw to show video instead
         self._scene_canvas.events.draw.disconnect()
@@ -329,10 +324,7 @@ class StreamingCanvas(VispyCanvas):
         except Exception as e:
             logger.exception('VT live init failed: %s', e)
 
-    def _vt_smoke_worker(self):
-        from napari_cuda.client.streaming.smoke import start_vt_smoke_thread
-
-        start_vt_smoke_thread(self._decoded_to_queue)
+    # Legacy VT smoke worker removed; StreamManager owns smoke modes now
 
     def _stream_worker(self):
         """Background thread to receive and decode video stream via PixelReceiver."""

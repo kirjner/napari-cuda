@@ -75,6 +75,18 @@ static PyObject* m_counts(PyObject* self, PyObject* args){
     return Py_BuildValue("(III)", a,b,c);
 }
 
+// Forward declarations for GL helper bindings
+#ifdef __APPLE__
+static PyObject* m_gl_cache_init(PyObject*, PyObject*);
+static PyObject* m_gl_cache_destroy(PyObject*, PyObject*);
+static PyObject* m_alloc_pb_bgra(PyObject*, PyObject*);
+static PyObject* m_pixel_format(PyObject*, PyObject*);
+static PyObject* m_gl_tex_from_pb(PyObject*, PyObject*);
+static PyObject* m_gl_release_tex(PyObject*, PyObject*);
+static PyObject* m_pb_lock_base(PyObject*, PyObject*);
+static PyObject* m_pb_unlock_base(PyObject*, PyObject*);
+#endif
+
 static PyMethodDef Methods[] = {
     {"create", m_create, METH_VARARGS, "Create VT session"},
     {"decode", m_decode, METH_VARARGS, "Submit AVCC AU"},
@@ -88,6 +100,15 @@ static PyMethodDef Methods[] = {
 #else
     {"map_to_rgb", m_map_to_rgb_stub, METH_VARARGS, "Map CVPixelBufferRef to RGB bytes (w,h)"},
 #endif
+    // GL zero-copy helpers
+    {"gl_cache_init_for_current_context", m_gl_cache_init, METH_NOARGS, "Init GL texture cache for current context"},
+    {"gl_cache_destroy", m_gl_cache_destroy, METH_VARARGS, "Destroy GL cache"},
+    {"alloc_pixelbuffer_bgra", m_alloc_pb_bgra, METH_VARARGS, "Allocate BGRA CVPixelBuffer (optionally IOSurface)"},
+    {"pixel_format", m_pixel_format, METH_VARARGS, "Get pixel format of CVPixelBufferRef"},
+    {"gl_tex_from_cvpixelbuffer", m_gl_tex_from_pb, METH_VARARGS, "Create GL texture from CVPixelBuffer"},
+    {"gl_release_tex", m_gl_release_tex, METH_VARARGS, "Release CVOpenGLTextureRef"},
+    {"pb_lock_base", m_pb_lock_base, METH_VARARGS, "Lock base; return (addr,bpr,w,h)"},
+    {"pb_unlock_base", m_pb_unlock_base, METH_VARARGS, "Unlock base"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -198,4 +219,92 @@ static PyObject* m_map_to_rgb_impl(PyObject* self, PyObject* args){
     Py_DECREF(out);
     return ret;
 }
+#endif
+
+#ifdef __APPLE__
+// --- GL helper bindings ---
+static void _glcache_capsule_destructor(PyObject* cap){
+    void* p = PyCapsule_GetPointer(cap, "GLCache");
+    if (p) gl_cache_destroy((gl_cache_t*)p);
+}
+
+static PyObject* m_gl_cache_init(PyObject* self, PyObject* noargs){
+    gl_cache_t* c = gl_cache_init_for_current_context();
+    if (!c) Py_RETURN_NONE;
+    return PyCapsule_New((void*)c, "GLCache", _glcache_capsule_destructor);
+}
+
+static PyObject* m_gl_cache_destroy(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* p = PyCapsule_GetPointer(cap, "GLCache");
+    if (p) gl_cache_destroy((gl_cache_t*)p);
+    Py_RETURN_NONE;
+}
+
+static PyObject* m_alloc_pb_bgra(PyObject* self, PyObject* args){
+    int w,h, ios=1; if (!PyArg_ParseTuple(args, "ii|p", &w,&h,&ios)) return NULL;
+    void* pb = alloc_pixelbuffer_bgra(w,h, ios);
+    if (!pb) Py_RETURN_NONE;
+    PyObject* cap = PyCapsule_New(pb, "CVPixelBufferRef", NULL);
+    return cap;
+}
+
+static PyObject* m_pixel_format(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* pb = PyCapsule_GetPointer(cap, "CVPixelBufferRef");
+    if (!pb) Py_RETURN_NONE;
+    unsigned int pf = pixel_format(pb);
+    return PyLong_FromUnsignedLong(pf);
+}
+
+static PyObject* m_gl_tex_from_pb(PyObject* self, PyObject* args){
+    PyObject* cap_cache; PyObject* cap_pb;
+    if (!PyArg_ParseTuple(args, "OO", &cap_cache, &cap_pb)) return NULL;
+    gl_cache_t* cache = (gl_cache_t*)PyCapsule_GetPointer(cap_cache, "GLCache");
+    void* pb = PyCapsule_GetPointer(cap_pb, "CVPixelBufferRef");
+    if (!cache || !pb) Py_RETURN_NONE;
+    void* tex = NULL; unsigned int name=0, target=0; int w=0,h=0;
+    int ok = gl_tex_from_cvpixelbuffer(cache, pb, &tex, &name, &target, &w, &h);
+    if (!ok || !tex) Py_RETURN_NONE;
+    PyObject* cap_tex = PyCapsule_New(tex, "CVOpenGLTextureRef", NULL);
+    return Py_BuildValue("(OIIii)", cap_tex, name, target, w, h);
+}
+
+static PyObject* m_gl_release_tex(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* tex = PyCapsule_GetPointer(cap, "CVOpenGLTextureRef");
+    if (tex) gl_release_tex(tex);
+    Py_RETURN_NONE;
+}
+
+// Direct CVPixelBuffer base access for writing synthetic patterns (macOS only)
+static PyObject* m_pb_lock_base(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* p = PyCapsule_GetPointer(cap, "CVPixelBufferRef");
+    if (!p) Py_RETURN_NONE;
+    CVPixelBufferRef pb = (CVPixelBufferRef)p;
+    if (CVPixelBufferLockBaseAddress(pb, 0) != kCVReturnSuccess) Py_RETURN_NONE;
+    void* base = CVPixelBufferGetBaseAddress(pb);
+    size_t bpr = (size_t)CVPixelBufferGetBytesPerRow(pb);
+    size_t w = (size_t)CVPixelBufferGetWidth(pb);
+    size_t h = (size_t)CVPixelBufferGetHeight(pb);
+    // Return (addr, bpr, w, h)
+    return Py_BuildValue("(KkII)", (unsigned long long)base, (unsigned long long)bpr, (unsigned int)w, (unsigned int)h);
+}
+
+static PyObject* m_pb_unlock_base(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* p = PyCapsule_GetPointer(cap, "CVPixelBufferRef");
+    if (p){ CVPixelBufferUnlockBaseAddress((CVPixelBufferRef)p, 0); }
+    Py_RETURN_NONE;
+}
+#else
+static PyObject* m_gl_cache_init(PyObject* self, PyObject* noargs){ Py_RETURN_NONE; }
+static PyObject* m_gl_cache_destroy(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_alloc_pb_bgra(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_pixel_format(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_gl_tex_from_pb(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_gl_release_tex(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_pb_lock_base(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_pb_unlock_base(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
 #endif
