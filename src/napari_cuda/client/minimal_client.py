@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 try:
     # Lightweight AVCC → AnnexB shim for PyAV
-    from napari_cuda.client.avcc_shim import normalize_to_annexb  # type: ignore
+    from napari_cuda.codec.h264 import normalize_to_annexb  # type: ignore
 except Exception:  # pragma: no cover - optional import for older snapshots
     normalize_to_annexb = None  # type: ignore
 

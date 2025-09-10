@@ -21,52 +21,7 @@ import threading
 logger = logging.getLogger(__name__)
 
 
-def parse_avcc_sps_pps(avcc: bytes) -> Tuple[List[bytes], List[bytes], int]:
-    """Parse avcC (AVCDecoderConfigurationRecord) and return (sps_list, pps_list, nal_length_size).
-
-    avcC format (ISO/IEC 14496-15):
-      - configurationVersion: 1 byte
-      - AVCProfileIndication: 1 byte
-      - profile_compatibility: 1 byte
-      - AVCLevelIndication: 1 byte
-      - lengthSizeMinusOne: low 2 bits of next byte; nal_length_size = value + 1
-      - numOfSequenceParameterSets: low 5 bits of next byte
-      - for each SPS: 2-byte length + SPS bytes
-      - numOfPictureParameterSets: 1 byte
-      - for each PPS: 2-byte length + PPS bytes
-    """
-    if not avcc or len(avcc) < 7:
-        raise ValueError("Invalid avcC: too short")
-    i = 0
-    configuration_version = avcc[i]; i += 1
-    if configuration_version != 1:
-        logger.debug("Unexpected avcC configurationVersion=%d", configuration_version)
-    _profile = avcc[i]; i += 1
-    _compat = avcc[i]; i += 1
-    _level = avcc[i]; i += 1
-    length_size_minus_one = avcc[i] & 0x03; i += 1
-    nal_length_size = int(length_size_minus_one) + 1
-    num_sps = avcc[i] & 0x1F; i += 1
-    sps_list: List[bytes] = []
-    for _ in range(num_sps):
-        if i + 2 > len(avcc):
-            raise ValueError("Invalid avcC: truncated SPS length")
-        ln = int.from_bytes(avcc[i:i+2], 'big'); i += 2
-        if i + ln > len(avcc):
-            raise ValueError("Invalid avcC: truncated SPS data")
-        sps_list.append(avcc[i:i+ln]); i += ln
-    if i >= len(avcc):
-        raise ValueError("Invalid avcC: missing PPS count")
-    num_pps = avcc[i]; i += 1
-    pps_list: List[bytes] = []
-    for _ in range(num_pps):
-        if i + 2 > len(avcc):
-            raise ValueError("Invalid avcC: truncated PPS length")
-        ln = int.from_bytes(avcc[i:i+2], 'big'); i += 2
-        if i + ln > len(avcc):
-            raise ValueError("Invalid avcC: truncated PPS data")
-        pps_list.append(avcc[i:i+ln]); i += ln
-    return sps_list, pps_list, nal_length_size
+from napari_cuda.codec.h264 import parse_avcc as parse_avcc_sps_pps  # re-use shared parser
 
 
 def is_vt_available() -> bool:

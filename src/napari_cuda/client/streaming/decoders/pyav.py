@@ -29,7 +29,7 @@ class PyAVDecoder:
         import av
         # Be resilient to state/format races: always normalize to Annex B
         try:
-            from napari_cuda.client.avcc_shim import normalize_to_annexb  # type: ignore
+            from napari_cuda.codec.h264 import normalize_to_annexb  # type: ignore
             b, _ = normalize_to_annexb(data)
             packet = av.Packet(b)
         except Exception:
