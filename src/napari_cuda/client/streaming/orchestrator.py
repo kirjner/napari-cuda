@@ -29,6 +29,7 @@ from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.utils.env import env_float, env_str
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
+from napari_cuda.client.streaming.config import extract_video_config
 
 logger = logging.getLogger(__name__)
 
@@ -160,17 +161,13 @@ class StreamManager:
         def _state_worker() -> None:
             def _on_video_config(data: dict) -> None:
                 try:
-                    width = int(data.get('width') or 0)
-                    height = int(data.get('height') or 0)
-                    fps = float(data.get('fps') or 0.0)
+                    w, h, fps, fmt, avcc_b64 = extract_video_config(data)
                     if fps > 0:
                         self._fps = fps
-                    fmt = (data.get('format') or '').lower() or 'avcc'
-                    self._stream_format = 'annexb' if fmt.startswith('annex') else 'avcc'
+                    self._stream_format = fmt
                     self._stream_format_set = True
-                    avcc_b64 = data.get('data')
-                    if width > 0 and height > 0 and avcc_b64:
-                        self._init_vt_from_avcc(avcc_b64, width, height)
+                    if w > 0 and h > 0 and avcc_b64:
+                        self._init_vt_from_avcc(avcc_b64, w, h)
                 except Exception:
                     logger.debug("video_config handling failed", exc_info=True)
 
