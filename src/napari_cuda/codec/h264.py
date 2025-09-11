@@ -220,3 +220,38 @@ def contains_idr_avcc(data: bytes, nal_len_size: int = 4, hevc: bool = False) ->
                 return True
     return False
 
+
+# --- Extradata heuristics ---
+
+
+def extract_sps_pps_from_blob(b: bytes) -> tuple[bytes | None, bytes | None]:
+    """Best-effort SPS/PPS extraction from arbitrary H.264 blob.
+
+    Tries AnnexB split, then AVCC split with multiple length sizes.
+    If still not found, heuristically splits on first PPS (nal_type=8)
+    following an SPS (nal_type=7).
+    """
+    nals = split_annexb(b)
+    if not nals:
+        for nsz in (4, 3, 2, 1):
+            nals = split_avcc_by_len(b, nsz)
+            if nals:
+                break
+    if nals:
+        return find_sps_pps(nals)
+    # Heuristic: locate SPS start and PPS start by byte-wise scan
+    n = len(b)
+    sps_i = -1
+    pps_i = -1
+    for i in range(n):
+        t = b[i] & 0x1F
+        if t == 7 and sps_i == -1:
+            sps_i = i
+        elif t == 8 and sps_i != -1:
+            pps_i = i
+            break
+    if sps_i != -1 and pps_i != -1:
+        sps = b[sps_i:pps_i]
+        pps = b[pps_i:]
+        return sps, pps
+    return None, None

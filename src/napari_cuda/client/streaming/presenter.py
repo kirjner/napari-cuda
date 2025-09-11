@@ -146,6 +146,7 @@ class FixedLatencyPresenter:
         # Work on a single selected item and a list of items to release outside the lock
         to_release: List[_BufItem] = []
         sel: Optional[_BufItem] = None
+        is_preview = False
         with self._lock:
             items = self._buf[active]
             if not items:
@@ -165,10 +166,12 @@ class FixedLatencyPresenter:
                     sel = last_due
                     self._out_count[active] += 1
                 elif items and (items[0].due_ts - n) > self._preview_guard_s:
+                    # Preview the latest frame without consuming it to avoid strobing.
+                    # Keep only the most recent candidate, but do not pop it here.
                     while len(items) > 1:
                         to_release.append(items.popleft())
-                    sel = items.pop()
-                    self._out_count[active] += 1
+                    sel = items[-1]
+                    is_preview = True
                 else:
                     sel = None
         # Release outside the lock
@@ -176,7 +179,7 @@ class FixedLatencyPresenter:
             self._release_many(to_release)
         if sel is None:
             return None
-        return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=False)
+        return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=is_preview)
 
     def stats(self) -> Dict[str, object]:
         with self._lock:

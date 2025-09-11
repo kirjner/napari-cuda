@@ -275,6 +275,10 @@ void vt_release_frame(void* buf) {
     if (buf) CFRelease((CFTypeRef)buf);
 }
 
+void vt_retain_frame(void* buf) {
+    if (buf) CFRetain((CFTypeRef)buf);
+}
+
 void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* qlen) {
     if (!s) return;
     if (submits) *submits = s->submits;

@@ -36,6 +36,7 @@ int vt_get_frame(vt_session_t* s, double timeout_s, void** out_buf, double* out_
 
 // Release a CVPixelBufferRef obtained from vt_get_frame().
 void vt_release_frame(void* buf);
+void vt_retain_frame(void* buf);
 
 // Diagnostics counters
 void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* qlen);

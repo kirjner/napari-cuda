@@ -14,6 +14,7 @@ try:
         release_frame,
         counts,
         map_to_rgb,
+        retain_frame,
         # Zero-copy / GL helpers
         gl_cache_init_for_current_context,
         gl_cache_destroy,

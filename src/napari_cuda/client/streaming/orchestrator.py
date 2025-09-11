@@ -128,6 +128,7 @@ class StreamManager:
 
         # Last VT payload for redraw fallback (offline VT-source or VT decode)
         self._last_vt_payload = None  # type: ignore[var-annotated]
+        self._last_vt_persistent = False
 
         # Frame queue for renderer (latest-wins)
         self._frame_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=3)
@@ -230,6 +231,20 @@ class StreamManager:
                             continue
                         try:
                             from napari_cuda import _vt as vt  # type: ignore
+                            # Retain a copy for draw-last-frame fallback
+                            try:
+                                # Take an extra retain so we can safely reuse as last-frame fallback
+                                vt.retain_frame(img_buf)
+                                # Release previously cached decode PB retain if any
+                                if self._last_vt_payload is not None and not getattr(self, '_last_vt_persistent', False):
+                                    try:
+                                        vt.release_frame(self._last_vt_payload)
+                                    except Exception:
+                                        pass
+                                self._last_vt_payload = img_buf
+                                self._last_vt_persistent = True
+                            except Exception:
+                                self._last_vt_persistent = False
                             self._presenter.submit(
                                 SubmittedFrame(
                                     source=Source.VT,
@@ -370,10 +385,9 @@ class StreamManager:
                 idx = 0
                 mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
                 logger.info("VT smoke (vt-source): %dx%d @ %.1f fps (mode=%s)", sw, sh, fps, mode)
-                # Drive presenter for VT source with minimal latency in ARRIVAL mode
+                # Drive presenter in ARRIVAL mode; keep configured latency
                 try:
                     self._presenter.set_mode(TimestampMode.ARRIVAL)
-                    self._presenter.set_latency(0.0)
                 except Exception:
                     pass
                 # Ensure VT is the active source
@@ -497,114 +511,181 @@ class StreamManager:
                     fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
                 except Exception:
                     fps = 60.0
-                # Configure encoder
-                enc = av.CodecContext.create('h264', 'w')
-                enc.width = sw
-                enc.height = sh
-                enc.pix_fmt = 'yuv420p'
-                from fractions import Fraction as _Fraction
-                enc.time_base = _Fraction(1, int(round(fps)))
-                keyint = int(max(1, round(fps)))
-                enc.options = {
-                    'tune': 'zerolatency',
-                    'preset': 'veryfast',
-                    'bf': '0',
-                    'keyint': str(keyint),
-                    'sc_threshold': '0',
-                    # Best-effort to get headers in-stream for resilience
-                    'x264-params': f"keyint={keyint}:scenecut=0:repeat-headers=1",
-                    # Prefer Annex B output if supported
-                    'annexb': '1',
-                }
+                # Configure encoder (prefer VT encoder; fallback to libx264)
+                def _make_encoder():
+                    try:
+                        enc_i = av.CodecContext.create('h264_videotoolbox', 'w')
+                        target_fmt = 'nv12'
+                        is_vt = True
+                    except Exception:
+                        try:
+                            enc_i = av.CodecContext.create('libx264', 'w')
+                            target_fmt = 'yuv420p'
+                            is_vt = False
+                        except Exception:
+                            enc_i = av.CodecContext.create('h264', 'w')
+                            target_fmt = 'yuv420p'
+                            is_vt = False
+                    enc_i.width = sw
+                    enc_i.height = sh
+                    enc_i.pix_fmt = target_fmt
+                    from fractions import Fraction as _Fraction
+                    enc_i.time_base = _Fraction(1, int(round(fps)))
+                    keyint = int(max(1, round(fps)))
+                    opts = {
+                        # keep options minimal; VT encoder ignores many x264 flags
+                    }
+                    if is_vt:
+                        # Ask for real-time behavior; VT will choose appropriate profile/level
+                        opts.update({'realtime': '1'})
+                    else:
+                        # libx264: immediate IDR with headers in-stream; AnnexB for easy parsing
+                        opts.update({
+                            'tune': 'zerolatency',
+                            'preset': 'veryfast',
+                            'bf': '0',
+                            'keyint': '1',
+                            'sc_threshold': '0',
+                            'x264-params': 'keyint=1:scenecut=0:repeat-headers=1',
+                            'annexb': '1',
+                        })
+                    enc_i.options = opts
+                    try:
+                        enc_i.open()
+                    except Exception:
+                        logger.debug('encode-smoke: enc.open() failed', exc_info=True)
+                    try:
+                        ed = getattr(enc_i, 'extradata', None)
+                        if ed:
+                            logger.info('encode-smoke: encoder=%s pixfmt=%s extradata_len=%d',
+                                        enc_i.name, target_fmt, len(bytes(ed)))
+                        else:
+                            logger.info('encode-smoke: encoder=%s pixfmt=%s extradata_len=0', enc_i.name, target_fmt)
+                    except Exception:
+                        pass
+                    return enc_i, target_fmt
+
+                enc, target_pixfmt = _make_encoder()
                 logger.info("VT smoke (encode): %dx%d @ %.1f fps", sw, sh, fps)
-                # ARRIVAL mode with tiny latency; VT as active source
+                # ARRIVAL mode; VT as active source (keep configured latency)
                 try:
                     self._presenter.set_mode(TimestampMode.ARRIVAL)
-                    self._presenter.set_latency(0.0)
                     self._source_mux.set_active(Source.VT)
                 except Exception:
                     pass
-                # avcC to initialize VT (from extradata or first packets)
+                # avcC to initialize VT (built from packer SPS/PPS)
                 avcc_bytes: bytes | None = None
-                # Frame generator: lightweight gradient
+                # Use server-style packer to assemble AVCC AUs and cache SPS/PPS
+                try:
+                    from napari_cuda.server.bitstream import ParamCache, pack_to_avcc, build_avcc_config  # type: ignore
+                    os.environ.setdefault('NAPARI_CUDA_ALLOW_PY_FALLBACK', '1')
+                    _cache = ParamCache()
+                except Exception:
+                    _cache = None  # type: ignore
+                # Frame generator bases
                 import numpy as _np
                 x = _np.linspace(0, 255, sw, dtype=_np.uint8)[None, :]
                 y = _np.linspace(0, 255, sh, dtype=_np.uint8)[:, None]
+                smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
                 # Start loop
                 first_packets_logged = 0
+                accum = bytearray()
+                extradata_len_logged = -1
+                seen_sps: bytes | None = None
+                seen_pps: bytes | None = None
                 # If VT not initialized yet, we will inspect first packets for SPS/PPS
                 while True:
                     t = time.perf_counter()
-                    r = _np.broadcast_to(x, (sh, sw))
-                    g = _np.broadcast_to(y, (sh, sw))
-                    b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
-                    rgb = _np.dstack([r, g, b])
+                    # Generate RGB according to smoke mode
+                    if smoke_mode == 'checker':
+                        tnow = time.perf_counter()
+                        ox = int(((_np.sin(tnow * 2.0) * 0.5 + 0.5) * 64))
+                        oy = int(((_np.cos(tnow * 1.7) * 0.5 + 0.5) * 64))
+                        xx = (_np.arange(sw, dtype=_np.int32)[None, :] + ox) // 32
+                        yy = (_np.arange(sh, dtype=_np.int32)[:, None] + oy) // 32
+                        mask = ((xx ^ yy) & 1).astype(_np.uint8)
+                        r = (mask * 255).astype(_np.uint8, copy=False)
+                        g = _np.broadcast_to(x, (sh, sw))
+                        b = _np.broadcast_to(y, (sh, sw))
+                        rgb = _np.dstack([r, g, b])
+                    else:
+                        r = _np.broadcast_to(x, (sh, sw))
+                        g = _np.broadcast_to(y, (sh, sw))
+                        b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
+                        rgb = _np.dstack([r, g, b])
                     try:
-                        # Re-check encoder extradata until avcC is obtained
-                        if avcc_bytes is None:
-                            try:
-                                extra = getattr(enc, 'extradata', None)
-                                if extra:
-                                    b = bytes(extra)
-                                    if len(b) >= 5 and b[0] == 1:
-                                        avcc_bytes = b
-                                        logger.info("VT smoke (encode): using avcC from encoder extradata")
-                                    else:
-                                        nals_e = split_annexb(b) or split_avcc_by_len(b, 4) or split_avcc_by_len(b, 2)
-                                        sps_e, pps_e = find_sps_pps(nals_e)
-                                        if sps_e and pps_e:
-                                            avcc_bytes = build_avcc(sps_e, pps_e)
-                                            logger.info("VT smoke (encode): built avcC from extradata SPS/PPS")
-                            except Exception:
-                                logger.debug("encode-smoke: extradata inspection failed", exc_info=True)
                         vframe = av.VideoFrame.from_ndarray(rgb, format='rgb24')
+                        try:
+                            vframe = vframe.reformat(sw, sh, format=target_pixfmt)
+                        except Exception:
+                            logger.debug('encode-smoke: frame reformat failed', exc_info=True)
                         packets = enc.encode(vframe)
                     except Exception:
                         logger.debug("encode-smoke: encode failed", exc_info=True)
-                        continue
-                    for p in packets:
+                        # Recreate encoder and retry next frame
                         try:
-                            data = p.to_bytes()
+                            enc, target_pixfmt = _make_encoder()
                         except Exception:
+                            pass
+                        continue
+                    # Assemble AU via packer (prefer AVCC; cache SPS/PPS)
+                    au = None
+                    is_key = False
+                    if _cache is not None:
+                        payloads = []
+                        for p in list(packets):
                             try:
-                                data = bytes(p)
+                                payloads.append(p.to_bytes())
                             except Exception:
-                                data = memoryview(p).tobytes()
+                                try:
+                                    payloads.append(bytes(p))
+                                except Exception:
+                                    payloads.append(memoryview(p).tobytes())
+                        try:
+                            au, is_key = pack_to_avcc(payloads, _cache)  # type: ignore[misc]
+                        except Exception:
+                            logger.debug('encode-smoke: pack_to_avcc failed', exc_info=True)
                         if avcc_bytes is None:
                             try:
-                                nals = split_annexb(data)
-                                if not nals:
-                                    nals = split_avcc_by_len(data, 4) or split_avcc_by_len(data, 2)
-                                sps, pps = find_sps_pps(nals)
-                                if sps and pps:
-                                    avcc_bytes = build_avcc(sps, pps)
-                                    logger.info("VT smoke (encode): initialized avcC from stream SPS/PPS")
+                                avcc_b = build_avcc_config(_cache)  # type: ignore[misc]
+                                if avcc_b:
+                                    avcc_bytes = avcc_b
+                                    import base64 as _b64
+                                    self._init_vt_from_avcc(_b64.b64encode(avcc_bytes).decode('ascii'), sw, sh)
+                                    # Disable gating only after VT init
+                                    self._vt_wait_keyframe = False
+                                    logger.info('VT smoke (encode): initialized VT from packer avcC')
                             except Exception:
-                                logger.debug("encode-smoke: SPS/PPS parse failed", exc_info=True)
-                        # Initialize VT when we have avcC
-                        if avcc_bytes is not None and self._vt_decoder is None:
+                                logger.debug('encode-smoke: build_avcc_config failed', exc_info=True)
+                    else:
+                        # Fallback: concatenate packets as-is (legacy behavior)
+                        group = bytearray()
+                        for p in list(packets):
                             try:
-                                import base64 as _b64
-                                self._init_vt_from_avcc(_b64.b64encode(avcc_bytes).decode('ascii'), sw, sh)
-                                # For offline encode-smoke, disable keyframe gating
-                                self._vt_wait_keyframe = False
+                                group.extend(p.to_bytes())
                             except Exception:
-                                logger.debug("encode-smoke: VT init failed", exc_info=True)
-                        # Submit AU to VT input queue
-                        try:
-                            au = data if not is_annexb(data) else annexb_to_avcc(data)
-                            if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
-                                # Backlog: drain and continue (fresh start)
-                                while self._vt_in_q.qsize() > 0:
-                                    _ = self._vt_in_q.get_nowait()
-                                self._presenter.clear(Source.VT)
-                            self._vt_in_q.put_nowait((au, None))
-                            self._vt_enqueued += 1
-                            if first_packets_logged < 3:
-                                logger.info("encode-smoke: submitted AU len=%d", len(au))
-                                first_packets_logged += 1
-                        except Exception:
-                            logger.debug("encode-smoke: submit failed", exc_info=True)
+                                try:
+                                    group.extend(bytes(p))
+                                except Exception:
+                                    group.extend(memoryview(p).tobytes())
+                        data = bytes(group)
+                        au = data if not is_annexb(data) else annexb_to_avcc(data)
+                    # Submit AU to VT input queue
+                    try:
+                        if au is None or len(au) == 0:
+                            continue
+                        if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
+                            # Backlog: drain and continue (fresh start)
+                            while self._vt_in_q.qsize() > 0:
+                                _ = self._vt_in_q.get_nowait()
+                            self._presenter.clear(Source.VT)
+                        self._vt_in_q.put_nowait((au, None))
+                        self._vt_enqueued += 1
+                        if first_packets_logged < 3:
+                            logger.info("encode-smoke: submitted AU len=%d", len(au))
+                            first_packets_logged += 1
+                    except Exception:
+                        logger.debug("encode-smoke: submit failed", exc_info=True)
                     # tick cadence
                     # Aim for fps
                     target = 1.0 / max(1.0, fps)
@@ -882,8 +963,8 @@ class StreamManager:
                 self._enqueue_frame(ready.payload)
 
         frame = None
-        # Draw-last-frame fallback for VT: if nothing due, reuse last VT payload to avoid flicker
-        if ready is None and self._source_mux.active == Source.VT and self._last_vt_payload is not None:
+        # Draw-last-frame fallback for VT: only reuse persistent VT payloads (vt-source)
+        if ready is None and self._source_mux.active == Source.VT and self._last_vt_payload is not None and getattr(self, '_last_vt_persistent', False):
             try:
                 self._enqueue_frame((self._last_vt_payload, None))
             except Exception:

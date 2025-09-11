@@ -42,6 +42,9 @@ async def _run_vt_smoke_test(put_frame: Callable[[np.ndarray], None]) -> None:
         logger.exception("VT smoke requires PyAV")
         return
 
+    # Prefer AVCC end-to-end; allow Python packer fallback if Cython is missing
+    os.environ.setdefault('NAPARI_CUDA_ALLOW_PY_FALLBACK', '1')
+
     enc = av.CodecContext.create('h264', 'w')
     enc.width = width
     enc.height = height
@@ -53,17 +56,15 @@ async def _run_vt_smoke_test(put_frame: Callable[[np.ndarray], None]) -> None:
         'bf': '0',
         'keyint': str(int(round(fps))),
         'sc_threshold': '0',
-        # Try to request AnnexB + repeated headers when supported (libx264).
-        # Some encoders (e.g., videotoolbox) may ignore these and emit AVCC.
-        'annexb': '1',
+        # Let packer normalize; annexb may be ignored by some encoders
+        'annexb': '0',
         'x264-params': f"keyint={int(round(fps))}:scenecut=0:repeat-headers=1",
     }
 
-    from napari_cuda.codec.h264 import (
-        split_annexb,
-        split_avcc_by_len,
-        annexb_to_avcc,
-        build_avcc,
+    from napari_cuda.server.bitstream import (
+        ParamCache,
+        pack_to_avcc,
+        build_avcc_config,
     )
 
     # Initialize VT when SPS/PPS observed
@@ -76,9 +77,11 @@ async def _run_vt_smoke_test(put_frame: Callable[[np.ndarray], None]) -> None:
         logger.error("VideoToolbox not available on this system")
         return
 
-    avcc_bytes = None
+    avcc_bytes: bytes | None = None
     vt = None
     decoded = 0
+    cache = ParamCache()
+    started = False
 
     i = 0
     while (nframes is None) or (i < nframes):
@@ -96,53 +99,40 @@ async def _run_vt_smoke_test(put_frame: Callable[[np.ndarray], None]) -> None:
         except Exception:
             logger.debug("VT smoke: encode failed", exc_info=True)
             continue
-        # Try encoder extradata first (may contain avcC or AnnexB SPS/PPS)
-        if avcc_bytes is None:
-            try:
-                extra = getattr(enc, 'extradata', None)
-                if extra:
-                    if len(extra) >= 5 and extra[0] == 1:
-                        avcc_bytes = bytes(extra)
-                        vt = VideoToolboxDecoder(avcc_bytes, width, height)
-                        logger.info("VT smoke: initialized VT from encoder extradata (avcC)")
-                    else:
-                        nals_e = split_annexb(extra)
-                        if not nals_e:
-                            nals_e = split_avcc_by_len(extra, 4) or split_avcc_by_len(extra, 2)
-                        sps_e = next((n for n in nals_e if n and (n[0] & 0x1F) == 7), None)
-                        pps_e = next((n for n in nals_e if n and (n[0] & 0x1F) == 8), None)
-                        if sps_e and pps_e:
-                            avcc_bytes = build_avcc(sps_e, pps_e)
-                            vt = VideoToolboxDecoder(avcc_bytes, width, height)
-                            logger.info("VT smoke: initialized VT from encoder extradata (SPS/PPS)")
-            except Exception:
-                logger.debug("VT smoke: extradata inspection failed", exc_info=True)
-
+        # Assemble packets for this frame into one AVCC AU using server packer
+        payloads: list[bytes] = []
         for p in packets:
             try:
-                data = p.to_bytes()
+                payloads.append(p.to_bytes())
             except Exception:
                 try:
-                    data = bytes(p)
+                    payloads.append(bytes(p))
                 except Exception:
-                    data = memoryview(p).tobytes()
-            # Extract SPS/PPS once
-            if avcc_bytes is None:
-                nals = split_annexb(data)
-                if not nals:
-                    nals = split_avcc_by_len(data, 4) or split_avcc_by_len(data, 2)
-                sps = next((n for n in nals if n and (n[0] & 0x1F) == 7), None)
-                pps = next((n for n in nals if n and (n[0] & 0x1F) == 8), None)
-                if sps and pps:
-                    avcc_bytes = build_avcc(sps, pps)
+                    payloads.append(memoryview(p).tobytes())
+        au, is_key = pack_to_avcc(payloads, cache)
+        if au is None:
+            i += 1
+            continue
+        # Initialize VT from avcC built from cached SPS/PPS
+        if avcc_bytes is None:
+            try:
+                avcc_b = build_avcc_config(cache)
+                if avcc_b:
+                    avcc_bytes = avcc_b
                     vt = VideoToolboxDecoder(avcc_bytes, width, height)
-                    logger.info("VT smoke: initialized VT from stream (SPS/PPS)")
-            if vt is None:
-                continue
-            avcc_au = annexb_to_avcc(data)
-            img_buf = vt.decode(avcc_au)
-            if img_buf is None:
-                continue
+                    logger.info("VT smoke: initialized VT from packer avcC (SPS/PPS)")
+            except Exception:
+                logger.debug("VT smoke: build avcC failed", exc_info=True)
+        if vt is None:
+            i += 1
+            continue
+        if not started and not is_key:
+            i += 1
+            continue
+        started = True
+        img_buf = vt.decode(au)
+        if img_buf is None:
+            continue
             try:
                 from Quartz import CoreVideo as CV  # type: ignore
                 CV.CVPixelBufferLockBaseAddress(img_buf, 0)

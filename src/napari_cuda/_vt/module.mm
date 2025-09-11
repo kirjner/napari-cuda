@@ -69,6 +69,13 @@ static PyObject* m_release_frame(PyObject* self, PyObject* args){
     Py_RETURN_NONE;
 }
 
+static PyObject* m_retain_frame(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* buf = PyCapsule_GetPointer(cap, "CVPixelBufferRef");
+    if (buf) vt_retain_frame(buf);
+    Py_RETURN_NONE;
+}
+
 static PyObject* m_counts(PyObject* self, PyObject* args){
     PyVTSession* obj; if (!PyArg_ParseTuple(args, "O", (PyObject**)&obj)) return NULL;
     uint32_t a=0,b=0,c=0; vt_counts(obj->sess, &a, &b, &c);
@@ -93,6 +100,7 @@ static PyMethodDef Methods[] = {
     {"flush", m_flush, METH_VARARGS, "Flush async frames"},
     {"get_frame", m_get_frame, METH_VARARGS, "Get decoded frame (capsule, pts) or None"},
     {"release_frame", m_release_frame, METH_VARARGS, "Release CVPixelBufferRef"},
+    {"retain_frame", m_retain_frame, METH_VARARGS, "Retain CVPixelBufferRef"},
     {"counts", m_counts, METH_VARARGS, "Get (submits, outputs, qlen)"},
     // map_to_rgb(capsule) -> (bytes, width, height)
 #ifdef __APPLE__
