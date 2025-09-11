@@ -228,16 +228,30 @@ class StreamManager:
                 sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
             except Exception:
                 sh = 720
-            try:
-                fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
-            except Exception:
+            # Preset handling
+            preset = (os.getenv('NAPARI_CUDA_SMOKE_PRESET') or '').lower().strip()
+            if preset == '4k60':
+                sw = 3840
+                sh = 2160
                 fps = 60.0
+            else:
+                try:
+                    fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
+                except Exception:
+                    fps = 60.0
             smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
             preencode = (os.getenv('NAPARI_CUDA_SMOKE_PREENCODE', '0') or '0') in ('1', 'true', 'yes')
             try:
                 pre_frames = int(os.getenv('NAPARI_CUDA_SMOKE_PRE_FRAMES', str(int(fps) * 3)))
             except Exception:
                 pre_frames = int(fps) * 3
+            # Phase 5: memory cap and disk path for preencode cache
+            try:
+                mem_cap_mb = int(os.getenv('NAPARI_CUDA_SMOKE_PRE_MB', '0') or '0')
+            except Exception:
+                mem_cap_mb = 0
+            pre_path = os.getenv('NAPARI_CUDA_SMOKE_PRE_PATH', None)
+
             cfg = SmokeConfig(
                 width=sw,
                 height=sh,
@@ -249,6 +263,8 @@ class StreamManager:
                 target='pyav' if smoke_source == 'pyav' else 'vt',
                 vt_latency_s=self._vt_latency_s,
                 pyav_latency_s=self._pyav_latency_s,
+                mem_cap_mb=mem_cap_mb,
+                pre_path=pre_path,
             )
             def _init_and_clear(avcc_b64: str, w: int, h: int) -> None:
                 self._init_vt_from_avcc(avcc_b64, w, h)

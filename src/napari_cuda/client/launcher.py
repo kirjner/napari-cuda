@@ -178,6 +178,27 @@ def main():
         action='store_true',
         help='Run client-side smoke test (offline)'
     )
+    parser.add_argument(
+        '--preset',
+        default=None,
+        help='Smoke preset (e.g., 4k60)'
+    )
+    parser.add_argument(
+        '--preencode',
+        action='store_true',
+        help='Enable preencode smoke mode (encode once, then replay)'
+    )
+    parser.add_argument(
+        '--pre-mb',
+        type=int,
+        default=None,
+        help='Preencode memory cap in MB (0 = unlimited)'
+    )
+    parser.add_argument(
+        '--pre-path',
+        default=None,
+        help='Directory path for disk-backed preencode cache'
+    )
     
     # For SSH tunnel setup hint
     parser.add_argument(
@@ -196,6 +217,18 @@ def main():
         print("\nThen run client with: --host localhost")
         sys.exit(0)
     
+    # Apply smoke-related CLI envs before launch
+    if args.smoke:
+        os.environ.setdefault('NAPARI_CUDA_SMOKE', '1')
+    if args.preset:
+        os.environ['NAPARI_CUDA_SMOKE_PRESET'] = str(args.preset)
+    if args.preencode:
+        os.environ['NAPARI_CUDA_SMOKE_PREENCODE'] = '1'
+    if args.pre_mb is not None:
+        os.environ['NAPARI_CUDA_SMOKE_PRE_MB'] = str(int(args.pre_mb))
+    if args.pre_path:
+        os.environ['NAPARI_CUDA_SMOKE_PRE_PATH'] = str(args.pre_path)
+
     # Launch client
     smoke = bool(args.smoke)
     launch_streaming_client(

@@ -14,10 +14,12 @@ Assumptions:
 
 import base64
 import logging
+import os
+import struct
 import time
 from dataclasses import dataclass
 from threading import Event, Thread
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from napari_cuda.client.streaming.types import Source, TimestampMode
 from napari_cuda.client.streaming.smoke.generators import make_generator
@@ -39,6 +41,9 @@ class SmokeConfig:
     target: str = 'vt'  # 'vt' or 'pyav'
     vt_latency_s: Optional[float] = None
     pyav_latency_s: Optional[float] = None
+    # Phase 5 additions
+    mem_cap_mb: int = 0  # 0 = unlimited in-memory
+    pre_path: Optional[str] = None  # directory for disk-backed cache
 
 
 class SmokePipeline:
@@ -59,9 +64,16 @@ class SmokePipeline:
         self._stop = Event()
         self._thread: Optional[Thread] = None
         self._cache: List[AccessUnit] = []
+        self._cache_bytes: int = 0
+        # Disk-backed cache state
+        self._use_disk: bool = False
+        self._disk_index: List[Tuple[int, int, float, bool]] = []  # (offset,length,pts,is_key)
+        self._disk_fh = None
+        self._disk_path: Optional[str] = None
         self._cache_ready = Event()
         self._submitted = 0
         self._dropped = 0
+        self._cache_count: int = 0
 
     def start(self) -> None:
         # Configure presenter and active source
@@ -149,15 +161,15 @@ class SmokePipeline:
         i = 0
         t0 = time.perf_counter()
         while not self._stop.is_set():
-            ts_this = float(i % n) / max(1.0, fps)
-            au = self._cache[i % n]
+            idx = self._wrap_index(i)
+            payload, pts, is_key = self._fetch_cached(idx)
             # Ensure we start at a keyframe for both targets
-            if i == 0 and not au.is_keyframe:
-                # find first keyframe
-                k = next((j for j, a in enumerate(self._cache) if a.is_keyframe), 0)
-                i = k
-                au = self._cache[i % n]
-            self._enqueue_target(au.payload, au.pts if au.pts is not None else ts_this)
+            if i == 0 and not is_key:
+                i = self._find_first_key()
+                idx = self._wrap_index(i)
+                payload, pts, is_key = self._fetch_cached(idx)
+            ts_this = float(idx) / max(1.0, fps)
+            self._enqueue_target(payload, pts if pts is not None else ts_this)
             i += 1
             # pacing
             target = 1.0 / max(1.0, fps)
@@ -172,16 +184,69 @@ class SmokePipeline:
         cache: List[AccessUnit] = []
         avcc_b: Optional[bytes] = None
         t_start = time.perf_counter()
+        cap_bytes = max(0, int(self.cfg.mem_cap_mb or 0)) * 1024 * 1024
+        pre_dir = (self.cfg.pre_path or '').strip() or None
+        # Helper: switch to disk and move any existing cache
+        def _switch_to_disk() -> None:
+            if self._use_disk:
+                return
+            if pre_dir is None:
+                return
+            os.makedirs(pre_dir, exist_ok=True)
+            path = os.path.join(pre_dir, 'smoke_preencode_cache.bin')
+            try:
+                fh = open(path, 'wb+')
+            except Exception as e:
+                logger.warning('smoke: failed to open disk cache %s: %s', path, e)
+                return
+            # Write any existing memory cache to disk
+            offset = 0
+            for a in cache:
+                offset = self._write_record(fh, offset, a.payload, float(a.pts or 0.0), bool(a.is_keyframe))
+            self._disk_fh = fh
+            self._disk_path = path
+            self._use_disk = True
+            # Build index for written items
+            self._disk_index = []
+            off = 0
+            for a in cache:
+                length = len(a.payload)
+                self._disk_index.append((off, length, float(a.pts or 0.0), bool(a.is_keyframe)))
+                off += 4 + 1 + 8 + length
+            # Clear memory cache tracking
+            cache.clear()
+            self._cache_bytes = 0
+            logger.info('smoke: using disk-backed preencode cache at %s', path)
+
         for i in range(n):
             ts_this = float(i) / max(1.0, fps)
             rgb = gen(i)
             aus = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
-            cache.extend(aus)
-            if avcc_b is None:
-                try:
-                    avcc_b = enc.get_avcc_config()
-                except Exception:
-                    avcc_b = None
+            for a in aus:
+                if self._use_disk:
+                    try:
+                        assert self._disk_fh is not None
+                        off = self._disk_index[-1][0] + 4 + 1 + 8 + self._disk_index[-1][1] if self._disk_index else 0
+                        new_off = self._write_record(self._disk_fh, off, a.payload, float(a.pts or 0.0), bool(a.is_keyframe))
+                        self._disk_index.append((off, len(a.payload), float(a.pts or 0.0), bool(a.is_keyframe)))
+                    except Exception:
+                        logger.debug('smoke: disk write failed', exc_info=True)
+                else:
+                    cache.append(a)
+                    self._cache_bytes += len(a.payload)
+                    # Enforce memory cap
+                    if cap_bytes > 0 and self._cache_bytes > cap_bytes:
+                        if pre_dir is not None:
+                            _switch_to_disk()
+                        else:
+                            while cache and self._cache_bytes > cap_bytes:
+                                old = cache.pop(0)
+                                self._cache_bytes -= len(old.payload)
+        if avcc_b is None:
+            try:
+                avcc_b = enc.get_avcc_config()
+            except Exception:
+                avcc_b = None
         try:
             enc.close()
         except Exception:
@@ -193,9 +258,50 @@ class SmokePipeline:
                 logger.debug('smoke: init_vt_from_avcc(pre) failed', exc_info=True)
             self._init_vt_from_avcc = None
         self._cache = cache
+        self._cache_count = len(self._disk_index) if self._use_disk else len(self._cache)
         self._cache_ready.set()
         dt = (time.perf_counter() - t_start) * 1000.0
-        logger.info('smoke: preencoded %d frames in %.1f ms (avg %.2f ms/frame)', len(cache), dt, dt / max(1, len(cache)))
+        logger.info('smoke: preencoded %d frames in %.1f ms (avg %.2f ms/frame) (cache=%s)', self._cache_count, dt, dt / max(1, self._cache_count), 'disk' if self._use_disk else 'mem')
+
+    def _write_record(self, fh, offset: int, payload: bytes, pts: float, is_key: bool) -> int:
+        try:
+            fh.seek(offset)
+            hdr = struct.pack('>I B d', int(len(payload)), 1 if is_key else 0, float(pts))
+            fh.write(hdr)
+            fh.write(payload)
+            return offset + len(hdr) + len(payload)
+        except Exception:
+            logger.debug('smoke: write_record failed', exc_info=True)
+            return offset
+
+    def _wrap_index(self, i: int) -> int:
+        n = max(1, int(self._cache_count or 1))
+        return int(i % n)
+
+    def _fetch_cached(self, idx: int) -> Tuple[bytes, Optional[float], bool]:
+        if not self._use_disk:
+            au = self._cache[idx]
+            return au.payload, au.pts, bool(au.is_keyframe)
+        try:
+            off, length, pts, is_key = self._disk_index[idx]
+            assert self._disk_fh is not None
+            self._disk_fh.seek(off + 4 + 1 + 8)
+            data = self._disk_fh.read(length)
+            return data, pts, is_key
+        except Exception:
+            logger.debug('smoke: disk fetch failed', exc_info=True)
+            return b'', None, False
+
+    def _find_first_key(self) -> int:
+        if not self._use_disk:
+            for j, a in enumerate(self._cache):
+                if a.is_keyframe:
+                    return j
+            return 0
+        for j, ent in enumerate(self._disk_index):
+            if ent[3]:
+                return j
+        return 0
 
     def _open_encoder(self, w: int, h: int, fps: float) -> H264Encoder:
         import os
@@ -264,4 +370,6 @@ class SmokePipeline:
             'dropped': int(self._dropped),
             'target': self.cfg.target,
             'mode': 'preencode' if self.cfg.preencode else 'encode-live',
+            'cache': 'disk' if self._use_disk else 'mem',
+            'count': int(self._cache_count),
         }
