@@ -897,10 +897,17 @@ class StreamManager:
             # Parse nal length size from avcC if available (5th byte low 2 bits + 1)
             try:
                 if len(avcc) >= 5:
-                    self._nal_length_size = int((avcc[4] & 0x03) + 1)
-                    if self._nal_length_size not in (1, 2, 3, 4):
+                    nsz = int((avcc[4] & 0x03) + 1)
+                    if nsz in (1, 2, 3, 4):
+                        self._nal_length_size = nsz
+                    else:
+                        logger.warning("Invalid avcC nal_length_size=%s; defaulting to 4", nsz)
                         self._nal_length_size = 4
+                else:
+                    logger.warning("avcC too short (%d); defaulting nal_length_size=4", len(avcc))
+                    self._nal_length_size = 4
             except Exception:
+                logger.warning("Failed to parse avcC nal_length_size; defaulting to 4", exc_info=True)
                 self._nal_length_size = 4
             logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
         except Exception as e:
