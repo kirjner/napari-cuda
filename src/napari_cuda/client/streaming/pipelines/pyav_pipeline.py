@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 """
-PyAVPipeline - handles PyAV decode path decoupled from the orchestrator.
+PyAVPipeline - handles PyAV decode path decoupled from the coordinator.
 
 - Owns its input queue and a worker thread.
 - On decode, submits frames to the shared presenter and schedules a draw.
-- Exposes simple enqueue() for the orchestrator to feed bytes+timestamps.
+- Exposes simple enqueue() for the coordinator to feed bytes+timestamps.
 """
 
 import queue

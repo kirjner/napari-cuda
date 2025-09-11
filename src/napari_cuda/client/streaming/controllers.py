@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Lightweight controllers to keep StreamManager slimmer.
+Lightweight controllers to keep the StreamCoordinator slim.
 
 Procedural style with small dataclasses that wrap starting threads for
 state and pixel receivers. Behavior mirrors the existing inline closures.
@@ -47,4 +47,3 @@ class ReceiveController:
         t = Thread(target=rx.run, daemon=True)
         t.start()
         return rx, t
-

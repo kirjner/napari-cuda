@@ -4,7 +4,7 @@ from __future__ import annotations
 VTPipeline - encapsulates VT submit/drain and avcC/AnnexB normalization.
 
 - Owns an input queue and two workers: submit (normalize+decode) and drain (present).
-- Coordinates with the orchestrator using small callbacks for gating and caching.
+- Coordinates with the coordinator using small callbacks for gating and caching.
 """
 
 import logging
