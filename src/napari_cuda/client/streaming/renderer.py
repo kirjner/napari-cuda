@@ -125,7 +125,9 @@ class GLRenderer:
                     arr = None
                 if arr is not None:
                     self._video_texture.set_data(arr)
-            ctx.clear('black')
+            # Avoid clearing every frame to prevent visible flashes on some drivers
+            if not self._has_drawn:
+                ctx.clear('black')
             self._video_program.draw('triangle_strip')
             self._has_drawn = True
 

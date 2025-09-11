@@ -118,6 +118,8 @@ class StreamManager:
         # Last VT payload for redraw fallback (offline VT-source or VT decode)
         self._last_vt_payload = None  # type: ignore[var-annotated]
         self._last_vt_persistent = False
+        # Last PyAV RGB frame for redraw fallback (avoid flicker when no new frame ready)
+        self._last_pyav_frame = None  # type: ignore[var-annotated]
 
         # Frame queue for renderer (latest-wins)
         self._frame_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=3)
@@ -934,15 +936,26 @@ class StreamManager:
                 except Exception:
                     logger.debug("enqueue VT payload failed", exc_info=True)
             else:
+                # Cache for last-frame fallback and enqueue
+                try:
+                    self._last_pyav_frame = ready.payload
+                except Exception:
+                    pass
                 self._enqueue_frame(ready.payload)
 
         frame = None
-        # Draw-last-frame fallback for VT: only reuse persistent VT payloads (vt-source)
-        if ready is None and self._source_mux.active == Source.VT and self._last_vt_payload is not None and getattr(self, '_last_vt_persistent', False):
-            try:
-                self._enqueue_frame((self._last_vt_payload, None))
-            except Exception:
-                logger.debug("enqueue last VT payload failed", exc_info=True)
+        # Draw-last-frame fallbacks to avoid black frames on GUI clears
+        if ready is None:
+            if self._source_mux.active == Source.VT and self._last_vt_payload is not None and getattr(self, '_last_vt_persistent', False):
+                try:
+                    self._enqueue_frame((self._last_vt_payload, None))
+                except Exception:
+                    logger.debug("enqueue last VT payload failed", exc_info=True)
+            elif self._source_mux.active == Source.PYAV and self._last_pyav_frame is not None:
+                try:
+                    self._enqueue_frame(self._last_pyav_frame)
+                except Exception:
+                    logger.debug("enqueue last PyAV frame failed", exc_info=True)
         while not self._frame_q.empty():
             try:
                 frame = self._frame_q.get_nowait()
