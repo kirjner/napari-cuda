@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Optional, Tuple
 
+from napari_cuda.codec.avcc import is_annexb
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +24,9 @@ class VTLiveDecoder:
         self._shim = VTShimDecoder(avcc, width, height)
 
     def decode(self, avcc_au: bytes, ts: Optional[float]) -> bool:
+        # Enforce invariants with assertions; let shim errors surface if any
+        assert avcc_au, "empty AVCC access unit"
+        assert not is_annexb(avcc_au), "VTLiveDecoder requires AVCC, got AnnexB input"
         return bool(self._shim.decode(avcc_au, ts))
 
     def get_frame_nowait(self) -> Optional[Tuple[object, Optional[float]]]:
@@ -42,4 +47,3 @@ class VTLiveDecoder:
             self._shim.flush()
         except Exception:
             logger.debug("VT shim flush failed", exc_info=True)
-
