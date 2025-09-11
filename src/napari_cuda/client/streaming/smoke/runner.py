@@ -10,10 +10,14 @@ import base64
 import time
 from typing import Callable, Optional
 
+import logging
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_pyav, submit_vt
 from napari_cuda.client.streaming.types import Source, TimestampMode
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 def run_encode_smoke(
@@ -33,13 +37,10 @@ def run_encode_smoke(
     logger: Optional["object"] = None,
 ) -> None:
     # Mode and latency
-    try:
-        presenter.set_mode(TimestampMode.ARRIVAL)
-        if vt_latency_s is not None:
-            presenter.set_latency(float(vt_latency_s))
-        source_mux.set_active(Source.VT)
-    except Exception:
-        pass
+    presenter.set_mode(TimestampMode.ARRIVAL)
+    if vt_latency_s is not None:
+        presenter.set_latency(float(vt_latency_s))
+    source_mux.set_active(Source.VT)
     # Encoder + generator
     enc = None
     def _make_encoder() -> H264Encoder:
@@ -48,17 +49,11 @@ def run_encode_smoke(
                 e = H264Encoder(EncoderConfig(name=name, width=width, height=height, fps=fps))
                 e.open()
                 if logger:
-                    try:
-                        logger.info("encode-smoke: encoder=%s opened (w=%d h=%d fps=%.1f)", name, width, height, fps)
-                    except Exception:
-                        pass
+                    logger.info("encode-smoke: encoder=%s opened (w=%d h=%d fps=%.1f)", name, width, height, fps)
                 return e
             except Exception:
                 if logger:
-                    try:
-                        logger.debug("encode-smoke: failed to open encoder=%s", name, exc_info=True)
-                    except Exception:
-                        pass
+                    logger.debug("encode-smoke: failed to open encoder=%s", name, exc_info=True)
                 continue
         raise RuntimeError("No H.264 encoder available")
     enc = _make_encoder()
@@ -75,14 +70,11 @@ def run_encode_smoke(
             au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
         except Exception:
             if logger:
-                try:
-                    logger.debug('encode-smoke: encode failed', exc_info=True)
-                except Exception:
-                    pass
+                logger.debug('encode-smoke: encode failed', exc_info=True)
             try:
                 enc.close()
             except Exception:
-                pass
+                logger.debug('encode-smoke: close failed', exc_info=True)
             enc = _make_encoder()
             continue
         if avcc_bytes is None and init_vt_from_avcc is not None:
@@ -92,36 +84,24 @@ def run_encode_smoke(
                 avcc_b = None
             if avcc_b:
                 avcc_bytes = avcc_b
-                try:
-                    init_vt_from_avcc(base64.b64encode(avcc_bytes).decode('ascii'), width, height)
-                except Exception:
-                    pass
+                init_vt_from_avcc(base64.b64encode(avcc_bytes).decode('ascii'), width, height)
                 if after_vt_init is not None:
                     try:
                         after_vt_init()
                     except Exception:
-                        pass
+                        logger.debug('encode-smoke: after_vt_init failed', exc_info=True)
                 if logger:
-                    try:
-                        logger.info('encode-smoke: initialized VT from encoder avcC')
-                    except Exception:
-                        pass
+                    logger.info('encode-smoke: initialized VT from encoder avcC')
         try:
             submitted = submit_vt(au_list, vt_in_q, presenter, vt_backlog_trigger, ts_this)
             if on_enqueued:
                 on_enqueued(int(submitted))
             if submitted and first_log < 3 and logger:
-                try:
-                    logger.info('encode-smoke: submitted AU len=%d ts=%.6f', len(au_list[0].payload), float(au_list[0].pts or ts_this))
-                except Exception:
-                    pass
+                logger.info('encode-smoke: submitted AU len=%d ts=%.6f', len(au_list[0].payload), float(au_list[0].pts or ts_this))
                 first_log += 1
         except Exception:
             if logger:
-                try:
-                    logger.debug('encode-smoke: submit failed', exc_info=True)
-                except Exception:
-                    pass
+                logger.debug('encode-smoke: submit failed', exc_info=True)
         # pacing
         target = 1.0 / max(1.0, fps)
         sleep = target - (time.perf_counter() - t0)
@@ -145,13 +125,10 @@ def run_pyav_smoke(
     logger: Optional["object"] = None,
 ) -> None:
     # Mode and latency
-    try:
-        presenter.set_mode(TimestampMode.ARRIVAL)
-        if pyav_latency_s is not None:
-            presenter.set_latency(float(pyav_latency_s))
-        source_mux.set_active(Source.PYAV)
-    except Exception:
-        pass
+    presenter.set_mode(TimestampMode.ARRIVAL)
+    if pyav_latency_s is not None:
+        presenter.set_latency(float(pyav_latency_s))
+    source_mux.set_active(Source.PYAV)
     # Encoder + generator
     enc = None
     def _make_encoder() -> H264Encoder:
@@ -160,17 +137,11 @@ def run_pyav_smoke(
                 e = H264Encoder(EncoderConfig(name=name, width=width, height=height, fps=fps))
                 e.open()
                 if logger:
-                    try:
-                        logger.info("pyav-smoke: encoder=%s opened", name)
-                    except Exception:
-                        pass
+                    logger.info("pyav-smoke: encoder=%s opened", name)
                 return e
             except Exception:
                 if logger:
-                    try:
-                        logger.debug("pyav-smoke: failed to open encoder=%s", name, exc_info=True)
-                    except Exception:
-                        pass
+                    logger.debug("pyav-smoke: failed to open encoder=%s", name, exc_info=True)
                 continue
         raise RuntimeError("No H.264 encoder available")
     enc = _make_encoder()
@@ -187,14 +158,11 @@ def run_pyav_smoke(
             au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
         except Exception:
             if logger:
-                try:
-                    logger.debug('pyav-smoke: encode failed', exc_info=True)
-                except Exception:
-                    pass
+                logger.debug('pyav-smoke: encode failed', exc_info=True)
             try:
                 enc.close()
             except Exception:
-                pass
+                logger.debug('pyav-smoke: close failed', exc_info=True)
             enc = _make_encoder()
             continue
         for au in au_list:
@@ -207,21 +175,14 @@ def run_pyav_smoke(
                 if on_enqueued:
                     on_enqueued(int(submitted))
                 if submitted and first_log < 3 and logger:
-                    try:
-                        logger.info('pyav-smoke: submitted AU len=%d ts=%.6f', len(au.payload), float(au.pts or ts_this))
-                    except Exception:
-                        pass
+                    logger.info('pyav-smoke: submitted AU len=%d ts=%.6f', len(au.payload), float(au.pts or ts_this))
                     first_log += 1
             except Exception:
                 if logger:
-                    try:
-                        logger.debug('pyav-smoke: submit failed', exc_info=True)
-                    except Exception:
-                        pass
+                    logger.debug('pyav-smoke: submit failed', exc_info=True)
         # pacing
         target = 1.0 / max(1.0, fps)
         sleep = target - (time.perf_counter() - t0)
         if sleep > 0:
             time.sleep(sleep)
         frame_idx += 1
-

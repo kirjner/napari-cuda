@@ -19,6 +19,7 @@ from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
 from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
+from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -110,10 +111,33 @@ class StreamManager:
         # avcC nal length size (default 4 if unknown)
         self._nal_length_size: int = 4
 
-        # Queues + workers
-        self._vt_in_q: "queue.Queue[tuple[bytes, float | None]]" = queue.Queue(maxsize=64)
+        # VT pipeline replaces inline queues/workers
         self._vt_backlog_trigger = int(vt_backlog_trigger)
         self._vt_enqueued = 0
+        # Callbacks for VT pipeline coordination
+        def _is_vt_gated() -> bool:
+            return bool(self._vt_wait_keyframe)
+        def _on_vt_backlog_gate() -> None:
+            self._vt_wait_keyframe = True
+        def _req_keyframe() -> None:
+            self._request_keyframe_once()
+        def _on_cache_last(pb: object, persistent: bool) -> None:
+            try:
+                # Keep local cache for draw fallback
+                self._last_vt_payload = pb
+                self._last_vt_persistent = bool(persistent)
+            except Exception:
+                logger.debug("cache last VT payload callback failed", exc_info=True)
+        self._vt_pipeline = VTPipeline(
+            presenter=self._presenter,
+            source_mux=self._source_mux,
+            scene_canvas=self._scene_canvas,
+            backlog_trigger=self._vt_backlog_trigger,
+            is_gated=_is_vt_gated,
+            on_backlog_gate=_on_vt_backlog_gate,
+            request_keyframe=_req_keyframe,
+            on_cache_last=_on_cache_last,
+        )
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
         self._pyav_enqueued = 0
         # PyAV pipeline replaces inline queue/worker
@@ -185,82 +209,11 @@ class StreamManager:
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
 
-        # Decoupled VT submit worker
-        def _vt_submit_worker() -> None:
-            while True:
-                try:
-                    data, ts = self._vt_in_q.get()
-                except Exception:
-                    logger.debug("VT submit worker queue.get failed", exc_info=True)
-                    continue
-                try:
-                    self._decode_vt_live(data, ts)
-                except Exception as e:
-                    logger.debug("VT submit worker error: %s", e)
-
-        Thread(target=_vt_submit_worker, daemon=True).start()
-
-        # VT drain worker: decouple VT output from UI draw loop
-        def _vt_drain_worker() -> None:
-            while True:
-                try:
-                    dec = self._vt_decoder
-                    if dec is None:
-                        time.sleep(0.005)
-                        continue
-                    drained = False
-                    while True:
-                        item = dec.get_frame_nowait()
-                        if not item:
-                            break
-                        drained = True
-                        img_buf, pts = item
-                        if self._vt_wait_keyframe:
-                            # Drain but don't submit while waiting for keyframe
-                            try:
-                                from napari_cuda import _vt as vt  # type: ignore
-                                vt.release_frame(img_buf)
-                            except Exception:
-                                logger.debug("VT release_frame during drain failed", exc_info=True)
-                            continue
-                        try:
-                            from napari_cuda import _vt as vt  # type: ignore
-                            # Retain a copy for draw-last-frame fallback
-                            try:
-                                # Take an extra retain so we can safely reuse as last-frame fallback
-                                vt.retain_frame(img_buf)
-                                # Release previously cached decode PB retain if any
-                                if self._last_vt_payload is not None and not getattr(self, '_last_vt_persistent', False):
-                                    try:
-                                        vt.release_frame(self._last_vt_payload)
-                                    except Exception:
-                                        logger.debug("VT release_frame (replace cached) failed", exc_info=True)
-                                self._last_vt_payload = img_buf
-                                self._last_vt_persistent = True
-                            except Exception:
-                                self._last_vt_persistent = False
-                            self._presenter.submit(
-                                SubmittedFrame(
-                                    source=Source.VT,
-                                    server_ts=float(pts) if pts is not None else None,
-                                    arrival_ts=time.time(),
-                                    payload=img_buf,
-                                    release_cb=vt.release_frame,
-                                )
-                            )
-                        except Exception:
-                            logger.debug("Presenter submit (VT) failed", exc_info=True)
-                    if drained:
-                        try:
-                            QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
-                        except Exception:
-                            logger.debug("Failed to schedule GUI update after VT drain", exc_info=True)
-                    if not drained:
-                        time.sleep(0.002)
-                except Exception:
-                    logger.debug("VT drain worker error", exc_info=True)
-
-        Thread(target=_vt_drain_worker, daemon=True).start()
+        # Start VT pipeline workers
+        try:
+            self._vt_pipeline.start()
+        except Exception:
+            logger.debug("Failed to start VT pipeline", exc_info=True)
 
         # Start PyAV pipeline worker
         try:
@@ -296,7 +249,7 @@ class StreamManager:
                     smoke_mode=smoke_mode,
                     presenter=self._presenter,
                     source_mux=self._source_mux,
-                    vt_in_q=self._vt_in_q,
+                    vt_in_q=self._vt_pipeline,
                     vt_backlog_trigger=self._vt_backlog_trigger,
                     vt_latency_s=self._vt_latency_s,
                     init_vt_from_avcc=lambda avcc_b64, w, h: self._init_vt_from_avcc(avcc_b64, w, h),
@@ -390,8 +343,10 @@ class StreamManager:
                                 # Gate VT path
                                 if self._vt_decoder is not None:
                                     self._vt_wait_keyframe = True
-                                    while self._vt_in_q.qsize() > 0:
-                                        _ = self._vt_in_q.get_nowait()
+                                    try:
+                                        self._vt_pipeline.clear()
+                                    except Exception:
+                                        logger.debug("VT pipeline clear during disco gate failed", exc_info=True)
                                     self._presenter.clear(Source.VT)
                                     self._request_keyframe_once()
                                 # Gate PyAV path
@@ -473,18 +428,10 @@ class StreamManager:
                             ts_float = None
                         b = bytes(pkt.payload)
                         try:
-                            if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
-                                self._vt_wait_keyframe = True
-                                logger.info("VT backlog detected (q=%d); requesting keyframe and resync", self._vt_in_q.qsize())
-                                self._request_keyframe_once()
-                                while self._vt_in_q.qsize() > 0:
-                                    _ = self._vt_in_q.get_nowait()
-                                self._presenter.clear(Source.VT)
-                            self._vt_in_q.put_nowait((b, ts_float))
+                            self._vt_pipeline.enqueue(b, ts_float)
                             self._vt_enqueued += 1
-                        except queue.Full:
-                            self._vt_wait_keyframe = True
-                            self._request_keyframe_once()
+                        except Exception:
+                            logger.debug("VT pipeline enqueue failed", exc_info=True)
                     else:
                         # PyAV path with backlog-safe gating
                         try:
@@ -633,11 +580,16 @@ class StreamManager:
         frame = None
         # Draw-last-frame fallbacks to avoid black frames on GUI clears
         if ready is None:
-            if self._source_mux.active == Source.VT and self._last_vt_payload is not None and getattr(self, '_last_vt_persistent', False):
+            if self._source_mux.active == Source.VT:
                 try:
-                    self._enqueue_frame((self._last_vt_payload, None))
+                    pb, persistent = self._vt_pipeline.last_payload_info()
                 except Exception:
-                    logger.debug("enqueue last VT payload failed", exc_info=True)
+                    pb, persistent = (None, False)
+                if pb is not None and persistent:
+                    try:
+                        self._enqueue_frame((pb, None))
+                    except Exception:
+                        logger.debug("enqueue last VT payload failed", exc_info=True)
             elif self._source_mux.active == Source.PYAV and self._last_pyav_frame is not None:
                 try:
                     self._enqueue_frame(self._last_pyav_frame)
@@ -657,8 +609,7 @@ class StreamManager:
             pres_stats = self._presenter.stats()
             vt_counts = None
             try:
-                if self._vt_decoder is not None:
-                    vt_counts = self._vt_decoder.counts()
+                vt_counts = self._vt_pipeline.counts()
             except Exception:
                 vt_counts = None
             logger.log(
@@ -697,6 +648,11 @@ class StreamManager:
                 try:
                     self._vt_decoder = VTLiveDecoder(avcc, width, height)
                     self._vt_backend = 'shim'
+                    # Bind decoder to VT pipeline
+                    try:
+                        self._vt_pipeline.set_decoder(self._vt_decoder)
+                    except Exception:
+                        logger.debug("VT pipeline set_decoder failed", exc_info=True)
                 except Exception as e:
                     logger.warning("VT shim unavailable: %s; falling back to PyAV", e)
                     self._vt_decoder = None
@@ -718,6 +674,10 @@ class StreamManager:
             except Exception:
                 logger.warning("Failed to parse avcC nal_length_size; defaulting to 4", exc_info=True)
                 self._nal_length_size = 4
+            try:
+                self._vt_pipeline.update_nal_length_size(self._nal_length_size)
+            except Exception:
+                logger.debug("VT pipeline update nal_length_size failed", exc_info=True)
             logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
         except Exception as e:
             logger.error("VT live init failed: %s", e)
@@ -767,53 +727,7 @@ class StreamManager:
             out.extend(nal)
         return bytes(out)
 
-    def _decode_vt_live(self, data: bytes, ts: float | None) -> None:
-        try:
-            if not data or self._vt_decoder is None:
-                return
-            # Normalize to AVCC with declared NAL length size (default 4)
-            target_len = int(self._nal_length_size or 4)
-            if is_annexb(data):
-                avcc_au = annexb_to_avcc(data)
-            else:
-                # Try to repackage AVCC if length size differs
-                nals = split_avcc_by_len(data, 4)
-                if not nals:
-                    nals = split_avcc_by_len(data, 2)
-                if nals:
-                    out = bytearray()
-                    for n in nals:
-                        out.extend(len(n).to_bytes(target_len, 'big'))
-                        out.extend(n)
-                    avcc_au = bytes(out)
-                else:
-                    # Fallback to raw data
-                    avcc_au = data
-            ok = self._vt_decoder.decode(avcc_au, ts)
-            if not ok:
-                self._vt_errors += 1
-                if self._vt_errors <= 3 or (self._vt_errors % 50 == 0):
-                    logger.warning("VT decode submit failed (errors=%d)", self._vt_errors)
-                return
-            self._vt_errors = 0
-            try:
-                if self._vt_enqueued <= 3:
-                    self._vt_decoder.flush()
-            except Exception:
-                logger.debug("VT flush failed", exc_info=True)
-        except Exception as e:
-            self._vt_errors += 1
-            logger.exception("VT live decode/map failed (%d): %s", self._vt_errors, e)
-            if self._vt_errors >= 3:
-                logger.error("Disabling VT after repeated errors; falling back to PyAV")
-                self._vt_decoder = None
-                try:
-                    self._source_mux.set_active(Source.PYAV)
-                    # Increase latency for PyAV fallback to smooth playback
-                    self._presenter.set_latency(self._pyav_latency_s)
-                    self._presenter.clear(Source.VT)
-                except Exception:
-                    logger.debug("VT disable fallback (set_active/set_latency/clear) failed", exc_info=True)
+    # VT decode/submit is handled by VTPipeline
 
     # Keyframe detection via shared helpers (AnnexB/AVCC)
     def _is_keyframe(self, payload: bytes, codec: int) -> bool:

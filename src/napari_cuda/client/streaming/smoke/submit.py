@@ -6,7 +6,10 @@ Minimal helpers to handle backlog and enqueue in smoke paths.
 
 from typing import Iterable, Optional
 
+import logging
 from napari_cuda.client.streaming.types import Source
+
+logger = logging.getLogger(__name__)
 
 
 def submit_vt(
@@ -28,11 +31,14 @@ def submit_vt(
         ts = getattr(au, 'pts', None)
         if ts is None:
             ts = ts_fallback
-        if vt_q.qsize() >= max(2, int(backlog_trigger) - 1):
-            while vt_q.qsize() > 0:
-                _ = vt_q.get_nowait()
-            presenter.clear(Source.VT)
-        vt_q.put_nowait((payload, ts))
+        qsz = int(vt_q.qsize())
+        if qsz >= max(2, int(backlog_trigger) - 1):
+            vt_q.clear()
+            try:
+                presenter.clear(Source.VT)
+            except Exception:
+                logger.debug("submit_vt: presenter.clear failed", exc_info=True)
+        vt_q.enqueue(payload, ts)
         submitted += 1
     return submitted
 
@@ -44,12 +50,6 @@ def submit_pyav(
     backlog_trigger: int,
     ts_fallback: Optional[float],
 ) -> int:
-    """Submit to PyAV path supporting either a queue-like object or a pipeline.
-
-    - If `pyav_q` has `enqueue()`/`clear()`/`qsize()`, treat it as a pipeline.
-    - Otherwise, assume a legacy Queue with `put_nowait()`/`get_nowait()`/`qsize()`.
-    """
-    is_pipeline = hasattr(pyav_q, 'enqueue')
     submitted = 0
     for au in aus:
         payload = getattr(au, 'payload', None)
@@ -58,27 +58,13 @@ def submit_pyav(
         ts = getattr(au, 'pts', None)
         if ts is None:
             ts = ts_fallback
-        try:
-            qsz = int(pyav_q.qsize())
-        except Exception:
-            qsz = 0
+        qsz = int(pyav_q.qsize())
         if qsz >= max(2, int(backlog_trigger) - 1):
+            pyav_q.clear()
             try:
-                if is_pipeline and hasattr(pyav_q, 'clear'):
-                    pyav_q.clear()
-                else:
-                    while pyav_q.qsize() > 0:
-                        _ = pyav_q.get_nowait()
+                presenter.clear(Source.PYAV)
             except Exception:
-                pass
-            presenter.clear(Source.PYAV)
-        try:
-            if is_pipeline:
-                pyav_q.enqueue(payload, ts)
-            else:
-                pyav_q.put_nowait((payload, ts))
-            submitted += 1
-        except Exception:
-            # Drop on failure
-            pass
+                logger.debug("submit_pyav: presenter.clear failed", exc_info=True)
+        pyav_q.enqueue(payload, ts)
+        submitted += 1
     return submitted
