@@ -40,7 +40,11 @@ Offline smoke (no network)
   - `NAPARI_CUDA_SMOKE_W` (default 1280)
   - `NAPARI_CUDA_SMOKE_H` (default 720)
   - `NAPARI_CUDA_SMOKE_FPS` (default 60)
-  - `NAPARI_CUDA_SMOKE_MODE={checker|gradient}` (default `checker`)
+  - `NAPARI_CUDA_SMOKE_MODE={checker|gradient|mip_turntable}` (default `checker`)
+  - Aliases: `mip_turntable` can also be selected via `turntable` or `volume` for convenience.
+  - Turntable controls:
+    - `NAPARI_CUDA_SMOKE_TT_DPS` — degrees per second (default 30; honors `NAPARI_CUDA_TURNTABLE_DPS` too)
+    - `NAPARI_CUDA_SMOKE_TT_ELEV` — elevation angle in degrees (default 30)
 - Latency knobs used during smoke runs:
   - `vt`: `NAPARI_CUDA_CLIENT_VT_LATENCY_MS` (ARRIVAL mode)
   - `pyav`: `NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS` (ARRIVAL mode)

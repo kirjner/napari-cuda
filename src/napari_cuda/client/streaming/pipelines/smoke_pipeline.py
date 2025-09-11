@@ -13,8 +13,10 @@ Assumptions:
 """
 
 import base64
+import ctypes
 import logging
 import os
+import platform
 import struct
 import time
 from dataclasses import dataclass
@@ -27,6 +29,50 @@ from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.codec.avcc import AccessUnit
 
 logger = logging.getLogger(__name__)
+
+# Platform-specific accurate sleep implementation
+_sleep_func = None
+
+def _init_accurate_sleep():
+    """Initialize platform-specific accurate sleep function."""
+    global _sleep_func
+    system = platform.system()
+    
+    if system == 'Darwin':  # macOS
+        try:
+            libc = ctypes.CDLL('libc.dylib')
+            
+            class Timespec(ctypes.Structure):
+                _fields_ = [('tv_sec', ctypes.c_long), ('tv_nsec', ctypes.c_long)]
+            
+            nanosleep = libc.nanosleep
+            nanosleep.argtypes = [ctypes.POINTER(Timespec), ctypes.POINTER(Timespec)]
+            nanosleep.restype = ctypes.c_int
+            
+            def accurate_sleep(seconds: float) -> None:
+                if seconds <= 0:
+                    return
+                ts = Timespec()
+                ts.tv_sec = int(seconds)
+                ts.tv_nsec = int((seconds - ts.tv_sec) * 1e9)
+                nanosleep(ctypes.pointer(ts), None)
+            
+            _sleep_func = accurate_sleep
+            logger.debug("Using nanosleep for accurate timing")
+        except Exception:
+            logger.debug("Failed to setup nanosleep, using time.sleep")
+            _sleep_func = time.sleep
+    else:
+        _sleep_func = time.sleep
+
+_init_accurate_sleep()
+
+def accurate_sleep(seconds: float) -> None:
+    """Sleep with best available accuracy for the platform."""
+    if _sleep_func is not None:
+        _sleep_func(seconds)
+    else:
+        time.sleep(seconds)
 
 
 @dataclass
@@ -162,7 +208,7 @@ class SmokePipeline:
                 self._metrics.observe_ms('napari_cuda_client_smoke_loop_ms', (t1 - t0) * 1000.0)
             sleep = target - (t1 - t0)
             if sleep > 0:
-                time.sleep(sleep)
+                accurate_sleep(sleep)
 
     # --- preencode → replay path ---
     def _run_preencode_replay(self) -> None:
@@ -188,7 +234,7 @@ class SmokePipeline:
             target = 1.0 / max(1.0, fps)
             sleep = target - (time.perf_counter() - t0)
             if sleep > 0:
-                time.sleep(sleep)
+                accurate_sleep(sleep)
             t0 = time.perf_counter()
 
     def _build_cache(self, w: int, h: int, fps: float, n: int) -> None:
