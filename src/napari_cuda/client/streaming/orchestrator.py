@@ -468,6 +468,7 @@ class StreamManager:
                         )
                         # Cache last VT payload for draw-last-frame fallback to avoid flicker
                         self._last_vt_payload = pb
+                        self._last_vt_persistent = True  # vt-source owns persistent PBs (no release_cb)
                         try:
                             QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
                         except Exception:
@@ -481,15 +482,6 @@ class StreamManager:
                     else:
                         next_t = time.perf_counter()
             def _vt_encode_worker() -> None:
-                # Encode RGB patterns with PyAV -> H.264 AUs -> VT live decode
-                try:
-                    import av  # type: ignore
-                except Exception as e:
-                    logger.error("PyAV not available for encode smoke: %s", e)
-                    # Fallback to vt-source
-                    Thread(target=_vt_synthetic_worker, daemon=True).start()
-                    return
-                # Dimensions/FPS
                 try:
                     sw = int(os.getenv('NAPARI_CUDA_VT_SMOKE_W', '1280'))
                 except Exception:
@@ -502,88 +494,23 @@ class StreamManager:
                     fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
                 except Exception:
                     fps = 60.0
-                # Configure encoder (prefer VT encoder; fallback to libx264)
-                def _make_encoder() -> H264Encoder:
-                    for name in ('h264_videotoolbox', 'libx264', 'h264'):
-                        try:
-                            e = H264Encoder(EncoderConfig(name=name, width=sw, height=sh, fps=fps))
-                            e.open()
-                            logger.info('encode-smoke: encoder=%s opened', name)
-                            return e
-                        except Exception:
-                            logger.debug('encode-smoke: failed to open encoder=%s', name, exc_info=True)
-                            continue
-                    raise RuntimeError('No H.264 encoder available')
-
-                enc = _make_encoder()
-                logger.info("VT smoke (encode): %dx%d @ %.1f fps", sw, sh, fps)
-                # ARRIVAL mode; VT as active source (keep configured latency)
-                try:
-                    self._presenter.set_mode(TimestampMode.ARRIVAL)
-                    self._source_mux.set_active(Source.VT)
-                except Exception:
-                    pass
-                # avcC to initialize VT
-                avcc_bytes: bytes | None = None
-                # Frame generator bases
                 smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
-                gen = make_generator(smoke_mode, sw, sh, fps)
-                # Start loop
-                first_packets_logged = 0
-                frame_idx = 0
-                accum = bytearray()
-                extradata_len_logged = -1
-                seen_sps: bytes | None = None
-                seen_pps: bytes | None = None
-                # If VT not initialized yet, we will inspect first packets for SPS/PPS
-                while True:
-                    t = time.perf_counter()
-                    rgb = gen(frame_idx)
-                    # Compute a monotonic PTS based on frame index and nominal FPS
-                    ts_this = float(frame_idx) / float(max(1.0, fps))
-                    try:
-                        au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
-                    except Exception:
-                        logger.debug('encode-smoke: encode failed', exc_info=True)
-                        # Recreate encoder and retry next frame
-                        try:
-                            enc.close()
-                        except Exception:
-                            pass
-                        try:
-                            enc = _make_encoder()
-                        except Exception:
-                            pass
-                        continue
-                    # Initialize VT from encoder's avcC cache
-                    if avcc_bytes is None:
-                        try:
-                            avcc_b = enc.get_avcc_config()
-                            if avcc_b:
-                                avcc_bytes = avcc_b
-                                import base64 as _b64
-                                self._init_vt_from_avcc(_b64.b64encode(avcc_bytes).decode('ascii'), sw, sh)
-                                # Disable gating only after VT init
-                                self._vt_wait_keyframe = False
-                                logger.info('VT smoke (encode): initialized VT from encoder avcC')
-                        except Exception:
-                            logger.debug('encode-smoke: get_avcc_config failed', exc_info=True)
-                    # Submit AU(s) to VT input queue
-                    try:
-                        submitted = submit_vt(au_list, self._vt_in_q, self._presenter, self._vt_backlog_trigger, ts_this)
-                        self._vt_enqueued += int(submitted)
-                        if submitted and first_packets_logged < 3:
-                            logger.info('encode-smoke: submitted AU len=%d ts=%.6f', len(au_list[0].payload), float(au_list[0].pts or ts_this))
-                            first_packets_logged += 1
-                    except Exception:
-                        logger.debug('encode-smoke: submit failed', exc_info=True)
-                    # tick cadence
-                    # Aim for fps
-                    target = 1.0 / max(1.0, fps)
-                    sleep = target - (time.perf_counter() - t)
-                    if sleep > 0:
-                        time.sleep(sleep)
-                    frame_idx += 1
+                from napari_cuda.client.streaming.smoke.runner import run_encode_smoke as _run_encode_smoke
+                _run_encode_smoke(
+                    width=sw,
+                    height=sh,
+                    fps=fps,
+                    smoke_mode=smoke_mode,
+                    presenter=self._presenter,
+                    source_mux=self._source_mux,
+                    vt_in_q=self._vt_in_q,
+                    vt_backlog_trigger=self._vt_backlog_trigger,
+                    vt_latency_s=self._vt_latency_s,
+                    init_vt_from_avcc=lambda avcc_b64, w, h: self._init_vt_from_avcc(avcc_b64, w, h),
+                    after_vt_init=lambda: setattr(self, '_vt_wait_keyframe', False),
+                    on_enqueued=lambda n: setattr(self, '_vt_enqueued', self._vt_enqueued + int(n)),
+                    logger=logger,
+                )
 
             if smoke_source == 'encode':
                 Thread(target=_vt_encode_worker, daemon=True).start()
@@ -591,11 +518,9 @@ class StreamManager:
                 # PyAV decode smoke: encode with H264Encoder and decode via PyAV
                 def _pyav_encode_worker() -> None:
                     try:
-                        # Initialize PyAV decoder locally for smoke mode
                         self._init_decoder()
                     except Exception:
                         logger.debug('pyav-smoke: init decoder failed', exc_info=True)
-                    # Dimensions/FPS
                     try:
                         sw = int(os.getenv('NAPARI_CUDA_VT_SMOKE_W', '1280'))
                     except Exception:
@@ -608,68 +533,21 @@ class StreamManager:
                         fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
                     except Exception:
                         fps = 60.0
-                    # Prefer immediate start with ARRIVAL mode; PyAV as active source
-                    try:
-                        self._presenter.set_mode(TimestampMode.ARRIVAL)
-                        self._presenter.set_latency(self._pyav_latency_s)
-                        self._source_mux.set_active(Source.PYAV)
-                    except Exception:
-                        pass
-                    # Encoder
-                    def _make_encoder() -> H264Encoder:
-                        for name in ('h264_videotoolbox', 'libx264', 'h264'):
-                            try:
-                                e = H264Encoder(EncoderConfig(name=name, width=sw, height=sh, fps=fps))
-                                e.open()
-                                logger.info('pyav-smoke: encoder=%s opened', name)
-                                return e
-                            except Exception:
-                                logger.debug('pyav-smoke: failed to open encoder=%s', name, exc_info=True)
-                                continue
-                        raise RuntimeError('No H.264 encoder available')
-                    enc = _make_encoder()
                     smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
-                    gen = make_generator(smoke_mode, sw, sh, fps)
-                    first_packets_logged = 0
-                    frame_idx = 0
-                    started = False
-                    while True:
-                        t0 = time.perf_counter()
-                        rgb = gen(frame_idx)
-                        ts_this = float(frame_idx) / float(max(1.0, fps))
-                        try:
-                            au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
-                        except Exception:
-                            logger.debug('pyav-smoke: encode failed', exc_info=True)
-                            try:
-                                enc.close()
-                            except Exception:
-                                pass
-                            try:
-                                enc = _make_encoder()
-                            except Exception:
-                                pass
-                            continue
-                        # Gate until first keyframe for decoder stability
-                        for au in au_list:
-                            if not started:
-                                if not au.is_keyframe:
-                                    continue
-                                started = True
-                            try:
-                                submitted = submit_pyav([au], self._pyav_in_q, self._presenter, self._pyav_backlog_trigger, ts_this)
-                                self._pyav_enqueued += int(submitted)
-                                if submitted and first_packets_logged < 3:
-                                    logger.info('pyav-smoke: submitted AU len=%d ts=%.6f', len(au.payload), float(au.pts or ts_this))
-                                    first_packets_logged += 1
-                            except Exception:
-                                logger.debug('pyav-smoke: submit failed', exc_info=True)
-                        # pacing
-                        target = 1.0 / max(1.0, fps)
-                        sleep = target - (time.perf_counter() - t0)
-                        if sleep > 0:
-                            time.sleep(sleep)
-                        frame_idx += 1
+                    from napari_cuda.client.streaming.smoke.runner import run_pyav_smoke as _run_pyav_smoke
+                    _run_pyav_smoke(
+                        width=sw,
+                        height=sh,
+                        fps=fps,
+                        smoke_mode=smoke_mode,
+                        presenter=self._presenter,
+                        source_mux=self._source_mux,
+                        pyav_in_q=self._pyav_in_q,
+                        pyav_backlog_trigger=self._pyav_backlog_trigger,
+                        pyav_latency_s=self._pyav_latency_s,
+                        on_enqueued=lambda n: setattr(self, '_pyav_enqueued', self._pyav_enqueued + int(n)),
+                        logger=logger,
+                    )
                 Thread(target=_pyav_encode_worker, daemon=True).start()
             else:
                 Thread(target=_vt_synthetic_worker, daemon=True).start()
