@@ -14,8 +14,8 @@ __all__ = [
     "state",
     "decoders",
     "renderer",
-    "orchestrator",
+    "coordinator",
 ]
 
 # Friendly re-export for cleaner imports
-from .orchestrator import StreamManager  # noqa: E402,F401
+from .coordinator import StreamCoordinator  # noqa: E402,F401

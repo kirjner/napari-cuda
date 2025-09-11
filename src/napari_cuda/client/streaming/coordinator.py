@@ -40,7 +40,7 @@ from napari_cuda.client.streaming.config import extract_video_config
 logger = logging.getLogger(__name__)
 
 
-class StreamManager:
+class StreamCoordinator:
     """Orchestrates receiver, state, decoders, presenter, and renderer.
 
     This is a slim re-hosting of the logic previously embedded in
@@ -223,7 +223,7 @@ class StreamManager:
 
         # Receiver thread or smoke mode
         if self._vt_smoke:
-            logger.info("StreamManager in smoke test mode (offline)")
+            logger.info("StreamCoordinator in smoke test mode (offline)")
             # Ensure PyAV decoder is ready if targeting pyav
             smoke_source = (os.getenv('NAPARI_CUDA_SMOKE_SOURCE') or 'vt').lower()
             if smoke_source == 'pyav':
@@ -691,4 +691,4 @@ class StreamManager:
         nsz = int(self._nal_length_size or 4)
         return contains_idr_avcc(payload, nal_len_size=nsz, hevc=hevc)
 
-# No alias export; prefer StreamManager
+# Coordinator end

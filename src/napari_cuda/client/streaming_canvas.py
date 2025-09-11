@@ -24,7 +24,7 @@ vispy_logger.setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
-# No direct networking or shader setup here; StreamManager + GLRenderer own these
+# No direct networking or shader setup here; StreamCoordinator + GLRenderer own these
 
 
 from napari_cuda.utils.env import env_bool, env_int, env_float
@@ -165,7 +165,7 @@ class StreamingCanvas(VispyCanvas):
         self._vt_backlog_trigger = env_int(
             'NAPARI_CUDA_CLIENT_VT_BACKLOG_TRIGGER', 16
         )
-        # Workers are managed by StreamManager when enabled
+        # Workers are managed by StreamCoordinator when enabled
 
         # Expected bitstream format from server ('avcc' or 'annexb'); default to AVCC
         self._stream_format = 'avcc'
@@ -179,14 +179,14 @@ class StreamingCanvas(VispyCanvas):
         self._pyav_backlog_trigger = env_int(
             'NAPARI_CUDA_CLIENT_PYAV_BACKLOG_TRIGGER', 16
         )
-        # PyAV worker is managed by StreamManager when enabled
+        # PyAV worker is managed by StreamCoordinator when enabled
 
-        # Orchestrate with StreamManager (it handles vt_smoke internally)
+        # Orchestrate with StreamCoordinator (it handles vt_smoke internally)
         self._use_manager = True
         if self._use_manager:
-            from napari_cuda.client.streaming import StreamManager
+            from napari_cuda.client.streaming import StreamCoordinator
 
-            self._manager = StreamManager(
+            self._manager = StreamCoordinator(
                 scene_canvas=self._scene_canvas,
                 server_host=self.server_host,
                 server_port=self.server_port,
@@ -254,7 +254,7 @@ class StreamingCanvas(VispyCanvas):
         else:
             self._vt_stats_level = None
 
-    # No state-channel helpers here; StreamManager owns StateChannel
+    # No state-channel helpers here; StreamCoordinator owns StateChannel
 
     def _init_vt_from_avcc(
         self, avcc_b64: str, width: int, height: int
@@ -294,19 +294,19 @@ class StreamingCanvas(VispyCanvas):
         except Exception as e:
             logger.exception('VT live init failed: %s', e)
 
-    # Legacy VT smoke worker removed; StreamManager owns smoke modes now
+    # Legacy VT smoke worker removed; StreamCoordinator owns smoke modes now
 
     def _stream_worker(self):
         """Background thread to receive and decode video stream via PixelReceiver."""
-        # No direct stream worker here; StreamManager owns the receiver
+        # No direct stream worker here; StreamCoordinator owns the receiver
 
-    # No local decoder init; StreamManager owns decoders
+    # No local decoder init; StreamCoordinator owns decoders
 
-    # No local AnnexB→AVCC conversion; handled in StreamManager/decoders
+    # No local AnnexB→AVCC conversion; handled in StreamCoordinator/decoders
 
-    # No local VT live decoding; handled in StreamManager
+    # No local VT live decoding; handled in StreamCoordinator
 
-    # No local VT pixel buffer mapping here; handled in StreamManager/smoke
+    # No local VT pixel buffer mapping here; handled in StreamCoordinator/smoke
 
     def _decoded_to_queue(self, frame: np.ndarray) -> None:
         """Enqueue a decoded RGB frame with latest-wins behavior."""
@@ -316,12 +316,12 @@ class StreamingCanvas(VispyCanvas):
         self.frame_queue.put(frame)
 
     def _draw_video_frame(self, event):
-        """Draw via StreamManager when enabled; else legacy path for VT smoke."""
+        """Draw via StreamCoordinator when enabled; else legacy path for VT smoke."""
         if getattr(self, '_use_manager', False):
             try:
                 self._manager.draw()
             except Exception:
-                logger.exception('StreamManager draw failed')
+                logger.exception('StreamCoordinator draw failed')
             return
         # Fallback to legacy smoke path
         try:
