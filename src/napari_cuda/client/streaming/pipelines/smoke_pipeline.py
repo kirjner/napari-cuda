@@ -27,6 +27,8 @@ from napari_cuda.client.streaming.types import Source, TimestampMode
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.codec.avcc import AccessUnit
+from .jitter_channel import JitterChannel, JitterConfig, from_env as jitter_from_env
+from .jitter_presets import apply_preset as apply_jitter_preset
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +124,20 @@ class SmokePipeline:
         self._submitted = 0
         self._dropped = 0
         self._cache_count: int = 0
+        # Jitter simulation
+        self._jitter: Optional[JitterChannel] = None
+        self._jitter_enabled: bool = False
 
     def start(self) -> None:
         # Configure presenter and active source
-        self.presenter.set_mode(TimestampMode.ARRIVAL)
+        try:
+            ts_env = (os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or '').lower()
+            if ts_env == 'server':
+                self.presenter.set_mode(TimestampMode.SERVER)
+            else:
+                self.presenter.set_mode(TimestampMode.ARRIVAL)
+        except Exception:
+            logger.debug('smoke: set presenter ts mode failed', exc_info=True)
         tgt = (self.cfg.target or 'vt').lower()
         if tgt == 'pyav':
             if self.cfg.pyav_latency_s is not None:
@@ -135,6 +147,25 @@ class SmokePipeline:
             if self.cfg.vt_latency_s is not None:
                 self.presenter.set_latency(float(self.cfg.vt_latency_s))
             self.source_mux.set_active(Source.VT)
+
+        # Optional jitter simulation
+        try:
+            # Allow a simple preset via env for non-launcher entrypoints
+            preset = (os.getenv('NAPARI_CUDA_JIT_PRESET') or '').strip()
+            if preset:
+                try:
+                    keys = apply_jitter_preset(preset)
+                    if keys:
+                        logger.info('smoke: applied jitter preset=%s (set %d vars)', preset, len(keys))
+                except Exception:
+                    logger.debug('smoke: apply jitter preset failed', exc_info=True)
+            jcfg = jitter_from_env()
+        except Exception:
+            jcfg = JitterConfig(enable=False)
+        if jcfg.enable:
+            self._jitter = JitterChannel(self.pipeline, metrics=self._metrics, config=jcfg)
+            self._jitter.start()
+            self._jitter_enabled = True
 
         if self.cfg.preencode:
             self._thread = Thread(target=self._run_preencode_replay, daemon=True)
@@ -194,7 +225,7 @@ class SmokePipeline:
                         continue
                     started = True
                 tq0 = time.perf_counter()
-                self._enqueue_target(au.payload, au.pts)
+                self._enqueue_target(au.payload, au.pts, bool(au.is_keyframe))
                 tq1 = time.perf_counter()
                 if self._metrics is not None:
                     self._metrics.observe_ms('napari_cuda_client_smoke_enqueue_ms', (tq1 - tq0) * 1000.0)
@@ -228,7 +259,7 @@ class SmokePipeline:
                 idx = self._wrap_index(i)
                 payload, pts, is_key = self._fetch_cached(idx)
             ts_this = float(idx) / max(1.0, fps)
-            self._enqueue_target(payload, pts if pts is not None else ts_this)
+            self._enqueue_target(payload, pts if pts is not None else ts_this, bool(is_key))
             i += 1
             # pacing
             target = 1.0 / max(1.0, fps)
@@ -402,6 +433,13 @@ class SmokePipeline:
                 elif name == "h264_videotoolbox":
                     # Realtime mode to reduce latency/CPU on macOS
                     opts = {'realtime': '1'}
+                    # Encourage all-intra when jitter is enabled to avoid P-frame
+                    # reference loss artifacts. Can be overridden by env.
+                    all_intra_env = os.getenv('NAPARI_CUDA_SMOKE_ALLINTRA')
+                    all_intra = (all_intra_env.lower() in ('1','true','yes') if all_intra_env is not None else self._jitter_enabled)
+                    if all_intra:
+                        # Common ffmpeg options understood by many H.264 encoders
+                        opts.update({'g': '1', 'bf': '0', 'max_key_interval': '1'})
                 e = H264Encoder(EncoderConfig(name=name, width=w, height=h, fps=fps, options=opts))
                 e.open()
                 logger.info("smoke: encoder=%s opened (w=%d h=%d fps=%.1f)", name, w, h, fps)
@@ -412,29 +450,48 @@ class SmokePipeline:
                 continue
         raise RuntimeError(f"No H.264 encoder available: {last_err}")
 
-    def _enqueue_target(self, payload: bytes, ts: Optional[float]) -> None:
+    def _enqueue_target(self, payload: bytes, ts: Optional[float], is_key: bool) -> None:
         tgt = (self.cfg.target or 'vt').lower()
         pl = self.pipeline
         qsz = int(pl.qsize())
         if self._metrics is not None:
             self._metrics.set('napari_cuda_client_smoke_qdepth', float(qsz))
-        if qsz >= max(2, int(self.cfg.backlog_trigger) - 1):
-            pl.clear()
-            self.presenter.clear(Source.PYAV if tgt == 'pyav' else Source.VT)
+        # Backpressure gate only considers the real consumer queue (downstream
+        # decoder/renderer). The jitter queue is part of the network simulation
+        # and is already bounded with tail drop; we don't clear or gate on it.
+        backlog_trig = max(2, int(self.cfg.backlog_trigger))
+        if qsz >= backlog_trig - 1:
+            try:
+                pl.clear()
+            except Exception:
+                logger.debug('smoke: downstream clear failed', exc_info=True)
+            try:
+                self.presenter.clear(Source.PYAV if tgt == 'pyav' else Source.VT)
+            except Exception:
+                logger.debug('smoke: presenter clear failed', exc_info=True)
             self._dropped += 1
             if self._metrics is not None:
                 self._metrics.inc('napari_cuda_client_smoke_dropped', 1.0)
-        if payload:
-            pl.enqueue(payload, ts)
-            self._submitted += 1
-            if self._metrics is not None:
-                self._metrics.inc('napari_cuda_client_smoke_submitted', 1.0)
-        else:
+            return
+        if not payload:
             logger.debug('smoke: skipped empty AU payload')
+            return
+        # Route via jitter when enabled
+        if self._jitter is not None:
+            try:
+                self._jitter.submit(payload, float(ts or 0.0), bool(is_key))
+            except Exception:
+                logger.debug('smoke: jitter submit failed; falling back to direct enqueue', exc_info=True)
+                pl.enqueue(payload, ts)
+        else:
+            pl.enqueue(payload, ts)
+        self._submitted += 1
+        if self._metrics is not None:
+            self._metrics.inc('napari_cuda_client_smoke_submitted', 1.0)
 
     # Introspection
     def stats(self) -> dict:
-        return {
+        s = {
             'submitted': int(self._submitted),
             'dropped': int(self._dropped),
             'target': self.cfg.target,
@@ -442,3 +499,6 @@ class SmokePipeline:
             'cache': 'disk' if self._use_disk else 'mem',
             'count': int(self._cache_count),
         }
+        if self._jitter is not None:
+            s['jitter'] = {'enabled': True, 'q': int(self._jitter.qsize())}
+        return s

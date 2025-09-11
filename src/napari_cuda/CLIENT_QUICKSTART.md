@@ -26,6 +26,7 @@ Environment knobs (client)
 - Display timer:
   - `NAPARI_CUDA_CLIENT_DISPLAY_FPS` — paint cadence (default 60)
   - `NAPARI_CUDA_CLIENT_VISPY_TIMER=1` — use vispy.Timer instead of Qt QTimer
+  - `NAPARI_CUDA_CLIENT_VT_BUFFER` — presenter buffer size in frames. If unset, the client derives a default of `ceil(latency_s*60)+2` to avoid trimming not‑yet‑due frames in SERVER mode.
 
 Notes
 - VT backend expects AVCC from the server; the server sends AVCC and announces it via the state channel.
@@ -55,6 +56,57 @@ Offline smoke (no network)
   - One‑time info logs for smoke start, VT init, and first zero‑copy draw.
   - Presenter stats with `NAPARI_CUDA_VT_STATS=info|debug` (1 Hz).
   - First few AU submissions log AU length and timestamp for visibility.
+
+Jittered smoke (network simulation)
+- Enable: `NAPARI_CUDA_JIT_ENABLE=1`
+- Timing model:
+  - `NAPARI_CUDA_JIT_BASE_MS` — base latency added to each AU (default 0)
+  - `NAPARI_CUDA_JIT_MODE={uniform|normal|pareto}` (default `uniform`)
+  - `NAPARI_CUDA_JIT_JITTER_MS` — ±half‑range (uniform) or sigma (normal) (default 20)
+  - Pareto heavy tail: `NAPARI_CUDA_JIT_PARETO_ALPHA` (default 2.5), `NAPARI_CUDA_JIT_PARETO_SCALE` (ms, default 5)
+  - Bursts: `NAPARI_CUDA_JIT_BURST_P` (default 0.03) and `NAPARI_CUDA_JIT_BURST_MS` or `BURST_MIN_MS`/`BURST_MAX_MS`
+- Loss/reorder/duplication:
+  - `NAPARI_CUDA_JIT_LOSS_P` (default 0.0; TCP/WebSocket are reliable)
+  - `NAPARI_CUDA_JIT_REORDER_P` (default 0.0; TCP preserves order), `NAPARI_CUDA_JIT_REORDER_ADV_MS` (default 5)
+  - `NAPARI_CUDA_JIT_DUP_P` (default 0.0), `NAPARI_CUDA_JIT_DUP_MS` (default 10)
+- Bandwidth cap:
+  - `NAPARI_CUDA_JIT_BW_KBPS` (default 0=disabled), `NAPARI_CUDA_JIT_BURST_BYTES` (default 32768)
+- PTS policy:
+  - `NAPARI_CUDA_JIT_AFFECT_PTS` — also delays PTS (default 0); leave off to test ARRIVAL mode buffering
+  - `NAPARI_CUDA_JIT_TS_SOURCE={encode|send}` — when `send`, stamp PTS at submit time (server-like). Optional `NAPARI_CUDA_JIT_TS_BIAS_MS` shifts PTS by a constant.
+- Other:
+  - `NAPARI_CUDA_JIT_QUEUE_CAP` (default 512), `NAPARI_CUDA_JIT_SEED` (default 1234)
+- Example scenarios:
+  - Mild Wi‑Fi: `NAPARI_CUDA_JIT_ENABLE=1 NAPARI_CUDA_JIT_BASE_MS=10 NAPARI_CUDA_JIT_JITTER_MS=15 NAPARI_CUDA_JIT_LOSS_P=0.005 NAPARI_CUDA_JIT_REORDER_P=0.01`
+  - Heavy tail: `NAPARI_CUDA_JIT_ENABLE=1 NAPARI_CUDA_JIT_MODE=pareto NAPARI_CUDA_JIT_PARETO_ALPHA=2 NAPARI_CUDA_JIT_PARETO_SCALE=8 NAPARI_CUDA_JIT_BURST_P=0.03 NAPARI_CUDA_JIT_BURST_MS=100`
+  - Bandwidth cap: `NAPARI_CUDA_JIT_ENABLE=1 NAPARI_CUDA_JIT_BW_KBPS=4000 NAPARI_CUDA_JIT_BURST_BYTES=65536`
+
+Jitter presets (quick setup)
+- CLI flags (launcher):
+  - `--jitter` → applies `mild` preset (envs you set explicitly still override)
+  - `--jitter-preset {off,mild,heavy,cap4mbps,wifi30}` → selects a preset
+- Env fallback (without launcher flags):
+  - `NAPARI_CUDA_JIT_PRESET={off|mild|heavy|cap4mbps|wifi30}` — applied on smoke start
+- Override behavior:
+  - Any explicit env you set wins over the preset (presets use setdefault)
+- Examples:
+  - `uv run napari-cuda-client --smoke --jitter` (mild jitter)
+  - `NAPARI_CUDA_JIT_JITTER_MS=25 uv run napari-cuda-client --smoke --jitter` (override jitter amplitude)
+  - `NAPARI_CUDA_JIT_PRESET=cap4mbps uv run napari-cuda-client --smoke`
+
+Server timestamp mode (optional)
+- Switch presenter to server timestamps:
+  - `NAPARI_CUDA_CLIENT_VT_TS_MODE=server`
+- Combine with server-like PTS stamping in jitter:
+  - `NAPARI_CUDA_JIT_TS_SOURCE=send` (use submit time as PTS)
+  - Optionally set `NAPARI_CUDA_SERVER_TS_BIAS_MS=0` to remove client bias
+
+All‑intra for robustness
+- When jitter is enabled, the smoke encoder prefers all‑intra GOPs to avoid reference loss artifacts:
+  - For `libx264`, we already set `keyint=1:min-keyint=1:bf=0`.
+  - For `h264_videotoolbox`, we set `g=1`, `bf=0`, `max_key_interval=1` when jitter is on.
+- Override:
+  - Set `NAPARI_CUDA_SMOKE_ALLINTRA=0` to allow P‑frames (expect artifacts if frames are dropped before the next keyframe).
 
 Troubleshooting
 - No picture after connect: wait for first keyframe; client auto‑requests one and logs on receipt.

@@ -215,6 +215,30 @@ def main():
         default=None,
         help='Client metrics dump interval in seconds (CSV), default 1.0'
     )
+    # Latency controls
+    parser.add_argument(
+        '--latency-ms',
+        type=float,
+        default=None,
+        help='Target VT latency (ms) for ARRIVAL mode (sets NAPARI_CUDA_CLIENT_VT_LATENCY_MS)'
+    )
+    parser.add_argument(
+        '--pyav-latency-ms',
+        type=float,
+        default=None,
+        help='Target PyAV latency (ms) used when falling back to CPU decode (sets NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS)'
+    )
+    # Jitter presets
+    parser.add_argument(
+        '--jitter',
+        action='store_true',
+        help='Enable jitter with a mild default preset (overridden by explicit envs)'
+    )
+    parser.add_argument(
+        '--jitter-preset',
+        default=None,
+        help='Jitter preset name (off,mild,heavy,cap4mbps,wifi30). Explicit envs override preset.'
+    )
     
     # For SSH tunnel setup hint
     parser.add_argument(
@@ -251,6 +275,31 @@ def main():
         os.environ['NAPARI_CUDA_CLIENT_METRICS_OUT'] = str(args.metrics_out)
     if args.metrics_interval is not None:
         os.environ['NAPARI_CUDA_CLIENT_METRICS_INTERVAL'] = str(float(args.metrics_interval))
+    # Latency envs (CLI wins over existing)
+    if args.latency_ms is not None:
+        os.environ['NAPARI_CUDA_CLIENT_VT_LATENCY_MS'] = str(float(args.latency_ms))
+    if args.pyav_latency_ms is not None:
+        os.environ['NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS'] = str(float(args.pyav_latency_ms))
+
+    # Apply jitter presets (user envs win)
+    try:
+        if args.jitter and not args.jitter_preset:
+            os.environ.setdefault('NAPARI_CUDA_JIT_PRESET', 'mild')
+        if args.jitter_preset:
+            # Set a marker env so downstream components can apply if launched differently
+            os.environ['NAPARI_CUDA_JIT_PRESET'] = str(args.jitter_preset)
+        # Apply now in this process for consistency
+        from .streaming.pipelines.jitter_presets import apply_preset as _apply_jit
+        preset_name = os.getenv('NAPARI_CUDA_JIT_PRESET')
+        if preset_name:
+            try:
+                applied = _apply_jit(preset_name)
+                if applied:
+                    logger.info("launcher: applied jitter preset='%s' (set %d vars; existing envs preserved)", preset_name, len(applied))
+            except Exception:
+                logger.exception("launcher: failed to apply jitter preset '%s'", preset_name)
+    except Exception:
+        logger.exception('launcher: jitter preset handling failed')
 
     # Launch client
     smoke = bool(args.smoke)

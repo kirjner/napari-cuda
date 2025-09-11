@@ -118,7 +118,19 @@ class StreamingCanvas(VispyCanvas):
         self._vt_latency_s = max(
             0.0, env_float('NAPARI_CUDA_CLIENT_VT_LATENCY_MS', 0.0) / 1000.0
         )
-        self._vt_buffer_limit = env_int('NAPARI_CUDA_CLIENT_VT_BUFFER', 3)
+        # If not explicitly set, derive a sane default from latency and a 60 Hz
+        # output cadence: roughly ceil(latency * 60) + 2 frames. This avoids
+        # trimming not-yet-due frames in SERVER mode with higher latency.
+        try:
+            buf_env = os.getenv('NAPARI_CUDA_CLIENT_VT_BUFFER')
+            if buf_env is None or buf_env.strip() == '':
+                import math
+                derived = max(3, int(math.ceil(self._vt_latency_s * 60.0)) + 2)
+                self._vt_buffer_limit = derived
+            else:
+                self._vt_buffer_limit = max(1, int(buf_env))
+        except Exception:
+            self._vt_buffer_limit = 3
         # Higher latency when falling back to PyAV (smoother on CPU decode)
         self._pyav_latency_s = max(
             0.0,

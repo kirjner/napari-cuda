@@ -165,14 +165,10 @@ class FixedLatencyPresenter:
                 if last_due is not None:
                     sel = last_due
                     self._out_count[active] += 1
-                elif items and (items[0].due_ts - n) > self._preview_guard_s:
-                    # Preview the latest frame without consuming it to avoid strobing.
-                    # Keep only the most recent candidate, but do not pop it here.
-                    while len(items) > 1:
-                        to_release.append(items.popleft())
-                    sel = items[-1]
-                    is_preview = True
                 else:
+                    # In SERVER mode, avoid previewing future frames to prevent
+                    # out-of-order visual churn. Let the renderer keep the last
+                    # displayed frame until a frame becomes due.
                     sel = None
         # Release outside the lock
         if to_release:

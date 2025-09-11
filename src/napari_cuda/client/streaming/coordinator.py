@@ -357,6 +357,18 @@ class StreamCoordinator:
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
+        # If we're in SERVER timestamp mode and haven't learned an offset yet
+        # (common in offline smoke), derive one from recent buffer samples to
+        # avoid falling back to arrival semantics with a large latency.
+        try:
+            if self._presenter.clock.mode == TimestampMode.SERVER:
+                off = getattr(self._presenter.clock, 'offset', None)
+                if off is None:
+                    learned = self._presenter.relearn_offset(Source.VT)
+                    if learned is not None:
+                        logger.info("Presenter offset learned from buffer: %.3fs", float(learned))
+        except Exception:
+            logger.debug("draw: offset learn attempt failed", exc_info=True)
 
         ready = self._presenter.pop_due(time.time(), self._source_mux.active)
         if ready is not None:
