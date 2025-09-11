@@ -36,14 +36,7 @@ class VTLiveDecoder:
         return item
 
     def counts(self) -> tuple[int, int, int]:
-        try:
-            return self._shim.counts()
-        except Exception:
-            logger.debug("VT shim counts failed", exc_info=True)
-            return (0, 0, -1)
+        return self._shim.counts()
 
     def flush(self) -> None:
-        try:
-            self._shim.flush()
-        except Exception:
-            logger.debug("VT shim flush failed", exc_info=True)
+        self._shim.flush()
