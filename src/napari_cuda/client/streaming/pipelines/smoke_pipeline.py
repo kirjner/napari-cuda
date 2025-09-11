@@ -55,12 +55,14 @@ class SmokePipeline:
         source_mux: object,
         pipeline: object,
         init_vt_from_avcc: Optional[callable] = None,
+        metrics: Optional[object] = None,
     ) -> None:
         self.cfg = config
         self.presenter = presenter
         self.source_mux = source_mux
         self.pipeline = pipeline
         self._init_vt_from_avcc = init_vt_from_avcc
+        self._metrics = metrics  # ClientMetrics-like (optional)
         self._stop = Event()
         self._thread: Optional[Thread] = None
         self._cache: List[AccessUnit] = []
@@ -113,7 +115,9 @@ class SmokePipeline:
             ts_this = float(idx) / max(1.0, fps)
             rgb = gen(idx)
             try:
+                t_e0 = time.perf_counter()
                 aus = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
+                t_e1 = time.perf_counter()
             except Exception:
                 logger.debug('smoke: encode failed; reopening encoder', exc_info=True)
                 try:
@@ -122,6 +126,8 @@ class SmokePipeline:
                     logger.debug('smoke: encoder close failed', exc_info=True)
                 enc = self._open_encoder(w, h, fps)
                 continue
+            if self._metrics is not None:
+                self._metrics.observe_ms('napari_cuda_client_smoke_encode_ms', (t_e1 - t_e0) * 1000.0)
             # For VT target, initialize from avcC once
             if self.cfg.target == 'vt' and self._init_vt_from_avcc is not None:
                 try:
@@ -141,13 +147,20 @@ class SmokePipeline:
                     if not au.is_keyframe:
                         continue
                     started = True
+                tq0 = time.perf_counter()
                 self._enqueue_target(au.payload, au.pts)
+                tq1 = time.perf_counter()
+                if self._metrics is not None:
+                    self._metrics.observe_ms('napari_cuda_client_smoke_enqueue_ms', (tq1 - tq0) * 1000.0)
                 if first_log < 3:
                     logger.info('smoke: submitted AU len=%d ts=%.6f', len(au.payload), float(au.pts or ts_this))
                     first_log += 1
             # pacing
             target = 1.0 / max(1.0, fps)
-            sleep = target - (time.perf_counter() - t0)
+            t1 = time.perf_counter()
+            if self._metrics is not None:
+                self._metrics.observe_ms('napari_cuda_client_smoke_loop_ms', (t1 - t0) * 1000.0)
+            sleep = target - (t1 - t0)
             if sleep > 0:
                 time.sleep(sleep)
 
@@ -262,6 +275,10 @@ class SmokePipeline:
         self._cache_ready.set()
         dt = (time.perf_counter() - t_start) * 1000.0
         logger.info('smoke: preencoded %d frames in %.1f ms (avg %.2f ms/frame) (cache=%s)', self._cache_count, dt, dt / max(1, self._cache_count), 'disk' if self._use_disk else 'mem')
+        if self._metrics is not None:
+            self._metrics.observe_ms('napari_cuda_client_smoke_preencode_build_ms', dt)
+            self._metrics.set('napari_cuda_client_smoke_cache_disk', 1.0 if self._use_disk else 0.0)
+            self._metrics.set('napari_cuda_client_smoke_cache_frames', float(self._cache_count))
 
     def _write_record(self, fh, offset: int, payload: bytes, pts: float, is_key: bool) -> int:
         try:
@@ -353,13 +370,19 @@ class SmokePipeline:
         tgt = (self.cfg.target or 'vt').lower()
         pl = self.pipeline
         qsz = int(pl.qsize())
+        if self._metrics is not None:
+            self._metrics.set('napari_cuda_client_smoke_qdepth', float(qsz))
         if qsz >= max(2, int(self.cfg.backlog_trigger) - 1):
             pl.clear()
             self.presenter.clear(Source.PYAV if tgt == 'pyav' else Source.VT)
             self._dropped += 1
+            if self._metrics is not None:
+                self._metrics.inc('napari_cuda_client_smoke_dropped', 1.0)
         if payload:
             pl.enqueue(payload, ts)
             self._submitted += 1
+            if self._metrics is not None:
+                self._metrics.inc('napari_cuda_client_smoke_submitted', 1.0)
         else:
             logger.debug('smoke: skipped empty AU payload')
 

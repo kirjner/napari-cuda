@@ -417,9 +417,40 @@ class StreamingCanvas(VispyCanvas):
         # Presenter queue depths by source (buf sizes)
         buf = stats.get('buf', {})
         buf_vt = int(buf.get('vt', 0)); buf_py = int(buf.get('pyav', 0))
+        # Pipelines qsize (ingress)
+        try:
+            q_vt = getattr(mgr, '_vt_pipeline', None).qsize() if hasattr(getattr(mgr, '_vt_pipeline', None), 'qsize') else 0
+        except Exception:
+            logger.debug('FPS HUD: vt qsize failed', exc_info=True)
+            q_vt = 0
+        try:
+            q_py = getattr(mgr, '_pyav_pipeline', None).qsize() if hasattr(getattr(mgr, '_pyav_pipeline', None), 'qsize') else 0
+        except Exception:
+            logger.debug('FPS HUD: pyav qsize failed', exc_info=True)
+            q_py = 0
+        # Selected client-side timing means (if metrics enabled)
+        dec_py_ms = None
+        vt_submit_ms = None
+        try:
+            metrics = getattr(mgr, '_metrics', None)
+            if metrics is not None and hasattr(metrics, 'snapshot'):
+                snap = metrics.snapshot()
+                h = snap.get('histograms', {}) or {}
+                dec_py_ms = (h.get('napari_cuda_client_pyav_decode_ms') or {}).get('mean_ms')
+                vt_submit_ms = (h.get('napari_cuda_client_vt_submit_ms') or {}).get('mean_ms')
+        except Exception:
+            logger.debug('FPS HUD: metrics snapshot failed', exc_info=True)
         txt = (
             f"{active_str} out:{out_fps:.1f} fps  mode:{mode}  latency:{lat_ms} ms  "
-            f"buf[vt:{buf_vt} py:{buf_py}]"
+            f"buf[vt:{buf_vt} py:{buf_py}]  q[vt:{q_vt} py:{q_py}]"
         )
+        # Append decode/submit timings if available
+        extra = []
+        if isinstance(dec_py_ms, (int, float)):
+            extra.append(f"dec.py:{dec_py_ms:.2f}ms")
+        if isinstance(vt_submit_ms, (int, float)):
+            extra.append(f"vt.sub:{vt_submit_ms:.2f}ms")
+        if extra:
+            txt = txt + "\n" + "  ".join(extra)
         self._fps_label.setText(txt)
         self._fps_label.adjustSize()

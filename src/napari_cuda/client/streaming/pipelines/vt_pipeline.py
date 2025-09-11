@@ -33,6 +33,7 @@ class VTPipeline:
         on_backlog_gate: Callable[[], None] | None = None,
         request_keyframe: Callable[[], None] | None = None,
         on_cache_last: Callable[[object, bool], None] | None = None,
+        metrics: object | None = None,
     ) -> None:
         self._presenter = presenter
         self._source_mux = source_mux
@@ -44,6 +45,7 @@ class VTPipeline:
         self._errors = 0
         self._enqueued = 0
         self._nal_length_size = 4
+        self._metrics = metrics
         # Coordination hooks
         self._is_gated = is_gated or (lambda: False)
         self._on_backlog_gate = on_backlog_gate or (lambda: None)
@@ -126,9 +128,14 @@ class VTPipeline:
 
     def enqueue(self, b: bytes, ts: Optional[float]) -> None:
         try:
-            if self.qsize() >= max(2, self._backlog_trigger - 1):
+            qd = self.qsize()
+            if self._metrics is not None:
+                self._metrics.set('napari_cuda_client_vt_qdepth', float(qd))
+            if qd >= max(2, self._backlog_trigger - 1):
                 # Gate and request resync on next keyframe
                 self._on_backlog_gate()
+                if self._metrics is not None:
+                    self._metrics.inc('napari_cuda_client_vt_backlog_gates', 1.0)
                 self.clear()
                 self._presenter.clear(Source.VT)
                 self._request_keyframe()
@@ -138,6 +145,8 @@ class VTPipeline:
         except queue.Full:
             # If enqueuing fails, gate and request keyframe
             self._on_backlog_gate()
+            if self._metrics is not None:
+                self._metrics.inc('napari_cuda_client_vt_backlog_gates', 1.0)
             self._request_keyframe()
 
     def qsize(self) -> int:
@@ -173,6 +182,7 @@ class VTPipeline:
         try:
             if not data or self._decoder is None:
                 return
+            t0 = time.perf_counter()
             target_len = int(self._nal_length_size or 4)
             if is_annexb(data):
                 avcc_au = annexb_to_avcc(data, out_len=target_len)
@@ -194,6 +204,8 @@ class VTPipeline:
                 self._errors += 1
                 if self._errors <= 3 or (self._errors % 50 == 0):
                     logger.warning("VTPipeline: VT decode submit failed (errors=%d)", self._errors)
+                if self._metrics is not None:
+                    self._metrics.inc('napari_cuda_client_vt_decode_errors', 1.0)
                 return
             self._errors = 0
             # Flush early on first few enqueues to reduce startup latency
@@ -202,6 +214,9 @@ class VTPipeline:
                     self._decoder.flush()
             except Exception:
                 logger.debug("VTPipeline: flush failed", exc_info=True)
+            t1 = time.perf_counter()
+            if self._metrics is not None:
+                self._metrics.observe_ms('napari_cuda_client_vt_submit_ms', (t1 - t0) * 1000.0)
         except Exception as e:
             self._errors += 1
             logger.exception("VTPipeline: decode/map failed (%d): %s", self._errors, e)

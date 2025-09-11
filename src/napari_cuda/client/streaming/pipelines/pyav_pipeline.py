@@ -32,6 +32,7 @@ class PyAVPipeline:
     scene_canvas: object
     backlog_trigger: int = 16
     latency_s: float = 0.08
+    metrics: object | None = None  # ClientMetrics-like (optional)
 
     def __post_init__(self) -> None:
         self._in_q: "queue.Queue[tuple[bytes, float|None]]" = queue.Queue(maxsize=64)
@@ -55,9 +56,13 @@ class PyAVPipeline:
                     continue
                 arr = None
                 try:
+                    t0 = time.perf_counter()
                     dec = self._decoder
                     if dec is not None:
                         arr = dec(b)
+                    t1 = time.perf_counter()
+                    if self.metrics is not None:
+                        self.metrics.observe_ms('napari_cuda_client_pyav_decode_ms', (t1 - t0) * 1000.0)
                 except Exception:
                     logger.debug("PyAVPipeline: decode failed", exc_info=True)
                     arr = None
@@ -87,6 +92,8 @@ class PyAVPipeline:
         try:
             self._in_q.put_nowait((b, ts))
             self._enqueued += 1
+            if self.metrics is not None:
+                self.metrics.set('napari_cuda_client_pyav_qdepth', float(self._in_q.qsize()))
         except Exception:
             # Queue full; drop oldest by non-blocking drain, then retry once
             logger.debug("PyAVPipeline: enqueue failed; attempting drop-oldest and retry", exc_info=True)
@@ -97,6 +104,9 @@ class PyAVPipeline:
             try:
                 self._in_q.put_nowait((b, ts))
                 self._enqueued += 1
+                if self.metrics is not None:
+                    self.metrics.inc('napari_cuda_client_pyav_dropped', 1.0)
+                    self.metrics.set('napari_cuda_client_pyav_qdepth', float(self._in_q.qsize()))
             except Exception:
                 logger.warning("PyAVPipeline: queue full; dropped frame")
 

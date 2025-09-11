@@ -21,6 +21,7 @@ from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
 from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
 from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
 from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
+from napari_cuda.client.streaming.metrics import ClientMetrics
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -126,6 +127,13 @@ class StreamManager:
                 self._last_vt_persistent = bool(persistent)
             except Exception:
                 logger.debug("cache last VT payload callback failed", exc_info=True)
+        # Client metrics (optional, env-controlled)
+        try:
+            metrics_enabled = (os.getenv('NAPARI_CUDA_CLIENT_METRICS', '0') or '0').lower() in ('1', 'true', 'yes')
+        except Exception:
+            metrics_enabled = False
+        self._metrics = ClientMetrics(enabled=metrics_enabled)
+
         self._vt_pipeline = VTPipeline(
             presenter=self._presenter,
             source_mux=self._source_mux,
@@ -135,6 +143,7 @@ class StreamManager:
             on_backlog_gate=_on_vt_backlog_gate,
             request_keyframe=_req_keyframe,
             on_cache_last=_on_cache_last,
+            metrics=self._metrics,
         )
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
         self._pyav_enqueued = 0
@@ -145,6 +154,7 @@ class StreamManager:
             scene_canvas=self._scene_canvas,
             backlog_trigger=self._pyav_backlog_trigger,
             latency_s=self._pyav_latency_s,
+            metrics=self._metrics,
         )
         self._pyav_wait_keyframe: bool = False
 
@@ -174,6 +184,7 @@ class StreamManager:
             self._stats_level = None
         self._last_stats_time: float = 0.0
         self._stats_timer = None
+        self._metrics_timer = None
         # Adaptive VT scheduling state
         self._preview_streak: int = 0
         self._arrival_fallback: bool = False
@@ -277,6 +288,7 @@ class StreamManager:
                 source_mux=self._source_mux,
                 pipeline=self._pyav_pipeline if smoke_source == 'pyav' else self._vt_pipeline,
                 init_vt_from_avcc=_init_and_clear,
+                metrics=self._metrics,
             )
             self._smoke.start()
         else:
@@ -438,6 +450,19 @@ class StreamManager:
             except Exception:
                 logger.debug("Failed to start stats timer; falling back to draw-based logging", exc_info=True)
 
+        # Client metrics CSV dump timer (independent of stats log level)
+        if getattr(self._metrics, 'enabled', False):
+            try:
+                interval_s = env_float('NAPARI_CUDA_CLIENT_METRICS_INTERVAL', 1.0)
+                interval_ms = max(100, int(round(1000.0 * max(0.1, float(interval_s)))))
+                self._metrics_timer = QtCore.QTimer(self._scene_canvas.native)
+                self._metrics_timer.setTimerType(QtCore.Qt.PreciseTimer)
+                self._metrics_timer.setInterval(interval_ms)
+                self._metrics_timer.timeout.connect(self._metrics.dump_csv_row)  # type: ignore[arg-type]
+                self._metrics_timer.start()
+            except Exception:
+                logger.debug("Failed to start client metrics timer", exc_info=True)
+
     def _enqueue_frame(self, frame: np.ndarray) -> None:
         if self._frame_q.full():
             try:
@@ -530,6 +555,8 @@ class StreamManager:
             except queue.Empty:
                 break
         self._renderer.draw(frame)
+        # Count a presented frame for client-side FPS derivation
+        self._metrics.inc('napari_cuda_client_presented_total', 1.0)
 
     def _log_stats(self) -> None:
         if self._stats_level is None:
@@ -541,6 +568,10 @@ class StreamManager:
                 vt_counts = self._vt_pipeline.counts()
             except Exception:
                 vt_counts = None
+            # Also update a few gauges in the client metrics sink
+            self._metrics.set('napari_cuda_client_present_buf_vt', float(pres_stats['buf'].get('vt', 0)))
+            self._metrics.set('napari_cuda_client_present_buf_pyav', float(pres_stats['buf'].get('pyav', 0)))
+            self._metrics.set('napari_cuda_client_present_latency_ms', float(pres_stats.get('latency_ms', 0.0)))
             logger.log(
                 self._stats_level,
                 "presenter=%s vt_counts=%s keyframes_seen=%d",

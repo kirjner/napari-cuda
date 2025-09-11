@@ -199,6 +199,22 @@ def main():
         default=None,
         help='Directory path for disk-backed preencode cache'
     )
+    parser.add_argument(
+        '--metrics',
+        action='store_true',
+        help='Enable client metrics collection (HUD can display decode/submit timings)'
+    )
+    parser.add_argument(
+        '--metrics-out',
+        default=None,
+        help='Write periodic client metrics CSV to this path'
+    )
+    parser.add_argument(
+        '--metrics-interval',
+        type=float,
+        default=None,
+        help='Client metrics dump interval in seconds (CSV), default 1.0'
+    )
     
     # For SSH tunnel setup hint
     parser.add_argument(
@@ -228,6 +244,13 @@ def main():
         os.environ['NAPARI_CUDA_SMOKE_PRE_MB'] = str(int(args.pre_mb))
     if args.pre_path:
         os.environ['NAPARI_CUDA_SMOKE_PRE_PATH'] = str(args.pre_path)
+    # Client metrics envs
+    if args.metrics:
+        os.environ['NAPARI_CUDA_CLIENT_METRICS'] = '1'
+    if args.metrics_out:
+        os.environ['NAPARI_CUDA_CLIENT_METRICS_OUT'] = str(args.metrics_out)
+    if args.metrics_interval is not None:
+        os.environ['NAPARI_CUDA_CLIENT_METRICS_INTERVAL'] = str(float(args.metrics_interval))
 
     # Launch client
     smoke = bool(args.smoke)
