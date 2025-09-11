@@ -275,8 +275,7 @@ class StreamManager:
                 config=cfg,
                 presenter=self._presenter,
                 source_mux=self._source_mux,
-                vt_pipeline=self._vt_pipeline,
-                pyav_pipeline=self._pyav_pipeline,
+                pipeline=self._pyav_pipeline if smoke_source == 'pyav' else self._vt_pipeline,
                 init_vt_from_avcc=_init_and_clear,
             )
             self._smoke.start()

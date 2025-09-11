@@ -48,15 +48,13 @@ class SmokePipeline:
         config: SmokeConfig,
         presenter: object,
         source_mux: object,
-        vt_pipeline: object,
-        pyav_pipeline: object,
+        pipeline: object,
         init_vt_from_avcc: Optional[callable] = None,
     ) -> None:
         self.cfg = config
         self.presenter = presenter
         self.source_mux = source_mux
-        self.vt_pipeline = vt_pipeline
-        self.pyav_pipeline = pyav_pipeline
+        self.pipeline = pipeline
         self._init_vt_from_avcc = init_vt_from_avcc
         self._stop = Event()
         self._thread: Optional[Thread] = None
@@ -215,7 +213,7 @@ class SmokePipeline:
 
     def _enqueue_target(self, payload: bytes, ts: Optional[float]) -> None:
         tgt = (self.cfg.target or 'vt').lower()
-        pl = self.pyav_pipeline if tgt == 'pyav' else self.vt_pipeline
+        pl = self.pipeline
         qsz = int(pl.qsize())
         if qsz >= max(2, int(self.cfg.backlog_trigger) - 1):
             pl.clear()
