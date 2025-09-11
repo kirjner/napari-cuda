@@ -39,6 +39,6 @@ def nal_length_size_from_avcc(avcc: bytes) -> int:
             if n in (1, 2, 3, 4):
                 return n
     except Exception:
-        pass
+        import logging as _logging
+        _logging.getLogger(__name__).debug("nal_length_size_from_avcc failed", exc_info=True)
     return 4
-

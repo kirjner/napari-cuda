@@ -13,10 +13,12 @@ from qtpy import QtCore
 from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, SourceMux
 from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
 from napari_cuda.client.streaming.state import StateChannel
+from napari_cuda.client.streaming.controllers import StateController, ReceiveController
 from napari_cuda.client.streaming.types import Source, SubmittedFrame, TimestampMode
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
+from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -25,6 +27,7 @@ from napari_cuda.codec.avcc import (
     build_avcc,
     find_sps_pps,
 )
+from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.utils.env import env_float, env_str
 from napari_cuda.client.streaming.smoke.generators import make_generator
@@ -79,7 +82,7 @@ class StreamManager:
         try:
             self._presenter.set_latency(self._pyav_latency_s)
         except Exception:
-            pass
+            logger.debug("Failed to set initial presenter latency", exc_info=True)
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
         self._warmup_ms_override = env_str('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MS', None)
@@ -111,9 +114,16 @@ class StreamManager:
         self._vt_in_q: "queue.Queue[tuple[bytes, float | None]]" = queue.Queue(maxsize=64)
         self._vt_backlog_trigger = int(vt_backlog_trigger)
         self._vt_enqueued = 0
-        self._pyav_in_q: "queue.Queue[tuple[bytes, float | None]]" = queue.Queue(maxsize=64)
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
         self._pyav_enqueued = 0
+        # PyAV pipeline replaces inline queue/worker
+        self._pyav_pipeline = PyAVPipeline(
+            presenter=self._presenter,
+            source_mux=self._source_mux,
+            scene_canvas=self._scene_canvas,
+            backlog_trigger=self._pyav_backlog_trigger,
+            latency_s=self._pyav_latency_s,
+        )
         self._pyav_wait_keyframe: bool = False
 
         # Last VT payload for redraw fallback (offline VT-source or VT decode)
@@ -158,7 +168,7 @@ class StreamManager:
 
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
-        def _state_worker() -> None:
+        if not self._vt_smoke:
             def _on_video_config(data: dict) -> None:
                 try:
                     w, h, fps, fmt, avcc_b64 = extract_video_config(data)
@@ -171,12 +181,8 @@ class StreamManager:
                 except Exception:
                     logger.debug("video_config handling failed", exc_info=True)
 
-            self._state_channel = StateChannel(self.server_host, self.state_port, on_video_config=_on_video_config)
-            self._state_channel.run()
-
-        if not self._vt_smoke:
-            t_state = Thread(target=_state_worker, daemon=True)
-            t_state.start()
+            st = StateController(self.server_host, self.state_port, _on_video_config)
+            self._state_channel, t_state = st.start()
             self._threads.append(t_state)
 
         # Decoupled VT submit worker
@@ -215,7 +221,7 @@ class StreamManager:
                                 from napari_cuda import _vt as vt  # type: ignore
                                 vt.release_frame(img_buf)
                             except Exception:
-                                pass
+                                logger.debug("VT release_frame during drain failed", exc_info=True)
                             continue
                         try:
                             from napari_cuda import _vt as vt  # type: ignore
@@ -228,7 +234,7 @@ class StreamManager:
                                     try:
                                         vt.release_frame(self._last_vt_payload)
                                     except Exception:
-                                        pass
+                                        logger.debug("VT release_frame (replace cached) failed", exc_info=True)
                                 self._last_vt_payload = img_buf
                                 self._last_vt_persistent = True
                             except Exception:
@@ -248,7 +254,7 @@ class StreamManager:
                         try:
                             QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
                         except Exception:
-                            pass
+                            logger.debug("Failed to schedule GUI update after VT drain", exc_info=True)
                     if not drained:
                         time.sleep(0.002)
                 except Exception:
@@ -256,242 +262,32 @@ class StreamManager:
 
         Thread(target=_vt_drain_worker, daemon=True).start()
 
-        # PyAV worker
-        def _pyav_worker() -> None:
-            while True:
-                try:
-                    b, ts = self._pyav_in_q.get()
-                except Exception:
-                    continue
-                try:
-                    arr = None
-                    try:
-                        arr = self.decoder.decode(b) if self.decoder else None
-                    except Exception as e:
-                        logger.debug("PyAV worker decode error: %s", e)
-                        arr = None
-                    if arr is None:
-                        continue
-                    try:
-                        self._presenter.submit(
-                            SubmittedFrame(
-                                source=Source.PYAV,
-                                server_ts=float(ts) if ts is not None else None,
-                                arrival_ts=time.time(),
-                                payload=arr,
-                                release_cb=None,
-                            )
-                        )
-                    except Exception:
-                        logger.debug("Presenter submit (PyAV) failed", exc_info=True)
-                    QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
-                except Exception:
-                    logger.debug("PyAV worker error", exc_info=True)
+        # Start PyAV pipeline worker
+        try:
+            self._pyav_pipeline.start()
+        except Exception:
+            logger.debug("Failed to start PyAV pipeline", exc_info=True)
 
-        Thread(target=_pyav_worker, daemon=True).start()
-
-        # Receiver thread or VT smoke
+        # Receiver thread or smoke mode
         if self._vt_smoke:
             logger.info("StreamManager in VT smoke test mode (offline)")
-            smoke_source = (os.getenv('NAPARI_CUDA_VT_SMOKE_SOURCE') or 'vt').lower()
+            smoke_source = (os.getenv('NAPARI_CUDA_SMOKE_SOURCE') or 'vt').lower()
             # Offline VT-source generator: produce CVPixelBuffer BGRA frames and render zero-copy
-            def _vt_synthetic_worker() -> None:
-                try:
-                    sw = int(os.getenv('NAPARI_CUDA_VT_SMOKE_W', '1280'))
-                except Exception:
-                    sw = 1280
-                try:
-                    sh = int(os.getenv('NAPARI_CUDA_VT_SMOKE_H', '720'))
-                except Exception:
-                    sh = 720
-                try:
-                    fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
-                except Exception:
-                    fps = 60.0
-                interval = max(1.0 / max(1.0, fps), 1.0 / 240.0)
-                import numpy as _np
-                # Precompute gradient bases
-                x = _np.linspace(0, 255, sw, dtype=_np.uint8)[None, :]
-                y = _np.linspace(0, 255, sh, dtype=_np.uint8)[:, None]
-                # Precompute turntable geometry (all per‑pixel math factored out)
-                aspect = sw / float(max(1, sh))
-                xs = _np.linspace(-1.0, 1.0, sw, dtype=_np.float32) * aspect
-                ys = _np.linspace(-1.0, 1.0, sh, dtype=_np.float32)
-                X = _np.broadcast_to(xs[None, :], (sh, sw))
-                Y = _np.broadcast_to(ys[:, None], (sh, sw))
-                R2 = X * X + Y * Y
-                MASK = R2 <= 1.0
-                # Static light direction
-                L = _np.array([0.35, 0.6, 1.0], dtype=_np.float32)
-                L = L / _np.linalg.norm(L)
-                # Precompute invariant sphere data
-                Z0 = _np.zeros_like(X)
-                Z0[MASK] = _np.sqrt(_np.maximum(0.0, 1.0 - R2[MASK]))
-                Nx0 = X
-                Ny0 = Y
-                Nz0 = Z0
-                # Base long/lat for checker albedo; Ny0 is static so lat0 is static
-                lon0 = _np.arctan2(Nz0, Nx0)
-                lat0 = _np.arcsin(_np.clip(Ny0, -1.0, 1.0))
-                # Precompute scaled u0 and integer v-cells for 8x8 tiling
-                u0_scaled = (lon0 / (2.0 * _np.pi) + 0.5) * 8.0
-                v_cells = _np.floor((lat0 / _np.pi + 0.5) * 8.0).astype(_np.int32)
-                # Preallocate work arrays to avoid per-frame allocations
-                u_work = _np.empty_like(u0_scaled, dtype=_np.float32)
-                lam = _np.empty_like(Nx0, dtype=_np.float32)
-                check_f = _np.empty_like(Nx0, dtype=_np.float32)
-                # Allocate double-buffered persistent CVPixelBuffers
-                try:
-                    from napari_cuda import _vt as vt  # type: ignore
-                except Exception as e:
-                    logger.error("VT shim not available for offline VT-source smoke: %s", e)
-                    return
-                pb0 = vt.alloc_pixelbuffer_bgra(sw, sh, True)
-                pb1 = vt.alloc_pixelbuffer_bgra(sw, sh, True)
-                pbs = [pb0, pb1]
-                if pb0 is None or pb1 is None:
-                    logger.error("alloc_pixelbuffer_bgra failed; falling back to RGB generator")
-                    # Fall back to RGB generator path
-                    while True:
-                        t = time.perf_counter()
-                        ox = int(((_np.sin(t * 2.0) * 0.5 + 0.5) * 64))
-                        oy = int(((_np.cos(t * 1.7) * 0.5 + 0.5) * 64))
-                        xx = (_np.arange(sw, dtype=_np.int32)[None, :] + ox) // 32
-                        yy = (_np.arange(sh, dtype=_np.int32)[:, None] + oy) // 32
-                        mask = ((xx ^ yy) & 1).astype(_np.uint8)
-                        r = mask * 255
-                        g = _np.broadcast_to(x, (sh, sw))
-                        b = _np.broadcast_to(y, (sh, sw))
-                        rgb = _np.dstack([r, g, b])
-                        try:
-                            self._presenter.submit(SubmittedFrame(Source.PYAV, None, time.time(), rgb, None))
-                            QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
-                        except Exception:
-                            logger.debug("Presenter submit (fallback RGB) failed", exc_info=True)
-                        time.sleep(interval)
-                next_t = time.perf_counter()
-                idx = 0
-                mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
-                logger.info("VT smoke (vt-source): %dx%d @ %.1f fps (mode=%s)", sw, sh, fps, mode)
-                # Drive presenter in ARRIVAL mode; keep configured latency
-                try:
-                    self._presenter.set_mode(TimestampMode.ARRIVAL)
-                except Exception:
-                    pass
-                # Ensure VT is the active source
-                try:
-                    self._source_mux.set_active(Source.VT)
-                except Exception:
-                    pass
-                while True:
-                    pb = pbs[idx & 1]
-                    idx += 1
-                    # Lock base and fill BGRA
-                    try:
-                        addr, bpr, width_i, height_i = vt.pb_lock_base(pb)
-                    except Exception:
-                        addr = None
-                    if addr:
-                        import ctypes as _ctypes
-                        width_i = int(width_i); height_i = int(height_i); bpr = int(bpr)
-                        size = bpr * height_i
-                        raw = (_ctypes.c_ubyte * size).from_address(int(addr))
-                        arr = _np.ctypeslib.as_array(raw)
-                        img = arr.reshape((height_i, bpr // 4, 4))
-                        t = time.perf_counter()
-                        if mode == 'checker':
-                            ox = int(((_np.sin(t * 2.0) * 0.5 + 0.5) * 64))
-                            oy = int(((_np.cos(t * 1.7) * 0.5 + 0.5) * 64))
-                            xx = (_np.arange(width_i, dtype=_np.int32)[None, :] + ox) // 32
-                            yy = (_np.arange(height_i, dtype=_np.int32)[:, None] + oy) // 32
-                            mask = ((xx ^ yy) & 1).astype(_np.uint8)
-                            r = mask * 255
-                            g = _np.broadcast_to(x, (height_i, width_i))
-                            b = _np.broadcast_to(y, (height_i, width_i))
-                            img[:height_i, :width_i, 0] = b
-                            img[:height_i, :width_i, 1] = g
-                            img[:height_i, :width_i, 2] = r
-                            img[:height_i, :width_i, 3] = 255
-                        elif mode == 'turntable':
-                            # Lambert-shaded sphere with checker albedo; fully vectorized, preallocated temporaries
-                            theta = t * 0.8
-                            c = _np.cos(theta); s = _np.sin(theta)
-                            # lam = max(0, Nx0*(c*Lx - s*Lz) + Ny0*Ly + Nz0*(s*Lx + c*Lz))
-                            _np.multiply(Nx0, (c * L[0] - s * L[2]), out=lam)
-                            lam += Ny0 * L[1]
-                            lam += Nz0 * (s * L[0] + c * L[2])
-                            _np.maximum(lam, 0.0, out=lam)
-                            # Checker: floor((u0_scaled - theta*8)) + v_cells mod 2
-                            u_work[...] = u0_scaled
-                            u_work -= (theta * 8.0)
-                            u_cells = _np.floor(u_work, out=u_work).astype(_np.int32, copy=False)
-                            check = (u_cells + v_cells) & 1
-                            # Convert to float once
-                            _np.multiply(check, 1.0, out=check_f, dtype=_np.float32)
-                            # Base albedo per channel from check
-                            base_r = 0.2 + 0.8 * check_f
-                            base_g = 1.0 - 0.7 * check_f
-                            base_b = 0.2 + 0.8 * check_f
-                            shade = 0.2 + 0.8 * lam
-                            # Compute colors in-place, write only inside sphere mask
-                            col_r = (shade * base_r * 255.0).astype(_np.uint8, copy=False)
-                            col_g = (shade * base_g * 255.0).astype(_np.uint8, copy=False)
-                            col_b = (shade * base_b * 255.0).astype(_np.uint8, copy=False)
-                            img[MASK, 0] = col_b[MASK]
-                            img[MASK, 1] = col_g[MASK]
-                            img[MASK, 2] = col_r[MASK]
-                            img[:height_i, :width_i, 3] = 255
-                        else:
-                            g = _np.broadcast_to(x, (height_i, width_i))
-                            b = _np.broadcast_to(y, (height_i, width_i))
-                            img[:height_i, :width_i, 0] = b
-                            img[:height_i, :width_i, 1] = g
-                            img[:height_i, :width_i, 2] = 255 - b
-                            img[:height_i, :width_i, 3] = 255
-                        try:
-                            vt.pb_unlock_base(pb)
-                        except Exception:
-                            pass
-                    # Submit CVPixelBuffer for zero-copy draw; keep PBs persistent (no release_cb)
-                    try:
-                        self._presenter.submit(
-                            SubmittedFrame(
-                                source=Source.VT,
-                                server_ts=None,
-                                arrival_ts=time.time(),
-                                payload=pb,
-                                release_cb=None,
-                            )
-                        )
-                        # Cache last VT payload for draw-last-frame fallback to avoid flicker
-                        self._last_vt_payload = pb
-                        self._last_vt_persistent = True  # vt-source owns persistent PBs (no release_cb)
-                        try:
-                            QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
-                        except Exception:
-                            pass
-                    except Exception:
-                        logger.debug("Presenter submit (vt-source) failed", exc_info=True)
-                    next_t += interval
-                    sleep = next_t - time.perf_counter()
-                    if sleep > 0:
-                        time.sleep(sleep)
-                    else:
-                        next_t = time.perf_counter()
+            
             def _vt_encode_worker() -> None:
                 try:
-                    sw = int(os.getenv('NAPARI_CUDA_VT_SMOKE_W', '1280'))
+                    sw = int(os.getenv('NAPARI_CUDA_SMOKE_W', '1280'))
                 except Exception:
                     sw = 1280
                 try:
-                    sh = int(os.getenv('NAPARI_CUDA_VT_SMOKE_H', '720'))
+                    sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
                 except Exception:
                     sh = 720
                 try:
-                    fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
+                    fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
                 except Exception:
                     fps = 60.0
-                smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
+                smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
                 from napari_cuda.client.streaming.smoke.runner import run_encode_smoke as _run_encode_smoke
                 _run_encode_smoke(
                     width=sw,
@@ -509,28 +305,31 @@ class StreamManager:
                     logger=logger,
                 )
 
-            if smoke_source == 'encode':
-                Thread(target=_vt_encode_worker, daemon=True).start()
-            elif smoke_source == 'pyav':
+            if smoke_source == 'pyav':
                 # PyAV decode smoke: encode with H264Encoder and decode via PyAV
                 def _pyav_encode_worker() -> None:
                     try:
                         self._init_decoder()
+                        try:
+                            dec = self.decoder.decode if self.decoder else None
+                        except Exception:
+                            dec = None
+                        self._pyav_pipeline.set_decoder(dec)
                     except Exception:
                         logger.debug('pyav-smoke: init decoder failed', exc_info=True)
                     try:
-                        sw = int(os.getenv('NAPARI_CUDA_VT_SMOKE_W', '1280'))
+                        sw = int(os.getenv('NAPARI_CUDA_SMOKE_W', '1280'))
                     except Exception:
                         sw = 1280
                     try:
-                        sh = int(os.getenv('NAPARI_CUDA_VT_SMOKE_H', '720'))
+                        sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
                     except Exception:
                         sh = 720
                     try:
-                        fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
+                        fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
                     except Exception:
                         fps = 60.0
-                    smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
+                    smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
                     from napari_cuda.client.streaming.smoke.runner import run_pyav_smoke as _run_pyav_smoke
                     _run_pyav_smoke(
                         width=sw,
@@ -539,7 +338,7 @@ class StreamManager:
                         smoke_mode=smoke_mode,
                         presenter=self._presenter,
                         source_mux=self._source_mux,
-                        pyav_in_q=self._pyav_in_q,
+                        pyav_in_q=self._pyav_pipeline,
                         pyav_backlog_trigger=self._pyav_backlog_trigger,
                         pyav_latency_s=self._pyav_latency_s,
                         on_enqueued=lambda n: setattr(self, '_pyav_enqueued', self._pyav_enqueued + int(n)),
@@ -547,11 +346,17 @@ class StreamManager:
                     )
                 Thread(target=_pyav_encode_worker, daemon=True).start()
             else:
-                Thread(target=_vt_synthetic_worker, daemon=True).start()
+                Thread(target=_vt_encode_worker, daemon=True).start()
         else:
             def _on_connected() -> None:
                 try:
                     self._init_decoder()
+                    # Bind decoder to pipeline
+                    try:
+                        dec = self.decoder.decode if self.decoder else None
+                    except Exception:
+                        dec = None
+                    self._pyav_pipeline.set_decoder(dec)
                 except Exception:
                     logger.debug("init decoder on connect failed", exc_info=True)
 
@@ -591,11 +396,18 @@ class StreamManager:
                                     self._request_keyframe_once()
                                 # Gate PyAV path
                                 self._pyav_wait_keyframe = True
-                                while self._pyav_in_q.qsize() > 0:
-                                    _ = self._pyav_in_q.get_nowait()
+                                try:
+                                    self._pyav_pipeline.clear()
+                                except Exception:
+                                    logger.debug("PyAV pipeline clear failed during disco gate", exc_info=True)
                                 self._presenter.clear(Source.PYAV)
                                 try:
                                     self._init_decoder()
+                                    try:
+                                        dec = self.decoder.decode if self.decoder else None
+                                    except Exception:
+                                        dec = None
+                                    self._pyav_pipeline.set_decoder(dec)
                                 except Exception:
                                     logger.debug("PyAV decoder reinit after discontinuity failed", exc_info=True)
                                 self._disco_gated = True
@@ -626,7 +438,7 @@ class StreamManager:
                             try:
                                 self._presenter.set_latency(self._vt_latency_s)
                             except Exception:
-                                pass
+                                logger.debug("Presenter set_latency restore for VT failed", exc_info=True)
                             self._presenter.clear(Source.PYAV)
                             logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", int(pkt.seq))
                             self._disco_gated = False
@@ -647,7 +459,7 @@ class StreamManager:
                                         self._warmup_until = time.time() + float(self._warmup_window_s)
                                         self._presenter.set_latency(self._vt_latency_s + extra_s)
                             except Exception:
-                                pass
+                                logger.debug("Warmup latency set failed", exc_info=True)
                         else:
                             # While VT is gated, avoid decoding previews; just request keyframe
                             self._request_keyframe_once()
@@ -681,15 +493,22 @@ class StreamManager:
                             ts_float = None
                         b = bytes(pkt.payload)
                         # If backlog builds, reset decoder and wait for a fresh keyframe
-                        if self._pyav_in_q.qsize() >= max(2, self._pyav_backlog_trigger - 1):
+                        if self._pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
                             self._pyav_wait_keyframe = True
                             # Drain queued items and clear presenter buffer for a clean start
-                            while self._pyav_in_q.qsize() > 0:
-                                _ = self._pyav_in_q.get_nowait()
+                            try:
+                                self._pyav_pipeline.clear()
+                            except Exception:
+                                logger.debug("PyAV pipeline clear failed after backlog", exc_info=True)
                             self._presenter.clear(Source.PYAV)
                             # Recreate decoder fresh to drop reference history
                             try:
                                 self._init_decoder()
+                                try:
+                                    dec = self.decoder.decode if self.decoder else None
+                                except Exception:
+                                    dec = None
+                                self._pyav_pipeline.set_decoder(dec)
                             except Exception:
                                 logger.debug("PyAV decoder reinit failed after backlog", exc_info=True)
                         # If waiting for keyframe, skip until flags indicate a keyframe
@@ -706,32 +525,25 @@ class StreamManager:
                             self._disco_gated = False
                         # Enqueue for decode
                         try:
-                            self._pyav_in_q.put_nowait((b, ts_float))
+                            self._pyav_pipeline.enqueue(b, ts_float)
                             self._pyav_enqueued += 1
-                        except queue.Full:
-                            # Best-effort: drop one and retry; if still full, drop this frame
-                            try:
-                                _ = self._pyav_in_q.get_nowait()
-                            except queue.Empty:
-                                pass
-                            try:
-                                self._pyav_in_q.put_nowait((b, ts_float))
-                            except queue.Full:
-                                logger.debug("PyAV queue full; dropping frame", exc_info=True)
+                        except Exception:
+                            logger.debug("PyAV pipeline enqueue failed; dropping frame", exc_info=True)
                 except Exception:
                     logger.debug("stream frame handling failed", exc_info=True)
 
             def _on_disconnect(exc: Exception | None) -> None:
                 return
 
-            self._receiver = PixelReceiver(
+            rc = ReceiveController(
                 self.server_host,
                 self.server_port,
                 on_connected=_on_connected,
                 on_frame=_on_frame,
                 on_disconnect=_on_disconnect,
             )
-            Thread(target=self._receiver.run, daemon=True).start()
+            self._receiver, t_rx = rc.start()
+            self._threads.append(t_rx)
 
         # Dedicated 1 Hz presenter stats timer (decoupled from draw loop)
         if self._stats_level is not None:
@@ -760,7 +572,7 @@ class StreamManager:
                 try:
                     self._presenter.set_latency(self._vt_latency_s)
                 except Exception:
-                    pass
+                    logger.debug("Presenter set_latency fallback after VT disable failed", exc_info=True)
                 self._warmup_until = 0.0
             else:
                 remain = max(0.0, self._warmup_until - now)
@@ -769,7 +581,7 @@ class StreamManager:
                 try:
                     self._presenter.set_latency(cur)
                 except Exception:
-                    pass
+                    logger.debug("Presenter set_latency during warmup failed", exc_info=True)
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
@@ -815,7 +627,7 @@ class StreamManager:
                 try:
                     self._last_pyav_frame = ready.payload
                 except Exception:
-                    pass
+                    logger.debug("Cache last PyAV frame failed", exc_info=True)
                 self._enqueue_frame(ready.payload)
 
         frame = None
@@ -1001,84 +813,18 @@ class StreamManager:
                     self._presenter.set_latency(self._pyav_latency_s)
                     self._presenter.clear(Source.VT)
                 except Exception:
-                    pass
+                    logger.debug("VT disable fallback (set_active/set_latency/clear) failed", exc_info=True)
 
-    # Keyframe detection that doesn't rely solely on header flags
+    # Keyframe detection via shared helpers (AnnexB/AVCC)
     def _is_keyframe(self, payload: bytes, codec: int) -> bool:
         try:
-            c = int(codec)
+            hevc = int(codec) == 2
         except Exception:
-            c = 0
-        # Fast path: Annex B start codes present
-        if payload[:4] == b"\x00\x00\x00\x01" or payload[:3] == b"\x00\x00\x01":
-            return self._is_keyframe_annexb(payload, c)
-        # Otherwise, assume AVCC 4-byte length delimited
-        return self._is_keyframe_avcc(payload, c)
-
-    def _is_keyframe_annexb(self, data: bytes, codec: int) -> bool:
-        i = 0
-        n = len(data)
-        # Iterate NAL units separated by 00 00 01 or 00 00 00 01
-        while i < n:
-            # Find next start code
-            sc = -1
-            sc_len = 0
-            j = i
-            while j + 3 <= n:
-                if data[j:j+3] == b"\x00\x00\x01":
-                    sc = j
-                    sc_len = 3
-                    break
-                if j + 4 <= n and data[j:j+4] == b"\x00\x00\x00\x01":
-                    sc = j
-                    sc_len = 4
-                    break
-                j += 1
-            if sc == -1:
-                break
-            # Move to NAL header
-            j = sc + sc_len
-            if j >= n:
-                break
-            nal_hdr0 = data[j]
-            if codec == 2:  # HEVC/H.265
-                # HEVC nal_unit_type: bits 1..6 (after forbidden_zero_bit)
-                # Two-byte header in HEVC
-                if j + 1 >= n:
-                    break
-                nal_unit_type = (data[j] >> 1) & 0x3F
-                # IRAP pictures: 16..21
-                if 16 <= nal_unit_type <= 21:
-                    return True
-            else:  # H.264 default
-                nal_unit_type = nal_hdr0 & 0x1F
-                # IDR slice
-                if nal_unit_type == 5:
-                    return True
-            i = j + 1
-        return False
-
-    def _is_keyframe_avcc(self, data: bytes, codec: int) -> bool:
-        i = 0
-        n = len(data)
-        # Assume 4-byte lengths (common for avcC)
-        while i + 4 <= n:
-            ln = int.from_bytes(data[i:i+4], 'big', signed=False)
-            i += 4
-            if ln <= 0 or i + ln > n:
-                break
-            nal_hdr0 = data[i]
-            if codec == 2:  # HEVC/H.265
-                if i + 1 >= n:
-                    break
-                nal_unit_type = (data[i] >> 1) & 0x3F
-                if 16 <= nal_unit_type <= 21:
-                    return True
-            else:  # H.264
-                nal_unit_type = nal_hdr0 & 0x1F
-                if nal_unit_type == 5:
-                    return True
-            i += ln
-        return False
+            hevc = False
+        if is_annexb(payload):
+            return contains_idr_annexb(payload, hevc=hevc)
+        # Use parsed nal_length_size when available (defaults to 4)
+        nsz = int(self._nal_length_size or 4)
+        return contains_idr_avcc(payload, nal_len_size=nsz, hevc=hevc)
 
 # No alias export; prefer StreamManager

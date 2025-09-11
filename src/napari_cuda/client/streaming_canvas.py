@@ -10,9 +10,10 @@ import logging
 import os
 import queue
 from threading import Thread
+import time
 
 import numpy as np
-from qtpy import QtCore
+from qtpy import QtCore, QtWidgets
 from vispy import app as vispy_app
 
 from napari._vispy.canvas import VispyCanvas
@@ -90,7 +91,7 @@ class StreamingCanvas(VispyCanvas):
             state_port or int(os.getenv('NAPARI_CUDA_STATE_PORT', '8081'))
         )
         # Offline VT smoke test mode (no server required)
-        env_smoke = env_bool('NAPARI_CUDA_VT_SMOKE', False)
+        env_smoke = env_bool('NAPARI_CUDA_SMOKE', False)
         self._vt_smoke = bool(vt_smoke or env_smoke)
 
         # Queue for decoded frames (latest-wins draining in draw)
@@ -210,10 +211,15 @@ class StreamingCanvas(VispyCanvas):
         self._scene_canvas.events.draw.connect(self._draw_video_frame)
         # Timer-driven display at target fps (use VisPy app timer to ensure GUI-thread delivery)
         fps = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
-        # Default to Qt timer for napari/Qt integration; enable vispy timer only if requested
-        use_vispy_timer = (
-            os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER', '0') == '1'
-        )
+        # Timer selection:
+        # - If env NAPARI_CUDA_CLIENT_VISPY_TIMER=1, force VisPy timer
+        # - Else, in smoke mode prefer VisPy timer by default for steadier cadence
+        # - Otherwise, fall back to Qt QTimer
+        env_vispy = os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER')
+        if env_vispy is not None:
+            use_vispy_timer = (env_vispy == '1')
+        else:
+            use_vispy_timer = bool(self._vt_smoke)
         interval = max(1.0 / max(1.0, fps), 1.0 / 120.0)
         if use_vispy_timer:
             self._display_timer = vispy_app.Timer(
@@ -232,8 +238,8 @@ class StreamingCanvas(VispyCanvas):
             self._display_timer.setInterval(
                 max(1, int(round(1000.0 / max(1.0, fps))))
             )
-            # Schedule a paint event each tick; actual draw occurs in paint handler
-            self._display_timer.timeout.connect(self._scene_canvas.native.update)
+            # Schedule a paint event each tick; drive via VisPy canvas update for reliable draw events
+            self._display_timer.timeout.connect(self._scene_canvas.update)
             self._display_timer.start()
             logger.info(
                 'Video display initialized (Qt QTimer @ %.1f fps)', fps
@@ -242,6 +248,15 @@ class StreamingCanvas(VispyCanvas):
         logger.info(
             f'StreamingCanvas initialized for {server_host}:{server_port}'
         )
+
+        # Optional FPS HUD overlay (enabled by default in smoke mode or via env)
+        try:
+            hud_env = os.getenv('NAPARI_CUDA_FPS_HUD')
+            self._hud_enabled = (hud_env == '1') or bool(self._vt_smoke)
+            if self._hud_enabled:
+                self._init_fps_hud()
+        except Exception:
+            logger.debug('FPS HUD init failed', exc_info=True)
 
         # Timestamp handling for VT scheduling
         self._vt_ts_mode = (
@@ -352,3 +367,71 @@ class StreamingCanvas(VispyCanvas):
             self._renderer.draw(frame)
         except Exception:
             logger.exception('GLRenderer draw failed')
+
+    # --- FPS HUD helpers ---
+    def _init_fps_hud(self) -> None:
+        lbl = QtWidgets.QLabel(self._scene_canvas.native)
+        lbl.setObjectName('napari_cuda_fps_hud')
+        lbl.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        lbl.setStyleSheet(
+            "#napari_cuda_fps_hud {"
+            "  background: rgba(0,0,0,120);"
+            "  color: #fff;"
+            "  border-radius: 4px;"
+            "  padding: 3px 6px;"
+            "  font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;"
+            "  font-size: 11px;"
+            "}"
+        )
+        lbl.setText('fps: --')
+        lbl.move(8, 8)
+        lbl.resize(140, 20)
+        lbl.raise_()
+        lbl.show()
+        self._fps_label = lbl
+        # Prime counters
+        self._hud_prev_time = 0.0
+        self._hud_prev_submit = {'vt': 0, 'pyav': 0}
+        self._hud_prev_out = {'vt': 0, 'pyav': 0}
+        # 1 Hz HUD updater
+        self._fps_timer = QtCore.QTimer(self._scene_canvas.native)
+        self._fps_timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self._fps_timer.setInterval(1000)
+        self._fps_timer.timeout.connect(self._update_fps_hud)
+        self._fps_timer.start()
+
+    def _update_fps_hud(self) -> None:
+        try:
+            mgr = getattr(self, '_manager', None)
+            if mgr is None or not hasattr(mgr, '_presenter'):
+                return
+            now = time.time()
+            last = float(self._hud_prev_time or 0.0)
+            stats = mgr._presenter.stats()  # {'submit': {...}, 'out': {...}, 'buf': {...}, 'latency_ms': ..., 'mode': ...}
+            sub = stats.get('submit', {})
+            out = stats.get('out', {})
+            vt_sub = int(sub.get('vt', 0)); py_sub = int(sub.get('pyav', 0))
+            vt_out = int(out.get('vt', 0)); py_out = int(out.get('pyav', 0))
+            if last == 0.0:
+                # Prime
+                self._hud_prev_time = now
+                self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
+                self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
+                return
+            dt = max(1e-3, now - last)
+            fps_out_vt = (vt_out - self._hud_prev_out['vt']) / dt
+            fps_out_py = (py_out - self._hud_prev_out['pyav']) / dt
+            fps_sub_vt = (vt_sub - self._hud_prev_submit['vt']) / dt
+            fps_sub_py = (py_sub - self._hud_prev_submit['pyav']) / dt
+            self._hud_prev_time = now
+            self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
+            self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
+            # Active source readout + latency and mode
+            active = getattr(mgr._source_mux, 'active', None)
+            active_str = getattr(active, 'value', str(active)) if active is not None else '-'
+            lat_ms = stats.get('latency_ms', 0)
+            mode = stats.get('mode', '')
+            txt = f"{active_str} out:{fps_out_vt if active_str=='vt' else fps_out_py:.1f} fps"
+            self._fps_label.setText(txt)
+        except Exception:
+            logger.debug('FPS HUD update failed', exc_info=True)

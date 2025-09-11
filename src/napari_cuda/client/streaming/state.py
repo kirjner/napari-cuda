@@ -46,7 +46,7 @@ class StateChannel:
                     while not self._out_q.empty():
                         _ = self._out_q.get_nowait()
             except Exception:
-                pass
+                logger.debug("StateChannel.run: drain out_q failed", exc_info=True)
             self._loop = None
 
     async def _run(self) -> None:
@@ -120,7 +120,7 @@ class StateChannel:
                 async with websockets.connect(url) as ws:
                     await ws.send('{"type":"request_keyframe"}')
             except Exception:
-                pass
+                logger.debug("StateChannel._send_once: send failed", exc_info=True)
         try:
             url = f"ws://{self.host}:{self.port}"
             asyncio.run(_send_once(url))

@@ -41,19 +41,20 @@ class VTShimDecoder:
         try:
             self._sess = None
         except Exception:
-            pass
+            logger.debug("VTShimDecoder.close: failed to clear session", exc_info=True)
 
     def flush(self) -> None:
         try:
             self._vt.flush(self._sess)
         except Exception:
-            pass
+            logger.debug("VTShimDecoder.flush: failed", exc_info=True)
 
     def counts(self) -> Tuple[int, int, int]:
         try:
             a, b, c = self._vt.counts(self._sess)
             return int(a), int(b), int(c)
         except Exception:
+            logger.debug("VTShimDecoder.counts: failed", exc_info=True)
             return (0, 0, 0)
 
     def decode(self, avcc_au: bytes, pts: Optional[float]) -> bool:
@@ -72,6 +73,7 @@ class VTShimDecoder:
             cap, pts = res
             return cap, float(pts)
         except Exception:
+            logger.debug("VTShimDecoder.get_frame_nowait: failed", exc_info=True)
             return None
 
     def get_frame(self, timeout: Optional[float] = None) -> Optional[Tuple[object, Optional[float]]]:
@@ -82,6 +84,7 @@ class VTShimDecoder:
             cap, pts = res
             return cap, float(pts)
         except Exception:
+            logger.debug("VTShimDecoder.get_frame: failed", exc_info=True)
             return None
 
     # Helpers to map/release frames from the shim capsule

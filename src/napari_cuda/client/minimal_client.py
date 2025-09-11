@@ -103,7 +103,7 @@ class MinimalClient(QtCore.QObject):
                     "Please use the StreamingCanvas client for VT decode."
                 )
         except Exception:
-            pass
+            logger.debug("MinimalClient: VT toggle check failed", exc_info=True)
         try:
             buf_n = int(os.getenv('NAPARI_CUDA_CLIENT_BUFFER_FRAMES', '3'))
         except Exception:
@@ -277,7 +277,7 @@ class MinimalClient(QtCore.QObject):
                             self._last_fmt_str or '?',
                         )
                     except Exception:
-                        pass
+                        logger.debug("MinimalClient: periodic stats log failed", exc_info=True)
         except Exception as e:
             logger.debug("display tick error: %s", e)
 

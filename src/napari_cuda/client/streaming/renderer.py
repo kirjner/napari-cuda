@@ -263,7 +263,7 @@ class GLRenderer:
                 _GL.glDisable(_GL.GL_DEPTH_TEST)
                 _GL.glDisable(_GL.GL_BLEND)
         except Exception:
-            pass
+            logger.debug("GL state setup failed", exc_info=True)
         res = self._vt.gl_tex_from_cvpixelbuffer(cache_cap, cvpixelbuffer_cap)
         if not res:
             return False
@@ -278,10 +278,7 @@ class GLRenderer:
                 if prog is None or self._gl_vbo is None:
                     return False
                 if not self._vt_first_draw_logged:
-                    try:
-                        logger.info("GLRenderer: VT zero-copy draw engaged (RECT target)")
-                    except Exception:
-                        pass
+                    logger.info("GLRenderer: VT zero-copy draw engaged (RECT target)")
                     self._vt_first_draw_logged = True
                 _GL.glUseProgram(prog)
                 # u_tex_size
@@ -313,10 +310,7 @@ class GLRenderer:
                 if prog is None or self._gl_vbo is None:
                     return False
                 if not self._vt_first_draw_logged:
-                    try:
-                        logger.info("GLRenderer: VT zero-copy draw engaged (2D target)")
-                    except Exception:
-                        pass
+                    logger.info("GLRenderer: VT zero-copy draw engaged (2D target)")
                     self._vt_first_draw_logged = True
                 _GL.glUseProgram(prog)
                 _GL.glActiveTexture(_GL.GL_TEXTURE0)
@@ -347,5 +341,5 @@ class GLRenderer:
             try:
                 self._vt.gl_release_tex(tex_cap)
             except Exception:
-                pass
+                logger.debug("gl_release_tex (cleanup) failed", exc_info=True)
             return False

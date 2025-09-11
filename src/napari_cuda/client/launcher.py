@@ -85,7 +85,7 @@ def launch_streaming_client(server_host='localhost',
         try:
             proxy_viewer._connect_to_server()
         except Exception as e:
-            logger.debug(f"Deferred server connect failed (will retry later): {e}")
+            logger.debug("Deferred server connect failed (will retry later)", exc_info=True)
     
     # Replace canvas inside the QtViewer welcome overlay stack (current napari layout)
     try:
@@ -98,7 +98,7 @@ def launch_streaming_client(server_host='localhost',
                     ow.removeWidget(old_canvas.native)
                     break
         except Exception:
-            pass
+            logger.debug("launcher: failed to remove old canvas from overlay", exc_info=True)
         # Ensure our streaming canvas is the primary widget in the overlay
         try:
             # Avoid duplicate insert if already present
@@ -106,7 +106,7 @@ def launch_streaming_client(server_host='localhost',
             if not present:
                 ow.insertWidget(0, streaming_canvas.native)
         except Exception:
-            pass
+            logger.debug("launcher: failed to insert streaming canvas into overlay", exc_info=True)
         # Hide the welcome screen so only the video canvas is visible
         try:
             qt_viewer.set_welcome_visible(False)
@@ -114,9 +114,9 @@ def launch_streaming_client(server_host='localhost',
             try:
                 ow.set_welcome_visible(False)
             except Exception:
-                pass
+                logger.debug("launcher: failed to hide welcome overlay (overlay widget)", exc_info=True)
     except Exception:
-        pass
+        logger.debug("launcher: overlay manipulation failed", exc_info=True)
     
     # Clean up old canvas widget
     try:
@@ -126,7 +126,7 @@ def launch_streaming_client(server_host='localhost',
         try:
             old_canvas.native.deleteLater()
         except Exception:
-            pass
+            logger.debug("launcher: cleanup old canvas native failed", exc_info=True)
     
     # Now show the window
     window.show()
@@ -172,10 +172,11 @@ def main():
         action='store_true',
         help='Enable debug logging'
     )
+    # Unified smoke flag (offline; no server)
     parser.add_argument(
-        '--vt-smoke',
+        '--smoke',
         action='store_true',
-        help='Run client-side VideoToolbox smoke test (no server)'
+        help='Run client-side smoke test (offline)'
     )
     
     # For SSH tunnel setup hint
@@ -196,12 +197,13 @@ def main():
         sys.exit(0)
     
     # Launch client
+    smoke = bool(args.smoke)
     launch_streaming_client(
         server_host=args.host,
         state_port=args.state_port,
         pixel_port=args.pixel_port,
         debug=args.debug,
-        vt_smoke=args.vt_smoke
+        vt_smoke=smoke
     )
 
 

@@ -32,20 +32,19 @@ Notes
 - Fixed‑latency presenter is used for both VT and PyAV; arrival mode ignores server clocks and is most robust at very low latency.
 
 Offline smoke (no network)
-- `NAPARI_CUDA_VT_SMOKE=1` enables offline testing without a server.
-- `NAPARI_CUDA_VT_SMOKE_SOURCE={vt|encode|pyav}` selects the path:
-  - `vt` (default): synthetic CVPixelBuffer generator rendered zero‑copy.
-  - `encode`: PyAV H.264 encode → AVCC → VT decode → zero‑copy render.
+- `NAPARI_CUDA_SMOKE=1` enables offline testing without a server.
+- `NAPARI_CUDA_SMOKE_SOURCE={vt|pyav}` selects the path:
+  - `vt`   (default): PyAV H.264 encode → AVCC → VT decode → zero‑copy render.
   - `pyav`: PyAV H.264 encode → PyAV decode (CPU) → RGB render.
 - Dimensions / cadence / pattern:
-  - `NAPARI_CUDA_VT_SMOKE_W` (default 1280)
-  - `NAPARI_CUDA_VT_SMOKE_H` (default 720)
-  - `NAPARI_CUDA_VT_SMOKE_FPS` (default 60)
-  - `NAPARI_CUDA_VT_SMOKE_MODE={checker|gradient}` (default `checker`)
+  - `NAPARI_CUDA_SMOKE_W` (default 1280)
+  - `NAPARI_CUDA_SMOKE_H` (default 720)
+  - `NAPARI_CUDA_SMOKE_FPS` (default 60)
+  - `NAPARI_CUDA_SMOKE_MODE={checker|gradient}` (default `checker`)
 - Latency knobs used during smoke runs:
-  - `encode` and `vt`: `NAPARI_CUDA_CLIENT_VT_LATENCY_MS` (ARRIVAL mode)
+  - `vt`: `NAPARI_CUDA_CLIENT_VT_LATENCY_MS` (ARRIVAL mode)
   - `pyav`: `NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS` (ARRIVAL mode)
-- Pack/encode notes (encode/pyav):
+- Pack/encode notes (vt/pyav):
   - Uses the server AVCC packer; if the Cython packer isn’t built, set `NAPARI_CUDA_ALLOW_PY_FALLBACK=1`.
   - VT expects AVCC; smoke paths normalize AUs to AVCC and gate on keyframes.
 - Diagnostics:
