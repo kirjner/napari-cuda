@@ -27,6 +27,8 @@ from napari_cuda.codec.avcc import (
 )
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.utils.env import env_float, env_str
+from napari_cuda.client.streaming.smoke.generators import make_generator
+from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 
 logger = logging.getLogger(__name__)
 
@@ -522,10 +524,8 @@ class StreamManager:
                 # avcC to initialize VT
                 avcc_bytes: bytes | None = None
                 # Frame generator bases
-                import numpy as _np
-                x = _np.linspace(0, 255, sw, dtype=_np.uint8)[None, :]
-                y = _np.linspace(0, 255, sh, dtype=_np.uint8)[:, None]
                 smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
+                gen = make_generator(smoke_mode, sw, sh, fps)
                 # Start loop
                 first_packets_logged = 0
                 frame_idx = 0
@@ -536,23 +536,7 @@ class StreamManager:
                 # If VT not initialized yet, we will inspect first packets for SPS/PPS
                 while True:
                     t = time.perf_counter()
-                    # Generate RGB according to smoke mode
-                    if smoke_mode == 'checker':
-                        tnow = time.perf_counter()
-                        ox = int(((_np.sin(tnow * 2.0) * 0.5 + 0.5) * 64))
-                        oy = int(((_np.cos(tnow * 1.7) * 0.5 + 0.5) * 64))
-                        xx = (_np.arange(sw, dtype=_np.int32)[None, :] + ox) // 32
-                        yy = (_np.arange(sh, dtype=_np.int32)[:, None] + oy) // 32
-                        mask = ((xx ^ yy) & 1).astype(_np.uint8)
-                        r = (mask * 255).astype(_np.uint8, copy=False)
-                        g = _np.broadcast_to(x, (sh, sw))
-                        b = _np.broadcast_to(y, (sh, sw))
-                        rgb = _np.dstack([r, g, b])
-                    else:
-                        r = _np.broadcast_to(x, (sh, sw))
-                        g = _np.broadcast_to(y, (sh, sw))
-                        b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
-                        rgb = _np.dstack([r, g, b])
+                    rgb = gen(frame_idx)
                     # Compute a monotonic PTS based on frame index and nominal FPS
                     ts_this = float(frame_idx) / float(max(1.0, fps))
                     try:
@@ -583,25 +567,14 @@ class StreamManager:
                         except Exception:
                             logger.debug('encode-smoke: get_avcc_config failed', exc_info=True)
                     # Submit AU(s) to VT input queue
-                    for au_obj in au_list:
-                        au = au_obj.payload
-                        if not au:
-                            continue
-                        try:
-                            if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
-                                # Backlog: drain and continue (fresh start)
-                                while self._vt_in_q.qsize() > 0:
-                                    _ = self._vt_in_q.get_nowait()
-                                self._presenter.clear(Source.VT)
-                            # Use AU pts when present; else fall back to computed ts
-                            ts_submit = au_obj.pts if au_obj.pts is not None else ts_this
-                            self._vt_in_q.put_nowait((au, ts_submit))
-                            self._vt_enqueued += 1
-                            if first_packets_logged < 3:
-                                logger.info('encode-smoke: submitted AU len=%d ts=%.6f', len(au), float(ts_submit))
-                                first_packets_logged += 1
-                        except Exception:
-                            logger.debug('encode-smoke: submit failed', exc_info=True)
+                    try:
+                        submitted = submit_vt(au_list, self._vt_in_q, self._presenter, self._vt_backlog_trigger, ts_this)
+                        self._vt_enqueued += int(submitted)
+                        if submitted and first_packets_logged < 3:
+                            logger.info('encode-smoke: submitted AU len=%d ts=%.6f', len(au_list[0].payload), float(au_list[0].pts or ts_this))
+                            first_packets_logged += 1
+                    except Exception:
+                        logger.debug('encode-smoke: submit failed', exc_info=True)
                     # tick cadence
                     # Aim for fps
                     target = 1.0 / max(1.0, fps)
@@ -653,31 +626,14 @@ class StreamManager:
                                 continue
                         raise RuntimeError('No H.264 encoder available')
                     enc = _make_encoder()
-                    import numpy as _np
-                    x = _np.linspace(0, 255, sw, dtype=_np.uint8)[None, :]
-                    y = _np.linspace(0, 255, sh, dtype=_np.uint8)[:, None]
                     smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
+                    gen = make_generator(smoke_mode, sw, sh, fps)
                     first_packets_logged = 0
                     frame_idx = 0
                     started = False
                     while True:
                         t0 = time.perf_counter()
-                        if smoke_mode == 'checker':
-                            tnow = time.perf_counter()
-                            ox = int(((_np.sin(tnow * 2.0) * 0.5 + 0.5) * 64))
-                            oy = int(((_np.cos(tnow * 1.7) * 0.5 + 0.5) * 64))
-                            xx = (_np.arange(sw, dtype=_np.int32)[None, :] + ox) // 32
-                            yy = (_np.arange(sh, dtype=_np.int32)[:, None] + oy) // 32
-                            mask = ((xx ^ yy) & 1).astype(_np.uint8)
-                            r = (mask * 255).astype(_np.uint8, copy=False)
-                            g = _np.broadcast_to(x, (sh, sw))
-                            b = _np.broadcast_to(y, (sh, sw))
-                            rgb = _np.dstack([r, g, b])
-                        else:
-                            r = _np.broadcast_to(x, (sh, sw))
-                            g = _np.broadcast_to(y, (sh, sw))
-                            b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
-                            rgb = _np.dstack([r, g, b])
+                        rgb = gen(frame_idx)
                         ts_this = float(frame_idx) / float(max(1.0, fps))
                         try:
                             au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
@@ -699,13 +655,9 @@ class StreamManager:
                                     continue
                                 started = True
                             try:
-                                if self._pyav_in_q.qsize() >= max(2, self._pyav_backlog_trigger - 1):
-                                    while self._pyav_in_q.qsize() > 0:
-                                        _ = self._pyav_in_q.get_nowait()
-                                    self._presenter.clear(Source.PYAV)
-                                self._pyav_in_q.put_nowait((au.payload, au.pts))
-                                self._pyav_enqueued += 1
-                                if first_packets_logged < 3:
+                                submitted = submit_pyav([au], self._pyav_in_q, self._presenter, self._pyav_backlog_trigger, ts_this)
+                                self._pyav_enqueued += int(submitted)
+                                if submitted and first_packets_logged < 3:
                                     logger.info('pyav-smoke: submitted AU len=%d ts=%.6f', len(au.payload), float(au.pts or ts_this))
                                     first_packets_logged += 1
                             except Exception:
