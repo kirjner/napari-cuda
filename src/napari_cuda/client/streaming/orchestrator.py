@@ -17,7 +17,7 @@ from napari_cuda.client.streaming.types import Source, SubmittedFrame, Timestamp
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
-from napari_cuda.codec.h264 import (
+from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
     split_annexb,
