@@ -85,46 +85,29 @@ class VTPipeline:
                         img_buf, pts = item
                         if self._is_gated():
                             # Drain but don't present while waiting for keyframe
-                            try:
-                                from napari_cuda import _vt as vt  # type: ignore
-                                vt.release_frame(img_buf)
-                            except Exception:
-                                logger.debug("VTPipeline: release_frame during gate failed", exc_info=True)
+                            from napari_cuda import _vt as vt  # type: ignore
+                            vt.release_frame(img_buf)
                             continue
                         # Present and cache last
-                        try:
-                            from napari_cuda import _vt as vt  # type: ignore
-                            # Take an extra retain for last-frame fallback
-                            try:
-                                vt.retain_frame(img_buf)
-                                # Release previously cached retain if any (when not persistent)
-                                if self._last_payload is not None and not self._last_persistent:
-                                    try:
-                                        vt.release_frame(self._last_payload)
-                                    except Exception:
-                                        logger.debug("VTPipeline: release last cached failed", exc_info=True)
-                                self._last_payload = img_buf
-                                self._last_persistent = True
-                                self._on_cache_last(self._last_payload, True)
-                            except Exception:
-                                self._last_persistent = False
-                                self._on_cache_last(img_buf, False)
-                            self._presenter.submit(
-                                SubmittedFrame(
-                                    source=Source.VT,
-                                    server_ts=float(pts) if pts is not None else None,
-                                    arrival_ts=time.time(),
-                                    payload=img_buf,
-                                    release_cb=vt.release_frame,
-                                )
+                        from napari_cuda import _vt as vt  # type: ignore
+                        # Take an extra retain for last-frame fallback; update cache
+                        vt.retain_frame(img_buf)
+                        if self._last_payload is not None and not self._last_persistent:
+                            vt.release_frame(self._last_payload)
+                        self._last_payload = img_buf
+                        self._last_persistent = True
+                        self._on_cache_last(self._last_payload, True)
+                        self._presenter.submit(
+                            SubmittedFrame(
+                                source=Source.VT,
+                                server_ts=float(pts) if pts is not None else None,
+                                arrival_ts=time.time(),
+                                payload=img_buf,
+                                release_cb=vt.release_frame,
                             )
-                        except Exception:
-                            logger.debug("VTPipeline: presenter submit failed", exc_info=True)
+                        )
                     if drained:
-                        try:
-                            QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
-                        except Exception:
-                            logger.debug("VTPipeline: schedule GUI update failed", exc_info=True)
+                        QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
                     if not drained:
                         time.sleep(0.002)
                 except Exception:
@@ -225,4 +208,3 @@ class VTPipeline:
             if self._errors >= 3:
                 logger.error("VTPipeline: disabling decoder after repeated errors")
                 self._decoder = None
-

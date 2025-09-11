@@ -217,10 +217,7 @@ class SmokePipeline:
         qsz = int(pl.qsize())
         if qsz >= max(2, int(self.cfg.backlog_trigger) - 1):
             pl.clear()
-            try:
-                self.presenter.clear(Source.PYAV if tgt == 'pyav' else Source.VT)
-            except Exception:
-                logger.debug("smoke: presenter clear failed", exc_info=True)
+            self.presenter.clear(Source.PYAV if tgt == 'pyav' else Source.VT)
             self._dropped += 1
         if payload:
             pl.enqueue(payload, ts)

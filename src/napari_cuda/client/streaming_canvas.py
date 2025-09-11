@@ -384,8 +384,11 @@ class StreamingCanvas(VispyCanvas):
             "}"
         )
         lbl.setText('fps: --')
+        lbl.setWordWrap(False)
+        # Let the label size to content; keep a sensible minimum width
+        lbl.adjustSize()
+        lbl.setMinimumWidth(260)
         lbl.move(8, 8)
-        lbl.resize(140, 20)
         lbl.raise_()
         lbl.show()
         self._fps_label = lbl
@@ -401,37 +404,37 @@ class StreamingCanvas(VispyCanvas):
         self._fps_timer.start()
 
     def _update_fps_hud(self) -> None:
+        mgr = getattr(self, '_manager', None)
+        if mgr is None or not hasattr(mgr, '_presenter'):
+            return
+        now = time.time()
+        last = float(self._hud_prev_time or 0.0)
+        # Only guard the stats() call; everything else should be deterministic
         try:
-            mgr = getattr(self, '_manager', None)
-            if mgr is None or not hasattr(mgr, '_presenter'):
-                return
-            now = time.time()
-            last = float(self._hud_prev_time or 0.0)
-            stats = mgr._presenter.stats()  # {'submit': {...}, 'out': {...}, 'buf': {...}, 'latency_ms': ..., 'mode': ...}
-            sub = stats.get('submit', {})
-            out = stats.get('out', {})
-            vt_sub = int(sub.get('vt', 0)); py_sub = int(sub.get('pyav', 0))
-            vt_out = int(out.get('vt', 0)); py_out = int(out.get('pyav', 0))
-            if last == 0.0:
-                # Prime
-                self._hud_prev_time = now
-                self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
-                self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
-                return
-            dt = max(1e-3, now - last)
-            fps_out_vt = (vt_out - self._hud_prev_out['vt']) / dt
-            fps_out_py = (py_out - self._hud_prev_out['pyav']) / dt
-            fps_sub_vt = (vt_sub - self._hud_prev_submit['vt']) / dt
-            fps_sub_py = (py_sub - self._hud_prev_submit['pyav']) / dt
+            stats = mgr._presenter.stats()
+        except Exception:
+            logger.debug('FPS HUD: presenter.stats failed', exc_info=True)
+            return
+        sub = stats.get('submit', {})
+        out = stats.get('out', {})
+        vt_sub = int(sub.get('vt', 0)); py_sub = int(sub.get('pyav', 0))
+        vt_out = int(out.get('vt', 0)); py_out = int(out.get('pyav', 0))
+        if last == 0.0:
             self._hud_prev_time = now
             self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
             self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
-            # Active source readout + latency and mode
-            active = getattr(mgr._source_mux, 'active', None)
-            active_str = getattr(active, 'value', str(active)) if active is not None else '-'
-            lat_ms = stats.get('latency_ms', 0)
-            mode = stats.get('mode', '')
-            txt = f"{active_str} out:{fps_out_vt if active_str=='vt' else fps_out_py:.1f} fps"
-            self._fps_label.setText(txt)
-        except Exception:
-            logger.debug('FPS HUD update failed', exc_info=True)
+            return
+        dt = max(1e-3, now - last)
+        fps_out_vt = (vt_out - self._hud_prev_out['vt']) / dt
+        fps_out_py = (py_out - self._hud_prev_out['pyav']) / dt
+        self._hud_prev_time = now
+        self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
+        self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
+        active = getattr(mgr._source_mux, 'active', None)
+        active_str = getattr(active, 'value', str(active)) if active is not None else '-'
+        lat_ms = int(stats.get('latency_ms', 0) or 0)
+        mode = str(stats.get('mode', '') or '')
+        out_fps = fps_out_vt if active_str == 'vt' else fps_out_py
+        txt = f"{active_str} out:{out_fps:.1f} fps  mode:{mode}  latency:{lat_ms} ms"
+        self._fps_label.setText(txt)
+        self._fps_label.adjustSize()
