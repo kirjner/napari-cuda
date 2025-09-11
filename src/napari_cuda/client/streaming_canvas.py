@@ -430,14 +430,20 @@ class StreamingCanvas(VispyCanvas):
             q_py = 0
         # Selected client-side timing means (if metrics enabled)
         dec_py_ms = None
+        vt_dec_ms = None
         vt_submit_ms = None
+        render_vt_ms = None
+        render_pyav_ms = None
         try:
             metrics = getattr(mgr, '_metrics', None)
             if metrics is not None and hasattr(metrics, 'snapshot'):
                 snap = metrics.snapshot()
                 h = snap.get('histograms', {}) or {}
                 dec_py_ms = (h.get('napari_cuda_client_pyav_decode_ms') or {}).get('mean_ms')
+                vt_dec_ms = (h.get('napari_cuda_client_vt_decode_ms') or {}).get('mean_ms')
                 vt_submit_ms = (h.get('napari_cuda_client_vt_submit_ms') or {}).get('mean_ms')
+                render_vt_ms = (h.get('napari_cuda_client_render_vt_ms') or {}).get('mean_ms')
+                render_pyav_ms = (h.get('napari_cuda_client_render_pyav_ms') or {}).get('mean_ms')
         except Exception:
             logger.debug('FPS HUD: metrics snapshot failed', exc_info=True)
         txt = (
@@ -446,10 +452,18 @@ class StreamingCanvas(VispyCanvas):
         )
         # Append decode/submit timings if available
         extra = []
-        if isinstance(dec_py_ms, (int, float)):
-            extra.append(f"dec.py:{dec_py_ms:.2f}ms")
-        if isinstance(vt_submit_ms, (int, float)):
-            extra.append(f"vt.sub:{vt_submit_ms:.2f}ms")
+        if active_str == 'pyav':
+            if isinstance(dec_py_ms, (int, float)):
+                extra.append(f"dec:{dec_py_ms:.2f}ms")
+            if isinstance(render_pyav_ms, (int, float)):
+                extra.append(f"render:{render_pyav_ms:.2f}ms")
+        elif active_str == 'vt':
+            if isinstance(vt_dec_ms, (int, float)):
+                extra.append(f"dec:{vt_dec_ms:.2f}ms")
+            if isinstance(render_vt_ms, (int, float)):
+                extra.append(f"render:{render_vt_ms:.2f}ms")
+            if isinstance(vt_submit_ms, (int, float)):
+                extra.append(f"sub:{vt_submit_ms:.2f}ms")
         if extra:
             txt = txt + "\n" + "  ".join(extra)
         self._fps_label.setText(txt)

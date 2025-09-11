@@ -6,6 +6,7 @@ import queue
 import time
 from threading import Thread
 from typing import Optional
+from dataclasses import dataclass
 
 import numpy as np
 from qtpy import QtCore
@@ -38,6 +39,33 @@ from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _SyncState:
+    last_seq: Optional[int] = None
+    last_disco_log: float = 0.0
+    keyframes_seen: int = 0
+
+    def update_and_check(self, cur: int) -> bool:
+        """Return True if sequence discontinuity detected."""
+        if self.last_seq is None:
+            self.last_seq = int(cur)
+            return False
+        expected = (int(self.last_seq) + 1) & 0xFFFFFFFF
+        if int(cur) != expected:
+            now = time.time()
+            if (now - self.last_disco_log) > 0.2:
+                logger.warning(
+                    "Pixel stream discontinuity: expected=%d got=%d; gating until keyframe",
+                    expected,
+                    int(cur),
+                )
+                self.last_disco_log = now
+            self.last_seq = int(cur)
+            return True
+        self.last_seq = int(cur)
+        return False
 
 
 class StreamCoordinator:
@@ -192,26 +220,15 @@ class StreamCoordinator:
         self._arrival_logged: bool = False
         # Debounce duplicate video_config
         self._last_vcfg_key = None
-        # Stream continuity tracking
-        self._last_seq: Optional[int] = None
+        # Stream continuity and gate tracking
+        self._sync = _SyncState()
         self._disco_gated: bool = False
-        self._last_disco_log: float = 0.0
         self._last_key_logged: Optional[int] = None
-        self._keyframes_seen: int = 0
 
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
         if not self._vt_smoke:
-            def _on_video_config(data: dict) -> None:
-                w, h, fps, fmt, avcc_b64 = extract_video_config(data)
-                if fps > 0:
-                    self._fps = fps
-                self._stream_format = fmt
-                self._stream_format_set = True
-                if w > 0 and h > 0 and avcc_b64:
-                    self._init_vt_from_avcc(avcc_b64, w, h)
-
-            st = StateController(self.server_host, self.state_port, _on_video_config)
+            st = StateController(self.server_host, self.state_port, self._on_video_config)
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
 
@@ -292,149 +309,12 @@ class StreamCoordinator:
             )
             self._smoke.start()
         else:
-            def _on_connected() -> None:
-                self._init_decoder()
-                # Bind decoder to pipeline
-                dec = self.decoder.decode if self.decoder else None
-                self._pyav_pipeline.set_decoder(dec)
-
-            def _on_frame(pkt: Packet) -> None:
-                    # Log keyframe detection to verify server behavior
-                    # try:
-                    #     if (pkt.flags & 0x01) != 0 or self._is_keyframe(pkt.payload, pkt.codec):
-                    #         s = int(pkt.seq)
-                    #         if self._last_key_logged != s:
-                    #             logger.info("Keyframe detected (seq=%d)", s)
-                    #             self._last_key_logged = s
-                    #             self._keyframes_seen += 1
-                    # except Exception:
-                    #     pass
-                    # Detect stream discontinuity by sequence number
-                    cur = int(pkt.seq)
-                    if self._last_seq is not None and not (self._vt_wait_keyframe or self._pyav_wait_keyframe):
-                        expected = (self._last_seq + 1) & 0xFFFFFFFF
-                        if cur != expected:
-                            # Log at most ~5 Hz to avoid spam
-                            now = time.time()
-                            if (now - self._last_disco_log) > 0.2:
-                                logger.warning(
-                                    "Pixel stream discontinuity: expected=%d got=%d; gating until keyframe",
-                                    expected,
-                                    cur,
-                                )
-                                self._last_disco_log = now
-                            # Gate VT path
-                            if self._vt_decoder is not None:
-                                self._vt_wait_keyframe = True
-                                self._vt_pipeline.clear()
-                                self._presenter.clear(Source.VT)
-                                self._request_keyframe_once()
-                            # Gate PyAV path
-                            self._pyav_wait_keyframe = True
-                            self._pyav_pipeline.clear()
-                            self._presenter.clear(Source.PYAV)
-                            self._init_decoder()
-                            dec = self.decoder.decode if self.decoder else None
-                            self._pyav_pipeline.set_decoder(dec)
-                            self._disco_gated = True
-                    # Always update last_seq
-                    self._last_seq = int(pkt.seq)
-                    # Global initial gate (first frame must be keyframe)
-                    if not self._stream_seen_keyframe:
-                        if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
-                            self._stream_seen_keyframe = True
-                        else:
-                            return
-                    # VT-specific gate: after VT (re)init, require a fresh keyframe
-                    if self._vt_decoder is not None and self._vt_wait_keyframe:
-                        if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
-                            self._vt_wait_keyframe = False
-                            self._vt_gate_lift_time = time.time()
-                            try:
-                                self._vt_ts_offset = float(self._vt_gate_lift_time - float(pkt.ts)) - float(self._server_bias_s)
-                            except Exception:
-                                self._vt_ts_offset = None
-                            self._source_mux.set_active(Source.VT)
-                            self._presenter.set_offset(self._vt_ts_offset)
-                            # Restore low latency for VT
-                            try:
-                                self._presenter.set_latency(self._vt_latency_s)
-                            except Exception:
-                                logger.debug("Presenter set_latency restore for VT failed", exc_info=True)
-                            self._presenter.clear(Source.PYAV)
-                            logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", int(pkt.seq))
-                            self._disco_gated = False
-                            # Engage warmup ramp in ARRIVAL mode to reduce startup ticks
-                            try:
-                                if self._presenter.clock.mode == TimestampMode.ARRIVAL and self._warmup_window_s > 0:
-                                    # Determine extra: explicit override (ms) or auto size to exceed one frame interval
-                                    if self._warmup_ms_override:
-                                        extra_ms = max(0.0, float(self._warmup_ms_override))
-                                    else:
-                                        frame_ms = 1000.0 / (self._fps if (self._fps and self._fps > 0) else 60.0)
-                                        target_ms = frame_ms + float(self._warmup_margin_ms)
-                                        base_ms = float(self._vt_latency_s) * 1000.0
-                                        extra_ms = max(0.0, min(float(self._warmup_max_ms), target_ms - base_ms))
-                                    extra_s = extra_ms / 1000.0
-                                    if extra_s > 0.0:
-                                        self._warmup_extra_active_s = extra_s
-                                        self._warmup_until = time.time() + float(self._warmup_window_s)
-                                        self._presenter.set_latency(self._vt_latency_s + extra_s)
-                            except Exception:
-                                logger.debug("Warmup latency set failed", exc_info=True)
-                        else:
-                            # While VT is gated, avoid decoding previews; just request keyframe
-                            self._request_keyframe_once()
-                            return
-
-                    # Prefer VT if ready; otherwise PyAV
-                    if self._vt_decoder is not None and not self._vt_wait_keyframe:
-                        ts_float = float(pkt.ts)
-                        b = bytes(pkt.payload)
-                        try:
-                            self._vt_pipeline.enqueue(b, ts_float)
-                            self._vt_enqueued += 1
-                        except Exception:
-                            logger.debug("VT pipeline enqueue failed", exc_info=True)
-                    else:
-                        # PyAV path with backlog-safe gating
-                        try:
-                            ts_float = float(pkt.ts)
-                        except Exception:
-                            ts_float = None
-                        b = bytes(pkt.payload)
-                        # If backlog builds, reset decoder and wait for a fresh keyframe
-                        if self._pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
-                            self._pyav_wait_keyframe = True
-                            # Drain queued items and clear presenter buffer for a clean start
-                            self._pyav_pipeline.clear()
-                            self._presenter.clear(Source.PYAV)
-                            # Recreate decoder fresh to drop reference history
-                            self._init_decoder()
-                            dec = self.decoder.decode if self.decoder else None
-                            self._pyav_pipeline.set_decoder(dec)
-                        # If waiting for keyframe, skip until flags indicate a keyframe
-                        if self._pyav_wait_keyframe:
-                            if not (self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01)):
-                                return
-                            # Got keyframe: clear gate
-                            self._pyav_wait_keyframe = False
-                            # Reinitialize decoder one more time right at the keyframe
-                            self._init_decoder()
-                            self._disco_gated = False
-                        # Enqueue for decode
-                        self._pyav_pipeline.enqueue(b, ts_float)
-                        self._pyav_enqueued += 1
-
-            def _on_disconnect(exc: Exception | None) -> None:
-                return
-
             rc = ReceiveController(
                 self.server_host,
                 self.server_port,
-                on_connected=_on_connected,
-                on_frame=_on_frame,
-                on_disconnect=_on_disconnect,
+                on_connected=self._on_connected,
+                on_frame=self._on_frame,
+                on_disconnect=self._on_disconnect,
             )
             self._receiver, t_rx = rc.start()
             self._threads.append(t_rx)
@@ -472,17 +352,8 @@ class StreamCoordinator:
         self._frame_q.put(frame)
 
     def draw(self) -> None:
-        # Arrival-mode startup warmup: ramp latency from (base+extra) down to base
-        if self._warmup_until > 0 and self._presenter.clock.mode == TimestampMode.ARRIVAL:
-            now = time.time()
-            if now >= self._warmup_until:
-                self._presenter.set_latency(self._vt_latency_s)
-                self._warmup_until = 0.0
-            else:
-                remain = max(0.0, self._warmup_until - now)
-                frac = remain / max(1e-6, self._warmup_window_s)
-                cur = self._vt_latency_s + self._warmup_extra_active_s * frac
-                self._presenter.set_latency(cur)
+        # Arrival-mode startup warmup: ramp latency down
+        self._apply_warmup(time.time())
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
@@ -554,7 +425,17 @@ class StreamCoordinator:
                 frame = self._frame_q.get_nowait()
             except queue.Empty:
                 break
-        self._renderer.draw(frame)
+        # Time the render operation based on frame type
+        if frame is not None:
+            is_vt = isinstance(frame, tuple) and len(frame) == 2
+            t_render0 = time.perf_counter()
+            self._renderer.draw(frame)
+            t_render1 = time.perf_counter()
+            if self._metrics is not None and self._metrics.enabled:
+                metric_name = 'napari_cuda_client_render_vt_ms' if is_vt else 'napari_cuda_client_render_pyav_ms'
+                self._metrics.observe_ms(metric_name, (t_render1 - t_render0) * 1000.0)
+        else:
+            self._renderer.draw(frame)
         # Count a presented frame for client-side FPS derivation
         self._metrics.inc('napari_cuda_client_presented_total', 1.0)
 
@@ -577,7 +458,7 @@ class StreamCoordinator:
                 "presenter=%s vt_counts=%s keyframes_seen=%d",
                 pres_stats,
                 vt_counts,
-                self._keyframes_seen,
+                self._sync.keyframes_seen,
             )
         except Exception:
             logger.debug("stats logging failed", exc_info=True)
@@ -637,45 +518,155 @@ class StreamCoordinator:
         if ch is not None:
             ch.request_keyframe_once()
 
-    def _decode_frame(self, h264_data: bytes) -> None:
-        if self.decoder:
-            try:
-                frame = self.decoder.decode(h264_data)
-            except Exception as e:
-                logger.debug("PyAV decode error; skipping frame: %s", e)
-                frame = None
-            if frame is not None:
-                self._enqueue_frame(frame)
+    # Extracted helpers
+    def _on_video_config(self, data: dict) -> None:
+        w, h, fps, fmt, avcc_b64 = extract_video_config(data)
+        if fps > 0:
+            self._fps = fps
+        self._stream_format = fmt
+        self._stream_format_set = True
+        if w > 0 and h > 0 and avcc_b64:
+            self._init_vt_from_avcc(avcc_b64, w, h)
 
-    def _annexb_to_avcc(self, data: bytes) -> bytes:
-        out = bytearray()
-        n = len(data)
-        idx: list[int] = []
-        i = 0
-        while i + 3 <= n:
-            if data[i:i+3] == b"\x00\x00\x01":
-                idx.append(i)
-                i += 3
-            elif i + 4 <= n and data[i:i+4] == b"\x00\x00\x00\x01":
-                idx.append(i)
-                i += 4
+    def _on_connected(self) -> None:
+        self._init_decoder()
+        dec = self.decoder.decode if self.decoder else None
+        self._pyav_pipeline.set_decoder(dec)
+
+    def _on_disconnect(self, exc: Exception | None) -> None:
+        logger.info("PixelReceiver disconnected: %s", exc)
+
+    def _on_frame(self, pkt: Packet) -> None:
+        cur = int(pkt.seq)
+        if not (self._vt_wait_keyframe or self._pyav_wait_keyframe):
+            if self._sync.update_and_check(cur):
+                if self._vt_decoder is not None:
+                    self._vt_wait_keyframe = True
+                    self._vt_pipeline.clear()
+                    self._presenter.clear(Source.VT)
+                    self._request_keyframe_once()
+                self._pyav_wait_keyframe = True
+                self._pyav_pipeline.clear()
+                self._presenter.clear(Source.PYAV)
+                self._init_decoder()
+                dec = self.decoder.decode if self.decoder else None
+                self._pyav_pipeline.set_decoder(dec)
+                self._disco_gated = True
+        if not self._stream_seen_keyframe:
+            if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
+                self._stream_seen_keyframe = True
             else:
-                i += 1
-        idx.append(n)
-        for a, b in zip(idx, idx[1:]):
-            j = a
-            while j < b and data[j] == 0:
-                j += 1
-            if j + 3 <= b and data[j:j+3] == b"\x00\x00\x01":
-                j += 3
-            elif j + 4 <= b and data[j:j+4] == b"\x00\x00\x00\x01":
-                j += 4
-            nal = data[j:b]
-            if not nal:
-                continue
-            out.extend(len(nal).to_bytes(4, "big"))
-            out.extend(nal)
-        return bytes(out)
+                return
+        if self._vt_decoder is not None and self._vt_wait_keyframe:
+            if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
+                self._vt_wait_keyframe = False
+                self._vt_gate_lift_time = time.time()
+                try:
+                    self._vt_ts_offset = float(self._vt_gate_lift_time - float(pkt.ts)) - float(self._server_bias_s)
+                except Exception:
+                    self._vt_ts_offset = None
+                self._source_mux.set_active(Source.VT)
+                self._presenter.set_offset(self._vt_ts_offset)
+                try:
+                    self._presenter.set_latency(self._vt_latency_s)
+                except Exception:
+                    logger.debug("Presenter set_latency restore for VT failed", exc_info=True)
+                self._presenter.clear(Source.PYAV)
+                logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", cur)
+                self._disco_gated = False
+                try:
+                    if self._presenter.clock.mode == TimestampMode.ARRIVAL and self._warmup_window_s > 0:
+                        if self._warmup_ms_override:
+                            extra_ms = max(0.0, float(self._warmup_ms_override))
+                        else:
+                            frame_ms = 1000.0 / (self._fps if (self._fps and self._fps > 0) else 60.0)
+                            target_ms = frame_ms + float(self._warmup_margin_ms)
+                            base_ms = float(self._vt_latency_s) * 1000.0
+                            extra_ms = max(0.0, min(float(self._warmup_max_ms), target_ms - base_ms))
+                        extra_s = extra_ms / 1000.0
+                        if extra_s > 0.0:
+                            self._warmup_extra_active_s = extra_s
+                            self._warmup_until = time.time() + float(self._warmup_window_s)
+                            self._presenter.set_latency(self._vt_latency_s + extra_s)
+                except Exception:
+                    logger.debug("Warmup latency set failed", exc_info=True)
+            else:
+                self._request_keyframe_once()
+                return
+        if self._vt_decoder is not None and not self._vt_wait_keyframe:
+            ts_float = float(pkt.ts)
+            b = bytes(pkt.payload)
+            try:
+                self._vt_pipeline.enqueue(b, ts_float)
+                self._vt_enqueued += 1
+            except Exception:
+                logger.debug("VT pipeline enqueue failed", exc_info=True)
+        else:
+            try:
+                ts_float = float(pkt.ts)
+            except Exception:
+                ts_float = None
+            b = bytes(pkt.payload)
+            if self._pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
+                self._pyav_wait_keyframe = True
+                self._pyav_pipeline.clear()
+                self._presenter.clear(Source.PYAV)
+                self._init_decoder()
+                dec = self.decoder.decode if self.decoder else None
+                self._pyav_pipeline.set_decoder(dec)
+            if self._pyav_wait_keyframe:
+                if not (self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01)):
+                    return
+                self._pyav_wait_keyframe = False
+                self._init_decoder()
+                self._disco_gated = False
+            self._pyav_pipeline.enqueue(b, ts_float)
+            self._pyav_enqueued += 1
+
+    def _apply_warmup(self, now: float) -> None:
+        if self._warmup_until > 0 and self._presenter.clock.mode == TimestampMode.ARRIVAL:
+            if now >= self._warmup_until:
+                self._presenter.set_latency(self._vt_latency_s)
+                self._warmup_until = 0.0
+            else:
+                remain = max(0.0, self._warmup_until - now)
+                frac = remain / max(1e-6, self._warmup_window_s)
+                cur = self._vt_latency_s + self._warmup_extra_active_s * frac
+                self._presenter.set_latency(cur)
+
+    def _start_stats_timer(self) -> None:
+        try:
+            self._stats_timer = QtCore.QTimer(self._scene_canvas.native)
+            self._stats_timer.setTimerType(QtCore.Qt.PreciseTimer)
+            self._stats_timer.setInterval(1000)
+            self._stats_timer.timeout.connect(self._log_stats)
+            self._stats_timer.start()
+        except Exception:
+            logger.debug("Failed to start stats timer; falling back to draw-based logging", exc_info=True)
+
+    def _start_metrics_timer(self) -> None:
+        try:
+            interval_s = env_float('NAPARI_CUDA_CLIENT_METRICS_INTERVAL', 1.0)
+            interval_ms = max(100, int(round(1000.0 * max(0.1, float(interval_s)))))
+            self._metrics_timer = QtCore.QTimer(self._scene_canvas.native)
+            self._metrics_timer.setTimerType(QtCore.Qt.PreciseTimer)
+            self._metrics_timer.setInterval(interval_ms)
+            self._metrics_timer.timeout.connect(self._metrics.dump_csv_row)  # type: ignore[arg-type]
+            self._metrics_timer.start()
+        except Exception:
+            logger.debug("Failed to start client metrics timer", exc_info=True)
+
+    def stop(self) -> None:
+        try:
+            if self._stats_timer is not None:
+                self._stats_timer.stop()
+        except Exception:
+            logger.debug("stop: stats timer stop failed", exc_info=True)
+        try:
+            if self._metrics_timer is not None:
+                self._metrics_timer.stop()
+        except Exception:
+            logger.debug("stop: metrics timer stop failed", exc_info=True)
 
     # VT decode/submit is handled by VTPipeline
 

@@ -199,7 +199,11 @@ class VTPipeline:
                     avcc_au = bytes(out)
                 else:
                     avcc_au = data
+            t_dec0 = time.perf_counter()
             ok = self._decoder.decode(avcc_au, ts)
+            t_dec1 = time.perf_counter()
+            if self._metrics is not None:
+                self._metrics.observe_ms('napari_cuda_client_vt_decode_ms', (t_dec1 - t_dec0) * 1000.0)
             if not ok:
                 self._errors += 1
                 if self._errors <= 3 or (self._errors % 50 == 0):
