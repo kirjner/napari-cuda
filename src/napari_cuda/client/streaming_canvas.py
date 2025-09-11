@@ -209,41 +209,20 @@ class StreamingCanvas(VispyCanvas):
         # Override draw to show video instead
         self._scene_canvas.events.draw.disconnect()
         self._scene_canvas.events.draw.connect(self._draw_video_frame)
-        # Timer-driven display at target fps (use VisPy app timer to ensure GUI-thread delivery)
-        fps = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
-        # Timer selection:
-        # - If env NAPARI_CUDA_CLIENT_VISPY_TIMER=1, force VisPy timer
-        # - Else, in smoke mode prefer VisPy timer by default for steadier cadence
-        # - Otherwise, fall back to Qt QTimer
-        env_vispy = os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER')
-        if env_vispy is not None:
-            use_vispy_timer = (env_vispy == '1')
-        else:
-            use_vispy_timer = bool(self._vt_smoke)
-        interval = max(1.0 / max(1.0, fps), 1.0 / 120.0)
-        if use_vispy_timer:
-            self._display_timer = vispy_app.Timer(
-                interval=interval,
-                connect=lambda ev: self._scene_canvas.update(),
-                start=True,
+        # Timer-driven display loop centralized in helper for steady cadence
+        try:
+            from napari_cuda.client.streaming.display_loop import DisplayLoop
+            fps = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
+            prefer_vispy = True if self._vt_smoke else None
+            self._display_loop = DisplayLoop(
+                scene_canvas=self._scene_canvas,
+                callback=self._scene_canvas.update,
+                fps=fps,
+                prefer_vispy=prefer_vispy,
             )
-            logger.info(
-                'Video display initialized (vispy.Timer @ %.1f fps)',
-                1.0 / interval,
-            )
-        else:
-            # Fallback to Qt timer, ensure it belongs to the canvas' GUI thread
-            self._display_timer = QtCore.QTimer(self._scene_canvas.native)
-            self._display_timer.setTimerType(QtCore.Qt.PreciseTimer)
-            self._display_timer.setInterval(
-                max(1, int(round(1000.0 / max(1.0, fps))))
-            )
-            # Schedule a paint event each tick; drive via VisPy canvas update for reliable draw events
-            self._display_timer.timeout.connect(self._scene_canvas.update)
-            self._display_timer.start()
-            logger.info(
-                'Video display initialized (Qt QTimer @ %.1f fps)', fps
-            )
+            self._display_loop.start()
+        except Exception:
+            logger.exception('Failed to start DisplayLoop')
 
         logger.info(
             f'StreamingCanvas initialized for {server_host}:{server_port}'
@@ -435,6 +414,12 @@ class StreamingCanvas(VispyCanvas):
         lat_ms = int(stats.get('latency_ms', 0) or 0)
         mode = str(stats.get('mode', '') or '')
         out_fps = fps_out_vt if active_str == 'vt' else fps_out_py
-        txt = f"{active_str} out:{out_fps:.1f} fps  mode:{mode}  latency:{lat_ms} ms"
+        # Presenter queue depths by source (buf sizes)
+        buf = stats.get('buf', {})
+        buf_vt = int(buf.get('vt', 0)); buf_py = int(buf.get('pyav', 0))
+        txt = (
+            f"{active_str} out:{out_fps:.1f} fps  mode:{mode}  latency:{lat_ms} ms  "
+            f"buf[vt:{buf_vt} py:{buf_py}]"
+        )
         self._fps_label.setText(txt)
         self._fps_label.adjustSize()

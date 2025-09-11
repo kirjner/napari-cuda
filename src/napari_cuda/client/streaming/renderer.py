@@ -6,10 +6,7 @@ from typing import Optional, Tuple, Any
 import numpy as np
 from vispy.gloo import Texture2D, Program
 
-try:
-    from OpenGL import GL as _GL  # type: ignore
-except Exception:  # pragma: no cover
-    _GL = None  # type: ignore
+from OpenGL import GL as GL  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +84,7 @@ class GLRenderer:
         # Try VT zero-copy path if payload looks like a CVPixelBuffer and OpenGL is available
         drew_vt = False
         vt_attempted = False
-        if payload is not None and _GL is not None:
+        if payload is not None:
             try:
                 # Lazy import to detect VT capsule
                 if self._vt is None:
@@ -140,46 +137,42 @@ class GLRenderer:
 
     # --- VT helpers ---
     def _compile_glsl(self, vert_src: str, frag_src: str) -> Optional[int]:
-        if _GL is None:
-            return None
-        vs = _GL.glCreateShader(_GL.GL_VERTEX_SHADER)
-        _GL.glShaderSource(vs, vert_src)
-        _GL.glCompileShader(vs)
-        ok = _GL.glGetShaderiv(vs, _GL.GL_COMPILE_STATUS)
-        if ok != _GL.GL_TRUE:
-            log = _GL.glGetShaderInfoLog(vs)
-            _GL.glDeleteShader(vs)
+        vs = GL.glCreateShader(GL.GL_VERTEX_SHADER)
+        GL.glShaderSource(vs, vert_src)
+        GL.glCompileShader(vs)
+        ok = GL.glGetShaderiv(vs, GL.GL_COMPILE_STATUS)
+        if ok != GL.GL_TRUE:
+            log = GL.glGetShaderInfoLog(vs)
+            GL.glDeleteShader(vs)
             logger.debug("Vertex shader compile failed: %s", log)
             return None
-        fs = _GL.glCreateShader(_GL.GL_FRAGMENT_SHADER)
-        _GL.glShaderSource(fs, frag_src)
-        _GL.glCompileShader(fs)
-        ok = _GL.glGetShaderiv(fs, _GL.GL_COMPILE_STATUS)
-        if ok != _GL.GL_TRUE:
-            log = _GL.glGetShaderInfoLog(fs)
-            _GL.glDeleteShader(vs)
-            _GL.glDeleteShader(fs)
+        fs = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
+        GL.glShaderSource(fs, frag_src)
+        GL.glCompileShader(fs)
+        ok = GL.glGetShaderiv(fs, GL.GL_COMPILE_STATUS)
+        if ok != GL.GL_TRUE:
+            log = GL.glGetShaderInfoLog(fs)
+            GL.glDeleteShader(vs)
+            GL.glDeleteShader(fs)
             logger.debug("Fragment shader compile failed: %s", log)
             return None
-        prog = _GL.glCreateProgram()
-        _GL.glAttachShader(prog, vs)
-        _GL.glAttachShader(prog, fs)
-        _GL.glBindAttribLocation(prog, 0, 'a_position')
-        _GL.glBindAttribLocation(prog, 1, 'a_tex')
-        _GL.glLinkProgram(prog)
-        link_ok = _GL.glGetProgramiv(prog, _GL.GL_LINK_STATUS)
-        _GL.glDeleteShader(vs)
-        _GL.glDeleteShader(fs)
-        if link_ok != _GL.GL_TRUE:
-            log = _GL.glGetProgramInfoLog(prog)
-            _GL.glDeleteProgram(prog)
+        prog = GL.glCreateProgram()
+        GL.glAttachShader(prog, vs)
+        GL.glAttachShader(prog, fs)
+        GL.glBindAttribLocation(prog, 0, 'a_position')
+        GL.glBindAttribLocation(prog, 1, 'a_tex')
+        GL.glLinkProgram(prog)
+        link_ok = GL.glGetProgramiv(prog, GL.GL_LINK_STATUS)
+        GL.glDeleteShader(vs)
+        GL.glDeleteShader(fs)
+        if link_ok != GL.GL_TRUE:
+            log = GL.glGetProgramInfoLog(prog)
+            GL.glDeleteProgram(prog)
             logger.debug("Program link failed: %s", log)
             return None
         return int(prog)
 
     def _ensure_raw_gl_resources(self) -> None:
-        if _GL is None:
-            return
         # Create VBO if needed
         if self._gl_vbo is None:
             import numpy as _np
@@ -189,11 +182,11 @@ class GLRenderer:
                 -1.0,  1.0, 0.0, 1.0,
                  1.0,  1.0, 1.0, 1.0,
             ], dtype=_np.float32)
-            vbo = _GL.glGenBuffers(1)
+            vbo = GL.glGenBuffers(1)
             self._gl_vbo = int(vbo)
-            _GL.glBindBuffer(_GL.GL_ARRAY_BUFFER, self._gl_vbo)
-            _GL.glBufferData(_GL.GL_ARRAY_BUFFER, quad.nbytes, quad, _GL.GL_STATIC_DRAW)
-            _GL.glBindBuffer(_GL.GL_ARRAY_BUFFER, 0)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._gl_vbo)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, quad.nbytes, quad, GL.GL_STATIC_DRAW)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
         # Compile programs if needed (try 3.2 core shaders first, then 1.20)
         if self._gl_prog_rect is None:
             V150 = """
@@ -222,9 +215,9 @@ class GLRenderer:
                 prog = self._compile_glsl(V120, F120)
             if prog is not None:
                 self._gl_prog_rect = prog
-                self._gl_pos_loc_rect = int(_GL.glGetAttribLocation(prog, 'a_position'))
-                self._gl_tex_loc_rect = int(_GL.glGetAttribLocation(prog, 'a_tex'))
-                self._gl_u_tex_size_loc = int(_GL.glGetUniformLocation(prog, 'u_tex_size'))
+                self._gl_pos_loc_rect = int(GL.glGetAttribLocation(prog, 'a_position'))
+                self._gl_tex_loc_rect = int(GL.glGetAttribLocation(prog, 'a_tex'))
+                self._gl_u_tex_size_loc = int(GL.glGetUniformLocation(prog, 'u_tex_size'))
         if self._gl_prog_2d is None:
             V150_2D = """
             #version 150
@@ -251,17 +244,16 @@ class GLRenderer:
                 prog2 = self._compile_glsl(V120_2D, F120_2D)
             if prog2 is not None:
                 self._gl_prog_2d = prog2
-                self._gl_pos_loc_2d = int(_GL.glGetAttribLocation(prog2, 'a_position'))
-                self._gl_tex_loc_2d = int(_GL.glGetAttribLocation(prog2, 'a_tex'))
+                self._gl_pos_loc_2d = int(GL.glGetAttribLocation(prog2, 'a_position'))
+                self._gl_tex_loc_2d = int(GL.glGetAttribLocation(prog2, 'a_tex'))
 
     def _draw_vt_texture(self, cache_cap, cvpixelbuffer_cap) -> bool:
-        if _GL is None or self._vt is None:
+        if self._vt is None:
             return False
         # Ensure sane GL state; avoid clearing so previous image persists on errors
         try:
-            if _GL is not None:
-                _GL.glDisable(_GL.GL_DEPTH_TEST)
-                _GL.glDisable(_GL.GL_BLEND)
+            GL.glDisable(GL.GL_DEPTH_TEST)
+            GL.glDisable(GL.GL_BLEND)
         except Exception:
             logger.debug("GL state setup failed", exc_info=True)
         res = self._vt.gl_tex_from_cvpixelbuffer(cache_cap, cvpixelbuffer_cap)
@@ -280,30 +272,30 @@ class GLRenderer:
                 if not self._vt_first_draw_logged:
                     logger.info("GLRenderer: VT zero-copy draw engaged (RECT target)")
                     self._vt_first_draw_logged = True
-                _GL.glUseProgram(prog)
+                GL.glUseProgram(prog)
                 # u_tex_size
                 if self._gl_u_tex_size_loc is not None and int(self._gl_u_tex_size_loc) != -1:
-                    _GL.glUniform2f(int(self._gl_u_tex_size_loc), float(w_i), float(h_i))
-                _GL.glActiveTexture(_GL.GL_TEXTURE0)
-                _GL.glBindTexture(target_i, name_i)
-                loc_sampler = _GL.glGetUniformLocation(prog, 'u_texRect')
+                    GL.glUniform2f(int(self._gl_u_tex_size_loc), float(w_i), float(h_i))
+                GL.glActiveTexture(GL.GL_TEXTURE0)
+                GL.glBindTexture(target_i, name_i)
+                loc_sampler = GL.glGetUniformLocation(prog, 'u_texRect')
                 if int(loc_sampler) != -1:
-                    _GL.glUniform1i(loc_sampler, 0)
+                    GL.glUniform1i(loc_sampler, 0)
                 # VBO attributes
-                _GL.glBindBuffer(_GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
                 stride = 4 * 4
                 import ctypes as _ctypes
                 if self._gl_pos_loc_rect is not None and int(self._gl_pos_loc_rect) != -1:
-                    _GL.glEnableVertexAttribArray(int(self._gl_pos_loc_rect))
-                    _GL.glVertexAttribPointer(int(self._gl_pos_loc_rect), 2, _GL.GL_FLOAT, _GL.GL_FALSE, stride, _ctypes.c_void_p(0))
+                    GL.glEnableVertexAttribArray(int(self._gl_pos_loc_rect))
+                    GL.glVertexAttribPointer(int(self._gl_pos_loc_rect), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(0))
                 if self._gl_tex_loc_rect is not None and int(self._gl_tex_loc_rect) != -1:
-                    _GL.glEnableVertexAttribArray(int(self._gl_tex_loc_rect))
-                    _GL.glVertexAttribPointer(int(self._gl_tex_loc_rect), 2, _GL.GL_FLOAT, _GL.GL_FALSE, stride, _ctypes.c_void_p(8))
+                    GL.glEnableVertexAttribArray(int(self._gl_tex_loc_rect))
+                    GL.glVertexAttribPointer(int(self._gl_tex_loc_rect), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
                 # Draw
-                _GL.glDrawArrays(_GL.GL_TRIANGLE_STRIP, 0, 4)
+                GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
                 # Cleanup binds
-                _GL.glBindBuffer(_GL.GL_ARRAY_BUFFER, 0)
-                _GL.glUseProgram(0)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                GL.glUseProgram(0)
             else:
                 # GL_TEXTURE_2D path
                 prog = self._gl_prog_2d
@@ -312,24 +304,24 @@ class GLRenderer:
                 if not self._vt_first_draw_logged:
                     logger.info("GLRenderer: VT zero-copy draw engaged (2D target)")
                     self._vt_first_draw_logged = True
-                _GL.glUseProgram(prog)
-                _GL.glActiveTexture(_GL.GL_TEXTURE0)
-                _GL.glBindTexture(target_i, name_i)
-                loc_sampler = _GL.glGetUniformLocation(prog, 'u_tex2d')
+                GL.glUseProgram(prog)
+                GL.glActiveTexture(GL.GL_TEXTURE0)
+                GL.glBindTexture(target_i, name_i)
+                loc_sampler = GL.glGetUniformLocation(prog, 'u_tex2d')
                 if int(loc_sampler) != -1:
-                    _GL.glUniform1i(loc_sampler, 0)
-                _GL.glBindBuffer(_GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
+                    GL.glUniform1i(loc_sampler, 0)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
                 stride = 4 * 4
                 import ctypes as _ctypes
                 if self._gl_pos_loc_2d is not None and int(self._gl_pos_loc_2d) != -1:
-                    _GL.glEnableVertexAttribArray(int(self._gl_pos_loc_2d))
-                    _GL.glVertexAttribPointer(int(self._gl_pos_loc_2d), 2, _GL.GL_FLOAT, _GL.GL_FALSE, stride, _ctypes.c_void_p(0))
+                    GL.glEnableVertexAttribArray(int(self._gl_pos_loc_2d))
+                    GL.glVertexAttribPointer(int(self._gl_pos_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(0))
                 if self._gl_tex_loc_2d is not None and int(self._gl_tex_loc_2d) != -1:
-                    _GL.glEnableVertexAttribArray(int(self._gl_tex_loc_2d))
-                    _GL.glVertexAttribPointer(int(self._gl_tex_loc_2d), 2, _GL.GL_FLOAT, _GL.GL_FALSE, stride, _ctypes.c_void_p(8))
-                _GL.glDrawArrays(_GL.GL_TRIANGLE_STRIP, 0, 4)
-                _GL.glBindBuffer(_GL.GL_ARRAY_BUFFER, 0)
-                _GL.glUseProgram(0)
+                    GL.glEnableVertexAttribArray(int(self._gl_tex_loc_2d))
+                    GL.glVertexAttribPointer(int(self._gl_tex_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
+                GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                GL.glUseProgram(0)
             # Release the GL texture object created by VT
             try:
                 self._vt.gl_release_tex(tex_cap)

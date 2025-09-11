@@ -198,10 +198,42 @@ class SmokePipeline:
         logger.info('smoke: preencoded %d frames in %.1f ms (avg %.2f ms/frame)', len(cache), dt, dt / max(1, len(cache)))
 
     def _open_encoder(self, w: int, h: int, fps: float) -> H264Encoder:
+        import os
         last_err = None
-        for name in ("h264_videotoolbox", "libx264", "h264"):
+        # Allow forcing an encoder via env, else keep the default preference order
+        forced = os.getenv('NAPARI_CUDA_SMOKE_ENCODER')
+        names = [forced] if forced else ["h264_videotoolbox", "libx264", "h264"]
+        for name in names:
+            if not name:
+                continue
             try:
-                e = H264Encoder(EncoderConfig(name=name, width=w, height=h, fps=fps))
+                opts = None
+                if name in ("libx264", "h264"):
+                    # Favor fastest for smoke to keep FPS high
+                    preset = os.getenv('NAPARI_CUDA_SMOKE_X264_PRESET', 'ultrafast')
+                    tune = os.getenv('NAPARI_CUDA_SMOKE_X264_TUNE', 'zerolatency')
+                    xtra = os.getenv('NAPARI_CUDA_SMOKE_X264_PARAMS', '')
+                    params = 'keyint=1:min-keyint=1:scenecut=0:repeat-headers=1'
+                    if xtra:
+                        params = f"{params}:{xtra}"
+                    opts = {
+                        'preset': str(preset),
+                        'tune': str(tune),
+                        'bf': '0',
+                        'x264-params': params,
+                        'annexb': '0',
+                    }
+                    br = os.getenv('NAPARI_CUDA_SMOKE_BITRATE')
+                    if br:
+                        # Accept raw ffmpeg value (e.g., 4000k) or numeric kbps
+                        if br.isdigit():
+                            opts['b'] = f"{br}k"
+                        else:
+                            opts['b'] = br
+                elif name == "h264_videotoolbox":
+                    # Realtime mode to reduce latency/CPU on macOS
+                    opts = {'realtime': '1'}
+                e = H264Encoder(EncoderConfig(name=name, width=w, height=h, fps=fps, options=opts))
                 e.open()
                 logger.info("smoke: encoder=%s opened (w=%d h=%d fps=%.1f)", name, w, h, fps)
                 return e
