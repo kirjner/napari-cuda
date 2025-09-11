@@ -24,7 +24,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from napari_cuda.codec.h264 import (
+from napari_cuda.codec.avcc import (
     is_annexb,
     annexb_to_avcc,
     split_avcc_by_len,
@@ -196,7 +196,6 @@ def encode_decode_demo(
     def repack_to_len(au_bytes: bytes, preferred: int) -> Tuple[bytes, list[int]]:
         # Return AVCC AU with desired length size and nal types
         if is_annexb(au_bytes):
-            from napari_cuda.codec.h264 import split_annexb
             nals = split_annexb(au_bytes)
         else:
             nals = []

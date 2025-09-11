@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from napari_cuda.server.bitstream import ParamCache, pack_to_avcc, build_avcc_config
-from napari_cuda.codec.h264 import split_avcc_by_len
+from napari_cuda.codec.avcc import split_avcc_by_len, AccessUnit
 
 
 def _pkt_bytes(pkt) -> bytes:
@@ -45,7 +45,7 @@ def encode_all(
     fps: float,
     frames: int,
     pix_fmt: Optional[str],
-) -> Tuple[bytes, List[Tuple[bytes, bool, float]]]:
+) -> Tuple[bytes, List[AccessUnit]]:
     import av
 
     # Ensure Python fallback if Cython packer isn't built
@@ -85,7 +85,7 @@ def encode_all(
 
     cache = ParamCache()
     avcc_cfg: Optional[bytes] = None
-    aus: List[Tuple[bytes, bool, float]] = []
+    aus: List[AccessUnit] = []
 
     # Encode all frames; pack each set of output packets into a single AVCC AU
     for i in range(max(1, int(frames))):
@@ -108,7 +108,7 @@ def encode_all(
         au, is_key = pack_to_avcc(payload_obj, cache)
         if au is not None:
             ts = (i + 1) / float(max(1.0, fps))  # start at >0 to avoid 0.0
-            aus.append((au, is_key, ts))
+            aus.append(AccessUnit(payload=au, is_keyframe=bool(is_key), pts=float(ts)))
         if avcc_cfg is None:
             avcc_cfg = build_avcc_config(cache)
 
@@ -119,7 +119,7 @@ def encode_all(
         au, is_key = pack_to_avcc(payload_obj, cache)
         if au is not None:
             ts = (len(aus) + 1) / float(max(1.0, fps))
-            aus.append((au, is_key, ts))
+            aus.append(AccessUnit(payload=au, is_keyframe=bool(is_key), pts=float(ts)))
     except Exception:
         pass
 
@@ -131,7 +131,7 @@ def encode_all(
     return avcc_cfg, aus
 
 
-def decode_with_vt(avcc: bytes, aus: List[Tuple[bytes, bool, float]], min_decoded: int = 0) -> int:
+def decode_with_vt(avcc: bytes, aus: List[AccessUnit], min_decoded: int = 0) -> int:
     from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
 
     vt = VTLiveDecoder(avcc, 0, 0)  # width/height are not used by shim mapping in this demo
@@ -140,16 +140,16 @@ def decode_with_vt(avcc: bytes, aus: List[Tuple[bytes, bool, float]], min_decode
     decoded = 0
 
     # Print first two AU NAL types for visibility
-    for i, (au, is_key, ts) in enumerate(aus[:2]):
-        nals = split_avcc_by_len(au, 4)
+    for i, au in enumerate(aus[:2]):
+        nals = split_avcc_by_len(au.payload, 4)
         nts = [(n[0] & 0x1F) for n in nals if n]
-        print(f'AU{i} types={nts} key={is_key} len={len(au)}')
+        print(f'AU{i} types={nts} key={au.is_keyframe} len={len(au.payload)}')
 
-    for au, is_key, ts in aus:
-        if not started and not is_key:
+    for au in aus:
+        if not started and not au.is_keyframe:
             continue
         started = True
-        _ = vt.decode(au, ts)
+        _ = vt.decode(au.payload, au.pts)
         # brief poll for output
         t0 = time.time()
         while True:

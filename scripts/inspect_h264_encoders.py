@@ -23,7 +23,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from napari_cuda.codec.h264 import (
+from napari_cuda.codec.avcc import (
     is_annexb,
     split_annexb,
     split_avcc_by_len,
