@@ -196,7 +196,7 @@ class StreamingCanvas(VispyCanvas):
                 vt_ts_mode=ts_mode.value,
                 stream_format=self._stream_format,
                 vt_backlog_trigger=self._vt_backlog_trigger,
-                pyav_backlog_trigger=_env_int(
+                pyav_backlog_trigger=env_int(
                     'NAPARI_CUDA_CLIENT_PYAV_BACKLOG_TRIGGER', 16
                 ),
                 vt_smoke=self._vt_smoke,
@@ -209,7 +209,7 @@ class StreamingCanvas(VispyCanvas):
         self._scene_canvas.events.draw.disconnect()
         self._scene_canvas.events.draw.connect(self._draw_video_frame)
         # Timer-driven display at target fps (use VisPy app timer to ensure GUI-thread delivery)
-        fps = _env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
+        fps = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
         # Default to Qt timer for napari/Qt integration; enable vispy timer only if requested
         use_vispy_timer = (
             os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER', '0') == '1'
