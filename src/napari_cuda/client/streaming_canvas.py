@@ -26,31 +26,7 @@ logger = logging.getLogger(__name__)
 # No direct networking or shader setup here; StreamManager + GLRenderer own these
 
 
-# Env parsing helpers
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    v = val.strip().lower()
-    if v in ('1', 'true', 'yes', 'on'):
-        return True
-    if v in ('0', 'false', 'no', 'off'):
-        return False
-    return default
+from napari_cuda.utils.env import env_bool, env_int, env_float
 
 
 class StreamingCanvas(VispyCanvas):
@@ -114,11 +90,11 @@ class StreamingCanvas(VispyCanvas):
             state_port or int(os.getenv('NAPARI_CUDA_STATE_PORT', '8081'))
         )
         # Offline VT smoke test mode (no server required)
-        env_smoke = _env_bool('NAPARI_CUDA_VT_SMOKE', False)
+        env_smoke = env_bool('NAPARI_CUDA_VT_SMOKE', False)
         self._vt_smoke = bool(vt_smoke or env_smoke)
 
         # Queue for decoded frames (latest-wins draining in draw)
-        buf_n = _env_int('NAPARI_CUDA_CLIENT_BUFFER_FRAMES', 3)
+        buf_n = env_int('NAPARI_CUDA_CLIENT_BUFFER_FRAMES', 3)
         self.frame_queue = queue.Queue(maxsize=max(1, buf_n))
 
         # Video display resources
@@ -139,13 +115,13 @@ class StreamingCanvas(VispyCanvas):
         self._active_source: str = 'pyav'
         # VT presenter jitter buffer + latency target
         self._vt_latency_s = max(
-            0.0, _env_float('NAPARI_CUDA_CLIENT_VT_LATENCY_MS', 0.0) / 1000.0
+            0.0, env_float('NAPARI_CUDA_CLIENT_VT_LATENCY_MS', 0.0) / 1000.0
         )
-        self._vt_buffer_limit = _env_int('NAPARI_CUDA_CLIENT_VT_BUFFER', 3)
+        self._vt_buffer_limit = env_int('NAPARI_CUDA_CLIENT_VT_BUFFER', 3)
         # Higher latency when falling back to PyAV (smoother on CPU decode)
         self._pyav_latency_s = max(
             0.0,
-            _env_float(
+            env_float(
                 'NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS',
                 max(50.0, self._vt_latency_s * 1000.0),
             )
@@ -185,7 +161,7 @@ class StreamingCanvas(VispyCanvas):
         )
         self._vt_enqueued = 0
         # Backlog handling: if queue builds up, resync on next keyframe to avoid smear
-        self._vt_backlog_trigger = _env_int(
+        self._vt_backlog_trigger = env_int(
             'NAPARI_CUDA_CLIENT_VT_BACKLOG_TRIGGER', 16
         )
         # Workers are managed by StreamManager when enabled
@@ -199,7 +175,7 @@ class StreamingCanvas(VispyCanvas):
             maxsize=64
         )
         self._pyav_enqueued = 0
-        self._pyav_backlog_trigger = _env_int(
+        self._pyav_backlog_trigger = env_int(
             'NAPARI_CUDA_CLIENT_PYAV_BACKLOG_TRIGGER', 16
         )
         # PyAV worker is managed by StreamManager when enabled

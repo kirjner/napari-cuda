@@ -25,6 +25,7 @@ from napari_cuda.codec.h264 import (
     build_avcc,
     find_sps_pps,
 )
+from napari_cuda.utils.env import env_float, env_str
 
 logger = logging.getLogger(__name__)
 
@@ -77,22 +78,10 @@ class StreamManager:
             pass
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
-        try:
-            self._warmup_ms_override = os.getenv('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MS')
-        except Exception:
-            self._warmup_ms_override = None
-        try:
-            self._warmup_window_s = float((os.getenv('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_WINDOW_S') or '0.75'))
-        except Exception:
-            self._warmup_window_s = 0.75
-        try:
-            self._warmup_margin_ms = float((os.getenv('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MARGIN_MS') or '2'))
-        except Exception:
-            self._warmup_margin_ms = 2.0
-        try:
-            self._warmup_max_ms = float((os.getenv('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MAX_MS') or '24'))
-        except Exception:
-            self._warmup_max_ms = 24.0
+        self._warmup_ms_override = env_str('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MS', None)
+        self._warmup_window_s = env_float('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_WINDOW_S', 0.75)
+        self._warmup_margin_ms = env_float('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MARGIN_MS', 2.0)
+        self._warmup_max_ms = env_float('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MAX_MS', 24.0)
         self._warmup_until: float = 0.0
         self._warmup_extra_active_s: float = 0.0
         self._fps: Optional[float] = None
@@ -110,10 +99,7 @@ class StreamManager:
         self._vt_ts_offset: Optional[float] = None
         self._vt_errors = 0
         # Small negative bias so frames tend to be due slightly earlier in SERVER mode
-        try:
-            self._server_bias_s = float((os.getenv('NAPARI_CUDA_SERVER_TS_BIAS_MS') or '5')) / 1000.0
-        except Exception:
-            self._server_bias_s = 0.005
+        self._server_bias_s = env_float('NAPARI_CUDA_SERVER_TS_BIAS_MS', 5.0) / 1000.0
         # avcC nal length size (default 4 if unknown)
         self._nal_length_size: int = 4
 
@@ -141,7 +127,7 @@ class StreamManager:
         self._vt_smoke = bool(vt_smoke)
 
         # Stats logging (1 Hz) controlled by env NAPARI_CUDA_VT_STATS
-        lvl_env = (os.getenv('NAPARI_CUDA_VT_STATS') or '').lower() if 'os' in globals() else ''
+        lvl_env = (env_str('NAPARI_CUDA_VT_STATS', '') or '').lower()
         if lvl_env in ('1', 'true', 'yes', 'info'):
             self._stats_level = logging.INFO
         elif lvl_env in ('debug', 'dbg'):
