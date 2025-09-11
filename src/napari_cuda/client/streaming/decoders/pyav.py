@@ -34,9 +34,18 @@ class PyAVDecoder:
             packet = av.Packet(b)
         except Exception:
             packet = av.Packet(data)
-        frames = self.codec.decode(packet)
-        for frame in frames:
-            arr = frame.to_ndarray(format=self.pixfmt)
+        try:
+            frames = self.codec.decode(packet)
+        except av.AVError:
+            # Common on boundary/flush-like packets; skip quietly
+            logger.debug("PyAVDecoder: codec.decode AVError", exc_info=True)
+            return None
+        for frame in frames or []:
+            try:
+                arr = frame.to_ndarray(format=self.pixfmt)
+            except Exception:
+                logger.debug("PyAVDecoder: frame conversion failed", exc_info=True)
+                continue
             if self.pixfmt == 'bgr24':
                 arr = arr[..., ::-1].copy()
             if self.swap_rb:

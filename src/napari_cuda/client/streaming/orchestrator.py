@@ -20,6 +20,7 @@ from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
 from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
 from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
+from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -223,83 +224,62 @@ class StreamManager:
 
         # Receiver thread or smoke mode
         if self._vt_smoke:
-            logger.info("StreamManager in VT smoke test mode (offline)")
+            logger.info("StreamManager in smoke test mode (offline)")
+            # Ensure PyAV decoder is ready if targeting pyav
             smoke_source = (os.getenv('NAPARI_CUDA_SMOKE_SOURCE') or 'vt').lower()
-            # Offline VT-source generator: produce CVPixelBuffer BGRA frames and render zero-copy
-            
-            def _vt_encode_worker() -> None:
-                try:
-                    sw = int(os.getenv('NAPARI_CUDA_SMOKE_W', '1280'))
-                except Exception:
-                    sw = 1280
-                try:
-                    sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
-                except Exception:
-                    sh = 720
-                try:
-                    fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
-                except Exception:
-                    fps = 60.0
-                smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
-                from napari_cuda.client.streaming.smoke.runner import run_encode_smoke as _run_encode_smoke
-                _run_encode_smoke(
-                    width=sw,
-                    height=sh,
-                    fps=fps,
-                    smoke_mode=smoke_mode,
-                    presenter=self._presenter,
-                    source_mux=self._source_mux,
-                    vt_in_q=self._vt_pipeline,
-                    vt_backlog_trigger=self._vt_backlog_trigger,
-                    vt_latency_s=self._vt_latency_s,
-                    init_vt_from_avcc=lambda avcc_b64, w, h: self._init_vt_from_avcc(avcc_b64, w, h),
-                    after_vt_init=lambda: setattr(self, '_vt_wait_keyframe', False),
-                    on_enqueued=lambda n: setattr(self, '_vt_enqueued', self._vt_enqueued + int(n)),
-                    logger=logger,
-                )
-
             if smoke_source == 'pyav':
-                # PyAV decode smoke: encode with H264Encoder and decode via PyAV
-                def _pyav_encode_worker() -> None:
-                    try:
-                        self._init_decoder()
-                        try:
-                            dec = self.decoder.decode if self.decoder else None
-                        except Exception:
-                            dec = None
-                        self._pyav_pipeline.set_decoder(dec)
-                    except Exception:
-                        logger.debug('pyav-smoke: init decoder failed', exc_info=True)
-                    try:
-                        sw = int(os.getenv('NAPARI_CUDA_SMOKE_W', '1280'))
-                    except Exception:
-                        sw = 1280
-                    try:
-                        sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
-                    except Exception:
-                        sh = 720
-                    try:
-                        fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
-                    except Exception:
-                        fps = 60.0
-                    smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
-                    from napari_cuda.client.streaming.smoke.runner import run_pyav_smoke as _run_pyav_smoke
-                    _run_pyav_smoke(
-                        width=sw,
-                        height=sh,
-                        fps=fps,
-                        smoke_mode=smoke_mode,
-                        presenter=self._presenter,
-                        source_mux=self._source_mux,
-                        pyav_in_q=self._pyav_pipeline,
-                        pyav_backlog_trigger=self._pyav_backlog_trigger,
-                        pyav_latency_s=self._pyav_latency_s,
-                        on_enqueued=lambda n: setattr(self, '_pyav_enqueued', self._pyav_enqueued + int(n)),
-                        logger=logger,
-                    )
-                Thread(target=_pyav_encode_worker, daemon=True).start()
-            else:
-                Thread(target=_vt_encode_worker, daemon=True).start()
+                try:
+                    self._init_decoder()
+                    dec = self.decoder.decode if self.decoder else None
+                except Exception:
+                    logger.debug('smoke: init decoder failed', exc_info=True)
+                    dec = None
+                self._pyav_pipeline.set_decoder(dec)
+            # Read config
+            try:
+                sw = int(os.getenv('NAPARI_CUDA_SMOKE_W', '1280'))
+            except Exception:
+                sw = 1280
+            try:
+                sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
+            except Exception:
+                sh = 720
+            try:
+                fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
+            except Exception:
+                fps = 60.0
+            smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
+            preencode = (os.getenv('NAPARI_CUDA_SMOKE_PREENCODE', '0') or '0') in ('1', 'true', 'yes')
+            try:
+                pre_frames = int(os.getenv('NAPARI_CUDA_SMOKE_PRE_FRAMES', str(int(fps) * 3)))
+            except Exception:
+                pre_frames = int(fps) * 3
+            cfg = SmokeConfig(
+                width=sw,
+                height=sh,
+                fps=fps,
+                smoke_mode=smoke_mode,
+                preencode=preencode,
+                pre_frames=pre_frames,
+                backlog_trigger=self._vt_backlog_trigger if smoke_source == 'vt' else self._pyav_backlog_trigger,
+                target='pyav' if smoke_source == 'pyav' else 'vt',
+                vt_latency_s=self._vt_latency_s,
+                pyav_latency_s=self._pyav_latency_s,
+            )
+            def _init_and_clear(avcc_b64: str, w: int, h: int) -> None:
+                self._init_vt_from_avcc(avcc_b64, w, h)
+                # In smoke mode, lift VT gate immediately after init
+                self._vt_wait_keyframe = False
+
+            self._smoke = SmokePipeline(
+                config=cfg,
+                presenter=self._presenter,
+                source_mux=self._source_mux,
+                vt_pipeline=self._vt_pipeline,
+                pyav_pipeline=self._pyav_pipeline,
+                init_vt_from_avcc=_init_and_clear,
+            )
+            self._smoke.start()
         else:
             def _on_connected() -> None:
                 try:

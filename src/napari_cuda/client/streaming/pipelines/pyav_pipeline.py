@@ -59,7 +59,7 @@ class PyAVPipeline:
                     if dec is not None:
                         arr = dec(b)
                 except Exception:
-                    logger.exception("PyAVPipeline: decode failed")
+                    logger.debug("PyAVPipeline: decode failed", exc_info=True)
                     arr = None
                 if arr is None:
                     continue
