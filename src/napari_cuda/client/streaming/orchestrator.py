@@ -25,6 +25,7 @@ from napari_cuda.codec.avcc import (
     build_avcc,
     find_sps_pps,
 )
+from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.utils.env import env_float, env_str
 
 logger = logging.getLogger(__name__)
@@ -498,60 +499,19 @@ class StreamManager:
                 except Exception:
                     fps = 60.0
                 # Configure encoder (prefer VT encoder; fallback to libx264)
-                def _make_encoder():
-                    try:
-                        enc_i = av.CodecContext.create('h264_videotoolbox', 'w')
-                        target_fmt = 'nv12'
-                        is_vt = True
-                    except Exception:
+                def _make_encoder() -> H264Encoder:
+                    for name in ('h264_videotoolbox', 'libx264', 'h264'):
                         try:
-                            enc_i = av.CodecContext.create('libx264', 'w')
-                            target_fmt = 'yuv420p'
-                            is_vt = False
+                            e = H264Encoder(EncoderConfig(name=name, width=sw, height=sh, fps=fps))
+                            e.open()
+                            logger.info('encode-smoke: encoder=%s opened', name)
+                            return e
                         except Exception:
-                            enc_i = av.CodecContext.create('h264', 'w')
-                            target_fmt = 'yuv420p'
-                            is_vt = False
-                    enc_i.width = sw
-                    enc_i.height = sh
-                    enc_i.pix_fmt = target_fmt
-                    from fractions import Fraction as _Fraction
-                    enc_i.time_base = _Fraction(1, int(round(fps)))
-                    keyint = int(max(1, round(fps)))
-                    opts = {
-                        # keep options minimal; VT encoder ignores many x264 flags
-                    }
-                    if is_vt:
-                        # Ask for real-time behavior; VT will choose appropriate profile/level
-                        opts.update({'realtime': '1'})
-                    else:
-                        # libx264: immediate IDR with headers in-stream; AnnexB for easy parsing
-                        opts.update({
-                            'tune': 'zerolatency',
-                            'preset': 'veryfast',
-                            'bf': '0',
-                            'keyint': '1',
-                            'sc_threshold': '0',
-                            'x264-params': 'keyint=1:scenecut=0:repeat-headers=1',
-                            'annexb': '1',
-                        })
-                    enc_i.options = opts
-                    try:
-                        enc_i.open()
-                    except Exception:
-                        logger.debug('encode-smoke: enc.open() failed', exc_info=True)
-                    try:
-                        ed = getattr(enc_i, 'extradata', None)
-                        if ed:
-                            logger.info('encode-smoke: encoder=%s pixfmt=%s extradata_len=%d',
-                                        enc_i.name, target_fmt, len(bytes(ed)))
-                        else:
-                            logger.info('encode-smoke: encoder=%s pixfmt=%s extradata_len=0', enc_i.name, target_fmt)
-                    except Exception:
-                        pass
-                    return enc_i, target_fmt
+                            logger.debug('encode-smoke: failed to open encoder=%s', name, exc_info=True)
+                            continue
+                    raise RuntimeError('No H.264 encoder available')
 
-                enc, target_pixfmt = _make_encoder()
+                enc = _make_encoder()
                 logger.info("VT smoke (encode): %dx%d @ %.1f fps", sw, sh, fps)
                 # ARRIVAL mode; VT as active source (keep configured latency)
                 try:
@@ -559,15 +519,8 @@ class StreamManager:
                     self._source_mux.set_active(Source.VT)
                 except Exception:
                     pass
-                # avcC to initialize VT (built from packer SPS/PPS)
+                # avcC to initialize VT
                 avcc_bytes: bytes | None = None
-                # Use server-style packer to assemble AVCC AUs and cache SPS/PPS
-                try:
-                    from napari_cuda.server.bitstream import ParamCache, pack_to_avcc, build_avcc_config  # type: ignore
-                    os.environ.setdefault('NAPARI_CUDA_ALLOW_PY_FALLBACK', '1')
-                    _cache = ParamCache()
-                except Exception:
-                    _cache = None  # type: ignore
                 # Frame generator bases
                 import numpy as _np
                 x = _np.linspace(0, 255, sw, dtype=_np.uint8)[None, :]
@@ -600,78 +553,50 @@ class StreamManager:
                         b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
                         rgb = _np.dstack([r, g, b])
                     try:
-                        vframe = av.VideoFrame.from_ndarray(rgb, format='rgb24')
-                        try:
-                            vframe = vframe.reformat(sw, sh, format=target_pixfmt)
-                        except Exception:
-                            logger.debug('encode-smoke: frame reformat failed', exc_info=True)
-                        packets = enc.encode(vframe)
+                        au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24')
                     except Exception:
-                        logger.debug("encode-smoke: encode failed", exc_info=True)
+                        logger.debug('encode-smoke: encode failed', exc_info=True)
                         # Recreate encoder and retry next frame
                         try:
-                            enc, target_pixfmt = _make_encoder()
+                            enc.close()
+                        except Exception:
+                            pass
+                        try:
+                            enc = _make_encoder()
                         except Exception:
                             pass
                         continue
-                    # Assemble AU via packer (prefer AVCC; cache SPS/PPS)
-                    au = None
-                    is_key = False
-                    if _cache is not None:
-                        payloads = []
-                        for p in list(packets):
-                            try:
-                                payloads.append(p.to_bytes())
-                            except Exception:
-                                try:
-                                    payloads.append(bytes(p))
-                                except Exception:
-                                    payloads.append(memoryview(p).tobytes())
+                    # Initialize VT from encoder's avcC cache
+                    if avcc_bytes is None:
                         try:
-                            au, is_key = pack_to_avcc(payloads, _cache)  # type: ignore[misc]
+                            avcc_b = enc.get_avcc_config()
+                            if avcc_b:
+                                avcc_bytes = avcc_b
+                                import base64 as _b64
+                                self._init_vt_from_avcc(_b64.b64encode(avcc_bytes).decode('ascii'), sw, sh)
+                                # Disable gating only after VT init
+                                self._vt_wait_keyframe = False
+                                logger.info('VT smoke (encode): initialized VT from encoder avcC')
                         except Exception:
-                            logger.debug('encode-smoke: pack_to_avcc failed', exc_info=True)
-                        if avcc_bytes is None:
-                            try:
-                                avcc_b = build_avcc_config(_cache)  # type: ignore[misc]
-                                if avcc_b:
-                                    avcc_bytes = avcc_b
-                                    import base64 as _b64
-                                    self._init_vt_from_avcc(_b64.b64encode(avcc_bytes).decode('ascii'), sw, sh)
-                                    # Disable gating only after VT init
-                                    self._vt_wait_keyframe = False
-                                    logger.info('VT smoke (encode): initialized VT from packer avcC')
-                            except Exception:
-                                logger.debug('encode-smoke: build_avcc_config failed', exc_info=True)
-                    else:
-                        # Fallback: concatenate packets as-is (legacy behavior)
-                        group = bytearray()
-                        for p in list(packets):
-                            try:
-                                group.extend(p.to_bytes())
-                            except Exception:
-                                try:
-                                    group.extend(bytes(p))
-                                except Exception:
-                                    group.extend(memoryview(p).tobytes())
-                        data = bytes(group)
-                        au = data if not is_annexb(data) else annexb_to_avcc(data)
-                    # Submit AU to VT input queue
-                    try:
-                        if au is None or len(au) == 0:
+                            logger.debug('encode-smoke: get_avcc_config failed', exc_info=True)
+                    # Submit AU(s) to VT input queue
+                    for au_obj in au_list:
+                        au = au_obj.payload
+                        if not au:
                             continue
-                        if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
-                            # Backlog: drain and continue (fresh start)
-                            while self._vt_in_q.qsize() > 0:
-                                _ = self._vt_in_q.get_nowait()
-                            self._presenter.clear(Source.VT)
-                        self._vt_in_q.put_nowait((au, None))
-                        self._vt_enqueued += 1
-                        if first_packets_logged < 3:
-                            logger.info("encode-smoke: submitted AU len=%d", len(au))
-                            first_packets_logged += 1
-                    except Exception:
-                        logger.debug("encode-smoke: submit failed", exc_info=True)
+                        try:
+                            if self._vt_in_q.qsize() >= max(2, self._vt_backlog_trigger - 1):
+                                # Backlog: drain and continue (fresh start)
+                                while self._vt_in_q.qsize() > 0:
+                                    _ = self._vt_in_q.get_nowait()
+                                self._presenter.clear(Source.VT)
+                            self._vt_in_q.put_nowait((au, None))
+                            self._vt_enqueued += 1
+                            if first_packets_logged < 3:
+                                logger.info('encode-smoke: submitted AU len=%d', len(au))
+                                first_packets_logged += 1
+                        except Exception:
+                            logger.debug('encode-smoke: submit failed', exc_info=True)
                     # tick cadence
                     # Aim for fps
                     target = 1.0 / max(1.0, fps)
