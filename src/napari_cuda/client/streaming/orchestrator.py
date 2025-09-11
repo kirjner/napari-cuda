@@ -612,6 +612,111 @@ class StreamManager:
 
             if smoke_source == 'encode':
                 Thread(target=_vt_encode_worker, daemon=True).start()
+            elif smoke_source == 'pyav':
+                # PyAV decode smoke: encode with H264Encoder and decode via PyAV
+                def _pyav_encode_worker() -> None:
+                    try:
+                        # Initialize PyAV decoder locally for smoke mode
+                        self._init_decoder()
+                    except Exception:
+                        logger.debug('pyav-smoke: init decoder failed', exc_info=True)
+                    # Dimensions/FPS
+                    try:
+                        sw = int(os.getenv('NAPARI_CUDA_VT_SMOKE_W', '1280'))
+                    except Exception:
+                        sw = 1280
+                    try:
+                        sh = int(os.getenv('NAPARI_CUDA_VT_SMOKE_H', '720'))
+                    except Exception:
+                        sh = 720
+                    try:
+                        fps = float(os.getenv('NAPARI_CUDA_VT_SMOKE_FPS', '60'))
+                    except Exception:
+                        fps = 60.0
+                    # Prefer immediate start with ARRIVAL mode; PyAV as active source
+                    try:
+                        self._presenter.set_mode(TimestampMode.ARRIVAL)
+                        self._presenter.set_latency(self._pyav_latency_s)
+                        self._source_mux.set_active(Source.PYAV)
+                    except Exception:
+                        pass
+                    # Encoder
+                    def _make_encoder() -> H264Encoder:
+                        for name in ('h264_videotoolbox', 'libx264', 'h264'):
+                            try:
+                                e = H264Encoder(EncoderConfig(name=name, width=sw, height=sh, fps=fps))
+                                e.open()
+                                logger.info('pyav-smoke: encoder=%s opened', name)
+                                return e
+                            except Exception:
+                                logger.debug('pyav-smoke: failed to open encoder=%s', name, exc_info=True)
+                                continue
+                        raise RuntimeError('No H.264 encoder available')
+                    enc = _make_encoder()
+                    import numpy as _np
+                    x = _np.linspace(0, 255, sw, dtype=_np.uint8)[None, :]
+                    y = _np.linspace(0, 255, sh, dtype=_np.uint8)[:, None]
+                    smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
+                    first_packets_logged = 0
+                    frame_idx = 0
+                    started = False
+                    while True:
+                        t0 = time.perf_counter()
+                        if smoke_mode == 'checker':
+                            tnow = time.perf_counter()
+                            ox = int(((_np.sin(tnow * 2.0) * 0.5 + 0.5) * 64))
+                            oy = int(((_np.cos(tnow * 1.7) * 0.5 + 0.5) * 64))
+                            xx = (_np.arange(sw, dtype=_np.int32)[None, :] + ox) // 32
+                            yy = (_np.arange(sh, dtype=_np.int32)[:, None] + oy) // 32
+                            mask = ((xx ^ yy) & 1).astype(_np.uint8)
+                            r = (mask * 255).astype(_np.uint8, copy=False)
+                            g = _np.broadcast_to(x, (sh, sw))
+                            b = _np.broadcast_to(y, (sh, sw))
+                            rgb = _np.dstack([r, g, b])
+                        else:
+                            r = _np.broadcast_to(x, (sh, sw))
+                            g = _np.broadcast_to(y, (sh, sw))
+                            b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
+                            rgb = _np.dstack([r, g, b])
+                        ts_this = float(frame_idx) / float(max(1.0, fps))
+                        try:
+                            au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
+                        except Exception:
+                            logger.debug('pyav-smoke: encode failed', exc_info=True)
+                            try:
+                                enc.close()
+                            except Exception:
+                                pass
+                            try:
+                                enc = _make_encoder()
+                            except Exception:
+                                pass
+                            continue
+                        # Gate until first keyframe for decoder stability
+                        for au in au_list:
+                            if not started:
+                                if not au.is_keyframe:
+                                    continue
+                                started = True
+                            try:
+                                if self._pyav_in_q.qsize() >= max(2, self._pyav_backlog_trigger - 1):
+                                    while self._pyav_in_q.qsize() > 0:
+                                        _ = self._pyav_in_q.get_nowait()
+                                    self._presenter.clear(Source.PYAV)
+                                self._pyav_in_q.put_nowait((au.payload, au.pts))
+                                self._pyav_enqueued += 1
+                                if first_packets_logged < 3:
+                                    logger.info('pyav-smoke: submitted AU len=%d ts=%.6f', len(au.payload), float(au.pts or ts_this))
+                                    first_packets_logged += 1
+                            except Exception:
+                                logger.debug('pyav-smoke: submit failed', exc_info=True)
+                        # pacing
+                        target = 1.0 / max(1.0, fps)
+                        sleep = target - (time.perf_counter() - t0)
+                        if sleep > 0:
+                            time.sleep(sleep)
+                        frame_idx += 1
+                Thread(target=_pyav_encode_worker, daemon=True).start()
             else:
                 Thread(target=_vt_synthetic_worker, daemon=True).start()
         else:
