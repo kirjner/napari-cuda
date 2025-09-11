@@ -136,7 +136,7 @@ class H264Encoder:
         except Exception:
             return
 
-    def encode_rgb_frame(self, rgb: 'object', pixfmt: str = 'rgb24') -> List[AccessUnit]:
+    def encode_rgb_frame(self, rgb: 'object', pixfmt: str = 'rgb24', pts: Optional[float] = None) -> List[AccessUnit]:
         """Encode a single RGB ndarray and return a list of AVCC AUs for the frame.
 
         The returned list usually contains 0-1 AUs; encoders can emit multiple packets
@@ -161,8 +161,8 @@ class H264Encoder:
         au_bytes, is_key = pack_to_avcc(payloads, self._cache)
         result: List[AccessUnit] = []
         if au_bytes is not None:
-            # PTS is optional here; caller can assign arrival/server timestamps
-            result.append(AccessUnit(payload=au_bytes, is_keyframe=bool(is_key), pts=None))
+            # Attach provided PTS if any; caller computes based on frame index/fps
+            result.append(AccessUnit(payload=au_bytes, is_keyframe=bool(is_key), pts=pts))
         return result
 
     def flush(self) -> List[AccessUnit]:
@@ -189,4 +189,3 @@ class H264Encoder:
     def close(self) -> None:
         self._enc = None
         self._opened = False
-

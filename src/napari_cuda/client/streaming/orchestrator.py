@@ -528,6 +528,7 @@ class StreamManager:
                 smoke_mode = (os.getenv('NAPARI_CUDA_VT_SMOKE_MODE', 'checker') or 'checker').lower()
                 # Start loop
                 first_packets_logged = 0
+                frame_idx = 0
                 accum = bytearray()
                 extradata_len_logged = -1
                 seen_sps: bytes | None = None
@@ -552,8 +553,10 @@ class StreamManager:
                         g = _np.broadcast_to(y, (sh, sw))
                         b = ((r.astype(_np.uint16) + g.astype(_np.uint16)) // 2).astype(_np.uint8)
                         rgb = _np.dstack([r, g, b])
+                    # Compute a monotonic PTS based on frame index and nominal FPS
+                    ts_this = float(frame_idx) / float(max(1.0, fps))
                     try:
-                        au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24')
+                        au_list = enc.encode_rgb_frame(rgb, pixfmt='rgb24', pts=ts_this)
                     except Exception:
                         logger.debug('encode-smoke: encode failed', exc_info=True)
                         # Recreate encoder and retry next frame
@@ -590,10 +593,12 @@ class StreamManager:
                                 while self._vt_in_q.qsize() > 0:
                                     _ = self._vt_in_q.get_nowait()
                                 self._presenter.clear(Source.VT)
-                            self._vt_in_q.put_nowait((au, None))
+                            # Use AU pts when present; else fall back to computed ts
+                            ts_submit = au_obj.pts if au_obj.pts is not None else ts_this
+                            self._vt_in_q.put_nowait((au, ts_submit))
                             self._vt_enqueued += 1
                             if first_packets_logged < 3:
-                                logger.info('encode-smoke: submitted AU len=%d', len(au))
+                                logger.info('encode-smoke: submitted AU len=%d ts=%.6f', len(au), float(ts_submit))
                                 first_packets_logged += 1
                         except Exception:
                             logger.debug('encode-smoke: submit failed', exc_info=True)
@@ -603,6 +608,7 @@ class StreamManager:
                     sleep = target - (time.perf_counter() - t)
                     if sleep > 0:
                         time.sleep(sleep)
+                    frame_idx += 1
 
             if smoke_source == 'encode':
                 Thread(target=_vt_encode_worker, daemon=True).start()
