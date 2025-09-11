@@ -81,10 +81,7 @@ class StreamManager:
         self._vt_latency_s = float(vt_latency_s)
         self._pyav_latency_s = float(pyav_latency_s) if pyav_latency_s is not None else max(0.06, float(vt_latency_s))
         # Default to PyAV latency until VT is proven ready
-        try:
-            self._presenter.set_latency(self._pyav_latency_s)
-        except Exception:
-            logger.debug("Failed to set initial presenter latency", exc_info=True)
+        self._presenter.set_latency(self._pyav_latency_s)
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
         self._warmup_ms_override = env_str('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MS', None)
@@ -195,32 +192,23 @@ class StreamManager:
         # State channel thread (disabled in offline VT smoke mode)
         if not self._vt_smoke:
             def _on_video_config(data: dict) -> None:
-                try:
-                    w, h, fps, fmt, avcc_b64 = extract_video_config(data)
-                    if fps > 0:
-                        self._fps = fps
-                    self._stream_format = fmt
-                    self._stream_format_set = True
-                    if w > 0 and h > 0 and avcc_b64:
-                        self._init_vt_from_avcc(avcc_b64, w, h)
-                except Exception:
-                    logger.debug("video_config handling failed", exc_info=True)
+                w, h, fps, fmt, avcc_b64 = extract_video_config(data)
+                if fps > 0:
+                    self._fps = fps
+                self._stream_format = fmt
+                self._stream_format_set = True
+                if w > 0 and h > 0 and avcc_b64:
+                    self._init_vt_from_avcc(avcc_b64, w, h)
 
             st = StateController(self.server_host, self.state_port, _on_video_config)
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
 
         # Start VT pipeline workers
-        try:
-            self._vt_pipeline.start()
-        except Exception:
-            logger.debug("Failed to start VT pipeline", exc_info=True)
+        self._vt_pipeline.start()
 
         # Start PyAV pipeline worker
-        try:
-            self._pyav_pipeline.start()
-        except Exception:
-            logger.debug("Failed to start PyAV pipeline", exc_info=True)
+        self._pyav_pipeline.start()
 
         # Receiver thread or smoke mode
         if self._vt_smoke:
@@ -228,12 +216,8 @@ class StreamManager:
             # Ensure PyAV decoder is ready if targeting pyav
             smoke_source = (os.getenv('NAPARI_CUDA_SMOKE_SOURCE') or 'vt').lower()
             if smoke_source == 'pyav':
-                try:
-                    self._init_decoder()
-                    dec = self.decoder.decode if self.decoder else None
-                except Exception:
-                    logger.debug('smoke: init decoder failed', exc_info=True)
-                    dec = None
+                self._init_decoder()
+                dec = self.decoder.decode if self.decoder else None
                 self._pyav_pipeline.set_decoder(dec)
             # Read config
             try:
@@ -281,19 +265,12 @@ class StreamManager:
             self._smoke.start()
         else:
             def _on_connected() -> None:
-                try:
-                    self._init_decoder()
-                    # Bind decoder to pipeline
-                    try:
-                        dec = self.decoder.decode if self.decoder else None
-                    except Exception:
-                        dec = None
-                    self._pyav_pipeline.set_decoder(dec)
-                except Exception:
-                    logger.debug("init decoder on connect failed", exc_info=True)
+                self._init_decoder()
+                # Bind decoder to pipeline
+                dec = self.decoder.decode if self.decoder else None
+                self._pyav_pipeline.set_decoder(dec)
 
             def _on_frame(pkt: Packet) -> None:
-                try:
                     # Log keyframe detection to verify server behavior
                     # try:
                     #     if (pkt.flags & 0x01) != 0 or self._is_keyframe(pkt.payload, pkt.codec):
@@ -305,52 +282,35 @@ class StreamManager:
                     # except Exception:
                     #     pass
                     # Detect stream discontinuity by sequence number
-                    try:
-                        cur = int(pkt.seq)
-                        if self._last_seq is not None and not (self._vt_wait_keyframe or self._pyav_wait_keyframe):
-                            expected = (self._last_seq + 1) & 0xFFFFFFFF
-                            if cur != expected:
-                                # Log at most ~5 Hz to avoid spam
-                                now = time.time()
-                                if (now - self._last_disco_log) > 0.2:
-                                    logger.warning(
-                                        "Pixel stream discontinuity: expected=%d got=%d; gating until keyframe",
-                                        expected,
-                                        cur,
-                                    )
-                                    self._last_disco_log = now
-                                # Gate VT path
-                                if self._vt_decoder is not None:
-                                    self._vt_wait_keyframe = True
-                                    try:
-                                        self._vt_pipeline.clear()
-                                    except Exception:
-                                        logger.debug("VT pipeline clear during disco gate failed", exc_info=True)
-                                    self._presenter.clear(Source.VT)
-                                    self._request_keyframe_once()
-                                # Gate PyAV path
-                                self._pyav_wait_keyframe = True
-                                try:
-                                    self._pyav_pipeline.clear()
-                                except Exception:
-                                    logger.debug("PyAV pipeline clear failed during disco gate", exc_info=True)
-                                self._presenter.clear(Source.PYAV)
-                                try:
-                                    self._init_decoder()
-                                    try:
-                                        dec = self.decoder.decode if self.decoder else None
-                                    except Exception:
-                                        dec = None
-                                    self._pyav_pipeline.set_decoder(dec)
-                                except Exception:
-                                    logger.debug("PyAV decoder reinit after discontinuity failed", exc_info=True)
-                                self._disco_gated = True
-                    finally:
-                        # Always update last_seq
-                        try:
-                            self._last_seq = int(pkt.seq)
-                        except Exception:
-                            self._last_seq = None
+                    cur = int(pkt.seq)
+                    if self._last_seq is not None and not (self._vt_wait_keyframe or self._pyav_wait_keyframe):
+                        expected = (self._last_seq + 1) & 0xFFFFFFFF
+                        if cur != expected:
+                            # Log at most ~5 Hz to avoid spam
+                            now = time.time()
+                            if (now - self._last_disco_log) > 0.2:
+                                logger.warning(
+                                    "Pixel stream discontinuity: expected=%d got=%d; gating until keyframe",
+                                    expected,
+                                    cur,
+                                )
+                                self._last_disco_log = now
+                            # Gate VT path
+                            if self._vt_decoder is not None:
+                                self._vt_wait_keyframe = True
+                                self._vt_pipeline.clear()
+                                self._presenter.clear(Source.VT)
+                                self._request_keyframe_once()
+                            # Gate PyAV path
+                            self._pyav_wait_keyframe = True
+                            self._pyav_pipeline.clear()
+                            self._presenter.clear(Source.PYAV)
+                            self._init_decoder()
+                            dec = self.decoder.decode if self.decoder else None
+                            self._pyav_pipeline.set_decoder(dec)
+                            self._disco_gated = True
+                    # Always update last_seq
+                    self._last_seq = int(pkt.seq)
                     # Global initial gate (first frame must be keyframe)
                     if not self._stream_seen_keyframe:
                         if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
@@ -401,10 +361,7 @@ class StreamManager:
 
                     # Prefer VT if ready; otherwise PyAV
                     if self._vt_decoder is not None and not self._vt_wait_keyframe:
-                        try:
-                            ts_float = float(pkt.ts)
-                        except Exception:
-                            ts_float = None
+                        ts_float = float(pkt.ts)
                         b = bytes(pkt.payload)
                         try:
                             self._vt_pipeline.enqueue(b, ts_float)
@@ -422,21 +379,12 @@ class StreamManager:
                         if self._pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
                             self._pyav_wait_keyframe = True
                             # Drain queued items and clear presenter buffer for a clean start
-                            try:
-                                self._pyav_pipeline.clear()
-                            except Exception:
-                                logger.debug("PyAV pipeline clear failed after backlog", exc_info=True)
+                            self._pyav_pipeline.clear()
                             self._presenter.clear(Source.PYAV)
                             # Recreate decoder fresh to drop reference history
-                            try:
-                                self._init_decoder()
-                                try:
-                                    dec = self.decoder.decode if self.decoder else None
-                                except Exception:
-                                    dec = None
-                                self._pyav_pipeline.set_decoder(dec)
-                            except Exception:
-                                logger.debug("PyAV decoder reinit failed after backlog", exc_info=True)
+                            self._init_decoder()
+                            dec = self.decoder.decode if self.decoder else None
+                            self._pyav_pipeline.set_decoder(dec)
                         # If waiting for keyframe, skip until flags indicate a keyframe
                         if self._pyav_wait_keyframe:
                             if not (self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01)):
@@ -444,19 +392,11 @@ class StreamManager:
                             # Got keyframe: clear gate
                             self._pyav_wait_keyframe = False
                             # Reinitialize decoder one more time right at the keyframe
-                            try:
-                                self._init_decoder()
-                            except Exception:
-                                logger.debug("PyAV decoder reinit at keyframe failed", exc_info=True)
+                            self._init_decoder()
                             self._disco_gated = False
                         # Enqueue for decode
-                        try:
-                            self._pyav_pipeline.enqueue(b, ts_float)
-                            self._pyav_enqueued += 1
-                        except Exception:
-                            logger.debug("PyAV pipeline enqueue failed; dropping frame", exc_info=True)
-                except Exception:
-                    logger.debug("stream frame handling failed", exc_info=True)
+                        self._pyav_pipeline.enqueue(b, ts_float)
+                        self._pyav_enqueued += 1
 
             def _on_disconnect(exc: Exception | None) -> None:
                 return
@@ -495,19 +435,13 @@ class StreamManager:
         if self._warmup_until > 0 and self._presenter.clock.mode == TimestampMode.ARRIVAL:
             now = time.time()
             if now >= self._warmup_until:
-                try:
-                    self._presenter.set_latency(self._vt_latency_s)
-                except Exception:
-                    logger.debug("Presenter set_latency fallback after VT disable failed", exc_info=True)
+                self._presenter.set_latency(self._vt_latency_s)
                 self._warmup_until = 0.0
             else:
                 remain = max(0.0, self._warmup_until - now)
                 frac = remain / max(1e-6, self._warmup_window_s)
                 cur = self._vt_latency_s + self._warmup_extra_active_s * frac
-                try:
-                    self._presenter.set_latency(cur)
-                except Exception:
-                    logger.debug("Presenter set_latency during warmup failed", exc_info=True)
+                self._presenter.set_latency(cur)
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
@@ -628,10 +562,7 @@ class StreamManager:
                     self._vt_decoder = VTLiveDecoder(avcc, width, height)
                     self._vt_backend = 'shim'
                     # Bind decoder to VT pipeline
-                    try:
-                        self._vt_pipeline.set_decoder(self._vt_decoder)
-                    except Exception:
-                        logger.debug("VT pipeline set_decoder failed", exc_info=True)
+                    self._vt_pipeline.set_decoder(self._vt_decoder)
                 except Exception as e:
                     logger.warning("VT shim unavailable: %s; falling back to PyAV", e)
                     self._vt_decoder = None
@@ -639,24 +570,17 @@ class StreamManager:
             self._last_vcfg_key = cfg_key
             self._vt_wait_keyframe = True
             # Parse nal length size from avcC if available (5th byte low 2 bits + 1)
-            try:
-                if len(avcc) >= 5:
-                    nsz = int((avcc[4] & 0x03) + 1)
-                    if nsz in (1, 2, 3, 4):
-                        self._nal_length_size = nsz
-                    else:
-                        logger.warning("Invalid avcC nal_length_size=%s; defaulting to 4", nsz)
-                        self._nal_length_size = 4
+            if len(avcc) >= 5:
+                nsz = int((avcc[4] & 0x03) + 1)
+                if nsz in (1, 2, 3, 4):
+                    self._nal_length_size = nsz
                 else:
-                    logger.warning("avcC too short (%d); defaulting nal_length_size=4", len(avcc))
+                    logger.warning("Invalid avcC nal_length_size=%s; defaulting to 4", nsz)
                     self._nal_length_size = 4
-            except Exception:
-                logger.warning("Failed to parse avcC nal_length_size; defaulting to 4", exc_info=True)
+            else:
+                logger.warning("avcC too short (%d); defaulting nal_length_size=4", len(avcc))
                 self._nal_length_size = 4
-            try:
-                self._vt_pipeline.update_nal_length_size(self._nal_length_size)
-            except Exception:
-                logger.debug("VT pipeline update nal_length_size failed", exc_info=True)
+            self._vt_pipeline.update_nal_length_size(self._nal_length_size)
             logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
         except Exception as e:
             logger.error("VT live init failed: %s", e)
