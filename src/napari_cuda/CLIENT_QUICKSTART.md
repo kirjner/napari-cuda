@@ -33,16 +33,25 @@ Notes
 
 Offline smoke (no network)
 - `NAPARI_CUDA_VT_SMOKE=1` enables offline testing without a server.
-- `NAPARI_CUDA_VT_SMOKE_SOURCE={vt|encode}` selects the source:
+- `NAPARI_CUDA_VT_SMOKE_SOURCE={vt|encode|pyav}` selects the path:
   - `vt` (default): synthetic CVPixelBuffer generator rendered zero‑copy.
-  - `encode`: PyAV H.264 encoder → VT decode → zero‑copy render.
-- Dimensions and cadence:
+  - `encode`: PyAV H.264 encode → AVCC → VT decode → zero‑copy render.
+  - `pyav`: PyAV H.264 encode → PyAV decode (CPU) → RGB render.
+- Dimensions / cadence / pattern:
   - `NAPARI_CUDA_VT_SMOKE_W` (default 1280)
   - `NAPARI_CUDA_VT_SMOKE_H` (default 720)
   - `NAPARI_CUDA_VT_SMOKE_FPS` (default 60)
+  - `NAPARI_CUDA_VT_SMOKE_MODE={checker|gradient}` (default `checker`)
+- Latency knobs used during smoke runs:
+  - `encode` and `vt`: `NAPARI_CUDA_CLIENT_VT_LATENCY_MS` (ARRIVAL mode)
+  - `pyav`: `NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS` (ARRIVAL mode)
+- Pack/encode notes (encode/pyav):
+  - Uses the server AVCC packer; if the Cython packer isn’t built, set `NAPARI_CUDA_ALLOW_PY_FALLBACK=1`.
+  - VT expects AVCC; smoke paths normalize AUs to AVCC and gate on keyframes.
 - Diagnostics:
   - One‑time info logs for smoke start, VT init, and first zero‑copy draw.
   - Presenter stats with `NAPARI_CUDA_VT_STATS=info|debug` (1 Hz).
+  - First few AU submissions log AU length and timestamp for visibility.
 
 Troubleshooting
 - No picture after connect: wait for first keyframe; client auto‑requests one and logs on receipt.
