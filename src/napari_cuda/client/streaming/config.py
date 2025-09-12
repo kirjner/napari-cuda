@@ -59,6 +59,8 @@ class ClientConfig:
     unified_scheduler: bool = False
     draw_coalesce: bool = False
     next_due_wake: bool = False
+    # Temporary flag to keep coordinator's legacy last-frame enqueue fallback
+    keep_last_frame_fallback: bool = False
 
     # Preview guards (kept for clarity; identical behavior to today)
     server_preview_guard_ms: float = 0.0
@@ -85,6 +87,7 @@ class ClientConfig:
         unified = _env_bool("NAPARI_CUDA_UNIFIED_SCHEDULER", False)
         coalesce = _env_bool("NAPARI_CUDA_DRAW_COALESCE", False)
         wake = _env_bool("NAPARI_CUDA_NEXT_DUE_WAKE", False)
+        keep_last = _env_bool("NAPARI_CUDA_KEEP_LAST_FRAME_FALLBACK", False)
 
         # Preview guards (retain current behavior)
         serv_guard = _env_float("NAPARI_CUDA_SERVER_PREVIEW_GUARD_MS", 0.0)
@@ -98,6 +101,7 @@ class ClientConfig:
             unified_scheduler=unified,
             draw_coalesce=coalesce,
             next_due_wake=wake,
+            keep_last_frame_fallback=keep_last,
             server_preview_guard_ms=serv_guard,
             arrival_preview_guard_ms=arr_guard,
         )

@@ -66,15 +66,24 @@ class FixedLatencyPresenter:
         latency_s: float,
         buffer_limit: int,
         ts_mode: TimestampMode,
-        preview_guard_s: float = 1.0/60.0,
+        preview_guard_s: float = 1.0 / 60.0,
+        *,
+        unified: bool = False,
+        preview_guard_arrival_s: Optional[float] = None,
+        preview_guard_server_s: Optional[float] = None,
     ) -> None:
         self.latency_s = float(max(0.0, latency_s))
         self.buffer_limit = max(1, int(buffer_limit))
         self.clock = ClockSync(ts_mode)
-        # If nothing is due yet in SERVER mode, allow previewing when the
-        # earliest due time is more than this guard ahead of now. Keep small
-        # (about one frame at 60 Hz) to avoid visible stalls.
-        self._preview_guard_s = max(0.0, float(preview_guard_s))
+        # Unified scheduler flag (Phase 1). When False, preserves legacy behavior.
+        self._unified = bool(unified)
+        # Back-compat single guard; used to seed arrival guard if not provided.
+        _guard = max(0.0, float(preview_guard_s))
+        # Per-mode preview guards (seconds). Defaults: arrival ~ one frame; server 0.
+        self._preview_guard_arrival_s = float(_guard if preview_guard_arrival_s is None else max(0.0, float(preview_guard_arrival_s)))
+        self._preview_guard_server_s = float(0.0 if preview_guard_server_s is None else max(0.0, float(preview_guard_server_s)))
+        # Legacy single guard kept for non-unified path
+        self._preview_guard_s = float(_guard)
         # Deque per source for O(1) append/pop from ends
         self._buf: Dict[Source, Deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
         self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
@@ -83,6 +92,9 @@ class FixedLatencyPresenter:
         # Count preview returns in ARRIVAL mode (not consumed)
         self._preview_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         self._lock = threading.Lock()
+        # Offset PLL (bounded) state for SERVER mode
+        self._pll_offset: Optional[float] = None
+        self._pll_last_update: float = 0.0
 
     def set_latency(self, latency_s: float) -> None:
         self.latency_s = float(max(0.0, latency_s))
@@ -95,6 +107,8 @@ class FixedLatencyPresenter:
 
     def set_offset(self, offset: Optional[float]) -> None:
         self.clock.set_offset(offset)
+        # Seed PLL with explicit offset if provided
+        self._pll_offset = float(offset) if (offset is not None and math.isfinite(float(offset))) else None
 
     def submit(self, sf: SubmittedFrame) -> None:
         due = self.clock.compute_due(sf.arrival_ts, sf.server_ts, self.latency_s)
@@ -114,6 +128,12 @@ class FixedLatencyPresenter:
             # Trim to buffer limit from the left (oldest first)
             while len(items) > self.buffer_limit:
                 to_release.append(items.popleft())
+        # Update PLL estimator opportunistically when unified and SERVER mode
+        try:
+            if self._unified and self.clock.mode == TimestampMode.SERVER:
+                self._maybe_update_pll(sf.arrival_ts, sf.server_ts)
+        except Exception:
+            logger.debug("submit: PLL update failed", exc_info=True)
         for it in to_release:
             cb = it.release_cb
             if cb is not None:
@@ -157,15 +177,8 @@ class FixedLatencyPresenter:
             items = self._buf[active]
             if not items:
                 return None
-            if self.clock.mode == TimestampMode.ARRIVAL:
-                # Sticky latest: trim older items, then preview the newest without consuming
-                while len(items) > 1:
-                    to_release.append(items.popleft())
-                sel = items[-1]
-                is_preview = True
-                # Do not increment out_count for previews; track separately
-                self._preview_count[active] += 1
-            else:
+            if self._unified:
+                # Unified: consume newest due; else preview latest if earliest future is sufficiently far
                 last_due: Optional[_BufItem] = None
                 while items and items[0].due_ts <= n:
                     if last_due is not None:
@@ -175,10 +188,38 @@ class FixedLatencyPresenter:
                     sel = last_due
                     self._out_count[active] += 1
                 else:
-                    # In SERVER mode, avoid previewing future frames to prevent
-                    # out-of-order visual churn. Let the renderer keep the last
-                    # displayed frame until a frame becomes due.
-                    sel = None
+                    earliest = items[0]
+                    guard = self._preview_guard_arrival_s if self.clock.mode == TimestampMode.ARRIVAL else self._preview_guard_server_s
+                    if (earliest.due_ts - n) > guard:
+                        sel = items[-1]
+                        is_preview = True
+                        self._preview_count[active] += 1
+                    else:
+                        sel = None
+            else:
+                # Legacy behavior: ARRIVAL previews latest (sticky), SERVER consumes due only
+                if self.clock.mode == TimestampMode.ARRIVAL:
+                    # Sticky latest: trim older items, then preview the newest without consuming
+                    while len(items) > 1:
+                        to_release.append(items.popleft())
+                    sel = items[-1]
+                    is_preview = True
+                    # Do not increment out_count for previews; track separately
+                    self._preview_count[active] += 1
+                else:
+                    last_due = None
+                    while items and items[0].due_ts <= n:
+                        if last_due is not None:
+                            to_release.append(last_due)
+                        last_due = items.popleft()
+                    if last_due is not None:
+                        sel = last_due
+                        self._out_count[active] += 1
+                    else:
+                        # In SERVER mode, avoid previewing future frames to prevent
+                        # out-of-order visual churn. Let the renderer keep the last
+                        # displayed frame until a frame becomes due.
+                        sel = None
         # Release outside the lock
         if to_release:
             self._release_many(to_release)
@@ -187,7 +228,20 @@ class FixedLatencyPresenter:
         return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=is_preview)
 
     def stats(self) -> Dict[str, object]:
+        now = time.time()
         with self._lock:
+            # Compute next_due (ms) per source and simple fill metrics
+            next_due: Dict[str, Optional[int]] = {}
+            fill: Dict[str, int] = {}
+            for s in (Source.VT, Source.PYAV):
+                items = self._buf[s]
+                fill[s.value] = len(items)
+                if not items:
+                    next_due[s.value] = None
+                else:
+                    # Clamp negative to zero if already due
+                    delta_ms = int(round(max(0.0, items[0].due_ts - now) * 1000.0))
+                    next_due[s.value] = delta_ms
             return {
                 "submit": {s.value: self._submit_count[s] for s in (Source.VT, Source.PYAV)},
                 "out": {s.value: self._out_count[s] for s in (Source.VT, Source.PYAV)},
@@ -195,6 +249,8 @@ class FixedLatencyPresenter:
                 "buf": {s.value: len(self._buf[s]) for s in (Source.VT, Source.PYAV)},
                 "latency_ms": int(round(self.latency_s * 1000.0)),
                 "mode": self.clock.mode.value,
+                "next_due_ms": next_due,
+                "fill": fill,
             }
 
     # Adaptive offset helper: compute median of (arrival - server_ts)
@@ -216,6 +272,39 @@ class FixedLatencyPresenter:
             return None
         self.set_offset(float(med))
         return float(med)
+
+    def _maybe_update_pll(self, arrival_ts: float, server_ts: Optional[float]) -> None:
+        """Bounded PLL update toward median offset target.
+
+        - Samples (arrival - server) to estimate offset when server_ts is available.
+        - Moves internal PLL slowly toward the median with a rate limit (ms/s).
+        - Writes back to clock.offset so compute_due uses the smoothed value.
+        """
+        try:
+            if server_ts is None or not math.isfinite(float(server_ts)):
+                return
+            # Estimate target as simple median over recent samples via relearn_offset
+            target = self.relearn_offset(Source.VT)
+            if target is None or not math.isfinite(float(target)):
+                return
+            now = float(arrival_ts)
+            if self._pll_offset is None:
+                self._pll_offset = float(target)
+                self.clock.set_offset(self._pll_offset)
+                self._pll_last_update = now
+                return
+            dt = max(1e-3, now - float(self._pll_last_update or now))
+            # Limit change rate to ±0.5 ms/s toward target
+            max_rate = 0.0005  # seconds per second
+            err = float(target) - float(self._pll_offset)
+            step = max(-max_rate * dt, min(max_rate * dt, err))
+            new_off = float(self._pll_offset) + step
+            # Write back
+            self._pll_offset = new_off
+            self.clock.set_offset(new_off)
+            self._pll_last_update = now
+        except Exception:
+            logger.debug("PLL update failed", exc_info=True)
 
 
 class SourceMux:

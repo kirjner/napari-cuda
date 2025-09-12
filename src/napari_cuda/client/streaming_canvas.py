@@ -519,7 +519,13 @@ class StreamingCanvas(VispyCanvas):
             logger.debug('FPS HUD: metrics snapshot failed', exc_info=True)
         vtq_bit = f" vtq:{vt_q_len}" if isinstance(vt_q_len, int) else ""
         # Clear, orthogonal layout
-        line1 = f"src:{active_str}  mode:{mode}  latency:{lat_ms} ms"
+        # Scheduler tag to disambiguate legacy vs unified behavior
+        try:
+            sched_unified = bool(getattr(mgr._presenter, '_unified', False))
+            sched_tag = 'unified' if sched_unified else 'legacy'
+        except Exception:
+            sched_tag = '-'
+        line1 = f"src:{active_str}  mode:{mode}  sched:{sched_tag}  latency:{lat_ms} ms"
         line2 = f"ingress:{sub_fps:.1f}/s  consumed:{out_fps:.1f}/s  preview:{prev_fps:.1f}/s"
         line3 = f"queues: presenter[vt:{buf_vt} py:{buf_py}]  pipeline[vt:{q_vt} py:{q_py}]{vtq_bit}"
         txt = line1 + "\n" + line2 + "\n" + line3

@@ -106,8 +106,10 @@ class VTPipeline:
                             continue
                         # Present and cache last
                         from napari_cuda import _vt as vt  # type: ignore
-                        # Take an extra retain for last-frame fallback; update cache
-                        vt.retain_frame(img_buf)
+                        # Retain twice:
+                        #  - once for the pipeline's last-frame cache (released when cache updates)
+                        #  - once for the presenter-owned buffer entry (released when consumed/trimmed)
+                        vt.retain_frame(img_buf)  # cache retain
                         # Always release the previously cached payload. The
                         # cached copy is our own extra retain specifically for
                         # redraw fallback. Without releasing it here, we'd leak
@@ -122,6 +124,9 @@ class VTPipeline:
                         self._last_payload = img_buf
                         self._last_persistent = True
                         self._on_cache_last(self._last_payload, True)
+                        # Give presenter its own retain so it can safely preview without
+                        # racing the cache's lifecycle.
+                        vt.retain_frame(img_buf)  # presenter retain
                         self._presenter.submit(
                             SubmittedFrame(
                                 source=Source.VT,

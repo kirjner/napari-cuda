@@ -104,18 +104,76 @@ class StreamCoordinator:
 
         # Presenter + source mux
         ts_mode = TimestampMode.ARRIVAL if (vt_ts_mode or 'arrival') == 'arrival' else TimestampMode.SERVER
-        # Preview guard small to avoid choppiness in SERVER mode
+        # Preview guards and unified flag from ClientConfig when available
+        try:
+            unified_cfg = bool(getattr(self._client_cfg, 'unified_scheduler', False))
+            arr_guard_ms = float(getattr(self._client_cfg, 'arrival_preview_guard_ms', 16.0))
+            serv_guard_ms = float(getattr(self._client_cfg, 'server_preview_guard_ms', 0.0))
+        except Exception:
+            unified_cfg = False
+            arr_guard_ms = 16.0
+            serv_guard_ms = 0.0
+        # Fallback to env if ClientConfig missing or failed to initialize
+        try:
+            env_unified = (os.getenv('NAPARI_CUDA_UNIFIED_SCHEDULER', '0') or '0').lower() in ('1','true','yes','on')
+            if not unified_cfg and env_unified:
+                unified_cfg = True
+            # Optional overrides for guards
+            try:
+                _arr = os.getenv('NAPARI_CUDA_ARRIVAL_PREVIEW_GUARD_MS')
+                if _arr not in (None, ''):
+                    arr_guard_ms = float(_arr)
+            except Exception:
+                pass
+            try:
+                _srv = os.getenv('NAPARI_CUDA_SERVER_PREVIEW_GUARD_MS')
+                if _srv not in (None, ''):
+                    serv_guard_ms = float(_srv)
+            except Exception:
+                pass
+        except Exception:
+            pass
         self._presenter = FixedLatencyPresenter(
             latency_s=float(vt_latency_s),
             buffer_limit=int(vt_buffer_limit),
             ts_mode=ts_mode,
             preview_guard_s=1.0/60.0,
+            unified=unified_cfg,
+            preview_guard_arrival_s=float(arr_guard_ms) / 1000.0,
+            preview_guard_server_s=float(serv_guard_ms) / 1000.0,
         )
+        try:
+            logger.info(
+                "Presenter init: mode=%s unified=%s arr_guard=%.1fms srv_guard=%.1fms latency=%.0fms",
+                ts_mode.value,
+                'True' if unified_cfg else 'False',
+                float(arr_guard_ms),
+                float(serv_guard_ms),
+                float(vt_latency_s) * 1000.0,
+            )
+        except Exception:
+            pass
         self._source_mux = SourceMux(Source.PYAV)
         self._vt_latency_s = float(vt_latency_s)
         self._pyav_latency_s = float(pyav_latency_s) if pyav_latency_s is not None else max(0.06, float(vt_latency_s))
         # Default to PyAV latency until VT is proven ready
         self._presenter.set_latency(self._pyav_latency_s)
+        # Feature flags from ClientConfig (with env fallbacks)
+        try:
+            self._keep_last_frame_fallback = bool(getattr(self._client_cfg, 'keep_last_frame_fallback', False))
+        except Exception:
+            self._keep_last_frame_fallback = False
+        try:
+            env_keep = (os.getenv('NAPARI_CUDA_KEEP_LAST_FRAME_FALLBACK', '0') or '0').lower() in ('1','true','yes','on')
+            if env_keep:
+                self._keep_last_frame_fallback = True
+        except Exception:
+            pass
+        try:
+            self._next_due_wake = bool(getattr(self._client_cfg, 'next_due_wake', False))
+        except Exception:
+            self._next_due_wake = False
+        self._next_due_pending_until: float = 0.0
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
         self._warmup_ms_override = env_str('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MS', None)
@@ -500,8 +558,9 @@ class StreamCoordinator:
                 self._enqueue_frame(ready.payload)
 
         frame = None
-        # Draw-last-frame fallbacks to avoid black frames on GUI clears
-        if ready is None:
+        # Optional legacy last-frame fallback (temporary, gated). When disabled,
+        # rely on renderer persistence and presenter preview to avoid flicker.
+        if ready is None and self._keep_last_frame_fallback:
             if self._source_mux.active == Source.VT:
                 try:
                     pb, persistent = self._vt_pipeline.last_payload_info()
@@ -517,6 +576,26 @@ class StreamCoordinator:
                     self._enqueue_frame(self._last_pyav_frame)
                 except Exception:
                     logger.debug("enqueue last PyAV frame failed", exc_info=True)
+        # Next-due wake: if nothing was ready, schedule a precise update near due time
+        if ready is None and self._next_due_wake:
+            try:
+                stats = self._presenter.stats()
+                active = getattr(self._source_mux.active, 'value', 'vt')
+                nd_map = stats.get('next_due_ms', {}) or {}
+                nd_ms = nd_map.get(active)
+                if isinstance(nd_ms, int) and nd_ms > 0:
+                    now = time.time()
+                    until = now + (nd_ms / 1000.0)
+                    if until > self._next_due_pending_until:
+                        self._next_due_pending_until = until
+                        def _wake():
+                            try:
+                                self._scene_canvas.native.update()
+                            finally:
+                                self._next_due_pending_until = 0.0
+                        QtCore.QTimer.singleShot(max(1, int(nd_ms)), _wake)
+            except Exception:
+                logger.debug("next-due wake scheduling failed", exc_info=True)
         while not self._frame_q.empty():
             try:
                 frame = self._frame_q.get_nowait()
