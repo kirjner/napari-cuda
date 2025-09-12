@@ -276,11 +276,8 @@ class StreamCoordinator:
         self._last_stats_time: float = 0.0
         self._stats_timer = None
         self._metrics_timer = None
-        # Adaptive VT scheduling state
-        self._preview_streak: int = 0
-        self._arrival_fallback: bool = False
+        # Simplified scheduling: no ARRIVAL fallback; rely on unified preview/PLL.
         self._relearn_logged: bool = False
-        self._arrival_logged: bool = False
         # Debounce duplicate video_config
         self._last_vcfg_key = None
         # Stream continuity and gate tracking
@@ -516,32 +513,17 @@ class StreamCoordinator:
         ready = self._presenter.pop_due(time.time(), self._source_mux.active)
         if ready is not None:
             src_val = getattr(ready.source, 'value', str(ready.source))
-            # Adaptive scheduling for VT: handle sustained preview-only condition
+            # Optional: log a one-time relearn attempt on early preview streaks (lightweight)
             if src_val == 'vt':
-                if getattr(ready, 'preview', False):
-                    self._preview_streak += 1
-                    if self._preview_streak == 20 and not self._relearn_logged:
-                        off = self._presenter.relearn_offset(Source.VT)
-                        logger.info(
-                            "VT preview streak; relearned offset=%s",
-                            f"{off:.3f}s" if off is not None else "n/a",
-                        )
-                        self._relearn_logged = True
-                    if self._preview_streak >= 40 and not self._arrival_fallback:
-                        self._presenter.set_mode(TimestampMode.ARRIVAL)
-                        self._arrival_fallback = True
-                        self._arrival_logged = True
-                        logger.info("VT adaptive fallback: ARRIVAL mode engaged")
-                else:
-                    if self._arrival_fallback:
-                        # Consuming VT frames again; restore SERVER mode
-                        self._presenter.set_mode(TimestampMode.SERVER)
-                        self._arrival_fallback = False
-                        self._relearn_logged = False
-                        if self._arrival_logged:
-                            logger.info("VT adaptive fallback: SERVER mode restored")
-                            self._arrival_logged = False
-                    self._preview_streak = 0
+                if getattr(ready, 'preview', False) and not self._relearn_logged:
+                    off = self._presenter.relearn_offset(Source.VT)
+                    logger.info(
+                        "VT preview detected; relearned offset=%s",
+                        f"{off:.3f}s" if (off is not None) else "n/a",
+                    )
+                    self._relearn_logged = True
+                elif not getattr(ready, 'preview', False):
+                    self._relearn_logged = False
             if src_val == 'vt':
                 # Zero-copy path: pass CVPixelBuffer + release_cb through to GLRenderer
                 try:
@@ -751,7 +733,7 @@ class StreamCoordinator:
                 logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", cur)
                 self._disco_gated = False
                 try:
-                    if self._presenter.clock.mode == TimestampMode.ARRIVAL and self._warmup_window_s > 0:
+                    if self._warmup_window_s > 0:
                         if self._warmup_ms_override:
                             extra_ms = max(0.0, float(self._warmup_ms_override))
                         else:
@@ -800,7 +782,7 @@ class StreamCoordinator:
             self._pyav_enqueued += 1
 
     def _apply_warmup(self, now: float) -> None:
-        if self._warmup_until > 0 and self._presenter.clock.mode == TimestampMode.ARRIVAL:
+        if self._warmup_until > 0:
             if now >= self._warmup_until:
                 self._presenter.set_latency(self._vt_latency_s)
                 self._warmup_until = 0.0

@@ -148,14 +148,8 @@ class StreamingCanvas(VispyCanvas):
         )
         from napari_cuda.client.streaming.types import Source, TimestampMode
 
-        ts_mode_env = (
-            os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or 'arrival'
-        ).lower()
-        ts_mode = (
-            TimestampMode.ARRIVAL
-            if ts_mode_env == 'arrival'
-            else TimestampMode.SERVER
-        )
+        # Simplified: always use server timestamp mode
+        ts_mode = TimestampMode.SERVER
         self._presenter = FixedLatencyPresenter(
             latency_s=self._vt_latency_s,
             buffer_limit=self._vt_buffer_limit,

@@ -32,10 +32,9 @@ class ClockSync:
         self.offset = offset
 
     def compute_due(self, arrival_ts: float, server_ts: Optional[float], latency_s: float) -> float:
-        if self.mode == TimestampMode.ARRIVAL or server_ts is None:
-            return float(arrival_ts) + float(latency_s)
+        # Simplified: prefer server timestamp + offset; fallback to arrival when unavailable/invalid.
         off = self.offset
-        if off is None or abs(off) > 5.0:
+        if server_ts is None or off is None or not math.isfinite(float(off)) or abs(float(off)) > 5.0:
             return float(arrival_ts) + float(latency_s)
         return float(server_ts) + float(off) + float(latency_s)
 
@@ -75,14 +74,15 @@ class FixedLatencyPresenter:
         self.latency_s = float(max(0.0, latency_s))
         self.buffer_limit = max(1, int(buffer_limit))
         self.clock = ClockSync(ts_mode)
-        # Unified scheduler flag (Phase 1). When False, preserves legacy behavior.
-        self._unified = bool(unified)
-        # Back-compat single guard; used to seed arrival guard if not provided.
+        # Force unified scheduler behavior for jitter robustness.
+        self._unified = True
+        # Single preview guard (seconds); use provided arrival/server guards if set, else default.
         _guard = max(0.0, float(preview_guard_s))
-        # Per-mode preview guards (seconds). Defaults: arrival ~ one frame; server 0.
-        self._preview_guard_arrival_s = float(_guard if preview_guard_arrival_s is None else max(0.0, float(preview_guard_arrival_s)))
-        self._preview_guard_server_s = float(0.0 if preview_guard_server_s is None else max(0.0, float(preview_guard_server_s)))
-        # Legacy single guard kept for non-unified path
+        if preview_guard_arrival_s is not None:
+            _guard = max(0.0, float(preview_guard_arrival_s))
+        if preview_guard_server_s is not None:
+            # If explicit server guard provided, prefer the max for robustness.
+            _guard = max(_guard, max(0.0, float(preview_guard_server_s)))
         self._preview_guard_s = float(_guard)
         # Deque per source for O(1) append/pop from ends
         self._buf: Dict[Source, Deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
@@ -177,49 +177,23 @@ class FixedLatencyPresenter:
             items = self._buf[active]
             if not items:
                 return None
-            if self._unified:
-                # Unified: consume newest due; else preview latest if earliest future is sufficiently far
-                last_due: Optional[_BufItem] = None
-                while items and items[0].due_ts <= n:
-                    if last_due is not None:
-                        to_release.append(last_due)
-                    last_due = items.popleft()
+            # Unified: consume newest due; else preview latest if earliest future is sufficiently far
+            last_due: Optional[_BufItem] = None
+            while items and items[0].due_ts <= n:
                 if last_due is not None:
-                    sel = last_due
-                    self._out_count[active] += 1
-                else:
-                    earliest = items[0]
-                    guard = self._preview_guard_arrival_s if self.clock.mode == TimestampMode.ARRIVAL else self._preview_guard_server_s
-                    if (earliest.due_ts - n) > guard:
-                        sel = items[-1]
-                        is_preview = True
-                        self._preview_count[active] += 1
-                    else:
-                        sel = None
+                    to_release.append(last_due)
+                last_due = items.popleft()
+            if last_due is not None:
+                sel = last_due
+                self._out_count[active] += 1
             else:
-                # Legacy behavior: ARRIVAL previews latest (sticky), SERVER consumes due only
-                if self.clock.mode == TimestampMode.ARRIVAL:
-                    # Sticky latest: trim older items, then preview the newest without consuming
-                    while len(items) > 1:
-                        to_release.append(items.popleft())
+                earliest = items[0]
+                if (earliest.due_ts - n) > self._preview_guard_s:
                     sel = items[-1]
                     is_preview = True
-                    # Do not increment out_count for previews; track separately
                     self._preview_count[active] += 1
                 else:
-                    last_due = None
-                    while items and items[0].due_ts <= n:
-                        if last_due is not None:
-                            to_release.append(last_due)
-                        last_due = items.popleft()
-                    if last_due is not None:
-                        sel = last_due
-                        self._out_count[active] += 1
-                    else:
-                        # In SERVER mode, avoid previewing future frames to prevent
-                        # out-of-order visual churn. Let the renderer keep the last
-                        # displayed frame until a frame becomes due.
-                        sel = None
+                    sel = None
         # Release outside the lock
         if to_release:
             self._release_many(to_release)
@@ -258,17 +232,35 @@ class FixedLatencyPresenter:
         with self._lock:
             items = list(self._buf.get(source) or [])
         diffs: List[float] = []
-        for it in items[-20:]:  # last N samples
+        considered = items[-20:]  # last N samples
+        total = len(considered)
+        for it in considered:
             # Guard against None/NaN values from decoder timestamps
             if it.server_ts is not None and math.isfinite(it.arrival_ts) and math.isfinite(it.server_ts):
                 diffs.append(float(it.arrival_ts) - float(it.server_ts))
         if not diffs:
+            try:
+                logger.debug(
+                    "relearn_offset: insufficient samples (total=%d finite=%d)",
+                    total,
+                    0,
+                )
+            except Exception:
+                pass
             return None
         diffs.sort()
         mid = len(diffs) // 2
         med = diffs[mid] if len(diffs) % 2 == 1 else 0.5 * (diffs[mid - 1] + diffs[mid])
         # Reject unreasonable or non-finite offsets; keep SERVER mode from latching junk
         if not math.isfinite(med) or abs(float(med)) > 5.0:
+            try:
+                logger.debug(
+                    "relearn_offset: rejected median (val=%s, samples=%d)",
+                    med,
+                    len(diffs),
+                )
+            except Exception:
+                pass
             return None
         self.set_offset(float(med))
         return float(med)

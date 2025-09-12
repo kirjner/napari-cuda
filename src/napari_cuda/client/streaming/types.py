@@ -12,7 +12,6 @@ class Source(str, Enum):
 
 class TimestampMode(str, Enum):
     SERVER = "server"
-    ARRIVAL = "arrival"
 
 
 @dataclass
@@ -47,4 +46,3 @@ class ReadyFrame:
     payload: Any
     release_cb: Optional[Callable[[Any], None]] = None
     preview: bool = False
-
