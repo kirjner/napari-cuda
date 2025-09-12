@@ -54,26 +54,17 @@ class FixedLatencyPresenter:
         self,
         latency_s: float,
         buffer_limit: int,
-        server_timestamp: bool = True,
-        preview_guard_s: float = 1.0 / 60.0,
+        preview_guard_s: float = 0.0,
         *,
         unified: bool = False,
-        preview_guard_arrival_s: Optional[float] = None,
-        preview_guard_server_s: Optional[float] = None,
     ) -> None:
         self.latency_s = float(max(0.0, latency_s))
         self.buffer_limit = max(1, int(buffer_limit))
         self.clock = ClockSync()
         # Force unified scheduler behavior for jitter robustness.
         self._unified = True
-        # Single preview guard (seconds); use provided arrival/server guards if set, else default.
-        _guard = max(0.0, float(preview_guard_s))
-        if preview_guard_arrival_s is not None:
-            _guard = max(0.0, float(preview_guard_arrival_s))
-        if preview_guard_server_s is not None:
-            # If explicit server guard provided, prefer the max for robustness.
-            _guard = max(_guard, max(0.0, float(preview_guard_server_s)))
-        self._preview_guard_s = float(_guard)
+        # Single preview guard (seconds)
+        self._preview_guard_s = max(0.0, float(preview_guard_s))
         # Deque per source for O(1) append/pop from ends
         self._buf: Dict[Source, Deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
         self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}

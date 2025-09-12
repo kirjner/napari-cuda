@@ -220,7 +220,7 @@ def main():
         '--latency-ms',
         type=float,
         default=None,
-        help='Target VT latency (ms) for ARRIVAL mode (sets NAPARI_CUDA_CLIENT_VT_LATENCY_MS)'
+        help='Target VT latency (ms) (sets NAPARI_CUDA_CLIENT_VT_LATENCY_MS)'
     )
     parser.add_argument(
         '--pyav-latency-ms',

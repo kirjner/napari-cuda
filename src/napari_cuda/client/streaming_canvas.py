@@ -151,7 +151,7 @@ class StreamingCanvas(VispyCanvas):
         self._presenter = FixedLatencyPresenter(
             latency_s=self._vt_latency_s,
             buffer_limit=self._vt_buffer_limit,
-            server_timestamp=True,
+            preview_guard_s=0.0,
         )
         self._source_mux = SourceMux(Source.PYAV)
         assert self._presenter is not None
@@ -164,13 +164,14 @@ class StreamingCanvas(VispyCanvas):
                 default_draw_fps=fps,
             )
             logger.info(
-                "ClientConfig initialized: latency=%.0fms buf=%d draw_fps=%.1f (unified=%s, coalesce=%s, next_due_wake=%s)",
+                "ClientConfig initialized: latency=%.0fms buf=%d draw_fps=%.1f (unified=%s, coalesce=%s, next_due_wake=%s, preview_guard=%.1fms)",
                 self._client_cfg.base_latency_ms,
                 self._client_cfg.buffer_limit,
                 self._client_cfg.draw_fps,
                 self._client_cfg.unified_scheduler,
                 self._client_cfg.draw_coalesce,
                 self._client_cfg.next_due_wake,
+                self._client_cfg.preview_guard_ms,
             )
         except Exception:
             logger.debug("ClientConfig init failed", exc_info=True)

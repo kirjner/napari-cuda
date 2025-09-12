@@ -101,55 +101,35 @@ class StreamCoordinator:
         self._stream_format = stream_format
         self._stream_format_set = False
 
-        # Presenter + source mux
-        # Simplified: always use server timestamps
-        # Preview guards and unified flag from ClientConfig when available
+        # Presenter + source mux (server timestamps only)
+        # Preview guard and unified flag
         try:
             unified_cfg = bool(getattr(self._client_cfg, 'unified_scheduler', False))
-            arr_guard_ms = float(getattr(self._client_cfg, 'arrival_preview_guard_ms', 16.0))
-            serv_guard_ms = float(getattr(self._client_cfg, 'server_preview_guard_ms', 0.0))
+            preview_guard_ms = float(getattr(self._client_cfg, 'preview_guard_ms', 0.0))
         except Exception:
             unified_cfg = False
-            arr_guard_ms = 16.0
-            serv_guard_ms = 0.0
-        # Fallback to env if ClientConfig missing or failed to initialize
+            preview_guard_ms = 0.0
+        # Fallback to single env override if provided
         try:
             env_unified = (os.getenv('NAPARI_CUDA_UNIFIED_SCHEDULER', '0') or '0').lower() in ('1','true','yes','on')
             if not unified_cfg and env_unified:
                 unified_cfg = True
-            # Optional overrides for guards
-            try:
-                _arr = os.getenv('NAPARI_CUDA_ARRIVAL_PREVIEW_GUARD_MS')
-                if _arr not in (None, ''):
-                    arr_guard_ms = float(_arr)
-            except Exception:
-                pass
-            try:
-                _srv = os.getenv('NAPARI_CUDA_SERVER_PREVIEW_GUARD_MS')
-                if _srv not in (None, ''):
-                    serv_guard_ms = float(_srv)
-            except Exception:
-                pass
+            _pg = os.getenv('NAPARI_CUDA_PREVIEW_GUARD_MS')
+            if _pg not in (None, ''):
+                preview_guard_ms = float(_pg)
         except Exception:
             pass
         self._presenter = FixedLatencyPresenter(
             latency_s=float(vt_latency_s),
             buffer_limit=int(vt_buffer_limit),
-            server_timestamp=True,
-            preview_guard_s=1.0/60.0,
+            preview_guard_s=float(preview_guard_ms) / 1000.0,
             unified=unified_cfg,
-            preview_guard_arrival_s=float(arr_guard_ms) / 1000.0,
-            preview_guard_server_s=float(serv_guard_ms) / 1000.0,
         )
         try:
-            logger.info(
-                "Presenter init: server_ts=%s unified=%s arr_guard=%.1fms srv_guard=%.1fms latency=%.0fms",
-                'True',
-                'True' if unified_cfg else 'False',
-                float(arr_guard_ms),
-                float(serv_guard_ms),
-                float(vt_latency_s) * 1000.0,
-            )
+            logger.info("Presenter init: unified=%s preview_guard=%.1fms latency=%.0fms",
+                        'True' if unified_cfg else 'False',
+                        float(preview_guard_ms),
+                        float(vt_latency_s) * 1000.0)
         except Exception:
             pass
         self._source_mux = SourceMux(Source.PYAV)

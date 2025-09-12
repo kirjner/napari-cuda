@@ -50,7 +50,6 @@ class ClientConfig:
     future options while we deprecate scattered envs.
     """
 
-    mode: str = "server"  # simplified; retained for logging compatibility
     base_latency_ms: float = 0.0
     buffer_limit: int = 3
     draw_fps: float = 60.0
@@ -62,9 +61,8 @@ class ClientConfig:
     # Temporary flag to keep coordinator's legacy last-frame enqueue fallback
     keep_last_frame_fallback: bool = False
 
-    # Preview guards (kept for clarity; identical behavior to today)
-    server_preview_guard_ms: float = 0.0
-    arrival_preview_guard_ms: float = 16.0
+    # Single preview guard (ms)
+    preview_guard_ms: float = 0.0
 
     # Compatibility helper to ease logging/inspection
     def as_dict(self) -> Dict[str, Any]:
@@ -72,8 +70,6 @@ class ClientConfig:
 
     @staticmethod
     def from_env(default_latency_ms: float = 0.0, default_buffer_limit: int = 3, default_draw_fps: float = 60.0) -> "ClientConfig":
-        # Timestamp mode
-        mode = "server"  # Timestamp mode simplified
         # Latency: prefer explicit VT latency env; else provided defaults
         base_latency_ms = _env_float("NAPARI_CUDA_CLIENT_VT_LATENCY_MS", default_latency_ms)
         # Buffer limit: mirror existing env; coordinator/Presenter still own the logic
@@ -89,12 +85,10 @@ class ClientConfig:
         wake = _env_bool("NAPARI_CUDA_NEXT_DUE_WAKE", False)
         keep_last = _env_bool("NAPARI_CUDA_KEEP_LAST_FRAME_FALLBACK", False)
 
-        # Preview guards (retain current behavior)
-        serv_guard = _env_float("NAPARI_CUDA_SERVER_PREVIEW_GUARD_MS", 0.0)
-        arr_guard = _env_float("NAPARI_CUDA_ARRIVAL_PREVIEW_GUARD_MS", 16.0)
+        # Single preview guard
+        preview_guard = _env_float("NAPARI_CUDA_PREVIEW_GUARD_MS", 0.0)
 
         return ClientConfig(
-            mode=mode,
             base_latency_ms=base_latency_ms,
             buffer_limit=buffer_limit,
             draw_fps=draw_fps,
@@ -102,8 +96,7 @@ class ClientConfig:
             draw_coalesce=coalesce,
             next_due_wake=wake,
             keep_last_frame_fallback=keep_last,
-            server_preview_guard_ms=serv_guard,
-            arrival_preview_guard_ms=arr_guard,
+            preview_guard_ms=preview_guard,
         )
 
 
