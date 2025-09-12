@@ -10,8 +10,12 @@ class Source(str, Enum):
     VT = "vt"
 
 
-class TimestampMode(str, Enum):
-    SERVER = "server"
+"""Timestamping is simplified to server timestamps only.
+
+Historically there was a TimestampMode with ARRIVAL and SERVER. The client
+now always uses server timestamps when available, and falls back to arrival
+time only for missing/invalid server timestamps.
+"""
 
 
 @dataclass

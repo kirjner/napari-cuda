@@ -8,31 +8,22 @@ from collections import deque
 import threading
 import math
 
-from napari_cuda.client.streaming.types import (
-    ReadyFrame,
-    Source,
-    SubmittedFrame,
-    TimestampMode,
-)
+from napari_cuda.client.streaming.types import ReadyFrame, Source, SubmittedFrame
 
 logger = logging.getLogger(__name__)
 
 
 class ClockSync:
-    """Computes due times based on timestamp mode and offset."""
+    """Computes due times based on server timestamp + offset, with fallback."""
 
-    def __init__(self, mode: TimestampMode, offset: Optional[float] = None):
-        self.mode = mode
+    def __init__(self, offset: Optional[float] = None):
         self.offset = offset
-
-    def set_mode(self, mode: TimestampMode) -> None:
-        self.mode = mode
 
     def set_offset(self, offset: Optional[float]) -> None:
         self.offset = offset
 
     def compute_due(self, arrival_ts: float, server_ts: Optional[float], latency_s: float) -> float:
-        # Simplified: prefer server timestamp + offset; fallback to arrival when unavailable/invalid.
+        # Prefer server timestamp + offset; fallback to arrival when unavailable/invalid.
         off = self.offset
         if server_ts is None or off is None or not math.isfinite(float(off)) or abs(float(off)) > 5.0:
             return float(arrival_ts) + float(latency_s)
@@ -54,17 +45,16 @@ class FixedLatencyPresenter:
     - Maintains per-source buffers of frames with computed due times.
     - Drops oldest frames beyond `buffer_limit` per source.
     - Returns the latest due frame at `pop_due()` for the active source.
-    - In ARRIVAL mode, return the newest item without consuming it ("sticky").
-      This avoids empty-buffer stalls when draw and decode phases misalign.
-    - If nothing is due and the earliest future frame is far (>200ms), it can
-      return a preview of the latest frame to avoid visible stalls.
+    - Always consume newest due; if nothing is due and the earliest future
+      frame is sufficiently far, return a preview of the latest frame to avoid
+      visible stalls (without consuming it).
     """
 
     def __init__(
         self,
         latency_s: float,
         buffer_limit: int,
-        ts_mode: TimestampMode,
+        server_timestamp: bool = True,
         preview_guard_s: float = 1.0 / 60.0,
         *,
         unified: bool = False,
@@ -73,7 +63,7 @@ class FixedLatencyPresenter:
     ) -> None:
         self.latency_s = float(max(0.0, latency_s))
         self.buffer_limit = max(1, int(buffer_limit))
-        self.clock = ClockSync(ts_mode)
+        self.clock = ClockSync()
         # Force unified scheduler behavior for jitter robustness.
         self._unified = True
         # Single preview guard (seconds); use provided arrival/server guards if set, else default.
@@ -89,7 +79,7 @@ class FixedLatencyPresenter:
         self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         # Count frames actually consumed (removed from buffer)
         self._out_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
-        # Count preview returns in ARRIVAL mode (not consumed)
+        # Count preview returns (not consumed)
         self._preview_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         self._lock = threading.Lock()
         # Offset PLL (bounded) state for SERVER mode
@@ -102,8 +92,7 @@ class FixedLatencyPresenter:
     def set_buffer_limit(self, n: int) -> None:
         self.buffer_limit = max(1, int(n))
 
-    def set_mode(self, mode: TimestampMode) -> None:
-        self.clock.set_mode(mode)
+    # set_mode removed; server timestamping is always preferred.
 
     def set_offset(self, offset: Optional[float]) -> None:
         self.clock.set_offset(offset)
@@ -128,9 +117,9 @@ class FixedLatencyPresenter:
             # Trim to buffer limit from the left (oldest first)
             while len(items) > self.buffer_limit:
                 to_release.append(items.popleft())
-        # Update PLL estimator opportunistically when unified and SERVER mode
+        # Update PLL estimator opportunistically when unified
         try:
-            if self._unified and self.clock.mode == TimestampMode.SERVER:
+            if self._unified:
                 self._maybe_update_pll(sf.arrival_ts, sf.server_ts)
         except Exception:
             logger.debug("submit: PLL update failed", exc_info=True)
@@ -222,7 +211,7 @@ class FixedLatencyPresenter:
                 "preview": {s.value: self._preview_count[s] for s in (Source.VT, Source.PYAV)},
                 "buf": {s.value: len(self._buf[s]) for s in (Source.VT, Source.PYAV)},
                 "latency_ms": int(round(self.latency_s * 1000.0)),
-                "mode": self.clock.mode.value,
+                "server_timestamp": True,
                 "next_due_ms": next_due,
                 "fill": fill,
             }

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from threading import Event, Thread
 from typing import Iterable, List, Optional, Tuple
 
-from napari_cuda.client.streaming.types import Source, TimestampMode
+from napari_cuda.client.streaming.types import Source
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.codec.avcc import AccessUnit
@@ -130,14 +130,7 @@ class SmokePipeline:
 
     def start(self) -> None:
         # Configure presenter and active source
-        try:
-            ts_env = (os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or '').lower()
-            if ts_env == 'server':
-                self.presenter.set_mode(TimestampMode.SERVER)
-            else:
-                self.presenter.set_mode(TimestampMode.ARRIVAL)
-        except Exception:
-            logger.debug('smoke: set presenter ts mode failed', exc_info=True)
+        # Server timestamping is always used; no mode to set.
         tgt = (self.cfg.target or 'vt').lower()
         if tgt == 'pyav':
             if self.cfg.pyav_latency_s is not None:

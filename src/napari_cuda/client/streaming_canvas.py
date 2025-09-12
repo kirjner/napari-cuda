@@ -146,14 +146,12 @@ class StreamingCanvas(VispyCanvas):
             FixedLatencyPresenter,
             SourceMux,
         )
-        from napari_cuda.client.streaming.types import Source, TimestampMode
+        from napari_cuda.client.streaming.types import Source
 
-        # Simplified: always use server timestamp mode
-        ts_mode = TimestampMode.SERVER
         self._presenter = FixedLatencyPresenter(
             latency_s=self._vt_latency_s,
             buffer_limit=self._vt_buffer_limit,
-            ts_mode=ts_mode,
+            server_timestamp=True,
         )
         self._source_mux = SourceMux(Source.PYAV)
         assert self._presenter is not None
@@ -166,8 +164,7 @@ class StreamingCanvas(VispyCanvas):
                 default_draw_fps=fps,
             )
             logger.info(
-                "ClientConfig initialized: mode=%s latency=%.0fms buf=%d draw_fps=%.1f (unified=%s, coalesce=%s, next_due_wake=%s)",
-                self._client_cfg.mode,
+                "ClientConfig initialized: latency=%.0fms buf=%d draw_fps=%.1f (unified=%s, coalesce=%s, next_due_wake=%s)",
                 self._client_cfg.base_latency_ms,
                 self._client_cfg.buffer_limit,
                 self._client_cfg.draw_fps,
@@ -220,7 +217,6 @@ class StreamingCanvas(VispyCanvas):
                 vt_latency_s=self._vt_latency_s,
                 pyav_latency_s=self._pyav_latency_s,
                 vt_buffer_limit=self._vt_buffer_limit,
-                vt_ts_mode=ts_mode.value,
                 stream_format=self._stream_format,
                 vt_backlog_trigger=self._vt_backlog_trigger,
                 pyav_backlog_trigger=env_int(
@@ -274,10 +270,7 @@ class StreamingCanvas(VispyCanvas):
         except Exception:
             logger.debug('FPS HUD init failed', exc_info=True)
 
-        # Timestamp handling for VT scheduling
-        self._vt_ts_mode = (
-            os.getenv('NAPARI_CUDA_CLIENT_VT_TS_MODE') or 'server'
-        ).lower()
+        # Timestamp handling for VT scheduling (server timestamps only)
         self._vt_ts_offset = None  # server_ts -> local_now offset (seconds)
         # Keyframe request throttling while VT waits for sync
         self._vt_last_key_req: float | None = None
@@ -458,7 +451,6 @@ class StreamingCanvas(VispyCanvas):
         active = getattr(mgr._source_mux, 'active', None)
         active_str = getattr(active, 'value', str(active)) if active is not None else '-'
         lat_ms = int(stats.get('latency_ms', 0) or 0)
-        mode = str(stats.get('mode', '') or '')
         sub_fps = fps_sub_vt if active_str == 'vt' else fps_sub_py
         out_fps = fps_out_vt if active_str == 'vt' else fps_out_py
         prev_fps = fps_prev_vt if active_str == 'vt' else fps_prev_py
@@ -519,7 +511,7 @@ class StreamingCanvas(VispyCanvas):
             sched_tag = 'unified' if sched_unified else 'legacy'
         except Exception:
             sched_tag = '-'
-        line1 = f"src:{active_str}  mode:{mode}  sched:{sched_tag}  latency:{lat_ms} ms"
+        line1 = f"src:{active_str}  sched:{sched_tag}  latency:{lat_ms} ms"
         line2 = f"ingress:{sub_fps:.1f}/s  consumed:{out_fps:.1f}/s  preview:{prev_fps:.1f}/s"
         line3 = f"queues: presenter[vt:{buf_vt} py:{buf_py}]  pipeline[vt:{q_vt} py:{q_py}]{vtq_bit}"
         txt = line1 + "\n" + line2 + "\n" + line3

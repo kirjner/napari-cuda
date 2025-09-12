@@ -16,7 +16,7 @@ from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, Source
 from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
 from napari_cuda.client.streaming.state import StateChannel
 from napari_cuda.client.streaming.controllers import StateController, ReceiveController
-from napari_cuda.client.streaming.types import Source, SubmittedFrame, TimestampMode
+from napari_cuda.client.streaming.types import Source, SubmittedFrame
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
@@ -86,7 +86,6 @@ class StreamCoordinator:
         vt_latency_s: float,
         vt_buffer_limit: int,
         pyav_latency_s: Optional[float] = None,
-        vt_ts_mode: str = 'arrival',
         stream_format: str = 'avcc',
         vt_backlog_trigger: int = 16,
         pyav_backlog_trigger: int = 16,
@@ -103,7 +102,7 @@ class StreamCoordinator:
         self._stream_format_set = False
 
         # Presenter + source mux
-        ts_mode = TimestampMode.ARRIVAL if (vt_ts_mode or 'arrival') == 'arrival' else TimestampMode.SERVER
+        # Simplified: always use server timestamps
         # Preview guards and unified flag from ClientConfig when available
         try:
             unified_cfg = bool(getattr(self._client_cfg, 'unified_scheduler', False))
@@ -136,7 +135,7 @@ class StreamCoordinator:
         self._presenter = FixedLatencyPresenter(
             latency_s=float(vt_latency_s),
             buffer_limit=int(vt_buffer_limit),
-            ts_mode=ts_mode,
+            server_timestamp=True,
             preview_guard_s=1.0/60.0,
             unified=unified_cfg,
             preview_guard_arrival_s=float(arr_guard_ms) / 1000.0,
@@ -144,8 +143,8 @@ class StreamCoordinator:
         )
         try:
             logger.info(
-                "Presenter init: mode=%s unified=%s arr_guard=%.1fms srv_guard=%.1fms latency=%.0fms",
-                ts_mode.value,
+                "Presenter init: server_ts=%s unified=%s arr_guard=%.1fms srv_guard=%.1fms latency=%.0fms",
+                'True',
                 'True' if unified_cfg else 'False',
                 float(arr_guard_ms),
                 float(serv_guard_ms),
@@ -497,16 +496,13 @@ class StreamCoordinator:
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
-        # If we're in SERVER timestamp mode and haven't learned an offset yet
-        # (common in offline smoke), derive one from recent buffer samples to
-        # avoid falling back to arrival semantics with a large latency.
+        # If no offset learned yet (common in smoke/offline), derive from buffer samples.
         try:
-            if self._presenter.clock.mode == TimestampMode.SERVER:
-                off = getattr(self._presenter.clock, 'offset', None)
-                if off is None:
-                    learned = self._presenter.relearn_offset(Source.VT)
-                    if learned is not None and math.isfinite(learned):
-                        logger.info("Presenter offset learned from buffer: %.3fs", float(learned))
+            off = getattr(self._presenter.clock, 'offset', None)
+            if off is None:
+                learned = self._presenter.relearn_offset(Source.VT)
+                if learned is not None and math.isfinite(learned):
+                    logger.info("Presenter offset learned from buffer: %.3fs", float(learned))
         except Exception:
             logger.debug("draw: offset learn attempt failed", exc_info=True)
 

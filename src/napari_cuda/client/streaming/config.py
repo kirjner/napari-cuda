@@ -50,7 +50,7 @@ class ClientConfig:
     future options while we deprecate scattered envs.
     """
 
-    mode: str = "arrival"  # "arrival" | "server"
+    mode: str = "server"  # simplified; retained for logging compatibility
     base_latency_ms: float = 0.0
     buffer_limit: int = 3
     draw_fps: float = 60.0
@@ -73,7 +73,7 @@ class ClientConfig:
     @staticmethod
     def from_env(default_latency_ms: float = 0.0, default_buffer_limit: int = 3, default_draw_fps: float = 60.0) -> "ClientConfig":
         # Timestamp mode
-        mode = (_env_str("NAPARI_CUDA_CLIENT_VT_TS_MODE", "arrival") or "arrival").lower()
+        mode = "server"  # Timestamp mode simplified
         # Latency: prefer explicit VT latency env; else provided defaults
         base_latency_ms = _env_float("NAPARI_CUDA_CLIENT_VT_LATENCY_MS", default_latency_ms)
         # Buffer limit: mirror existing env; coordinator/Presenter still own the logic
