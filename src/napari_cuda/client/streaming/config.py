@@ -54,12 +54,7 @@ class ClientConfig:
     buffer_limit: int = 3
     draw_fps: float = 60.0
 
-    # Feature flags (disabled by default until later phases)
-    unified_scheduler: bool = False
-    draw_coalesce: bool = False
-    next_due_wake: bool = False
-    # Temporary flag to keep coordinator's legacy last-frame enqueue fallback
-    keep_last_frame_fallback: bool = False
+    # (legacy feature flags removed)
 
     # Single preview guard (ms)
     preview_guard_ms: float = 0.0
@@ -79,11 +74,7 @@ class ClientConfig:
         if draw_fps == default_draw_fps:
             draw_fps = _env_float("NAPARI_CUDA_SMOKE_FPS", draw_fps)
 
-        # Feature flags (default off)
-        unified = _env_bool("NAPARI_CUDA_UNIFIED_SCHEDULER", False)
-        coalesce = _env_bool("NAPARI_CUDA_DRAW_COALESCE", False)
-        wake = _env_bool("NAPARI_CUDA_NEXT_DUE_WAKE", False)
-        keep_last = _env_bool("NAPARI_CUDA_KEEP_LAST_FRAME_FALLBACK", False)
+        # (legacy feature flags removed)
 
         # Single preview guard
         preview_guard = _env_float("NAPARI_CUDA_PREVIEW_GUARD_MS", 0.0)
@@ -92,10 +83,6 @@ class ClientConfig:
             base_latency_ms=base_latency_ms,
             buffer_limit=buffer_limit,
             draw_fps=draw_fps,
-            unified_scheduler=unified,
-            draw_coalesce=coalesce,
-            next_due_wake=wake,
-            keep_last_frame_fallback=keep_last,
             preview_guard_ms=preview_guard,
         )
 

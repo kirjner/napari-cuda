@@ -130,21 +130,8 @@ class StreamCoordinator:
         self._pyav_latency_s = float(pyav_latency_s) if pyav_latency_s is not None else max(0.06, float(vt_latency_s))
         # Default to PyAV latency until VT is proven ready
         self._presenter.set_latency(self._pyav_latency_s)
-        # Feature flags from ClientConfig (with env fallbacks)
-        try:
-            self._keep_last_frame_fallback = bool(getattr(self._client_cfg, 'keep_last_frame_fallback', False))
-        except Exception:
-            self._keep_last_frame_fallback = False
-        try:
-            env_keep = (os.getenv('NAPARI_CUDA_KEEP_LAST_FRAME_FALLBACK', '0') or '0').lower() in ('1','true','yes','on')
-            if env_keep:
-                self._keep_last_frame_fallback = True
-        except Exception:
-            pass
-        try:
-            self._next_due_wake = bool(getattr(self._client_cfg, 'next_due_wake', False))
-        except Exception:
-            self._next_due_wake = False
+        # Keep-last-frame fallback default enabled for smoother presentation
+        self._keep_last_frame_fallback = True
         self._next_due_pending_until: float = 0.0
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
@@ -527,26 +514,7 @@ class StreamCoordinator:
                     self._enqueue_frame(self._last_pyav_frame)
                 except Exception:
                     logger.debug("enqueue last PyAV frame failed", exc_info=True)
-        # Next-due wake: if nothing was ready, schedule a precise update near due time
-        if ready is None and self._next_due_wake:
-            try:
-                stats = self._presenter.stats()
-                active = getattr(self._source_mux.active, 'value', 'vt')
-                nd_map = stats.get('next_due_ms', {}) or {}
-                nd_ms = nd_map.get(active)
-                if isinstance(nd_ms, int) and nd_ms > 0:
-                    now = time.time()
-                    until = now + (nd_ms / 1000.0)
-                    if until > self._next_due_pending_until:
-                        self._next_due_pending_until = until
-                        def _wake():
-                            try:
-                                self._scene_canvas.native.update()
-                            finally:
-                                self._next_due_pending_until = 0.0
-                        QtCore.QTimer.singleShot(max(1, int(nd_ms)), _wake)
-            except Exception:
-                logger.debug("next-due wake scheduling failed", exc_info=True)
+        # Next-due wake dropped (scheduler simplified)
         while not self._frame_q.empty():
             try:
                 frame = self._frame_q.get_nowait()
