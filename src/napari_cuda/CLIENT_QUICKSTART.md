@@ -24,7 +24,7 @@ Environment knobs (client)
 - Display timer:
   - `NAPARI_CUDA_CLIENT_DISPLAY_FPS` — paint cadence (default 60)
   - `NAPARI_CUDA_CLIENT_VISPY_TIMER=1` — use vispy.Timer instead of Qt QTimer
-  - `NAPARI_CUDA_CLIENT_VT_BUFFER` — presenter buffer size in frames. If unset, the client derives a default of `ceil(latency_s*60)+2` to avoid trimming not‑yet‑due frames in SERVER mode.
+  - `NAPARI_CUDA_CLIENT_VT_BUFFER` — presenter buffer size in frames.
 
 Notes
 - VT backend expects AVCC from the server; the server sends AVCC and announces it via the state channel.

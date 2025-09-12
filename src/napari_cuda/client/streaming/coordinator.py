@@ -107,13 +107,7 @@ class StreamCoordinator:
             preview_guard_ms = float(getattr(self._client_cfg, 'preview_guard_ms', 0.0))
         except Exception:
             preview_guard_ms = 0.0
-        # Optional env override for preview guard
-        try:
-            _pg = os.getenv('NAPARI_CUDA_PREVIEW_GUARD_MS')
-            if _pg not in (None, ''):
-                preview_guard_ms = float(_pg)
-        except Exception:
-            pass
+        # No env overrides; preview_guard_ms comes from ClientConfig only
         self._presenter = FixedLatencyPresenter(
             latency_s=float(vt_latency_s),
             buffer_limit=int(vt_buffer_limit),

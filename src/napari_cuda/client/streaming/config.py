@@ -76,8 +76,8 @@ class ClientConfig:
 
         # (legacy feature flags removed)
 
-        # Single preview guard
-        preview_guard = _env_float("NAPARI_CUDA_PREVIEW_GUARD_MS", 0.0)
+        # Single preview guard (no env by default; keep default)
+        preview_guard = 0.0
 
         return ClientConfig(
             base_latency_ms=base_latency_ms,

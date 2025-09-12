@@ -13,7 +13,7 @@ Unreleased
 - Robust keyframe detection from bitstream NAL types in addition to header flags.
 - Defaults updated:
   - `NAPARI_CUDA_CLIENT_VT_LATENCY_MS=0` (was 80)
-  - `NAPARI_CUDA_CLIENT_VT_TS_MODE=arrival` (was server)
+  - Removed `NAPARI_CUDA_CLIENT_VT_TS_MODE`; client always uses server timestamps.
 - New envs and tuning:
   - `NAPARI_CUDA_CLIENT_PYAV_LATENCY_MS` (default 50)
   - `NAPARI_CUDA_CLIENT_STARTUP_WARMUP_*` (MS, MARGIN_MS, MAX_MS, WINDOW_S)
