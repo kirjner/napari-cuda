@@ -34,7 +34,12 @@ class DisplayLoop:
         - prefer_vispy: whether to prefer VisPy timer (default: env or True when smoke)
         """
         self._canvas = scene_canvas
-        self._callback = callback or getattr(scene_canvas, 'update')
+        # Prefer native.update() (Qt) for scheduling draws; fall back to canvas.update
+        if callback is not None:
+            self._callback = callback
+        else:
+            native = getattr(scene_canvas, 'native', None)
+            self._callback = getattr(native, 'update', None) or getattr(scene_canvas, 'update')
         # Resolve FPS
         try:
             # Prefer explicit arg, else client display env, else smoke fps env
@@ -55,6 +60,14 @@ class DisplayLoop:
             self._prefer_vispy = True
         self._timer = None
         self._using_vispy = False
+        # Log chosen callback target once for clarity
+        try:
+            cb_obj = getattr(self._callback, '__self__', None)
+            cb_name = getattr(self._callback, '__name__', 'update') if self._callback else 'None'
+            owner = type(cb_obj).__name__ if cb_obj is not None else 'None'
+            logger.info('DisplayLoop: callback=%s.%s', owner, cb_name)
+        except Exception:
+            logger.debug('DisplayLoop: callback introspection failed', exc_info=True)
 
     @property
     def fps(self) -> float:
@@ -118,7 +131,10 @@ class DisplayLoop:
             if cb is not None:
                 cb()
             else:
-                # Fallback to canvas.update via native
-                self._canvas.update()
+                # Fallback: prefer native.update(), else canvas.update()
+                native = getattr(self._canvas, 'native', None)
+                upd = getattr(native, 'update', None) or getattr(self._canvas, 'update')
+                if upd is not None:
+                    upd()
         except Exception:
             logger.debug('DisplayLoop: tick failed', exc_info=True)

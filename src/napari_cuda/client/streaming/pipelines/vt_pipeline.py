@@ -46,6 +46,20 @@ class VTPipeline:
         self._enqueued = 0
         self._nal_length_size = 4
         self._metrics = metrics
+        # Optional periodic flush to nudge VT to retire internal surfaces.
+        # Disabled by default; enable with NAPARI_CUDA_VT_PERIODIC_FLUSH_S.
+        import os as _os
+        try:
+            self._periodic_flush_s = float(_os.getenv('NAPARI_CUDA_VT_PERIODIC_FLUSH_S', '0') or '0')
+        except Exception:
+            self._periodic_flush_s = 0.0
+        self._last_flush_time = 0.0
+        # Gate per-decode GUI updates; DisplayLoop usually drives redraws
+        import os as _os
+        try:
+            self._post_decode_update = (_os.getenv('NAPARI_CUDA_CLIENT_DECODE_UPDATE', '1') or '1') in ('1','true','yes')
+        except Exception:
+            self._post_decode_update = True
         # Coordination hooks
         self._is_gated = is_gated or (lambda: False)
         self._on_backlog_gate = on_backlog_gate or (lambda: None)
@@ -94,8 +108,17 @@ class VTPipeline:
                         from napari_cuda import _vt as vt  # type: ignore
                         # Take an extra retain for last-frame fallback; update cache
                         vt.retain_frame(img_buf)
-                        if self._last_payload is not None and not self._last_persistent:
-                            vt.release_frame(self._last_payload)
+                        # Always release the previously cached payload. The
+                        # cached copy is our own extra retain specifically for
+                        # redraw fallback. Without releasing it here, we'd leak
+                        # a CVPixelBuffer per decoded frame, eventually causing
+                        # VT/GL failures and a visible freeze while the HUD
+                        # keeps updating.
+                        if self._last_payload is not None:
+                            try:
+                                vt.release_frame(self._last_payload)
+                            except Exception:
+                                logger.debug("VTPipeline: release previous cached payload failed", exc_info=True)
                         self._last_payload = img_buf
                         self._last_persistent = True
                         self._on_cache_last(self._last_payload, True)
@@ -108,8 +131,17 @@ class VTPipeline:
                                 release_cb=vt.release_frame,
                             )
                         )
-                    if drained:
+                    if drained and self._post_decode_update:
                         QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
+                    # Optional periodic flush of VT async frames
+                    if self._periodic_flush_s and self._periodic_flush_s > 0:
+                        now = time.time()
+                        if (now - self._last_flush_time) >= float(self._periodic_flush_s):
+                            try:
+                                dec.flush()  # type: ignore[attr-defined]
+                            except Exception:
+                                logger.debug("VTPipeline: periodic flush failed", exc_info=True)
+                            self._last_flush_time = now
                     if not drained:
                         time.sleep(0.002)
                 except Exception:

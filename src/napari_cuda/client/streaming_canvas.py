@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 from napari_cuda.utils.env import env_bool, env_int, env_float
+from napari_cuda.client.streaming.config import ClientConfig
 
 
 class StreamingCanvas(VispyCanvas):
@@ -163,6 +164,25 @@ class StreamingCanvas(VispyCanvas):
         self._source_mux = SourceMux(Source.PYAV)
         assert self._presenter is not None
         assert self._source_mux is not None
+        # Construct minimal client config (phase 0; no behavior change)
+        try:
+            self._client_cfg = ClientConfig.from_env(
+                default_latency_ms=self._vt_latency_s * 1000.0,
+                default_buffer_limit=self._vt_buffer_limit,
+                default_draw_fps=fps,
+            )
+            logger.info(
+                "ClientConfig initialized: mode=%s latency=%.0fms buf=%d draw_fps=%.1f (unified=%s, coalesce=%s, next_due_wake=%s)",
+                self._client_cfg.mode,
+                self._client_cfg.base_latency_ms,
+                self._client_cfg.buffer_limit,
+                self._client_cfg.draw_fps,
+                self._client_cfg.unified_scheduler,
+                self._client_cfg.draw_coalesce,
+                self._client_cfg.next_due_wake,
+            )
+        except Exception:
+            logger.debug("ClientConfig init failed", exc_info=True)
         # VT diagnostics
         self._vt_last_stats_log: float = 0.0
         self._vt_last_submit_count: int = 0
@@ -213,6 +233,7 @@ class StreamingCanvas(VispyCanvas):
                     'NAPARI_CUDA_CLIENT_PYAV_BACKLOG_TRIGGER', 16
                 ),
                 vt_smoke=self._vt_smoke,
+                client_cfg=getattr(self, '_client_cfg', None),
             )
             self._manager.start()
         else:
@@ -225,10 +246,20 @@ class StreamingCanvas(VispyCanvas):
         try:
             from napari_cuda.client.streaming.display_loop import DisplayLoop
             fps = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
-            prefer_vispy = True if self._vt_smoke else None
+            # Honor explicit env override for timer backend; else prefer VisPy in smoke
+            env_vispy = os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER')
+            if env_vispy is not None:
+                prefer_vispy = (env_vispy == '1')
+            else:
+                prefer_vispy = True if self._vt_smoke else None
+            # Prefer native.update so Qt drives the actual widget repaint
+            try:
+                cb = getattr(self._scene_canvas.native, 'update')
+            except Exception:
+                cb = getattr(self._scene_canvas, 'update')
             self._display_loop = DisplayLoop(
                 scene_canvas=self._scene_canvas,
-                callback=self._scene_canvas.update,
+                callback=cb,
                 fps=fps,
                 prefer_vispy=prefer_vispy,
             )
@@ -387,6 +418,7 @@ class StreamingCanvas(VispyCanvas):
         self._hud_prev_time = 0.0
         self._hud_prev_submit = {'vt': 0, 'pyav': 0}
         self._hud_prev_out = {'vt': 0, 'pyav': 0}
+        self._hud_prev_preview = {'vt': 0, 'pyav': 0}
         # 1 Hz HUD updater
         self._fps_timer = QtCore.QTimer(self._scene_canvas.native)
         self._fps_timer.setTimerType(QtCore.Qt.PreciseTimer)
@@ -408,27 +440,46 @@ class StreamingCanvas(VispyCanvas):
             return
         sub = stats.get('submit', {})
         out = stats.get('out', {})
+        prev = stats.get('preview', {})
         vt_sub = int(sub.get('vt', 0)); py_sub = int(sub.get('pyav', 0))
         vt_out = int(out.get('vt', 0)); py_out = int(out.get('pyav', 0))
+        vt_prev = int(prev.get('vt', 0)); py_prev = int(prev.get('pyav', 0))
         if last == 0.0:
             self._hud_prev_time = now
             self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
             self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
+            self._hud_prev_preview = {'vt': vt_prev, 'pyav': py_prev}
             return
         dt = max(1e-3, now - last)
+        fps_sub_vt = (vt_sub - self._hud_prev_submit['vt']) / dt
+        fps_sub_py = (py_sub - self._hud_prev_submit['pyav']) / dt
         fps_out_vt = (vt_out - self._hud_prev_out['vt']) / dt
         fps_out_py = (py_out - self._hud_prev_out['pyav']) / dt
+        fps_prev_vt = (vt_prev - self._hud_prev_preview['vt']) / dt
+        fps_prev_py = (py_prev - self._hud_prev_preview['pyav']) / dt
         self._hud_prev_time = now
         self._hud_prev_submit = {'vt': vt_sub, 'pyav': py_sub}
         self._hud_prev_out = {'vt': vt_out, 'pyav': py_out}
+        self._hud_prev_preview = {'vt': vt_prev, 'pyav': py_prev}
         active = getattr(mgr._source_mux, 'active', None)
         active_str = getattr(active, 'value', str(active)) if active is not None else '-'
         lat_ms = int(stats.get('latency_ms', 0) or 0)
         mode = str(stats.get('mode', '') or '')
+        sub_fps = fps_sub_vt if active_str == 'vt' else fps_sub_py
         out_fps = fps_out_vt if active_str == 'vt' else fps_out_py
+        prev_fps = fps_prev_vt if active_str == 'vt' else fps_prev_py
         # Presenter queue depths by source (buf sizes)
         buf = stats.get('buf', {})
         buf_vt = int(buf.get('vt', 0)); buf_py = int(buf.get('pyav', 0))
+        # VT decoder internal queue length (shim counts), if available
+        vt_q_len = None
+        try:
+            vt_counts = getattr(mgr, '_vt_pipeline', None).counts() if hasattr(getattr(mgr, '_vt_pipeline', None), 'counts') else None
+            if vt_counts is not None:
+                # (submits, outputs, qlen)
+                vt_q_len = int(vt_counts[2])
+        except Exception:
+            logger.debug('FPS HUD: vt counts failed', exc_info=True)
         # Pipelines qsize (ingress)
         try:
             q_vt = getattr(mgr, '_vt_pipeline', None).qsize() if hasattr(getattr(mgr, '_vt_pipeline', None), 'qsize') else 0
@@ -446,6 +497,9 @@ class StreamingCanvas(VispyCanvas):
         vt_submit_ms = None
         render_vt_ms = None
         render_pyav_ms = None
+        draw_mean_ms = None
+        draw_last_ms = None
+        present_fps = None
         try:
             metrics = getattr(mgr, '_metrics', None)
             if metrics is not None and hasattr(metrics, 'snapshot'):
@@ -456,12 +510,19 @@ class StreamingCanvas(VispyCanvas):
                 vt_submit_ms = (h.get('napari_cuda_client_vt_submit_ms') or {}).get('mean_ms')
                 render_vt_ms = (h.get('napari_cuda_client_render_vt_ms') or {}).get('mean_ms')
                 render_pyav_ms = (h.get('napari_cuda_client_render_pyav_ms') or {}).get('mean_ms')
+                d_hist = (h.get('napari_cuda_client_draw_interval_ms') or {})
+                draw_mean_ms = d_hist.get('mean_ms')
+                draw_last_ms = d_hist.get('last_ms')
+                d = snap.get('derived', {}) or {}
+                present_fps = d.get('fps')
         except Exception:
             logger.debug('FPS HUD: metrics snapshot failed', exc_info=True)
-        txt = (
-            f"{active_str} out:{out_fps:.1f} fps  mode:{mode}  latency:{lat_ms} ms  "
-            f"buf[vt:{buf_vt} py:{buf_py}]  q[vt:{q_vt} py:{q_py}]"
-        )
+        vtq_bit = f" vtq:{vt_q_len}" if isinstance(vt_q_len, int) else ""
+        # Clear, orthogonal layout
+        line1 = f"src:{active_str}  mode:{mode}  latency:{lat_ms} ms"
+        line2 = f"ingress:{sub_fps:.1f}/s  consumed:{out_fps:.1f}/s  preview:{prev_fps:.1f}/s"
+        line3 = f"queues: presenter[vt:{buf_vt} py:{buf_py}]  pipeline[vt:{q_vt} py:{q_py}]{vtq_bit}"
+        txt = line1 + "\n" + line2 + "\n" + line3
         # Append decode/submit timings if available
         extra = []
         if active_str == 'pyav':
@@ -478,5 +539,51 @@ class StreamingCanvas(VispyCanvas):
                 extra.append(f"sub:{vt_submit_ms:.2f}ms")
         if extra:
             txt = txt + "\n" + "  ".join(extra)
+        # Append draw-loop pacing and presented FPS if available
+        loop_bits = []
+        if isinstance(present_fps, (int, float)):
+            loop_bits.append(f"present:{present_fps:.1f}fps")
+        # Show last draw interval by default for responsiveness; optionally include mean
+        if isinstance(draw_last_ms, (int, float)) and draw_last_ms > 0:
+            loop_bits.append(f"loop:{draw_last_ms:.2f}ms")
+        try:
+            import os as _os
+            if (_os.getenv('NAPARI_CUDA_HUD_LOOP_SHOW_MEAN') or '0') in ('1','true','yes'):
+                if isinstance(draw_mean_ms, (int, float)) and draw_mean_ms > 0:
+                    loop_bits.append(f"mean:{draw_mean_ms:.2f}ms")
+        except Exception:
+            pass
+        # Optional memory usage (enable with NAPARI_CUDA_HUD_SHOW_MEM=1)
+        try:
+            import os as _os, sys as _sys
+            if (_os.getenv('NAPARI_CUDA_HUD_SHOW_MEM') or '0') in ('1','true','yes'):
+                cur_mb = None; max_mb = None
+                # Prefer current RSS via psutil if available
+                try:
+                    import psutil as _ps
+                    p = _ps.Process()
+                    cur_mb = float(p.memory_info().rss) / (1024.0 * 1024.0)
+                except Exception:
+                    pass
+                # High-water mark via resource
+                try:
+                    import resource as _res
+                    rss = _res.getrusage(_res.RUSAGE_SELF).ru_maxrss
+                    if _sys.platform == 'darwin':
+                        max_mb = float(rss) / (1024.0 * 1024.0)
+                    else:
+                        max_mb = float(rss) / 1024.0
+                except Exception:
+                    pass
+                if isinstance(cur_mb, float) and isinstance(max_mb, float):
+                    loop_bits.append(f"mem:{cur_mb:.0f}/{max_mb:.0f}MB")
+                elif isinstance(cur_mb, float):
+                    loop_bits.append(f"mem:{cur_mb:.0f}MB")
+                elif isinstance(max_mb, float):
+                    loop_bits.append(f"mem_max:{max_mb:.0f}MB")
+        except Exception:
+            logger.debug('FPS HUD: mem calc failed', exc_info=True)
+        if loop_bits:
+            txt = txt + "\n" + "  ".join(loop_bits)
         self._fps_label.setText(txt)
         self._fps_label.adjustSize()

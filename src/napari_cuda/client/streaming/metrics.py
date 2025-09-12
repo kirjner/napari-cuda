@@ -103,6 +103,13 @@ class ClientMetrics:
         if enabled is None:
             enabled = _truthy(os.getenv("NAPARI_CUDA_CLIENT_METRICS", "0"))
         self.enabled = bool(enabled)
+        # Allow environment override for metrics window length
+        try:
+            win_env = os.getenv("NAPARI_CUDA_CLIENT_METRICS_WINDOW")
+            if win_env is not None and win_env.strip() != "":
+                window = int(float(win_env))
+        except Exception:
+            pass
         self._window = max(16, int(window))
         self._counters: Dict[str, float] = {}
         self._gauges: Dict[str, float] = {}
@@ -190,4 +197,3 @@ class ClientMetrics:
             except Exception:
                 # Best-effort only
                 pass
-

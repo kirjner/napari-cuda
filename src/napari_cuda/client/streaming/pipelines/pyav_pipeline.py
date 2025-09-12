@@ -39,6 +39,12 @@ class PyAVPipeline:
         self._enqueued: int = 0
         self._decoder: Optional[DecodeFn] = None
         self._worker_started: bool = False
+        # Gate per-decode GUI updates; DisplayLoop usually drives redraws
+        import os as _os
+        try:
+            self._post_decode_update = (_os.getenv('NAPARI_CUDA_CLIENT_DECODE_UPDATE', '1') or '1') in ('1','true','yes')
+        except Exception:
+            self._post_decode_update = True
 
     def set_decoder(self, decode_fn: Optional[DecodeFn]) -> None:
         self._decoder = decode_fn
@@ -81,7 +87,8 @@ class PyAVPipeline:
                 except Exception:
                     logger.exception("PyAVPipeline: presenter submit failed")
                 try:
-                    QtCore.QTimer.singleShot(0, self.scene_canvas.native.update)
+                    if self._post_decode_update:
+                        QtCore.QTimer.singleShot(0, self.scene_canvas.native.update)
                 except Exception:
                     logger.debug("PyAVPipeline: schedule GUI update failed", exc_info=True)
 

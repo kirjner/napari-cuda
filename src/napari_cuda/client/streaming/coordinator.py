@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import time
@@ -23,6 +24,7 @@ from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
 from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
 from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
 from napari_cuda.client.streaming.metrics import ClientMetrics
+from napari_cuda.client.streaming.eventloop_monitor import EventLoopMonitor
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -89,8 +91,11 @@ class StreamCoordinator:
         vt_backlog_trigger: int = 16,
         pyav_backlog_trigger: int = 16,
         vt_smoke: bool = False,
+        client_cfg: object | None = None,
     ) -> None:
         self._scene_canvas = scene_canvas
+        # Phase 0: stash client config for future phases (no behavior change)
+        self._client_cfg = client_cfg
         self.server_host = server_host
         self.server_port = int(server_port)
         self.state_port = int(state_port)
@@ -224,6 +229,22 @@ class StreamCoordinator:
         self._sync = _SyncState()
         self._disco_gated: bool = False
         self._last_key_logged: Optional[int] = None
+        # Draw pacing diagnostics
+        self._last_draw_pc: float = 0.0
+        # Draw watchdog
+        self._watchdog_timer = None
+        try:
+            self._watchdog_ms = max(0, int(env_float('NAPARI_CUDA_CLIENT_DRAW_WATCHDOG_MS', 0.0)))
+        except Exception:
+            self._watchdog_ms = 0
+        # Event loop stall monitor (disabled by default)
+        try:
+            self._evloop_stall_ms = max(0, int(env_float('NAPARI_CUDA_CLIENT_EVENTLOOP_STALL_MS', 0.0)))
+            self._evloop_sample_ms = max(50, int(env_float('NAPARI_CUDA_CLIENT_EVENTLOOP_SAMPLE_MS', 100.0)))
+        except Exception:
+            self._evloop_stall_ms = 0
+            self._evloop_sample_ms = 100
+        self._evloop_mon: Optional[EventLoopMonitor] = None
 
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
@@ -342,6 +363,61 @@ class StreamCoordinator:
                 self._metrics_timer.start()
             except Exception:
                 logger.debug("Failed to start client metrics timer", exc_info=True)
+        # Optional draw watchdog: if no draw observed for threshold, kick an update/repaint
+        # Optional draw watchdog: if no draw observed for threshold, kick an update/repaint
+        if self._watchdog_ms > 0:
+            try:
+                self._watchdog_timer = QtCore.QTimer(self._scene_canvas.native)
+                self._watchdog_timer.setTimerType(QtCore.Qt.PreciseTimer)
+                self._watchdog_timer.setInterval(max(100, int(self._watchdog_ms // 2) or 100))
+                def _wd_tick():
+                    try:
+                        last = float(self._last_draw_pc or 0.0)
+                        if last <= 0.0:
+                            return
+                        now = time.perf_counter()
+                        if (now - last) * 1000.0 >= float(self._watchdog_ms):
+                            try:
+                                # Prefer native.repaint for an immediate paint, fallback to update
+                                rep = getattr(self._scene_canvas.native, 'repaint', None)
+                                if callable(rep):
+                                    rep()
+                                else:
+                                    try:
+                                        self._scene_canvas.native.update()
+                                    except Exception:
+                                        # Final fallback to canvas.update
+                                        getattr(self._scene_canvas, 'update', lambda: None)()
+                            except Exception:
+                                logger.debug("watchdog: kick failed", exc_info=True)
+                            try:
+                                self._metrics.inc('napari_cuda_client_draw_watchdog_kicks', 1.0)
+                            except Exception:
+                                pass
+                    except Exception:
+                        logger.debug("watchdog tick failed", exc_info=True)
+                self._watchdog_timer.timeout.connect(_wd_tick)
+                self._watchdog_timer.start()
+                logger.info("Draw watchdog enabled: threshold=%d ms", self._watchdog_ms)
+            except Exception:
+                logger.debug("Failed to start draw watchdog", exc_info=True)
+        # Optional event loop monitor (diagnostic): logs and metrics on stalls
+        if self._evloop_stall_ms > 0:
+            try:
+                def _kick():
+                    try:
+                        self._scene_canvas.native.update()
+                    except Exception:
+                        getattr(self._scene_canvas, 'update', lambda: None)()
+                self._evloop_mon = EventLoopMonitor(
+                    parent=self._scene_canvas.native,
+                    metrics=self._metrics,
+                    stall_threshold_ms=int(self._evloop_stall_ms),
+                    sample_interval_ms=int(self._evloop_sample_ms),
+                    on_stall_kick=_kick,
+                )
+            except Exception:
+                logger.debug("Failed to start EventLoopMonitor", exc_info=True)
 
     def _enqueue_frame(self, frame: np.ndarray) -> None:
         if self._frame_q.full():
@@ -352,6 +428,15 @@ class StreamCoordinator:
         self._frame_q.put(frame)
 
     def draw(self) -> None:
+        # Draw-loop pacing metric (perf_counter for monotonic interval)
+        try:
+            now_pc = time.perf_counter()
+            last_pc = float(self._last_draw_pc or 0.0)
+            if last_pc > 0.0 and self._metrics is not None:
+                self._metrics.observe_ms('napari_cuda_client_draw_interval_ms', (now_pc - last_pc) * 1000.0)
+            self._last_draw_pc = now_pc
+        except Exception:
+            logger.debug("draw: pacing metric failed", exc_info=True)
         # Arrival-mode startup warmup: ramp latency down
         self._apply_warmup(time.time())
         # Stats are reported via a dedicated timer now
@@ -365,7 +450,7 @@ class StreamCoordinator:
                 off = getattr(self._presenter.clock, 'offset', None)
                 if off is None:
                     learned = self._presenter.relearn_offset(Source.VT)
-                    if learned is not None:
+                    if learned is not None and math.isfinite(learned):
                         logger.info("Presenter offset learned from buffer: %.3fs", float(learned))
         except Exception:
             logger.debug("draw: offset learn attempt failed", exc_info=True)
@@ -446,10 +531,10 @@ class StreamCoordinator:
             if self._metrics is not None and self._metrics.enabled:
                 metric_name = 'napari_cuda_client_render_vt_ms' if is_vt else 'napari_cuda_client_render_pyav_ms'
                 self._metrics.observe_ms(metric_name, (t_render1 - t_render0) * 1000.0)
+            # Count a presented frame for client-side FPS derivation (only when a frame was actually drawn)
+            self._metrics.inc('napari_cuda_client_presented_total', 1.0)
         else:
             self._renderer.draw(frame)
-        # Count a presented frame for client-side FPS derivation
-        self._metrics.inc('napari_cuda_client_presented_total', 1.0)
 
     def _log_stats(self) -> None:
         if self._stats_level is None:
@@ -679,6 +764,16 @@ class StreamCoordinator:
                 self._metrics_timer.stop()
         except Exception:
             logger.debug("stop: metrics timer stop failed", exc_info=True)
+        try:
+            if self._watchdog_timer is not None:
+                self._watchdog_timer.stop()
+        except Exception:
+            logger.debug("stop: watchdog timer stop failed", exc_info=True)
+        try:
+            if self._evloop_mon is not None:
+                self._evloop_mon.stop()
+        except Exception:
+            logger.debug("stop: event loop monitor stop failed", exc_info=True)
 
     # VT decode/submit is handled by VTPipeline
 
