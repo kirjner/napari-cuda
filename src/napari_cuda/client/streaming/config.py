@@ -9,8 +9,6 @@ keeps behavior unchanged — we only read existing envs and expose a structured
 config for downstream components to consume gradually.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional, Tuple
 import os
