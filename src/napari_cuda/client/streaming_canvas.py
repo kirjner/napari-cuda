@@ -164,13 +164,10 @@ class StreamingCanvas(VispyCanvas):
                 default_draw_fps=fps,
             )
             logger.info(
-                "ClientConfig initialized: latency=%.0fms buf=%d draw_fps=%.1f (unified=%s, coalesce=%s, next_due_wake=%s, preview_guard=%.1fms)",
+                "ClientConfig initialized: latency=%.0fms buf=%d draw_fps=%.1f preview_guard=%.1fms",
                 self._client_cfg.base_latency_ms,
                 self._client_cfg.buffer_limit,
                 self._client_cfg.draw_fps,
-                self._client_cfg.unified_scheduler,
-                self._client_cfg.draw_coalesce,
-                self._client_cfg.next_due_wake,
                 self._client_cfg.preview_guard_ms,
             )
         except Exception:
@@ -506,13 +503,7 @@ class StreamingCanvas(VispyCanvas):
             logger.debug('FPS HUD: metrics snapshot failed', exc_info=True)
         vtq_bit = f" vtq:{vt_q_len}" if isinstance(vt_q_len, int) else ""
         # Clear, orthogonal layout
-        # Scheduler tag to disambiguate legacy vs unified behavior
-        try:
-            sched_unified = bool(getattr(mgr._presenter, '_unified', False))
-            sched_tag = 'unified' if sched_unified else 'legacy'
-        except Exception:
-            sched_tag = '-'
-        line1 = f"src:{active_str}  sched:{sched_tag}  latency:{lat_ms} ms"
+        line1 = f"src:{active_str}  latency:{lat_ms} ms"
         line2 = f"ingress:{sub_fps:.1f}/s  consumed:{out_fps:.1f}/s  preview:{prev_fps:.1f}/s"
         line3 = f"queues: presenter[vt:{buf_vt} py:{buf_py}]  pipeline[vt:{q_vt} py:{q_py}]{vtq_bit}"
         txt = line1 + "\n" + line2 + "\n" + line3

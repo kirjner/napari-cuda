@@ -102,18 +102,13 @@ class StreamCoordinator:
         self._stream_format_set = False
 
         # Presenter + source mux (server timestamps only)
-        # Preview guard and unified flag
+        # Single preview guard (ms)
         try:
-            unified_cfg = bool(getattr(self._client_cfg, 'unified_scheduler', False))
             preview_guard_ms = float(getattr(self._client_cfg, 'preview_guard_ms', 0.0))
         except Exception:
-            unified_cfg = False
             preview_guard_ms = 0.0
-        # Fallback to single env override if provided
+        # Optional env override for preview guard
         try:
-            env_unified = (os.getenv('NAPARI_CUDA_UNIFIED_SCHEDULER', '0') or '0').lower() in ('1','true','yes','on')
-            if not unified_cfg and env_unified:
-                unified_cfg = True
             _pg = os.getenv('NAPARI_CUDA_PREVIEW_GUARD_MS')
             if _pg not in (None, ''):
                 preview_guard_ms = float(_pg)
@@ -123,11 +118,9 @@ class StreamCoordinator:
             latency_s=float(vt_latency_s),
             buffer_limit=int(vt_buffer_limit),
             preview_guard_s=float(preview_guard_ms) / 1000.0,
-            unified=unified_cfg,
         )
         try:
-            logger.info("Presenter init: unified=%s preview_guard=%.1fms latency=%.0fms",
-                        'True' if unified_cfg else 'False',
+            logger.info("Presenter init: preview_guard=%.1fms latency=%.0fms",
                         float(preview_guard_ms),
                         float(vt_latency_s) * 1000.0)
         except Exception:
