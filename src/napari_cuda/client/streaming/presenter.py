@@ -121,15 +121,29 @@ class FixedLatencyPresenter:
         to_release: List[_BufItem] = []
         with self._lock:
             items = self._buf[sf.source]
-            items.append(
-                _BufItem(
-                    due_ts=due,
-                    payload=sf.payload,
-                    release_cb=sf.release_cb,
-                    server_ts=sf.server_ts,
-                    arrival_ts=sf.arrival_ts,
-                )
+            # Insert by due_ts to avoid head-of-line blocking when arrivals are
+            # out-of-order (e.g., with simulated or real network jitter). The
+            # buffer sizes are small (on the order of tens of frames), so an
+            # O(n) insert keeps things simple and predictable.
+            new_item = _BufItem(
+                due_ts=due,
+                payload=sf.payload,
+                release_cb=sf.release_cb,
+                server_ts=sf.server_ts,
+                arrival_ts=sf.arrival_ts,
             )
+            if not items:
+                items.append(new_item)
+            else:
+                # Walk from the right for amortized efficiency when due_ts is
+                # typically non-decreasing, but robust when out-of-order.
+                pos = len(items)
+                while pos > 0 and items[pos - 1].due_ts > due:
+                    pos -= 1
+                if pos == len(items):
+                    items.append(new_item)
+                else:
+                    items.insert(pos, new_item)
             self._submit_count[sf.source] += 1
             # Diagnostics: track which path was used (server vs arrival)
             try:
@@ -184,7 +198,8 @@ class FixedLatencyPresenter:
                     logger.debug("release_cb failed during buffer clear", exc_info=True)
 
     def pop_due(self, now: Optional[float], active: Source) -> Optional[ReadyFrame]:
-        n = float(now if now is not None else time.time())
+        # Use monotonic clock for scheduling decisions
+        n = float(now if now is not None else time.perf_counter())
         # Work on a single selected item and a list of items to release outside the lock
         to_release: List[_BufItem] = []
         sel: Optional[_BufItem] = None
@@ -221,7 +236,8 @@ class FixedLatencyPresenter:
         return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=is_preview)
 
     def stats(self) -> Dict[str, object]:
-        now = time.time()
+        # Use monotonic clock to compare against due_ts values
+        now = time.perf_counter()
         with self._lock:
             # Compute next_due (ms) per source and simple fill metrics
             next_due: Dict[str, Optional[int]] = {}

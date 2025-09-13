@@ -115,6 +115,9 @@ class StreamCoordinator:
         self.state_port = int(state_port)
         self._stream_format = stream_format
         self._stream_format_set = False
+        # Thread/state handles
+        self._threads: list[Thread] = []
+        self._state_channel: Optional[StateChannel] = None
 
         # Presenter + source mux (server timestamps only)
         # Single preview guard (ms)
@@ -141,6 +144,7 @@ class StreamCoordinator:
         self._presenter.set_latency(self._pyav_latency_s)
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
+        # Monotonic scheduling marker for next due
         self._next_due_pending_until: float = 0.0
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
@@ -161,8 +165,10 @@ class StreamCoordinator:
         self._vt_backend: Optional[str] = None
         self._vt_cfg_key = None
         self._vt_wait_keyframe: bool = False
-        self._vt_gate_lift_time: float = 0.0
-        self._vt_ts_offset: Optional[float] = None
+        self._vt_gate_lift_time: float = 0.0  # wall time at VT gate lift
+        self._mono_at_gate: float = 0.0       # perf_counter() at VT gate lift
+        self._wall_to_mono: Optional[float] = None  # server_wall -> client_mono offset
+        self._vt_ts_offset: Optional[float] = None  # legacy wall->wall offset (unused once monotonic is active)
         self._vt_errors = 0
         # Bias for server timestamp alignment; default 0 for exact due times
         self._server_bias_s = env_float('NAPARI_CUDA_SERVER_TS_BIAS_MS', 0.0) / 1000.0
@@ -195,53 +201,58 @@ class StreamCoordinator:
             metrics_enabled = False
         self._metrics = ClientMetrics(enabled=metrics_enabled)
 
-        # Presenter-owned wake scheduling: single-shot QTimer owned by the GUI thread
+        # Presenter-owned wake scheduling: single-shot QTimer owned by the GUI thread,
+        # optionally disabled when an external fixed-cadence display loop is active.
+        # Opt-in via NAPARI_CUDA_USE_DISPLAY_LOOP=1.
         self._wake_timer = None
         self._in_present: bool = False
         try:
-            self._wake_timer = QtCore.QTimer(self._scene_canvas.native)
-            self._wake_timer.setTimerType(QtCore.Qt.PreciseTimer)
-            self._wake_timer.setSingleShot(True)
-            # On wake, request a canvas update and immediately schedule the next wake
-            self._wake_timer.timeout.connect(self._on_present_timer)
+            use_disp_loop_env = (os.getenv('NAPARI_CUDA_USE_DISPLAY_LOOP', '0') or '0').lower()
+            self._use_display_loop = use_disp_loop_env in ('1', 'true', 'yes', 'on')
         except Exception:
-            logger.debug("Wake timer init failed", exc_info=True)
-        
+            self._use_display_loop = False
+        if not self._use_display_loop:
+            try:
+                self._wake_timer = QtCore.QTimer(self._scene_canvas.native)
+                self._wake_timer.setTimerType(QtCore.Qt.PreciseTimer)
+                self._wake_timer.setSingleShot(True)
+                # On wake, request a canvas update and immediately schedule the next wake
+                self._wake_timer.timeout.connect(self._on_present_timer)
+            except Exception:
+                logger.debug("Wake timer init failed", exc_info=True)
+
         def _schedule_next_wake() -> None:
+            if self._use_display_loop:
+                # External display loop drives cadence; no per-frame wake scheduling
+                return
             try:
                 earliest = self._presenter.peek_next_due(self._source_mux.active)
                 if earliest is None:
                     return
-                now = time.time()
-                delay_ms = max(0, int(round((float(earliest) - now) * 1000.0 + float(self._wake_fudge_ms or 0.0))))
-                # If a wake is already scheduled earlier or equal, keep it.
-                # Only treat it as pending if it's still in the future; if it's in the past,
-                # consider it stale and allow rescheduling to recover from missed wakes.
-                if self._next_due_pending_until > now:
-                    pending_ms = int(round((self._next_due_pending_until - now) * 1000.0))
-                    if pending_ms <= delay_ms + 1:
+                now_mono = time.perf_counter()
+                delta_ms = (float(earliest) - now_mono) * 1000.0 + float(self._wake_fudge_ms or 0.0)
+                # If a wake is already scheduled earlier (within a small margin), keep it to avoid thrash
+                if self._next_due_pending_until > now_mono:
+                    pending_ms = (self._next_due_pending_until - now_mono) * 1000.0
+                    if delta_ms >= (pending_ms - 0.5):
                         return
                 else:
                     # Clear stale marker
                     self._next_due_pending_until = 0.0
-                # Always schedule via the QTimer to avoid draw-event recursion
-                # If a wake is already scheduled earlier or equal, keep it; otherwise (re)schedule
+                # (Re)schedule
                 try:
                     if self._wake_timer is not None and self._wake_timer.isActive():
-                        if self._next_due_pending_until > now:
-                            pending_ms = int(round((self._next_due_pending_until - now) * 1000.0))
-                            if pending_ms <= delay_ms + 1:
-                                return
+                        # Only stop if we're moving the wake earlier by a meaningful amount
                         try:
                             self._wake_timer.stop()
                         except Exception:
                             pass
                 except Exception:
                     logger.debug("schedule_next_wake: timer state check failed", exc_info=True)
-                self._next_due_pending_until = now + (delay_ms / 1000.0)
+                self._next_due_pending_until = now_mono + max(0.0, delta_ms) / 1000.0
                 try:
                     if self._wake_timer is not None:
-                        self._wake_timer.start(delay_ms)
+                        self._wake_timer.start(max(0, int(delta_ms)))
                     else:
                         # Fallback: poke the canvas to ensure progress
                         self._scene_canvas.native.update()
@@ -259,12 +270,16 @@ class StreamCoordinator:
 
         # Build pipelines after scheduler hooks are ready
         # Create a wake proxy so pipelines can nudge scheduling from any thread
-        try:
-            self._wake_proxy = _WakeProxy(_schedule_next_wake, self._scene_canvas.native)
-            wake_cb = self._wake_proxy.trigger.emit
-        except Exception:
-            logger.debug("WakeProxy init failed; falling back to direct schedule callback", exc_info=True)
-            wake_cb = _schedule_next_wake
+        if not self._use_display_loop:
+            try:
+                self._wake_proxy = _WakeProxy(_schedule_next_wake, self._scene_canvas.native)
+                wake_cb = self._wake_proxy.trigger.emit
+            except Exception:
+                logger.debug("WakeProxy init failed; falling back to direct schedule callback", exc_info=True)
+                wake_cb = _schedule_next_wake
+        else:
+            # External loop owns draw cadence; pipelines don't need to schedule wakes
+            wake_cb = (lambda: None)
         self._vt_pipeline = VTPipeline(
             presenter=self._presenter,
             source_mux=self._source_mux,
@@ -296,7 +311,8 @@ class StreamCoordinator:
         self._last_pyav_frame = None
 
         # Frame queue for renderer (latest-wins)
-        self._frame_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=3)
+        # Holds either numpy arrays or (capsule, release_cb) tuples for VT
+        self._frame_q: "queue.Queue[object]" = queue.Queue(maxsize=3)
 
         # Receiver/state flags
         self._stream_seen_keyframe = False
@@ -343,14 +359,11 @@ class StreamCoordinator:
             self._in_present = True
             # Clear pending marker to allow next wake to be scheduled freely
             self._next_due_pending_until = 0.0
-            rep = getattr(self._scene_canvas.native, 'repaint', None)
-            if callable(rep):
-                rep()
-            else:
-                try:
-                    self._scene_canvas.native.update()
-                except Exception:
-                    getattr(self._scene_canvas, 'update', lambda: None)()
+            # Prefer non-blocking update() over repaint()
+            try:
+                self._scene_canvas.native.update()
+            except Exception:
+                getattr(self._scene_canvas, 'update', lambda: None)()
         except Exception:
             logger.debug("present timer: repaint/update failed", exc_info=True)
         # Do not schedule next wake here; draw() re-arms after consumption to reduce early wakes
@@ -477,8 +490,7 @@ class StreamCoordinator:
                 self._metrics_timer.start()
             except Exception:
                 logger.debug("Failed to start client metrics timer", exc_info=True)
-        # Optional draw watchdog: if no draw observed for threshold, kick an update/repaint
-        # Optional draw watchdog: if no draw observed for threshold, kick an update/repaint
+        # Optional draw watchdog: if no draw observed for threshold, kick an update
         if self._watchdog_ms > 0:
             try:
                 self._watchdog_timer = QtCore.QTimer(self._scene_canvas.native)
@@ -492,16 +504,11 @@ class StreamCoordinator:
                         now = time.perf_counter()
                         if (now - last) * 1000.0 >= float(self._watchdog_ms):
                             try:
-                                # Prefer native.repaint for an immediate paint, fallback to update
-                                rep = getattr(self._scene_canvas.native, 'repaint', None)
-                                if callable(rep):
-                                    rep()
-                                else:
-                                    try:
-                                        self._scene_canvas.native.update()
-                                    except Exception:
-                                        # Final fallback to canvas.update
-                                        getattr(self._scene_canvas, 'update', lambda: None)()
+                                # Kick with non-blocking update
+                                self._scene_canvas.native.update()
+                            except Exception:
+                                # Final fallback to canvas.update
+                                getattr(self._scene_canvas, 'update', lambda: None)()
                             except Exception:
                                 logger.debug("watchdog: kick failed", exc_info=True)
                             try:
@@ -554,8 +561,7 @@ class StreamCoordinator:
             self._last_draw_pc = now_pc
         except Exception:
             logger.debug("draw: pacing metric failed", exc_info=True)
-        # Arrival-mode startup warmup: ramp latency down
-        self._apply_warmup(time.time())
+        # One-shot warmup handled via timer at VT gate lift
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
@@ -569,9 +575,16 @@ class StreamCoordinator:
         except Exception:
             logger.debug("draw: offset learn attempt failed", exc_info=True)
 
-        ready = self._presenter.pop_due(time.time(), self._source_mux.active)
+        ready = self._presenter.pop_due(time.perf_counter(), self._source_mux.active)
         if ready is not None:
             src_val = getattr(ready.source, 'value', str(ready.source))
+            # Record presentation lateness relative to due time for non-preview frames
+            try:
+                if not getattr(ready, 'preview', False) and self._metrics is not None and self._metrics.enabled:
+                    late_ms = (time.perf_counter() - float(getattr(ready, 'due_ts', 0.0))) * 1000.0
+                    self._metrics.observe_ms('napari_cuda_client_present_lateness_ms', float(late_ms))
+            except Exception:
+                logger.debug("draw: lateness metric failed", exc_info=True)
             # Optional: log a one-time relearn attempt on early preview streaks (lightweight)
             if src_val == 'vt':
                 if getattr(ready, 'preview', False) and not self._relearn_logged:
@@ -772,12 +785,16 @@ class StreamCoordinator:
             if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
                 self._vt_wait_keyframe = False
                 self._vt_gate_lift_time = time.time()
+                self._mono_at_gate = time.perf_counter()
                 try:
+                    # Compute wall->mono offset once at gate lift
+                    self._wall_to_mono = float(self._mono_at_gate - float(self._vt_gate_lift_time) - float(self._server_bias_s))
                     self._vt_ts_offset = float(self._vt_gate_lift_time - float(pkt.ts)) - float(self._server_bias_s)
                 except Exception:
-                    self._vt_ts_offset = None
+                    self._wall_to_mono = None
                 self._source_mux.set_active(Source.VT)
-                self._presenter.set_offset(self._vt_ts_offset)
+                # Use wall->mono offset for monotonic scheduling
+                self._presenter.set_offset(self._wall_to_mono)
                 try:
                     self._presenter.set_latency(self._vt_latency_s)
                 except Exception:
@@ -796,9 +813,25 @@ class StreamCoordinator:
                             extra_ms = max(0.0, min(float(self._warmup_max_ms), target_ms - base_ms))
                         extra_s = extra_ms / 1000.0
                         if extra_s > 0.0:
-                            self._warmup_extra_active_s = extra_s
-                            self._warmup_until = time.time() + float(self._warmup_window_s)
+                            # One-shot warmup: set extra latency once, restore via single-shot timer
                             self._presenter.set_latency(self._vt_latency_s + extra_s)
+                            try:
+                                # Cancel prior warmup timer if present
+                                if hasattr(self, '_warmup_reset_timer') and self._warmup_reset_timer is not None:
+                                    self._warmup_reset_timer.stop()
+                            except Exception:
+                                pass
+                            self._warmup_reset_timer = QtCore.QTimer(self._scene_canvas.native)
+                            self._warmup_reset_timer.setSingleShot(True)
+                            self._warmup_reset_timer.setTimerType(QtCore.Qt.PreciseTimer)
+                            self._warmup_reset_timer.setInterval(max(1, int(float(self._warmup_window_s) * 1000.0)))
+                            def _restore_latency() -> None:
+                                try:
+                                    self._presenter.set_latency(self._vt_latency_s)
+                                except Exception:
+                                    logger.debug("Warmup latency restore failed", exc_info=True)
+                            self._warmup_reset_timer.timeout.connect(_restore_latency)
+                            self._warmup_reset_timer.start()
                 except Exception:
                     logger.debug("Warmup latency set failed", exc_info=True)
                 # Schedule first wake after VT becomes active
@@ -811,7 +844,7 @@ class StreamCoordinator:
                 return
         if self._vt_decoder is not None and not self._vt_wait_keyframe:
             ts_float = float(pkt.ts)
-            b = bytes(pkt.payload)
+            b = pkt.payload
             try:
                 self._vt_pipeline.enqueue(b, ts_float)
                 self._vt_enqueued += 1
@@ -822,7 +855,7 @@ class StreamCoordinator:
                 ts_float = float(pkt.ts)
             except Exception:
                 ts_float = None
-            b = bytes(pkt.payload)
+            b = pkt.payload
             if self._pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
                 self._pyav_wait_keyframe = True
                 self._pyav_pipeline.clear()

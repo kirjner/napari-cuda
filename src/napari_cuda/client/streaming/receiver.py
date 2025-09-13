@@ -23,7 +23,7 @@ class Packet:
     height: int
     codec: int
     flags: int
-    payload: bytes
+    payload: memoryview
 
 
 class PixelReceiver:

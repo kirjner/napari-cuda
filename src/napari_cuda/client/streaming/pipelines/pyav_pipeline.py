@@ -22,7 +22,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-DecodeFn = Callable[[bytes], Optional[object]]
+DecodeFn = Callable[[bytes | memoryview], Optional[object]]
 
 
 @dataclass
@@ -36,7 +36,7 @@ class PyAVPipeline:
     schedule_next_wake: Optional[Callable[[], None]] = None
 
     def __post_init__(self) -> None:
-        self._in_q: "queue.Queue[tuple[bytes, float|None]]" = queue.Queue(maxsize=64)
+        self._in_q: "queue.Queue[tuple[bytes | memoryview, float|None]]" = queue.Queue(maxsize=64)
         self._enqueued: int = 0
         self._decoder: Optional[DecodeFn] = None
         self._worker_started: bool = False
@@ -80,7 +80,7 @@ class PyAVPipeline:
                         SubmittedFrame(
                             source=Source.PYAV,
                             server_ts=float(ts) if ts is not None else None,
-                            arrival_ts=time.time(),
+                            arrival_ts=time.perf_counter(),
                             payload=arr,
                             release_cb=None,
                         )
@@ -98,7 +98,7 @@ class PyAVPipeline:
         Thread(target=_worker, daemon=True).start()
         self._worker_started = True
 
-    def enqueue(self, b: bytes, ts: Optional[float]) -> None:
+    def enqueue(self, b: bytes | memoryview, ts: Optional[float]) -> None:
         try:
             self._in_q.put_nowait((b, ts))
             self._enqueued += 1

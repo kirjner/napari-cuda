@@ -242,6 +242,26 @@ class StreamingCanvas(VispyCanvas):
                 client_cfg=getattr(self, '_client_cfg', None),
             )
             self._manager.start()
+            # Optional fixed-cadence display loop to stabilize draw phase under jitter
+            try:
+                import os as _os
+                use_disp_loop = (_os.getenv('NAPARI_CUDA_USE_DISPLAY_LOOP', '0') or '0').lower() in ('1','true','yes','on')
+            except Exception:
+                use_disp_loop = False
+            if use_disp_loop:
+                try:
+                    from napari_cuda.client.streaming.display_loop import DisplayLoop as _DisplayLoop
+                    fps = None
+                    try:
+                        # Prefer configured draw_fps from ClientConfig
+                        fps = float(getattr(self, '_client_cfg', None).draw_fps)  # type: ignore[union-attr]
+                    except Exception:
+                        fps = None
+                    self._display_loop = _DisplayLoop(scene_canvas=self._scene_canvas, fps=fps, prefer_vispy=True)
+                    self._display_loop.start()
+                    logger.info("DisplayLoop enabled (vispy timer preferred) for steady 60 Hz cadence")
+                except Exception:
+                    logger.exception("Failed to start DisplayLoop")
         else:
             pass
 
@@ -399,6 +419,14 @@ class StreamingCanvas(VispyCanvas):
         self._hud_prev_submit = {'vt': 0, 'pyav': 0}
         self._hud_prev_out = {'vt': 0, 'pyav': 0}
         self._hud_prev_preview = {'vt': 0, 'pyav': 0}
+        # Jitter HUD helpers (per-second deltas)
+        self._hud_prev_jit_time = 0.0
+        self._hud_prev_jitter = {
+            'delivered': 0,
+            'dropped': 0,
+            'reordered': 0,
+            'duplicated': 0,
+        }
         # 1 Hz HUD updater
         self._fps_timer = QtCore.QTimer(self._scene_canvas.native)
         self._fps_timer.setTimerType(QtCore.Qt.PreciseTimer)
@@ -479,11 +507,20 @@ class StreamingCanvas(VispyCanvas):
         draw_mean_ms = None
         draw_last_ms = None
         present_fps = None
+        # Metrics snapshot (decode/render/draw + jitter + lateness)
+        jit_q = None
+        jit_deliv_rate = None
+        jit_drop_rate = None
+        jit_sched_mean = None
+        late_last_ms = None
+        late_mean_ms = None
+        late_p90_ms = None
         try:
             metrics = getattr(mgr, '_metrics', None)
             if metrics is not None and hasattr(metrics, 'snapshot'):
                 snap = metrics.snapshot()
                 h = snap.get('histograms', {}) or {}
+                # Decode/submit/render
                 dec_py_ms = (h.get('napari_cuda_client_pyav_decode_ms') or {}).get('mean_ms')
                 vt_dec_ms = (h.get('napari_cuda_client_vt_decode_ms') or {}).get('mean_ms')
                 vt_submit_ms = (h.get('napari_cuda_client_vt_submit_ms') or {}).get('mean_ms')
@@ -492,6 +529,39 @@ class StreamingCanvas(VispyCanvas):
                 d_hist = (h.get('napari_cuda_client_draw_interval_ms') or {})
                 draw_mean_ms = d_hist.get('mean_ms')
                 draw_last_ms = d_hist.get('last_ms')
+                # Jitter metrics
+                g = snap.get('gauges', {}) or {}
+                c = snap.get('counters', {}) or {}
+                jit_q = g.get('napari_cuda_jit_qdepth')
+                # Per-second delivered/drop rates (delta counters)
+                now = time.time()
+                prev_t = float(self._hud_prev_jit_time or 0.0)
+                if prev_t <= 0.0:
+                    self._hud_prev_jit_time = now
+                    self._hud_prev_jitter['delivered'] = int(c.get('napari_cuda_jit_delivered', 0) or 0)
+                    self._hud_prev_jitter['dropped'] = int(c.get('napari_cuda_jit_dropped', 0) or 0)
+                    self._hud_prev_jitter['reordered'] = int(c.get('napari_cuda_jit_reordered', 0) or 0)
+                    self._hud_prev_jitter['duplicated'] = int(c.get('napari_cuda_jit_duplicated', 0) or 0)
+                else:
+                    dtj = max(1e-3, now - prev_t)
+                    d_deliv = int(c.get('napari_cuda_jit_delivered', 0) or 0) - int(self._hud_prev_jitter['delivered'])
+                    d_drop = int(c.get('napari_cuda_jit_dropped', 0) or 0) - int(self._hud_prev_jitter['dropped'])
+                    jit_deliv_rate = max(0.0, float(d_deliv) / dtj)
+                    jit_drop_rate = max(0.0, float(d_drop) / dtj)
+                    # Update prev snapshot
+                    self._hud_prev_jit_time = now
+                    self._hud_prev_jitter['delivered'] = int(c.get('napari_cuda_jit_delivered', 0) or 0)
+                    self._hud_prev_jitter['dropped'] = int(c.get('napari_cuda_jit_dropped', 0) or 0)
+                    self._hud_prev_jitter['reordered'] = int(c.get('napari_cuda_jit_reordered', 0) or 0)
+                    self._hud_prev_jitter['duplicated'] = int(c.get('napari_cuda_jit_duplicated', 0) or 0)
+                jit_sched = (h.get('napari_cuda_jit_sched_delay_ms') or {})
+                jit_sched_mean = jit_sched.get('mean_ms')
+                # Presenter lateness (non-preview frames)
+                late_hist = (h.get('napari_cuda_client_present_lateness_ms') or {})
+                late_last_ms = late_hist.get('last_ms')
+                late_mean_ms = late_hist.get('mean_ms')
+                late_p90_ms = late_hist.get('p90_ms')
+                # Derived
                 d = snap.get('derived', {}) or {}
                 present_fps = d.get('fps')
         except Exception:
@@ -532,6 +602,11 @@ class StreamingCanvas(VispyCanvas):
                     loop_bits.append(f"mean:{draw_mean_ms:.2f}ms")
         except Exception:
             pass
+        # Presenter lateness summary (helps correlate judder)
+        if isinstance(late_last_ms, (int, float)) and isinstance(late_mean_ms, (int, float)):
+            loop_bits.append(f"late:{late_last_ms:.1f}/{late_mean_ms:.1f}ms")
+        if isinstance(late_p90_ms, (int, float)) and late_p90_ms is not None:
+            loop_bits.append(f"p90:{late_p90_ms:.1f}ms")
         # Optional memory usage (enable with NAPARI_CUDA_HUD_SHOW_MEM=1)
         try:
             import os as _os, sys as _sys
@@ -564,5 +639,22 @@ class StreamingCanvas(VispyCanvas):
             logger.debug('FPS HUD: mem calc failed', exc_info=True)
         if loop_bits:
             txt = txt + "\n" + "  ".join(loop_bits)
+        # Optional jitter line (shown when metrics are present)
+        try:
+            show_jit = (jit_q is not None) or (jit_deliv_rate is not None) or (jit_sched_mean is not None)
+            if show_jit:
+                parts = []
+                if isinstance(jit_q, (int, float)):
+                    parts.append(f"jitq:{int(jit_q)}")
+                if isinstance(jit_deliv_rate, float):
+                    parts.append(f"jit:{jit_deliv_rate:.1f}/s")
+                if isinstance(jit_drop_rate, float) and jit_drop_rate > 0:
+                    parts.append(f"drop:{jit_drop_rate:.1f}/s")
+                if isinstance(jit_sched_mean, (int, float)):
+                    parts.append(f"sched:{jit_sched_mean:.1f}ms")
+                if parts:
+                    txt = txt + "\n" + "  ".join(parts)
+        except Exception:
+            logger.debug('FPS HUD: jitter line failed', exc_info=True)
         self._fps_label.setText(txt)
         self._fps_label.adjustSize()

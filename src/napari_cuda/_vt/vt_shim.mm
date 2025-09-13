@@ -8,6 +8,8 @@
 #import <OpenGL/gl.h>
 #import <CoreVideo/CVOpenGLTexture.h>
 #import <CoreVideo/CVOpenGLTextureCache.h>
+#include <stdlib.h>   // getenv
+#include <strings.h>  // strcasecmp
 #import <pthread.h>
 
 #include "vt_shim.h"
@@ -230,8 +232,24 @@ int vt_decode(vt_session_t* s, const uint8_t* avcc_au, size_t len, double pts_se
         CFMutableDictionaryRef d = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(atts, 0);
         CFDictionarySetValue(d, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
     }
+    // Allow disabling 1x real-time pacing via env to avoid unexpected FPS caps
+    // Some hosts exhibit an effective ~50 Hz cap when using 1x pacing. The
+    // presenter already schedules by server PTS, so we can safely decode as
+    // fast as possible and let presentation timing enforce cadence.
     VTDecodeInfoFlags info = 0;
-    st = VTDecompressionSessionDecodeFrame(s->session, sb, kVTDecodeFrame_EnableAsynchronousDecompression | kVTDecodeFrame_1xRealTimePlayback, NULL, &info);
+    VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
+    const char* env_1x = getenv("NAPARI_CUDA_VT_1X_REALTIME");
+    int use_1x = 0;
+    if (env_1x && *env_1x) {
+        // truthy: 1, true, yes, on (case-insensitive)
+        if (env_1x[0] == '1' || strcasecmp(env_1x, "true") == 0 || strcasecmp(env_1x, "yes") == 0 || strcasecmp(env_1x, "on") == 0) {
+            use_1x = 1;
+        }
+    }
+    if (use_1x) {
+        flags |= kVTDecodeFrame_1xRealTimePlayback;
+    }
+    st = VTDecompressionSessionDecodeFrame(s->session, sb, flags, NULL, &info);
     CFRelease(sb);
     if (st != noErr) return -5;
     __sync_fetch_and_add(&s->submits, 1);

@@ -39,7 +39,7 @@ class VTPipeline:
         self._presenter = presenter
         self._source_mux = source_mux
         self._scene_canvas = scene_canvas
-        self._in_q: "queue.Queue[tuple[bytes, float | None]]" = queue.Queue(maxsize=64)
+        self._in_q: "queue.Queue[tuple[bytes | memoryview, float | None]]" = queue.Queue(maxsize=64)
         self._backlog_trigger = int(backlog_trigger)
         self._decoder = None  # VTLiveDecoder-like
         self._started = False
@@ -134,7 +134,7 @@ class VTPipeline:
                             SubmittedFrame(
                                 source=Source.VT,
                                 server_ts=float(pts) if pts is not None else None,
-                                arrival_ts=time.time(),
+                                arrival_ts=time.perf_counter(),
                                 payload=img_buf,
                                 release_cb=vt.release_frame,
                             )
@@ -171,7 +171,7 @@ class VTPipeline:
         if n in (1, 2, 3, 4):
             self._nal_length_size = int(n)
 
-    def enqueue(self, b: bytes, ts: Optional[float]) -> None:
+    def enqueue(self, b: bytes | memoryview, ts: Optional[float]) -> None:
         try:
             qd = self.qsize()
             if self._metrics is not None:
@@ -223,7 +223,7 @@ class VTPipeline:
         return self._last_payload, bool(self._last_persistent)
 
     # Internal decode submit with normalization
-    def _decode_vt_live(self, data: bytes, ts: float | None) -> None:
+    def _decode_vt_live(self, data: bytes | memoryview, ts: float | None) -> None:
         try:
             if not data or self._decoder is None:
                 return
