@@ -380,6 +380,11 @@ class EGLHeadlessServer:
                                 self._worker.reset_encoder()
                             # Bypass pacing once to deliver next keyframe immediately
                             self._bypass_until_key = True
+                            # Count encoder resets/force events for diagnostics
+                            try:
+                                self.metrics.inc('napari_cuda_encoder_resets')
+                            except Exception:
+                                pass
                             # Watchdog: if no keyframe arrives within 300 ms, reset encoder
                             async def _kf_watchdog(last_key_seq: Optional[int]):
                                 try:
