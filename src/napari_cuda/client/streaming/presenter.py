@@ -118,6 +118,20 @@ class FixedLatencyPresenter:
         except Exception:
             logger.debug("submit: offset seeding failed", exc_info=True)
         due = self.clock.compute_due(sf.arrival_ts, sf.server_ts, self.latency_s)
+        try:
+            logger.debug(
+                "PRES_SUB src=%s due_mono=%.6f arr_mono=%.6f server_wall=%s lat_ms=%.2f",
+                sf.source.value, float(due), float(sf.arrival_ts),
+                f"{sf.server_ts:.6f}" if sf.server_ts is not None else "None",
+                self.latency_s * 1000.0,
+            )
+            # Needed latency diagnostic (if server_ts + offset available)
+            off = self.clock.offset
+            if sf.server_ts is not None and off is not None and math.isfinite(float(off)):
+                needed_ms = max(0.0, (float(sf.arrival_ts) - (float(sf.server_ts) + float(off))) * 1000.0)
+                logger.debug("PRES_NEED ms=%.3f", float(needed_ms))
+        except Exception:
+            pass
         to_release: List[_BufItem] = []
         with self._lock:
             items = self._buf[sf.source]
@@ -233,6 +247,16 @@ class FixedLatencyPresenter:
             self._release_many(to_release)
         if sel is None:
             return None
+        try:
+            lateness_ms = (n - float(sel.due_ts)) * 1000.0
+            logger.debug(
+                "PRES_POP src=%s mode=%s now=%.6f due=%.6f late_ms=%.3f fill=%d early_eps=%.3f",
+                active.value, ("preview" if is_preview else "consume"),
+                float(n), float(sel.due_ts), float(lateness_ms),
+                len(self._buf[active]), float(self._early_consume_s or 0.0),
+            )
+        except Exception:
+            pass
         return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=is_preview)
 
     def stats(self) -> Dict[str, object]:

@@ -175,6 +175,14 @@ class JitterChannel:
                 deliver_pts = deliver_pts + (delay_ms / 1000.0)
             if self.cfg.ts_bias_ms:
                 deliver_pts = deliver_pts + (float(self.cfg.ts_bias_ms) / 1000.0)
+        try:
+            self._log.debug(
+                "JIT_SUB seq=%d delay_ms=%.3f deliver_t=%.6f pts_wall=%.6f flags(loss=%.2f, reo=%.2f, dup=%.2f, burst_p=%.2f)",
+                int(self._seq + 1), float(delay_ms), float(deliver_t), float(deliver_pts),
+                float(self.cfg.loss_p), float(self.cfg.reorder_p), float(self.cfg.dup_p), float(self.cfg.burst_p),
+            )
+        except Exception:
+            pass
         # Bounded queue
         with self._cv:
             cap = max(1, int(self.cfg.queue_cap))
@@ -237,6 +245,7 @@ class JitterChannel:
                     continue
                 self._have_key = True
             # Deliver
+            token_before = float(self._bucket)
             t0 = time.perf_counter()
             try:
                 self._down.enqueue(payload, pts)
@@ -246,6 +255,13 @@ class JitterChannel:
                 self._inc("napari_cuda_jit_dropped", 1.0)
                 continue
             t1 = time.perf_counter()
+            try:
+                self._log.debug(
+                    "JIT_DELIVER seq=%d now=%.6f sched_t=%.6f wait_ms=%.3f bytes=%d tokens_before=%.1f tokens_after=%.1f",
+                    int(seq), float(t1), float(deliver_t), (t1 - float(deliver_t)) * 1000.0, int(need), token_before, float(self._bucket)
+                )
+            except Exception:
+                pass
             self._observe_ms("napari_cuda_jit_sched_delay_ms", (t1 - t0) * 1000.0)
             self._inc("napari_cuda_jit_delivered", 1.0)
             self._set("napari_cuda_jit_qdepth", float(self.qsize()))

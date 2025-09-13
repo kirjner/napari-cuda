@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 
@@ -25,7 +25,7 @@ class PyAVDecoder:
         self.swap_rb = bool(swap_rb)
         self.pixfmt = pixfmt if pixfmt in {'rgb24', 'bgr24'} else 'rgb24'
 
-    def decode(self, data: bytes) -> Optional[np.ndarray]:
+    def decode(self, data: Union[bytes, bytearray, memoryview]) -> Optional[np.ndarray]:
         import av
         # Be resilient to state/format races: always normalize to Annex B
         try:

@@ -85,6 +85,11 @@ class PyAVPipeline:
                             release_cb=None,
                         )
                     )
+                    try:
+                        t_prod = time.perf_counter()
+                        logger.debug("PYAV_OUT out_mono=%.6f", float(t_prod))
+                    except Exception:
+                        pass
                 except Exception:
                     logger.exception("PyAVPipeline: presenter submit failed")
                 try:

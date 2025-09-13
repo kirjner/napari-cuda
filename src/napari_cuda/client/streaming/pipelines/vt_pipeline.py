@@ -10,6 +10,7 @@ VTPipeline - encapsulates VT submit/drain and avcC/AnnexB normalization.
 import logging
 import queue
 import time
+import threading
 from threading import Thread
 from typing import Callable, Optional, Tuple
 
@@ -71,6 +72,10 @@ class VTPipeline:
         self._last_persistent = False
         # Scheduling hook to coordinator (optional)
         self._schedule_next_wake = schedule_next_wake or (lambda: None)
+        # Drain coordination to reduce busy polling
+        self._drain_event = threading.Event()
+        # Repack scratch buffer to avoid per-frame allocs
+        self._repack_buf = bytearray()
 
     def start(self) -> None:
         if self._started:
@@ -79,12 +84,14 @@ class VTPipeline:
         def _submit_worker() -> None:
             while True:
                 try:
-                    data, ts = self._in_q.get()
+                    data, ts = self._in_q.get(timeout=0.1)
                 except Exception:
-                    logger.debug("VTPipeline: queue.get failed", exc_info=True)
+                    # Timeout or queue error; nothing to submit
                     continue
                 try:
                     self._decode_vt_live(data, ts)
+                    # Decoded data may be ready for drain
+                    self._drain_event.set()
                 except Exception:
                     logger.exception("VTPipeline: decode submit failed")
 
@@ -93,7 +100,9 @@ class VTPipeline:
                 try:
                     dec = self._decoder
                     if dec is None:
-                        time.sleep(0.005)
+                        # Wait until decoder is set or new work arrives
+                        self._drain_event.wait(0.05)
+                        self._drain_event.clear()
                         continue
                     drained = False
                     while True:
@@ -156,7 +165,9 @@ class VTPipeline:
                                 logger.debug("VTPipeline: periodic flush failed", exc_info=True)
                             self._last_flush_time = now
                     if not drained:
-                        time.sleep(0.002)
+                        # Block briefly until new decoded frames are likely available
+                        self._drain_event.wait(0.01)
+                        self._drain_event.clear()
                 except Exception:
                     logger.debug("VTPipeline: drain worker error", exc_info=True)
 
@@ -187,6 +198,7 @@ class VTPipeline:
             else:
                 self._in_q.put_nowait((b, ts))
                 self._enqueued += 1
+                self._drain_event.set()
         except queue.Full:
             # If enqueuing fails, gate and request keyframe
             self._on_backlog_gate()
@@ -237,13 +249,15 @@ class VTPipeline:
                 if not nals:
                     nals = split_avcc_by_len(data, 2)
                 if nals:
-                    out = bytearray()
+                    out = self._repack_buf
+                    out.clear()
                     for n in nals:
                         out.extend(len(n).to_bytes(target_len, 'big'))
                         out.extend(n)
                     avcc_au = bytes(out)
                 else:
-                    avcc_au = data
+                    # Ensure bytes object for VT shim
+                    avcc_au = data if isinstance(data, (bytes, bytearray)) else bytes(data)
             t_dec0 = time.perf_counter()
             ok = self._decoder.decode(avcc_au, ts)
             t_dec1 = time.perf_counter()

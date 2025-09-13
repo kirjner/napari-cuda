@@ -56,11 +56,35 @@ class GLRenderer:
         self._gl_vbo: Optional[int] = None
         self._vt_first_draw_logged: bool = False
         self._has_drawn: bool = False
+        # Track current video texture shape for resize detection
+        self._vid_shape: Optional[tuple[int, int]] = None
+        # Set swap/pacing preferences once to reduce compositor jitter
+        try:
+            from qtpy.QtGui import QSurfaceFormat
+            fmt = QSurfaceFormat()
+            fmt.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
+            fmt.setSwapInterval(1)
+            QSurfaceFormat.setDefaultFormat(fmt)
+        except Exception:
+            logger.debug("QSurfaceFormat default config failed", exc_info=True)
         self._init_resources()
 
     def _init_resources(self) -> None:
+        # Ensure unpack alignment for tight RGB rows
+        try:
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        except Exception:
+            logger.debug("glPixelStorei UNPACK_ALIGNMENT failed", exc_info=True)
         dummy_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        self._video_texture = Texture2D(dummy_frame)
+        try:
+            self._video_texture = Texture2D(dummy_frame, internalformat='rgb8')
+            # Minimize filtering artifacts and edge sampling
+            self._video_texture.interpolation = 'nearest'  # type: ignore[attr-defined]
+            self._video_texture.wrapping = 'clamp_to_edge'  # type: ignore[attr-defined]
+        except Exception:
+            # Fallback without internalformat if not supported
+            self._video_texture = Texture2D(dummy_frame)
+        self._vid_shape = (dummy_frame.shape[0], dummy_frame.shape[1])
         self._video_program = Program(VERTEX_SHADER, FRAGMENT_SHADER)
         vertices = np.array([
             [-1, -1, 0, 1],
@@ -102,6 +126,7 @@ class GLRenderer:
                 logger.debug("VT zero-copy draw attempt failed; falling back", exc_info=True)
                 drew_vt = False
 
+        did_draw = False
         if not drew_vt:
             # If VT was attempted but failed, preserve last frame to avoid flicker
             if vt_attempted and self._has_drawn:
@@ -121,15 +146,29 @@ class GLRenderer:
                     logger.debug("Frame normalization failed", exc_info=True)
                     arr = None
                 if arr is not None:
-                    self._video_texture.set_data(arr)
+                    # Recreate texture only if size changed to avoid realloc churn
+                    h, w = int(arr.shape[0]), int(arr.shape[1])
+                    if self._vid_shape != (h, w):
+                        try:
+                            self._video_texture = Texture2D(arr, internalformat='rgb8')
+                            self._video_texture.interpolation = 'nearest'  # type: ignore[attr-defined]
+                            self._video_texture.wrapping = 'clamp_to_edge'  # type: ignore[attr-defined]
+                            self._video_program['texture'] = self._video_texture
+                        except Exception:
+                            self._video_texture = Texture2D(arr)
+                            self._video_program['texture'] = self._video_texture
+                        self._vid_shape = (h, w)
+                    else:
+                        self._video_texture.set_data(arr)
             # Avoid clearing every frame to prevent visible flashes on some drivers
             if not self._has_drawn:
                 ctx.clear('black')
             self._video_program.draw('triangle_strip')
             self._has_drawn = True
+            did_draw = True
 
         # Invoke release callback (if provided) after submission
-        if release_cb is not None and payload is not None:
+        if release_cb is not None and payload is not None and (drew_vt or did_draw):
             try:
                 release_cb(payload)  # type: ignore[misc]
             except Exception:

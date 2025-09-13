@@ -10,37 +10,41 @@ Includes:
 - NAL type helpers and simple IDR detection
 """
 
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Union
+
+BytesLike = Union[bytes, bytearray, memoryview]
 
 
 # --- Detection & splitting ---
 
 
-def is_annexb(buf: bytes) -> bool:
+def is_annexb(buf: BytesLike) -> bool:
     if not buf:
         return False
+    mv = memoryview(buf).cast('B')
     i = 0
-    n = len(buf)
+    n = len(mv)
     limit = min(n, 32)
     while i < limit and buf[i] == 0:
         i += 1
-    if i + 3 <= n and buf[i : i + 3] == b"\x00\x00\x01":
+    if i + 3 <= n and mv[i : i + 3].tobytes() == b"\x00\x00\x01":
         return True
-    if i + 4 <= n and buf[i : i + 4] == b"\x00\x00\x00\x01":
+    if i + 4 <= n and mv[i : i + 4].tobytes() == b"\x00\x00\x00\x01":
         return True
     return False
 
 
-def split_annexb(data: bytes) -> List[bytes]:
+def split_annexb(data: BytesLike) -> List[bytes]:
     out: List[bytes] = []
+    mv = memoryview(data).cast('B')
     i = 0
-    n = len(data)
+    n = len(mv)
     idx: List[int] = []
     while i + 3 <= n:
-        if data[i : i + 3] == b"\x00\x00\x01":
+        if mv[i : i + 3].tobytes() == b"\x00\x00\x01":
             idx.append(i)
             i += 3
-        elif i + 4 <= n and data[i : i + 4] == b"\x00\x00\x00\x01":
+        elif i + 4 <= n and mv[i : i + 4].tobytes() == b"\x00\x00\x00\x01":
             idx.append(i)
             i += 4
         else:
@@ -48,29 +52,30 @@ def split_annexb(data: bytes) -> List[bytes]:
     idx.append(n)
     for a, b in zip(idx, idx[1:]):
         j = a
-        while j < b and data[j] == 0:
+        while j < b and mv[j] == 0:
             j += 1
-        if j + 3 <= b and data[j : j + 3] == b"\x00\x00\x01":
+        if j + 3 <= b and mv[j : j + 3].tobytes() == b"\x00\x00\x01":
             j += 3
-        elif j + 4 <= b and data[j : j + 4] == b"\x00\x00\x00\x01":
+        elif j + 4 <= b and mv[j : j + 4].tobytes() == b"\x00\x00\x00\x01":
             j += 4
-        nal = data[j:b]
+        nal = mv[j:b].tobytes()
         if nal:
             out.append(nal)
     return out
 
 
-def split_avcc_by_len(data: bytes, nal_len_size: int = 4) -> List[bytes]:
+def split_avcc_by_len(data: BytesLike, nal_len_size: int = 4) -> List[bytes]:
     out: List[bytes] = []
     i = 0
-    n = len(data)
+    mv = memoryview(data).cast('B')
+    n = len(mv)
     try:
         while i + nal_len_size <= n:
-            ln = int.from_bytes(data[i : i + nal_len_size], "big", signed=False)
+            ln = int.from_bytes(mv[i : i + nal_len_size].tobytes(), "big", signed=False)
             i += nal_len_size
             if ln <= 0 or i + ln > n:
                 break
-            out.append(data[i : i + ln])
+            out.append(mv[i : i + ln].tobytes())
             i += ln
     except Exception:
         out = []
@@ -80,9 +85,9 @@ def split_avcc_by_len(data: bytes, nal_len_size: int = 4) -> List[bytes]:
 # --- Conversions ---
 
 
-def annexb_to_avcc(data: bytes, out_len: int = 4) -> bytes:
+def annexb_to_avcc(data: BytesLike, out_len: int = 4) -> bytes:
     if not is_annexb(data):
-        return data
+        return bytes(data)
     nals = split_annexb(data)
     out = bytearray()
     for n in nals:
@@ -91,62 +96,63 @@ def annexb_to_avcc(data: bytes, out_len: int = 4) -> bytes:
     return bytes(out)
 
 
-def avcc_to_annexb(avcc: bytes, nal_len_size: int = 4) -> bytes:
+def avcc_to_annexb(avcc: BytesLike, nal_len_size: int = 4) -> bytes:
     out = bytearray()
     for n in split_avcc_by_len(avcc, nal_len_size) or []:
         out += b"\x00\x00\x00\x01" + n
     return bytes(out if out else avcc)
 
 
-def normalize_to_annexb(buf: bytes) -> Tuple[bytes, bool]:
+def normalize_to_annexb(buf: BytesLike) -> Tuple[bytes, bool]:
     if is_annexb(buf):
-        return buf, False
+        return bytes(buf), False
     return avcc_to_annexb(buf, 4), True
 
 
 # --- avcC helpers ---
 
 
-def parse_avcc(avcc: bytes) -> Tuple[List[bytes], List[bytes], int]:
-    if not avcc or len(avcc) < 7:
+def parse_avcc(avcc: BytesLike) -> Tuple[List[bytes], List[bytes], int]:
+    mv = memoryview(avcc).cast('B')
+    if not mv or len(mv) < 7:
         raise ValueError("Invalid avcC: too short")
     i = 0
-    _configuration_version = avcc[i]
+    _configuration_version = mv[i]
     i += 1
-    _profile = avcc[i]
+    _profile = mv[i]
     i += 1
-    _compat = avcc[i]
+    _compat = mv[i]
     i += 1
-    _level = avcc[i]
+    _level = mv[i]
     i += 1
-    length_size_minus_one = avcc[i] & 0x03
+    length_size_minus_one = mv[i] & 0x03
     i += 1
     nal_length_size = int(length_size_minus_one) + 1
-    num_sps = avcc[i] & 0x1F
+    num_sps = mv[i] & 0x1F
     i += 1
     sps_list: List[bytes] = []
     for _ in range(num_sps):
-        if i + 2 > len(avcc):
+        if i + 2 > len(mv):
             raise ValueError("Invalid avcC: truncated SPS length")
-        ln = int.from_bytes(avcc[i : i + 2], "big")
+        ln = int.from_bytes(mv[i : i + 2].tobytes(), "big")
         i += 2
-        if i + ln > len(avcc):
+        if i + ln > len(mv):
             raise ValueError("Invalid avcC: truncated SPS data")
-        sps_list.append(avcc[i : i + ln])
+        sps_list.append(mv[i : i + ln].tobytes())
         i += ln
-    if i >= len(avcc):
+    if i >= len(mv):
         raise ValueError("Invalid avcC: missing PPS count")
-    num_pps = avcc[i]
+    num_pps = mv[i]
     i += 1
     pps_list: List[bytes] = []
     for _ in range(num_pps):
-        if i + 2 > len(avcc):
+        if i + 2 > len(mv):
             raise ValueError("Invalid avcC: truncated PPS length")
-        ln = int.from_bytes(avcc[i : i + 2], "big")
+        ln = int.from_bytes(mv[i : i + 2].tobytes(), "big")
         i += 2
-        if i + ln > len(avcc):
+        if i + ln > len(mv):
             raise ValueError("Invalid avcC: truncated PPS data")
-        pps_list.append(avcc[i : i + ln])
+        pps_list.append(mv[i : i + ln].tobytes())
         i += ln
     return sps_list, pps_list, nal_length_size
 
@@ -189,7 +195,7 @@ def nal_type_h265(b0: int) -> int:
     return (b0 >> 1) & 0x3F
 
 
-def contains_idr_annexb(data: bytes, hevc: bool = False) -> bool:
+def contains_idr_annexb(data: BytesLike, hevc: bool = False) -> bool:
     for n in split_annexb(data):
         if not n:
             continue
@@ -205,7 +211,7 @@ def contains_idr_annexb(data: bytes, hevc: bool = False) -> bool:
     return False
 
 
-def contains_idr_avcc(data: bytes, nal_len_size: int = 4, hevc: bool = False) -> bool:
+def contains_idr_avcc(data: BytesLike, nal_len_size: int = 4, hevc: bool = False) -> bool:
     for n in split_avcc_by_len(data, nal_len_size):
         if not n:
             continue
@@ -224,7 +230,7 @@ def contains_idr_avcc(data: bytes, nal_len_size: int = 4, hevc: bool = False) ->
 # --- Extradata heuristics ---
 
 
-def extract_sps_pps_from_blob(b: bytes) -> tuple[bytes | None, bytes | None]:
+def extract_sps_pps_from_blob(b: BytesLike) -> tuple[bytes | None, bytes | None]:
     """Best-effort SPS/PPS extraction from arbitrary H.264 blob.
 
     Tries AnnexB split, then AVCC split with multiple length sizes.

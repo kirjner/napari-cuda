@@ -328,6 +328,7 @@ class StreamCoordinator:
         self._last_stats_time: float = 0.0
         self._stats_timer = None
         self._metrics_timer = None
+        self._warmup_reset_timer = None
         self._relearn_logged: bool = False
         self._last_relearn_log_ts: float = 0.0
         # Debounce duplicate video_config
@@ -504,11 +505,13 @@ class StreamCoordinator:
                         now = time.perf_counter()
                         if (now - last) * 1000.0 >= float(self._watchdog_ms):
                             try:
-                                # Kick with non-blocking update
-                                self._scene_canvas.native.update()
-                            except Exception:
-                                # Final fallback to canvas.update
-                                getattr(self._scene_canvas, 'update', lambda: None)()
+                                # Only kick if frames are pending
+                                if self._presenter.peek_next_due(self._source_mux.active) is not None:
+                                    try:
+                                        self._scene_canvas.native.update()
+                                    except Exception:
+                                        # Final fallback to canvas.update
+                                        getattr(self._scene_canvas, 'update', lambda: None)()
                             except Exception:
                                 logger.debug("watchdog: kick failed", exc_info=True)
                             try:
@@ -658,6 +661,15 @@ class StreamCoordinator:
                 self._metrics.observe_ms(metric_name, (t_render1 - t_render0) * 1000.0)
             # Count a presented frame for client-side FPS derivation (only when a frame was actually drawn)
             self._metrics.inc('napari_cuda_client_presented_total', 1.0)
+            try:
+                now = time.perf_counter()
+                last = getattr(self, '_last_present_mono', 0.0)
+                if last:
+                    inter_ms = (now - float(last)) * 1000.0
+                    logger.debug("PRESENT inter_ms=%.3f", float(inter_ms))
+                self._last_present_mono = now
+            except Exception:
+                pass
         else:
             self._renderer.draw(frame)
         # Clear draw guard
@@ -917,6 +929,11 @@ class StreamCoordinator:
         except Exception:
             logger.debug("stop: metrics timer stop failed", exc_info=True)
         try:
+            if self._warmup_reset_timer is not None:
+                self._warmup_reset_timer.stop()
+        except Exception:
+            logger.debug("stop: warmup reset timer stop failed", exc_info=True)
+        try:
             if self._watchdog_timer is not None:
                 self._watchdog_timer.stop()
         except Exception:
@@ -930,7 +947,7 @@ class StreamCoordinator:
     # VT decode/submit is handled by VTPipeline
 
     # Keyframe detection via shared helpers (AnnexB/AVCC)
-    def _is_keyframe(self, payload: bytes, codec: int) -> bool:
+    def _is_keyframe(self, payload: bytes | memoryview, codec: int) -> bool:
         try:
             hevc = int(codec) == 2
         except Exception:

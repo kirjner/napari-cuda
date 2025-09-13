@@ -66,13 +66,13 @@ class PixelReceiver:
                     async for message in ws:
                         if not isinstance(message, (bytes, bytearray, memoryview)):
                             continue
-                        b = bytes(message)
-                        if len(b) < HEADER_STRUCT.size:
+                        mv = memoryview(message)
+                        if len(mv) < HEADER_STRUCT.size:
                             continue
                         try:
-                            hdr = b[: HEADER_STRUCT.size]
-                            # Use memoryview to avoid copying payload on the hot path
-                            payload = memoryview(b)[HEADER_STRUCT.size :]
+                            hdr = mv[: HEADER_STRUCT.size]
+                            # Zero-copy payload view into message buffer
+                            payload = mv[HEADER_STRUCT.size :]
                             seq, ts, w, h, codec, flags, _ = HEADER_STRUCT.unpack(hdr)
                         except Exception:
                             logger.debug("Invalid stream header", exc_info=True)
