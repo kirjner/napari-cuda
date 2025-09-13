@@ -59,6 +59,22 @@ class StreamingCanvas(VispyCanvas):
         server_port : int
             Remote server pixel stream port
         """
+        # Optional: control vsync via env before any GL surface is created
+        try:
+            vs_env = (os.getenv('NAPARI_CUDA_VSYNC') or '').strip().lower()
+            if vs_env:
+                from qtpy import QtGui  # type: ignore
+                fmt = QtGui.QSurfaceFormat()
+                if vs_env in ('0', 'off', 'false', 'no'):
+                    fmt.setSwapInterval(0)
+                    logger.info('GL vsync disabled via NAPARI_CUDA_VSYNC=0')
+                else:
+                    fmt.setSwapInterval(1)
+                    logger.info('GL vsync enabled via NAPARI_CUDA_VSYNC=1')
+                QtGui.QSurfaceFormat.setDefaultFormat(fmt)
+        except Exception:
+            logger.debug('VSync default format setup failed', exc_info=True)
+
         # Ensure we have a KeymapHandler; create a minimal one if not provided
         if key_map_handler is None:
             try:
@@ -158,10 +174,12 @@ class StreamingCanvas(VispyCanvas):
         assert self._source_mux is not None
         # Construct minimal client config (phase 0; no behavior change)
         try:
+            # Estimate display FPS early from env to avoid NameError before DisplayLoop init
+            fps_guess = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', env_float('NAPARI_CUDA_SMOKE_FPS', 60.0))
             self._client_cfg = ClientConfig.from_env(
                 default_latency_ms=self._vt_latency_s * 1000.0,
                 default_buffer_limit=self._vt_buffer_limit,
-                default_draw_fps=fps,
+                default_draw_fps=fps_guess,
             )
             logger.info(
                 "ClientConfig initialized: latency=%.0fms buf=%d draw_fps=%.1f preview_guard=%.1fms",
@@ -230,30 +248,7 @@ class StreamingCanvas(VispyCanvas):
         # Override draw to show video instead
         self._scene_canvas.events.draw.disconnect()
         self._scene_canvas.events.draw.connect(self._draw_video_frame)
-        # Timer-driven display loop centralized in helper for steady cadence
-        try:
-            from napari_cuda.client.streaming.display_loop import DisplayLoop
-            fps = env_float('NAPARI_CUDA_CLIENT_DISPLAY_FPS', 60.0)
-            # Honor explicit env override for timer backend; else prefer VisPy in smoke
-            env_vispy = os.getenv('NAPARI_CUDA_CLIENT_VISPY_TIMER')
-            if env_vispy is not None:
-                prefer_vispy = (env_vispy == '1')
-            else:
-                prefer_vispy = True if self._vt_smoke else None
-            # Prefer native.update so Qt drives the actual widget repaint
-            try:
-                cb = getattr(self._scene_canvas.native, 'update')
-            except Exception:
-                cb = getattr(self._scene_canvas, 'update')
-            self._display_loop = DisplayLoop(
-                scene_canvas=self._scene_canvas,
-                callback=cb,
-                fps=fps,
-                prefer_vispy=prefer_vispy,
-            )
-            self._display_loop.start()
-        except Exception:
-            logger.exception('Failed to start DisplayLoop')
+        # DisplayLoop removed: presenter-owned wake schedules repaint on demand
 
         logger.info(
             f'StreamingCanvas initialized for {server_host}:{server_port}'

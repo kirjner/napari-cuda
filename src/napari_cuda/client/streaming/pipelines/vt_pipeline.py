@@ -34,6 +34,7 @@ class VTPipeline:
         request_keyframe: Callable[[], None] | None = None,
         on_cache_last: Callable[[object, bool], None] | None = None,
         metrics: object | None = None,
+        schedule_next_wake: Callable[[], None] | None = None,
     ) -> None:
         self._presenter = presenter
         self._source_mux = source_mux
@@ -54,12 +55,12 @@ class VTPipeline:
         except Exception:
             self._periodic_flush_s = 0.0
         self._last_flush_time = 0.0
-        # Gate per-decode GUI updates; DisplayLoop usually drives redraws
+        # Gate per-decode GUI updates; now disabled by default since presenter wake drives draws
         import os as _os
         try:
-            self._post_decode_update = (_os.getenv('NAPARI_CUDA_CLIENT_DECODE_UPDATE', '1') or '1') in ('1','true','yes')
+            self._post_decode_update = (_os.getenv('NAPARI_CUDA_CLIENT_DECODE_UPDATE', '0') or '0') in ('1','true','yes')
         except Exception:
-            self._post_decode_update = True
+            self._post_decode_update = False
         # Coordination hooks
         self._is_gated = is_gated or (lambda: False)
         self._on_backlog_gate = on_backlog_gate or (lambda: None)
@@ -68,6 +69,8 @@ class VTPipeline:
         # Last VT payload for redraw fallback
         self._last_payload = None  # type: ignore[var-annotated]
         self._last_persistent = False
+        # Scheduling hook to coordinator (optional)
+        self._schedule_next_wake = schedule_next_wake or (lambda: None)
 
     def start(self) -> None:
         if self._started:
@@ -136,6 +139,11 @@ class VTPipeline:
                                 release_cb=vt.release_frame,
                             )
                         )
+                        # Nudge coordinator to schedule next-due wake (thread-safe via proxy)
+                        try:
+                            self._schedule_next_wake()
+                        except Exception:
+                            logger.debug("VTPipeline: schedule_next_wake failed", exc_info=True)
                     if drained and self._post_decode_update:
                         QtCore.QTimer.singleShot(0, self._scene_canvas.native.update)
                     # Optional periodic flush of VT async frames

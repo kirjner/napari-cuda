@@ -301,6 +301,20 @@ class SmokePipeline:
             self._cache_bytes = 0
             logger.info('smoke: using disk-backed preencode cache at %s', path)
 
+        # Initialize VT as soon as we have avcC to avoid long gaps before first draw
+        if self.cfg.target == 'vt' and self._init_vt_from_avcc is not None:
+            try:
+                avcc_b = enc.get_avcc_config()
+            except Exception:
+                avcc_b = None
+            if avcc_b:
+                try:
+                    self._init_vt_from_avcc(base64.b64encode(avcc_b).decode('ascii'), w, h)
+                    # Call only once
+                    self._init_vt_from_avcc = None
+                except Exception:
+                    logger.debug('smoke: early init_vt_from_avcc failed', exc_info=True)
+
         for i in range(n):
             ts_this = float(i) / max(1.0, fps)
             rgb = gen(i)
@@ -334,6 +348,7 @@ class SmokePipeline:
             enc.close()
         except Exception:
             logger.debug('smoke: encoder close failed', exc_info=True)
+        # If VT wasn't initialized early, try once more now
         if self.cfg.target == 'vt' and self._init_vt_from_avcc is not None and avcc_b:
             try:
                 self._init_vt_from_avcc(base64.b64encode(avcc_b).decode('ascii'), w, h)

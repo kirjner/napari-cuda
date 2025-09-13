@@ -21,9 +21,9 @@ Environment knobs (client)
   - `NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MARGIN_MS` — auto margin above one frame (default 2 ms)
   - `NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MAX_MS` — cap on extra (default 24 ms)
   - `NAPARI_CUDA_CLIENT_STARTUP_WARMUP_WINDOW_S` — ramp duration (default 0.75 s)
-- Display timer:
-  - `NAPARI_CUDA_CLIENT_DISPLAY_FPS` — paint cadence (default 60)
-  - `NAPARI_CUDA_CLIENT_VISPY_TIMER=1` — use vispy.Timer instead of Qt QTimer
+- Display/wake:
+  - Drawing is presenter-scheduled (per-frame wake); decode-driven GUI updates are off by default.
+  - `NAPARI_CUDA_CLIENT_DECODE_UPDATE=1` re-enables per-decode updates (not recommended with server PTS scheduling).
   - `NAPARI_CUDA_CLIENT_VT_BUFFER` — presenter buffer size in frames.
 
 Notes

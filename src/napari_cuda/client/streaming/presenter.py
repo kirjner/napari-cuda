@@ -23,9 +23,11 @@ class ClockSync:
         self.offset = offset
 
     def compute_due(self, arrival_ts: float, server_ts: Optional[float], latency_s: float) -> float:
-        # Prefer server timestamp + offset; fallback to arrival when unavailable/invalid.
+        # Prefer server timestamp + offset; fallback to arrival only if server_ts/offset unavailable.
         off = self.offset
-        if server_ts is None or off is None or not math.isfinite(float(off)) or abs(float(off)) > 5.0:
+        if server_ts is None or off is None:
+            return float(arrival_ts) + float(latency_s)
+        if not math.isfinite(float(off)):
             return float(arrival_ts) + float(latency_s)
         return float(server_ts) + float(off) + float(latency_s)
 
@@ -65,6 +67,18 @@ class FixedLatencyPresenter:
         self._unified = True
         # Single preview guard (seconds)
         self._preview_guard_s = max(0.0, float(preview_guard_s))
+        # Early-consume tolerance: treat frames within this window before due as due
+        # to avoid preview churn from timer quantization and minor scheduling jitter.
+        # Allow env override (ms) via NAPARI_CUDA_EARLY_CONSUME_MS.
+        try:
+            import os as _os
+            e_ms = _os.getenv('NAPARI_CUDA_EARLY_CONSUME_MS')
+            if e_ms is not None and e_ms.strip() != '':
+                self._early_consume_s = max(0.0, float(e_ms) / 1000.0)
+            else:
+                self._early_consume_s = min(0.004, max(0.0, float(preview_guard_s))) if preview_guard_s else 0.003
+        except Exception:
+            self._early_consume_s = 0.003
         # Deque per source for O(1) append/pop from ends
         self._buf: Dict[Source, Deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
         self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
@@ -76,6 +90,9 @@ class FixedLatencyPresenter:
         # Offset PLL (bounded) state for SERVER mode
         self._pll_offset: Optional[float] = None
         self._pll_last_update: float = 0.0
+        # Diagnostics: count how due times are computed
+        self._due_server: int = 0
+        self._due_arrival: int = 0
 
     def set_latency(self, latency_s: float) -> None:
         self.latency_s = float(max(0.0, latency_s))
@@ -91,6 +108,15 @@ class FixedLatencyPresenter:
         self._pll_offset = float(offset) if (offset is not None and math.isfinite(float(offset))) else None
 
     def submit(self, sf: SubmittedFrame) -> None:
+        # Seed offset immediately on first good sample to avoid startup churn
+        try:
+            if self.clock.offset is None and sf.server_ts is not None and math.isfinite(float(sf.server_ts)) and math.isfinite(float(sf.arrival_ts)):
+                seed = float(sf.arrival_ts) - float(sf.server_ts)
+                self.clock.set_offset(seed)
+                self._pll_offset = float(seed)
+                self._pll_last_update = float(sf.arrival_ts)
+        except Exception:
+            logger.debug("submit: offset seeding failed", exc_info=True)
         due = self.clock.compute_due(sf.arrival_ts, sf.server_ts, self.latency_s)
         to_release: List[_BufItem] = []
         with self._lock:
@@ -105,6 +131,16 @@ class FixedLatencyPresenter:
                 )
             )
             self._submit_count[sf.source] += 1
+            # Diagnostics: track which path was used (server vs arrival)
+            try:
+                off = self.clock.offset
+                used_server = (sf.server_ts is not None) and (off is not None) and math.isfinite(float(off))
+                if used_server:
+                    self._due_server += 1
+                else:
+                    self._due_arrival += 1
+            except Exception:
+                logger.debug("submit: due path count failed", exc_info=True)
             # Trim to buffer limit from the left (oldest first)
             while len(items) > self.buffer_limit:
                 to_release.append(items.popleft())
@@ -157,9 +193,12 @@ class FixedLatencyPresenter:
             items = self._buf[active]
             if not items:
                 return None
-            # Unified: consume newest due; else preview latest if earliest future is sufficiently far
+            # Unified: consume newest due (allow small early-consume epsilon);
+            # else preview latest if earliest future is sufficiently far
             last_due: Optional[_BufItem] = None
-            while items and items[0].due_ts <= n:
+            # Consume frames that are due or within early-consume window
+            early_now = n + float(self._early_consume_s or 0.0)
+            while items and items[0].due_ts <= early_now:
                 if last_due is not None:
                     to_release.append(last_due)
                 last_due = items.popleft()
@@ -205,7 +244,19 @@ class FixedLatencyPresenter:
                 "server_timestamp": True,
                 "next_due_ms": next_due,
                 "fill": fill,
+                "due_path": {"server": int(self._due_server), "arrival": int(self._due_arrival)},
             }
+
+    def peek_next_due(self, active: Source) -> Optional[float]:
+        """Return the earliest due_ts for the active source, or None.
+
+        Callers should schedule a wake for max(0, due_ts - now).
+        """
+        with self._lock:
+            items = self._buf.get(active)
+            if not items:
+                return None
+            return float(items[0].due_ts)
 
     # Adaptive offset helper: compute median of (arrival - server_ts)
     def relearn_offset(self, source: Source) -> Optional[float]:
@@ -231,8 +282,8 @@ class FixedLatencyPresenter:
         diffs.sort()
         mid = len(diffs) // 2
         med = diffs[mid] if len(diffs) % 2 == 1 else 0.5 * (diffs[mid - 1] + diffs[mid])
-        # Reject unreasonable or non-finite offsets; keep SERVER mode from latching junk
-        if not math.isfinite(med) or abs(float(med)) > 5.0:
+        # Reject only non-finite values; accept large offsets (epoch alignment)
+        if not math.isfinite(med):
             try:
                 logger.debug(
                     "relearn_offset: rejected median (val=%s, samples=%d)",

@@ -57,7 +57,7 @@ class ClientConfig:
     # (legacy feature flags removed)
 
     # Single preview guard (ms)
-    preview_guard_ms: float = 0.0
+    preview_guard_ms: float = 5.0
 
     # Compatibility helper to ease logging/inspection
     def as_dict(self) -> Dict[str, Any]:
@@ -76,8 +76,8 @@ class ClientConfig:
 
         # (legacy feature flags removed)
 
-        # Single preview guard (no env by default; keep default)
-        preview_guard = 0.0
+        # Single preview guard: allow env override (ms); default small non-zero
+        preview_guard = _env_float("NAPARI_CUDA_CLIENT_PREVIEW_GUARD_MS", 5.0)
 
         return ClientConfig(
             base_latency_ms=base_latency_ms,

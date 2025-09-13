@@ -43,6 +43,19 @@ from napari_cuda.client.streaming.config import extract_video_config
 logger = logging.getLogger(__name__)
 
 
+class _WakeProxy(QtCore.QObject):
+    """Qt signal proxy to safely schedule wakes from any thread.
+
+    Emitting `trigger` from worker threads posts a queued call to the GUI
+    thread where `_schedule_next_wake` runs and arms the QTimer.
+    """
+
+    trigger = QtCore.Signal()
+
+    def __init__(self, slot, parent=None) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(parent)
+        self.trigger.connect(slot)
+
 @dataclass
 class _SyncState:
     last_seq: Optional[int] = None
@@ -93,6 +106,8 @@ class StreamCoordinator:
         client_cfg: object | None = None,
     ) -> None:
         self._scene_canvas = scene_canvas
+        # Set smoke mode early so start() can rely on it even if later init changes
+        self._vt_smoke = bool(vt_smoke)
         # Phase 0: stash client config for future phases (no behavior change)
         self._client_cfg = client_cfg
         self.server_host = server_host
@@ -149,8 +164,10 @@ class StreamCoordinator:
         self._vt_gate_lift_time: float = 0.0
         self._vt_ts_offset: Optional[float] = None
         self._vt_errors = 0
-        # Small negative bias so frames tend to be due slightly earlier in SERVER mode
-        self._server_bias_s = env_float('NAPARI_CUDA_SERVER_TS_BIAS_MS', 5.0) / 1000.0
+        # Bias for server timestamp alignment; default 0 for exact due times
+        self._server_bias_s = env_float('NAPARI_CUDA_SERVER_TS_BIAS_MS', 0.0) / 1000.0
+        # Wake scheduling fudge (ms) to compensate for timer quantization; added to due delay
+        self._wake_fudge_ms = env_float('NAPARI_CUDA_WAKE_FUDGE_MS', 1.0)
         # avcC nal length size (default 4 if unknown)
         self._nal_length_size: int = 4
 
@@ -178,6 +195,76 @@ class StreamCoordinator:
             metrics_enabled = False
         self._metrics = ClientMetrics(enabled=metrics_enabled)
 
+        # Presenter-owned wake scheduling: single-shot QTimer owned by the GUI thread
+        self._wake_timer = None
+        self._in_present: bool = False
+        try:
+            self._wake_timer = QtCore.QTimer(self._scene_canvas.native)
+            self._wake_timer.setTimerType(QtCore.Qt.PreciseTimer)
+            self._wake_timer.setSingleShot(True)
+            # On wake, request a canvas update and immediately schedule the next wake
+            self._wake_timer.timeout.connect(self._on_present_timer)
+        except Exception:
+            logger.debug("Wake timer init failed", exc_info=True)
+        
+        def _schedule_next_wake() -> None:
+            try:
+                earliest = self._presenter.peek_next_due(self._source_mux.active)
+                if earliest is None:
+                    return
+                now = time.time()
+                delay_ms = max(0, int(round((float(earliest) - now) * 1000.0 + float(self._wake_fudge_ms or 0.0))))
+                # If a wake is already scheduled earlier or equal, keep it.
+                # Only treat it as pending if it's still in the future; if it's in the past,
+                # consider it stale and allow rescheduling to recover from missed wakes.
+                if self._next_due_pending_until > now:
+                    pending_ms = int(round((self._next_due_pending_until - now) * 1000.0))
+                    if pending_ms <= delay_ms + 1:
+                        return
+                else:
+                    # Clear stale marker
+                    self._next_due_pending_until = 0.0
+                # Always schedule via the QTimer to avoid draw-event recursion
+                # If a wake is already scheduled earlier or equal, keep it; otherwise (re)schedule
+                try:
+                    if self._wake_timer is not None and self._wake_timer.isActive():
+                        if self._next_due_pending_until > now:
+                            pending_ms = int(round((self._next_due_pending_until - now) * 1000.0))
+                            if pending_ms <= delay_ms + 1:
+                                return
+                        try:
+                            self._wake_timer.stop()
+                        except Exception:
+                            pass
+                except Exception:
+                    logger.debug("schedule_next_wake: timer state check failed", exc_info=True)
+                self._next_due_pending_until = now + (delay_ms / 1000.0)
+                try:
+                    if self._wake_timer is not None:
+                        self._wake_timer.start(delay_ms)
+                    else:
+                        # Fallback: poke the canvas to ensure progress
+                        self._scene_canvas.native.update()
+                except Exception:
+                    # As a last resort, poke the canvas to drive a draw
+                    try:
+                        self._scene_canvas.native.update()
+                    except Exception:
+                        getattr(self._scene_canvas, 'update', lambda: None)()
+            except Exception:
+                logger.debug("schedule_next_wake failed", exc_info=True)
+
+        # Expose to pipelines via closure
+        self._schedule_next_wake = _schedule_next_wake
+
+        # Build pipelines after scheduler hooks are ready
+        # Create a wake proxy so pipelines can nudge scheduling from any thread
+        try:
+            self._wake_proxy = _WakeProxy(_schedule_next_wake, self._scene_canvas.native)
+            wake_cb = self._wake_proxy.trigger.emit
+        except Exception:
+            logger.debug("WakeProxy init failed; falling back to direct schedule callback", exc_info=True)
+            wake_cb = _schedule_next_wake
         self._vt_pipeline = VTPipeline(
             presenter=self._presenter,
             source_mux=self._source_mux,
@@ -188,10 +275,10 @@ class StreamCoordinator:
             request_keyframe=_req_keyframe,
             on_cache_last=_on_cache_last,
             metrics=self._metrics,
+            schedule_next_wake=wake_cb,
         )
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
         self._pyav_enqueued = 0
-        # PyAV pipeline replaces inline queue/worker
         self._pyav_pipeline = PyAVPipeline(
             presenter=self._presenter,
             source_mux=self._source_mux,
@@ -199,26 +286,22 @@ class StreamCoordinator:
             backlog_trigger=self._pyav_backlog_trigger,
             latency_s=self._pyav_latency_s,
             metrics=self._metrics,
+            schedule_next_wake=wake_cb,
         )
         self._pyav_wait_keyframe: bool = False
 
-        # Last VT payload for redraw fallback (offline VT-source or VT decode)
-        self._last_vt_payload = None  # type: ignore[var-annotated]
+        # Last-frame caches for redraw fallback
+        self._last_vt_payload = None  # VT payload capsule
         self._last_vt_persistent = False
-        # Last PyAV RGB frame for redraw fallback (avoid flicker when no new frame ready)
-        self._last_pyav_frame = None  # type: ignore[var-annotated]
+        self._last_pyav_frame = None
 
         # Frame queue for renderer (latest-wins)
         self._frame_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=3)
 
-        # Receiver/state
+        # Receiver/state flags
         self._stream_seen_keyframe = False
-        self._state_channel: Optional[StateChannel] = None
-        self._receiver: Optional[PixelReceiver] = None
-        self._threads: list[Thread] = []
-        self._vt_smoke = bool(vt_smoke)
 
-        # Stats logging (1 Hz) controlled by env NAPARI_CUDA_VT_STATS
+        # Stats/logging and diagnostics
         lvl_env = (env_str('NAPARI_CUDA_VT_STATS', '') or '').lower()
         if lvl_env in ('1', 'true', 'yes', 'info'):
             self._stats_level = logging.INFO
@@ -229,8 +312,8 @@ class StreamCoordinator:
         self._last_stats_time: float = 0.0
         self._stats_timer = None
         self._metrics_timer = None
-        # Simplified scheduling: no ARRIVAL fallback; rely on unified preview/PLL.
         self._relearn_logged: bool = False
+        self._last_relearn_log_ts: float = 0.0
         # Debounce duplicate video_config
         self._last_vcfg_key = None
         # Stream continuity and gate tracking
@@ -253,6 +336,29 @@ class StreamCoordinator:
             self._evloop_stall_ms = 0
             self._evloop_sample_ms = 100
         self._evloop_mon: Optional[EventLoopMonitor] = None
+
+    def _on_present_timer(self) -> None:
+        # On wake, request a paint; the actual GL draw happens inside the canvas draw event
+        try:
+            self._in_present = True
+            # Clear pending marker to allow next wake to be scheduled freely
+            self._next_due_pending_until = 0.0
+            rep = getattr(self._scene_canvas.native, 'repaint', None)
+            if callable(rep):
+                rep()
+            else:
+                try:
+                    self._scene_canvas.native.update()
+                except Exception:
+                    getattr(self._scene_canvas, 'update', lambda: None)()
+        except Exception:
+            logger.debug("present timer: repaint/update failed", exc_info=True)
+        # Do not schedule next wake here; draw() re-arms after consumption to reduce early wakes
+        finally:
+            try:
+                self._in_present = False
+            except Exception:
+                pass
 
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
@@ -436,6 +542,9 @@ class StreamCoordinator:
         self._frame_q.put(frame)
 
     def draw(self) -> None:
+        # Guard to avoid scheduling immediate repaints from within draw
+        in_draw_prev = getattr(self, '_in_draw', False)
+        self._in_draw = True
         # Draw-loop pacing metric (perf_counter for monotonic interval)
         try:
             now_pc = time.perf_counter()
@@ -466,11 +575,18 @@ class StreamCoordinator:
             # Optional: log a one-time relearn attempt on early preview streaks (lightweight)
             if src_val == 'vt':
                 if getattr(ready, 'preview', False) and not self._relearn_logged:
-                    off = self._presenter.relearn_offset(Source.VT)
-                    logger.info(
-                        "VT preview detected; relearned offset=%s",
-                        f"{off:.3f}s" if (off is not None) else "n/a",
-                    )
+                    # Rate-limit relearn logs to 1/sec
+                    now = time.time()
+                    if (now - float(self._last_relearn_log_ts or 0.0)) >= 1.0:
+                        off = self._presenter.relearn_offset(Source.VT)
+                        if off is not None:
+                            logger.debug(
+                                "VT preview detected; relearned offset=%s",
+                                f"{off:.3f}s",
+                            )
+                        else:
+                            logger.debug("VT preview detected; offset relearn not available yet")
+                        self._last_relearn_log_ts = now
                     self._relearn_logged = True
                 elif not getattr(ready, 'preview', False):
                     self._relearn_logged = False
@@ -508,7 +624,11 @@ class StreamCoordinator:
                     self._enqueue_frame(self._last_pyav_frame)
                 except Exception:
                     logger.debug("enqueue last PyAV frame failed", exc_info=True)
-        # Next-due wake dropped (scheduler simplified)
+        # Schedule next wake based on earliest due; avoids relying on a 60 Hz loop
+        try:
+            self._schedule_next_wake()
+        except Exception:
+            logger.debug("draw: schedule_next_wake failed", exc_info=True)
         while not self._frame_q.empty():
             try:
                 frame = self._frame_q.get_nowait()
@@ -527,6 +647,8 @@ class StreamCoordinator:
             self._metrics.inc('napari_cuda_client_presented_total', 1.0)
         else:
             self._renderer.draw(frame)
+        # Clear draw guard
+        self._in_draw = in_draw_prev
 
     def _log_stats(self) -> None:
         if self._stats_level is None:
@@ -679,6 +801,11 @@ class StreamCoordinator:
                             self._presenter.set_latency(self._vt_latency_s + extra_s)
                 except Exception:
                     logger.debug("Warmup latency set failed", exc_info=True)
+                # Schedule first wake after VT becomes active
+                try:
+                    self._schedule_next_wake()
+                except Exception:
+                    logger.debug("schedule_next_wake after VT gate failed", exc_info=True)
             else:
                 self._request_keyframe_once()
                 return
