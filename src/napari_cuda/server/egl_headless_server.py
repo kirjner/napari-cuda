@@ -40,7 +40,7 @@ class EncodeConfig:
 class EGLHeadlessServer:
     def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False,
                  host: str = '0.0.0.0', state_port: int = 8081, pixel_port: int = 8082, fps: int = 60,
-                 animate: bool = False, animate_dps: float = 30.0) -> None:
+                 animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False) -> None:
         self.width = width
         self.height = height
         self.use_volume = use_volume
@@ -62,7 +62,8 @@ class EGLHeadlessServer:
             qsize = int(os.getenv('NAPARI_CUDA_FRAME_QUEUE', '1'))
         except Exception:
             qsize = 1
-        self._frame_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=max(1, qsize))
+        # Queue holds tuples of (payload_bytes, flags, capture_wall_ts)
+        self._frame_q: asyncio.Queue[tuple[bytes, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
         self._seq = 0
         self._stop = threading.Event()
         
@@ -84,6 +85,8 @@ class EGLHeadlessServer:
         # Track last keyframe for metrics only
         self._last_key_seq: Optional[int] = None
         self._last_key_ts: Optional[float] = None
+        # Watchdog task handle (cancel when keyframe arrives)
+        self._kf_watchdog_task: Optional[asyncio.Task] = None
         # Broadcaster pacing: bypass once until keyframe for immediate start
         self._bypass_until_key: bool = False
         
@@ -91,6 +94,11 @@ class EGLHeadlessServer:
         self._drops_total: int = 0
         self._last_send_ts: Optional[float] = None
         self._send_count: int = 0
+        # Optional detailed per-send logging (seq, send_ts, cap_ts, delta)
+        try:
+            self._log_sends = bool(log_sends or int(os.getenv('NAPARI_CUDA_LOG_SENDS', '0') or '0'))
+        except Exception:
+            self._log_sends = bool(log_sends)
         
 
     async def start(self) -> None:
@@ -129,7 +137,7 @@ class EGLHeadlessServer:
             self._stop_worker()
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
-        def on_frame(payload_obj, _flags: int) -> None:
+        def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None) -> None:
             # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
             # Optional: raw NAL summary before packing for diagnostics
             try:
@@ -146,7 +154,7 @@ class EGLHeadlessServer:
                     has_sps = any(((n[0] & 0x1F) == 7) or (((n[0] >> 1) & 0x3F) == 33) for n in nals if n)
                     has_pps = any(((n[0] & 0x1F) == 8) or (((n[0] >> 1) & 0x3F) == 34) for n in nals if n)
                     has_idr = any(((n[0] & 0x1F) == 5) or (((n[0] >> 1) & 0x3F) in (19, 20, 21)) for n in nals if n)
-                    logger.info("Raw NALs: count=%d sps=%s pps=%s idr=%s", len(nals), has_sps, has_pps, has_idr)
+                    logger.debug("Raw NALs: count=%d sps=%s pps=%s idr=%s", len(nals), has_sps, has_pps, has_idr)
             except Exception as e:
                 logger.debug("Raw NAL summary failed: %s", e)
             t_p0 = time.perf_counter()
@@ -203,36 +211,20 @@ class EGLHeadlessServer:
                         logger.info("Bitstream dump complete: %s", self._dump_path)
                 except Exception as e:
                     logger.debug("Bitstream dump error: %s", e)
-            ts = time.time()
+            # Use capture start wall-clock from the render thread if provided; fallback to now
+            cap_ts = float(capture_wall_ts) if capture_wall_ts is not None else time.time()
             flags = 0x01 if is_key else 0
-            header = struct.pack('!IdIIBBH', self._seq, ts, self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
-            self._seq = (self._seq + 1) & 0xFFFFFFFF
-            data = header + avcc_pkt
-            # Optional keyframe logging for diagnostics
-            try:
-                if is_key:
-                    logger.info("Server: IDR sent (seq=%d)", (self._seq - 1) & 0xFFFFFFFF)
-            except Exception:
-                pass
-            
             # Enqueue via callback that handles QueueFull inside the event loop thread
             def _enqueue():
                 try:
-                    self._frame_q.put_nowait(data)
+                    self._frame_q.put_nowait((avcc_pkt, flags, cap_ts))
                     try:
-                        self.metrics.inc('napari_cuda_frames_total')
-                        self.metrics.inc('napari_cuda_bytes_total', len(avcc_pkt))
                         self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
-                        if flags & 0x01:
-                            self.metrics.inc('napari_cuda_keyframes_total')
-                            self._last_key_seq = (self._seq - 1) & 0xFFFFFFFF
-                            self._last_key_ts = ts
-                            
                     except Exception:
                         pass
                 except asyncio.QueueFull:
                     try:
-                        self._drain_and_put(data)
+                        self._drain_and_put((avcc_pkt, flags, cap_ts))
                         try:
                             self.metrics.inc('napari_cuda_frames_dropped')
                             self._drops_total += 1
@@ -278,7 +270,9 @@ class EGLHeadlessServer:
                         pass
                     # Track last keyframe timestamp/seq for metrics if needed
                     # Keyframe tracking is handled after AVCC packing in on_frame
-                    on_frame(pkt, flags)
+                    # Forward the encoder output along with the capture wall timestamp
+                    cap_ts = getattr(timings, 'capture_wall_ts', None)
+                    on_frame(pkt, flags, cap_ts)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
                     if sleep > 0:
@@ -305,7 +299,7 @@ class EGLHeadlessServer:
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
 
-    def _drain_and_put(self, data: bytes) -> None:
+    def _drain_and_put(self, data: tuple[bytes, int, float]) -> None:
         try:
             while not self._frame_q.empty():
                 self._frame_q.get_nowait()
@@ -397,7 +391,10 @@ class EGLHeadlessServer:
                                 except Exception as e:
                                     logger.debug("Keyframe watchdog error: %s", e)
                             try:
-                                asyncio.create_task(_kf_watchdog(self._last_key_seq))
+                                # Cancel previous watchdog before starting a new one
+                                if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
+                                    self._kf_watchdog_task.cancel()
+                                self._kf_watchdog_task = asyncio.create_task(_kf_watchdog(self._last_key_seq))
                             except Exception:
                                 pass
                             # Re-broadcast current video config if known to tighten init window
@@ -479,7 +476,10 @@ class EGLHeadlessServer:
         loop = asyncio.get_running_loop()
         tick = 1.0 / max(1.0, target_fps)
         next_t = loop.time()
-        latest: Optional[bytes] = None
+        # Map loop.time() monotonic clock to wall time for stable header timestamps
+        mono0 = loop.time()
+        wall0 = time.time()
+        latest: Optional[tuple[bytes, int, float]] = None
 
         async def _fill_until(deadline: float) -> None:
             nonlocal latest
@@ -496,39 +496,31 @@ class EGLHeadlessServer:
             except asyncio.TimeoutError:
                 return
 
-        async def _fill_and_find_key(deadline: float) -> Optional[bytes]:
+        async def _fill_and_find_key(deadline: float) -> Optional[tuple[bytes, int, float]]:
             """Drain queue up to deadline and return the FIRST keyframe seen (if any).
 
             If no keyframe found, returns None and leaves `latest` pointing to the newest item.
             """
             nonlocal latest
-            found: Optional[bytes] = None
+            found: Optional[tuple[bytes, int, float]] = None
             remaining = max(0.0, deadline - loop.time())
             try:
                 item = await asyncio.wait_for(self._frame_q.get(), timeout=remaining if remaining > 0 else 1e-6)
             except asyncio.TimeoutError:
                 return None
             latest = item
-            buf = item
-            if len(buf) >= struct.calcsize('!IdIIBBH'):
-                try:
-                    _seq, _ts, _w, _h, _codec, _flags, _res = struct.unpack('!IdIIBBH', buf[:struct.calcsize('!IdIIBBH')])
-                    if (_flags & 0x01) != 0:
-                        found = buf
-                except Exception:
-                    pass
+            payload, flags, _cap_ts = item
+            if (flags & 0x01) != 0:
+                found = item
             # Drain the rest without waiting, but capture the first keyframe encountered
             while True:
                 try:
-                    buf = self._frame_q.get_nowait()
-                    latest = buf
-                    if found is None and len(buf) >= struct.calcsize('!IdIIBBH'):
-                        try:
-                            _seq, _ts, _w, _h, _codec, _flags, _res = struct.unpack('!IdIIBBH', buf[:struct.calcsize('!IdIIBBH')])
-                            if (_flags & 0x01) != 0:
-                                found = buf
-                        except Exception:
-                            pass
+                    it2 = self._frame_q.get_nowait()
+                    latest = it2
+                    if found is None:
+                        _payload2, flags2, _cap_ts2 = it2
+                        if (flags2 & 0x01) != 0:
+                            found = it2
                 except asyncio.QueueEmpty:
                     break
             return found
@@ -536,10 +528,42 @@ class EGLHeadlessServer:
         while True:
             # Immediate keyframe bypass for new clients or after keyframe request
             if self._bypass_until_key:
-                key_buf = await _fill_and_find_key(loop.time() + 0.050)
-                if key_buf is not None:
+                key_item = await _fill_and_find_key(loop.time() + 0.050)
+                if key_item is not None:
                     if self._clients:
-                        await asyncio.gather(*(self._safe_send(c, key_buf) for c in list(self._clients)), return_exceptions=True)
+                        # Build header with broadcaster-paced wall time and send
+                        payload, flags, cap_ts = key_item
+                        send_ts_mono = loop.time()
+                        send_ts_wall = wall0 + (send_ts_mono - mono0)
+                        seq = self._seq & 0xFFFFFFFF
+                        header = struct.pack('!IdIIBBH', seq, float(send_ts_wall), self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
+                        to_send = header + payload
+                        await asyncio.gather(*(self._safe_send(c, to_send) for c in list(self._clients)), return_exceptions=True)
+                        # Update counters/metrics and log
+                        try:
+                            self.metrics.inc('napari_cuda_frames_total')
+                            self.metrics.inc('napari_cuda_bytes_total', len(payload))
+                            if flags & 0x01:
+                                self.metrics.inc('napari_cuda_keyframes_total')
+                                self._last_key_seq = seq
+                                self._last_key_ts = float(send_ts_wall)
+                                try:
+                                    self.metrics.set('napari_cuda_last_key_seq', float(self._last_key_seq))
+                                    self.metrics.set('napari_cuda_last_key_ts', float(self._last_key_ts))
+                                except Exception:
+                                    pass
+                                # Cancel any pending keyframe watchdog once a keyframe is observed
+                                try:
+                                    if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
+                                        self._kf_watchdog_task.cancel()
+                                except Exception:
+                                    pass
+                            if self._log_sends:
+                                cap_to_send_ms = (send_ts_wall - float(cap_ts)) * 1000.0
+                                logger.info("Send frame seq=%d send_ts=%.6f cap_ts=%.6f delta=%.3f ms (bypass)", seq, send_ts_mono, float(cap_ts), cap_to_send_ms)
+                        except Exception:
+                            pass
+                        self._seq = (self._seq + 1) & 0xFFFFFFFF
                     latest = None
                     self._bypass_until_key = False
                     next_t = loop.time() + tick
@@ -554,7 +578,38 @@ class EGLHeadlessServer:
 
             if latest is not None:
                 if self._clients:
-                    await asyncio.gather(*(self._safe_send(c, latest) for c in list(self._clients)), return_exceptions=True)
+                    payload, flags, cap_ts = latest
+                    send_ts_mono = loop.time()
+                    send_ts_wall = wall0 + (send_ts_mono - mono0)
+                    seq = self._seq & 0xFFFFFFFF
+                    header = struct.pack('!IdIIBBH', seq, float(send_ts_wall), self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
+                    to_send = header + payload
+                    await asyncio.gather(*(self._safe_send(c, to_send) for c in list(self._clients)), return_exceptions=True)
+                    # Update counters/metrics and log
+                    try:
+                        self.metrics.inc('napari_cuda_frames_total')
+                        self.metrics.inc('napari_cuda_bytes_total', len(payload))
+                        if flags & 0x01:
+                            self.metrics.inc('napari_cuda_keyframes_total')
+                            self._last_key_seq = seq
+                            self._last_key_ts = float(send_ts_wall)
+                            try:
+                                self.metrics.set('napari_cuda_last_key_seq', float(self._last_key_seq))
+                                self.metrics.set('napari_cuda_last_key_ts', float(self._last_key_ts))
+                            except Exception:
+                                pass
+                            # Cancel any pending keyframe watchdog once a keyframe is observed
+                            try:
+                                if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
+                                    self._kf_watchdog_task.cancel()
+                            except Exception:
+                                pass
+                        if self._log_sends:
+                            cap_to_send_ms = (send_ts_wall - float(cap_ts)) * 1000.0
+                            logger.info("Send frame seq=%d send_ts=%.6f cap_ts=%.6f delta=%.3f ms", seq, send_ts_mono, float(cap_ts), cap_to_send_ms)
+                    except Exception:
+                        pass
+                    self._seq = (self._seq + 1) & 0xFFFFFFFF
                     # Simple send timing log for smoothing diagnostics
                     try:
                         now2 = loop.time()
@@ -649,12 +704,13 @@ def main() -> None:
     parser.add_argument('--animate-dps', type=float, default=float(os.getenv('NAPARI_CUDA_TURNTABLE_DPS', '30.0')),
                         help='Turntable speed in degrees per second (default 30)')
     parser.add_argument('--volume', action='store_true', help='Use 3D volume visual')
+    parser.add_argument('--log-sends', action='store_true', help='Log per-send timing (seq, send_ts, cap_ts, delta)')
     args = parser.parse_args()
 
     async def run():
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
-                                animate=args.animate, animate_dps=args.animate_dps)
+                                animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends))
         await srv.start()
 
     asyncio.run(run())

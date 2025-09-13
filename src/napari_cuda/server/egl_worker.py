@@ -54,6 +54,8 @@ class FrameTimings:
     pack_ms: float
     total_ms: float
     packet_bytes: Optional[int]
+    # Wall-clock timestamp (seconds) at frame capture start (server clock)
+    capture_wall_ts: float = 0.0
 
 
 @dataclass
@@ -445,14 +447,14 @@ class EGLRendererWorker:
                 self._encoder = None
             try:
                 self._init_encoder()
-                logger.info("NVENC encoder reset; next frame should include IDR")
+                logger.debug("NVENC encoder reset; next frame should include IDR")
             except Exception as e:
                 logger.exception("Failed to reset NVENC encoder: %s", e)
 
     def force_idr(self) -> None:
         """Best-effort request to force next frame as IDR via Reconfigure."""
         try:
-            logger.info("Requesting encoder force IDR")
+            logger.debug("Requesting encoder force IDR")
         except Exception:
             pass
         try:
@@ -582,6 +584,8 @@ class EGLRendererWorker:
         Flags bit 0x01 indicates keyframe (IDR/CRA).
         """
         # Debug env is logged once at init by DebugDumper
+        # Capture wall and monotonic timestamps at frame start
+        wall_ts = time.time()
         t0 = time.perf_counter()
         t_r0 = time.perf_counter()
         # Optional animation
@@ -807,7 +811,7 @@ class EGLRendererWorker:
                                     break
                         else:
                             keyframe = _packet_is_keyframe(pkt_obj)
-                    logger.info("Encode frame %d: keyframe=%s", self._frame_index, bool(keyframe))
+                    logger.debug("Encode frame %d: keyframe=%s", self._frame_index, bool(keyframe))
             except Exception as e:
                 logger.debug("Keyframe instrumentation skipped: %s", e)
         # If encoder wasn't available, set NVENC time to 0
@@ -815,7 +819,19 @@ class EGLRendererWorker:
         pack_ms = ((t_p1 - t_p0) * 1000.0) if enc is not None else 0.0
         total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
         pkt_bytes = None
-        timings = FrameTimings(render_ms, blit_gpu_ns, blit_cpu_ms, map_ms, copy_ms, convert_ms, encode_ms, pack_ms, total_ms, pkt_bytes)
+        timings = FrameTimings(
+            render_ms,
+            blit_gpu_ns,
+            blit_cpu_ms,
+            map_ms,
+            copy_ms,
+            convert_ms,
+            encode_ms,
+            pack_ms,
+            total_ms,
+            pkt_bytes,
+            wall_ts,
+        )
         flags = 0
         return timings, pkt_obj, flags
 

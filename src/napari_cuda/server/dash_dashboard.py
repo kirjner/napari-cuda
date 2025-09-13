@@ -138,6 +138,11 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
                 html.Div(id='clients', className='value'),
                 html.Div('clients', className='unit'),
             ], className='tile'),
+            html.Div([
+                html.Div('Last IDR', className='label'),
+                html.Div(id='last_idr_age', className='value'),
+                html.Div(id='last_idr_seq', className='unit'),
+            ], className='tile'),
         ], className='tiles'),
         html.Div([
             dcc.Graph(id='g_total'),
@@ -186,6 +191,8 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         Output('store_copy', 'data'),
         Output('store_pack', 'data'),
         Output('store_bitrate', 'data'),
+        Output('last_idr_age', 'children'),
+        Output('last_idr_seq', 'children'),
         Input('tick', 'n_intervals'),
         State('store_total', 'data'),
         State('store_encode', 'data'),
@@ -237,6 +244,13 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
         dropped = int(c.get('napari_cuda_frames_dropped', 0))
         clients = int(float(g.get('napari_cuda_pixel_clients', 0.0)))
 
+        # Last IDR age and seq
+        last_idr_ts = float(g.get('napari_cuda_last_key_ts', 0.0) or 0.0)
+        last_idr_seq = int(float(g.get('napari_cuda_last_key_seq', 0.0) or 0.0)) if g.get('napari_cuda_last_key_seq') is not None else 0
+        age_s = (float(snap.get('ts', 0.0)) - last_idr_ts) if last_idr_ts > 0 else None
+        last_idr_age_str = f"{age_s:.1f}s" if age_s is not None else "—"
+        last_idr_seq_str = f"seq {last_idr_seq:,}" if last_idr_seq else "seq —"
+
         # Compute instantaneous bitrate (Mbps) from byte delta over tick interval
         last_b = float((s_meta or {}).get('last_b', 0.0))
         last_ts = float((s_meta or {}).get('last_ts', 0.0))
@@ -276,6 +290,8 @@ def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int
             s_copy,
             s_pack,
             s_bitrate,
+            last_idr_age_str,
+            last_idr_seq_str,
         )
 
     # Note: a previous compatibility callback duplicated Outputs and blocked updates.
