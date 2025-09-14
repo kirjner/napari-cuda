@@ -192,3 +192,5 @@ testdata/
 .env.hpc
 logs/
 uv.lock
+backups/
+profile/

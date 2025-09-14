@@ -82,10 +82,19 @@ static PyObject* m_counts(PyObject* self, PyObject* args){
     return Py_BuildValue("(III)", a,b,c);
 }
 
+static PyObject* m_stats(PyObject* self, PyObject* args){
+    PyVTSession* obj; if (!PyArg_ParseTuple(args, "O", (PyObject**)&obj)) return NULL;
+    uint32_t a=0,b=0,c=0,d=0,e=0,f=0;
+    vt_stats(obj->sess, &a, &b, &c, &d, &e, &f);
+    return Py_BuildValue("(IIIIII)", a,b,c,d,e,f);
+}
+
 // Forward declarations for GL helper bindings
 #ifdef __APPLE__
 static PyObject* m_gl_cache_init(PyObject*, PyObject*);
 static PyObject* m_gl_cache_destroy(PyObject*, PyObject*);
+static PyObject* m_gl_cache_flush(PyObject*, PyObject*);
+static PyObject* m_gl_cache_counts(PyObject*, PyObject*);
 static PyObject* m_alloc_pb_bgra(PyObject*, PyObject*);
 static PyObject* m_pixel_format(PyObject*, PyObject*);
 static PyObject* m_gl_tex_from_pb(PyObject*, PyObject*);
@@ -102,6 +111,7 @@ static PyMethodDef Methods[] = {
     {"release_frame", m_release_frame, METH_VARARGS, "Release CVPixelBufferRef"},
     {"retain_frame", m_retain_frame, METH_VARARGS, "Retain CVPixelBufferRef"},
     {"counts", m_counts, METH_VARARGS, "Get (submits, outputs, qlen)"},
+    {"stats", m_stats, METH_VARARGS, "Get (submits, outputs, qlen, drops, retains, releases)"},
     // map_to_rgb(capsule) -> (bytes, width, height)
 #ifdef __APPLE__
     {"map_to_rgb", m_map_to_rgb_impl, METH_VARARGS, "Map CVPixelBufferRef to RGB bytes (w,h)"},
@@ -111,6 +121,8 @@ static PyMethodDef Methods[] = {
     // GL zero-copy helpers
     {"gl_cache_init_for_current_context", m_gl_cache_init, METH_NOARGS, "Init GL texture cache for current context"},
     {"gl_cache_destroy", m_gl_cache_destroy, METH_VARARGS, "Destroy GL cache"},
+    {"gl_cache_flush", m_gl_cache_flush, METH_VARARGS, "Flush GL texture cache"},
+    {"gl_cache_counts", m_gl_cache_counts, METH_VARARGS, "Get GL cache (creates, releases)"},
     {"alloc_pixelbuffer_bgra", m_alloc_pb_bgra, METH_VARARGS, "Allocate BGRA CVPixelBuffer (optionally IOSurface)"},
     {"pixel_format", m_pixel_format, METH_VARARGS, "Get pixel format of CVPixelBufferRef"},
     {"gl_tex_from_cvpixelbuffer", m_gl_tex_from_pb, METH_VARARGS, "Create GL texture from CVPixelBuffer"},
@@ -125,7 +137,8 @@ static struct PyModuleDef module = {
     "_vt",
     "VT shim module",
     -1,
-    Methods
+    Methods,
+    NULL
 };
 
 PyMODINIT_FUNC PyInit__vt(void){
@@ -249,6 +262,20 @@ static PyObject* m_gl_cache_destroy(PyObject* self, PyObject* args){
     Py_RETURN_NONE;
 }
 
+static PyObject* m_gl_cache_flush(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* p = PyCapsule_GetPointer(cap, "GLCache");
+    if (p) gl_cache_flush((gl_cache_t*)p);
+    Py_RETURN_NONE;
+}
+
+static PyObject* m_gl_cache_counts(PyObject* self, PyObject* args){
+    PyObject* cap; if (!PyArg_ParseTuple(args, "O", &cap)) return NULL;
+    void* p = PyCapsule_GetPointer(cap, "GLCache");
+    uint32_t a=0,b=0; if (p) gl_cache_counts((gl_cache_t*)p, &a, &b);
+    return Py_BuildValue("(II)", a, b);
+}
+
 static PyObject* m_alloc_pb_bgra(PyObject* self, PyObject* args){
     int w,h, ios=1; if (!PyArg_ParseTuple(args, "ii|p", &w,&h,&ios)) return NULL;
     void* pb = alloc_pixelbuffer_bgra(w,h, ios);
@@ -309,6 +336,8 @@ static PyObject* m_pb_unlock_base(PyObject* self, PyObject* args){
 #else
 static PyObject* m_gl_cache_init(PyObject* self, PyObject* noargs){ Py_RETURN_NONE; }
 static PyObject* m_gl_cache_destroy(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_gl_cache_flush(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
+static PyObject* m_gl_cache_counts(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
 static PyObject* m_alloc_pb_bgra(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
 static PyObject* m_pixel_format(PyObject* self, PyObject* args){ Py_RETURN_NONE; }
 static PyObject* m_gl_tex_from_pb(PyObject* self, PyObject* args){ Py_RETURN_NONE; }

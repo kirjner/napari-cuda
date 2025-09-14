@@ -40,12 +40,24 @@ void vt_retain_frame(void* buf);
 
 // Diagnostics counters
 void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* qlen);
+// Extended stats: adds drops (queue overflow), retains and releases accounted per-session
+void vt_stats(vt_session_t* s,
+              uint32_t* submits,
+              uint32_t* outputs,
+              uint32_t* qlen,
+              uint32_t* drops,
+              uint32_t* retains,
+              uint32_t* releases);
 
 // --- OpenGL / zero-copy helpers (macOS only) ---
 // Initialize a CVOpenGLTextureCache for the current OpenGL context. Returns NULL on failure.
 gl_cache_t* gl_cache_init_for_current_context(void);
 // Destroy a GL cache created above.
 void gl_cache_destroy(gl_cache_t* cache);
+// Flush the GL texture cache to release any internally cached textures.
+void gl_cache_flush(gl_cache_t* cache);
+// Retrieve GL cache counters: number of created and released CVOpenGLTextureRefs.
+void gl_cache_counts(gl_cache_t* cache, uint32_t* creates, uint32_t* releases);
 // Allocate a BGRA CVPixelBuffer compatible with OpenGL. If use_iosurface is nonzero,
 // the buffer will be IOSurface-backed for optimal interop.
 void* alloc_pixelbuffer_bgra(int width, int height, int use_iosurface);

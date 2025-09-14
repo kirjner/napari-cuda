@@ -15,6 +15,7 @@ class VTLiveDecoder:
     - decode(avcc_au: bytes, ts: Optional[float]) -> bool
     - get_frame_nowait() -> Optional[Tuple[object, Optional[float]]]
     - counts() -> tuple[int, int, int]
+    - stats() -> tuple[int, int, int, int, int, int]
     - flush() -> None
     """
 
@@ -40,3 +41,6 @@ class VTLiveDecoder:
 
     def flush(self) -> None:
         self._shim.flush()
+
+    def stats(self) -> tuple[int, int, int, int, int, int]:
+        return self._shim.stats()

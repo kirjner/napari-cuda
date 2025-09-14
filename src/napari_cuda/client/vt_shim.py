@@ -57,6 +57,15 @@ class VTShimDecoder:
             logger.debug("VTShimDecoder.counts: failed", exc_info=True)
             return (0, 0, 0)
 
+    def stats(self) -> Tuple[int, int, int, int, int, int]:
+        """Return extended stats: (submits, outputs, qlen, drops, retains, releases)."""
+        try:
+            a, b, c, d, e, f = self._vt.stats(self._sess)
+            return int(a), int(b), int(c), int(d), int(e), int(f)
+        except Exception:
+            logger.debug("VTShimDecoder.stats: failed", exc_info=True)
+            return (0, 0, 0, 0, 0, 0)
+
     def decode(self, avcc_au: bytes, pts: Optional[float]) -> bool:
         try:
             rc = self._vt.decode(self._sess, avcc_au, float(pts) if pts is not None else 0.0)

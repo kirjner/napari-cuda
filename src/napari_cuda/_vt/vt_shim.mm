@@ -6,6 +6,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl.h>
+#define COREVIDEO_SILENCE_GL_DEPRECATION 1
 #import <CoreVideo/CVOpenGLTexture.h>
 #import <CoreVideo/CVOpenGLTextureCache.h>
 #include <stdlib.h>   // getenv
@@ -34,11 +35,17 @@ struct vt_session {
     // counters
     uint32_t submits;
     uint32_t outputs;
+    uint32_t drops;    // queue overflow drops of oldest
+    uint32_t retains;  // retain_frame() calls attributed to this session
+    uint32_t releases; // release_frame() calls attributed to this session
+    int trace;         // enable trace logging
 };
 
 // GL cache wrapper
 struct gl_cache {
     CVOpenGLTextureCacheRef cache;
+    uint32_t creates;
+    uint32_t releases;
 };
 
 static void vt_output_cb(void *refcon,
@@ -55,6 +62,14 @@ static void vt_output_cb(void *refcon,
     }
     // Retain for cross-thread handoff
     CFRetain(imageBuffer);
+    // Tag buffer with session pointer for later per-session retain/release accounting
+    static CFStringRef kNapariVTSessionKey = CFSTR("napari_cuda.vt.session");
+    intptr_t sp = (intptr_t)s;
+    CFNumberRef spnum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &sp);
+    if (spnum) {
+        CVBufferSetAttachment(imageBuffer, kNapariVTSessionKey, spnum, kCVAttachmentMode_ShouldNotPropagate);
+        CFRelease(spnum);
+    }
     double pts_s = NAN;
     if (CMTIME_IS_NUMERIC(pts)) {
         pts_s = (double)pts.value / (double)pts.timescale;
@@ -64,6 +79,7 @@ static void vt_output_cb(void *refcon,
     if (s->qcount == s->qcap) {
         vt_item_t *old = &s->q[s->qhead];
         if (old->buf) CFRelease(old->buf);
+        __sync_fetch_and_add(&s->drops, 1);
         s->qhead = (s->qhead + 1) % s->qcap;
         s->qcount--;
     }
@@ -73,6 +89,9 @@ static void vt_output_cb(void *refcon,
     s->qtail = (s->qtail + 1) % s->qcap;
     s->qcount++;
     s->outputs++;
+    if (s->trace && (s->outputs % 120u) == 0u) {
+        fprintf(stderr, "[vt] outputs=%u qlen=%d\n", s->outputs, s->qcount);
+    }
     pthread_cond_signal(&s->cv);
     pthread_mutex_unlock(&s->mu);
 }
@@ -117,7 +136,21 @@ static int parse_avcc(const uint8_t* avcc, size_t n, const uint8_t*** sets, size
 vt_session_t* vt_create(const uint8_t* avcc, size_t avcc_len, int width, int height, uint32_t pixfmt) {
     vt_session_t* s = (vt_session_t*)calloc(1, sizeof(vt_session_t));
     if (!s) return NULL;
-    s->qcap = 16; s->q = (vt_item_t*)calloc(s->qcap, sizeof(vt_item_t));
+    const char* tr = getenv("NAPARI_CUDA_VT_TRACE");
+    if (tr && *tr) {
+        if (tr[0]=='1' || strcasecmp(tr, "true")==0 || strcasecmp(tr, "yes")==0 || strcasecmp(tr, "on")==0) s->trace = 1;
+    }
+    // Ring queue capacity (env-tunable). Smaller caps reduce retained CVPixelBuffers.
+    int cap = 16;
+    const char* qcenv = getenv("NAPARI_CUDA_VT_QCAP");
+    if (qcenv && *qcenv) {
+        int v = atoi(qcenv);
+        if (v < 2) v = 2;
+        if (v > 64) v = 64;
+        cap = v;
+    }
+    s->qcap = cap;
+    s->q = (vt_item_t*)calloc(s->qcap, sizeof(vt_item_t));
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
     s->requested_pixfmt = pixfmt;
@@ -169,6 +202,9 @@ vt_session_t* vt_create(const uint8_t* avcc, size_t avcc_len, int width, int hei
 
     // Real-time hint
     VTSessionSetProperty(sess, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
+    if (s->trace) {
+        fprintf(stderr, "[vt] session created pixfmt=%u qcap=%d\n", (unsigned int)pixfmt, s->qcap);
+    }
     return s;
 fail:
     if (pfnum) CFRelease(pfnum);
@@ -253,11 +289,16 @@ int vt_decode(vt_session_t* s, const uint8_t* avcc_au, size_t len, double pts_se
     CFRelease(sb);
     if (st != noErr) return -5;
     __sync_fetch_and_add(&s->submits, 1);
+    if (s->trace && (s->submits % 120u) == 0u) {
+        fprintf(stderr, "[vt] submits=%u\n", s->submits);
+    }
     return 0;
 }
 
 int vt_flush(vt_session_t* s) {
     if (!s || !s->session) return -1;
+    // Proactively finish delayed frames (e.g., B-frames) then wait for async completion.
+    VTDecompressionSessionFinishDelayedFrames(s->session);
     VTDecompressionSessionWaitForAsynchronousFrames(s->session);
     return 0;
 }
@@ -290,11 +331,35 @@ int vt_get_frame(vt_session_t* s, double timeout_s, void** out_buf, double* out_
 }
 
 void vt_release_frame(void* buf) {
-    if (buf) CFRelease((CFTypeRef)buf);
+    if (!buf) return;
+    // Attribute the release to the originating session if available
+    static CFStringRef kNapariVTSessionKey = CFSTR("napari_cuda.vt.session");
+    CFTypeRef att = CVBufferCopyAttachment((CVImageBufferRef)buf, kNapariVTSessionKey, NULL);
+    if (att && CFGetTypeID(att) == CFNumberGetTypeID()) {
+        intptr_t sp = 0;
+        if (CFNumberGetValue((CFNumberRef)att, kCFNumberSInt64Type, &sp) && sp) {
+            vt_session_t* s = (vt_session_t*)sp;
+            __sync_fetch_and_add(&s->releases, 1);
+        }
+    }
+    CFRelease((CFTypeRef)buf);
+    if (att) CFRelease(att);
 }
 
 void vt_retain_frame(void* buf) {
-    if (buf) CFRetain((CFTypeRef)buf);
+    if (!buf) return;
+    // Attribute the retain to the originating session if available
+    static CFStringRef kNapariVTSessionKey = CFSTR("napari_cuda.vt.session");
+    CFTypeRef att = CVBufferCopyAttachment((CVImageBufferRef)buf, kNapariVTSessionKey, NULL);
+    if (att && CFGetTypeID(att) == CFNumberGetTypeID()) {
+        intptr_t sp = 0;
+        if (CFNumberGetValue((CFNumberRef)att, kCFNumberSInt64Type, &sp) && sp) {
+            vt_session_t* s = (vt_session_t*)sp;
+            __sync_fetch_and_add(&s->retains, 1);
+        }
+    }
+    CFRetain((CFTypeRef)buf);
+    if (att) CFRelease(att);
 }
 
 void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* qlen) {
@@ -306,6 +371,26 @@ void vt_counts(vt_session_t* s, uint32_t* submits, uint32_t* outputs, uint32_t* 
         *qlen = (uint32_t)s->qcount;
         pthread_mutex_unlock(&s->mu);
     }
+}
+
+void vt_stats(vt_session_t* s,
+              uint32_t* submits,
+              uint32_t* outputs,
+              uint32_t* qlen,
+              uint32_t* drops,
+              uint32_t* retains,
+              uint32_t* releases) {
+    if (!s) return;
+    if (submits) *submits = s->submits;
+    if (outputs) *outputs = s->outputs;
+    if (qlen) {
+        pthread_mutex_lock(&s->mu);
+        *qlen = (uint32_t)s->qcount;
+        pthread_mutex_unlock(&s->mu);
+    }
+    if (drops) *drops = s->drops;
+    if (retains) *retains = s->retains;
+    if (releases) *releases = s->releases;
 }
 
 // ---- OpenGL helpers ----
@@ -327,6 +412,11 @@ void gl_cache_destroy(gl_cache_t* cache) {
     if (!cache) return;
     if (cache->cache) CFRelease(cache->cache);
     free(cache);
+}
+
+void gl_cache_flush(gl_cache_t* cache) {
+    if (!cache || !cache->cache) return;
+    CVOpenGLTextureCacheFlush(cache->cache, 0);
 }
 
 void* alloc_pixelbuffer_bgra(int width, int height, int use_iosurface) {
@@ -373,6 +463,7 @@ int gl_tex_from_cvpixelbuffer(gl_cache_t* cache, void* cvpixelbuffer, void** out
     // Create texture with default attributes (may be GL_TEXTURE_RECTANGLE)
     CVReturn rc = CVOpenGLTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache->cache, pb, NULL, &tex);
     if (rc != kCVReturnSuccess || !tex) return 0;
+    __sync_fetch_and_add(&cache->creates, 1);
     GLenum target = CVOpenGLTextureGetTarget(tex);
     GLuint name = CVOpenGLTextureGetName(tex);
     size_t w = CVPixelBufferGetWidth(pb);
@@ -385,7 +476,16 @@ int gl_tex_from_cvpixelbuffer(gl_cache_t* cache, void* cvpixelbuffer, void** out
 }
 
 void gl_release_tex(void* cvgltex) {
-    if (cvgltex) CFRelease((CFTypeRef)cvgltex);
+    if (cvgltex) {
+        CFRelease((CFTypeRef)cvgltex);
+        // We cannot directly access gl_cache here; counts are best-effort via flush caller.
+    }
+}
+
+void gl_cache_counts(gl_cache_t* cache, uint32_t* creates, uint32_t* releases) {
+    if (!cache) return;
+    if (creates) *creates = cache->creates;
+    if (releases) *releases = cache->releases; // currently we don't track releases precisely
 }
 
 #else

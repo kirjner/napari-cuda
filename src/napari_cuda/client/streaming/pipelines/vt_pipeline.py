@@ -40,7 +40,13 @@ class VTPipeline:
         self._presenter = presenter
         self._source_mux = source_mux
         self._scene_canvas = scene_canvas
-        self._in_q: "queue.Queue[tuple[bytes | memoryview, float | None]]" = queue.Queue(maxsize=64)
+        # Input queue capacity (tunable via env to limit in-flight frames)
+        import os as _os
+        try:
+            inq_cap = int(_os.getenv('NAPARI_CUDA_VT_INPUT_Q', '64') or '64')
+        except Exception:
+            inq_cap = 64
+        self._in_q: "queue.Queue[tuple[bytes | memoryview, float | None]]" = queue.Queue(maxsize=max(2, int(inq_cap)))
         self._backlog_trigger = int(backlog_trigger)
         self._decoder = None  # VTLiveDecoder-like
         self._started = False
@@ -67,7 +73,11 @@ class VTPipeline:
         self._on_backlog_gate = on_backlog_gate or (lambda: None)
         self._request_keyframe = request_keyframe or (lambda: None)
         self._on_cache_last = on_cache_last or (lambda _pb, _persistent: None)
-        # Last VT payload for redraw fallback
+        # Last VT payload for redraw fallback (optional cache)
+        try:
+            self._hold_cache = ((_os.getenv('NAPARI_CUDA_VT_HOLD_CACHE', '1') or '1').lower() in ('1','true','yes','on'))
+        except Exception:
+            self._hold_cache = True
         self._last_payload = None  # type: ignore[var-annotated]
         self._last_persistent = False
         # Scheduling hook to coordinator (optional)
@@ -118,27 +128,26 @@ class VTPipeline:
                             continue
                         # Present and cache last
                         from napari_cuda import _vt as vt  # type: ignore
-                        # Retain twice:
-                        #  - once for the pipeline's last-frame cache (released when cache updates)
-                        #  - once for the presenter-owned buffer entry (released when consumed/trimmed)
-                        vt.retain_frame(img_buf)  # cache retain
-                        # Always release the previously cached payload. The
-                        # cached copy is our own extra retain specifically for
-                        # redraw fallback. Without releasing it here, we'd leak
-                        # a CVPixelBuffer per decoded frame, eventually causing
-                        # VT/GL failures and a visible freeze while the HUD
-                        # keeps updating.
-                        if self._last_payload is not None:
-                            try:
-                                vt.release_frame(self._last_payload)
-                            except Exception:
-                                logger.debug("VTPipeline: release previous cached payload failed", exc_info=True)
-                        self._last_payload = img_buf
-                        self._last_persistent = True
-                        self._on_cache_last(self._last_payload, True)
-                        # Give presenter its own retain so it can safely preview without
-                        # racing the cache's lifecycle.
-                        vt.retain_frame(img_buf)  # presenter retain
+                        # Optionally keep a last-frame cache; otherwise avoid extra retains
+                        if self._hold_cache:
+                            # Retain once for cache
+                            vt.retain_frame(img_buf)
+                            # Release previously cached payload
+                            if self._last_payload is not None:
+                                try:
+                                    vt.release_frame(self._last_payload)
+                                except Exception:
+                                    logger.debug("VTPipeline: release previous cached payload failed", exc_info=True)
+                            self._last_payload = img_buf
+                            self._last_persistent = True
+                            self._on_cache_last(self._last_payload, True)
+                        else:
+                            # No cache retained
+                            self._last_payload = None
+                            self._last_persistent = False
+                            self._on_cache_last(None, False)
+                        # Retain once for presenter-owned buffer entry
+                        vt.retain_frame(img_buf)
                         self._presenter.submit(
                             SubmittedFrame(
                                 source=Source.VT,
@@ -148,6 +157,12 @@ class VTPipeline:
                                 release_cb=vt.release_frame,
                             )
                         )
+                        # Release the base reference obtained from vt_get_frame();
+                        # retains above keep the buffer alive for cache/presenter as needed.
+                        try:
+                            vt.release_frame(img_buf)
+                        except Exception:
+                            logger.debug("VTPipeline: base release failed", exc_info=True)
                         # Nudge coordinator to schedule next-due wake (thread-safe via proxy)
                         try:
                             self._schedule_next_wake()
@@ -173,6 +188,37 @@ class VTPipeline:
 
         Thread(target=_submit_worker, daemon=True).start()
         Thread(target=_drain_worker, daemon=True).start()
+        # Optional periodic VT debug logging
+        import os as _os
+        _vt_debug = (_os.getenv('NAPARI_CUDA_VT_DEBUG', '0') or '0') in ('1','true','yes','on')
+        if _vt_debug:
+            def _vt_debugger() -> None:
+                last = None
+                while True:
+                    try:
+                        dec = self._decoder
+                        if dec is not None and hasattr(dec, 'stats'):
+                            s = dec.stats()  # type: ignore[attr-defined]
+                            # s: (submits, outputs, qlen, drops, retains, releases)
+                            if last is not None:
+                                dt_sub = s[0] - last[0]
+                                dt_out = s[1] - last[1]
+                                dt_ret = s[4] - last[4]
+                                dt_rel = s[5] - last[5]
+                                outstanding = s[4] - s[5]
+                                logger.info(
+                                    "VT dbg: sub=%d out=%d q=%d drop=%d ret=%d rel=%d outstd=%d (+ret=%d +rel=%d)",
+                                    s[0], s[1], s[2], s[3], s[4], s[5], outstanding, dt_ret, dt_rel,
+                                )
+                            else:
+                                logger.info(
+                                    "VT dbg: sub=%d out=%d q=%d drop=%d ret=%d rel=%d", s[0], s[1], s[2], s[3], s[4], s[5]
+                                )
+                            last = s
+                        time.sleep(1.0)
+                    except Exception:
+                        time.sleep(1.0)
+            Thread(target=_vt_debugger, daemon=True).start()
         self._started = True
 
     def set_decoder(self, dec: Optional[object]) -> None:

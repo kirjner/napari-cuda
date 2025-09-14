@@ -45,6 +45,18 @@ class GLRenderer:
         # VT zero-copy state (initialized lazily inside draw when needed)
         self._vt = None  # type: ignore
         self._vt_cache = None  # GLCache capsule
+        self._gl_dbg_last_log: float = 0.0
+        self._gl_frame_counter: int = 0
+        # Debug safety: force CPU mapping instead of zero-copy
+        try:
+            import os as _os
+            self._vt_force_cpu = (_os.getenv('NAPARI_CUDA_VT_FORCE_CPU', '0') or '0') in ('1','true','yes','on')
+            self._vt_gl_safe = (_os.getenv('NAPARI_CUDA_VT_GL_SAFE', '0') or '0') in ('1','true','yes','on')
+            self._vt_gl_flush_every = int(_os.getenv('NAPARI_CUDA_VT_GL_FLUSH_EVERY', '30') or '30')
+        except Exception:
+            self._vt_force_cpu = False
+            self._vt_gl_safe = False
+            self._vt_gl_flush_every = 30
         # Raw-GL programs/VBO for rectangle/2D textures
         self._gl_prog_rect: Optional[int] = None
         self._gl_prog_2d: Optional[int] = None
@@ -115,7 +127,7 @@ class GLRenderer:
                     from napari_cuda import _vt as vt  # type: ignore
                     self._vt = vt
                 pf = self._vt.pixel_format(payload)  # type: ignore[misc]
-                if pf is not None:
+                if pf is not None and not self._vt_force_cpu:
                     if self._vt_cache is None:
                         self._vt_cache = self._vt.gl_cache_init_for_current_context()
                     if self._vt_cache:
@@ -139,7 +151,19 @@ class GLRenderer:
                 self._init_resources()
             if payload is not None:
                 try:
-                    arr = np.asarray(payload)
+                    # If payload is a CVPixelBuffer and force_cpu is on, map to RGB bytes
+                    if self._vt is not None:
+                        try:
+                            pf = self._vt.pixel_format(payload)  # type: ignore[misc]
+                        except Exception:
+                            pf = None
+                        if pf is not None and self._vt_force_cpu:
+                            data = self._vt.map_to_rgb(payload)
+                            arr = np.frombuffer(data[0], dtype=np.uint8).reshape((int(data[2]), int(data[1]), 3))
+                        else:
+                            arr = np.asarray(payload)
+                    else:
+                        arr = np.asarray(payload)
                     if arr.dtype != np.uint8 or not arr.flags.c_contiguous:
                         arr = np.ascontiguousarray(arr, dtype=np.uint8)
                 except Exception:
@@ -361,11 +385,40 @@ class GLRenderer:
                 GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
                 GL.glUseProgram(0)
+            # Ensure GPU finished using the texture if debug safety is enabled
+            try:
+                if self._vt_gl_safe:
+                    GL.glFinish()
+                else:
+                    GL.glFlush()
+            except Exception:
+                pass
             # Release the GL texture object created by VT
             try:
                 self._vt.gl_release_tex(tex_cap)
             except Exception:
                 logger.debug("gl_release_tex failed", exc_info=True)
+            # Optionally flush the texture cache periodically to release internal resources
+            try:
+                self._gl_frame_counter += 1
+                if self._vt_gl_flush_every > 0 and (self._gl_frame_counter % int(max(1, self._vt_gl_flush_every))) == 0:
+                    self._vt.gl_cache_flush(cache_cap)
+            except Exception:
+                logger.debug("gl_cache_flush failed", exc_info=True)
+            # Optional GL cache debug
+            try:
+                import os as _os, time as _time
+                if (_os.getenv('NAPARI_CUDA_VT_GL_DEBUG', '0') or '0') in ('1','true','yes','on'):
+                    now = _time.time()
+                    if now - float(self._gl_dbg_last_log or 0.0) >= 1.0:
+                        try:
+                            creates, releases = self._vt.gl_cache_counts(cache_cap)  # type: ignore[misc]
+                            logger.info("VT GL dbg: cache creates=%d releases=%d", int(creates), int(releases))
+                        except Exception:
+                            pass
+                        self._gl_dbg_last_log = now
+            except Exception:
+                pass
             return True
         except Exception:
             logger.debug("VT draw failed", exc_info=True)
