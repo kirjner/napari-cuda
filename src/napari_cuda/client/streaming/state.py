@@ -5,6 +5,7 @@ import base64
 import logging
 import time
 from typing import Callable, Optional
+import threading
 
 import websockets
 
@@ -123,6 +124,19 @@ class StateChannel:
                 logger.debug("StateChannel._send_once: send failed", exc_info=True)
         try:
             url = f"ws://{self.host}:{self.port}"
-            asyncio.run(_send_once(url))
+            # If we're already inside an event loop (e.g., called from async context),
+            # run the coroutine on a short-lived background thread to avoid
+            # 'coroutine was never awaited' or 'asyncio.run() in running loop' issues.
+            try:
+                asyncio.get_running_loop()
+                def _runner(u: str) -> None:
+                    try:
+                        asyncio.run(_send_once(u))
+                    except Exception:
+                        logger.debug("StateChannel._send_once thread failed", exc_info=True)
+                threading.Thread(target=_runner, args=(url,), daemon=True).start()
+            except RuntimeError:
+                # No running loop in this thread; safe to run directly
+                asyncio.run(_send_once(url))
         except Exception:
             logger.debug("Keyframe request (fallback) failed", exc_info=True)
