@@ -354,15 +354,15 @@ class EGLRendererWorker:
             nonrefp = int(os.getenv('NAPARI_CUDA_NONREFP', '0'))
         except Exception:
             nonrefp = 0
-        # Legacy preset path only (stable, low-variance)
+        # Preset-based path only (stable, low-variance)
         preset_env = os.getenv('NAPARI_CUDA_PRESET', '')
-        # IDR period (frames) for legacy path (and for logging fallback)
+        # IDR period (frames) for preset path (and for logging fallback)
         try:
             idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600') or '600')
         except Exception:
             idr_period = 600
 
-        # Legacy preset/tuning path: low-latency tuning, explicit preset, no B-frames, repeat SPS/PPS, fixed IDR period
+        # Preset/tuning path: low-latency tuning, explicit preset, no B-frames, repeat SPS/PPS, fixed IDR period
         preset = preset_env.strip() if preset_env.strip() else 'P3'
         kwargs = {
             'codec': 'h264',
@@ -384,12 +384,12 @@ class EGLRendererWorker:
             self._idr_period_cfg = int(idr_period)
             try:
                 if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
-                    self._log_encoder_settings('legacy', kwargs)
+                    self._log_encoder_settings('preset', kwargs)
             except Exception:
                 pass
             try:
                 logger.info(
-                    "NVENC encoder (legacy) created: %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
+                    "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
                     self.width, self.height, self._enc_input_fmt, preset, rc_mode.upper(), int(idr_period)
                 )
             except Exception:
@@ -398,7 +398,7 @@ class EGLRendererWorker:
             self._force_next_idr = True
             return
         except Exception as e:
-            logger.warning("Legacy NVENC path failed (%s)", e, exc_info=True)
+            logger.warning("Preset NVENC path failed (%s)", e, exc_info=True)
 
         # If preset path fails for any reason, fall back to minimal encoder without tuning
         try:
@@ -418,7 +418,7 @@ class EGLRendererWorker:
         Combines the initialization kwargs we passed to NVENC with any
         reconfigurable params reported by the encoder at runtime.
 
-        path: 'legacy' or 'modern' for clarity in logs.
+        path label used in logs (e.g., 'preset').
         """
         try:
             # Canonicalize known fields from init kwargs
@@ -431,7 +431,7 @@ class EGLRendererWorker:
 
             # Common
             take('codec', 'codec')
-            # Legacy keys
+            # Preset keys
             take('preset', 'preset')
             take('tuning_info', 'tuning')
             take('bf', 'bf')
