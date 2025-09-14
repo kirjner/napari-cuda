@@ -354,6 +354,28 @@ class StreamCoordinator:
             self._evloop_stall_ms = 0
             self._evloop_sample_ms = 100
         self._evloop_mon: Optional[EventLoopMonitor] = None
+        # Dims/Z control (client-initiated)
+        try:
+            import os as _os
+            z0 = _os.getenv('NAPARI_CUDA_ZARR_Z')
+            self._dims_z: Optional[int] = int(z0) if z0 is not None and z0.strip() != '' else None
+        except Exception:
+            self._dims_z = None
+        try:
+            import os as _os
+            zmin = _os.getenv('NAPARI_CUDA_ZARR_Z_MIN')
+            zmax = _os.getenv('NAPARI_CUDA_ZARR_Z_MAX')
+            self._dims_z_min: Optional[int] = int(zmin) if zmin else None
+            self._dims_z_max: Optional[int] = int(zmax) if zmax else None
+        except Exception:
+            self._dims_z_min = None
+            self._dims_z_max = None
+        self._wheel_px_accum: float = 0.0
+        try:
+            import os as _os
+            self._wheel_step: int = max(1, int(_os.getenv('NAPARI_CUDA_WHEEL_Z_STEP', '1') or '1'))
+        except Exception:
+            self._wheel_step = 1
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
@@ -393,12 +415,26 @@ class StreamCoordinator:
                     resize_debounce_ms = int(_os.getenv('NAPARI_CUDA_RESIZE_DEBOUNCE_MS', '80'))
                 except Exception:
                     resize_debounce_ms = 80
+                try:
+                    enable_wheel_set_dims = (_os.getenv('NAPARI_CUDA_CLIENT_WHEEL_SET_DIMS', '1') or '1').lower() in ('1','true','yes','on')
+                except Exception:
+                    enable_wheel_set_dims = True
+                try:
+                    log_input_info = (_os.getenv('NAPARI_CUDA_INPUT_LOG', '0') or '0').lower() in ('1','true','yes','on')
+                except Exception:
+                    log_input_info = False
+                # Optional wheel callback to map wheel -> dims.set
+                wheel_cb = (lambda d: None)
+                if enable_wheel_set_dims:
+                    wheel_cb = self._on_wheel_for_dims
                 if self._state_channel is not None:
                     sender = InputSender(
                         widget=self._scene_canvas.native,
                         send_json=self._state_channel.send_json,
                         max_rate_hz=max_rate_hz,
                         resize_debounce_ms=resize_debounce_ms,
+                        on_wheel=wheel_cb,
+                        log_info=log_input_info,
                     )
                     sender.start()
                     self._input_sender = sender  # type: ignore[attr-defined]
@@ -796,6 +832,47 @@ class StreamCoordinator:
 
     def _on_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
+
+    # --- Input mapping: wheel -> dims.set (Z stepping) -------------------------------
+    def _on_wheel_for_dims(self, data: dict) -> None:
+        try:
+            ay = int(data.get('angle_y') or 0)
+            py = int(data.get('pixel_y') or 0)
+            mods = int(data.get('mods') or 0)
+        except Exception:
+            ay = 0; py = 0; mods = 0
+        # For now, ignore modifiers (server may treat ctrl as zoom based on input.wheel)
+        step = 0
+        if ay != 0:
+            step = (1 if ay > 0 else -1) * int(self._wheel_step or 1)
+        elif py != 0:
+            # Accumulate pixel delta to synthesize steps (assume ~30 px per notch)
+            self._wheel_px_accum += float(py)
+            thr = 30.0
+            while self._wheel_px_accum >= thr:
+                step += int(self._wheel_step or 1)
+                self._wheel_px_accum -= thr
+            while self._wheel_px_accum <= -thr:
+                step -= int(self._wheel_step or 1)
+                self._wheel_px_accum += thr
+        if step == 0:
+            return
+        # Update local Z index and clamp if bounds provided
+        if self._dims_z is None:
+            self._dims_z = 0
+        self._dims_z = int(self._dims_z) + int(step)
+        if self._dims_z_min is not None and self._dims_z < int(self._dims_z_min):
+            self._dims_z = int(self._dims_z_min)
+        if self._dims_z_max is not None and self._dims_z > int(self._dims_z_max):
+            self._dims_z = int(self._dims_z_max)
+        # Send dims.set to server
+        ch = self._state_channel
+        if ch is not None:
+            ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
+            try:
+                logger.info("wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)", int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok))
+            except Exception:
+                pass
 
     def _on_frame(self, pkt: Packet) -> None:
         cur = int(pkt.seq)

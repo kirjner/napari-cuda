@@ -24,6 +24,8 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         *,
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
+        on_wheel: Optional[Callable[[dict], None]] = None,
+        log_info: bool = False,
     ) -> None:
         super().__init__(widget)
         self._widget = widget
@@ -35,6 +37,8 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         self._resize_timer = QtCore.QTimer(self)  # type: ignore[no-untyped-call]
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._flush_resize)
+        self._on_wheel = on_wheel
+        self._log_info = bool(log_info)
 
     def eventFilter(self, obj, event):  # type: ignore[no-untyped-def]
         try:
@@ -104,6 +108,20 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             'ts': float(time.time()),
         }
         ok = self._send_json(msg)
+        try:
+            if self._log_info:
+                logger.info(
+                    "input.wheel sent: ay=%d py=%d mods=%d pos=(%.1f,%.1f)",
+                    int(ay), int(py), int(mods), float(x), float(y),
+                )
+        except Exception:
+            pass
+        # Notify optional wheel callback (e.g., for dims.set mapping)
+        try:
+            if self._on_wheel is not None:
+                self._on_wheel(msg)
+        except Exception:
+            logger.debug("on_wheel callback failed", exc_info=True)
         if ok:
             self._last_wheel_send = now
         return False
@@ -143,6 +161,11 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             'ts': float(time.time()),
         }
         _ = self._send_json(msg)
+        try:
+            if self._log_info:
+                logger.info("view.resize sent: %dx%d dpr=%.2f", int(w), int(h), float(dpr))
+        except Exception:
+            pass
 
 
 class InputSender:
@@ -158,9 +181,18 @@ class InputSender:
         *,
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
+        on_wheel: Optional[Callable[[dict], None]] = None,
+        log_info: bool = False,
     ) -> None:
         self._widget = widget
-        self._filter = _EventFilter(widget, send_json, max_rate_hz=max_rate_hz, resize_debounce_ms=resize_debounce_ms)
+        self._filter = _EventFilter(
+            widget,
+            send_json,
+            max_rate_hz=max_rate_hz,
+            resize_debounce_ms=resize_debounce_ms,
+            on_wheel=on_wheel,
+            log_info=log_info,
+        )
         # Set debounce interval explicitly on the timer
         try:
             self._filter._resize_timer.setInterval(int(max(0, resize_debounce_ms)))  # type: ignore[attr-defined]
@@ -184,4 +216,3 @@ class InputSender:
             _ = self._filter._send_json(msg)  # type: ignore[attr-defined]
         except Exception:
             logger.debug("Initial resize send failed", exc_info=True)
-
