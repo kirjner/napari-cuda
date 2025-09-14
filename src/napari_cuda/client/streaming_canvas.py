@@ -274,10 +274,15 @@ class StreamingCanvas(VispyCanvas):
             f'StreamingCanvas initialized for {server_host}:{server_port}'
         )
 
-        # Optional FPS HUD overlay (enabled by default in smoke mode or via env)
+        # Optional FPS/metrics HUD overlay.
+        # Enable when:
+        #  - smoke mode is active, or
+        #  - NAPARI_CUDA_FPS_HUD=1, or
+        #  - client metrics are enabled (via --metrics or NAPARI_CUDA_CLIENT_METRICS=1)
         try:
             hud_env = os.getenv('NAPARI_CUDA_FPS_HUD')
-            self._hud_enabled = (hud_env == '1') or bool(self._vt_smoke)
+            metrics_env = (os.getenv('NAPARI_CUDA_CLIENT_METRICS', '0') or '0').lower() in ('1', 'true', 'yes', 'on')
+            self._hud_enabled = (hud_env == '1') or bool(self._vt_smoke) or bool(metrics_env)
             if self._hud_enabled:
                 self._init_fps_hud()
         except Exception:
