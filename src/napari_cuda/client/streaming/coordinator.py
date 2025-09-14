@@ -376,6 +376,14 @@ class StreamCoordinator:
             self._wheel_step: int = max(1, int(_os.getenv('NAPARI_CUDA_WHEEL_Z_STEP', '1') or '1'))
         except Exception:
             self._wheel_step = 1
+        # dims.set rate limiting (coalesce)
+        try:
+            import os as _os
+            rate = float(_os.getenv('NAPARI_CUDA_DIMS_SET_RATE', '60') or '60')
+        except Exception:
+            rate = 60.0
+        self._dims_min_dt: float = 1.0 / max(1.0, rate)
+        self._last_dims_send: float = 0.0
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
@@ -423,7 +431,7 @@ class StreamCoordinator:
                     log_input_info = (_os.getenv('NAPARI_CUDA_INPUT_LOG', '0') or '0').lower() in ('1','true','yes','on')
                 except Exception:
                     log_input_info = False
-                # Optional wheel callback to map wheel -> dims.set
+                # Optional callback to map wheel -> dims.set
                 wheel_cb = (lambda d: None)
                 if enable_wheel_set_dims:
                     wheel_cb = self._on_wheel_for_dims
@@ -867,12 +875,16 @@ class StreamCoordinator:
             self._dims_z = int(self._dims_z_max)
         # Send dims.set to server
         ch = self._state_channel
+        now = time.perf_counter()
+        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
+            logger.debug("dims.set gated by rate limiter (wheel)")
+            return
         if ch is not None:
             ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
-            try:
-                logger.info("wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)", int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok))
-            except Exception:
-                pass
+            self._last_dims_send = now
+            logger.info("wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)", int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok))
+
+    # No key→dims mapping (reverted per request)
 
     def _on_frame(self, pkt: Packet) -> None:
         cur = int(pkt.seq)

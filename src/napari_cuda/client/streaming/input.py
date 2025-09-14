@@ -47,6 +47,8 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
                 return self._handle_wheel(event)
             elif et == QtCore.QEvent.Resize:  # type: ignore[attr-defined]
                 return self._handle_resize(event)
+            elif et == QtCore.QEvent.KeyPress or et == QtCore.QEvent.KeyRelease:  # type: ignore[attr-defined]
+                return self._handle_key(event, down=(et == QtCore.QEvent.KeyPress))
         except Exception:
             logger.debug("InputSender eventFilter error", exc_info=True)
         return False
@@ -108,14 +110,11 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             'ts': float(time.time()),
         }
         ok = self._send_json(msg)
-        try:
-            if self._log_info:
-                logger.info(
-                    "input.wheel sent: ay=%d py=%d mods=%d pos=(%.1f,%.1f)",
-                    int(ay), int(py), int(mods), float(x), float(y),
-                )
-        except Exception:
-            pass
+        if self._log_info:
+            logger.info(
+                "input.wheel sent: ay=%d py=%d mods=%d pos=(%.1f,%.1f)",
+                int(ay), int(py), int(mods), float(x), float(y),
+            )
         # Notify optional wheel callback (e.g., for dims.set mapping)
         try:
             if self._on_wheel is not None:
@@ -161,11 +160,41 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             'ts': float(time.time()),
         }
         _ = self._send_json(msg)
+        if self._log_info:
+            logger.info("view.resize sent: %dx%d dpr=%.2f", int(w), int(h), float(dpr))
+
+    # --- Key events ----------------------------------------------------------------
+    def _handle_key(self, ev, *, down: bool) -> bool:  # type: ignore[no-untyped-def]
         try:
-            if self._log_info:
-                logger.info("view.resize sent: %dx%d dpr=%.2f", int(w), int(h), float(dpr))
+            key = int(ev.key())
         except Exception:
-            pass
+            key = 0
+        try:
+            txt = str(ev.text()) if hasattr(ev, 'text') else ''
+        except Exception:
+            txt = ''
+        try:
+            mods = int(ev.modifiers())
+        except Exception:
+            mods = 0
+        try:
+            auto = bool(getattr(ev, 'isAutoRepeat')() if hasattr(ev, 'isAutoRepeat') else False)
+        except Exception:
+            auto = False
+        msg = {
+            'type': 'input.key',
+            'phase': 'down' if down else 'up',
+            'key': int(key),
+            'text': txt,
+            'mods': int(mods),
+            'auto': bool(auto),
+            'ts': float(time.time()),
+        }
+        ok = self._send_json(msg)
+        if self._log_info and down:
+            logger.info("input.key sent: key=%d auto=%s mods=%d", int(key), bool(auto), int(mods))
+        # Optional: coordinator mapping callback is invoked via constructor hook (on_key)
+        return False
 
 
 class InputSender:
