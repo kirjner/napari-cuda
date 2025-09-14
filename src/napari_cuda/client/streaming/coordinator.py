@@ -25,6 +25,7 @@ from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
 from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
 from napari_cuda.client.streaming.metrics import ClientMetrics
 from napari_cuda.client.streaming.eventloop_monitor import EventLoopMonitor
+from napari_cuda.client.streaming.input import InputSender
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -380,6 +381,30 @@ class StreamCoordinator:
             st = StateController(self.server_host, self.state_port, self._on_video_config)
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
+            # Attach input forwarding (wheel + resize) now that state channel exists
+            try:
+                # Env knobs
+                import os as _os
+                try:
+                    max_rate_hz = float(_os.getenv('NAPARI_CUDA_INPUT_MAX_RATE', '120'))
+                except Exception:
+                    max_rate_hz = 120.0
+                try:
+                    resize_debounce_ms = int(_os.getenv('NAPARI_CUDA_RESIZE_DEBOUNCE_MS', '80'))
+                except Exception:
+                    resize_debounce_ms = 80
+                if self._state_channel is not None:
+                    sender = InputSender(
+                        widget=self._scene_canvas.native,
+                        send_json=self._state_channel.send_json,
+                        max_rate_hz=max_rate_hz,
+                        resize_debounce_ms=resize_debounce_ms,
+                    )
+                    sender.start()
+                    self._input_sender = sender  # type: ignore[attr-defined]
+                    logger.info("InputSender attached (wheel+resize)")
+            except Exception:
+                logger.debug("Failed to attach InputSender", exc_info=True)
 
         # Start VT pipeline workers
         self._vt_pipeline.start()

@@ -140,3 +140,29 @@ class StateChannel:
                 asyncio.run(_send_once(url))
         except Exception:
             logger.debug("Keyframe request (fallback) failed", exc_info=True)
+
+    # --- Generic outbound messaging -------------------------------------------------
+    def send_json(self, obj: dict) -> bool:
+        """Enqueue a JSON message for the state channel sender.
+
+        Returns True if enqueued, False if the channel is not ready.
+
+        Thread-safe: uses loop.call_soon_threadsafe to put_nowait on the
+        sender queue when available.
+        """
+        try:
+            import json as _json
+            msg = _json.dumps(obj, separators=(",", ":"))
+        except Exception:
+            logger.debug("send_json: JSON encode failed", exc_info=True)
+            return False
+        try:
+            loop = self._loop
+            q = self._out_q
+            if loop is None or q is None:
+                return False
+            loop.call_soon_threadsafe(q.put_nowait, msg)
+            return True
+        except Exception:
+            logger.debug("send_json: enqueue failed", exc_info=True)
+            return False
