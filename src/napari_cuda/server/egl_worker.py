@@ -578,7 +578,7 @@ class EGLRendererWorker:
             return None
 
 
-    def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int]:
+    def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int, int]:
         """Same as capture_and_encode, but also returns the packet and flags.
 
         Flags bit 0x01 indicates keyframe (IDR/CRA).
@@ -833,7 +833,9 @@ class EGLRendererWorker:
             wall_ts,
         )
         flags = 0
-        return timings, pkt_obj, flags
+        # Use the worker's frame index as the capture-indexed sequence number
+        seq = int(self._frame_index)
+        return timings, pkt_obj, flags, seq
 
     # (packer is now provided by bitstream.py)
 
