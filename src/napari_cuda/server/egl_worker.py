@@ -72,7 +72,9 @@ class EGLRendererWorker:
 
     def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False, fps: int = 60,
                  volume_depth: int = 64, volume_dtype: str = "float32", volume_relative_step: Optional[float] = None,
-                 animate: bool = False, animate_dps: float = 30.0) -> None:
+                 animate: bool = False, animate_dps: float = 30.0,
+                 zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
+                 zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -131,6 +133,22 @@ class EGLRendererWorker:
 
         # Ensure partial initialization is cleaned up if any step fails
         try:
+            # Zarr/NGFF dataset configuration (optional)
+            self._zarr_path: Optional[str] = zarr_path or os.getenv('NAPARI_CUDA_ZARR_PATH') or None
+            self._zarr_level: Optional[str] = zarr_level or os.getenv('NAPARI_CUDA_ZARR_LEVEL') or None
+            self._zarr_axes: str = (zarr_axes or os.getenv('NAPARI_CUDA_ZARR_AXES') or 'zyx')
+            try:
+                _z = zarr_z if zarr_z is not None else int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1'))
+                self._zarr_init_z: Optional[int] = _z if _z >= 0 else None
+            except Exception:
+                self._zarr_init_z = None
+
+            # Lazy dataset handles
+            self._da_volume = None  # type: ignore[assignment]
+            self._zarr_shape: Optional[tuple[int, ...]] = None
+            self._zarr_dtype: Optional[str] = None
+            self._z_index: Optional[int] = None
+
             self._init_egl()
             self._init_cuda()
             self._init_vispy_scene()
@@ -154,8 +172,9 @@ class EGLRendererWorker:
         # Log format/size once for clarity
         try:
             logger.info(
-                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s",
+                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
                 self.width, self.height, getattr(self, '_enc_input_fmt', 'unknown'), self.fps, self._animate,
+                bool(self._zarr_path),
             )
         except Exception as e:
             logger.debug("Init info log failed: %s", e)
@@ -213,10 +232,42 @@ class EGLRendererWorker:
     def _init_vispy_scene(self) -> None:
         canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
         view = canvas.central_widget.add_view()
-        # Use a 3D camera for volumes, but a 2D PanZoom camera for images to avoid perspective skew
-        if self.use_volume:
+
+        # Determine scene content in priority order:
+        # 1) OME-Zarr 2D slice (preferred for real data MVP)
+        # 2) Explicit volume demo if requested
+        # 3) Synthetic 2D image pattern (fallback)
+
+        if self._zarr_path:
+            try:
+                # 2D slice mode from OME-Zarr (axes assumed zyx unless overridden)
+                view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+                arr2d = self._load_zarr_initial_slice()
+                visual = scene.visuals.Image(arr2d, parent=view.scene, cmap='grays', clim=None, method='auto')
+                # Camera range to data extents (note: array is (H, W))
+                try:
+                    h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
+                    view.camera.set_range(x=(0, w), y=(0, h))
+                except Exception as e:
+                    logger.debug("set_range(zarr) failed: %s", e)
+                # Log info
+                try:
+                    logger.info("Loaded OME-Zarr slice: level=%s z=%s shape=%s", self._zarr_level or "auto", self._z_index, arr2d.shape)
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.exception("Failed to initialize OME-Zarr slice; falling back to synthetic image: %s", e)
+                # Fallback to synthetic 2D image
+                view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+                image = make_rgba_image(self.width, self.height)
+                visual = scene.visuals.Image(image, parent=view.scene)
+                try:
+                    view.camera.set_range(x=(0, self.width), y=(0, self.height))
+                except Exception:
+                    pass
+        elif self.use_volume:
+            # 3D volume demo
             view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60, distance=500)
-            # Full XY resolution for apples-to-apples comparison with Image
             if self.volume_dtype == "float16":
                 dtype = np.float16
             elif self.volume_dtype == "uint8":
@@ -225,26 +276,116 @@ class EGLRendererWorker:
                 dtype = np.float32
             volume = np.random.rand(self.volume_depth, self.height, self.width).astype(dtype)
             visual = scene.visuals.Volume(volume, parent=view.scene, method="mip", cmap="viridis")
-            # Optional sampling control
             try:
                 if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
                     visual.relative_step_size = float(self.volume_relative_step)
             except Exception as e:
                 logger.debug("Set volume relative_step_size failed: %s", e)
         else:
-            # 2D image: orthographic view that fills the frame (no trapezoid)
+            # 2D synthetic image fallback
             view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
             image = make_rgba_image(self.width, self.height)
             visual = scene.visuals.Image(image, parent=view.scene)
-            # Ensure the full image extents are visible without perspective distortion
             try:
                 view.camera.set_range(x=(0, self.width), y=(0, self.height))
             except Exception as e:
                 logger.debug("PanZoom set_range failed: %s", e)
+
         canvas.render()
         self.canvas = canvas
         self.view = view
         self._visual = visual
+
+    def _infer_zarr_level(self, root: str) -> Optional[str]:
+        """Infer a dataset level path from NGFF .zattrs if level not provided."""
+        try:
+            import json
+            from pathlib import Path
+            zattrs = Path(root) / '.zattrs'
+            if not zattrs.exists():
+                return None
+            data = json.loads(zattrs.read_text())
+            ms = data.get('multiscales') or []
+            if not ms:
+                return None
+            datasets = ms[0].get('datasets') or []
+            # Prefer a mid-level if available (pick the second if >=2)
+            if not datasets:
+                return None
+            if self._zarr_level:
+                return self._zarr_level
+            if len(datasets) >= 2:
+                return datasets[1].get('path')
+            return datasets[0].get('path')
+        except Exception:
+            return None
+
+    def _load_zarr_initial_slice(self):
+        """Load initial 2D slice from a OME-Zarr (ZYX) dataset as float32 array.
+
+        - Chooses dataset level from provided level or .zattrs multiscales.
+        - Picks initial Z (provided or mid-slice).
+        - Returns a float32 normalized array (0..1) suitable for vispy Image.
+        """
+        assert self._zarr_path is not None
+        # Lazy import to avoid hard dependency unless used
+        import dask.array as da  # type: ignore
+        from pathlib import Path
+
+        root = self._zarr_path
+        level = self._zarr_level or self._infer_zarr_level(root) or ''
+        store_path = Path(root) / level if level else Path(root)
+
+        darr = da.from_zarr(str(store_path))
+        if darr.ndim != 3:
+            raise RuntimeError(f"Expected 3D (zyx) dataset; got shape {darr.shape}")
+        self._da_volume = darr
+        self._zarr_shape = tuple(int(s) for s in darr.shape)  # (Z,Y,X)
+        # Choose Z
+        z_init = self._zarr_init_z
+        if z_init is None:
+            z_init = int(self._zarr_shape[0] // 2) if self._zarr_shape else 0
+        z_init = max(0, min(z_init, int(darr.shape[0]) - 1))
+        self._z_index = int(z_init)
+
+        # Compute percentiles for contrast once (on a small sub-sample to keep fast)
+        try:
+            import numpy as _np
+            # Read a center crop or the chosen slice to estimate clims
+            sample = darr[self._z_index, :, :].astype('float32').compute()
+            p1, p99 = _np.percentile(sample, [0.5, 99.5])
+            self._zarr_clim = (float(p1), float(p99))
+            # Avoid zero span
+            if self._zarr_clim[1] <= self._zarr_clim[0]:
+                self._zarr_clim = (float(sample.min()), float(sample.max()))
+        except Exception:
+            self._zarr_clim = None
+
+        return self._load_zarr_slice(self._z_index)
+
+    def _load_zarr_slice(self, z: int):
+        """Load and normalize a single Z slice to float32 (0..1)."""
+        import numpy as _np
+        assert self._da_volume is not None
+        z = max(0, min(int(z), int(self._da_volume.shape[0]) - 1))
+        slab = self._da_volume[z, :, :].astype('float32').compute()
+        self._z_index = int(z)
+        # Normalize using cached clim if available, else min/max
+        c0, c1 = None, None
+        try:
+            if hasattr(self, '_zarr_clim') and self._zarr_clim is not None:
+                c0, c1 = self._zarr_clim
+        except Exception:
+            pass
+        if c0 is None or c1 is None or c1 <= c0:
+            c0 = float(slab.min())
+            c1 = float(slab.max())
+            if not _np.isfinite(c0) or not _np.isfinite(c1) or c1 <= c0:
+                c0, c1 = 0.0, 1.0
+        # Scale to 0..1
+        slab = (slab - c0) / max(1e-12, (c1 - c0))
+        slab = _np.clip(slab, 0.0, 1.0, out=slab)
+        return slab
 
     def _ensure_capture_buffers(self) -> None:
         if self._texture is None:
@@ -581,6 +722,36 @@ class EGLRendererWorker:
                     cam.angles = state.angles  # type: ignore[attr-defined]
                 except Exception as e:
                     logger.debug("Apply angles failed: %s", e)
+            # Handle dims (Z step) if OME-Zarr volume is active
+            if state.current_step is not None and getattr(self, '_da_volume', None) is not None:
+                try:
+                    # Interpret current_step against axes (default 'zyx')
+                    z_idx = None
+                    axes = (self._zarr_axes or 'zyx').lower()
+                    # Find index of 'z' in provided dims; assume dims tuple matches axes order
+                    if 'z' in axes:
+                        pos = axes.index('z')
+                        if pos < len(state.current_step):
+                            z_idx = int(state.current_step[pos])
+                    # Fallback: take first element
+                    if z_idx is None and len(state.current_step) > 0:
+                        z_idx = int(state.current_step[0])
+                    if z_idx is not None and (self._z_index is None or int(z_idx) != int(self._z_index)):
+                        slab = self._load_zarr_slice(int(z_idx))
+                        # Update visual on the render thread
+                        try:
+                            self._visual.set_data(slab)
+                            # Update camera range to new slab size if changed
+                            try:
+                                h, w = int(slab.shape[0]), int(slab.shape[1])
+                                if hasattr(self.view, 'camera'):
+                                    self.view.camera.set_range(x=(0, w), y=(0, h))
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.debug("Update z-slice failed: %s", e)
+                except Exception as e:
+                    logger.debug("Apply dims state failed: %s", e)
         except Exception as e:
             logger.debug("Apply state failed: %s", e)
 

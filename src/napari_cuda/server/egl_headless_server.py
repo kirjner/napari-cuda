@@ -40,7 +40,9 @@ class EncodeConfig:
 class EGLHeadlessServer:
     def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False,
                  host: str = '0.0.0.0', state_port: int = 8081, pixel_port: int = 8082, fps: int = 60,
-                 animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False) -> None:
+                 animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False,
+                 zarr_path: str | None = None, zarr_level: str | None = None,
+                 zarr_axes: str | None = None, zarr_z: int | None = None) -> None:
         self.width = width
         self.height = height
         self.use_volume = use_volume
@@ -101,6 +103,15 @@ class EGLHeadlessServer:
         except Exception:
             self._log_sends = bool(log_sends)
         
+        # Data configuration (optional OME-Zarr dataset for real data)
+        self._zarr_path = zarr_path or os.getenv('NAPARI_CUDA_ZARR_PATH') or None
+        self._zarr_level = zarr_level or os.getenv('NAPARI_CUDA_ZARR_LEVEL') or None
+        self._zarr_axes = zarr_axes or os.getenv('NAPARI_CUDA_ZARR_AXES') or None
+        try:
+            _z = zarr_z if zarr_z is not None else int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1'))
+            self._zarr_z = _z if _z >= 0 else None
+        except Exception:
+            self._zarr_z = None
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO,
@@ -249,6 +260,10 @@ class EGLHeadlessServer:
                     fps=self.cfg.fps,
                     animate=self._animate,
                     animate_dps=self._animate_dps,
+                    zarr_path=self._zarr_path,
+                    zarr_level=self._zarr_level,
+                    zarr_axes=self._zarr_axes,
+                    zarr_z=self._zarr_z,
                 )
                 tick = 1.0 / max(1, self.cfg.fps)
                 next_t = time.perf_counter()
@@ -711,13 +726,19 @@ def main() -> None:
     parser.add_argument('--animate-dps', type=float, default=float(os.getenv('NAPARI_CUDA_TURNTABLE_DPS', '30.0')),
                         help='Turntable speed in degrees per second (default 30)')
     parser.add_argument('--volume', action='store_true', help='Use 3D volume visual')
+    parser.add_argument('--zarr', dest='zarr_path', default=os.getenv('NAPARI_CUDA_ZARR_PATH'), help='Path to OME-Zarr root (enables 2D slice from ZYX volume)')
+    parser.add_argument('--zarr-level', dest='zarr_level', default=os.getenv('NAPARI_CUDA_ZARR_LEVEL'), help='Dataset level path inside OME-Zarr (e.g., level_02). If omitted, inferred from multiscales.')
+    parser.add_argument('--zarr-axes', dest='zarr_axes', default=os.getenv('NAPARI_CUDA_ZARR_AXES', 'zyx'), help='Axes order of the dataset (default: zyx)')
+    parser.add_argument('--zarr-z', dest='zarr_z', type=int, default=int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1')), help='Initial Z index for 2D slice (default: mid-slice)')
     parser.add_argument('--log-sends', action='store_true', help='Log per-send timing (seq, send_ts, stamp_ts, delta)')
     args = parser.parse_args()
 
     async def run():
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
-                                animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends))
+                                animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),
+                                zarr_path=args.zarr_path, zarr_level=args.zarr_level,
+                                zarr_axes=args.zarr_axes, zarr_z=(None if int(args.zarr_z) < 0 else int(args.zarr_z)))
         await srv.start()
 
     asyncio.run(run())

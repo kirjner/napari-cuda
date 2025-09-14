@@ -175,6 +175,8 @@ server = [
     "dash>=2.16.1",
     "plotly>=5.18.0",
     "Cython>=0.29.36",
+    "zarr>=2.12.0",
+    "numcodecs>=0.10.0",
 ]
 
 # Client dependencies (for local machine) — includes dashboard by default
