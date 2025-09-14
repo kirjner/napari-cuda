@@ -431,6 +431,8 @@ class StreamCoordinator:
                     log_input_info = (_os.getenv('NAPARI_CUDA_INPUT_LOG', '0') or '0').lower() in ('1','true','yes','on')
                 except Exception:
                     log_input_info = False
+                # Use same flag for dims logging (INFO when enabled, DEBUG otherwise)
+                self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
                 # Optional callback to map wheel -> dims.set
                 wheel_cb = (lambda d: None)
                 if enable_wheel_set_dims:
@@ -900,7 +902,16 @@ class StreamCoordinator:
         if ch is not None:
             ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
             self._last_dims_send = now
-            logger.info("wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)", int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok))
+            if getattr(self, '_log_dims_info', False):
+                logger.info(
+                    "wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)",
+                    int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok)
+                )
+            else:
+                logger.debug(
+                    "wheel->dims.set z=%d step=%+d (sent=%s)",
+                    int(self._dims_z), int(step), bool(ok)
+                )
 
     # Shortcut-driven Z stepping (Up/Down)
     def _step_z(self, delta: int) -> None:
@@ -925,7 +936,10 @@ class StreamCoordinator:
         if ch is not None:
             ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
             self._last_dims_send = now
-            logger.info("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
+            if getattr(self, '_log_dims_info', False):
+                logger.info("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
+            else:
+                logger.debug("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
 
     # (no key→dims mapping)
 
