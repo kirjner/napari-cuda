@@ -47,8 +47,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
                 return self._handle_wheel(event)
             elif et == QtCore.QEvent.Resize:  # type: ignore[attr-defined]
                 return self._handle_resize(event)
-            elif et == QtCore.QEvent.KeyPress or et == QtCore.QEvent.KeyRelease:  # type: ignore[attr-defined]
-                return self._handle_key(event, down=(et == QtCore.QEvent.KeyPress))
+            # No key handling in MVP
         except Exception:
             logger.debug("InputSender eventFilter error", exc_info=True)
         return False
@@ -163,38 +162,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         if self._log_info:
             logger.info("view.resize sent: %dx%d dpr=%.2f", int(w), int(h), float(dpr))
 
-    # --- Key events ----------------------------------------------------------------
-    def _handle_key(self, ev, *, down: bool) -> bool:  # type: ignore[no-untyped-def]
-        try:
-            key = int(ev.key())
-        except Exception:
-            key = 0
-        try:
-            txt = str(ev.text()) if hasattr(ev, 'text') else ''
-        except Exception:
-            txt = ''
-        try:
-            mods = int(ev.modifiers())
-        except Exception:
-            mods = 0
-        try:
-            auto = bool(getattr(ev, 'isAutoRepeat')() if hasattr(ev, 'isAutoRepeat') else False)
-        except Exception:
-            auto = False
-        msg = {
-            'type': 'input.key',
-            'phase': 'down' if down else 'up',
-            'key': int(key),
-            'text': txt,
-            'mods': int(mods),
-            'auto': bool(auto),
-            'ts': float(time.time()),
-        }
-        ok = self._send_json(msg)
-        if self._log_info and down:
-            logger.info("input.key sent: key=%d auto=%s mods=%d", int(key), bool(auto), int(mods))
-        # Optional: coordinator mapping callback is invoked via constructor hook (on_key)
-        return False
+    # (no key handling)
 
 
 class InputSender:

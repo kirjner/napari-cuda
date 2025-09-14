@@ -884,7 +884,7 @@ class StreamCoordinator:
             self._last_dims_send = now
             logger.info("wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)", int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok))
 
-    # No key→dims mapping (reverted per request)
+    # (no key→dims mapping)
 
     def _on_frame(self, pkt: Packet) -> None:
         cur = int(pkt.seq)
