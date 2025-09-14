@@ -447,6 +447,24 @@ class StreamCoordinator:
                     sender.start()
                     self._input_sender = sender  # type: ignore[attr-defined]
                     logger.info("InputSender attached (wheel+resize)")
+                    # Bind Up/Down shortcuts to step Z using the same dims.set path
+                    try:
+                        from qtpy import QtWidgets, QtGui, QtCore  # type: ignore
+                        parent = self._scene_canvas.native
+                        up_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Up), parent)  # type: ignore
+                        down_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Down), parent)  # type: ignore
+                        try:
+                            up_sc.setAutoRepeat(True)
+                            down_sc.setAutoRepeat(True)
+                        except Exception:
+                            pass
+                        up_sc.activated.connect(lambda: self._step_z(+int(self._wheel_step or 1)))  # type: ignore
+                        down_sc.activated.connect(lambda: self._step_z(-int(self._wheel_step or 1)))  # type: ignore
+                        # Keep references to avoid GC
+                        self._shortcuts = [up_sc, down_sc]  # type: ignore[attr-defined]
+                        logger.info("Shortcuts bound: Up/Down → dims.set Z step")
+                    except Exception:
+                        logger.debug("Failed to bind Up/Down shortcuts", exc_info=True)
             except Exception:
                 logger.debug("Failed to attach InputSender", exc_info=True)
 
@@ -883,6 +901,31 @@ class StreamCoordinator:
             ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
             self._last_dims_send = now
             logger.info("wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)", int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok))
+
+    # Shortcut-driven Z stepping (Up/Down)
+    def _step_z(self, delta: int) -> None:
+        try:
+            dz = int(delta)
+        except Exception:
+            dz = 0
+        if dz == 0:
+            return
+        if self._dims_z is None:
+            self._dims_z = 0
+        self._dims_z = int(self._dims_z) + int(dz)
+        if self._dims_z_min is not None and self._dims_z < int(self._dims_z_min):
+            self._dims_z = int(self._dims_z_min)
+        if self._dims_z_max is not None and self._dims_z > int(self._dims_z_max):
+            self._dims_z = int(self._dims_z_max)
+        now = time.perf_counter()
+        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
+            logger.debug("dims.set gated by rate limiter (shortcut)")
+            return
+        ch = self._state_channel
+        if ch is not None:
+            ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
+            self._last_dims_send = now
+            logger.info("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
 
     # (no key→dims mapping)
 
