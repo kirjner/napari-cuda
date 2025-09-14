@@ -354,177 +354,63 @@ class EGLRendererWorker:
             nonrefp = int(os.getenv('NAPARI_CUDA_NONREFP', '0'))
         except Exception:
             nonrefp = 0
-        # Optional legacy preset path gate: restore older NVENC config surface for motion stability
-        # Semantics:
-        # - If NAPARI_CUDA_ENCODER_LEGACY is set, it overrides everything (0=modern, 1=legacy)
-        # - Else, if NAPARI_CUDA_PRESET is set, prefer legacy (to honor explicit preset)
-        # - Else, default to legacy (stable, low-variance path)
+        # Legacy preset path only (stable, low-variance)
         preset_env = os.getenv('NAPARI_CUDA_PRESET', '')
-        legacy_raw = os.getenv('NAPARI_CUDA_ENCODER_LEGACY')
-        if legacy_raw is None:
-            legacy_gate = 1 if True else 0
-        else:
-            try:
-                v = legacy_raw.strip().lower()
-                legacy_gate = 1 if v in ('1', 'true', 'yes', 'on') else 0
-            except Exception:
-                legacy_gate = 1
         # IDR period (frames) for legacy path (and for logging fallback)
         try:
             idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600') or '600')
         except Exception:
             idr_period = 600
 
-        if legacy_gate or (legacy_raw is None and preset_env.strip() != ''):
-            # Legacy preset/tuning path: low-latency tuning, explicit preset, no B-frames, repeat SPS/PPS, fixed IDR period
-            preset = preset_env.strip() if preset_env.strip() else 'P3'
-            kwargs = {
-                'codec': 'h264',
-                'tuning_info': 'low_latency',
-                'preset': preset,
-                'bf': 0,
-                'repeatspspps': 1,
-                'idrperiod': int(idr_period),
-                'rc': rc_mode,
-            }
-            if bitrate and bitrate > 0:
-                kwargs['bitrate'] = int(bitrate)
-                kwargs['maxbitrate'] = int(bitrate)
-            # Also set explicit framerate to align RC pacing with server fps
-            kwargs['frameRateNum'] = int(max(1, int(self.fps)))
-            kwargs['frameRateDen'] = 1
-            kwargs['strictGOPTarget']=1
-            try:
-                self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
-                self._idr_period_cfg = int(idr_period)
-                try:
-                    if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
-                        self._log_encoder_settings('legacy', kwargs)
-                except Exception:
-                    pass
-                try:
-                    logger.info(
-                        "NVENC encoder (legacy) created: %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
-                        self.width, self.height, self._enc_input_fmt, preset, rc_mode.upper(), int(idr_period)
-                    )
-                except Exception:
-                    pass
-                # Force IDR next frame
-                self._force_next_idr = True
-                return
-            except Exception as e:
-                logger.warning("Legacy NVENC path failed (%s); falling back to modern config", e, exc_info=True)
-
-        # VBV sizing: disable by default to avoid CBR/VBV jitter; enable via env when desired
-        try:
-            vbv_frames = float(os.getenv('NAPARI_CUDA_VBV_FRAMES', '0'))
-        except Exception:
-            vbv_frames = 0.0
-        vbv_size = None
-        if bitrate and bitrate > 0 and self.fps > 0 and vbv_frames > 0:
-            vbv_size = max(1, int((bitrate // max(1, self.fps)) * vbv_frames))
-        # Map to PyNvVideoCodec-supported keys (lowerCamelCase or accepted lower-case variants)
-        # Avoid passing preset/tuning strings as this build rejects them. Let NVENC choose native keyframe cadence.
-        # Optional picture type decision toggle (default on unless explicitly disabled)
-        try:
-            ptd = int(os.getenv('NAPARI_CUDA_PTD', '1'))
-        except Exception:
-            ptd = 1
-        # Optional explicit GOP/IDR tuning for modern path: default to a fixed cadence like legacy
-        try:
-            gop_frames = int(os.getenv('NAPARI_CUDA_GOP_FRAMES', str(idr_period)) or str(idr_period))
-        except Exception:
-            gop_frames = int(idr_period)
-        try:
-            idr_override = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', str(idr_period)) or str(idr_period))
-        except Exception:
-            idr_override = int(idr_period)
-        try:
-            strict_gop = int(os.getenv('NAPARI_CUDA_STRICT_GOP', '0') or '0')
-        except Exception:
-            strict_gop = 0
-
+        # Legacy preset/tuning path: low-latency tuning, explicit preset, no B-frames, repeat SPS/PPS, fixed IDR period
+        preset = preset_env.strip() if preset_env.strip() else 'P3'
         kwargs = {
             'codec': 'h264',
-            # Low-latency settings; do not override keyframe cadence (let NVENC defaults apply)
-            'frameIntervalP': 1,  # no B-frames
-            'repeatSPSPPS': 1,
-            # GOP/IDR explicit settings are added below only if envs provided
-            'enablePTD': 0, # int(bool(ptd)),
-            # Rate control
-            'rcMode': rc_mode.upper(),  # CBR/VBR/CONSTQP
-            'enableLookahead': int(bool(lookahead)),
-            'enableAQ': 0,
-            'enableTemporalAQ': int(bool(temporalaq)),
-            'enableNonRefP': int(bool(nonrefp)),
-            # Framerate
-            'frameRateNum': int(max(1, int(self.fps))),
-            'frameRateDen': 1,
-            # Refresh behavior
-            'enableIntraRefresh': 0,
-            # References
-            'maxNumRefFrames': 1,
+            'tuning_info': 'low_latency',
+            'preset': preset,
+            'bf': 0,
+            'repeatspspps': 1,
+            'idrperiod': int(idr_period),
+            'rc': rc_mode,
         }
-        if gop_frames > 0:
-            kwargs['gopLength'] = int(gop_frames)
-        if idr_override > 0:
-            kwargs['idrPeriod'] = int(idr_override)
-        if strict_gop:
-            kwargs['strictGOPTarget'] = 1
         if bitrate and bitrate > 0:
-            # Provide multiple aliases to satisfy different binding versions
-            b = int(bitrate)
-            kwargs['bitrate'] = b
-            kwargs['maxBitrate'] = b
-            kwargs['averageBitrate'] = b
-            kwargs['maxbitrate'] = b
-        if vbv_size is not None and vbv_size > 0:
-            # Some builds expect lower-case variants; bindings accept both in many cases
-            kwargs['vbvBufferSize'] = int(vbv_size)
-            kwargs['vbvInitialDelay'] = int(vbv_size)
+            kwargs['bitrate'] = int(bitrate)
+            kwargs['maxbitrate'] = int(bitrate)
+        # Also set explicit framerate to align RC pacing with server fps
+        kwargs['frameRateNum'] = int(max(1, int(self.fps)))
+        kwargs['frameRateDen'] = 1
         try:
-            # PyNvVideoCodec does not accept RGBA; supported: NV12, YUV420, ARGB, ABGR, YUV444
-            # We feed ARGB (or ABGR) and convert from RGBA on-GPU before Encode.
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
+            self._idr_period_cfg = int(idr_period)
             try:
-                # Remember IDR cadence for verification/instrumentation
-                try:
-                    self._idr_period_cfg = int(kwargs.get('gopLength') or kwargs.get('idrPeriod') or idr_period)
-                except Exception:
-                    self._idr_period_cfg = idr_period
-                try:
-                    if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
-                        self._log_encoder_settings('modern', kwargs)
-                except Exception:
-                    pass
-                logger.info(
-                    "NVENC encoder created: %dx%d fmt=%s (low-latency)",
-                    self.width, self.height, self._enc_input_fmt,
-                )
-                layout = (
-                    'semi-planar' if self._enc_input_fmt == 'NV12' else (
-                        'planar' if self._enc_input_fmt == 'YUV444' else 'packed'
-                    )
-                )
-                logger.info(
-                    "Encoder config: codec=%s fIntP=%d rc=%s lookahead=%d aq=%d tAQ=%d nonrefp=%d repeatSPSPPS=%d",
-                    kwargs.get('codec'), kwargs.get('frameIntervalP'), kwargs.get('rcMode'), kwargs.get('enableLookahead'),
-                    kwargs.get('enableAQ'), kwargs.get('enableTemporalAQ'), kwargs.get('enableNonRefP'), kwargs.get('repeatSPSPPS'),
-                )
-            except Exception as e:
-                logger.debug("Encoder info log failed: %s", e)
-        except Exception:
-            # Fallback if kwargs unsupported by this binding version
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
+                if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
+                    self._log_encoder_settings('legacy', kwargs)
+            except Exception:
+                pass
             try:
-                logger.warning("NVENC encoder created without tuning kwargs; GOP cadence may vary")
-            except Exception as e:
-                logger.debug("Encoder warn log failed: %s", e)
-        # Ensure we emit an IDR on the first frame after (re)initialization
-        try:
+                logger.info(
+                    "NVENC encoder (legacy) created: %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
+                    self.width, self.height, self._enc_input_fmt, preset, rc_mode.upper(), int(idr_period)
+                )
+            except Exception:
+                pass
+            # Force IDR next frame
             self._force_next_idr = True
+            return
+        except Exception as e:
+            logger.warning("Legacy NVENC path failed (%s)", e, exc_info=True)
+
+        # If preset path fails for any reason, fall back to minimal encoder without tuning
+        try:
+            self._encoder  # type: ignore[attr-defined]
         except Exception:
             pass
+        if self._encoder is None:
+            try:
+                self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
+                logger.warning("NVENC encoder created without preset kwargs; cadence may vary")
+            except Exception:
+                pass
 
     def _log_encoder_settings(self, path: str, init_kwargs: dict) -> None:
         """Emit a single-line summary of encoder settings.
