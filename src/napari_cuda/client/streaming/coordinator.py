@@ -370,6 +370,12 @@ class StreamCoordinator:
         except Exception:
             self._dims_z_min = None
             self._dims_z_max = None
+        # Clamp initial Z if provided
+        if self._dims_z is not None:
+            if self._dims_z_min is not None and self._dims_z < self._dims_z_min:
+                self._dims_z = self._dims_z_min
+            if self._dims_z_max is not None and self._dims_z > self._dims_z_max:
+                self._dims_z = self._dims_z_max
         self._wheel_px_accum: float = 0.0
         try:
             import os as _os
