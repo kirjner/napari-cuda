@@ -354,27 +354,107 @@ class EGLRendererWorker:
             nonrefp = int(os.getenv('NAPARI_CUDA_NONREFP', '0'))
         except Exception:
             nonrefp = 0
-        # VBV sizing: approx per-frame budget (bitrate/fps). Some bindings apply these mainly to VBR; harmless for CBR.
+        # Optional legacy preset path gate: restore older NVENC config surface for motion stability
+        # Semantics:
+        # - If NAPARI_CUDA_ENCODER_LEGACY is set, it overrides everything (0=modern, 1=legacy)
+        # - Else, if NAPARI_CUDA_PRESET is set, prefer legacy (to honor explicit preset)
+        # - Else, default to legacy (stable, low-variance path)
+        preset_env = os.getenv('NAPARI_CUDA_PRESET', '')
+        legacy_raw = os.getenv('NAPARI_CUDA_ENCODER_LEGACY')
+        if legacy_raw is None:
+            legacy_gate = 1 if True else 0
+        else:
+            try:
+                v = legacy_raw.strip().lower()
+                legacy_gate = 1 if v in ('1', 'true', 'yes', 'on') else 0
+            except Exception:
+                legacy_gate = 1
+        # IDR period (frames) for legacy path (and for logging fallback)
         try:
-            vbv_frames = float(os.getenv('NAPARI_CUDA_VBV_FRAMES', '1.0'))
+            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600') or '600')
         except Exception:
-            vbv_frames = 1.0
+            idr_period = 600
+
+        if legacy_gate or (legacy_raw is None and preset_env.strip() != ''):
+            # Legacy preset/tuning path: low-latency tuning, explicit preset, no B-frames, repeat SPS/PPS, fixed IDR period
+            preset = preset_env.strip() if preset_env.strip() else 'P3'
+            kwargs = {
+                'codec': 'h264',
+                'tuning_info': 'low_latency',
+                'preset': preset,
+                'bf': 0,
+                'repeatspspps': 1,
+                'idrperiod': int(idr_period),
+                'rc': rc_mode,
+            }
+            if bitrate and bitrate > 0:
+                kwargs['bitrate'] = int(bitrate)
+                kwargs['maxbitrate'] = int(bitrate)
+            # Also set explicit framerate to align RC pacing with server fps
+            kwargs['frameRateNum'] = int(max(1, int(self.fps)))
+            kwargs['frameRateDen'] = 1
+            kwargs['strictGOPTarget']=1
+            try:
+                self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
+                self._idr_period_cfg = int(idr_period)
+                try:
+                    if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
+                        self._log_encoder_settings('legacy', kwargs)
+                except Exception:
+                    pass
+                try:
+                    logger.info(
+                        "NVENC encoder (legacy) created: %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
+                        self.width, self.height, self._enc_input_fmt, preset, rc_mode.upper(), int(idr_period)
+                    )
+                except Exception:
+                    pass
+                # Force IDR next frame
+                self._force_next_idr = True
+                return
+            except Exception as e:
+                logger.warning("Legacy NVENC path failed (%s); falling back to modern config", e, exc_info=True)
+
+        # VBV sizing: disable by default to avoid CBR/VBV jitter; enable via env when desired
+        try:
+            vbv_frames = float(os.getenv('NAPARI_CUDA_VBV_FRAMES', '0'))
+        except Exception:
+            vbv_frames = 0.0
         vbv_size = None
-        if bitrate and bitrate > 0 and self.fps > 0:
+        if bitrate and bitrate > 0 and self.fps > 0 and vbv_frames > 0:
             vbv_size = max(1, int((bitrate // max(1, self.fps)) * vbv_frames))
         # Map to PyNvVideoCodec-supported keys (lowerCamelCase or accepted lower-case variants)
         # Avoid passing preset/tuning strings as this build rejects them. Let NVENC choose native keyframe cadence.
+        # Optional picture type decision toggle (default on unless explicitly disabled)
+        try:
+            ptd = int(os.getenv('NAPARI_CUDA_PTD', '1'))
+        except Exception:
+            ptd = 1
+        # Optional explicit GOP/IDR tuning for modern path: default to a fixed cadence like legacy
+        try:
+            gop_frames = int(os.getenv('NAPARI_CUDA_GOP_FRAMES', str(idr_period)) or str(idr_period))
+        except Exception:
+            gop_frames = int(idr_period)
+        try:
+            idr_override = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', str(idr_period)) or str(idr_period))
+        except Exception:
+            idr_override = int(idr_period)
+        try:
+            strict_gop = int(os.getenv('NAPARI_CUDA_STRICT_GOP', '0') or '0')
+        except Exception:
+            strict_gop = 0
+
         kwargs = {
             'codec': 'h264',
             # Low-latency settings; do not override keyframe cadence (let NVENC defaults apply)
             'frameIntervalP': 1,  # no B-frames
             'repeatSPSPPS': 1,
-            # 'strictGOPTarget': 1,  # leave off without explicit gop/idr
-            'enablePTD': 1,
+            # GOP/IDR explicit settings are added below only if envs provided
+            'enablePTD': 0, # int(bool(ptd)),
             # Rate control
             'rcMode': rc_mode.upper(),  # CBR/VBR/CONSTQP
             'enableLookahead': int(bool(lookahead)),
-            'enableAQ': int(bool(aq)),
+            'enableAQ': 0,
             'enableTemporalAQ': int(bool(temporalaq)),
             'enableNonRefP': int(bool(nonrefp)),
             # Framerate
@@ -385,10 +465,20 @@ class EGLRendererWorker:
             # References
             'maxNumRefFrames': 1,
         }
+        if gop_frames > 0:
+            kwargs['gopLength'] = int(gop_frames)
+        if idr_override > 0:
+            kwargs['idrPeriod'] = int(idr_override)
+        if strict_gop:
+            kwargs['strictGOPTarget'] = 1
         if bitrate and bitrate > 0:
-            kwargs['bitrate'] = int(bitrate)
-            kwargs['maxBitrate'] = int(bitrate)
-        if vbv_size is not None:
+            # Provide multiple aliases to satisfy different binding versions
+            b = int(bitrate)
+            kwargs['bitrate'] = b
+            kwargs['maxBitrate'] = b
+            kwargs['averageBitrate'] = b
+            kwargs['maxbitrate'] = b
+        if vbv_size is not None and vbv_size > 0:
             # Some builds expect lower-case variants; bindings accept both in many cases
             kwargs['vbvBufferSize'] = int(vbv_size)
             kwargs['vbvInitialDelay'] = int(vbv_size)
@@ -402,6 +492,11 @@ class EGLRendererWorker:
                     self._idr_period_cfg = int(kwargs.get('gopLength') or kwargs.get('idrPeriod') or idr_period)
                 except Exception:
                     self._idr_period_cfg = idr_period
+                try:
+                    if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
+                        self._log_encoder_settings('modern', kwargs)
+                except Exception:
+                    pass
                 logger.info(
                     "NVENC encoder created: %dx%d fmt=%s (low-latency)",
                     self.width, self.height, self._enc_input_fmt,
@@ -429,6 +524,98 @@ class EGLRendererWorker:
         try:
             self._force_next_idr = True
         except Exception:
+            pass
+
+    def _log_encoder_settings(self, path: str, init_kwargs: dict) -> None:
+        """Emit a single-line summary of encoder settings.
+
+        Combines the initialization kwargs we passed to NVENC with any
+        reconfigurable params reported by the encoder at runtime.
+
+        path: 'legacy' or 'modern' for clarity in logs.
+        """
+        try:
+            # Canonicalize known fields from init kwargs
+            k = {**init_kwargs}
+            canon: dict[str, object] = {}
+            def take(src_key: str, dst_key: str | None = None):
+                dst_key = dst_key or src_key
+                if src_key in k and k[src_key] is not None:
+                    canon[dst_key] = k[src_key]
+
+            # Common
+            take('codec', 'codec')
+            # Legacy keys
+            take('preset', 'preset')
+            take('tuning_info', 'tuning')
+            take('bf', 'bf')
+            take('repeatspspps', 'repeatSPSPPS')
+            take('idrperiod', 'idrPeriod')
+            take('rc', 'rcMode')
+            take('bitrate', 'bitrate')
+            take('maxbitrate', 'maxBitrate')
+            # Modern keys
+            take('frameIntervalP', 'frameIntervalP')
+            take('repeatSPSPPS', 'repeatSPSPPS')
+            take('gopLength', 'gopLength')
+            take('idrPeriod', 'idrPeriod')
+            take('rcMode', 'rcMode')
+            take('enablePTD', 'enablePTD')
+            take('enableLookahead', 'enableLookahead')
+            take('enableAQ', 'enableAQ')
+            take('enableTemporalAQ', 'enableTemporalAQ')
+            take('enableNonRefP', 'enableNonRefP')
+            take('frameRateNum', 'frameRateNum')
+            take('frameRateDen', 'frameRateDen')
+            take('enableIntraRefresh', 'enableIntraRefresh')
+            take('maxNumRefFrames', 'maxNumRefFrames')
+            take('vbvBufferSize', 'vbvBufferSize')
+            take('vbvInitialDelay', 'vbvInitialDelay')
+
+            # Merge in live reconfigure params if available
+            live = {}
+            try:
+                if hasattr(self._encoder, 'GetEncodeReconfigureParams'):
+                    params = self._encoder.GetEncodeReconfigureParams()
+                    # Pull known fields if present
+                    for attr in (
+                        'rateControlMode', 'averageBitrate', 'maxBitRate',
+                        'vbvBufferSize', 'vbvInitialDelay', 'frameRateNum', 'frameRateDen', 'multiPass',
+                    ):
+                        if hasattr(params, attr):
+                            live[attr] = getattr(params, attr)
+            except Exception:
+                pass
+
+            # Compose a flat, readable line
+            # Prefer explicit canon values; supplement with live where not present
+            for src, dst in (
+                ('rateControlMode', 'rcMode'),
+                ('averageBitrate', 'bitrate'),
+                ('maxBitRate', 'maxBitrate'),
+                ('vbvBufferSize', 'vbvBufferSize'),
+                ('vbvInitialDelay', 'vbvInitialDelay'),
+                ('frameRateNum', 'frameRateNum'),
+                ('frameRateDen', 'frameRateDen'),
+            ):
+                if dst not in canon and src in live:
+                    canon[dst] = live[src]
+
+            # Stable order for readability
+            order = [
+                'codec','preset','tuning','frameIntervalP','bf','maxNumRefFrames',
+                'gopLength','idrPeriod','repeatSPSPPS',
+                'rcMode','bitrate','maxBitrate','vbvBufferSize','vbvInitialDelay',
+                'enablePTD','enableLookahead','enableAQ','enableTemporalAQ','enableNonRefP',
+                'frameRateNum','frameRateDen','enableIntraRefresh'
+            ]
+            parts = []
+            for key in order:
+                if key in canon:
+                    parts.append(f"{key}={canon[key]}")
+            logger.info("Encoder settings (%s): %s", path, ", ".join(parts))
+        except Exception:
+            # Best-effort only
             pass
 
     def reset_encoder(self) -> None:
