@@ -94,6 +94,13 @@ class EGLHeadlessServer:
         self._kf_watchdog_task: Optional[asyncio.Task] = None
         # Broadcaster pacing: bypass once until keyframe for immediate start
         self._bypass_until_key: bool = False
+        # Keyframe watchdog cooldown to avoid rapid encoder resets
+        self._kf_last_reset_ts: Optional[float] = None
+        _cool = os.getenv('NAPARI_CUDA_KF_WATCHDOG_COOLDOWN')
+        try:
+            self._kf_watchdog_cooldown_s = float(_cool) if _cool else 2.0
+        except ValueError:
+            self._kf_watchdog_cooldown_s = 2.0
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.Lock()
         # Logging controls for camera ops
@@ -874,15 +881,23 @@ class EGLHeadlessServer:
                                 pass
                             # Watchdog: if no keyframe arrives within 300 ms, reset encoder
                             async def _kf_watchdog(last_key_seq: Optional[int]):
-                                try:
-                                    await asyncio.sleep(0.30)
-                                    # If no new keyframe observed, hard reset the encoder
-                                    if self._last_key_seq == last_key_seq and self._worker is not None:
-                                        logger.warning("Keyframe watchdog fired; resetting encoder")
+                                await asyncio.sleep(0.30)
+                                # If no new keyframe observed, hard reset the encoder (with cooldown)
+                                if self._last_key_seq == last_key_seq and self._worker is not None:
+                                    now = time.time()
+                                    # Cooldown: skip if a reset just happened
+                                    if self._kf_last_reset_ts is not None and (now - self._kf_last_reset_ts) < self._kf_watchdog_cooldown_s:
+                                        rem = self._kf_watchdog_cooldown_s - (now - self._kf_last_reset_ts)
+                                        logger.debug("Keyframe watchdog cooldown active (%.2fs remaining); skip reset", rem)
+                                        return
+                                    logger.warning("Keyframe watchdog fired; resetting encoder")
+                                    try:
                                         self._worker.reset_encoder()
-                                        self._bypass_until_key = True
-                                except Exception as e:
-                                    logger.debug("Keyframe watchdog error: %s", e)
+                                    except Exception:
+                                        logger.exception("Encoder reset failed during keyframe watchdog")
+                                        return
+                                    self._bypass_until_key = True
+                                    self._kf_last_reset_ts = now
                             try:
                                 # Cancel previous watchdog before starting a new one
                                 if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
@@ -931,6 +946,8 @@ class EGLHeadlessServer:
                 self._worker.reset_encoder()
                 # Allow immediate send of the first keyframe when pacing is enabled
                 self._bypass_until_key = True
+                # Record reset time for watchdog cooldown
+                self._kf_last_reset_ts = time.time()
                 # Request re-send of video configuration for new clients
                 self._needs_config = True
                 # If we already have a cached avcC, proactively re-broadcast on state channel
