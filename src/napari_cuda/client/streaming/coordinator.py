@@ -1013,28 +1013,22 @@ class StreamCoordinator:
 
     # --- Camera ops: zoom/pan/reset -----------------------------------------------
     def _widget_to_video(self, xw: float, yw: float) -> tuple[float, float]:
+        # Map widget pixel coordinates to video pixel coordinates assuming
+        # the video is stretched to fill the widget (no letterboxing).
         try:
             vw = float(self._vid_w or 0)
             vh = float(self._vid_h or 0)
             ww = float(self._scene_canvas.native.width())
             wh = float(self._scene_canvas.native.height())
-            try:
-                dpr = float(self._scene_canvas.native.devicePixelRatioF())
-            except Exception:
-                dpr = 1.0
             if vw <= 0 or vh <= 0 or ww <= 0 or wh <= 0:
                 return (xw, yw)
-            ww_d = ww * dpr; wh_d = wh * dpr
-            xw_d = float(xw) * dpr; yw_d = float(yw) * dpr
-            scale = min(ww_d / vw, wh_d / vh)
-            ox = (ww_d - vw * scale) / 2.0
-            oy = (wh_d - vh * scale) / 2.0
-            xv = (xw_d - ox) / max(1e-6, scale)
-            yv = (yw_d - oy) / max(1e-6, scale)
-            if vw > 0:
-                xv = max(0.0, min(vw, xv))
-            if vh > 0:
-                yv = max(0.0, min(vh, yv))
+            sx = vw / ww
+            sy = vh / wh
+            xv = float(xw) * sx
+            yv = float(yw) * sy
+            # Clamp to [0, video_wh]
+            xv = max(0.0, min(vw, xv))
+            yv = max(0.0, min(vh, yv))
             return (xv, yv)
         except Exception:
             return (xw, yw)
@@ -1070,12 +1064,22 @@ class StreamCoordinator:
             return
         # '+' zooms in, '-' zooms out
         f = base ** (-s)
-        ax = float(self._vid_w or 0) / 2.0
-        ay = float(self._vid_h or 0) / 2.0
-        ax_s, ay_s = self._server_anchor_from_video(ax, ay)
+        # Use cursor position if available; otherwise fall back to view center.
+        cursor_xw = getattr(self, '_cursor_wx', None)
+        cursor_yw = getattr(self, '_cursor_wy', None)
+        if isinstance(cursor_xw, (int, float)) and isinstance(cursor_yw, (int, float)):
+            xv, yv = self._widget_to_video(float(cursor_xw), float(cursor_yw))
+        else:
+            cx = float(self._vid_w or 0) / 2.0
+            cy = float(self._vid_h or 0) / 2.0
+            xv, yv = cx, cy
+        ax_s, ay_s = self._server_anchor_from_video(xv, yv)
         ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(f), 'anchor_px': [float(ax_s), float(ay_s)]})
         if getattr(self, '_log_dims_info', False):
-            logger.info("key->camera.zoom_at f=%.4f sent=%s", float(f), bool(ok))
+            logger.info(
+                "key->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s",
+                float(f), float(ax_s), float(ay_s), bool(ok)
+            )
 
     def _reset_camera(self) -> None:
         ch = self._state_channel
@@ -1115,11 +1119,28 @@ class StreamCoordinator:
 
     def _on_pointer(self, data: dict) -> None:
         phase = (data.get('phase') or '').lower()
+        # Parse positions with specific exception handling
+        xw_raw = data.get('x_px')
+        yw_raw = data.get('y_px')
         try:
-            xw = float(data.get('x_px') or 0.0)
-            yw = float(data.get('y_px') or 0.0)
+            xw = float(xw_raw) if xw_raw is not None else 0.0
+        except (TypeError, ValueError):
+            logger.debug("pointer x_px parse failed: %r", xw_raw, exc_info=True)
+            xw = 0.0
+        try:
+            yw = float(yw_raw) if yw_raw is not None else 0.0
+        except (TypeError, ValueError):
+            logger.debug("pointer y_px parse failed: %r", yw_raw, exc_info=True)
+            yw = 0.0
+        # Track latest cursor position regardless of drag
+        self._cursor_wx = xw
+        self._cursor_wy = yw
+        # Track latest cursor position regardless of drag
+        try:
+            self._cursor_wx = float(xw)
+            self._cursor_wy = float(yw)
         except Exception:
-            xw = yw = 0.0
+            pass
         if phase == 'down':
             self._dragging = True
             self._last_wx = xw
