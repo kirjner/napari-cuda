@@ -21,6 +21,7 @@ try:
 except Exception:  # pragma: no cover
     from pydantic import PrivateAttr  # type: ignore
 from napari.components import LayerList, Dims, Camera
+from qtpy import QtCore  # type: ignore
 
 if TYPE_CHECKING:
     # This import reveals napari's intentional architectural coupling between
@@ -53,6 +54,10 @@ class ProxyViewer(ViewerModel):
     # Bridge to coordinator (thin client path)
     _state_sender = PrivateAttr(default=None)
     _suppress_forward: bool = PrivateAttr(default=False)
+    _last_step_ui = PrivateAttr(default=None)
+    _dims_tx_timer = PrivateAttr(default=None)
+    _dims_tx_pending = PrivateAttr(default=None)
+    _dims_tx_interval_ms: int = PrivateAttr(default=35)
 
     def __init__(self, server_host='localhost', server_port=8081, offline: bool = False, **kwargs):
         """
@@ -205,18 +210,57 @@ class ProxyViewer(ViewerModel):
         if self._suppress_forward:
             return
         if self._state_sender is not None:
+            # Compute which axis changed (best-effort) and send set_index intent
             try:
-                step = list(self.dims.current_step)
+                cur = tuple(int(x) for x in self.dims.current_step)
             except Exception:
-                step = self.dims.current_step
+                cur = self.dims.current_step
+            changed_axis = None
             try:
-                ndisp = int(self.dims.ndisplay)
+                prev = tuple(int(x) for x in (self._last_step_ui or ()))
+                if isinstance(cur, tuple) and isinstance(prev, tuple) and len(prev) == len(cur):
+                    for i, (a, b) in enumerate(zip(prev, cur)):
+                        if a != b:
+                            changed_axis = i
+                            break
             except Exception:
-                ndisp = None
+                changed_axis = None
+            if changed_axis is None:
+                # Fallback to coordinator's primary axis if available
+                try:
+                    changed_axis = int(getattr(self._state_sender, '_primary_axis_index', 0) or 0)
+                except Exception:
+                    changed_axis = 0
+            # Coalesce rapid slider changes via single-shot timer
             try:
-                self._state_sender.set_dims(current_step=step, ndisplay=ndisp, origin='ui')
+                val = int(cur[changed_axis]) if isinstance(cur, (list, tuple)) else int(cur)
             except Exception:
-                logger.debug("ProxyViewer dims forward failed", exc_info=True)
+                val = None
+            if val is None:
+                return
+            # Stash pending and arm timer
+            self._dims_tx_pending = (int(changed_axis), int(val))
+            try:
+                if self._dims_tx_timer is None:
+                    t = QtCore.QTimer(self.window._qt_viewer) if self.window is not None else QtCore.QTimer()
+                    t.setSingleShot(True)
+                    t.setTimerType(QtCore.Qt.PreciseTimer)  # type: ignore[attr-defined]
+                    def _fire() -> None:
+                        try:
+                            pair = self._dims_tx_pending
+                            self._dims_tx_pending = None
+                            if pair is None:
+                                return
+                            ax, vv = pair
+                            _ = self._state_sender.dims_set_index(int(ax), int(vv), origin='ui')
+                        except Exception:
+                            logger.debug("ProxyViewer dims intent send failed", exc_info=True)
+                    t.timeout.connect(_fire)
+                    self._dims_tx_timer = t
+                # restart timer
+                self._dims_tx_timer.start(max(1, int(self._dims_tx_interval_ms)))
+            except Exception:
+                logger.debug("ProxyViewer dims coalesce timer failed", exc_info=True)
             return
         if self._state_websocket:
             command = {
@@ -308,17 +352,15 @@ class ProxyViewer(ViewerModel):
                 except Exception:
                     pass
             if current_step is not None:
-                try:
-                    self.dims.events.current_step.block()
-                except Exception:
-                    pass
-                try:
-                    self.dims.current_step = tuple(int(x) for x in current_step)
-                finally:
-                    try:
-                        self.dims.events.current_step.unblock()
-                    except Exception:
-                        pass
+                # Do not block events here: allow napari UI (sliders) to update.
+                # Loopback is prevented by _suppress_forward above.
+                self.dims.current_step = tuple(int(x) for x in current_step)
+            # Cache the latest step for diffing future UI changes
+            try:
+                if current_step is not None:
+                    self._last_step_ui = tuple(int(x) for x in current_step)
+            except Exception:
+                self._last_step_ui = current_step
         except Exception:
             logger.debug("ProxyViewer mirror dims apply failed", exc_info=True)
         finally:

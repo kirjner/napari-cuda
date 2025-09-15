@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from qtpy import QtCore
+import uuid
 
 from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, SourceMux
 from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
@@ -431,6 +432,20 @@ class StreamCoordinator:
         self._last_wy: float = 0.0
         self._pan_dx_accum: float = 0.0
         self._pan_dy_accum: float = 0.0
+        # --- Dims/intent state (intent-only client) ----------------------------
+        self._dims_ready: bool = False
+        self._dims_meta: dict = {
+            'ndim': None,
+            'order': None,
+            'axis_labels': None,
+            'range': None,
+            'sizes': None,
+            'ndisplay': None,
+        }
+        self._primary_axis_index: int | None = None
+        # Client identity for intents
+        self._client_id: str = uuid.uuid4().hex
+        self._client_seq: int = 0
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
@@ -496,7 +511,7 @@ class StreamCoordinator:
                     sender.start()
                     self._input_sender = sender  # type: ignore[attr-defined]
                     logger.info("InputSender attached (wheel+resize+pointer)")
-                    # Bind Up/Down shortcuts to step Z using the same dims.set path
+                    # Bind zoom/reset shortcuts; arrow keys handled via key callback
                     try:
                         from qtpy import QtWidgets, QtGui, QtCore  # type: ignore
                         # Bind shortcuts on the top-level window rather than the
@@ -519,8 +534,7 @@ class StreamCoordinator:
                                     parent = aw
                             except Exception:
                                 pass
-                        up_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Up), parent)  # type: ignore
-                        down_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Down), parent)  # type: ignore
+                        # Up/Down/Left/Right are handled in app-level key callback to avoid focus issues
                         plus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Plus), parent)  # type: ignore
                         eq_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Equal), parent)  # type: ignore
                         minus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Minus), parent)  # type: ignore
@@ -530,31 +544,27 @@ class StreamCoordinator:
                         # zero_str_sc = QtWidgets.QShortcut(QtGui.QKeySequence("0"), parent)  # type: ignore
                         # num0_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
                         # Ensure shortcuts fire regardless of widget focus
-                        for sc in (up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc):
+                        for sc in (plus_sc, eq_sc, minus_sc, home_sc):
                             try:
                                 sc.setContext(QtCore.Qt.ApplicationShortcut)  # type: ignore[attr-defined]
                             except Exception as e:
                                 logger.info("Shortcut context=ApplicationShortcut failed: %s", e, exc_info=True)
                         try:
-                            up_sc.setAutoRepeat(True)
-                            down_sc.setAutoRepeat(True)
                             plus_sc.setAutoRepeat(True)
                             eq_sc.setAutoRepeat(True)
                             minus_sc.setAutoRepeat(True)
                         except Exception:
                             pass
-                        up_sc.activated.connect(lambda: self._step_z(+int(self._wheel_step or 1)))  # type: ignore
-                        down_sc.activated.connect(lambda: self._step_z(-int(self._wheel_step or 1)))  # type: ignore
                         plus_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
                         eq_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
                         minus_sc.activated.connect(lambda: self._zoom_steps_at_center(-1))  # type: ignore
                         home_sc.activated.connect(lambda: (logger.info("shortcut: Home -> camera.reset"), self._reset_camera()))  # type: ignore
                         # Note: all 0-related bindings commented out for debugging
                         # Keep references to avoid GC
-                        self._shortcuts = [up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc]  # type: ignore[attr-defined]
-                        logger.info("Shortcuts bound: Up/Down→dims.set, +/-/=→zoom, Home→reset")
+                        self._shortcuts = [plus_sc, eq_sc, minus_sc, home_sc]  # type: ignore[attr-defined]
+                        logger.info("Shortcuts bound: +/-/=→zoom, Home→reset (arrows via keycb)")
                     except Exception:
-                        logger.debug("Failed to bind Up/Down shortcuts", exc_info=True)
+                        logger.debug("Failed to bind zoom/reset shortcuts", exc_info=True)
             except Exception:
                 logger.debug("Failed to attach InputSender", exc_info=True)
 
@@ -951,18 +961,44 @@ class StreamCoordinator:
     def _on_dims_update(self, data: dict) -> None:
         try:
             cur = data.get('current_step')
-            if isinstance(cur, (list, tuple)) and len(cur) > 0:
-                z = int(cur[0])
-                self._dims_z = z
-                if bool(getattr(self, '_log_dims_info', False)):
-                    logger.info("dims_update: baseline z=%d", z)
-            # Mirror to local viewer UI if attached (including optional metadata)
+            # Cache metadata and compute primary axis index
             ndisp = data.get('ndisplay')
             ndim = data.get('ndim')
             dims_range = data.get('range')
             order = data.get('order')
             axis_labels = data.get('axis_labels')
             sizes = data.get('sizes')
+            try:
+                self._dims_meta['ndim'] = int(ndim) if ndim is not None else self._dims_meta.get('ndim')
+            except Exception:
+                pass
+            if order is not None:
+                self._dims_meta['order'] = order
+            if axis_labels is not None:
+                self._dims_meta['axis_labels'] = axis_labels
+            if dims_range is not None:
+                self._dims_meta['range'] = dims_range
+            if sizes is not None:
+                self._dims_meta['sizes'] = sizes
+            try:
+                self._dims_meta['ndisplay'] = int(ndisp) if ndisp is not None else self._dims_meta.get('ndisplay')
+            except Exception:
+                pass
+            # Mark ready on first dims.update with metadata
+            if not self._dims_ready and (ndim is not None or order is not None):
+                self._dims_ready = True
+                logger.info("dims.update: metadata received; client intents enabled")
+            # Compute primary axis (first non-displayed axis)
+            try:
+                self._primary_axis_index = self._compute_primary_axis_index()
+            except Exception:
+                logger.debug("compute primary axis failed", exc_info=True)
+            if isinstance(cur, (list, tuple)) and len(cur) > 0 and bool(getattr(self, '_log_dims_info', False)):
+                try:
+                    logger.info("dims_update: step=%s ndisp=%s order=%s labels=%s", list(cur), self._dims_meta.get('ndisplay'), self._dims_meta.get('order'), self._dims_meta.get('axis_labels'))
+                except Exception:
+                    pass
+            # Mirror to local viewer UI if attached (including optional metadata)
             try:
                 vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
             except Exception:
@@ -1019,7 +1055,7 @@ class StreamCoordinator:
         else:
             self._on_wheel_for_dims(data)
 
-    # --- Input mapping: wheel -> dims.set (Z stepping) -------------------------------
+    # --- Input mapping: wheel -> dims.intent.step (primary axis) ---------------------
     def _on_wheel_for_dims(self, data: dict) -> None:
         try:
             ay = int(data.get('angle_y') or 0)
@@ -1043,61 +1079,22 @@ class StreamCoordinator:
                 self._wheel_px_accum += thr
         if step == 0:
             return
-        # Update local Z index and clamp if bounds provided
-        if self._dims_z is None:
-            self._dims_z = 0
-        self._dims_z = int(self._dims_z) + int(step)
-        if self._dims_z_min is not None and self._dims_z < int(self._dims_z_min):
-            self._dims_z = int(self._dims_z_min)
-        if self._dims_z_max is not None and self._dims_z > int(self._dims_z_max):
-            self._dims_z = int(self._dims_z_max)
-        # Send dims.set to server
-        ch = self._state_channel
-        now = time.perf_counter()
-        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
-            logger.debug("dims.set gated by rate limiter (wheel)")
-            return
-        if ch is not None:
-            ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
-            self._last_dims_send = now
-            if getattr(self, '_log_dims_info', False):
-                logger.info(
-                    "wheel->dims.set z=%d step=%+d (ay=%d py=%d mods=%d sent=%s)",
-                    int(self._dims_z), int(step), int(ay), int(py), int(mods), bool(ok)
-                )
-            else:
-                logger.debug(
-                    "wheel->dims.set z=%d step=%+d (sent=%s)",
-                    int(self._dims_z), int(step), bool(ok)
-                )
+        # Send intent to server on primary axis
+        sent = self.dims_step('primary', int(step), origin='wheel')
+        if getattr(self, '_log_dims_info', False):
+            logger.info(
+                "wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent)
+            )
 
-    # Shortcut-driven Z stepping (Up/Down)
-    def _step_z(self, delta: int) -> None:
+    # Shortcut-driven stepping via intents (arrows/page)
+    def _step_primary(self, delta: int, origin: str = 'keys') -> None:
         try:
             dz = int(delta)
         except Exception:
             dz = 0
         if dz == 0:
             return
-        if self._dims_z is None:
-            self._dims_z = 0
-        self._dims_z = int(self._dims_z) + int(dz)
-        if self._dims_z_min is not None and self._dims_z < int(self._dims_z_min):
-            self._dims_z = int(self._dims_z_min)
-        if self._dims_z_max is not None and self._dims_z > int(self._dims_z_max):
-            self._dims_z = int(self._dims_z_max)
-        now = time.perf_counter()
-        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
-            logger.debug("dims.set gated by rate limiter (shortcut)")
-            return
-        ch = self._state_channel
-        if ch is not None:
-            ok = ch.send_json({'type': 'dims.set', 'current_step': [int(self._dims_z)], 'ndisplay': 2})
-            self._last_dims_send = now
-            if getattr(self, '_log_dims_info', False):
-                logger.info("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
-            else:
-                logger.debug("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
+        _ = self.dims_step('primary', dz, origin=origin)
 
     # --- Camera ops: zoom/pan/reset -----------------------------------------------
     def _widget_to_video(self, xw: float, yw: float) -> tuple[float, float]:
@@ -1209,6 +1206,28 @@ class StreamCoordinator:
         if key == int(getattr(_QtCore.Qt, 'Key_0', 0)) and (mods == 0 or keypad_only):  # type: ignore[attr-defined]
             logger.info("keycb: Key_0 -> camera.reset")
             self._reset_camera()
+            return
+        # Map arrows and page keys to primary-axis stepping
+        try:
+            k_left = int(getattr(_QtCore.Qt, 'Key_Left'))
+            k_right = int(getattr(_QtCore.Qt, 'Key_Right'))
+            k_up = int(getattr(_QtCore.Qt, 'Key_Up'))
+            k_down = int(getattr(_QtCore.Qt, 'Key_Down'))
+            k_pgup = int(getattr(_QtCore.Qt, 'Key_PageUp'))
+            k_pgdn = int(getattr(_QtCore.Qt, 'Key_PageDown'))
+        except Exception:
+            k_left = k_right = k_up = k_down = k_pgup = k_pgdn = -1
+        if key in (k_left, k_right, k_up, k_down, k_pgup, k_pgdn):
+            # Coarse step for PageUp/Down
+            coarse = 10
+            if key == k_left or key == k_down:
+                self._step_primary(-1, origin='keys')
+            elif key == k_right or key == k_up:
+                self._step_primary(+1, origin='keys')
+            elif key == k_pgup:
+                self._step_primary(+coarse, origin='keys')
+            elif key == k_pgdn:
+                self._step_primary(-coarse, origin='keys')
 
     # --- Public UI/state bridge methods -------------------------------------------
     def attach_viewer_mirror(self, viewer: object) -> None:
@@ -1270,24 +1289,99 @@ class StreamCoordinator:
         ok = ch.send_json(payload)
         return bool(ok)
 
-    def set_dims(self, *, current_step=None, ndisplay=None, origin: str = 'ui') -> bool:
-        """Send dims.set with optional current_step and ndisplay."""
+    # --- Intents API --------------------------------------------------------------
+    def _axis_to_index(self, axis: int | str) -> Optional[int]:
+        try:
+            if axis == 'primary':
+                return int(self._primary_axis_index) if self._primary_axis_index is not None else 0
+            if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
+                return int(axis)
+            # Map label to index via axis_labels
+            labels = self._dims_meta.get('axis_labels') or []
+            if isinstance(labels, (list, tuple)):
+                try:
+                    return int({str(lbl): i for i, lbl in enumerate(labels)}.get(str(axis)))
+                except Exception:
+                    return None
+            return None
+        except Exception:
+            return None
+
+    def _compute_primary_axis_index(self) -> Optional[int]:
+        order = self._dims_meta.get('order')
+        ndisplay = self._dims_meta.get('ndisplay')
+        labels = self._dims_meta.get('axis_labels')
+        try:
+            nd = int(ndisplay) if ndisplay is not None else 2
+        except Exception:
+            nd = 2
+        # Normalize order to indices
+        idx_order: list[int] | None = None
+        if isinstance(order, (list, tuple)) and len(order) > 0:
+            if all(isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order):
+                idx_order = [int(x) for x in order]
+            elif isinstance(labels, (list, tuple)) and all(isinstance(x, str) for x in order):
+                l2i = {str(lbl): i for i, lbl in enumerate(labels)}
+                idx_order = [int(l2i.get(str(lbl), i)) for i, lbl in enumerate(order)]
+        # Primary axis = first non-displayed axis (front of order excluding last ndisplay)
+        if idx_order and len(idx_order) > nd:
+            return int(idx_order[0])
+        # Fallback: 0
+        return 0
+
+    def _next_client_seq(self) -> int:
+        self._client_seq = (int(self._client_seq) + 1) & 0x7FFFFFFF
+        return int(self._client_seq)
+
+    def dims_step(self, axis: int | str, delta: int, *, origin: str = 'ui') -> bool:
+        if not self._dims_ready:
+            return False
+        idx = self._axis_to_index(axis)
+        if idx is None:
+            return False
+        now = time.perf_counter()
+        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
+            logger.debug("dims.intent.step gated by rate limiter (%s)", origin)
+            return False
         ch = self._state_channel
         if ch is None:
             return False
-        payload: dict = {'type': 'dims.set'}
-        if current_step is not None:
-            try:
-                payload['current_step'] = list(current_step)
-            except Exception:
-                payload['current_step'] = current_step
-        if ndisplay is not None:
-            payload['ndisplay'] = int(ndisplay)
-        try:
-            logger.info("%s->dims.set %s", origin, {k: v for k, v in payload.items() if k != 'type'})
-        except Exception:
-            pass
+        payload = {
+            'type': 'dims.intent.step',
+            'axis': int(idx),
+            'delta': int(delta),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
         ok = ch.send_json(payload)
+        self._last_dims_send = now
+        return bool(ok)
+
+    def dims_set_index(self, axis: int | str, value: int, *, origin: str = 'ui') -> bool:
+        if not self._dims_ready:
+            return False
+        idx = self._axis_to_index(axis)
+        if idx is None:
+            return False
+        now = time.perf_counter()
+        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
+            # Allow coalescing on caller side; treat as not sent
+            logger.debug("dims.intent.set_index gated by rate limiter (%s)", origin)
+            return False
+        ch = self._state_channel
+        if ch is None:
+            return False
+        payload = {
+            'type': 'dims.intent.set_index',
+            'axis': int(idx),
+            'value': int(value),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        self._last_dims_send = now
         return bool(ok)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:

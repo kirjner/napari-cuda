@@ -97,10 +97,23 @@ class StateChannel:
                                 self.on_video_config(data)
                             except Exception:
                                 logger.debug("on_video_config callback failed", exc_info=True)
-                    elif t == 'dims_update':
+                    elif t == 'dims.update':
                         if self.on_dims_update:
                             try:
-                                self.on_dims_update(data)
+                                # Normalize new-style dims.update (nested meta) to flattened keys
+                                meta = data.get('meta') or {}
+                                fwd = {
+                                    'current_step': data.get('current_step'),
+                                    'ndim': meta.get('ndim'),
+                                    'order': meta.get('order'),
+                                    'axis_labels': meta.get('axis_labels'),
+                                    'sizes': meta.get('sizes'),
+                                    'range': meta.get('range'),
+                                    'ndisplay': meta.get('ndisplay'),
+                                    'seq': data.get('seq'),
+                                    'last_client_id': data.get('last_client_id'),
+                                }
+                                self.on_dims_update(fwd)
                             except Exception:
                                 logger.debug("on_dims_update callback failed", exc_info=True)
                 ping_task.cancel()
