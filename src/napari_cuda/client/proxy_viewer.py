@@ -52,7 +52,7 @@ class ProxyViewer(ViewerModel):
     _last_step_ui = PrivateAttr(default=None)
     _dims_tx_timer = PrivateAttr(default=None)
     _dims_tx_pending = PrivateAttr(default=None)
-    _dims_tx_interval_ms: int = PrivateAttr(default=35)
+    _dims_tx_interval_ms: int = PrivateAttr(default=10)
 
     def __init__(self, server_host='localhost', server_port=8081, offline: bool = False, **kwargs):
         """
@@ -83,6 +83,14 @@ class ProxyViewer(ViewerModel):
         
         # In streaming client, delegate state to coordinator (no direct sockets)
         logger.info("ProxyViewer: thin client mode (coordinator-driven)")
+        # Slider transmit interval (ms); 0 disables coalescing and sends immediately
+        try:
+            import os as _os
+            iv = _os.getenv('NAPARI_CUDA_SLIDER_TX_MS')
+            if iv is not None and str(iv).strip() != '':
+                self._dims_tx_interval_ms = max(0, int(iv))
+        except Exception:
+            pass
         
         logger.info(f"ProxyViewer initialized for {server_host}:{server_port}")
 
@@ -152,29 +160,32 @@ class ProxyViewer(ViewerModel):
                 val = None
             if val is None:
                 return
-            # Stash pending and arm timer
-            self._dims_tx_pending = (int(changed_axis), int(val))
+            # Send immediately when coalescing is disabled, otherwise coalesce
             try:
-                if self._dims_tx_timer is None:
-                    t = QtCore.QTimer(self.window._qt_viewer) if self.window is not None else QtCore.QTimer()
-                    t.setSingleShot(True)
-                    t.setTimerType(QtCore.Qt.PreciseTimer)  # type: ignore[attr-defined]
-                    def _fire() -> None:
-                        try:
-                            pair = self._dims_tx_pending
-                            self._dims_tx_pending = None
-                            if pair is None:
-                                return
-                            ax, vv = pair
-                            _ = self._state_sender.dims_set_index(int(ax), int(vv), origin='ui')
-                        except Exception:
-                            logger.debug("ProxyViewer dims intent send failed", exc_info=True)
-                    t.timeout.connect(_fire)
-                    self._dims_tx_timer = t
-                # restart timer
-                self._dims_tx_timer.start(max(1, int(self._dims_tx_interval_ms)))
+                if int(getattr(self, '_dims_tx_interval_ms', 10) or 0) <= 0:
+                    _ = self._state_sender.dims_set_index(int(changed_axis), int(val), origin='ui')
+                else:
+                    self._dims_tx_pending = (int(changed_axis), int(val))
+                    if self._dims_tx_timer is None:
+                        t = QtCore.QTimer(self.window._qt_viewer) if self.window is not None else QtCore.QTimer()
+                        t.setSingleShot(True)
+                        t.setTimerType(QtCore.Qt.PreciseTimer)  # type: ignore[attr-defined]
+                        def _fire() -> None:
+                            try:
+                                pair = self._dims_tx_pending
+                                self._dims_tx_pending = None
+                                if pair is None:
+                                    return
+                                ax, vv = pair
+                                _ = self._state_sender.dims_set_index(int(ax), int(vv), origin='ui')
+                            except Exception:
+                                logger.debug("ProxyViewer dims intent send failed", exc_info=True)
+                        t.timeout.connect(_fire)
+                        self._dims_tx_timer = t
+                    # restart timer with configured interval
+                    self._dims_tx_timer.start(max(1, int(self._dims_tx_interval_ms)))
             except Exception:
-                logger.debug("ProxyViewer dims coalesce timer failed", exc_info=True)
+                logger.debug("ProxyViewer dims send failed", exc_info=True)
             return
         return
     
