@@ -60,11 +60,22 @@ class FrameTimings:
 
 @dataclass
 class ServerSceneState:
-    """Minimal scene state snapshot applied atomically per frame."""
+    """Minimal scene state snapshot applied atomically per frame.
+
+    Extended to support coalesced camera operations applied once per frame.
+    """
+    # Legacy absolute camera state (kept for compatibility)
     center: Optional[tuple[float, float, float]] = None
     zoom: Optional[float] = None
     angles: Optional[tuple[float, float, float]] = None
+    # Dims/Z state
     current_step: Optional[tuple[int, ...]] = None
+    # Coalesced camera ops (consumed once by the worker)
+    zoom_factor: Optional[float] = None
+    zoom_anchor_px: Optional[tuple[float, float]] = None
+    pan_dx_px: float = 0.0
+    pan_dy_px: float = 0.0
+    reset_view: bool = False
 
 
 class EGLRendererWorker:
@@ -110,6 +121,9 @@ class EGLRendererWorker:
         self._dst_pitch_bytes: Optional[int] = None
 
         self._encoder = None
+
+        # Track current data extents in world units (W,H)
+        self._data_wh: tuple[int, int] = (int(width), int(height))
 
         # Timer query double-buffering for capture blit
         self._query_ids = None  # type: Optional[tuple]
@@ -247,6 +261,7 @@ class EGLRendererWorker:
                 # Camera range to data extents (note: array is (H, W))
                 try:
                     h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
+                    self._data_wh = (w, h)
                     view.camera.set_range(x=(0, w), y=(0, h))
                 except Exception as e:
                     logger.debug("set_range(zarr) failed: %s", e)
@@ -262,6 +277,7 @@ class EGLRendererWorker:
                 image = make_rgba_image(self.width, self.height)
                 visual = scene.visuals.Image(image, parent=view.scene)
                 try:
+                    self._data_wh = (self.width, self.height)
                     view.camera.set_range(x=(0, self.width), y=(0, self.height))
                 except Exception:
                     pass
@@ -287,6 +303,7 @@ class EGLRendererWorker:
             image = make_rgba_image(self.width, self.height)
             visual = scene.visuals.Image(image, parent=view.scene)
             try:
+                self._data_wh = (self.width, self.height)
                 view.camera.set_range(x=(0, self.width), y=(0, self.height))
             except Exception as e:
                 logger.debug("PanZoom set_range failed: %s", e)
@@ -695,6 +712,11 @@ class EGLRendererWorker:
                 zoom=float(state.zoom) if state.zoom is not None else None,
                 angles=tuple(state.angles) if state.angles is not None else None,
                 current_step=tuple(state.current_step) if state.current_step is not None else None,
+                zoom_factor=float(state.zoom_factor) if getattr(state, 'zoom_factor', None) is not None else None,
+                zoom_anchor_px=tuple(state.zoom_anchor_px) if getattr(state, 'zoom_anchor_px', None) is not None else None,
+                pan_dx_px=float(getattr(state, 'pan_dx_px', 0.0) or 0.0),
+                pan_dy_px=float(getattr(state, 'pan_dy_px', 0.0) or 0.0),
+                reset_view=bool(getattr(state, 'reset_view', False)),
             )
 
     def _apply_pending_state(self) -> None:
@@ -707,22 +729,7 @@ class EGLRendererWorker:
             return
         try:
             cam = self.view.camera
-            if state.center is not None and hasattr(cam, 'center'):
-                try:
-                    cam.center = state.center  # type: ignore[attr-defined]
-                except Exception as e:
-                    logger.debug("Apply center failed: %s", e)
-            if state.zoom is not None and hasattr(cam, 'zoom'):
-                try:
-                    cam.zoom = state.zoom  # type: ignore[attr-defined]
-                except Exception as e:
-                    logger.debug("Apply zoom failed: %s", e)
-            if state.angles is not None and hasattr(cam, 'angles'):
-                try:
-                    cam.angles = state.angles  # type: ignore[attr-defined]
-                except Exception as e:
-                    logger.debug("Apply angles failed: %s", e)
-            # Handle dims (Z step) if OME-Zarr volume is active
+            # Handle dims (Z step) if OME-Zarr volume is active FIRST so camera can be authoritative after
             if state.current_step is not None and getattr(self, '_da_volume', None) is not None:
                 try:
                     # Interpret current_step against axes (default 'zyx')
@@ -741,17 +748,87 @@ class EGLRendererWorker:
                         # Update visual on the render thread
                         try:
                             self._visual.set_data(slab)
-                            # Update camera range to new slab size if changed
+                            # Only update camera extents if the slab dimensions changed; avoid recenter/zoom churn
                             try:
                                 h, w = int(slab.shape[0]), int(slab.shape[1])
-                                if hasattr(self.view, 'camera'):
+                                # Track last seen slab size
+                                last_wh = getattr(self, '_last_slab_wh', None)
+                                cur_wh = (w, h)
+                                if last_wh != cur_wh and hasattr(self.view, 'camera'):
                                     self.view.camera.set_range(x=(0, w), y=(0, h))
+                                self._last_slab_wh = cur_wh
+                                self._data_wh = cur_wh
                             except Exception:
                                 pass
                         except Exception as e:
                             logger.debug("Update z-slice failed: %s", e)
                 except Exception as e:
                     logger.debug("Apply dims state failed: %s", e)
+
+            # Apply camera ops LAST so they remain authoritative
+            try:
+                # Optional one-shot reset to data extents
+                if bool(getattr(state, 'reset_view', False)) and hasattr(self.view, 'camera'):
+                    try:
+                        w, h = getattr(self, '_data_wh', (self.width, self.height))
+                        self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
+                    except Exception as e:
+                        logger.debug("camera.reset failed: %s", e)
+                # Anchored zoom (canvas/video pixel anchor)
+                zf = getattr(state, 'zoom_factor', None)
+                anc = getattr(state, 'zoom_anchor_px', None)
+                if zf is not None and float(zf) > 0.0 and anc is not None and hasattr(self.view, 'camera'):
+                    try:
+                        self.view.camera.zoom(float(zf), center=(float(anc[0]), float(anc[1])))  # type: ignore[call-arg]
+                    except Exception as e:
+                        logger.debug("camera.zoom_at failed: %s", e)
+                # Pixel-space pan (convert canvas pixel delta to world delta)
+                dx = float(getattr(state, 'pan_dx_px', 0.0) or 0.0)
+                dy = float(getattr(state, 'pan_dy_px', 0.0) or 0.0)
+                if (dx != 0.0 or dy != 0.0) and hasattr(cam, 'center'):
+                    try:
+                        # Map canvas pixel shift to world delta using inverse transform at canvas center
+                        try:
+                            cx_px = self.width * 0.5
+                            cy_px = self.height * 0.5
+                            # Map from canvas pixels -> scene/world via inverse transform
+                            # Use canvas.scene as the target node to avoid ambiguity
+                            tr = self.view.scene.node_transform(self.canvas.scene)
+                            p0 = tr.imap((cx_px, cy_px))
+                            p1 = tr.imap((cx_px + dx, cy_px + dy))
+                            dwx = float(p1[0] - p0[0])
+                            dwy = float(p1[1] - p0[1])
+                        except Exception:
+                            # Fallback: approximate with zoom scale if available
+                            z = float(getattr(cam, 'zoom', 1.0) or 1.0)
+                            inv = 1.0 / max(1e-6, z)
+                            dwx = dx * inv
+                            dwy = dy * inv
+                        c = getattr(cam, 'center', None)
+                        if isinstance(c, (tuple, list)) and len(c) >= 2:
+                            cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
+                        else:
+                            cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
+                    except Exception as e:
+                        logger.debug("camera.pan_px failed: %s", e)
+                # Legacy absolute camera fields (kept for back-compat)
+                if state.center is not None and hasattr(cam, 'center'):
+                    try:
+                        cam.center = state.center  # type: ignore[attr-defined]
+                    except Exception as e:
+                        logger.debug("Apply center failed: %s", e)
+                if state.zoom is not None and hasattr(cam, 'zoom'):
+                    try:
+                        cam.zoom = state.zoom  # type: ignore[attr-defined]
+                    except Exception as e:
+                        logger.debug("Apply zoom failed: %s", e)
+                if state.angles is not None and hasattr(cam, 'angles'):
+                    try:
+                        cam.angles = state.angles  # type: ignore[attr-defined]
+                    except Exception as e:
+                        logger.debug("Apply angles failed: %s", e)
+            except Exception as e:
+                logger.debug("Apply camera ops failed: %s", e)
         except Exception as e:
             logger.debug("Apply state failed: %s", e)
 

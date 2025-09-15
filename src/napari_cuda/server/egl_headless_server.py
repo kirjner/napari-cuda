@@ -22,6 +22,7 @@ import socket
 from .egl_worker import EGLRendererWorker, ServerSceneState
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
+from napari_cuda.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,11 @@ class EGLHeadlessServer:
         self._kf_watchdog_task: Optional[asyncio.Task] = None
         # Broadcaster pacing: bypass once until keyframe for immediate start
         self._bypass_until_key: bool = False
+        # State access synchronization for latest-wins camera op coalescing
+        self._state_lock = threading.Lock()
+        # Logging controls for camera ops
+        self._log_cam_info: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_INFO', False)
+        self._log_cam_debug: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_DEBUG', False)
         
         # Drop/send tracking
         self._drops_total: int = 0
@@ -112,6 +118,8 @@ class EGLHeadlessServer:
             self._zarr_z = _z if _z >= 0 else None
         except Exception:
             self._zarr_z = None
+        # Verbose dims logging control: default debug, upgrade to info with flag
+        self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
 
     async def start(self) -> None:
         logging.basicConfig(level=logging.INFO,
@@ -269,7 +277,35 @@ class EGLHeadlessServer:
                 next_t = time.perf_counter()
                 
                 while not self._stop.is_set():
-                    self._worker.apply_state(self._latest_state)
+                    # Snapshot and clear one-shot camera ops atomically
+                    with self._state_lock:
+                        state = self._latest_state
+                        # Clear coalesced ops in the shared state so they are one-shot
+                        self._latest_state = ServerSceneState(
+                            center=state.center,
+                            zoom=state.zoom,
+                            angles=state.angles,
+                            current_step=state.current_step,
+                        )
+                    # Optional frame-level log of applied camera ops
+                    try:
+                        has_cam_ops = bool(getattr(state, 'reset_view', False)) or \
+                                      (getattr(state, 'zoom_factor', None) is not None) or \
+                                      (abs(float(getattr(state, 'pan_dx_px', 0.0) or 0.0)) > 1e-6) or \
+                                      (abs(float(getattr(state, 'pan_dy_px', 0.0) or 0.0)) > 1e-6)
+                        if has_cam_ops and (self._log_cam_info or self._log_cam_debug):
+                            zf = getattr(state, 'zoom_factor', None)
+                            anc = getattr(state, 'zoom_anchor_px', None)
+                            dx = float(getattr(state, 'pan_dx_px', 0.0) or 0.0)
+                            dy = float(getattr(state, 'pan_dy_px', 0.0) or 0.0)
+                            msg = f"apply: cam reset={bool(getattr(state,'reset_view', False))} zf={zf} anc={anc} pan=({dx:.2f},{dy:.2f})"
+                            if self._log_cam_info:
+                                logger.info(msg)
+                            else:
+                                logger.debug(msg)
+                    except Exception:
+                        pass
+                    self._worker.apply_state(state)
                     
                     timings, pkt, flags, seq = self._worker.capture_and_encode_packet()
                     # Observe timings (ms)
@@ -366,20 +402,108 @@ class EGLHeadlessServer:
                     center = data.get('center')
                     zoom = data.get('zoom')
                     angles = data.get('angles')
-                    self._latest_state = ServerSceneState(
-                        center=tuple(center) if center else None,
-                        zoom=float(zoom) if zoom is not None else None,
-                        angles=tuple(angles) if angles else None,
-                        current_step=self._latest_state.current_step,
-                    )
-                elif t == 'set_dims':
+                    try:
+                        if self._log_cam_info:
+                            logger.info("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
+                        elif self._log_cam_debug:
+                            logger.debug("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
+                    except Exception:
+                        pass
+                    with self._state_lock:
+                        self._latest_state = ServerSceneState(
+                            center=tuple(center) if center else None,
+                            zoom=float(zoom) if zoom is not None else None,
+                            angles=tuple(angles) if angles else None,
+                            current_step=self._latest_state.current_step,
+                        )
+                elif t == 'dims.set':
                     step = data.get('current_step')
-                    self._latest_state = ServerSceneState(
-                        center=self._latest_state.center,
-                        zoom=self._latest_state.zoom,
-                        angles=self._latest_state.angles,
-                        current_step=tuple(step) if step else None,
-                    )
+                    if self._log_dims_info:
+                        logger.info("state: dims.set -> current_step=%s", step)
+                    else:
+                        logger.debug("state: dims.set -> current_step=%s", step)
+                    # Preserve any coalesced camera ops already queued; dims is latest-wins
+                    with self._state_lock:
+                        s = self._latest_state
+                        self._latest_state = ServerSceneState(
+                            center=s.center,
+                            zoom=s.zoom,
+                            angles=s.angles,
+                            current_step=tuple(step) if step else None,
+                            zoom_factor=getattr(s, 'zoom_factor', None),
+                            zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
+                            pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0) or 0.0),
+                            pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) or 0.0),
+                            reset_view=bool(getattr(s, 'reset_view', False)),
+                        )
+                elif t == 'camera.zoom_at':
+                    try:
+                        factor = float(data.get('factor') or 0.0)
+                    except Exception:
+                        factor = 0.0
+                    anchor = data.get('anchor_px')
+                    anc_t = tuple(anchor) if isinstance(anchor, (list, tuple)) and len(anchor) >= 2 else None
+                    if factor > 0.0 and anc_t is not None:
+                        if self._log_cam_info:
+                            logger.info("state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)", factor, float(anc_t[0]), float(anc_t[1]))
+                        elif self._log_cam_debug:
+                            logger.debug("state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)", factor, float(anc_t[0]), float(anc_t[1]))
+                        with self._state_lock:
+                            s = self._latest_state
+                            nf = (s.zoom_factor if getattr(s, 'zoom_factor', None) else 1.0) * float(factor)
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                zoom_factor=float(nf),
+                                zoom_anchor_px=(float(anc_t[0]), float(anc_t[1])),
+                                pan_dx_px=getattr(s, 'pan_dx_px', 0.0),
+                                pan_dy_px=getattr(s, 'pan_dy_px', 0.0),
+                                reset_view=bool(getattr(s, 'reset_view', False)),
+                            )
+                elif t == 'camera.pan_px':
+                    try:
+                        dx = float(data.get('dx_px') or 0.0)
+                        dy = float(data.get('dy_px') or 0.0)
+                    except Exception:
+                        dx = 0.0; dy = 0.0
+                    if dx != 0.0 or dy != 0.0:
+                        if self._log_cam_info:
+                            logger.info("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
+                        elif self._log_cam_debug:
+                            logger.debug("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                zoom_factor=getattr(s, 'zoom_factor', None),
+                                zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
+                                pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0) + dx),
+                                pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) + dy),
+                                reset_view=bool(getattr(s, 'reset_view', False)),
+                            )
+                elif t == 'camera.reset':
+                    if self._log_cam_info:
+                        logger.info("state: camera.reset")
+                    elif self._log_cam_debug:
+                        logger.debug("state: camera.reset")
+                    with self._state_lock:
+                        s = self._latest_state
+                        self._latest_state = ServerSceneState(
+                            center=s.center,
+                            zoom=s.zoom,
+                            angles=s.angles,
+                            current_step=s.current_step,
+                            zoom_factor=getattr(s, 'zoom_factor', None),
+                            zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
+                            pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0)),
+                            pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0)),
+                            reset_view=True,
+                        )
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
                 elif t in ('request_keyframe', 'force_idr'):
