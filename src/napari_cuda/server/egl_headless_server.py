@@ -43,7 +43,8 @@ class EGLHeadlessServer:
                  host: str = '0.0.0.0', state_port: int = 8081, pixel_port: int = 8082, fps: int = 60,
                  animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False,
                  zarr_path: str | None = None, zarr_level: str | None = None,
-                 zarr_axes: str | None = None, zarr_z: int | None = None) -> None:
+                 zarr_axes: str | None = None, zarr_z: int | None = None,
+                 debug: bool = False) -> None:
         self.width = width
         self.height = height
         self.use_volume = use_volume
@@ -120,10 +121,97 @@ class EGLHeadlessServer:
             self._zarr_z = None
         # Verbose dims logging control: default debug, upgrade to info with flag
         self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
+        # Dedicated debug control for this module only (no dependency loggers)
+        self._debug_only_this_logger: bool = bool(debug) or env_bool('NAPARI_CUDA_DEBUG', False)
+
+    def _maybe_enable_debug_logger(self) -> None:
+        """Enable DEBUG logs for this module only, leaving root/others unchanged.
+
+        - Attaches a dedicated StreamHandler at DEBUG to our module logger.
+        - Disables propagation to avoid duplicate INFO/WARNING via root handlers.
+        - Does nothing unless NAPARI_CUDA_DEBUG or --debug is provided.
+        """
+        if not getattr(self, '_debug_only_this_logger', False):
+            return
+        try:
+            # Avoid stacking handlers on repeated calls
+            has_ours = any(isinstance(h, logging.StreamHandler) and getattr(h, '_napari_cuda_local', False)
+                           for h in logger.handlers)
+            if has_ours:
+                return
+            h = logging.StreamHandler()
+            fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+            h.setFormatter(logging.Formatter(fmt))
+            h.setLevel(logging.DEBUG)
+            # Tag so we don't add duplicates later
+            setattr(h, '_napari_cuda_local', True)
+            logger.addHandler(h)
+            logger.setLevel(logging.DEBUG)
+            # Ensure our records don't also bubble to root (which may be INFO)
+            logger.propagate = False
+        except Exception:
+            # Fail silent; we don't want logging issues to break the server
+            pass
+
+    # --- Helper to compute dims metadata for piggyback on dims_update ---------
+    def _dims_metadata(self) -> dict:
+        """Build lightweight dims metadata.
+
+        Returns keys used by client mirror logic:
+        - ndim: int
+        - order: list[str], e.g., ['z','y','x'] or ['y','x']
+        - sizes: list[int], sizes per axis in order
+        - range: list[[lo, hi]], index bounds per axis
+        - axis_labels: optional labels (mirrors order by default)
+
+        Never raises; logs failures and returns {} when unavailable.
+        """
+        try:
+            w = self._worker
+            if w is not None:
+                # Prefer OME-Zarr metadata when available
+                zshape = getattr(w, '_zarr_shape', None)
+                if isinstance(zshape, tuple) and len(zshape) == 3:
+                    try:
+                        sizes = [int(zshape[0]), int(zshape[1]), int(zshape[2])]
+                        axes = str(getattr(w, '_zarr_axes', 'zyx') or 'zyx').lower()
+                        order = [c for c in axes]
+                        rng = [[0, max(0, s - 1)] for s in sizes]
+                        return {'ndim': 3, 'order': order, 'sizes': sizes, 'range': rng, 'axis_labels': order}
+                    except Exception:
+                        logger.debug("dims metadata (zarr) build failed", exc_info=True)
+                # Synthetic/explicit volume demo
+                if bool(getattr(w, 'use_volume', False)):
+                    try:
+                        d = int(getattr(w, 'volume_depth', 0) or 0)
+                        h = int(getattr(w, 'height', 0) or 0)
+                        wi = int(getattr(w, 'width', 0) or 0)
+                        if d > 0 and h > 0 and wi > 0:
+                            sizes = [d, h, wi]
+                            rng = [[0, d - 1], [0, h - 1], [0, wi - 1]]
+                            return {'ndim': 3, 'order': ['z', 'y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['z','y','x']}
+                    except Exception:
+                        logger.debug("dims metadata (volume) build failed", exc_info=True)
+        except Exception:
+            logger.debug("dims metadata helper failed", exc_info=True)
+        # 2D fallback to canvas size
+        try:
+            h = int(self.height)
+            wi = int(self.width)
+            if h > 0 and wi > 0:
+                sizes = [h, wi]
+                rng = [[0, h - 1], [0, wi - 1]]
+                return {'ndim': 2, 'order': ['y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['y','x']}
+        except Exception:
+            logger.debug("dims metadata (2D fallback) build failed", exc_info=True)
+        return {}
 
     async def start(self) -> None:
+        # Keep global logging at INFO; optionally enable module-only DEBUG logging
         logging.basicConfig(level=logging.INFO,
                             format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s')
+        # Apply module-only debug after basicConfig so our handler takes precedence
+        self._maybe_enable_debug_logger()
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._start_worker(loop)
@@ -285,14 +373,18 @@ class EGLHeadlessServer:
                                 angles=s.angles,
                                 current_step=(int(z0),),
                             )
+                        # Build dims metadata for piggyback
+                        meta = self._dims_metadata()
                         msg = {'type': 'dims_update', 'current_step': [int(z0)], 'ndisplay': 2}
+                        if meta:
+                            msg.update(meta)
                         # Schedule broadcast on the asyncio loop thread
                         loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_state_json(msg)))
                         try:
                             if self._log_dims_info:
-                                logger.info("init: dims_update current_step=%s broadcast", [int(z0)])
+                                logger.info("init: dims_update current_step=%s broadcast (with meta=%s)", [int(z0)], meta)
                             else:
-                                logger.debug("init: dims_update current_step=%s broadcast", [int(z0)])
+                                logger.debug("init: dims_update current_step=%s broadcast (with meta=%s)", [int(z0)], meta)
                         except Exception:
                             pass
                 except Exception as e:
@@ -417,19 +509,22 @@ class EGLHeadlessServer:
                     await ws.send(json.dumps(msg))
             except Exception as e:
                 logger.debug("Initial state config send failed: %s", e)
-            # Send current dims baseline so clients can step relative to it
+            # Send current dims baseline so clients can step relative to it (include metadata)
             try:
                 cur = None
                 with self._state_lock:
                     cur = getattr(self._latest_state, 'current_step', None)
                 if cur is not None:
                     msg = {'type': 'dims_update', 'current_step': list(cur), 'ndisplay': 2}
+                    meta = self._dims_metadata()
+                    if meta:
+                        msg.update(meta)
                     await ws.send(json.dumps(msg))
                     try:
                         if self._log_dims_info:
-                            logger.info("connect: dims_update -> current_step=%s", list(cur))
+                            logger.info("connect: dims_update -> current_step=%s meta=%s", list(cur), meta)
                         else:
-                            logger.debug("connect: dims_update -> current_step=%s", list(cur))
+                            logger.debug("connect: dims_update -> current_step=%s meta=%s", list(cur), meta)
                     except Exception:
                         pass
             except Exception as e:
@@ -458,7 +553,7 @@ class EGLHeadlessServer:
                             angles=tuple(angles) if angles else None,
                             current_step=self._latest_state.current_step,
                         )
-                elif t == 'dims.set':
+                elif t == 'dims.set' or t == 'set_dims':
                     step = data.get('current_step')
                     if self._log_dims_info:
                         logger.info("state: dims.set -> current_step=%s", step)
@@ -478,9 +573,12 @@ class EGLHeadlessServer:
                             pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) or 0.0),
                             reset_view=bool(getattr(s, 'reset_view', False)),
                         )
-                    # Broadcast dims_update so new/other clients learn the baseline
+                    # Broadcast dims_update so new/other clients learn the baseline (include metadata)
                     try:
                         msg = {'type': 'dims_update', 'current_step': list(step) if step else None, 'ndisplay': data.get('ndisplay', 2)}
+                        meta = self._dims_metadata()
+                        if meta:
+                            msg.update(meta)
                         if msg['current_step'] is not None:
                             await self._broadcast_state_json(msg)
                     except Exception as e:
@@ -811,7 +909,7 @@ class EGLHeadlessServer:
                         if self._last_send_ts is not None:
                             dt = now2 - self._last_send_ts
                             self._send_count += 1
-                            if (self._send_count % int(max(1, self.cfg.fps))) == 0:
+                            if self._log_sends and (self._send_count % int(max(1, self.cfg.fps))) == 0:
                                 logger.debug("Pixel send dt=%.3f s (target=%.3f), drops=%d", dt, 1.0/max(1, self.cfg.fps), self._drops_total)
                         self._last_send_ts = now2
                     except Exception:
@@ -904,6 +1002,7 @@ def main() -> None:
     parser.add_argument('--zarr-axes', dest='zarr_axes', default=os.getenv('NAPARI_CUDA_ZARR_AXES', 'zyx'), help='Axes order of the dataset (default: zyx)')
     parser.add_argument('--zarr-z', dest='zarr_z', type=int, default=int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1')), help='Initial Z index for 2D slice (default: mid-slice)')
     parser.add_argument('--log-sends', action='store_true', help='Log per-send timing (seq, send_ts, stamp_ts, delta)')
+    parser.add_argument('--debug', action='store_true', help='Enable DEBUG for this server module only')
     args = parser.parse_args()
 
     async def run():
@@ -911,7 +1010,8 @@ def main() -> None:
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
                                 animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),
                                 zarr_path=args.zarr_path, zarr_level=args.zarr_level,
-                                zarr_axes=args.zarr_axes, zarr_z=(None if int(args.zarr_z) < 0 else int(args.zarr_z)))
+                                zarr_axes=args.zarr_axes, zarr_z=(None if int(args.zarr_z) < 0 else int(args.zarr_z)),
+                                debug=bool(args.debug))
         await srv.start()
 
     asyncio.run(run())
