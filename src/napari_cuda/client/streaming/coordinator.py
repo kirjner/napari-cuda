@@ -411,7 +411,7 @@ class StreamCoordinator:
             self._wheel_step: int = max(1, int(_os.getenv('NAPARI_CUDA_WHEEL_Z_STEP', '1') or '1'))
         except Exception:
             self._wheel_step = 1
-        # dims.set rate limiting (coalesce)
+        # dims intents rate limiting (coalesce)
         try:
             import os as _os
             rate = float(_os.getenv('NAPARI_CUDA_DIMS_SET_RATE', '60') or '60')
@@ -495,7 +495,7 @@ class StreamCoordinator:
                     log_input_info = False
                 # Use same flag for dims logging (INFO when enabled, DEBUG otherwise)
                 self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
-                # Unified wheel handler: dims.set for plain wheel; zoom for modifiers
+                # Unified wheel handler: dims intent step for plain wheel; zoom for modifiers
                 wheel_cb = self._on_wheel
                 if self._state_channel is not None:
                     sender = InputSender(

@@ -12,17 +12,18 @@ import numpy as np
 
 
 class MessageType(enum.Enum):
-    """Types of messages in the protocol."""
+    """Types of messages in the legacy protocol (kept for compatibility helpers).
+
+    Note: the streaming client uses intents (dims.intent.*) and expects
+    server-authoritative dims.update; it does not emit dims.set.
+    """
     # Client -> Server
     SET_CAMERA = "set_camera"
-    # Use server-preferred dims command name
-    SET_DIMS = "dims.set"
     REQUEST_FRAME = "request_frame"
     PING = "ping"
-    
+
     # Server -> Client
     CAMERA_UPDATE = "camera_update"
-    DIMS_UPDATE = "dims_update"
     FRAME_READY = "frame_ready"
     PONG = "pong"
     ERROR = "error"
@@ -60,14 +61,12 @@ class CameraUpdate(StateMessage):
             self.angles = list(self.angles)
 
 
-@dataclass 
-class DimsUpdate(StateMessage):
-    """Dimensions state update message."""
-    type: str = MessageType.DIMS_UPDATE.value
+@dataclass
+class DimsUpdate(StateMessage):  # Deprecated container used by helpers only
+    type: str = "dims.update"
     current_step: List[int] = None
     ndisplay: int = None
     order: List[int] = None
-    
     def __post_init__(self):
         if self.current_step:
             self.current_step = list(self.current_step)
@@ -175,7 +174,7 @@ class StreamProtocol:
         
         if msg_type == MessageType.CAMERA_UPDATE.value:
             return CameraUpdate(**msg_dict)
-        elif msg_type == MessageType.DIMS_UPDATE.value:
+        elif msg_type in ("dims_update", "dims.update"):
             return DimsUpdate(**msg_dict)
         elif msg_type in [t.value for t in MessageType]:
             return StateMessage(**msg_dict)
@@ -194,15 +193,9 @@ class StreamProtocol:
         return cmd.to_json()
     
     @staticmethod
-    def create_dims_command(current_step=None, ndisplay=None) -> str:
-        """Create dimensions update command."""
-        # Emit server-preferred command name 'dims.set'
-        cmd = DimsUpdate(
-            type=MessageType.SET_DIMS.value,
-            current_step=current_step,
-            ndisplay=ndisplay,
-        )
-        return cmd.to_json()
+    def create_dims_command(*args, **kwargs) -> str:  # pragma: no cover
+        """Deprecated: the client no longer emits dims.set. Use intents."""
+        raise RuntimeError("create_dims_command is deprecated; use dims intents")
     
     @staticmethod
     def create_error_response(error_msg: str) -> str:

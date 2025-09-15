@@ -1,18 +1,14 @@
 """
-ProxyViewer - Client-side viewer that forwards commands to remote server.
+ProxyViewer - Thin client viewer that mirrors server state via the coordinator.
 
-Critical: This must prevent local Window creation while maintaining
-the Viewer API for the QtViewer to interact with.
+All authoritative state is routed through the StreamCoordinator over a single
+state channel. No direct sockets or legacy dims.set paths remain here.
 """
 
-import asyncio
-import json
 import logging
-import websockets
 from typing import Optional, TYPE_CHECKING
 
 import napari
-import qasync
 from qtpy.QtWidgets import QApplication
 from napari.components.viewer_model import ViewerModel
 try:
@@ -48,7 +44,6 @@ class ProxyViewer(ViewerModel):
     # Private attributes (not part of the pydantic/EventedModel schema)
     _server_host: str = PrivateAttr(default='localhost')
     _server_port: int = PrivateAttr(default=8081)
-    _state_websocket = PrivateAttr(default=None)
     _window = PrivateAttr(default=None)
     _connection_pending: bool = PrivateAttr(default=False)
     # Bridge to coordinator (thin client path)
@@ -76,7 +71,6 @@ class ProxyViewer(ViewerModel):
         # Initialize private attributes (avoid pydantic field errors)
         self._server_host = server_host
         self._server_port = server_port
-        self._state_websocket = None
         self._window = None  # type: ignore[assignment]
         self._connection_pending = False
         
@@ -87,11 +81,8 @@ class ProxyViewer(ViewerModel):
         self.dims.events.current_step.connect(self._on_dims_change)
         self.dims.events.ndisplay.connect(self._on_dims_change)
         
-        # In streaming client, we run offline and delegate state to coordinator
-        if not bool(offline):
-            self._connect_to_server()
-        else:
-            logger.info("ProxyViewer offline mode: skipping server connection")
+        # In streaming client, delegate state to coordinator (no direct sockets)
+        logger.info("ProxyViewer: thin client mode (coordinator-driven)")
         
         logger.info(f"ProxyViewer initialized for {server_host}:{server_port}")
 
@@ -113,76 +104,7 @@ class ProxyViewer(ViewerModel):
     def window(self, value):  # value: 'Window'
         self._window = value
     
-    def _connect_to_server(self):
-        """Establish WebSocket connection to server."""
-        # Get or create qasync event loop (we require qasync)
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("Event loop is closed")
-        except RuntimeError:
-            app = QApplication.instance()
-            if app:
-                # Create qasync event loop for Qt/asyncio integration
-                loop = qasync.QEventLoop(app)
-                asyncio.set_event_loop(loop)
-            else:
-                # This shouldn't happen in normal usage
-                raise RuntimeError("No Qt application found - ProxyViewer requires Qt context")
-        
-        # Start connection in background; prefer loop.create_task to avoid requiring a running loop
-        try:
-            loop.create_task(self._maintain_connection())
-            self._connection_pending = False
-        except Exception as e:
-            logger.error(f"Failed to create connection task: {e}")
-            # Set flag to retry later when event loop is ready
-            self._connection_pending = True
-    
-    async def _maintain_connection(self):
-        """Maintain persistent connection to server."""
-        url = f"ws://{self.server_host}:{self.server_port}"
-        logger.info(f"Connecting to server at {url}")
-        
-        while True:
-            try:
-                async with websockets.connect(url) as websocket:
-                    self._state_websocket = websocket
-                    logger.info("Connected to server")
-                    
-                    # Listen for state updates from server
-                    async for message in websocket:
-                        data = json.loads(message)
-                        await self._handle_server_message(data)
-                        
-            except Exception as e:
-                logger.error(f"Connection lost: {e}")
-                self._state_websocket = None
-                
-                # Reconnect after delay
-                await asyncio.sleep(5)
-                logger.info("Attempting reconnection...")
-    
-    async def _handle_server_message(self, data):
-        """Process state update from server."""
-        msg_type = data.get('type')
-        
-        if msg_type == 'camera_update':
-            # Update local camera without triggering events
-            self.camera.events.center.block()
-            self.camera.events.zoom.block()
-            
-            self.camera.center = data.get('center', self.camera.center)
-            self.camera.zoom = data.get('zoom', self.camera.zoom)
-            
-            self.camera.events.center.unblock()
-            self.camera.events.zoom.unblock()
-            
-        elif msg_type == 'dims_update':
-            # Update local dims without triggering events
-            self.dims.events.current_step.block()
-            self.dims.current_step = data.get('current_step', self.dims.current_step)
-            self.dims.events.current_step.unblock()
+    # No direct socket handling in thin client mode
     
     def _on_camera_change(self, event=None):
         """Forward camera change.
@@ -192,15 +114,7 @@ class ProxyViewer(ViewerModel):
         and camera is server-controlled. Keyboard/UI handlers send explicit
         ops through the coordinator.
         """
-        if self._state_sender is not None:
-            return
-        if self._state_websocket:
-            command = {
-                'type': 'set_camera',
-                'center': list(self.camera.center),
-                'zoom': float(self.camera.zoom)
-            }
-            asyncio.create_task(self._send_command(command))
+        return
     
     def _on_dims_change(self, event=None):
         """Forward dimension change via coordinator when attached.
@@ -262,21 +176,8 @@ class ProxyViewer(ViewerModel):
             except Exception:
                 logger.debug("ProxyViewer dims coalesce timer failed", exc_info=True)
             return
-        if self._state_websocket:
-            command = {
-                'type': 'dims.set',
-                'current_step': list(self.dims.current_step),
-                'ndisplay': int(self.dims.ndisplay),
-            }
-            asyncio.create_task(self._send_command(command))
+        return
     
-    async def _send_command(self, command):
-        """Send command to server."""
-        if self._state_websocket:
-            try:
-                await self._state_websocket.send(json.dumps(command))
-            except Exception as e:
-                logger.error(f"Failed to send command: {e}")
 
     # --- Streaming client bridge -------------------------------------------------
     def attach_state_sender(self, sender) -> None:
@@ -407,8 +308,6 @@ class ProxyViewer(ViewerModel):
     
     def close(self):
         """Close connection to server and window if exists."""
-        if self._state_websocket:
-            asyncio.create_task(self._state_websocket.close())
         if self._window:
             self._window.close()
         logger.info("ProxyViewer closed")
