@@ -45,40 +45,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
     def eventFilter(self, obj, event):  # type: ignore[no-untyped-def]
         try:
             et = event.type()
-            # Prevent focus highlight on focus changes
-            if et == QtCore.QEvent.FocusIn:  # type: ignore[attr-defined]
-                # Only act for our widget or its descendants
-                try:
-                    is_target = (obj is self._widget) or (
-                        isinstance(obj, QtWidgets.QWidget) and hasattr(self._widget, 'isAncestorOf') and self._widget.isAncestorOf(obj)  # type: ignore[attr-defined]
-                    )
-                except Exception:
-                    is_target = False
-                if not is_target:
-                    return False
-                try:
-                    if hasattr(obj, 'clearFocus'):
-                        obj.clearFocus()
-                except Exception:
-                    pass
-                return True
             if et == QtCore.QEvent.Wheel:  # type: ignore[attr-defined]
-                # Only act for our widget or its descendants
-                try:
-                    is_target = (obj is self._widget) or (
-                        isinstance(obj, QtWidgets.QWidget) and hasattr(self._widget, 'isAncestorOf') and self._widget.isAncestorOf(obj)  # type: ignore[attr-defined]
-                    )
-                except Exception:
-                    is_target = False
-                if not is_target:
-                    return False
-                try:
-                    if hasattr(obj, 'clearFocus'):
-                        obj.clearFocus()
-                    if hasattr(self._widget, 'clearFocus'):
-                        self._widget.clearFocus()
-                except Exception:
-                    pass
                 return self._handle_wheel(event)
             elif et == QtCore.QEvent.Resize:  # type: ignore[attr-defined]
                 return self._handle_resize(event)
@@ -175,11 +142,6 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         # Consume to avoid selection highlighting in parent widgets
         try:
             ev.accept()
-        except Exception:
-            pass
-        # Ensure canvas does not appear focused after wheel
-        try:
-            self._widget.clearFocus()
         except Exception:
             pass
         return True
@@ -362,21 +324,7 @@ class InputSender:
             pass
 
     def start(self) -> None:
-        # Best-effort: remove focus highlight without deep nesting
-        try:
-            self._disable_focus_highlight()
-            self._configure_focus_policies()
-            self._apply_focus_rules_recursively()
-            # Install app-level filter as a safety net to catch late focus/wheel
-            try:
-                app = QtWidgets.QApplication.instance()
-                if app is not None:
-                    app.installEventFilter(self._filter)
-            except Exception:
-                pass
-        except Exception:
-            logger.debug("Failed to disable focus highlight", exc_info=True)
-        # Install event filter last
+        # Install event filter
         try:
             self._widget.installEventFilter(self._filter)
         except Exception:
@@ -396,83 +344,5 @@ class InputSender:
 
     # --- Mouse/Pan ---------------------------------------------------------------
     
-    def _disable_focus_highlight(self) -> None:
-        # Disable macOS focus ring when possible
-        if hasattr(QtCore.Qt, 'WA_MacShowFocusRect'):
-            self._widget.setAttribute(QtCore.Qt.WA_MacShowFocusRect, False)  # type: ignore[attr-defined]
-        # Suppress outline on focus via stylesheet
-        cur = self._widget.styleSheet() or ""
-        rules = [
-            "QWidget:focus { outline: none; border: 0px; }",
-            "QOpenGLWidget:focus { outline: none; border: 0px; }",
-            "*:focus { outline: none; }",
-        ]
-        extra = "\n".join([r for r in rules if r not in cur])
-        if extra:
-            self._widget.setStyleSheet((cur + ("\n" if cur else "")) + extra)
-
-    def _configure_focus_policies(self) -> None:
-        """Ensure wheel events do not force focus and trigger highlights.
-
-        - Prefer ClickFocus on the canvas widget so wheel does not grant focus.
-        - Set NoFocus on child widgets (e.g., GL subwidgets) to avoid focus rings.
-        - Apply macOS focus ring suppression recursively.
-        """
-        try:
-            self._widget.setFocusPolicy(QtCore.Qt.NoFocus)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        # Recursively apply to child widgets (best-effort)
-        try:
-            children = self._widget.findChildren(QtWidgets.QWidget)  # type: ignore[valid-type]
-        except Exception:
-            children = []
-        for ch in children:
-            try:
-                ch.setFocusPolicy(QtCore.Qt.NoFocus)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            try:
-                if hasattr(QtCore.Qt, 'WA_MacShowFocusRect'):
-                    ch.setAttribute(QtCore.Qt.WA_MacShowFocusRect, False)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-
-    def _apply_focus_rules_recursively(self) -> None:
-        """Apply NoFocus, disable Mac focus ring, and install event filter on children.
-
-        Called at start and once more shortly after to catch late-created GL widgets.
-        """
-        try:
-            children = self._widget.findChildren(QtWidgets.QWidget)  # type: ignore[valid-type]
-        except Exception:
-            children = []
-        for ch in children:
-            try:
-                ch.setFocusPolicy(QtCore.Qt.NoFocus)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            try:
-                if hasattr(QtCore.Qt, 'WA_MacShowFocusRect'):
-                    ch.setAttribute(QtCore.Qt.WA_MacShowFocusRect, False)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            try:
-                ch.installEventFilter(self._filter)
-            except Exception:
-                pass
-        # Re-apply shortly to catch dynamic children
-        try:
-            t = QtCore.QTimer(self._widget)
-            t.setSingleShot(True)
-            t.setInterval(200)
-            def _again() -> None:
-                try:
-                    self._apply_focus_rules_recursively()
-                except Exception:
-                    pass
-            t.timeout.connect(_again)
-            t.start()
-            self._focus_timer = t  # type: ignore[attr-defined]
-        except Exception:
-            pass
+    # No additional focus suppression helpers needed; coalesced wheel consumption
+    # in _handle_wheel is sufficient to prevent highlight during fast scroll.

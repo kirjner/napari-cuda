@@ -1111,19 +1111,7 @@ class StreamCoordinator:
         ax, ay = self._server_anchor_from_video(xv, yv)
         ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay)]})
         if getattr(self, '_log_dims_info', False):
-            # Single guarded block to collect widget metrics
-            ww = wh = 0
-            dpr = 1.0
-            try:
-                ww = int(self._scene_canvas.native.width())
-                wh = int(self._scene_canvas.native.height())
-                dpr = float(self._scene_canvas.native.devicePixelRatioF())
-            except Exception:
-                logger.debug("zoom log: failed to read widget metrics", exc_info=True)
-            logger.info(
-                "wheel+mod->camera.zoom_at f=%.4f widget=(%.1f,%.1f) video=(%.1f,%.1f) anchorBL=(%.1f,%.1f) widget_wh=%dx%d dpr=%.2f sent=%s",
-                float(factor), float(xw), float(yw), float(xv), float(yv), float(ax), float(ay), int(ww), int(wh), float(dpr), bool(ok)
-            )
+            logger.info("wheel+mod->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s", float(factor), float(ax), float(ay), bool(ok))
 
     def _on_pointer(self, data: dict) -> None:
         phase = (data.get('phase') or '').lower()
