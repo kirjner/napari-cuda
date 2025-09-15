@@ -1870,6 +1870,11 @@ class StreamCoordinator:
             dx_v = (xv1 - xv0)
             dy_v = (yv1 - yv0)
             dx_c, dy_c = self._video_delta_to_canvas(dx_v, dy_v)
+            if getattr(self, '_log_dims_info', False):
+                logger.info(
+                    "pointer move: mods=%d alt=%s vol3d=%s dx_c=%.2f dy_c=%.2f",
+                    int(mods), bool(alt), bool(in_vol3d), float(dx_c), float(dy_c)
+                )
             # If Alt held in 3D volume mode: orbit; suppress pan
             if alt and in_vol3d:
                 # If orbit just started mid-drag (Alt pressed), reset accumulators
@@ -1960,7 +1965,10 @@ class StreamCoordinator:
         self._orbit_daz_accum = 0.0
         self._orbit_del_accum = 0.0
         if getattr(self, '_log_dims_info', False):
-            logger.info("alt-drag->camera.orbit daz=%.2f del=%.2f sent=%s", float(daz), float(delv), bool(ok))
+            logger.info(
+                "alt-drag->camera.orbit daz=%.2f del=%.2f sent=%s",
+                float(daz), float(delv), bool(ok)
+            )
 
     # (no key→dims mapping)
 
