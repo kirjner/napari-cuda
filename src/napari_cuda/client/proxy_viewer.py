@@ -32,6 +32,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _maybe_enable_debug_logger() -> None:
+    """Enable DEBUG logs for this module only when env is set.
+
+    - Attaches a on-module handler at DEBUG.
+    - Disables propagation to avoid global DEBUG flood.
+    - Controlled by NAPARI_CUDA_CLIENT_DEBUG or NAPARI_CUDA_DEBUG envs.
+    """
+    try:
+        import os as _os
+        flag = (_os.getenv('NAPARI_CUDA_CLIENT_DEBUG') or _os.getenv('NAPARI_CUDA_DEBUG') or '').lower()
+        if flag not in ('1', 'true', 'yes', 'on', 'dbg', 'debug'):
+            return
+        has_local = any(getattr(h, '_napari_cuda_local', False) for h in logger.handlers)
+        if has_local:
+            return
+        h = logging.StreamHandler()
+        fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+        h.setFormatter(logging.Formatter(fmt))
+        h.setLevel(logging.DEBUG)
+        setattr(h, '_napari_cuda_local', True)
+        logger.addHandler(h)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+    except Exception:
+        pass
+
+
 class ProxyViewer(ViewerModel):
     """
     A viewer that forwards all commands to a remote server instead of 
@@ -53,6 +80,8 @@ class ProxyViewer(ViewerModel):
     _dims_tx_timer = PrivateAttr(default=None)
     _dims_tx_pending = PrivateAttr(default=None)
     _dims_tx_interval_ms: int = PrivateAttr(default=10)
+    _is_playing: bool = PrivateAttr(default=False)
+    _play_axis: Optional[int] = PrivateAttr(default=None)
 
     def __init__(self, server_host='localhost', server_port=8081, offline: bool = False, **kwargs):
         """
@@ -67,6 +96,7 @@ class ProxyViewer(ViewerModel):
         """
         # Initialize ViewerModel without creating a Window
         super().__init__(**kwargs)
+        _maybe_enable_debug_logger()
         
         # Initialize private attributes (avoid pydantic field errors)
         self._server_host = server_host
@@ -132,7 +162,7 @@ class ProxyViewer(ViewerModel):
         if self._suppress_forward:
             return
         if self._state_sender is not None:
-            # Compute which axis changed (best-effort) and send set_index intent
+            # Compute which axis changed (best-effort)
             try:
                 cur = tuple(int(x) for x in self.dims.current_step)
             except Exception:
@@ -147,6 +177,19 @@ class ProxyViewer(ViewerModel):
                             break
             except Exception:
                 changed_axis = None
+            logger.debug("dims.change: cur=%s prev=%s -> changed_axis=%s", cur, prev if 'prev' in locals() else None, changed_axis)
+            # Probe play state from QtDims
+            try:
+                qdims = getattr(getattr(self.window, '_qt_viewer', None), 'dims', None) if self.window is not None else None
+                if qdims is not None and hasattr(qdims, 'is_playing'):
+                    self._is_playing = bool(qdims.is_playing)
+                if not self._is_playing:
+                    self._play_axis = None
+            except Exception:
+                logger.debug("ProxyViewer: probe play state failed", exc_info=True)
+            if self._is_playing and self._play_axis is None and changed_axis is not None:
+                self._play_axis = int(changed_axis)
+            logger.debug("play state: playing=%s play_axis=%s", self._is_playing, self._play_axis)
             if changed_axis is None:
                 # Fallback to coordinator's primary axis if available
                 try:
@@ -160,9 +203,25 @@ class ProxyViewer(ViewerModel):
                 val = None
             if val is None:
                 return
+            # If the playing axis ticked, send step delta; suppress other local emitters on that axis
+            if self._is_playing and self._play_axis is not None and int(changed_axis) == int(self._play_axis):
+                try:
+                    prev_val = int(prev[changed_axis]) if isinstance(prev, tuple) else None
+                except Exception:
+                    prev_val = None
+                if prev_val is not None:
+                    delta = int(val) - int(prev_val)
+                    if delta != 0:
+                        logger.debug("play tick -> dims.intent.step axis=%d delta=%+d", int(changed_axis), int(delta))
+                        _ = self._state_sender.dims_step(int(changed_axis), int(delta), origin='play')
+                # Update last snapshot and stop here (no set_index on play axis)
+                self._last_step_ui = tuple(cur) if isinstance(cur, tuple) else cur
+                return
+            # Otherwise, send set_index for non-play axis changes (slider drags, etc.)
             # Send immediately when coalescing is disabled, otherwise coalesce
             try:
                 if int(getattr(self, '_dims_tx_interval_ms', 10) or 0) <= 0:
+                    logger.debug("slider -> dims.intent.set_index axis=%d value=%d (immediate)", int(changed_axis), int(val))
                     _ = self._state_sender.dims_set_index(int(changed_axis), int(val), origin='ui')
                 else:
                     self._dims_tx_pending = (int(changed_axis), int(val))
@@ -177,6 +236,7 @@ class ProxyViewer(ViewerModel):
                                 if pair is None:
                                     return
                                 ax, vv = pair
+                                logger.debug("slider (coalesced) -> dims.intent.set_index axis=%d value=%d", int(ax), int(vv))
                                 _ = self._state_sender.dims_set_index(int(ax), int(vv), origin='ui')
                             except Exception:
                                 logger.debug("ProxyViewer dims intent send failed", exc_info=True)

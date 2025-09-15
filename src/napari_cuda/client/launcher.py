@@ -41,11 +41,23 @@ def launch_streaming_client(server_host='localhost',
     # Setup logging - check env var too
     if os.getenv('NAPARI_CUDA_DEBUG', '').lower() in ('1', 'true', 'yes'):
         debug = True
-    level = logging.DEBUG if debug else logging.INFO
+    # Keep root at INFO to avoid third-party DEBUG flood; enable module DEBUG via env
     logging.basicConfig(
-        level=level,
+        level=logging.INFO,
         format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
     )
+    # If --debug, enable selective module debugging via env flags
+    if debug:
+        os.environ['NAPARI_CUDA_CLIENT_DEBUG'] = os.environ.get('NAPARI_CUDA_CLIENT_DEBUG', '1')
+        # Keep websockets quiet unless explicitly enabled
+        if os.environ.get('NAPARI_CUDA_WEBSOCKETS_DEBUG', '').lower() not in ('1','true','yes','on','dbg','debug'):
+            try:
+                logging.getLogger('websockets').setLevel(logging.INFO)
+                logging.getLogger('websockets.client').setLevel(logging.INFO)
+                logging.getLogger('websockets.server').setLevel(logging.INFO)
+                logging.getLogger('websockets.protocol').setLevel(logging.INFO)
+            except Exception:
+                pass
     
     logger.info(f"Launching streaming client for {server_host}")
     

@@ -272,9 +272,19 @@ class StreamingCanvas(VispyCanvas):
         else:
             pass
 
-        # Override draw to show video instead
-        self._scene_canvas.events.draw.disconnect()
-        self._scene_canvas.events.draw.connect(self._draw_video_frame)
+        # Override draw to show video instead, but keep play-enable hook intact
+        try:
+            # Detach only the base on_draw; keep other listeners (e.g., enable_dims_play)
+            self._scene_canvas.events.draw.disconnect(self.on_draw)
+        except Exception:
+            pass
+        try:
+            # Ensure dims play continues to tick
+            self._scene_canvas.events.draw.connect(self.enable_dims_play, position='first')
+        except Exception:
+            pass
+        # Connect our video draw after play-enable so _play_ready toggles properly
+        self._scene_canvas.events.draw.connect(self._draw_video_frame, position='last')
         # DisplayLoop removed: presenter-owned wake schedules repaint on demand
 
         logger.info(

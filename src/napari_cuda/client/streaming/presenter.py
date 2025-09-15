@@ -13,6 +13,27 @@ from napari_cuda.client.streaming.types import ReadyFrame, Source, SubmittedFram
 logger = logging.getLogger(__name__)
 
 
+def _configure_logger() -> None:
+    """Keep presenter logs quiet unless explicitly enabled.
+
+    By default clamp this module to INFO and disable propagation so DEBUG
+    logs don't flood the console. Opt back into DEBUG by setting
+    NAPARI_CUDA_PRESENTER_DEBUG=1.
+    """
+    try:
+        import os as _os
+        allow_dbg = (_os.getenv('NAPARI_CUDA_PRESENTER_DEBUG') or '').lower()
+        if allow_dbg not in ('1', 'true', 'yes', 'on', 'dbg', 'debug'):
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+    except Exception:
+        # Never fail due to logging config
+        pass
+
+
+_configure_logger()
+
+
 class ClockSync:
     """Computes due times based on server timestamp + offset, with fallback."""
 

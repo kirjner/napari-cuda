@@ -46,6 +46,34 @@ from napari_cuda.client.streaming.config import extract_video_config
 logger = logging.getLogger(__name__)
 
 
+def _maybe_enable_debug_logger() -> None:
+    """Enable DEBUG logs for this module only when env is set.
+
+    - Attaches a dedicated StreamHandler at DEBUG.
+    - Disables propagation so other libraries don't flood the console.
+    - Triggered by NAPARI_CUDA_CLIENT_DEBUG or NAPARI_CUDA_DEBUG.
+    """
+    try:
+        import os as _os
+        flag = (_os.getenv('NAPARI_CUDA_CLIENT_DEBUG') or _os.getenv('NAPARI_CUDA_DEBUG') or '').lower()
+        if flag not in ('1', 'true', 'yes', 'on', 'dbg', 'debug'):
+            return
+        has_local = any(getattr(h, '_napari_cuda_local', False) for h in logger.handlers)
+        if has_local:
+            return
+        h = logging.StreamHandler()
+        fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+        h.setFormatter(logging.Formatter(fmt))
+        h.setLevel(logging.DEBUG)
+        setattr(h, '_napari_cuda_local', True)
+        logger.addHandler(h)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+    except Exception:
+        # Don't let logging issues affect runtime
+        pass
+
+
 class _WakeProxy(QtCore.QObject):
     """Qt signal proxy to safely schedule wakes from any thread.
 
@@ -126,6 +154,7 @@ class StreamCoordinator:
         client_cfg: object | None = None,
     ) -> None:
         self._scene_canvas = scene_canvas
+        _maybe_enable_debug_logger()
         # Set smoke mode early so start() can rely on it even if later init changes
         self._vt_smoke = bool(vt_smoke)
         # Phase 0: stash client config for future phases (no behavior change)
@@ -781,14 +810,17 @@ class StreamCoordinator:
                     # Rate-limit relearn logs to 1/sec
                     now = time.time()
                     if (now - float(self._last_relearn_log_ts or 0.0)) >= 1.0:
-                        off = self._presenter.relearn_offset(Source.VT)
-                        if off is not None:
-                            logger.debug(
-                                "VT preview detected; relearned offset=%s",
-                                f"{off:.3f}s",
-                            )
-                        else:
-                            logger.debug("VT preview detected; offset relearn not available yet")
+                        # Only log preview/relearn when explicitly enabled
+                        import os as _os
+                        if (_os.getenv('NAPARI_CUDA_PREVIEW_DEBUG') or '').lower() in ('1','true','yes','on','dbg','debug'):
+                            off = self._presenter.relearn_offset(Source.VT)
+                            if off is not None:
+                                logger.debug(
+                                    "VT preview detected; relearned offset=%s",
+                                    f"{off:.3f}s",
+                                )
+                            else:
+                                logger.debug("VT preview detected; offset relearn not available yet")
                         self._last_relearn_log_ts = now
                     self._relearn_logged = True
                 elif not getattr(ready, 'preview', False):
@@ -852,8 +884,11 @@ class StreamCoordinator:
                 now = time.perf_counter()
                 last = getattr(self, '_last_present_mono', 0.0)
                 if last:
-                    inter_ms = (now - float(last)) * 1000.0
-                    logger.debug("PRESENT inter_ms=%.3f", float(inter_ms))
+                    # Only log PRESENT timing when explicitly enabled to avoid spam
+                    import os as _os
+                    if (_os.getenv('NAPARI_CUDA_PRESENT_DEBUG') or '').lower() in ('1','true','yes','on','dbg','debug'):
+                        inter_ms = (now - float(last)) * 1000.0
+                        logger.debug("PRESENT inter_ms=%.3f", float(inter_ms))
                 self._last_present_mono = now
             except Exception:
                 pass
@@ -1085,6 +1120,8 @@ class StreamCoordinator:
             logger.info(
                 "wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent)
             )
+        else:
+            logger.debug("wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent))
 
     # Shortcut-driven stepping via intents (arrows/page)
     def _step_primary(self, delta: int, origin: str = 'keys') -> None:
@@ -1339,6 +1376,16 @@ class StreamCoordinator:
         idx = self._axis_to_index(axis)
         if idx is None:
             return False
+        # Suppress local inputs on the playing axis while napari is animating it
+        try:
+            vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+            if vm_ref is not None:
+                is_playing = bool(getattr(vm_ref, '_is_playing', False))
+                play_axis = getattr(vm_ref, '_play_axis', None)
+                if is_playing and play_axis is not None and int(play_axis) == int(idx) and origin != 'play':
+                    return False
+        except Exception:
+            logger.debug("dims_step: play-axis suppression probe failed", exc_info=True)
         now = time.perf_counter()
         if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
             logger.debug("dims.intent.step gated by rate limiter (%s)", origin)
@@ -1364,6 +1411,16 @@ class StreamCoordinator:
         idx = self._axis_to_index(axis)
         if idx is None:
             return False
+        # Suppress local inputs on the playing axis while napari is animating it
+        try:
+            vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+            if vm_ref is not None:
+                is_playing = bool(getattr(vm_ref, '_is_playing', False))
+                play_axis = getattr(vm_ref, '_play_axis', None)
+                if is_playing and play_axis is not None and int(play_axis) == int(idx) and origin != 'play':
+                    return False
+        except Exception:
+            logger.debug("dims_set_index: play-axis suppression probe failed", exc_info=True)
         now = time.perf_counter()
         if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
             # Allow coalescing on caller side; treat as not sent

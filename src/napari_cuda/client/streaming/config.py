@@ -76,7 +76,7 @@ class ClientConfig:
 
         # (legacy feature flags removed)
 
-        # Single preview guard: allow env override (ms); default small non-zero
+        # Single preview guard: allow env override (ms); small non-zero default
         preview_guard = _env_float("NAPARI_CUDA_CLIENT_PREVIEW_GUARD_MS", 5.0)
 
         return ClientConfig(
