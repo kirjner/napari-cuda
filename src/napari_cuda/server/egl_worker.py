@@ -144,6 +144,86 @@ class EGLRendererWorker:
             self._log_keyframes = bool(int(os.getenv('NAPARI_CUDA_LOG_KEYFRAMES', '0') or '0'))
         except Exception:
             self._log_keyframes = False
+        # Zoom drift debug flag (INFO-level logs on zoom_at)
+        try:
+            self._debug_zoom_drift = bool(int(os.getenv('NAPARI_CUDA_DEBUG_ZOOM_DRIFT', '0') or '0'))
+        except Exception:
+            self._debug_zoom_drift = False
+        # Pan debug flag (INFO-level logs on pan_px)
+        try:
+            self._debug_pan = bool(int(os.getenv('NAPARI_CUDA_DEBUG_PAN', '0') or '0'))
+        except Exception:
+            self._debug_pan = False
+        # Reset debug flag (INFO-level logs on camera.reset)
+        try:
+            self._debug_reset = bool(int(os.getenv('NAPARI_CUDA_DEBUG_RESET', '0') or '0'))
+        except Exception:
+            self._debug_reset = False
+
+    # --- Debug helpers -------------------------------------------------------------
+    def _log_zoom_drift(self, zf: float, anc: tuple[float, float], center_world: tuple[float, float], cw: int, ch: int) -> None:
+        """Instrument anchored zoom to quantify pixel-space drift.
+
+        Computes pre/post canvas TL mapping error of the intended world center
+        to the requested canvas anchor and logs one concise INFO line.
+        Also applies the zoom to the camera.
+        """
+        try:
+            cam = self.view.camera
+            tr = self.view.transform * self.view.scene.transform
+            ax_px = float(anc[0])
+            ay_tl = float(ch) - float(anc[1])
+            # pre-zoom mapping
+            pre_map = tr.map([float(center_world[0]), float(center_world[1]), 0, 1])
+            pre_x = float(pre_map[0]); pre_y = float(pre_map[1])
+            pre_dx = pre_x - ax_px; pre_dy = pre_y - ay_tl
+            # apply zoom
+            cam.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
+            # post-zoom mapping
+            tr2 = self.view.transform * self.view.scene.transform
+            post_map = tr2.map([float(center_world[0]), float(center_world[1]), 0, 1])
+            post_x = float(post_map[0]); post_y = float(post_map[1])
+            post_dx = post_x - ax_px; post_dy = post_y - ay_tl
+            rect = getattr(cam, 'rect', None)
+            rect_tuple = None
+            if rect is not None:
+                rect_tuple = (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
+            logger.info(
+                "zoom_drift: f=%.4f ancTL=(%.1f,%.1f) world=(%.3f,%.3f) preTL=(%.1f,%.1f) err_pre=(%.2f,%.2f) postTL=(%.1f,%.1f) err_post=(%.2f,%.2f) cam.rect=%s canvas=%dx%d",
+                float(zf), float(ax_px), float(ay_tl), float(center_world[0]), float(center_world[1]),
+                pre_x, pre_y, pre_dx, pre_dy, post_x, post_y, post_dx, post_dy, str(rect_tuple), int(cw), int(ch)
+            )
+        except Exception:
+            logger.debug("zoom_drift instrumentation failed", exc_info=True)
+
+    def _log_pan_mapping(self, dx_px: float, dy_px: float, cw: int, ch: int) -> None:
+        """Instrument pixel-space pan mapping to world delta.
+
+        Logs canvas center, requested pixel delta, mapped world delta, and camera center after applying pan.
+        Also applies the pan to the camera.
+        """
+        try:
+            cam = self.view.camera
+            # Compute world delta using transform at canvas center
+            tr = self.view.transform * self.view.scene.transform
+            cx_px = float(cw) * 0.5
+            cy_px = float(ch) * 0.5
+            p0 = tr.imap((cx_px, cy_px))
+            p1 = tr.imap((cx_px + dx_px, cy_px + dy_px))
+            dwx = float(p1[0] - p0[0])
+            dwy = float(p1[1] - p0[1])
+            c0 = getattr(cam, 'center', None)
+            if isinstance(c0, (tuple, list)) and len(c0) >= 2:
+                cam.center = (float(c0[0]) - dwx, float(c0[1]) - dwy)  # type: ignore[attr-defined]
+            else:
+                cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
+            c1 = getattr(cam, 'center', None)
+            logger.info(
+                "pan_map: dpx=(%.2f,%.2f) world=(%.4f,%.4f) center_before=%s center_after=%s canvas=%dx%d",
+                float(dx_px), float(dy_px), dwx, dwy, str(c0), str(c1), int(cw), int(ch)
+            )
+        except Exception:
+            logger.debug("pan instrumentation failed", exc_info=True)
 
         # Ensure partial initialization is cleaned up if any step fails
         try:
@@ -246,11 +326,16 @@ class EGLRendererWorker:
     def _init_vispy_scene(self) -> None:
         canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
         view = canvas.central_widget.add_view()
+        # Ensure attributes are set before any first render
+        self.canvas = canvas
+        self.view = view
 
         # Determine scene content in priority order:
         # 1) OME-Zarr 2D slice (preferred for real data MVP)
         # 2) Explicit volume demo if requested
         # 3) Synthetic 2D image pattern (fallback)
+        scene_src = "synthetic"
+        scene_meta = ""
 
         if self._zarr_path:
             try:
@@ -263,13 +348,10 @@ class EGLRendererWorker:
                     h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
                     self._data_wh = (w, h)
                     view.camera.set_range(x=(0, w), y=(0, h))
+                    scene_src = "zarr"
+                    scene_meta = f"level={self._zarr_level or 'auto'} z={self._z_index} shape={h}x{w}"
                 except Exception as e:
                     logger.debug("set_range(zarr) failed: %s", e)
-                # Log info
-                try:
-                    logger.info("Loaded OME-Zarr slice: level=%s z=%s shape=%s", self._zarr_level or "auto", self._z_index, arr2d.shape)
-                except Exception:
-                    pass
             except Exception as e:
                 logger.exception("Failed to initialize OME-Zarr slice; falling back to synthetic image: %s", e)
                 # Fallback to synthetic 2D image
@@ -279,6 +361,8 @@ class EGLRendererWorker:
                 try:
                     self._data_wh = (self.width, self.height)
                     view.camera.set_range(x=(0, self.width), y=(0, self.height))
+                    scene_src = "synthetic"
+                    scene_meta = f"shape={self.height}x{self.width}"
                 except Exception:
                     pass
         elif self.use_volume:
@@ -295,6 +379,8 @@ class EGLRendererWorker:
             try:
                 if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
                     visual.relative_step_size = float(self.volume_relative_step)
+                scene_src = "volume"
+                scene_meta = f"depth={self.volume_depth} shape={self.height}x{self.width} dtype={self.volume_dtype}"
             except Exception as e:
                 logger.debug("Set volume relative_step_size failed: %s", e)
         else:
@@ -305,13 +391,19 @@ class EGLRendererWorker:
             try:
                 self._data_wh = (self.width, self.height)
                 view.camera.set_range(x=(0, self.width), y=(0, self.height))
+                scene_src = "synthetic"
+                scene_meta = f"shape={self.height}x{self.width}"
             except Exception as e:
                 logger.debug("PanZoom set_range failed: %s", e)
 
-        canvas.render()
-        self.canvas = canvas
-        self.view = view
+        # Assign visual before first draw and log concise init info
         self._visual = visual
+        try:
+            logger.info("Scene init: source=%s %s", scene_src, scene_meta)
+        except Exception:
+            pass
+        # First render after attributes are fully set
+        canvas.render()
 
     def _infer_zarr_level(self, root: str) -> Optional[str]:
         """Infer a dataset level path from NGFF .zattrs if level not provided."""
@@ -771,7 +863,17 @@ class EGLRendererWorker:
                 if bool(getattr(state, 'reset_view', False)) and hasattr(self.view, 'camera'):
                     try:
                         w, h = getattr(self, '_data_wh', (self.width, self.height))
-                        self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
+                        if self._debug_reset:
+                            # Log once with details
+                            rect_before = getattr(self.view.camera, 'rect', None)
+                            self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
+                            rect_after = getattr(self.view.camera, 'rect', None)
+                            logger.info(
+                                "reset_view: data=(%d,%d) rect_before=%s rect_after=%s",
+                                int(w), int(h), str(rect_before), str(rect_after)
+                            )
+                        else:
+                            self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
                     except Exception as e:
                         logger.debug("camera.reset failed: %s", e)
                 # Anchored zoom (canvas/video pixel anchor)
@@ -780,37 +882,43 @@ class EGLRendererWorker:
                 if zf is not None and float(zf) > 0.0 and anc is not None and hasattr(self.view, 'camera'):
                     try:
                         cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
-                        before_center = getattr(cam, 'center', None)
-                        before_zoom = getattr(cam, 'zoom', None)
-                        # Map anchor from canvas pixels (bottom-left origin) to world/scene coordinates
+                        # Capture canvas size for anchor mapping
+                        # Map anchor from canvas pixels (top-left origin expected by napari transform) to world/scene coordinates
                         center_world = None
                         try:
-                            tr = self.view.scene.node_transform(self.canvas.scene)
-                            wx, wy = tr.imap((float(anc[0]), float(anc[1])))
-                            center_world = (float(wx), float(wy))
+                            # The client sends anchor with bottom-left origin; convert to top-left for transform
+                            ax_px = float(anc[0])
+                            ay_bl = float(anc[1])
+                            ay_tl = float(ch) - ay_bl
+                            # Use napari-style transform: view.transform * view.scene.transform
+                            tr = self.view.transform * self.view.scene.transform
+                            mapped = tr.imap([ax_px, ay_tl, 0, 1])
+                            # mapped may be length-2 or length-4; take XY components
+                            wx = float(mapped[0])
+                            wy = float(mapped[1])
+                            center_world = (wx, wy)
                         except Exception:
                             # Fallback: proportionally map using camera rect and canvas size
                             try:
                                 rect = getattr(cam, 'rect', None)
                                 if rect is not None and cw and ch:
-                                    sx = float(anc[0]) / float(cw)
-                                    sy = float(anc[1]) / float(ch)
+                                    ax_px = float(anc[0])
+                                    ay_bl = float(anc[1])
+                                    sx = ax_px / float(cw)
+                                    sy_bl = ay_bl / float(ch)
                                     wx = float(rect.left) + sx * float(rect.width)
-                                    wy = float(rect.bottom) + sy * float(rect.height)
+                                    wy = float(rect.bottom) + sy_bl * float(rect.height)
                                     center_world = (wx, wy)
                             except Exception:
                                 center_world = None
                         if center_world is None:
                             # Last resort: pass through
                             center_world = (float(anc[0]), float(anc[1]))
-                        logger.debug(
-                            "apply_zoom_at: factor=%.4f anchorBL_px=(%.1f,%.1f) center_world=(%.3f,%.3f) canvas=%dx%d before_center=%s before_zoom=%s",
-                            float(zf), float(anc[0]), float(anc[1]), float(center_world[0]), float(center_world[1]), int(cw), int(ch), before_center, before_zoom
-                        )
-                        self.view.camera.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
-                        after_center = getattr(cam, 'center', None)
-                        after_zoom = getattr(cam, 'zoom', None)
-                        logger.debug("apply_zoom_at: after_center=%s after_zoom=%s", after_center, after_zoom)
+                        if self._debug_zoom_drift:
+                            self._log_zoom_drift(float(zf), (float(anc[0]), float(anc[1])), (float(center_world[0]), float(center_world[1])), int(cw), int(ch))
+                        else:
+                            # Apply zoom without extra instrumentation or extra logs
+                            self.view.camera.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
                     except Exception as e:
                         logger.debug("camera.zoom_at failed: %s", e)
                 # Pixel-space pan (convert canvas pixel delta to world delta)
@@ -818,28 +926,30 @@ class EGLRendererWorker:
                 dy = float(getattr(state, 'pan_dy_px', 0.0) or 0.0)
                 if (dx != 0.0 or dy != 0.0) and hasattr(cam, 'center'):
                     try:
-                        # Map canvas pixel shift to world delta using inverse transform at canvas center
-                        try:
-                            cx_px = self.width * 0.5
-                            cy_px = self.height * 0.5
-                            # Map from canvas pixels -> scene/world via inverse transform
-                            # Use canvas.scene as the target node to avoid ambiguity
-                            tr = self.view.scene.node_transform(self.canvas.scene)
-                            p0 = tr.imap((cx_px, cy_px))
-                            p1 = tr.imap((cx_px + dx, cy_px + dy))
-                            dwx = float(p1[0] - p0[0])
-                            dwy = float(p1[1] - p0[1])
-                        except Exception:
-                            # Fallback: approximate with zoom scale if available
-                            z = float(getattr(cam, 'zoom', 1.0) or 1.0)
-                            inv = 1.0 / max(1e-6, z)
-                            dwx = dx * inv
-                            dwy = dy * inv
-                        c = getattr(cam, 'center', None)
-                        if isinstance(c, (tuple, list)) and len(c) >= 2:
-                            cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
+                        cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
+                        if self._debug_pan:
+                            self._log_pan_mapping(dx, dy, int(cw), int(ch))
                         else:
-                            cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
+                            # Map canvas pixel shift to world delta using inverse transform at canvas center
+                            try:
+                                cx_px = float(cw) * 0.5
+                                cy_px = float(ch) * 0.5
+                                tr = self.view.transform * self.view.scene.transform
+                                p0 = tr.imap((cx_px, cy_px))
+                                p1 = tr.imap((cx_px + dx, cy_px + dy))
+                                dwx = float(p1[0] - p0[0])
+                                dwy = float(p1[1] - p0[1])
+                            except Exception:
+                                # Fallback: approximate with zoom scale if available
+                                z = float(getattr(cam, 'zoom', 1.0) or 1.0)
+                                inv = 1.0 / max(1e-6, z)
+                                dwx = dx * inv
+                                dwy = dy * inv
+                            c = getattr(cam, 'center', None)
+                            if isinstance(c, (tuple, list)) and len(c) >= 2:
+                                cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
+                            else:
+                                cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
                     except Exception as e:
                         logger.debug("camera.pan_px failed: %s", e)
                 # Legacy absolute camera fields (kept for back-compat)
