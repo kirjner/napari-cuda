@@ -298,12 +298,14 @@ class StreamingCanvas(VispyCanvas):
         #  - client metrics are enabled (via --metrics or NAPARI_CUDA_CLIENT_METRICS=1)
         try:
             hud_env = os.getenv('NAPARI_CUDA_FPS_HUD')
+            view_hud_env = (os.getenv('NAPARI_CUDA_VIEW_HUD') or '0').lower() in ('1','true','yes','on')
             metrics_env = (os.getenv('NAPARI_CUDA_CLIENT_METRICS', '0') or '0').lower() in ('1', 'true', 'yes', 'on')
-            self._hud_enabled = (hud_env == '1') or bool(self._vt_smoke) or bool(metrics_env)
+            # Enable the overlay when FPS HUD requested, metrics enabled, smoke mode, or view HUD requested
+            self._hud_enabled = (hud_env == '1') or bool(self._vt_smoke) or bool(metrics_env) or bool(view_hud_env)
             if self._hud_enabled:
                 self._init_fps_hud()
         except Exception:
-            logger.debug('FPS HUD init failed', exc_info=True)
+            logger.debug('FPS/VIEW HUD init failed', exc_info=True)
 
         # Timestamp handling for VT scheduling (server timestamps only)
         self._vt_ts_offset = None  # server_ts -> local_now offset (seconds)
