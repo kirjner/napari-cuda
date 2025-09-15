@@ -499,7 +499,14 @@ class StreamCoordinator:
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
         if not self._vt_smoke:
-            st = StateController(self.server_host, self.state_port, self._on_video_config, self._on_dims_update)
+            st = StateController(
+                self.server_host,
+                self.state_port,
+                self._on_video_config,
+                self._on_dims_update,
+                on_connected=self._on_state_connected,
+                on_disconnect=self._on_state_disconnect,
+            )
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
             # Attach input forwarding (wheel + resize) now that state channel exists
@@ -1069,6 +1076,24 @@ class StreamCoordinator:
 
     def _on_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
+
+    # State channel lifecycle: gate dims intents safely across reconnects
+    def _on_state_connected(self) -> None:
+        try:
+            # Safe option: require fresh dims.update before allowing intents
+            self._dims_ready = False
+            self._primary_axis_index = None
+            logger.info("StateChannel connected; gating dims intents until dims.update meta arrives")
+        except Exception:
+            logger.debug("_on_state_connected failed", exc_info=True)
+
+    def _on_state_disconnect(self, exc: Exception | None) -> None:
+        try:
+            self._dims_ready = False
+            self._primary_axis_index = None
+            logger.info("StateChannel disconnected: %s; dims intents gated", exc)
+        except Exception:
+            logger.debug("_on_state_disconnect failed", exc_info=True)
 
     # --- Input mapping: unified wheel handler -------------------------------------
     def _on_wheel(self, data: dict) -> None:

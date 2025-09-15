@@ -26,17 +26,27 @@ class StateChannel:
         port: int,
         on_video_config: Optional[Callable[[dict], None]] = None,
         on_dims_update: Optional[Callable[[dict], None]] = None,
+        on_connected: Optional[Callable[[], None]] = None,
+        on_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
     ) -> None:
         self.host = host
         self.port = int(port)
         self.on_video_config = on_video_config
         self.on_dims_update = on_dims_update
+        self.on_connected = on_connected
+        self.on_disconnect = on_disconnect
         self._last_key_req: Optional[float] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._out_q: Optional[asyncio.Queue[str]] = None
 
     def run(self) -> None:
+        """Start the state channel event loop and keep reconnecting.
+
+        Mirrors PixelReceiver's reconnection strategy so that when the server
+        drops and comes back, we resume receiving dims/video_config and our
+        send_json path becomes live again.
+        """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
@@ -54,73 +64,121 @@ class StateChannel:
 
     async def _run(self) -> None:
         url = f"ws://{self.host}:{self.port}"
-        try:
-            async with websockets.connect(url) as ws:
-                self._ws = ws
-                self._out_q = asyncio.Queue()
-                async def _pinger() -> None:
-                    while True:
+        logger.info("Connecting to state channel at %s", url)
+        retry_delay = 5.0
+        max_delay = 30.0
+        while True:
+            try:
+                async with websockets.connect(url) as ws:
+                    logger.info("Connected to state channel")
+                    # Reset backoff on successful connect
+                    retry_delay = 5.0
+                    self._ws = ws
+                    # Notify connected
+                    if self.on_connected:
                         try:
-                            await ws.send('{"type":"ping"}')
+                            self.on_connected()
                         except Exception:
-                            logger.debug("State ping failed; will stop pinger", exc_info=True)
-                            break
-                        await asyncio.sleep(2.0)
+                            logger.debug("on_connected callback failed (state)", exc_info=True)
+                    # Fresh sender queue per-connection; we intentionally drop any
+                    # queued messages from a previous disconnected session.
+                    self._out_q = asyncio.Queue()
 
-                async def _sender() -> None:
-                    # Relay queued outbound messages (e.g., keyframe requests)
-                    while True:
-                        try:
-                            msg = await self._out_q.get()  # type: ignore[arg-type]
-                            await ws.send(msg)
-                        except Exception:
-                            logger.debug("State sender failed; stopping", exc_info=True)
-                            break
+                    async def _pinger() -> None:
+                        while True:
+                            try:
+                                await ws.send('{"type":"ping"}')
+                            except Exception:
+                                logger.debug("State ping failed; will stop pinger", exc_info=True)
+                                break
+                            await asyncio.sleep(2.0)
 
-                ping_task = asyncio.create_task(_pinger())
-                send_task = asyncio.create_task(_sender())
-                # Request a keyframe on connect
-                try:
-                    await ws.send('{"type":"request_keyframe"}')
-                except Exception:
-                    logger.debug("Initial keyframe request failed", exc_info=True)
-                import json as _json
-                async for msg in ws:
+                    async def _sender() -> None:
+                        # Relay queued outbound messages (e.g., keyframe requests)
+                        while True:
+                            try:
+                                msg = await self._out_q.get()  # type: ignore[arg-type]
+                                await ws.send(msg)
+                            except Exception:
+                                logger.debug("State sender failed; stopping", exc_info=True)
+                                break
+
+                    ping_task = asyncio.create_task(_pinger())
+                    send_task = asyncio.create_task(_sender())
+                    # Request a keyframe on connect
                     try:
-                        data = _json.loads(msg)
-                    except _json.JSONDecodeError:
-                        continue
-                    t = (data.get('type') or '').lower()
-                    if t == 'video_config':
-                        if self.on_video_config:
-                            try:
-                                self.on_video_config(data)
-                            except Exception:
-                                logger.debug("on_video_config callback failed", exc_info=True)
-                    elif t == 'dims.update':
-                        if self.on_dims_update:
-                            try:
-                                # Normalize new-style dims.update (nested meta) to flattened keys
-                                meta = data.get('meta') or {}
-                                fwd = {
-                                    'current_step': data.get('current_step'),
-                                    'ndim': meta.get('ndim'),
-                                    'order': meta.get('order'),
-                                    'axis_labels': meta.get('axis_labels'),
-                                    'sizes': meta.get('sizes'),
-                                    'range': meta.get('range'),
-                                    'ndisplay': meta.get('ndisplay'),
-                                    'seq': data.get('seq'),
-                                    'last_client_id': data.get('last_client_id'),
-                                }
-                                self.on_dims_update(fwd)
-                            except Exception:
-                                logger.debug("on_dims_update callback failed", exc_info=True)
-                ping_task.cancel()
-                send_task.cancel()
-                self._ws = None
-        except Exception:
-            logger.exception("State channel ended")
+                        await ws.send('{"type":"request_keyframe"}')
+                    except Exception:
+                        logger.debug("Initial keyframe request failed", exc_info=True)
+                    import json as _json
+                    async for msg in ws:
+                        try:
+                            data = _json.loads(msg)
+                        except _json.JSONDecodeError:
+                            continue
+                        t = (data.get('type') or '').lower()
+                        if t == 'video_config':
+                            if self.on_video_config:
+                                try:
+                                    self.on_video_config(data)
+                                except Exception:
+                                    logger.debug("on_video_config callback failed", exc_info=True)
+                        elif t == 'dims.update':
+                            if self.on_dims_update:
+                                try:
+                                    # Normalize new-style dims.update (nested meta) to flattened keys
+                                    meta = data.get('meta') or {}
+                                    fwd = {
+                                        'current_step': data.get('current_step'),
+                                        'ndim': meta.get('ndim'),
+                                        'order': meta.get('order'),
+                                        'axis_labels': meta.get('axis_labels'),
+                                        'sizes': meta.get('sizes'),
+                                        'range': meta.get('range'),
+                                        'ndisplay': meta.get('ndisplay'),
+                                        'seq': data.get('seq'),
+                                        'last_client_id': data.get('last_client_id'),
+                                    }
+                                    self.on_dims_update(fwd)
+                                except Exception:
+                                    logger.debug("on_dims_update callback failed", exc_info=True)
+                    # Connection closed: cancel helpers and clear handles
+                    try:
+                        ping_task.cancel()
+                        send_task.cancel()
+                    finally:
+                        self._ws = None
+                        self._out_q = None
+                    # Normal close -> disconnect callback with None
+                    if self.on_disconnect:
+                        try:
+                            self.on_disconnect(None)
+                        except Exception:
+                            logger.debug("on_disconnect callback failed (state)", exc_info=True)
+            except Exception as e:
+                # Graceful handling similar to PixelReceiver
+                msg = str(e) or e.__class__.__name__
+                try:
+                    import websockets as _ws
+                except Exception:
+                    _ws = None  # type: ignore[assignment]
+                if isinstance(e, (EOFError, ConnectionRefusedError)):
+                    logger.info("State channel unavailable (%s); retrying in %.0fs", msg, retry_delay)
+                elif (_ws is not None) and isinstance(e, _ws.exceptions.InvalidMessage):  # type: ignore[attr-defined]
+                    logger.info("State channel handshake failed (%s); retrying in %.0fs", msg, retry_delay)
+                elif isinstance(e, OSError):
+                    logger.info("State channel socket error (%s); retrying in %.0fs", msg, retry_delay)
+                else:
+                    logger.exception("State channel error")
+                # Exceptional close -> disconnect callback with error
+                if self.on_disconnect:
+                    try:
+                        self.on_disconnect(e)
+                    except Exception:
+                        logger.debug("on_disconnect callback failed (state-exc)", exc_info=True)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(max_delay, retry_delay * 1.5)
+                logger.info("Reconnecting to state channel...")
 
     def request_keyframe_once(self) -> None:
         """Best-effort request for a keyframe via state channel (throttled)."""
