@@ -106,6 +106,8 @@ class EGLHeadlessServer:
         # Logging controls for camera ops
         self._log_cam_info: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_INFO', False)
         self._log_cam_debug: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_DEBUG', False)
+        # Logging controls for volume/multiscale intents
+        self._log_volume_info: bool = env_bool('NAPARI_CUDA_LOG_VOLUME_INFO', False)
         
         # Drop/send tracking
         self._drops_total: int = 0
@@ -133,6 +135,107 @@ class EGLHeadlessServer:
         # Dims intent/update tracking (server-authoritative dims seq and last client)
         self._dims_seq: int = 0
         self._last_dims_client_id: Optional[str] = None
+        # Volume and multiscale server-side state (reported via dims.update meta)
+        self._volume_state: dict = {
+            'mode': 'mip',           # 'mip' | 'translucent' | 'iso'
+            'colormap': 'gray',      # name string
+            'clim': [0.0, 1.0],      # [lo, hi]
+            'opacity': 1.0,          # 0..1
+            'sample_step': 1.0,      # relative multiplier
+        }
+        self._ms_state: dict = {
+            'levels': [],            # [{shape: [...], downsample: [...]}]
+            'current_level': 0,
+            'policy': 'auto',        # 'auto' | 'fixed'
+            'index_space': 'base',
+        }
+        self._allowed_render_modes = {'mip', 'translucent', 'iso'}
+
+    # --- Logging + Broadcast helpers --------------------------------------------
+    def _log_volume_intent(self, fmt: str, *args) -> None:
+        try:
+            if self._log_volume_info:
+                logger.info(fmt, *args)
+            else:
+                logger.debug(fmt, *args)
+        except Exception:
+            pass
+
+    async def _rebroadcast_meta(self, client_id: Optional[str]) -> None:
+        """Re-broadcast a dims.update with current_step and updated meta.
+
+        Safe to call after mutating volume/multiscale state. Never raises.
+        """
+        try:
+            cur = None
+            with self._state_lock:
+                cur = getattr(self._latest_state, 'current_step', None)
+            step_list = list(cur) if isinstance(cur, (list, tuple)) else [0]
+            await self._broadcast_dims_update(step_list, last_client_id=client_id)
+        except Exception as e:
+            logger.debug("rebroadcast meta failed: %s", e)
+
+    # --- Meta builders ------------------------------------------------------------
+    def _build_base_dims_meta(self) -> dict:
+        meta: dict = {}
+        try:
+            w = self._worker
+            if w is not None:
+                # Prefer OME-Zarr metadata when available
+                zshape = getattr(w, '_zarr_shape', None)
+                if isinstance(zshape, tuple) and len(zshape) == 3:
+                    sizes = [int(zshape[0]), int(zshape[1]), int(zshape[2])]
+                    axes = str(getattr(w, '_zarr_axes', 'zyx') or 'zyx').lower()
+                    order = [c for c in axes]
+                    rng = [[0, max(0, s - 1)] for s in sizes]
+                    return {'ndim': 3, 'order': order, 'sizes': sizes, 'range': rng, 'axis_labels': order}
+                # Synthetic/explicit volume demo when no zarr metadata
+                if bool(getattr(w, 'use_volume', False)):
+                    d = int(getattr(w, 'volume_depth', 0) or 0)
+                    h = int(getattr(w, 'height', 0) or 0)
+                    wi = int(getattr(w, 'width', 0) or 0)
+                    if d > 0 and h > 0 and wi > 0:
+                        sizes = [d, h, wi]
+                        rng = [[0, d - 1], [0, h - 1], [0, wi - 1]]
+                        return {'ndim': 3, 'order': ['z', 'y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['z','y','x']}
+        except Exception:
+            logger.debug("build base dims meta failed", exc_info=True)
+        # 2D fallback to canvas size
+        try:
+            h = int(self.height)
+            wi = int(self.width)
+            if h > 0 and wi > 0:
+                sizes = [h, wi]
+                rng = [[0, h - 1], [0, wi - 1]]
+                return {'ndim': 2, 'order': ['y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['y','x']}
+        except Exception:
+            logger.debug("dims metadata (2D fallback) build failed", exc_info=True)
+        return {}
+
+    def _build_render_meta(self) -> dict:
+        return {
+            'mode': self._volume_state.get('mode'),
+            'colormap': self._volume_state.get('colormap'),
+            'clim': list(self._volume_state.get('clim') or [0.0, 1.0]),
+            'opacity': float(self._volume_state.get('opacity', 1.0)),
+            'sample_step': float(self._volume_state.get('sample_step', 1.0)),
+        }
+
+    def _build_multiscale_meta(self, base: dict) -> dict:
+        levels = self._ms_state.get('levels') or []
+        if not levels:
+            try:
+                sz = base.get('sizes') or []
+                if isinstance(sz, (list, tuple)) and len(sz) >= int(base.get('ndim') or 0):
+                    levels = [{'shape': list(int(x) for x in sz), 'downsample': [1.0] * len(sz)}]
+            except Exception:
+                logger.debug("synthesize single multiscale level failed", exc_info=True)
+        return {
+            'levels': levels,
+            'current_level': int(self._ms_state.get('current_level', 0) or 0),
+            'policy': str(self._ms_state.get('policy', 'auto') or 'auto'),
+            'index_space': 'base',
+        }
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
@@ -165,56 +268,76 @@ class EGLHeadlessServer:
 
     # --- Helper to compute dims metadata for piggyback on dims_update ---------
     def _dims_metadata(self) -> dict:
-        """Build lightweight dims metadata.
+        """Build dims metadata including optional volume/multiscale fields.
 
-        Returns keys used by client mirror logic:
+        Base keys:
         - ndim: int
-        - order: list[str], e.g., ['z','y','x'] or ['y','x']
-        - sizes: list[int], sizes per axis in order
-        - range: list[[lo, hi]], index bounds per axis
-        - axis_labels: optional labels (mirrors order by default)
+        - order: list[str]
+        - sizes: list[int]
+        - range: list[[lo, hi]] (index bounds per axis)
+        - axis_labels: list[str]
 
-        Never raises; logs failures and returns {} when unavailable.
+        Extended meta:
+        - volume: bool
+        - render: dict
+        - multiscale: dict
         """
+        meta: dict = self._build_base_dims_meta()
+        # Extend with volume/multiscale fields
         try:
-            w = self._worker
-            if w is not None:
-                # Prefer OME-Zarr metadata when available
-                zshape = getattr(w, '_zarr_shape', None)
-                if isinstance(zshape, tuple) and len(zshape) == 3:
-                    try:
-                        sizes = [int(zshape[0]), int(zshape[1]), int(zshape[2])]
-                        axes = str(getattr(w, '_zarr_axes', 'zyx') or 'zyx').lower()
-                        order = [c for c in axes]
-                        rng = [[0, max(0, s - 1)] for s in sizes]
-                        return {'ndim': 3, 'order': order, 'sizes': sizes, 'range': rng, 'axis_labels': order}
-                    except Exception:
-                        logger.debug("dims metadata (zarr) build failed", exc_info=True)
-                # Synthetic/explicit volume demo
-                if bool(getattr(w, 'use_volume', False)):
-                    try:
-                        d = int(getattr(w, 'volume_depth', 0) or 0)
-                        h = int(getattr(w, 'height', 0) or 0)
-                        wi = int(getattr(w, 'width', 0) or 0)
-                        if d > 0 and h > 0 and wi > 0:
-                            sizes = [d, h, wi]
-                            rng = [[0, d - 1], [0, h - 1], [0, wi - 1]]
-                            return {'ndim': 3, 'order': ['z', 'y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['z','y','x']}
-                    except Exception:
-                        logger.debug("dims metadata (volume) build failed", exc_info=True)
+            use_vol = False
+            try:
+                use_vol = bool(getattr(self._worker, 'use_volume', False) or self.use_volume)
+            except Exception:
+                use_vol = bool(self.use_volume)
+            meta['volume'] = bool(use_vol)
+            if use_vol:
+                # Render params from server state
+                meta['render'] = self._build_render_meta()
+                # Multiscale description
+                meta['multiscale'] = self._build_multiscale_meta(meta)
         except Exception:
-            logger.debug("dims metadata helper failed", exc_info=True)
-        # 2D fallback to canvas size
+            logger.debug("extend dims meta with volume/multiscale failed", exc_info=True)
+        return meta
+
+    # --- Validation helpers -------------------------------------------------------
+    def _is_valid_render_mode(self, mode: str) -> bool:
+        return str(mode or '').lower() in self._allowed_render_modes
+
+    def _normalize_clim(self, lo: object, hi: object) -> Optional[tuple[float, float]]:
         try:
-            h = int(self.height)
-            wi = int(self.width)
-            if h > 0 and wi > 0:
-                sizes = [h, wi]
-                rng = [[0, h - 1], [0, wi - 1]]
-                return {'ndim': 2, 'order': ['y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['y','x']}
+            lo_f = float(lo)
+            hi_f = float(hi)
         except Exception:
-            logger.debug("dims metadata (2D fallback) build failed", exc_info=True)
-        return {}
+            return None
+        if hi_f < lo_f:
+            lo_f, hi_f = hi_f, lo_f
+        return (lo_f, hi_f)
+
+    def _clamp_opacity(self, a: object) -> Optional[float]:
+        try:
+            aa = float(a)
+        except Exception:
+            return None
+        return max(0.0, min(1.0, aa))
+
+    def _clamp_sample_step(self, rel: object) -> Optional[float]:
+        try:
+            rr = float(rel)
+        except Exception:
+            return None
+        return max(0.1, min(4.0, rr))
+
+    def _clamp_level(self, lvl: object) -> Optional[int]:
+        try:
+            iv = int(lvl)
+        except Exception:
+            return None
+        levels = self._ms_state.get('levels') or []
+        n = len(levels)
+        if n > 0:
+            return max(0, min(n - 1, iv))
+        return max(0, iv)
 
     # --- Dims intent helpers --------------------------------------------------
     def _resolve_axis_index(self, axis: object, meta: dict, cur_len: int) -> Optional[int]:
@@ -261,7 +384,8 @@ class EGLHeadlessServer:
         meta = self._dims_metadata() or {}
         # Always include ndisplay in meta for new, and as top-level for legacy
         try:
-            ndisp = 2
+            # If 3D and volume mode, prefer ndisplay=3; else 2
+            ndisp = 3 if int(meta.get('ndim') or 2) >= 3 and bool(meta.get('volume')) else 2
         except Exception:
             ndisp = 2
         # Inflate/align current_step to full length and order
@@ -793,6 +917,58 @@ class EGLHeadlessServer:
                             await self._broadcast_dims_update(new_step, last_client_id=client_id)
                     except Exception as e:
                         logger.debug("dims.intent.set_index handling failed: %s", e)
+                elif t == 'volume.intent.set_render_mode':
+                    mode = str(data.get('mode') or '').lower()
+                    client_seq = data.get('client_seq')
+                    client_id = data.get('client_id') or None
+                    if self._is_valid_render_mode(mode):
+                        self._volume_state['mode'] = mode
+                        self._log_volume_intent("intent: volume.set_render_mode mode=%s client_id=%s seq=%s", mode, client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
+                elif t == 'volume.intent.set_clim':
+                    pair = self._normalize_clim(data.get('lo'), data.get('hi'))
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    if pair is not None:
+                        lo, hi = pair
+                        self._volume_state['clim'] = [lo, hi]
+                        self._log_volume_intent("intent: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s", lo, hi, client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
+                elif t == 'volume.intent.set_colormap':
+                    name = data.get('name')
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    if isinstance(name, str) and name.strip():
+                        self._volume_state['colormap'] = str(name)
+                        self._log_volume_intent("intent: volume.set_colormap name=%s client_id=%s seq=%s", name, client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
+                elif t == 'volume.intent.set_opacity':
+                    a = self._clamp_opacity(data.get('alpha'))
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    if a is not None:
+                        self._volume_state['opacity'] = float(a)
+                        self._log_volume_intent("intent: volume.set_opacity alpha=%.3f client_id=%s seq=%s", a, client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
+                elif t == 'volume.intent.set_sample_step':
+                    rr = self._clamp_sample_step(data.get('relative'))
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    if rr is not None:
+                        self._volume_state['sample_step'] = float(rr)
+                        self._log_volume_intent("intent: volume.set_sample_step relative=%.3f client_id=%s seq=%s", rr, client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
+                elif t == 'multiscale.intent.set_policy':
+                    pol = str(data.get('policy') or '').lower()
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    if pol in ('auto', 'fixed'):
+                        self._ms_state['policy'] = pol
+                        self._log_volume_intent("intent: multiscale.set_policy policy=%s client_id=%s seq=%s", pol, client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
+                elif t == 'multiscale.intent.set_level':
+                    lvl = self._clamp_level(data.get('level'))
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    if lvl is not None:
+                        self._ms_state['current_level'] = int(lvl)
+                        self._ms_state['policy'] = 'fixed'
+                        self._log_volume_intent("intent: multiscale.set_level level=%d client_id=%s seq=%s", int(lvl), client_id, client_seq)
+                        await self._rebroadcast_meta(client_id)
                 elif t == 'camera.zoom_at':
                     try:
                         factor = float(data.get('factor') or 0.0)

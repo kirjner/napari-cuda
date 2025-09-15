@@ -17,10 +17,17 @@ import logging
 import ctypes
 from dataclasses import dataclass
 from typing import Optional
+from pathlib import Path
+import json
 import threading
 import math
 
 import numpy as np
+try:
+    import dask.array as da  # type: ignore
+except Exception as _da_err:
+    da = None  # type: ignore[assignment]
+    logging.getLogger(__name__).warning("dask.array not available; OME-Zarr features disabled: %s", _da_err)
 
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -38,6 +45,7 @@ import PyNvVideoCodec as pnvc  # type: ignore
 # Bitstream packing happens in the server layer
 from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
+from .hw_limits import get_hw_limits
 
 logger = logging.getLogger(__name__)
 
@@ -266,13 +274,35 @@ class EGLRendererWorker:
         self.view = view
 
         # Determine scene content in priority order:
-        # 1) OME-Zarr 2D slice (preferred for real data MVP)
-        # 2) Explicit volume demo if requested
-        # 3) Synthetic 2D image pattern (fallback)
+        # 1) OME-Zarr 3D volume (when --volume with --zarr is provided)
+        # 2) OME-Zarr 2D slice (preferred fallback for real data MVP)
+        # 3) Explicit synthetic 3D volume demo if requested
+        # 4) Synthetic 2D image pattern (fallback)
         scene_src = "synthetic"
         scene_meta = ""
 
-        if self._zarr_path:
+        if self._zarr_path and self.use_volume:
+            try:
+                # 3D volume from OME-Zarr (axes assumed zyx unless overridden)
+                view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
+                vol3d = self._load_zarr_volume3d()
+                # Normalize to float32 0..1 already performed by loader
+                visual = scene.visuals.Volume(vol3d, parent=view.scene, method="mip", cmap="grays")
+                try:
+                    if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
+                        visual.relative_step_size = float(self.volume_relative_step)
+                    d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
+                    self._data_wh = (w, h)
+                    scene_src = "zarr-volume"
+                    scene_meta = f"level={self._zarr_level or 'auto'} shape={d}x{h}x{w}"
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.exception("Failed to initialize OME-Zarr volume; falling back to 2D slice: %s", e)
+                # Fall through to 2D slice fallback
+                self.use_volume = False
+
+        if self._zarr_path and not self.use_volume:
             try:
                 # 2D slice mode from OME-Zarr (axes assumed zyx unless overridden)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
@@ -343,8 +373,6 @@ class EGLRendererWorker:
     def _infer_zarr_level(self, root: str) -> Optional[str]:
         """Infer a dataset level path from NGFF .zattrs if level not provided."""
         try:
-            import json
-            from pathlib import Path
             zattrs = Path(root) / '.zattrs'
             if not zattrs.exists():
                 return None
@@ -361,7 +389,8 @@ class EGLRendererWorker:
             if len(datasets) >= 2:
                 return datasets[1].get('path')
             return datasets[0].get('path')
-        except Exception:
+        except Exception as e:
+            logger.debug("infer zarr level failed", exc_info=True)
             return None
 
     def _load_zarr_initial_slice(self):
@@ -372,14 +401,11 @@ class EGLRendererWorker:
         - Returns a float32 normalized array (0..1) suitable for vispy Image.
         """
         assert self._zarr_path is not None
-        # Lazy import to avoid hard dependency unless used
-        import dask.array as da  # type: ignore
-        from pathlib import Path
-
         root = self._zarr_path
         level = self._zarr_level or self._infer_zarr_level(root) or ''
         store_path = Path(root) / level if level else Path(root)
-
+        if da is None:
+            raise RuntimeError("dask.array is required for OME-Zarr loading but is not available")
         darr = da.from_zarr(str(store_path))
         if darr.ndim != 3:
             raise RuntimeError(f"Expected 3D (zyx) dataset; got shape {darr.shape}")
@@ -394,22 +420,79 @@ class EGLRendererWorker:
 
         # Compute percentiles for contrast once (on a small sub-sample to keep fast)
         try:
-            import numpy as _np
             # Read a center crop or the chosen slice to estimate clims
             sample = darr[self._z_index, :, :].astype('float32').compute()
-            p1, p99 = _np.percentile(sample, [0.5, 99.5])
+            p1, p99 = np.percentile(sample, [0.5, 99.5])
             self._zarr_clim = (float(p1), float(p99))
             # Avoid zero span
             if self._zarr_clim[1] <= self._zarr_clim[0]:
                 self._zarr_clim = (float(sample.min()), float(sample.max()))
-        except Exception:
+        except Exception as e:
+            logger.debug("zarr percentile/clim compute failed", exc_info=True)
             self._zarr_clim = None
 
         return self._load_zarr_slice(self._z_index)
 
+    def _load_zarr_volume3d(self):
+        """Load entire OME-Zarr 3D volume (ZYX) as float32 0..1 array for Volume visual.
+
+        Uses the same dataset selection logic as _load_zarr_initial_slice and
+        normalizes with cached percentiles if available.
+        """
+        assert self._zarr_path is not None
+        root = self._zarr_path
+        level = self._zarr_level or self._infer_zarr_level(root) or ''
+        store_path = Path(root) / level if level else Path(root)
+        if da is None:
+            raise RuntimeError("dask.array is required for OME-Zarr loading but is not available")
+        darr = da.from_zarr(str(store_path))
+        if darr.ndim != 3:
+            raise RuntimeError(f"Expected 3D (zyx) dataset; got shape {darr.shape}")
+        self._da_volume = darr
+        self._zarr_shape = tuple(int(s) for s in darr.shape)  # (Z,Y,X)
+        # Budget check before compute
+        try:
+            hz, hy, hx = (int(self._zarr_shape[0]), int(self._zarr_shape[1]), int(self._zarr_shape[2]))
+            vox = hz * hy * hx
+            limits = get_hw_limits()
+            if vox > limits.volume_max_voxels:
+                raise RuntimeError(
+                    f"Volume too large for budget: {hz}x{hy}x{hx} vox={vox} > cap={limits.volume_max_voxels}"
+                )
+        except Exception as e:
+            logger.exception("Zarr volume size exceeds budget or check failed")
+            raise
+        # Ensure we have a contrast estimate
+        if not hasattr(self, '_zarr_clim') or self._zarr_clim is None:
+            try:
+                zc = int((self._zarr_shape[0] or 1) // 2)
+                sample = darr[zc, :, :].astype('float32').compute()
+                p1, p99 = np.percentile(sample, [0.5, 99.5])
+                c0, c1 = float(p1), float(p99)
+                if c1 <= c0:
+                    c0, c1 = float(sample.min()), float(sample.max())
+                self._zarr_clim = (c0, c1)
+            except Exception as e:
+                logger.debug("zarr volume clim compute failed", exc_info=True)
+                self._zarr_clim = None
+        # Load full volume to float32 and normalize to 0..1
+        vol = darr.astype('float32').compute()
+        c0, c1 = None, None
+        try:
+            if hasattr(self, '_zarr_clim') and self._zarr_clim is not None:
+                c0, c1 = self._zarr_clim
+        except Exception as e:
+            logger.debug("zarr volume clim fetch failed", exc_info=True)
+        if c0 is None or c1 is None or c1 <= c0:
+            c0 = float(vol.min()); c1 = float(vol.max())
+            if not _np.isfinite(c0) or not _np.isfinite(c1) or c1 <= c0:
+                c0, c1 = 0.0, 1.0
+        vol = (vol - c0) / max(1e-12, (c1 - c0))
+        np.clip(vol, 0.0, 1.0, out=vol)
+        return vol
+
     def _load_zarr_slice(self, z: int):
         """Load and normalize a single Z slice to float32 (0..1)."""
-        import numpy as _np
         assert self._da_volume is not None
         z = max(0, min(int(z), int(self._da_volume.shape[0]) - 1))
         slab = self._da_volume[z, :, :].astype('float32').compute()
@@ -419,16 +502,16 @@ class EGLRendererWorker:
         try:
             if hasattr(self, '_zarr_clim') and self._zarr_clim is not None:
                 c0, c1 = self._zarr_clim
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("zarr clim fetch failed", exc_info=True)
         if c0 is None or c1 is None or c1 <= c0:
             c0 = float(slab.min())
             c1 = float(slab.max())
-            if not _np.isfinite(c0) or not _np.isfinite(c1) or c1 <= c0:
+            if not np.isfinite(c0) or not np.isfinite(c1) or c1 <= c0:
                 c0, c1 = 0.0, 1.0
         # Scale to 0..1
         slab = (slab - c0) / max(1e-12, (c1 - c0))
-        slab = _np.clip(slab, 0.0, 1.0, out=slab)
+        slab = np.clip(slab, 0.0, 1.0, out=slab)
         return slab
 
     def _ensure_capture_buffers(self) -> None:
