@@ -273,6 +273,31 @@ class EGLHeadlessServer:
                     zarr_axes=self._zarr_axes,
                     zarr_z=self._zarr_z,
                 )
+                # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
+                try:
+                    z0 = getattr(self._worker, '_z_index', None)
+                    if z0 is not None:
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=(int(z0),),
+                            )
+                        msg = {'type': 'dims_update', 'current_step': [int(z0)], 'ndisplay': 2}
+                        # Schedule broadcast on the asyncio loop thread
+                        loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_state_json(msg)))
+                        try:
+                            if self._log_dims_info:
+                                logger.info("init: dims_update current_step=%s broadcast", [int(z0)])
+                            else:
+                                logger.debug("init: dims_update current_step=%s broadcast", [int(z0)])
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug("Initial dims_update broadcast failed: %s", e)
+
                 tick = 1.0 / max(1, self.cfg.fps)
                 next_t = time.perf_counter()
                 
@@ -392,6 +417,23 @@ class EGLHeadlessServer:
                     await ws.send(json.dumps(msg))
             except Exception as e:
                 logger.debug("Initial state config send failed: %s", e)
+            # Send current dims baseline so clients can step relative to it
+            try:
+                cur = None
+                with self._state_lock:
+                    cur = getattr(self._latest_state, 'current_step', None)
+                if cur is not None:
+                    msg = {'type': 'dims_update', 'current_step': list(cur), 'ndisplay': 2}
+                    await ws.send(json.dumps(msg))
+                    try:
+                        if self._log_dims_info:
+                            logger.info("connect: dims_update -> current_step=%s", list(cur))
+                        else:
+                            logger.debug("connect: dims_update -> current_step=%s", list(cur))
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("Initial dims baseline send failed: %s", e)
             async for msg in ws:
                 try:
                     data = json.loads(msg)
@@ -436,6 +478,13 @@ class EGLHeadlessServer:
                             pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) or 0.0),
                             reset_view=bool(getattr(s, 'reset_view', False)),
                         )
+                    # Broadcast dims_update so new/other clients learn the baseline
+                    try:
+                        msg = {'type': 'dims_update', 'current_step': list(step) if step else None, 'ndisplay': data.get('ndisplay', 2)}
+                        if msg['current_step'] is not None:
+                            await self._broadcast_state_json(msg)
+                    except Exception as e:
+                        logger.debug("dims.set broadcast failed: %s", e)
                 elif t == 'camera.zoom_at':
                     try:
                         factor = float(data.get('factor') or 0.0)
