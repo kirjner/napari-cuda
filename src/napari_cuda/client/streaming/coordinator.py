@@ -1424,6 +1424,81 @@ class StreamCoordinator:
             nd = 2
         return bool(vol) and int(nd) == 3
 
+    # --- Small utilities (no behavior change) ----------------------------------
+    def _clamp01(self, a: float) -> float:
+        try:
+            a = float(a)
+        except Exception:
+            a = 1.0
+        if a < 0.0:
+            return 0.0
+        if a > 1.0:
+            return 1.0
+        return a
+
+    def _clamp_sample_step(self, r: float) -> float:
+        try:
+            r = float(r)
+        except Exception:
+            r = 1.0
+        if r < 0.1:
+            return 0.1
+        if r > 4.0:
+            return 4.0
+        return r
+
+    def _ensure_lo_hi(self, lo: float, hi: float) -> tuple[float, float]:
+        try:
+            lo_f = float(lo)
+        except Exception:
+            lo_f = 0.0
+        try:
+            hi_f = float(hi)
+        except Exception:
+            hi_f = lo_f + 1.0
+        if hi_f <= lo_f:
+            lo_f, hi_f = hi_f, lo_f
+        return lo_f, hi_f
+
+    def _clamp_level(self, level: int) -> int:
+        try:
+            ms = self._dims_meta.get('multiscale') or {}
+            levels = ms.get('levels') if isinstance(ms, dict) else None
+            if isinstance(levels, (list, tuple)) and len(levels) > 0:
+                lo, hi = 0, len(levels) - 1
+                lv = int(level)
+                if lv < lo:
+                    return lo
+                if lv > hi:
+                    return hi
+                return lv
+            return int(level)
+        except Exception:
+            return int(level) if isinstance(level, (int, float)) else 0
+
+    def _send_intent(self, type_str: str, fields: dict, origin: str) -> bool:
+        ch = self._state_channel
+        if ch is None:
+            return False
+        payload = {'type': type_str}
+        try:
+            payload.update(fields)
+        except Exception:
+            # Best-effort
+            for k, v in (fields or {}).items():
+                payload[k] = v
+        payload['client_id'] = self._client_id
+        payload['client_seq'] = self._next_client_seq()
+        payload['origin'] = str(origin)
+        ok = ch.send_json(payload)
+        try:
+            # Log without the 'type' field for brevity
+            fields_to_log = {k: v for k, v in payload.items() if k not in ('type', 'client_id', 'client_seq', 'origin')}
+            logger.info("%s->%s %s sent=%s", origin, type_str, fields_to_log, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
     def _mirror_dims_to_viewer(
         self,
         vm_ref,
@@ -1545,207 +1620,72 @@ class StreamCoordinator:
         return False
 
     def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if not self._is_volume_mode():
             logger.debug("volume_set_render_mode gated: not in volume mode")
             return False
         if self._rate_gate_settings(origin):
             return False
-        payload = {
-            'type': 'volume.intent.set_render_mode',
-            'mode': str(mode),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->volume.intent.set_render_mode %s sent=%s", origin, {'mode': mode}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        return self._send_intent('volume.intent.set_render_mode', {'mode': str(mode)}, origin)
 
     def volume_set_clim(self, lo: float, hi: float, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if not self._is_volume_mode():
             logger.debug("volume_set_clim gated: not in volume mode")
             return False
         if self._rate_gate_settings(origin):
             return False
-        try:
-            lo_f = float(lo)
-        except Exception:
-            lo_f = 0.0
-        try:
-            hi_f = float(hi)
-        except Exception:
-            hi_f = lo_f + 1.0
-        if hi_f <= lo_f:
-            # Swap to maintain ordering; server will still clamp to dataset range
-            lo_f, hi_f = hi_f, lo_f
-        payload = {
-            'type': 'volume.intent.set_clim',
-            'lo': float(lo_f),
-            'hi': float(hi_f),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->volume.intent.set_clim %s sent=%s", origin, {'lo': lo_f, 'hi': hi_f}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        lo_f, hi_f = self._ensure_lo_hi(lo, hi)
+        return self._send_intent('volume.intent.set_clim', {'lo': float(lo_f), 'hi': float(hi_f)}, origin)
 
     def volume_set_colormap(self, name: str, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if not self._is_volume_mode():
             logger.debug("volume_set_colormap gated: not in volume mode")
             return False
         if self._rate_gate_settings(origin):
             return False
-        payload = {
-            'type': 'volume.intent.set_colormap',
-            'name': str(name),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->volume.intent.set_colormap %s sent=%s", origin, {'name': name}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        return self._send_intent('volume.intent.set_colormap', {'name': str(name)}, origin)
 
     def volume_set_opacity(self, alpha: float, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if not self._is_volume_mode():
             logger.debug("volume_set_opacity gated: not in volume mode")
             return False
         if self._rate_gate_settings(origin):
             return False
-        try:
-            a = float(alpha)
-        except Exception:
-            a = 1.0
-        # Clamp [0,1]
-        if a < 0.0:
-            a = 0.0
-        elif a > 1.0:
-            a = 1.0
-        payload = {
-            'type': 'volume.intent.set_opacity',
-            'alpha': float(a),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->volume.intent.set_opacity %s sent=%s", origin, {'alpha': a}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        a = self._clamp01(alpha)
+        return self._send_intent('volume.intent.set_opacity', {'alpha': float(a)}, origin)
 
     def volume_set_sample_step(self, relative: float, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if not self._is_volume_mode():
             logger.debug("volume_set_sample_step gated: not in volume mode")
             return False
         if self._rate_gate_settings(origin):
             return False
-        try:
-            r = float(relative)
-        except Exception:
-            r = 1.0
-        # Clamp to reasonable [0.1, 4.0]
-        if r < 0.1:
-            r = 0.1
-        elif r > 4.0:
-            r = 4.0
-        payload = {
-            'type': 'volume.intent.set_sample_step',
-            'relative': float(r),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->volume.intent.set_sample_step %s sent=%s", origin, {'relative': r}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        r = self._clamp_sample_step(relative)
+        return self._send_intent('volume.intent.set_sample_step', {'relative': float(r)}, origin)
 
     def multiscale_set_policy(self, policy: str, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if self._rate_gate_settings(origin):
             return False
-        payload = {
-            'type': 'multiscale.intent.set_policy',
-            'policy': str(policy),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->multiscale.intent.set_policy %s sent=%s", origin, {'policy': policy}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        return self._send_intent('multiscale.intent.set_policy', {'policy': str(policy)}, origin)
 
     def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
-        ch = self._state_channel
-        if ch is None or not self._dims_ready:
+        if not self._dims_ready:
             return False
         if self._rate_gate_settings(origin):
             return False
-        # Optional clamp to known levels
-        try:
-            ms = self._dims_meta.get('multiscale') or {}
-            levels = ms.get('levels') if isinstance(ms, dict) else None
-            if isinstance(levels, (list, tuple)) and len(levels) > 0:
-                lo, hi = 0, len(levels) - 1
-                try:
-                    lv = int(level)
-                except Exception:
-                    lv = 0
-                if lv < lo:
-                    lv = lo
-                elif lv > hi:
-                    lv = hi
-            else:
-                lv = int(level)
-        except Exception:
-            lv = int(level) if isinstance(level, (int, float)) else 0
-        payload = {
-            'type': 'multiscale.intent.set_level',
-            'level': int(lv),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        ok = ch.send_json(payload)
-        try:
-            logger.info("%s->multiscale.intent.set_level %s sent=%s", origin, {'level': lv}, bool(ok))
-        except Exception:
-            pass
-        return bool(ok)
+        lv = self._clamp_level(level)
+        return self._send_intent('multiscale.intent.set_level', {'level': int(lv)}, origin)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         ch = self._state_channel
