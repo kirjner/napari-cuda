@@ -779,7 +779,38 @@ class EGLRendererWorker:
                 anc = getattr(state, 'zoom_anchor_px', None)
                 if zf is not None and float(zf) > 0.0 and anc is not None and hasattr(self.view, 'camera'):
                     try:
-                        self.view.camera.zoom(float(zf), center=(float(anc[0]), float(anc[1])))  # type: ignore[call-arg]
+                        cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
+                        before_center = getattr(cam, 'center', None)
+                        before_zoom = getattr(cam, 'zoom', None)
+                        # Map anchor from canvas pixels (bottom-left origin) to world/scene coordinates
+                        center_world = None
+                        try:
+                            tr = self.view.scene.node_transform(self.canvas.scene)
+                            wx, wy = tr.imap((float(anc[0]), float(anc[1])))
+                            center_world = (float(wx), float(wy))
+                        except Exception:
+                            # Fallback: proportionally map using camera rect and canvas size
+                            try:
+                                rect = getattr(cam, 'rect', None)
+                                if rect is not None and cw and ch:
+                                    sx = float(anc[0]) / float(cw)
+                                    sy = float(anc[1]) / float(ch)
+                                    wx = float(rect.left) + sx * float(rect.width)
+                                    wy = float(rect.bottom) + sy * float(rect.height)
+                                    center_world = (wx, wy)
+                            except Exception:
+                                center_world = None
+                        if center_world is None:
+                            # Last resort: pass through
+                            center_world = (float(anc[0]), float(anc[1]))
+                        logger.debug(
+                            "apply_zoom_at: factor=%.4f anchorBL_px=(%.1f,%.1f) center_world=(%.3f,%.3f) canvas=%dx%d before_center=%s before_zoom=%s",
+                            float(zf), float(anc[0]), float(anc[1]), float(center_world[0]), float(center_world[1]), int(cw), int(ch), before_center, before_zoom
+                        )
+                        self.view.camera.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
+                        after_center = getattr(cam, 'center', None)
+                        after_zoom = getattr(cam, 'zoom', None)
+                        logger.debug("apply_zoom_at: after_center=%s after_zoom=%s", after_center, after_zoom)
                     except Exception as e:
                         logger.debug("camera.zoom_at failed: %s", e)
                 # Pixel-space pan (convert canvas pixel delta to world delta)
