@@ -12,6 +12,69 @@ import websockets
 logger = logging.getLogger(__name__)
 
 
+def _normalize_current_step(cur: object, meta: dict) -> object:
+    """Inflate/clamp current_step to match meta.ndim and meta.range when needed.
+
+    Returns the original value if already consistent or normalization fails.
+    """
+    try:
+        ndim = meta.get('ndim')
+        if not isinstance(cur, (list, tuple)) or not isinstance(ndim, (int, float)):
+            return cur
+        nd = int(ndim)
+        if nd <= 0 or len(cur) == nd:
+            return cur
+        rng = meta.get('range') or []
+        order = meta.get('order') or []
+        inflated = [0] * nd
+        try:
+            # If order provides axis indices, prefer mapping by index
+            if isinstance(order, (list, tuple)) and len(order) == nd and all(
+                isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order
+            ):
+                ord_idx = [int(x) for x in order]
+                for i, val in enumerate(list(cur)[:nd]):
+                    ax = ord_idx[i] if i < len(ord_idx) else i
+                    if 0 <= ax < nd:
+                        inflated[ax] = int(val) if isinstance(val, (int, float)) else 0
+            else:
+                for i in range(min(nd, len(cur))):
+                    val = cur[i]
+                    inflated[i] = int(val) if isinstance(val, (int, float)) else 0
+        except Exception:
+            for i in range(min(nd, len(cur))):
+                val = cur[i]
+                try:
+                    inflated[i] = int(val) if isinstance(val, (int, float)) else 0
+                except Exception:
+                    inflated[i] = 0
+        # Clamp to range if available: range may be list of (low, high[, step])
+        try:
+            if isinstance(rng, (list, tuple)) and len(rng) >= nd:
+                for i in range(nd):
+                    r = rng[i]
+                    if isinstance(r, (list, tuple)) and len(r) >= 2:
+                        lo = r[0]
+                        hi = r[1]
+                        try:
+                            lo_i = int(lo) if isinstance(lo, (int, float)) else 0
+                            hi_i = int(hi) if isinstance(hi, (int, float)) else inflated[i]
+                            if lo_i > hi_i:
+                                lo_i, hi_i = hi_i, lo_i
+                            if inflated[i] < lo_i:
+                                inflated[i] = lo_i
+                            elif inflated[i] > hi_i:
+                                inflated[i] = hi_i
+                        except Exception:
+                            pass
+        except Exception:
+            logger.debug("dims.update inflate/clamp failed", exc_info=True)
+        return inflated
+    except Exception:
+        logger.debug("dims.update optional guard failed", exc_info=True)
+        return cur
+
+
 class StateChannel:
     """Maintains a WebSocket connection to the state channel.
 
@@ -128,14 +191,18 @@ class StateChannel:
                                 try:
                                     # Normalize new-style dims.update (nested meta) to flattened keys
                                     meta = data.get('meta') or {}
+                                    cur = _normalize_current_step(data.get('current_step'), meta)
                                     fwd = {
-                                        'current_step': data.get('current_step'),
+                                        'current_step': cur,
                                         'ndim': meta.get('ndim'),
                                         'order': meta.get('order'),
                                         'axis_labels': meta.get('axis_labels'),
                                         'sizes': meta.get('sizes'),
                                         'range': meta.get('range'),
                                         'ndisplay': meta.get('ndisplay'),
+                                        'volume': bool(meta.get('volume')) if 'volume' in meta else None,
+                                        'render': meta.get('render') or None,
+                                        'multiscale': meta.get('multiscale') or None,
                                         'seq': data.get('seq'),
                                         'last_client_id': data.get('last_client_id'),
                                     }

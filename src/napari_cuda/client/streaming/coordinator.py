@@ -470,11 +470,22 @@ class StreamCoordinator:
             'range': None,
             'sizes': None,
             'ndisplay': None,
+            'volume': None,
+            'render': None,
+            'multiscale': None,
         }
         self._primary_axis_index: int | None = None
         # Client identity for intents
         self._client_id: str = uuid.uuid4().hex
         self._client_seq: int = 0
+        # Settings/mode intents rate limiting (coalesce like dims intents)
+        try:
+            import os as _os
+            settings_rate = float(_os.getenv('NAPARI_CUDA_SETTINGS_SET_RATE', '60') or '60')
+        except Exception:
+            settings_rate = 60.0
+        self._settings_min_dt: float = 1.0 / max(1.0, settings_rate)
+        self._last_settings_send: float = 0.0
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
@@ -1010,6 +1021,9 @@ class StreamCoordinator:
             order = data.get('order')
             axis_labels = data.get('axis_labels')
             sizes = data.get('sizes')
+            volume = data.get('volume')
+            render = data.get('render')
+            multiscale = data.get('multiscale')
             try:
                 self._dims_meta['ndim'] = int(ndim) if ndim is not None else self._dims_meta.get('ndim')
             except Exception:
@@ -1022,6 +1036,16 @@ class StreamCoordinator:
                 self._dims_meta['range'] = dims_range
             if sizes is not None:
                 self._dims_meta['sizes'] = sizes
+            # New meta facets (volume/render/multiscale)
+            try:
+                if volume is not None:
+                    self._dims_meta['volume'] = bool(volume)
+            except Exception:
+                pass
+            if render is not None:
+                self._dims_meta['render'] = render
+            if multiscale is not None:
+                self._dims_meta['multiscale'] = multiscale
             try:
                 self._dims_meta['ndisplay'] = int(ndisp) if ndisp is not None else self._dims_meta.get('ndisplay')
             except Exception:
@@ -1045,27 +1069,18 @@ class StreamCoordinator:
                 vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
             except Exception:
                 vm_ref = None
-            if vm_ref is not None and hasattr(vm_ref, '_apply_remote_dims_update'):
-                try:
-                    def _apply() -> None:
-                        try:
-                            vm_ref._apply_remote_dims_update(  # type: ignore[attr-defined]
-                                current_step=cur,
-                                ndisplay=ndisp,
-                                ndim=ndim,
-                                dims_range=dims_range,
-                                order=order,
-                                axis_labels=axis_labels,
-                                sizes=sizes,
-                            )
-                        except Exception:
-                            logger.debug("viewer mirror dims update failed", exc_info=True)
-                    if getattr(self, '_ui_call', None) is not None:
-                        self._ui_call.call.emit(_apply)  # type: ignore[attr-defined]
-                    else:
-                        _apply()
-                except Exception:
-                    logger.debug("schedule viewer mirror dims update failed", exc_info=True)
+            if vm_ref is not None:
+                # Note: viewer mirror currently ignores volume/render/multiscale
+                self._mirror_dims_to_viewer(
+                    vm_ref,
+                    cur,
+                    ndisp,
+                    ndim,
+                    dims_range,
+                    order,
+                    axis_labels,
+                    sizes,
+                )
         except Exception:
             logger.debug("dims_update parse failed", exc_info=True)
 
@@ -1397,6 +1412,58 @@ class StreamCoordinator:
         self._client_seq = (int(self._client_seq) + 1) & 0x7FFFFFFF
         return int(self._client_seq)
 
+    # --- Mode helpers -----------------------------------------------------------
+    def _is_volume_mode(self) -> bool:
+        try:
+            vol = bool(self._dims_meta.get('volume'))
+        except Exception:
+            vol = False
+        try:
+            nd = int(self._dims_meta.get('ndisplay') or 2)
+        except Exception:
+            nd = 2
+        return bool(vol) and int(nd) == 3
+
+    def _mirror_dims_to_viewer(
+        self,
+        vm_ref,
+        cur,
+        ndisplay,
+        ndim,
+        dims_range,
+        order,
+        axis_labels,
+        sizes,
+    ) -> None:
+        """Mirror dims metadata/step into an attached viewer on the GUI thread.
+
+        Keeps exception handling contained and avoids deep nesting at callsite.
+        """
+        if vm_ref is None or not hasattr(vm_ref, '_apply_remote_dims_update'):
+            return
+        # Build a callable to execute on the GUI thread (or inline fallback)
+        def _apply() -> None:  # type: ignore[no-redef]
+            vm_ref._apply_remote_dims_update(  # type: ignore[attr-defined]
+                current_step=cur,
+                ndisplay=ndisplay,
+                ndim=ndim,
+                dims_range=dims_range,
+                order=order,
+                axis_labels=axis_labels,
+                sizes=sizes,
+            )
+        ui_call = getattr(self, '_ui_call', None)
+        if ui_call is not None:
+            try:
+                ui_call.call.emit(_apply)  # type: ignore[attr-defined]
+            except Exception:
+                logger.debug("schedule viewer mirror dims update failed", exc_info=True)
+        else:
+            try:
+                _apply()
+            except Exception:
+                logger.debug("viewer mirror dims update failed", exc_info=True)
+
     def dims_step(self, axis: int | str, delta: int, *, origin: str = 'ui') -> bool:
         if not self._dims_ready:
             return False
@@ -1466,6 +1533,218 @@ class StreamCoordinator:
         }
         ok = ch.send_json(payload)
         self._last_dims_send = now
+        return bool(ok)
+
+    # --- Volume/multiscale intent senders --------------------------------------
+    def _rate_gate_settings(self, origin: str) -> bool:
+        now = time.perf_counter()
+        if (now - float(self._last_settings_send or 0.0)) < self._settings_min_dt:
+            logger.debug("settings intent gated by rate limiter (%s)", origin)
+            return True
+        self._last_settings_send = now
+        return False
+
+    def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if not self._is_volume_mode():
+            logger.debug("volume_set_render_mode gated: not in volume mode")
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        payload = {
+            'type': 'volume.intent.set_render_mode',
+            'mode': str(mode),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->volume.intent.set_render_mode %s sent=%s", origin, {'mode': mode}, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def volume_set_clim(self, lo: float, hi: float, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if not self._is_volume_mode():
+            logger.debug("volume_set_clim gated: not in volume mode")
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        try:
+            lo_f = float(lo)
+        except Exception:
+            lo_f = 0.0
+        try:
+            hi_f = float(hi)
+        except Exception:
+            hi_f = lo_f + 1.0
+        if hi_f <= lo_f:
+            # Swap to maintain ordering; server will still clamp to dataset range
+            lo_f, hi_f = hi_f, lo_f
+        payload = {
+            'type': 'volume.intent.set_clim',
+            'lo': float(lo_f),
+            'hi': float(hi_f),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->volume.intent.set_clim %s sent=%s", origin, {'lo': lo_f, 'hi': hi_f}, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def volume_set_colormap(self, name: str, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if not self._is_volume_mode():
+            logger.debug("volume_set_colormap gated: not in volume mode")
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        payload = {
+            'type': 'volume.intent.set_colormap',
+            'name': str(name),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->volume.intent.set_colormap %s sent=%s", origin, {'name': name}, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def volume_set_opacity(self, alpha: float, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if not self._is_volume_mode():
+            logger.debug("volume_set_opacity gated: not in volume mode")
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        try:
+            a = float(alpha)
+        except Exception:
+            a = 1.0
+        # Clamp [0,1]
+        if a < 0.0:
+            a = 0.0
+        elif a > 1.0:
+            a = 1.0
+        payload = {
+            'type': 'volume.intent.set_opacity',
+            'alpha': float(a),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->volume.intent.set_opacity %s sent=%s", origin, {'alpha': a}, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def volume_set_sample_step(self, relative: float, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if not self._is_volume_mode():
+            logger.debug("volume_set_sample_step gated: not in volume mode")
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        try:
+            r = float(relative)
+        except Exception:
+            r = 1.0
+        # Clamp to reasonable [0.1, 4.0]
+        if r < 0.1:
+            r = 0.1
+        elif r > 4.0:
+            r = 4.0
+        payload = {
+            'type': 'volume.intent.set_sample_step',
+            'relative': float(r),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->volume.intent.set_sample_step %s sent=%s", origin, {'relative': r}, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def multiscale_set_policy(self, policy: str, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        payload = {
+            'type': 'multiscale.intent.set_policy',
+            'policy': str(policy),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->multiscale.intent.set_policy %s sent=%s", origin, {'policy': policy}, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
+        ch = self._state_channel
+        if ch is None or not self._dims_ready:
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        # Optional clamp to known levels
+        try:
+            ms = self._dims_meta.get('multiscale') or {}
+            levels = ms.get('levels') if isinstance(ms, dict) else None
+            if isinstance(levels, (list, tuple)) and len(levels) > 0:
+                lo, hi = 0, len(levels) - 1
+                try:
+                    lv = int(level)
+                except Exception:
+                    lv = 0
+                if lv < lo:
+                    lv = lo
+                elif lv > hi:
+                    lv = hi
+            else:
+                lv = int(level)
+        except Exception:
+            lv = int(level) if isinstance(level, (int, float)) else 0
+        payload = {
+            'type': 'multiscale.intent.set_level',
+            'level': int(lv),
+            'client_id': self._client_id,
+            'client_seq': self._next_client_seq(),
+            'origin': str(origin),
+        }
+        ok = ch.send_json(payload)
+        try:
+            logger.info("%s->multiscale.intent.set_level %s sent=%s", origin, {'level': lv}, bool(ok))
+        except Exception:
+            pass
         return bool(ok)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
