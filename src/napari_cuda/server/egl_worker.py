@@ -160,71 +160,6 @@ class EGLRendererWorker:
         except Exception:
             self._debug_reset = False
 
-    # --- Debug helpers -------------------------------------------------------------
-    def _log_zoom_drift(self, zf: float, anc: tuple[float, float], center_world: tuple[float, float], cw: int, ch: int) -> None:
-        """Instrument anchored zoom to quantify pixel-space drift.
-
-        Computes pre/post canvas TL mapping error of the intended world center
-        to the requested canvas anchor and logs one concise INFO line.
-        Also applies the zoom to the camera.
-        """
-        try:
-            cam = self.view.camera
-            tr = self.view.transform * self.view.scene.transform
-            ax_px = float(anc[0])
-            ay_tl = float(ch) - float(anc[1])
-            # pre-zoom mapping
-            pre_map = tr.map([float(center_world[0]), float(center_world[1]), 0, 1])
-            pre_x = float(pre_map[0]); pre_y = float(pre_map[1])
-            pre_dx = pre_x - ax_px; pre_dy = pre_y - ay_tl
-            # apply zoom
-            cam.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
-            # post-zoom mapping
-            tr2 = self.view.transform * self.view.scene.transform
-            post_map = tr2.map([float(center_world[0]), float(center_world[1]), 0, 1])
-            post_x = float(post_map[0]); post_y = float(post_map[1])
-            post_dx = post_x - ax_px; post_dy = post_y - ay_tl
-            rect = getattr(cam, 'rect', None)
-            rect_tuple = None
-            if rect is not None:
-                rect_tuple = (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
-            logger.info(
-                "zoom_drift: f=%.4f ancTL=(%.1f,%.1f) world=(%.3f,%.3f) preTL=(%.1f,%.1f) err_pre=(%.2f,%.2f) postTL=(%.1f,%.1f) err_post=(%.2f,%.2f) cam.rect=%s canvas=%dx%d",
-                float(zf), float(ax_px), float(ay_tl), float(center_world[0]), float(center_world[1]),
-                pre_x, pre_y, pre_dx, pre_dy, post_x, post_y, post_dx, post_dy, str(rect_tuple), int(cw), int(ch)
-            )
-        except Exception:
-            logger.debug("zoom_drift instrumentation failed", exc_info=True)
-
-    def _log_pan_mapping(self, dx_px: float, dy_px: float, cw: int, ch: int) -> None:
-        """Instrument pixel-space pan mapping to world delta.
-
-        Logs canvas center, requested pixel delta, mapped world delta, and camera center after applying pan.
-        Also applies the pan to the camera.
-        """
-        try:
-            cam = self.view.camera
-            # Compute world delta using transform at canvas center
-            tr = self.view.transform * self.view.scene.transform
-            cx_px = float(cw) * 0.5
-            cy_px = float(ch) * 0.5
-            p0 = tr.imap((cx_px, cy_px))
-            p1 = tr.imap((cx_px + dx_px, cy_px + dy_px))
-            dwx = float(p1[0] - p0[0])
-            dwy = float(p1[1] - p0[1])
-            c0 = getattr(cam, 'center', None)
-            if isinstance(c0, (tuple, list)) and len(c0) >= 2:
-                cam.center = (float(c0[0]) - dwx, float(c0[1]) - dwy)  # type: ignore[attr-defined]
-            else:
-                cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
-            c1 = getattr(cam, 'center', None)
-            logger.info(
-                "pan_map: dpx=(%.2f,%.2f) world=(%.4f,%.4f) center_before=%s center_after=%s canvas=%dx%d",
-                float(dx_px), float(dy_px), dwx, dwy, str(c0), str(c1), int(cw), int(ch)
-            )
-        except Exception:
-            logger.debug("pan instrumentation failed", exc_info=True)
-
         # Ensure partial initialization is cleaned up if any step fails
         try:
             # Zarr/NGFF dataset configuration (optional)
@@ -1352,3 +1287,68 @@ class EGLRendererWorker:
         except Exception as e:
             logger.debug("Cleanup: eglTerminate failed: %s", e)
         self.egl_display = None
+
+    # --- Debug helpers -------------------------------------------------------------
+    def _log_zoom_drift(self, zf: float, anc: tuple[float, float], center_world: tuple[float, float], cw: int, ch: int) -> None:
+        """Instrument anchored zoom to quantify pixel-space drift.
+
+        Computes pre/post canvas TL mapping error of the intended world center
+        to the requested canvas anchor and logs one concise INFO line.
+        Also applies the zoom to the camera.
+        """
+        try:
+            cam = self.view.camera
+            tr = self.view.transform * self.view.scene.transform
+            ax_px = float(anc[0])
+            ay_tl = float(ch) - float(anc[1])
+            # pre-zoom mapping
+            pre_map = tr.map([float(center_world[0]), float(center_world[1]), 0, 1])
+            pre_x = float(pre_map[0]); pre_y = float(pre_map[1])
+            pre_dx = pre_x - ax_px; pre_dy = pre_y - ay_tl
+            # apply zoom
+            cam.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
+            # post-zoom mapping
+            tr2 = self.view.transform * self.view.scene.transform
+            post_map = tr2.map([float(center_world[0]), float(center_world[1]), 0, 1])
+            post_x = float(post_map[0]); post_y = float(post_map[1])
+            post_dx = post_x - ax_px; post_dy = post_y - ay_tl
+            rect = getattr(cam, 'rect', None)
+            rect_tuple = None
+            if rect is not None:
+                rect_tuple = (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
+            logger.info(
+                "zoom_drift: f=%.4f ancTL=(%.1f,%.1f) world=(%.3f,%.3f) preTL=(%.1f,%.1f) err_pre=(%.2f,%.2f) postTL=(%.1f,%.1f) err_post=(%.2f,%.2f) cam.rect=%s canvas=%dx%d",
+                float(zf), float(ax_px), float(ay_tl), float(center_world[0]), float(center_world[1]),
+                pre_x, pre_y, pre_dx, pre_dy, post_x, post_y, post_dx, post_dy, str(rect_tuple), int(cw), int(ch)
+            )
+        except Exception:
+            logger.debug("zoom_drift instrumentation failed", exc_info=True)
+
+    def _log_pan_mapping(self, dx_px: float, dy_px: float, cw: int, ch: int) -> None:
+        """Instrument pixel-space pan mapping to world delta.
+
+        Logs canvas center, requested pixel delta, mapped world delta, and camera center after applying pan.
+        Also applies the pan to the camera.
+        """
+        try:
+            cam = self.view.camera
+            # Compute world delta using transform at canvas center
+            tr = self.view.transform * self.view.scene.transform
+            cx_px = float(cw) * 0.5
+            cy_px = float(ch) * 0.5
+            p0 = tr.imap((cx_px, cy_px))
+            p1 = tr.imap((cx_px + dx_px, cy_px + dy_px))
+            dwx = float(p1[0] - p0[0])
+            dwy = float(p1[1] - p0[1])
+            c0 = getattr(cam, 'center', None)
+            if isinstance(c0, (tuple, list)) and len(c0) >= 2:
+                cam.center = (float(c0[0]) - dwx, float(c0[1]) - dwy)  # type: ignore[attr-defined]
+            else:
+                cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
+            c1 = getattr(cam, 'center', None)
+            logger.info(
+                "pan_map: dpx=(%.2f,%.2f) world=(%.4f,%.4f) center_before=%s center_after=%s canvas=%dx%d",
+                float(dx_px), float(dy_px), dwx, dwy, str(c0), str(c1), int(cw), int(ch)
+            )
+        except Exception:
+            logger.debug("pan instrumentation failed", exc_info=True)
