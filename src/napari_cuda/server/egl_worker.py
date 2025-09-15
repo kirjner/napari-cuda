@@ -302,7 +302,7 @@ class EGLRendererWorker:
                 # Fall through to 2D slice fallback
                 self.use_volume = False
 
-        if self._zarr_path and not self.use_volume:
+        elif self._zarr_path and not self.use_volume:
             try:
                 # 2D slice mode from OME-Zarr (axes assumed zyx unless overridden)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
