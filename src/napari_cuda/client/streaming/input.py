@@ -81,10 +81,16 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
                     txt = ""
                 if self._log_info:
                     logger.info("key press: key=%s mods=%s text=%r", key, mods, txt)
-                # Notify optional key callback (non-consuming)
+                # Notify optional key callback and allow it to consume
                 try:
                     if self._on_key is not None:
-                        self._on_key({'type': 'input.key', 'key': int(key), 'mods': int(mods), 'text': str(txt)})
+                        consumed = bool(self._on_key({'type': 'input.key', 'key': int(key), 'mods': int(mods), 'text': str(txt)}))
+                        if consumed:
+                            try:
+                                ev.accept()
+                            except Exception:
+                                pass
+                            return True
                 except Exception:
                     logger.debug("on_key callback failed", exc_info=True)
                 return False

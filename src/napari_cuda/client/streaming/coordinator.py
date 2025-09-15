@@ -1211,7 +1211,7 @@ class StreamCoordinator:
         ok = ch.send_json({'type': 'camera.reset'})
         logger.info("key->camera.reset sent=%s", bool(ok))
 
-    def _on_key_event(self, data: dict) -> None:
+    def _on_key_event(self, data: dict) -> bool:
         """Optional app-level key handling for bindings that struggle as QShortcut.
 
         Triggers camera reset on plain '0' with no modifiers. Also accepts
@@ -1234,7 +1234,7 @@ class StreamCoordinator:
         if txt == '0' and mods == 0:
             logger.info("keycb: '0' -> camera.reset")
             self._reset_camera()
-            return
+            return True
         # Or if the key is Key_0 and modifiers are none (or just keypad)
         try:
             keypad_only = (mods & ~int(_QtCore.Qt.KeypadModifier)) == 0 and (mods & int(_QtCore.Qt.KeypadModifier)) != 0  # type: ignore[attr-defined]
@@ -1243,7 +1243,7 @@ class StreamCoordinator:
         if key == int(getattr(_QtCore.Qt, 'Key_0', 0)) and (mods == 0 or keypad_only):  # type: ignore[attr-defined]
             logger.info("keycb: Key_0 -> camera.reset")
             self._reset_camera()
-            return
+            return True
         # Map arrows and page keys to primary-axis stepping
         try:
             k_left = int(getattr(_QtCore.Qt, 'Key_Left'))
@@ -1265,6 +1265,8 @@ class StreamCoordinator:
                 self._step_primary(+coarse, origin='keys')
             elif key == k_pgdn:
                 self._step_primary(-coarse, origin='keys')
+            return True
+        return False
 
     # --- Public UI/state bridge methods -------------------------------------------
     def attach_viewer_mirror(self, viewer: object) -> None:
