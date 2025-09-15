@@ -468,6 +468,18 @@ class StreamCoordinator:
         self._last_wy: float = 0.0
         self._pan_dx_accum: float = 0.0
         self._pan_dy_accum: float = 0.0
+        # Orbit (Alt-drag) accumulation (3D volume mode)
+        self._orbit_daz_accum: float = 0.0
+        self._orbit_del_accum: float = 0.0
+        self._orbit_dragging: bool = False
+        try:
+            self._orbit_deg_per_px_x: float = float(env_float('NAPARI_CUDA_ORBIT_DEG_PER_PX_X', 0.2))
+        except Exception:
+            self._orbit_deg_per_px_x = 0.2
+        try:
+            self._orbit_deg_per_px_y: float = float(env_float('NAPARI_CUDA_ORBIT_DEG_PER_PX_Y', 0.2))
+        except Exception:
+            self._orbit_deg_per_px_y = 0.2
         # --- Dims/intent state (intent-only client) ----------------------------
         self._dims_ready: bool = False
         self._dims_meta: dict = {
@@ -1827,12 +1839,29 @@ class StreamCoordinator:
             self._cursor_wy = float(yw)
         except Exception:
             pass
+        # Detect Alt modifier (for orbit)
+        try:
+            mods = int(data.get('mods') or 0)
+        except Exception:
+            mods = 0
+        try:
+            alt_mask = int(getattr(QtCore.Qt, 'AltModifier'))
+            alt = (mods & alt_mask) != 0
+        except Exception:
+            alt = (mods != 0)
+        in_vol3d = bool(self._is_volume_mode()) and int(self._dims_meta.get('ndisplay') or 2) == 3
+
         if phase == 'down':
             self._dragging = True
             self._last_wx = xw
             self._last_wy = yw
             self._pan_dx_accum = 0.0
             self._pan_dy_accum = 0.0
+            # Begin orbit drag when Alt held in 3D volume mode
+            if alt and in_vol3d:
+                self._orbit_dragging = True
+                self._orbit_daz_accum = 0.0
+                self._orbit_del_accum = 0.0
             return
         if phase == 'move' and self._dragging:
             # Accumulate pan in video px, then convert to canvas delta
@@ -1841,16 +1870,46 @@ class StreamCoordinator:
             dx_v = (xv1 - xv0)
             dy_v = (yv1 - yv0)
             dx_c, dy_c = self._video_delta_to_canvas(dx_v, dy_v)
-            self._pan_dx_accum += dx_c
-            self._pan_dy_accum += dy_c
+            # If Alt held in 3D volume mode: orbit; suppress pan
+            if alt and in_vol3d:
+                # If orbit just started mid-drag (Alt pressed), reset accumulators
+                if not self._orbit_dragging:
+                    self._orbit_dragging = True
+                    self._orbit_daz_accum = 0.0
+                    self._orbit_del_accum = 0.0
+                self._orbit_daz_accum += float(dx_c) * float(self._orbit_deg_per_px_x)
+                self._orbit_del_accum += float(-dy_c) * float(self._orbit_deg_per_px_y)
+                # Do not accumulate pan while orbiting
+            else:
+                # If we were orbiting but Alt released, flush residual orbit and stop orbit mode
+                if self._orbit_dragging:
+                    try:
+                        self._flush_orbit(force=True)
+                    except Exception:
+                        logger.debug("flush orbit (release) failed", exc_info=True)
+                    self._orbit_dragging = False
+                self._pan_dx_accum += dx_c
+                self._pan_dy_accum += dy_c
             self._last_wx = xw
             self._last_wy = yw
-            self._flush_pan_if_due()
+            # Flush orbit or pan at camera cadence
+            if self._orbit_dragging:
+                self._flush_orbit_if_due()
+            else:
+                self._flush_pan_if_due()
             return
         if phase == 'up':
             self._dragging = False
-            # Flush any residual pan
-            self._flush_pan(force=True)
+            # Flush any residual orbit first if active; otherwise flush pan
+            if self._orbit_dragging:
+                try:
+                    self._flush_orbit(force=True)
+                except Exception:
+                    logger.debug("flush orbit (up) failed", exc_info=True)
+                self._orbit_dragging = False
+            else:
+                # Flush any residual pan
+                self._flush_pan(force=True)
 
     def _flush_pan_if_due(self) -> None:
         now = time.perf_counter()
@@ -1879,6 +1938,29 @@ class StreamCoordinator:
         self._pan_dy_accum = 0.0
         if getattr(self, '_log_dims_info', False):
             logger.info("drag->camera.pan_px dx=%.1f dy=%.1f sent=%s", float(dx), float(dy), bool(ok))
+
+    def _flush_orbit_if_due(self) -> None:
+        now = time.perf_counter()
+        if (now - float(self._last_cam_send or 0.0)) >= self._cam_min_dt:
+            self._flush_orbit()
+
+    def _flush_orbit(self, force: bool = False) -> None:
+        # Coalesced orbit send using same cadence as pan
+        daz = float(self._orbit_daz_accum or 0.0)
+        delv = float(self._orbit_del_accum or 0.0)
+        if not force and abs(daz) < 1e-2 and abs(delv) < 1e-2:
+            return
+        ch = self._state_channel
+        if ch is None:
+            self._orbit_daz_accum = 0.0
+            self._orbit_del_accum = 0.0
+            return
+        ok = ch.send_json({'type': 'camera.orbit', 'd_az_deg': float(daz), 'd_el_deg': float(delv)})
+        self._last_cam_send = time.perf_counter()
+        self._orbit_daz_accum = 0.0
+        self._orbit_del_accum = 0.0
+        if getattr(self, '_log_dims_info', False):
+            logger.info("alt-drag->camera.orbit daz=%.2f del=%.2f sent=%s", float(daz), float(delv), bool(ok))
 
     # (no key→dims mapping)
 
