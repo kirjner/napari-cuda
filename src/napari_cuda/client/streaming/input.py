@@ -26,6 +26,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         resize_debounce_ms: int = 80,
         on_wheel: Optional[Callable[[dict], None]] = None,
         on_pointer: Optional[Callable[[dict], None]] = None,
+        on_key: Optional[Callable[[dict], None]] = None,
         log_info: bool = False,
     ) -> None:
         super().__init__(widget)
@@ -40,20 +41,60 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         self._resize_timer.timeout.connect(self._flush_resize)
         self._on_wheel = on_wheel
         self._on_pointer = on_pointer
+        self._on_key = on_key
         self._log_info = bool(log_info)
+        # Cache top-level window for gating app-level events
+        try:
+            self._top_window = widget.window()  # type: ignore[attr-defined]
+        except Exception:
+            self._top_window = None
 
     def eventFilter(self, obj, event):  # type: ignore[no-untyped-def]
         try:
             et = event.type()
-            if et == QtCore.QEvent.Wheel:  # type: ignore[attr-defined]
+            # Only handle wheel/resize/mouse for the canvas widget itself.
+            try:
+                target_is_canvas = (obj is self._widget)
+            except Exception:
+                target_is_canvas = False
+            if et == QtCore.QEvent.Wheel and target_is_canvas:  # type: ignore[attr-defined]
                 return self._handle_wheel(event)
-            elif et == QtCore.QEvent.Resize:  # type: ignore[attr-defined]
+            elif et == QtCore.QEvent.KeyPress:  # type: ignore[attr-defined]
+                # Gate to our top-level window to avoid cross-window noise
+                try:
+                    if obj is not None and hasattr(obj, 'window') and self._top_window is not None:
+                        if obj.window() is not self._top_window:  # type: ignore[attr-defined]
+                            return False
+                except Exception:
+                    pass
+                try:
+                    key = int(event.key())
+                except Exception:
+                    key = -1
+                try:
+                    mods = int(event.modifiers())
+                except Exception:
+                    mods = 0
+                try:
+                    txt = event.text()
+                except Exception:
+                    txt = ""
+                if self._log_info:
+                    logger.info("key press: key=%s mods=%s text=%r", key, mods, txt)
+                # Notify optional key callback (non-consuming)
+                try:
+                    if self._on_key is not None:
+                        self._on_key({'type': 'input.key', 'key': int(key), 'mods': int(mods), 'text': str(txt)})
+                except Exception:
+                    logger.debug("on_key callback failed", exc_info=True)
+                return False
+            elif et == QtCore.QEvent.Resize and target_is_canvas:  # type: ignore[attr-defined]
                 return self._handle_resize(event)
-            elif et == QtCore.QEvent.MouseButtonPress:  # type: ignore[attr-defined]
+            elif et == QtCore.QEvent.MouseButtonPress and target_is_canvas:  # type: ignore[attr-defined]
                 return self._handle_mouse_down(event)
-            elif et == QtCore.QEvent.MouseMove:  # type: ignore[attr-defined]
+            elif et == QtCore.QEvent.MouseMove and target_is_canvas:  # type: ignore[attr-defined]
                 return self._handle_mouse_move(event)
-            elif et == QtCore.QEvent.MouseButtonRelease:  # type: ignore[attr-defined]
+            elif et == QtCore.QEvent.MouseButtonRelease and target_is_canvas:  # type: ignore[attr-defined]
                 return self._handle_mouse_up(event)
         except Exception:
             logger.debug("InputSender eventFilter error", exc_info=True)
@@ -291,7 +332,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
 class InputSender:
     """Attach input forwarding to a canvas widget and a StateChannel.
 
-    Minimal MVP: wheel + resize only (mouse/key to be added in later phases).
+    Handles: wheel, resize, mouse, and optional key observation via callback.
     """
 
     def __init__(
@@ -303,6 +344,7 @@ class InputSender:
         resize_debounce_ms: int = 80,
         on_wheel: Optional[Callable[[dict], None]] = None,
         on_pointer: Optional[Callable[[dict], None]] = None,
+        on_key: Optional[Callable[[dict], None]] = None,
         log_info: bool = False,
     ) -> None:
         self._widget = widget
@@ -313,10 +355,12 @@ class InputSender:
             resize_debounce_ms=resize_debounce_ms,
             on_wheel=on_wheel,
             on_pointer=on_pointer,
+            on_key=on_key,
             log_info=log_info,
         )
         # Pointer callback wiring
         self._on_pointer = on_pointer
+        self._on_key = on_key
         # Set debounce interval explicitly on the timer
         try:
             self._filter._resize_timer.setInterval(int(max(0, resize_debounce_ms)))  # type: ignore[attr-defined]
@@ -329,6 +373,13 @@ class InputSender:
             self._widget.installEventFilter(self._filter)
         except Exception:
             logger.debug("Failed to install input event filter", exc_info=True)
+        # Install at the application level when input logging or on_key observation is enabled
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app is not None and (bool(getattr(self._filter, '_log_info', False)) or self._on_key is not None):
+                app.installEventFilter(self._filter)
+        except Exception:
+            logger.debug("Failed to install app-level event filter", exc_info=True)
         # Send initial resize snapshot so server knows canvas size at start
         try:
             w = int(self._widget.width())

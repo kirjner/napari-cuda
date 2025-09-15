@@ -465,6 +465,7 @@ class StreamCoordinator:
                         resize_debounce_ms=resize_debounce_ms,
                         on_wheel=wheel_cb,
                         on_pointer=self._on_pointer,
+                        on_key=self._on_key_event,
                         log_info=log_input_info,
                     )
                     sender.start()
@@ -473,15 +474,42 @@ class StreamCoordinator:
                     # Bind Up/Down shortcuts to step Z using the same dims.set path
                     try:
                         from qtpy import QtWidgets, QtGui, QtCore  # type: ignore
-                        parent = self._scene_canvas.native
+                        # Bind shortcuts on the top-level window rather than the
+                        # canvas widget to ensure they receive key events across
+                        # platforms (notably macOS) with ApplicationShortcut.
+                        parent = getattr(self._scene_canvas, 'native', None)
+                        try:
+                            if parent is not None and hasattr(parent, 'window'):
+                                w = parent.window()  # type: ignore[attr-defined]
+                                if w is not None:
+                                    parent = w
+                        except Exception:
+                            pass
+                        if parent is None:
+                            # Fallback: use the active window if available
+                            try:
+                                from qtpy import QtWidgets as _QtWidgets  # type: ignore
+                                aw = _QtWidgets.QApplication.activeWindow()
+                                if aw is not None:
+                                    parent = aw
+                            except Exception:
+                                pass
                         up_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Up), parent)  # type: ignore
                         down_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Down), parent)  # type: ignore
                         plus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Plus), parent)  # type: ignore
                         eq_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Equal), parent)  # type: ignore
                         minus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Minus), parent)  # type: ignore
                         home_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), parent)  # type: ignore
-                        zero_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
-                        num0_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
+                        # 0-key shortcuts disabled for investigation; rely on Home for reset
+                        # zero_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
+                        # zero_str_sc = QtWidgets.QShortcut(QtGui.QKeySequence("0"), parent)  # type: ignore
+                        # num0_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
+                        # Ensure shortcuts fire regardless of widget focus
+                        for sc in (up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc):
+                            try:
+                                sc.setContext(QtCore.Qt.ApplicationShortcut)  # type: ignore[attr-defined]
+                            except Exception as e:
+                                logger.info("Shortcut context=ApplicationShortcut failed: %s", e, exc_info=True)
                         try:
                             up_sc.setAutoRepeat(True)
                             down_sc.setAutoRepeat(True)
@@ -495,16 +523,11 @@ class StreamCoordinator:
                         plus_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
                         eq_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
                         minus_sc.activated.connect(lambda: self._zoom_steps_at_center(-1))  # type: ignore
-                        home_sc.activated.connect(self._reset_camera)  # type: ignore
-                        zero_sc.activated.connect(self._reset_camera)  # type: ignore
-                        # Some platforms might differentiate keypad 0; attempt bind and log failures
-                        try:
-                            num0_sc.activated.connect(self._reset_camera)  # type: ignore
-                        except Exception as e:
-                            logger.debug("Binding keypad 0 shortcut failed: %s", e, exc_info=True)
+                        home_sc.activated.connect(lambda: (logger.info("shortcut: Home -> camera.reset"), self._reset_camera()))  # type: ignore
+                        # Note: all 0-related bindings commented out for debugging
                         # Keep references to avoid GC
-                        self._shortcuts = [up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc, zero_sc, num0_sc]  # type: ignore[attr-defined]
-                        logger.info("Shortcuts bound: Up/Down→dims.set, +/-/=→zoom, Home/0→reset")
+                        self._shortcuts = [up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc]  # type: ignore[attr-defined]
+                        logger.info("Shortcuts bound: Up/Down→dims.set, +/-/=→zoom, Home→reset")
                     except Exception:
                         logger.debug("Failed to bind Up/Down shortcuts", exc_info=True)
             except Exception:
@@ -1093,9 +1116,42 @@ class StreamCoordinator:
         ch = self._state_channel
         if ch is None:
             return
+        logger.info("key->camera.reset (sending)")
         ok = ch.send_json({'type': 'camera.reset'})
-        if getattr(self, '_log_dims_info', False):
-            logger.info("key->camera.reset sent=%s", bool(ok))
+        logger.info("key->camera.reset sent=%s", bool(ok))
+
+    def _on_key_event(self, data: dict) -> None:
+        """Optional app-level key handling for bindings that struggle as QShortcut.
+
+        Triggers camera reset on plain '0' with no modifiers. Also accepts
+        keypad 0 when the only modifier is the keypad flag.
+        """
+        try:
+            from qtpy import QtCore as _QtCore  # type: ignore
+        except Exception:
+            return
+        try:
+            key = int(data.get('key'))
+        except Exception:
+            key = -1
+        try:
+            mods = int(data.get('mods') or 0)
+        except Exception:
+            mods = 0
+        txt = str(data.get('text') or '')
+        # Accept if explicitly '0' text with no modifiers
+        if txt == '0' and mods == 0:
+            logger.info("keycb: '0' -> camera.reset")
+            self._reset_camera()
+            return
+        # Or if the key is Key_0 and modifiers are none (or just keypad)
+        try:
+            keypad_only = (mods & ~int(_QtCore.Qt.KeypadModifier)) == 0 and (mods & int(_QtCore.Qt.KeypadModifier)) != 0  # type: ignore[attr-defined]
+        except Exception:
+            keypad_only = False
+        if key == int(getattr(_QtCore.Qt, 'Key_0', 0)) and (mods == 0 or keypad_only):  # type: ignore[attr-defined]
+            logger.info("keycb: Key_0 -> camera.reset")
+            self._reset_camera()
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         ch = self._state_channel
