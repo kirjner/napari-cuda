@@ -123,6 +123,9 @@ class EGLHeadlessServer:
         self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
         # Dedicated debug control for this module only (no dependency loggers)
         self._debug_only_this_logger: bool = bool(debug) or env_bool('NAPARI_CUDA_DEBUG', False)
+        # Dims intent/update tracking (server-authoritative dims seq and last client)
+        self._dims_seq: int = 0
+        self._last_dims_client_id: Optional[str] = None
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
@@ -205,6 +208,190 @@ class EGLHeadlessServer:
         except Exception:
             logger.debug("dims metadata (2D fallback) build failed", exc_info=True)
         return {}
+
+    # --- Dims intent helpers --------------------------------------------------
+    def _resolve_axis_index(self, axis: object, meta: dict, cur_len: int) -> Optional[int]:
+        """Resolve an axis specifier to a concrete index in current_step.
+
+        Accepts an integer index, a numeric string, or a label present in
+        meta['order'] or meta['axis_labels']. Returns None if unresolved.
+        """
+        try:
+            # Direct integer index
+            if isinstance(axis, int):
+                idx = int(axis)
+                return idx if 0 <= idx < max(0, int(cur_len)) else None
+            # Numeric string index
+            if isinstance(axis, str) and axis.strip().isdigit():
+                idx2 = int(axis.strip())
+                return idx2 if 0 <= idx2 < max(0, int(cur_len)) else None
+            # Label lookup: order then axis_labels
+            if isinstance(axis, str):
+                ax = axis.strip().lower()
+                order = meta.get('order') or []
+                if isinstance(order, (list, tuple)):
+                    try:
+                        pos = [str(x).lower() for x in order].index(ax)
+                        return pos if 0 <= pos < max(0, int(cur_len)) else None
+                    except Exception:
+                        pass
+                labels = meta.get('axis_labels') or []
+                if isinstance(labels, (list, tuple)):
+                    try:
+                        pos = [str(x).lower() for x in labels].index(ax)
+                        return pos if 0 <= pos < max(0, int(cur_len)) else None
+                    except Exception:
+                        pass
+        except Exception:
+            logger.debug("resolve axis failed", exc_info=True)
+        return None
+
+    def _build_dims_update_message(self, step_list: list[int], last_client_id: Optional[str]) -> dict:
+        """Build dims.update payload with nested metadata.
+
+        {'type':'dims.update', 'seq':..., 'last_client_id':..., 'current_step':[...], 'meta':{...}}
+        """
+        meta = self._dims_metadata() or {}
+        # Always include ndisplay in meta for new, and as top-level for legacy
+        try:
+            ndisp = 2
+        except Exception:
+            ndisp = 2
+        # Inflate/align current_step to full length and order
+        try:
+            ndim = int(meta.get('ndim') or 0)
+        except Exception:
+            ndim = 0
+        if ndim <= 0:
+            ndim = len(step_list) if step_list else 1
+        order = meta.get('order') if isinstance(meta.get('order'), (list, tuple)) else []
+        rng = meta.get('range') if isinstance(meta.get('range'), (list, tuple)) else None
+        # Start with zeros, then place provided indices
+        full = [0 for _ in range(int(ndim))]
+        if len(step_list) >= int(ndim):
+            full = [int(x) for x in step_list[:int(ndim)]]
+        elif len(step_list) == 1:
+            val = int(step_list[0])
+            try:
+                if order and 'z' in [str(c).lower() for c in order]:
+                    # Place value into the 'z' axis index if present
+                    lower = [str(c).lower() for c in order]
+                    zi = lower.index('z')
+                    if 0 <= zi < len(full):
+                        full[zi] = val
+                    else:
+                        full[0] = val
+                else:
+                    full[0] = val
+            except Exception:
+                full[0] = val
+        else:
+            # Partial list: place sequentially starting from 0
+            for i, v in enumerate(step_list):
+                if i < len(full):
+                    full[i] = int(v)
+        # Clamp to meta range if available
+        if rng:
+            try:
+                for i in range(min(len(full), len(rng))):
+                    lohi = rng[i]
+                    if isinstance(lohi, (list, tuple)) and len(lohi) >= 2:
+                        lo, hi = int(lohi[0]), int(lohi[1])
+                        if hi < lo:
+                            lo, hi = hi, lo
+                        full[i] = max(lo, min(hi, int(full[i])))
+            except Exception:
+                logger.debug("dims.update clamp in builder failed", exc_info=True)
+        # New shape with nested meta
+        seq_val = int(self._dims_seq) & 0x7FFFFFFF
+        self._dims_seq = (int(self._dims_seq) + 1) & 0x7FFFFFFF
+        new_msg = {
+            'type': 'dims.update',
+            'seq': seq_val,
+            'last_client_id': last_client_id,
+            'current_step': list(int(x) for x in full),
+            'meta': {**meta, 'ndisplay': int(ndisp)},
+        }
+        return new_msg
+
+    async def _broadcast_dims_update(self, step_list: list[int], last_client_id: Optional[str]) -> None:
+        """Broadcast dims update in both new and legacy formats.
+
+        Never raises; logs and continues on failure.
+        """
+        try:
+            self._last_dims_client_id = last_client_id
+            obj = self._build_dims_update_message(step_list, last_client_id)
+            await self._broadcast_state_json(obj)
+        except Exception:
+            logger.debug("dims update broadcast failed", exc_info=True)
+
+    def _apply_dims_intent(self, axis: object, step_delta: Optional[int], set_value: Optional[int]) -> Optional[list[int]]:
+        """Apply a dims intent to server state and return the new step list.
+
+        Axis may be label or index. Clamps result to meta range when available.
+        """
+        # Capture current step and infer length
+        with self._state_lock:
+            cur = getattr(self._latest_state, 'current_step', None)
+        meta = self._dims_metadata() or {}
+        try:
+            ndim = int(meta.get('ndim') or (len(cur) if cur is not None else 0))
+        except Exception:
+            ndim = len(cur) if cur is not None else 0
+        if ndim <= 0:
+            # Fallback to at least 1D if we can infer from cur
+            ndim = len(cur) if cur is not None else 1
+        # Build a working list from current or zeros
+        step = list(int(x) for x in (list(cur) if cur is not None else [0] * int(ndim)))
+        if len(step) < int(ndim):
+            step.extend([0] * (int(ndim) - len(step)))
+        idx = self._resolve_axis_index(axis, meta, len(step))
+        if idx is None:
+            # Default to first axis
+            idx = 0 if len(step) > 0 else None
+        if idx is None:
+            return None
+        # Compute target value
+        target = step[idx]
+        if step_delta is not None:
+            try:
+                target = int(target) + int(step_delta)
+            except Exception:
+                target = int(target)
+        if set_value is not None:
+            try:
+                target = int(set_value)
+            except Exception:
+                target = int(target)
+        # Clamp by range if available
+        try:
+            rng = meta.get('range')
+            if isinstance(rng, (list, tuple)) and idx < len(rng):
+                lohi = rng[idx]
+                if isinstance(lohi, (list, tuple)) and len(lohi) >= 2:
+                    lo = int(lohi[0]); hi = int(lohi[1])
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    target = max(lo, min(hi, int(target)))
+        except Exception:
+            logger.debug("clamp to range failed", exc_info=True)
+        # Update state
+        step[idx] = int(target)
+        with self._state_lock:
+            s = self._latest_state
+            self._latest_state = ServerSceneState(
+                center=s.center,
+                zoom=s.zoom,
+                angles=s.angles,
+                current_step=tuple(step),
+                zoom_factor=getattr(s, 'zoom_factor', None),
+                zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
+                pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0) or 0.0),
+                pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) or 0.0),
+                reset_view=bool(getattr(s, 'reset_view', False)),
+            )
+        return step
 
     async def start(self) -> None:
         # Keep global logging at INFO; optionally enable module-only DEBUG logging
@@ -373,18 +560,18 @@ class EGLHeadlessServer:
                                 angles=s.angles,
                                 current_step=(int(z0),),
                             )
-                        # Build dims metadata for piggyback
-                        meta = self._dims_metadata()
-                        msg = {'type': 'dims_update', 'current_step': [int(z0)], 'ndisplay': 2}
-                        if meta:
-                            msg.update(meta)
-                        # Schedule broadcast on the asyncio loop thread
-                        loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_state_json(msg)))
+                        # Build the authoritative dims.update once so logs match the sent payload
+                        step_list = [int(z0)]
+                        obj = self._build_dims_update_message(step_list, last_client_id=None)
+                        # Schedule broadcast of this exact object on the asyncio loop thread
+                        loop.call_soon_threadsafe(
+                            lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
+                        )
                         try:
                             if self._log_dims_info:
-                                logger.info("init: dims_update current_step=%s broadcast (with meta=%s)", [int(z0)], meta)
+                                logger.info("init: dims.update current_step=%s", obj.get('current_step'))
                             else:
-                                logger.debug("init: dims_update current_step=%s broadcast (with meta=%s)", [int(z0)], meta)
+                                logger.debug("init: dims.update current_step=%s", obj.get('current_step'))
                         except Exception:
                             pass
                 except Exception as e:
@@ -494,7 +681,26 @@ class EGLHeadlessServer:
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except Exception:
                 pass
-            # Send latest video config if available
+            # Send current dims baseline FIRST so client can gate inputs and inflate UI deterministically
+            try:
+                cur = None
+                with self._state_lock:
+                    cur = getattr(self._latest_state, 'current_step', None)
+                if cur is not None:
+                    # Build once so logs match sent payload
+                    obj = self._build_dims_update_message(list(cur), last_client_id=None)
+                    # Send authoritative dims.update with nested metadata
+                    await ws.send(json.dumps(obj))
+                    try:
+                        if self._log_dims_info:
+                            logger.info("connect: dims.update -> current_step=%s", obj.get('current_step'))
+                        else:
+                            logger.debug("connect: dims.update -> current_step=%s", obj.get('current_step'))
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("Initial dims baseline send failed: %s", e)
+            # Then send latest video config if available
             try:
                 if self._last_avcc is not None:
                     msg = {
@@ -509,26 +715,6 @@ class EGLHeadlessServer:
                     await ws.send(json.dumps(msg))
             except Exception as e:
                 logger.debug("Initial state config send failed: %s", e)
-            # Send current dims baseline so clients can step relative to it (include metadata)
-            try:
-                cur = None
-                with self._state_lock:
-                    cur = getattr(self._latest_state, 'current_step', None)
-                if cur is not None:
-                    msg = {'type': 'dims_update', 'current_step': list(cur), 'ndisplay': 2}
-                    meta = self._dims_metadata()
-                    if meta:
-                        msg.update(meta)
-                    await ws.send(json.dumps(msg))
-                    try:
-                        if self._log_dims_info:
-                            logger.info("connect: dims_update -> current_step=%s meta=%s", list(cur), meta)
-                        else:
-                            logger.debug("connect: dims_update -> current_step=%s meta=%s", list(cur), meta)
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug("Initial dims baseline send failed: %s", e)
             async for msg in ws:
                 try:
                     data = json.loads(msg)
@@ -554,35 +740,52 @@ class EGLHeadlessServer:
                             current_step=self._latest_state.current_step,
                         )
                 elif t == 'dims.set' or t == 'set_dims':
-                    step = data.get('current_step')
-                    if self._log_dims_info:
-                        logger.info("state: dims.set -> current_step=%s", step)
-                    else:
-                        logger.debug("state: dims.set -> current_step=%s", step)
-                    # Preserve any coalesced camera ops already queued; dims is latest-wins
-                    with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
-                            center=s.center,
-                            zoom=s.zoom,
-                            angles=s.angles,
-                            current_step=tuple(step) if step else None,
-                            zoom_factor=getattr(s, 'zoom_factor', None),
-                            zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
-                            pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0) or 0.0),
-                            pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) or 0.0),
-                            reset_view=bool(getattr(s, 'reset_view', False)),
-                        )
-                    # Broadcast dims_update so new/other clients learn the baseline (include metadata)
+                    # Legacy message ignored. Clients must send intents.
                     try:
-                        msg = {'type': 'dims_update', 'current_step': list(step) if step else None, 'ndisplay': data.get('ndisplay', 2)}
-                        meta = self._dims_metadata()
-                        if meta:
-                            msg.update(meta)
-                        if msg['current_step'] is not None:
-                            await self._broadcast_state_json(msg)
+                        logger.info("state: dims.set ignored (use dims.intent.*)")
+                    except Exception:
+                        pass
+                elif t == 'dims.intent.step':
+                    # dims.intent.step { axis:'z'|'y'|'x'|index, delta:int, client_seq, client_id }
+                    axis = data.get('axis')
+                    delta = int(data.get('delta') or 0)
+                    client_seq = data.get('client_seq')
+                    client_id = data.get('client_id') or None
+                    try:
+                        if self._log_dims_info:
+                            logger.info("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
+                        else:
+                            logger.debug("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
+                    except Exception:
+                        pass
+                    try:
+                        new_step = self._apply_dims_intent(axis=axis, step_delta=delta, set_value=None)
+                        if new_step is not None:
+                            await self._broadcast_dims_update(new_step, last_client_id=client_id)
                     except Exception as e:
-                        logger.debug("dims.set broadcast failed: %s", e)
+                        logger.debug("dims.intent.step handling failed: %s", e)
+                elif t == 'dims.intent.set_index':
+                    # dims.intent.set_index { axis:..., value:int, client_seq, client_id }
+                    axis = data.get('axis')
+                    try:
+                        value = int(data.get('value'))
+                    except Exception:
+                        value = 0
+                    client_seq = data.get('client_seq')
+                    client_id = data.get('client_id') or None
+                    try:
+                        if self._log_dims_info:
+                            logger.info("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
+                        else:
+                            logger.debug("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
+                    except Exception:
+                        pass
+                    try:
+                        new_step = self._apply_dims_intent(axis=axis, step_delta=None, set_value=value)
+                        if new_step is not None:
+                            await self._broadcast_dims_update(new_step, last_client_id=client_id)
+                    except Exception as e:
+                        logger.debug("dims.intent.set_index handling failed: %s", e)
                 elif t == 'camera.zoom_at':
                     try:
                         factor = float(data.get('factor') or 0.0)
