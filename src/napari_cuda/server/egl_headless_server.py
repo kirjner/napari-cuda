@@ -1461,3 +1461,33 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+                elif t == 'camera.orbit':
+                    try:
+                        daz = float(data.get('d_az_deg') or 0.0)
+                        delv = float(data.get('d_el_deg') or 0.0)
+                    except Exception:
+                        daz = 0.0; delv = 0.0
+                    if daz != 0.0 or delv != 0.0:
+                        if self._log_cam_info:
+                            logger.info("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
+                        elif self._log_cam_debug:
+                            logger.debug("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                zoom_factor=getattr(s, 'zoom_factor', None),
+                                zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
+                                pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0)),
+                                pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0)),
+                                reset_view=bool(getattr(s, 'reset_view', False)),
+                                orbit_daz_deg=float(getattr(s, 'orbit_daz_deg', 0.0) or 0.0) + float(daz),
+                                orbit_del_deg=float(getattr(s, 'orbit_del_deg', 0.0) or 0.0) + float(delv),
+                            )
+                        try:
+                            self.metrics.inc('napari_cuda_orbit_events')
+                        except Exception:
+                            pass

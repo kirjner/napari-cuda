@@ -90,6 +90,9 @@ class ServerSceneState:
     volume_clim: Optional[tuple[float, float]] = None
     volume_opacity: Optional[float] = None
     volume_sample_step: Optional[float] = None
+    # One-shot orbit deltas (degrees) for TurntableCamera
+    orbit_daz_deg: Optional[float] = None
+    orbit_del_deg: Optional[float] = None
 
 
 class EGLRendererWorker:
@@ -173,6 +176,20 @@ class EGLRendererWorker:
             self._debug_reset = bool(int(os.getenv('NAPARI_CUDA_DEBUG_RESET', '0') or '0'))
         except Exception:
             self._debug_reset = False
+        # Orbit debug flag (INFO-level logs on orbit)
+        try:
+            self._debug_orbit = bool(int(os.getenv('NAPARI_CUDA_DEBUG_ORBIT', '0') or '0'))
+        except Exception:
+            self._debug_orbit = False
+        # Orbit elevation clamp
+        try:
+            self._orbit_el_min = float(os.getenv('NAPARI_CUDA_ORBIT_ELEV_MIN', '-85.0') or '-85.0')
+        except Exception:
+            self._orbit_el_min = -85.0
+        try:
+            self._orbit_el_max = float(os.getenv('NAPARI_CUDA_ORBIT_ELEV_MAX', '85.0') or '85.0')
+        except Exception:
+            self._orbit_el_max = 85.0
 
         # Ensure partial initialization is cleaned up if any step fails
         try:
@@ -1006,6 +1023,45 @@ class EGLRendererWorker:
                             self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
                     except Exception as e:
                         logger.debug("camera.reset failed: %s", e)
+                # Orbit deltas (degrees) for TurntableCamera
+                try:
+                    from vispy.scene.cameras import TurntableCamera  # type: ignore
+                except Exception:
+                    TurntableCamera = None  # type: ignore
+                if TurntableCamera is not None and isinstance(cam, TurntableCamera):
+                    daz = getattr(state, 'orbit_daz_deg', None)
+                    delv = getattr(state, 'orbit_del_deg', None)
+                    if (daz is not None and float(daz) != 0.0) or (delv is not None and float(delv) != 0.0):
+                        try:
+                            cur_az = float(getattr(cam, 'azimuth', 0.0) or 0.0)
+                            cur_el = float(getattr(cam, 'elevation', 0.0) or 0.0)
+                            new_az = cur_az + float(daz or 0.0)
+                            # Wrap azimuth to [-180, 180]
+                            if new_az > 180.0:
+                                new_az = ((new_az + 180.0) % 360.0) - 180.0
+                            if new_az < -180.0:
+                                new_az = ((new_az - 180.0) % 360.0) + 180.0
+                            new_el = cur_el + float(delv or 0.0)
+                            # Clamp elevation
+                            el_min = float(getattr(self, '_orbit_el_min', -85.0))
+                            el_max = float(getattr(self, '_orbit_el_max', 85.0))
+                            if el_min > el_max:
+                                el_min, el_max = el_max, el_min
+                            if new_el < el_min:
+                                new_el = el_min
+                            if new_el > el_max:
+                                new_el = el_max
+                            setattr(cam, 'azimuth', float(new_az))
+                            setattr(cam, 'elevation', float(new_el))
+                            if self._debug_orbit:
+                                try:
+                                    logger.info("orbit: daz=%.2f del=%.2f -> az=%.2f el=%.2f (clamp=[%.1f,%.1f])",
+                                                float(daz or 0.0), float(delv or 0.0), float(new_az), float(new_el), float(el_min), float(el_max))
+                                except Exception:
+                                    logger.debug("orbit log failed", exc_info=True)
+                        except Exception:
+                            logger.debug("camera.orbit apply failed", exc_info=True)
+
                 # Anchored zoom (canvas/video pixel anchor)
                 zf = getattr(state, 'zoom_factor', None)
                 anc = getattr(state, 'zoom_anchor_px', None)
@@ -1013,10 +1069,6 @@ class EGLRendererWorker:
                     try:
                         cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
                         # Special-case TurntableCamera: adjust distance for zoom
-                        try:
-                            from vispy.scene.cameras import TurntableCamera  # type: ignore
-                        except Exception:
-                            TurntableCamera = None  # type: ignore
                         if TurntableCamera is not None and isinstance(cam, TurntableCamera):
                             # Map server zoom factor to distance scale directly:
                             # factor < 1 -> zoom IN (distance decreases), factor > 1 -> zoom OUT (distance increases)
