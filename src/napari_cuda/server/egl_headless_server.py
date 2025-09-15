@@ -924,6 +924,16 @@ class EGLHeadlessServer:
                     if self._is_valid_render_mode(mode):
                         self._volume_state['mode'] = mode
                         self._log_volume_intent("intent: volume.set_render_mode mode=%s client_id=%s seq=%s", mode, client_id, client_seq)
+                        # Queue one-shot render param application on render thread
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                volume_mode=str(mode),
+                            )
                         await self._rebroadcast_meta(client_id)
                 elif t == 'volume.intent.set_clim':
                     pair = self._normalize_clim(data.get('lo'), data.get('hi'))
@@ -932,6 +942,15 @@ class EGLHeadlessServer:
                         lo, hi = pair
                         self._volume_state['clim'] = [lo, hi]
                         self._log_volume_intent("intent: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s", lo, hi, client_id, client_seq)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                volume_clim=(float(lo), float(hi)),
+                            )
                         await self._rebroadcast_meta(client_id)
                 elif t == 'volume.intent.set_colormap':
                     name = data.get('name')
@@ -939,6 +958,15 @@ class EGLHeadlessServer:
                     if isinstance(name, str) and name.strip():
                         self._volume_state['colormap'] = str(name)
                         self._log_volume_intent("intent: volume.set_colormap name=%s client_id=%s seq=%s", name, client_id, client_seq)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                volume_colormap=str(name),
+                            )
                         await self._rebroadcast_meta(client_id)
                 elif t == 'volume.intent.set_opacity':
                     a = self._clamp_opacity(data.get('alpha'))
@@ -946,6 +974,15 @@ class EGLHeadlessServer:
                     if a is not None:
                         self._volume_state['opacity'] = float(a)
                         self._log_volume_intent("intent: volume.set_opacity alpha=%.3f client_id=%s seq=%s", a, client_id, client_seq)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                volume_opacity=float(a),
+                            )
                         await self._rebroadcast_meta(client_id)
                 elif t == 'volume.intent.set_sample_step':
                     rr = self._clamp_sample_step(data.get('relative'))
@@ -953,6 +990,15 @@ class EGLHeadlessServer:
                     if rr is not None:
                         self._volume_state['sample_step'] = float(rr)
                         self._log_volume_intent("intent: volume.set_sample_step relative=%.3f client_id=%s seq=%s", rr, client_id, client_seq)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                volume_sample_step=float(rr),
+                            )
                         await self._rebroadcast_meta(client_id)
                 elif t == 'multiscale.intent.set_policy':
                     pol = str(data.get('policy') or '').lower()

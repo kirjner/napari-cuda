@@ -84,6 +84,12 @@ class ServerSceneState:
     pan_dx_px: float = 0.0
     pan_dy_px: float = 0.0
     reset_view: bool = False
+    # One-shot volume render params (applied on render thread)
+    volume_mode: Optional[str] = None
+    volume_colormap: Optional[str] = None
+    volume_clim: Optional[tuple[float, float]] = None
+    volume_opacity: Optional[float] = None
+    volume_sample_step: Optional[float] = None
 
 
 class EGLRendererWorker:
@@ -216,6 +222,35 @@ class EGLRendererWorker:
         except Exception as e:
             logger.debug("Init info log failed: %s", e)
 
+    def _frame_volume_camera(self, w: int, h: int, d: int) -> None:
+        """Choose stable initial center and distance for TurntableCamera.
+
+        Center at the volume centroid and set distance so the full height fits
+        in view (adds a small margin). This avoids dead pan response before the
+        first zoom and prevents the initial zoom from overshooting.
+        """
+        try:
+            from vispy.scene.cameras import TurntableCamera  # type: ignore
+        except Exception:
+            TurntableCamera = None  # type: ignore
+        try:
+            cam = self.view.camera
+        except Exception:
+            return
+        if TurntableCamera is None or not isinstance(cam, TurntableCamera):
+            return
+        try:
+            cam.center = (float(w) * 0.5, float(h) * 0.5, float(d) * 0.5)  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("frame_volume: set center failed", exc_info=True)
+        try:
+            fov_deg = float(getattr(cam, 'fov', 60.0) or 60.0)
+            fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
+            dist = (0.5 * float(h)) / max(1e-6, math.tan(0.5 * fov_rad))
+            cam.distance = float(dist * 1.1)  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("frame_volume: set distance failed", exc_info=True)
+
     def _init_egl(self) -> None:
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
         if egl_display == EGL.EGL_NO_DISPLAY:
@@ -293,10 +328,24 @@ class EGLRendererWorker:
                         visual.relative_step_size = float(self.volume_relative_step)
                     d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
                     self._data_wh = (w, h)
+                    # Ensure initial camera frames the volume so first render is visible
+                    try:
+                        view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
+                    except Exception as e:
+                        # Fallback to XY only if TurntableCamera lacks z-range
+                        try:
+                            view.camera.set_range(x=(0, w), y=(0, h))
+                        except Exception:
+                            logger.debug("zarr-volume: initial camera set_range(xy) failed", exc_info=True)
+                    # Stabilize initial pan/zoom by framing center + distance
+                    try:
+                        self._frame_volume_camera(w, h, d)
+                    except Exception:
+                        logger.debug("zarr-volume: frame camera failed", exc_info=True)
                     scene_src = "zarr-volume"
                     scene_meta = f"level={self._zarr_level or 'auto'} shape={d}x{h}x{w}"
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("zarr-volume metadata set failed", exc_info=True)
             except Exception as e:
                 logger.exception("Failed to initialize OME-Zarr volume; falling back to 2D slice: %s", e)
                 # Fall through to 2D slice fallback
@@ -329,7 +378,7 @@ class EGLRendererWorker:
                     scene_src = "synthetic"
                     scene_meta = f"shape={self.height}x{self.width}"
                 except Exception:
-                    pass
+                    logger.debug("synthetic 2D: initial camera set_range failed", exc_info=True)
         elif self.use_volume:
             # 3D volume demo
             view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60, distance=500)
@@ -344,6 +393,22 @@ class EGLRendererWorker:
             try:
                 if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
                     visual.relative_step_size = float(self.volume_relative_step)
+                # Frame the synthetic volume to avoid needing a manual reset
+                try:
+                    d = int(self.volume_depth)
+                    h = int(self.height)
+                    w = int(self.width)
+                    self._data_wh = (w, h)
+                    view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
+                    try:
+                        self._frame_volume_camera(w, h, d)
+                    except Exception:
+                        logger.debug("synthetic volume: frame camera failed", exc_info=True)
+                except Exception:
+                    try:
+                        view.camera.set_range(x=(0, self.width), y=(0, self.height))
+                    except Exception:
+                        logger.debug("synthetic volume: initial camera set_range fallback failed", exc_info=True)
                 scene_src = "volume"
                 scene_meta = f"depth={self.volume_depth} shape={self.height}x{self.width} dtype={self.volume_dtype}"
             except Exception as e:
@@ -366,7 +431,7 @@ class EGLRendererWorker:
         try:
             logger.info("Scene init: source=%s %s", scene_src, scene_meta)
         except Exception:
-            pass
+            logger.debug("Scene init log failed", exc_info=True)
         # First render after attributes are fully set
         canvas.render()
 
@@ -654,14 +719,14 @@ class EGLRendererWorker:
                 if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
                     self._log_encoder_settings('preset', kwargs)
             except Exception:
-                pass
+                logger.debug("Log encoder settings failed", exc_info=True)
             try:
                 logger.info(
                     "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
                     self.width, self.height, self._enc_input_fmt, preset, rc_mode.upper(), int(idr_period)
                 )
             except Exception:
-                pass
+                logger.debug("Encoder creation info log failed", exc_info=True)
             # Force IDR next frame
             self._force_next_idr = True
             return
@@ -669,16 +734,13 @@ class EGLRendererWorker:
             logger.warning("Preset NVENC path failed (%s)", e, exc_info=True)
 
         # If preset path fails for any reason, fall back to minimal encoder without tuning
-        try:
-            self._encoder  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        if self._encoder is None:
+        enc = getattr(self, '_encoder', None)
+        if enc is None:
             try:
                 self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
                 logger.warning("NVENC encoder created without preset kwargs; cadence may vary")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception("NVENC fallback encoder creation failed: %s", e)
 
     def _log_encoder_settings(self, path: str, init_kwargs: dict) -> None:
         """Emit a single-line summary of encoder settings.
@@ -739,7 +801,7 @@ class EGLRendererWorker:
                         if hasattr(params, attr):
                             live[attr] = getattr(params, attr)
             except Exception:
-                pass
+                logger.debug("GetEncodeReconfigureParams failed", exc_info=True)
 
             # Compose a flat, readable line
             # Prefer explicit canon values; supplement with live where not present
@@ -794,10 +856,7 @@ class EGLRendererWorker:
 
     def force_idr(self) -> None:
         """Best-effort request to force next frame as IDR via Reconfigure."""
-        try:
-            logger.debug("Requesting encoder force IDR")
-        except Exception:
-            pass
+        logger.debug("Requesting encoder force IDR")
         try:
             if hasattr(self._encoder, 'GetEncodeReconfigureParams') and hasattr(self._encoder, 'Reconfigure'):
                 params = self._encoder.GetEncodeReconfigureParams()
@@ -869,11 +928,64 @@ class EGLRendererWorker:
                                 self._last_slab_wh = cur_wh
                                 self._data_wh = cur_wh
                             except Exception:
-                                pass
+                                logger.debug("zarr slice: camera set_range update failed", exc_info=True)
                         except Exception as e:
                             logger.debug("Update z-slice failed: %s", e)
                 except Exception as e:
                     logger.debug("Apply dims state failed: %s", e)
+
+            # Apply volume render params (one-shot, coalesced on render thread)
+            try:
+                vis = getattr(self, '_visual', None)
+                if vis is not None and hasattr(vis, 'set_data') and hasattr(vis, 'method'):
+                    # Render mode
+                    vmode = getattr(state, 'volume_mode', None)
+                    if vmode:
+                        try:
+                            m = str(vmode).lower()
+                            if m in ('mip', 'translucent', 'iso'):
+                                vis.method = m  # type: ignore[attr-defined]
+                        except Exception:
+                            logger.debug("apply volume mode failed", exc_info=True)
+                    # Colormap
+                    vcm = getattr(state, 'volume_colormap', None)
+                    if vcm:
+                        try:
+                            name = str(vcm).lower()
+                            if name == 'gray':
+                                name = 'grays'
+                            vis.cmap = name  # type: ignore[attr-defined]
+                        except Exception:
+                            logger.debug("apply volume colormap failed", exc_info=True)
+                    # CLim
+                    vcl = getattr(state, 'volume_clim', None)
+                    if isinstance(vcl, tuple) and len(vcl) >= 2:
+                        try:
+                            lo = float(vcl[0]); hi = float(vcl[1])
+                            if hi < lo:
+                                lo, hi = hi, lo
+                            vis.clim = (lo, hi)  # type: ignore[attr-defined]
+                        except Exception:
+                            logger.debug("apply volume clim failed", exc_info=True)
+                    # Opacity
+                    vo = getattr(state, 'volume_opacity', None)
+                    if vo is not None:
+                        try:
+                            a = max(0.0, min(1.0, float(vo)))
+                            if hasattr(vis, 'opacity'):
+                                vis.opacity = float(a)  # type: ignore[attr-defined]
+                        except Exception:
+                            logger.debug("apply volume opacity failed", exc_info=True)
+                    # Sample step (relative)
+                    vs = getattr(state, 'volume_sample_step', None)
+                    if vs is not None and hasattr(vis, 'relative_step_size'):
+                        try:
+                            rr = max(0.1, min(4.0, float(vs)))
+                            vis.relative_step_size = float(rr)  # type: ignore[attr-defined]
+                        except Exception:
+                            logger.debug("apply volume sample_step failed", exc_info=True)
+            except Exception:
+                logger.debug("Apply volume params failed", exc_info=True)
 
             # Apply camera ops LAST so they remain authoritative
             try:
@@ -900,74 +1012,137 @@ class EGLRendererWorker:
                 if zf is not None and float(zf) > 0.0 and anc is not None and hasattr(self.view, 'camera'):
                     try:
                         cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
-                        # Capture canvas size for anchor mapping
-                        # Map anchor from canvas pixels (top-left origin expected by napari transform) to world/scene coordinates
-                        center_world = None
+                        # Special-case TurntableCamera: adjust distance for zoom
                         try:
-                            # The client sends anchor with bottom-left origin; convert to top-left for transform
-                            ax_px = float(anc[0])
-                            ay_bl = float(anc[1])
-                            ay_tl = float(ch) - ay_bl
-                            # Use napari-style transform: view.transform * view.scene.transform
-                            tr = self.view.transform * self.view.scene.transform
-                            mapped = tr.imap([ax_px, ay_tl, 0, 1])
-                            # mapped may be length-2 or length-4; take XY components
-                            wx = float(mapped[0])
-                            wy = float(mapped[1])
-                            center_world = (wx, wy)
+                            from vispy.scene.cameras import TurntableCamera  # type: ignore
                         except Exception:
-                            # Fallback: proportionally map using camera rect and canvas size
+                            TurntableCamera = None  # type: ignore
+                        if TurntableCamera is not None and isinstance(cam, TurntableCamera):
+                            # Map server zoom factor to distance scale directly:
+                            # factor < 1 -> zoom IN (distance decreases), factor > 1 -> zoom OUT (distance increases)
                             try:
-                                rect = getattr(cam, 'rect', None)
-                                if rect is not None and cw and ch:
-                                    ax_px = float(anc[0])
-                                    ay_bl = float(anc[1])
-                                    sx = ax_px / float(cw)
-                                    sy_bl = ay_bl / float(ch)
-                                    wx = float(rect.left) + sx * float(rect.width)
-                                    wy = float(rect.bottom) + sy_bl * float(rect.height)
-                                    center_world = (wx, wy)
+                                cur_d = float(getattr(cam, 'distance', 1.0) or 1.0)
+                                zf_raw = float(zf)
+                                new_d = max(1e-6, cur_d * zf_raw)
+                                cam.distance = new_d  # type: ignore[attr-defined]
+                                if self._debug_zoom_drift:
+                                    try:
+                                        logger.info("zoom_3d: f=%.4f dist_before=%.4f dist_after=%.4f", float(zf_raw), cur_d, new_d)
+                                    except Exception:
+                                        logger.debug("zoom_3d log failed", exc_info=True)
                             except Exception:
-                                center_world = None
-                        if center_world is None:
-                            # Last resort: pass through
-                            center_world = (float(anc[0]), float(anc[1]))
-                        if self._debug_zoom_drift:
-                            self._log_zoom_drift(float(zf), (float(anc[0]), float(anc[1])), (float(center_world[0]), float(center_world[1])), int(cw), int(ch))
+                                logger.debug("turntable zoom(distance) failed", exc_info=True)
                         else:
-                            # Apply zoom without extra instrumentation or extra logs
-                            self.view.camera.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
+                            # 2D PanZoom path: map anchor to world and use camera.zoom()
+                            # Map anchor from canvas pixels (top-left origin for transform) to world
+                            center_world = None
+                            try:
+                                ax_px = float(anc[0])
+                                ay_bl = float(anc[1])
+                                ay_tl = float(ch) - ay_bl
+                                tr = self.view.transform * self.view.scene.transform
+                                mapped = tr.imap([ax_px, ay_tl, 0, 1])
+                                wx = float(mapped[0]); wy = float(mapped[1])
+                                center_world = (wx, wy)
+                            except Exception:
+                                try:
+                                    rect = getattr(cam, 'rect', None)
+                                    if rect is not None and cw and ch:
+                                        ax_px = float(anc[0])
+                                        ay_bl = float(anc[1])
+                                        sx = ax_px / float(cw)
+                                        sy_bl = ay_bl / float(ch)
+                                        wx = float(rect.left) + sx * float(rect.width)
+                                        wy = float(rect.bottom) + sy_bl * float(rect.height)
+                                        center_world = (wx, wy)
+                                except Exception:
+                                    center_world = None
+                            if center_world is None:
+                                center_world = (float(anc[0]), float(anc[1]))
+                            if self._debug_zoom_drift:
+                                self._log_zoom_drift(float(zf), (float(anc[0]), float(anc[1])), (float(center_world[0]), float(center_world[1])), int(cw), int(ch))
+                            else:
+                                self.view.camera.zoom(float(zf), center=center_world)  # type: ignore[call-arg]
                     except Exception as e:
                         logger.debug("camera.zoom_at failed: %s", e)
-                # Pixel-space pan (convert canvas pixel delta to world delta)
+                # Pixel-space pan: in 3D turn vertical drag into dolly (distance)
+                # and horizontal into lateral world pan; 2D maps to world delta.
                 dx = float(getattr(state, 'pan_dx_px', 0.0) or 0.0)
                 dy = float(getattr(state, 'pan_dy_px', 0.0) or 0.0)
                 if (dx != 0.0 or dy != 0.0) and hasattr(cam, 'center'):
                     try:
                         cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
-                        if self._debug_pan:
-                            self._log_pan_mapping(dx, dy, int(cw), int(ch))
-                        else:
-                            # Map canvas pixel shift to world delta using inverse transform at canvas center
+                        # Special-case TurntableCamera: derive per-pixel world scale from fov and distance
+                        try:
+                            from vispy.scene.cameras import TurntableCamera  # type: ignore
+                        except Exception:
+                            TurntableCamera = None  # type: ignore
+                        if TurntableCamera is not None and isinstance(cam, TurntableCamera):
                             try:
-                                cx_px = float(cw) * 0.5
-                                cy_px = float(ch) * 0.5
-                                tr = self.view.transform * self.view.scene.transform
-                                p0 = tr.imap((cx_px, cy_px))
-                                p1 = tr.imap((cx_px + dx, cy_px + dy))
-                                dwx = float(p1[0] - p0[0])
-                                dwy = float(p1[1] - p0[1])
+                                fov_deg = float(getattr(cam, 'fov', 60.0) or 60.0)
+                                dist = float(getattr(cam, 'distance', 1.0) or 1.0)
+                                fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
+                                scale_y = 2.0 * dist * math.tan(0.5 * fov_rad) / max(1e-6, float(ch))
+                                scale_x = scale_y * (float(cw) / max(1e-6, float(ch)))
+                                # Lateral pan from horizontal drag
+                                dwx = dx * scale_x
+                                # Dolly from vertical drag: pan down (dy>0) -> closer (reduce distance)
+                                if dy != 0.0:
+                                    try:
+                                        new_d = max(1e-6, dist - (dy * scale_y))
+                                        cam.distance = float(new_d)  # type: ignore[attr-defined]
+                                    except Exception:
+                                        logger.debug("turntable dolly(distance) failed", exc_info=True)
+                                # No vertical world pan when in 3D dolly mode
+                                dwy = 0.0
+                                if self._debug_pan:
+                                    try:
+                                        c0 = getattr(cam, 'center', None)
+                                        logger.info("pan_3d: dpx=(%.2f,%.2f) scale=(%.6f,%.6f) world_pan=(%.6f,%.6f) dolly %.4f->%.4f center_before=%s fov=%.2f canvas=%dx%d",
+                                                    float(dx), float(dy), float(scale_x), float(scale_y), float(dwx), float(dwy), float(dist), float(getattr(cam, 'distance', dist)), str(c0), float(fov_deg), int(cw), int(ch))
+                                    except Exception:
+                                        logger.debug("pan_3d log(pre) failed", exc_info=True)
                             except Exception:
-                                # Fallback: approximate with zoom scale if available
-                                z = float(getattr(cam, 'zoom', 1.0) or 1.0)
-                                inv = 1.0 / max(1e-6, z)
-                                dwx = dx * inv
-                                dwy = dy * inv
-                            c = getattr(cam, 'center', None)
-                            if isinstance(c, (tuple, list)) and len(c) >= 2:
-                                cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
+                                # Fallback to small proportional shift if unavailable
+                                dwx = dx * 0.01
+                                dwy = 0.0
+                                logger.debug("turntable pan scale compute failed; using tiny fallback world delta", exc_info=True)
+                        else:
+                            # 2D mapping using inverse transform at canvas center
+                            if self._debug_pan:
+                                # Use detailed 2D instrumented path which applies the pan
+                                self._log_pan_mapping(dx, dy, int(cw), int(ch))
+                                # Already applied; skip duplicate center update
+                                dwx = dwy = 0.0
                             else:
-                                cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
+                                try:
+                                    cx_px = float(cw) * 0.5
+                                    cy_px = float(ch) * 0.5
+                                    tr = self.view.transform * self.view.scene.transform
+                                    p0 = tr.imap((cx_px, cy_px))
+                                    p1 = tr.imap((cx_px + dx, cy_px + dy))
+                                    dwx = float(p1[0] - p0[0])
+                                    dwy = float(p1[1] - p0[1])
+                                except Exception:
+                                    # Fallback: approximate with zoom scale if available
+                                    z = float(getattr(cam, 'zoom', 1.0) or 1.0)
+                                    inv = 1.0 / max(1e-6, z)
+                                    dwx = dx * inv
+                                    dwy = dy * inv
+                        c = getattr(cam, 'center', None)
+                        if isinstance(c, (tuple, list)) and len(c) >= 2:
+                            cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
+                        else:
+                            cam.center = (-dwx, -dwy)  # type: ignore[attr-defined]
+                        if TurntableCamera is not None and isinstance(cam, TurntableCamera) and self._debug_pan:
+                            try:
+                                c1 = getattr(cam, 'center', None)
+                                logger.info(
+                                    "pan_3d: applied center_after=%s (added world delta=(%.6f,%.6f))",
+                                    str(c1), float(dwx), float(dwy)
+                                )
+                            except Exception:
+                                logger.debug("pan_3d log(post) failed", exc_info=True)
                     except Exception as e:
                         logger.debug("camera.pan_px failed: %s", e)
                 # Legacy absolute camera fields (kept for back-compat)
@@ -1214,7 +1389,7 @@ class EGLRendererWorker:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception:
-            pass
+            logger.debug("torch.cuda.synchronize failed", exc_info=True)
         t_c1 = time.perf_counter()
         convert_ms = (t_c1 - t_c0) * 1000.0
         with self._enc_lock:
@@ -1231,7 +1406,7 @@ class EGLRendererWorker:
                     pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.OUTPUT_SPSPPS)
                     self._force_next_idr = False
             except Exception:
-                pass
+                logger.debug("force_next_idr flag check failed", exc_info=True)
             if pic_flags:
                 pkt_obj = enc.Encode(dst, pic_flags)
             else:
