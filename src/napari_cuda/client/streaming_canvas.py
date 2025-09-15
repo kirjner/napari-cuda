@@ -242,6 +242,13 @@ class StreamingCanvas(VispyCanvas):
                 client_cfg=getattr(self, '_client_cfg', None),
             )
             self._manager.start()
+            # Bridge coordinator with ProxyViewer for unified state path
+            try:
+                self._manager.attach_viewer_mirror(viewer)
+                if hasattr(viewer, 'attach_state_sender'):
+                    viewer.attach_state_sender(self._manager)  # type: ignore[attr-defined]
+            except Exception:
+                logger.debug('StreamingCanvas: failed to attach viewer/state sender bridge', exc_info=True)
             # Optional fixed-cadence display loop to stabilize draw phase under jitter
             try:
                 import os as _os

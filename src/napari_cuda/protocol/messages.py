@@ -15,7 +15,8 @@ class MessageType(enum.Enum):
     """Types of messages in the protocol."""
     # Client -> Server
     SET_CAMERA = "set_camera"
-    SET_DIMS = "set_dims"
+    # Use server-preferred dims command name
+    SET_DIMS = "dims.set"
     REQUEST_FRAME = "request_frame"
     PING = "ping"
     
@@ -195,10 +196,11 @@ class StreamProtocol:
     @staticmethod
     def create_dims_command(current_step=None, ndisplay=None) -> str:
         """Create dimensions update command."""
+        # Emit server-preferred command name 'dims.set'
         cmd = DimsUpdate(
             type=MessageType.SET_DIMS.value,
             current_step=current_step,
-            ndisplay=ndisplay
+            ndisplay=ndisplay,
         )
         return cmd.to_json()
     

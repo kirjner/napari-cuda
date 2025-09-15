@@ -7,6 +7,7 @@ import queue
 import time
 from threading import Thread
 from typing import Optional
+import weakref
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,6 +57,23 @@ class _WakeProxy(QtCore.QObject):
     def __init__(self, slot, parent=None) -> None:  # type: ignore[no-untyped-def]
         super().__init__(parent)
         self.trigger.connect(slot)
+
+
+class _CallProxy(QtCore.QObject):
+    """Post callables to the GUI thread via queued signal delivery."""
+
+    call = QtCore.Signal(object)
+
+    def __init__(self, parent=None) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(parent)
+        self.call.connect(self._on_call)
+
+    def _on_call(self, fn) -> None:  # type: ignore[no-untyped-def]
+        try:
+            if callable(fn):
+                fn()
+        except Exception:
+            logger.debug("_CallProxy execution failed", exc_info=True)
 
 @dataclass
 class _SyncState:
@@ -119,6 +137,13 @@ class StreamCoordinator:
         # Thread/state handles
         self._threads: list[Thread] = []
         self._state_channel: Optional[StateChannel] = None
+        # Optional weakref to a ViewerModel mirror (e.g., ProxyViewer)
+        self._viewer_mirror = None  # type: ignore[var-annotated]
+        # UI call proxy to marshal updates to the GUI thread
+        try:
+            self._ui_call = _CallProxy(getattr(self._scene_canvas, 'native', None))
+        except Exception:
+            self._ui_call = None
 
         # Presenter + source mux (server timestamps only)
         # Single preview guard (ms)
@@ -931,6 +956,38 @@ class StreamCoordinator:
                 self._dims_z = z
                 if bool(getattr(self, '_log_dims_info', False)):
                     logger.info("dims_update: baseline z=%d", z)
+            # Mirror to local viewer UI if attached (including optional metadata)
+            ndisp = data.get('ndisplay')
+            ndim = data.get('ndim')
+            dims_range = data.get('range')
+            order = data.get('order')
+            axis_labels = data.get('axis_labels')
+            sizes = data.get('sizes')
+            try:
+                vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+            except Exception:
+                vm_ref = None
+            if vm_ref is not None and hasattr(vm_ref, '_apply_remote_dims_update'):
+                try:
+                    def _apply() -> None:
+                        try:
+                            vm_ref._apply_remote_dims_update(  # type: ignore[attr-defined]
+                                current_step=cur,
+                                ndisplay=ndisp,
+                                ndim=ndim,
+                                dims_range=dims_range,
+                                order=order,
+                                axis_labels=axis_labels,
+                                sizes=sizes,
+                            )
+                        except Exception:
+                            logger.debug("viewer mirror dims update failed", exc_info=True)
+                    if getattr(self, '_ui_call', None) is not None:
+                        self._ui_call.call.emit(_apply)  # type: ignore[attr-defined]
+                    else:
+                        _apply()
+                except Exception:
+                    logger.debug("schedule viewer mirror dims update failed", exc_info=True)
         except Exception:
             logger.debug("dims_update parse failed", exc_info=True)
 
@@ -1152,6 +1209,86 @@ class StreamCoordinator:
         if key == int(getattr(_QtCore.Qt, 'Key_0', 0)) and (mods == 0 or keypad_only):  # type: ignore[attr-defined]
             logger.info("keycb: Key_0 -> camera.reset")
             self._reset_camera()
+
+    # --- Public UI/state bridge methods -------------------------------------------
+    def attach_viewer_mirror(self, viewer: object) -> None:
+        """Attach a viewer to mirror server dims updates into local UI.
+
+        Stores a weak reference to avoid lifetime coupling.
+        """
+        try:
+            self._viewer_mirror = weakref.ref(viewer)  # type: ignore[attr-defined]
+        except Exception:
+            self._viewer_mirror = None
+
+    def send_json(self, obj: dict) -> bool:
+        ch = self._state_channel
+        return bool(ch.send_json(obj)) if ch is not None else False
+
+    def reset_camera(self, origin: str = 'ui') -> bool:
+        """Send a camera.reset to the server (used by UI bindings)."""
+        ch = self._state_channel
+        if ch is None:
+            return False
+        try:
+            logger.info("%s->camera.reset (sending)", origin)
+        except Exception:
+            pass
+        ok = ch.send_json({'type': 'camera.reset'})
+        try:
+            logger.info("%s->camera.reset sent=%s", origin, bool(ok))
+        except Exception:
+            pass
+        return bool(ok)
+
+    def set_camera(self, *, center=None, zoom=None, angles=None, origin: str = 'ui') -> bool:
+        """Send absolute camera fields when provided.
+
+        Prefer using zoom_at/pan_px/reset ops for interactions; this is
+        intended for explicit UI actions that set a known state.
+        """
+        ch = self._state_channel
+        if ch is None:
+            return False
+        payload: dict = {'type': 'set_camera'}
+        if center is not None:
+            try:
+                payload['center'] = list(center)
+            except Exception:
+                payload['center'] = center
+        if zoom is not None:
+            payload['zoom'] = float(zoom)
+        if angles is not None:
+            try:
+                payload['angles'] = list(angles)
+            except Exception:
+                payload['angles'] = angles
+        try:
+            logger.info("%s->set_camera %s", origin, {k: v for k, v in payload.items() if k != 'type'})
+        except Exception:
+            pass
+        ok = ch.send_json(payload)
+        return bool(ok)
+
+    def set_dims(self, *, current_step=None, ndisplay=None, origin: str = 'ui') -> bool:
+        """Send dims.set with optional current_step and ndisplay."""
+        ch = self._state_channel
+        if ch is None:
+            return False
+        payload: dict = {'type': 'dims.set'}
+        if current_step is not None:
+            try:
+                payload['current_step'] = list(current_step)
+            except Exception:
+                payload['current_step'] = current_step
+        if ndisplay is not None:
+            payload['ndisplay'] = int(ndisplay)
+        try:
+            logger.info("%s->dims.set %s", origin, {k: v for k, v in payload.items() if k != 'type'})
+        except Exception:
+            pass
+        ok = ch.send_json(payload)
+        return bool(ok)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         ch = self._state_channel

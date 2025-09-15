@@ -50,10 +50,12 @@ def launch_streaming_client(server_host='localhost',
     logger.info(f"Launching streaming client for {server_host}")
     
     # Create ProxyViewer (inherits from ViewerModel, no Window created)
+    # In the streaming client, keep ProxyViewer offline and forward state
+    # via the StreamCoordinator to avoid dual sockets/drift.
     proxy_viewer = ProxyViewer(
         server_host=server_host,
         server_port=state_port,
-        offline=bool(vt_smoke),
+        offline=True,
     )
     
     # Create Window manually with our ProxyViewer
@@ -130,7 +132,17 @@ def launch_streaming_client(server_host='localhost',
     
     # Now show the window
     window.show()
-    
+
+    # Wire the Home button to remote camera.reset via coordinator
+    try:
+        mgr = getattr(streaming_canvas, '_manager', None)
+        if mgr is not None:
+            rvb = window._qt_viewer.viewerButtons.resetViewButton
+            # Avoid duplicate connections by lambdas with default arg
+            rvb.clicked.connect(lambda _=False, m=mgr: m.reset_camera(origin='ui'))
+    except Exception:
+        logger.debug("launcher: failed to bind Home button to coordinator.reset_camera", exc_info=True)
+
     logger.info("Client launched successfully")
     
     # Run Qt event loop
