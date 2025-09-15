@@ -480,6 +480,8 @@ class StreamCoordinator:
                         eq_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Equal), parent)  # type: ignore
                         minus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Minus), parent)  # type: ignore
                         home_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), parent)  # type: ignore
+                        zero_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
+                        num0_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_0), parent)  # type: ignore
                         try:
                             up_sc.setAutoRepeat(True)
                             down_sc.setAutoRepeat(True)
@@ -494,9 +496,15 @@ class StreamCoordinator:
                         eq_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
                         minus_sc.activated.connect(lambda: self._zoom_steps_at_center(-1))  # type: ignore
                         home_sc.activated.connect(self._reset_camera)  # type: ignore
+                        zero_sc.activated.connect(self._reset_camera)  # type: ignore
+                        # Some platforms might differentiate keypad 0; attempt bind and log failures
+                        try:
+                            num0_sc.activated.connect(self._reset_camera)  # type: ignore
+                        except Exception as e:
+                            logger.debug("Binding keypad 0 shortcut failed: %s", e, exc_info=True)
                         # Keep references to avoid GC
-                        self._shortcuts = [up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc]  # type: ignore[attr-defined]
-                        logger.info("Shortcuts bound: Up/Down→dims.set, +/-/=→zoom, Home→reset")
+                        self._shortcuts = [up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc, zero_sc, num0_sc]  # type: ignore[attr-defined]
+                        logger.info("Shortcuts bound: Up/Down→dims.set, +/-/=→zoom, Home/0→reset")
                     except Exception:
                         logger.debug("Failed to bind Up/Down shortcuts", exc_info=True)
             except Exception:
