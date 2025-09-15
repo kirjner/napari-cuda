@@ -414,7 +414,7 @@ class StreamCoordinator:
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
         if not self._vt_smoke:
-            st = StateController(self.server_host, self.state_port, self._on_video_config)
+            st = StateController(self.server_host, self.state_port, self._on_video_config, self._on_dims_update)
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
             # Attach input forwarding (wheel + resize) now that state channel exists
@@ -858,6 +858,17 @@ class StreamCoordinator:
         self._stream_format_set = True
         if w > 0 and h > 0 and avcc_b64:
             self._init_vt_from_avcc(avcc_b64, w, h)
+
+    def _on_dims_update(self, data: dict) -> None:
+        try:
+            cur = data.get('current_step')
+            if isinstance(cur, (list, tuple)) and len(cur) > 0:
+                z = int(cur[0])
+                self._dims_z = z
+                if bool(getattr(self, '_log_dims_info', False)):
+                    logger.info("dims_update: baseline z=%d", z)
+        except Exception:
+            logger.debug("dims_update parse failed", exc_info=True)
 
     def _on_connected(self) -> None:
         self._init_decoder()

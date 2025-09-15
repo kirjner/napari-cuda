@@ -25,10 +25,12 @@ class StateChannel:
         host: str,
         port: int,
         on_video_config: Optional[Callable[[dict], None]] = None,
+        on_dims_update: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self.host = host
         self.port = int(port)
         self.on_video_config = on_video_config
+        self.on_dims_update = on_dims_update
         self._last_key_req: Optional[float] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -88,12 +90,19 @@ class StateChannel:
                         data = _json.loads(msg)
                     except _json.JSONDecodeError:
                         continue
-                    if (data.get('type') or '').lower() == 'video_config':
+                    t = (data.get('type') or '').lower()
+                    if t == 'video_config':
                         if self.on_video_config:
                             try:
                                 self.on_video_config(data)
                             except Exception:
                                 logger.debug("on_video_config callback failed", exc_info=True)
+                    elif t == 'dims_update':
+                        if self.on_dims_update:
+                            try:
+                                self.on_dims_update(data)
+                            except Exception:
+                                logger.debug("on_dims_update callback failed", exc_info=True)
                 ping_task.cancel()
                 send_task.cancel()
                 self._ws = None

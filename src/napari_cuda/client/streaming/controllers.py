@@ -20,9 +20,15 @@ class StateController:
     host: str
     port: int
     on_video_config: Optional[Callable[[dict], None]] = None
+    on_dims_update: Optional[Callable[[dict], None]] = None
 
     def start(self) -> Tuple[StateChannel, Thread]:
-        ch = StateChannel(self.host, int(self.port), on_video_config=self.on_video_config)
+        ch = StateChannel(
+            self.host,
+            int(self.port),
+            on_video_config=self.on_video_config,
+            on_dims_update=self.on_dims_update,
+        )
         t = Thread(target=ch.run, daemon=True)
         t.start()
         return ch, t
