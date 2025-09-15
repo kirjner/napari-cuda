@@ -25,6 +25,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
         on_wheel: Optional[Callable[[dict], None]] = None,
+        on_pointer: Optional[Callable[[dict], None]] = None,
         log_info: bool = False,
     ) -> None:
         super().__init__(widget)
@@ -38,16 +39,55 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._flush_resize)
         self._on_wheel = on_wheel
+        self._on_pointer = on_pointer
         self._log_info = bool(log_info)
 
     def eventFilter(self, obj, event):  # type: ignore[no-untyped-def]
         try:
             et = event.type()
+            # Prevent focus highlight on focus changes
+            if et == QtCore.QEvent.FocusIn:  # type: ignore[attr-defined]
+                # Only act for our widget or its descendants
+                try:
+                    is_target = (obj is self._widget) or (
+                        isinstance(obj, QtWidgets.QWidget) and hasattr(self._widget, 'isAncestorOf') and self._widget.isAncestorOf(obj)  # type: ignore[attr-defined]
+                    )
+                except Exception:
+                    is_target = False
+                if not is_target:
+                    return False
+                try:
+                    if hasattr(obj, 'clearFocus'):
+                        obj.clearFocus()
+                except Exception:
+                    pass
+                return True
             if et == QtCore.QEvent.Wheel:  # type: ignore[attr-defined]
+                # Only act for our widget or its descendants
+                try:
+                    is_target = (obj is self._widget) or (
+                        isinstance(obj, QtWidgets.QWidget) and hasattr(self._widget, 'isAncestorOf') and self._widget.isAncestorOf(obj)  # type: ignore[attr-defined]
+                    )
+                except Exception:
+                    is_target = False
+                if not is_target:
+                    return False
+                try:
+                    if hasattr(obj, 'clearFocus'):
+                        obj.clearFocus()
+                    if hasattr(self._widget, 'clearFocus'):
+                        self._widget.clearFocus()
+                except Exception:
+                    pass
                 return self._handle_wheel(event)
             elif et == QtCore.QEvent.Resize:  # type: ignore[attr-defined]
                 return self._handle_resize(event)
-            # No key handling in MVP
+            elif et == QtCore.QEvent.MouseButtonPress:  # type: ignore[attr-defined]
+                return self._handle_mouse_down(event)
+            elif et == QtCore.QEvent.MouseMove:  # type: ignore[attr-defined]
+                return self._handle_mouse_move(event)
+            elif et == QtCore.QEvent.MouseButtonRelease:  # type: ignore[attr-defined]
+                return self._handle_mouse_up(event)
         except Exception:
             logger.debug("InputSender eventFilter error", exc_info=True)
         return False
@@ -56,8 +96,18 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
     def _handle_wheel(self, ev) -> bool:  # type: ignore[no-untyped-def]
         now = time.perf_counter()
         if (now - float(self._last_wheel_send or 0.0)) < self._min_dt:
-            # Drop excessive wheel rate
-            return False
+            # Coalesce: consume event to avoid parent handling/focus highlight,
+            # but skip sending to server when over rate limit
+            try:
+                ev.accept()
+            except Exception:
+                pass
+            try:
+                # Ensure canvas doesn't get/keep focus
+                self._widget.clearFocus()
+            except Exception:
+                pass
+            return True
         try:
             # angleDelta is in 1/8 deg units, typical step is 120 per notch
             a = ev.angleDelta()
@@ -122,7 +172,17 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             logger.debug("on_wheel callback failed", exc_info=True)
         if ok:
             self._last_wheel_send = now
-        return False
+        # Consume to avoid selection highlighting in parent widgets
+        try:
+            ev.accept()
+        except Exception:
+            pass
+        # Ensure canvas does not appear focused after wheel
+        try:
+            self._widget.clearFocus()
+        except Exception:
+            pass
+        return True
 
     # --- Resize --------------------------------------------------------------------
     def _handle_resize(self, ev) -> bool:  # type: ignore[no-untyped-def]
@@ -164,6 +224,107 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
 
     # (no key handling)
 
+    # --- Mouse handling (forward to on_pointer) ----------------------------------
+    def _handle_mouse_down(self, ev) -> bool:  # type: ignore[no-untyped-def]
+        try:
+            if self._on_pointer is not None:
+                try:
+                    pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                    x = float(pos.x()); y = float(pos.y())
+                except Exception:
+                    x = y = 0.0
+                try:
+                    btn = int(ev.button())
+                    btns = int(ev.buttons())
+                    mods = int(ev.modifiers())
+                except Exception:
+                    btn = 0; btns = 0; mods = 0
+                self._on_pointer({
+                    'type': 'input.pointer',
+                    'phase': 'down',
+                    'x_px': float(x),
+                    'y_px': float(y),
+                    'button': int(btn),
+                    'buttons': int(btns),
+                    'mods': int(mods),
+                    'width_px': int(self._widget.width()),
+                    'height_px': int(self._widget.height()),
+                    'ts': float(time.time()),
+                })
+        except Exception:
+            logger.debug("on_pointer (down) failed", exc_info=True)
+        try:
+            ev.accept()
+        except Exception:
+            pass
+        return True
+
+    def _handle_mouse_move(self, ev) -> bool:  # type: ignore[no-untyped-def]
+        try:
+            if self._on_pointer is not None:
+                try:
+                    pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                    x = float(pos.x()); y = float(pos.y())
+                except Exception:
+                    x = y = 0.0
+                try:
+                    btns = int(ev.buttons())
+                    mods = int(ev.modifiers())
+                except Exception:
+                    btns = 0; mods = 0
+                self._on_pointer({
+                    'type': 'input.pointer',
+                    'phase': 'move',
+                    'x_px': float(x),
+                    'y_px': float(y),
+                    'buttons': int(btns),
+                    'mods': int(mods),
+                    'width_px': int(self._widget.width()),
+                    'height_px': int(self._widget.height()),
+                    'ts': float(time.time()),
+                })
+        except Exception:
+            logger.debug("on_pointer (move) failed", exc_info=True)
+        try:
+            ev.accept()
+        except Exception:
+            pass
+        return True
+
+    def _handle_mouse_up(self, ev) -> bool:  # type: ignore[no-untyped-def]
+        try:
+            if self._on_pointer is not None:
+                try:
+                    pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                    x = float(pos.x()); y = float(pos.y())
+                except Exception:
+                    x = y = 0.0
+                try:
+                    btn = int(ev.button())
+                    btns = int(ev.buttons())
+                    mods = int(ev.modifiers())
+                except Exception:
+                    btn = 0; btns = 0; mods = 0
+                self._on_pointer({
+                    'type': 'input.pointer',
+                    'phase': 'up',
+                    'x_px': float(x),
+                    'y_px': float(y),
+                    'button': int(btn),
+                    'buttons': int(btns),
+                    'mods': int(mods),
+                    'width_px': int(self._widget.width()),
+                    'height_px': int(self._widget.height()),
+                    'ts': float(time.time()),
+                })
+        except Exception:
+            logger.debug("on_pointer (up) failed", exc_info=True)
+        try:
+            ev.accept()
+        except Exception:
+            pass
+        return True
+
 
 class InputSender:
     """Attach input forwarding to a canvas widget and a StateChannel.
@@ -179,6 +340,7 @@ class InputSender:
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
         on_wheel: Optional[Callable[[dict], None]] = None,
+        on_pointer: Optional[Callable[[dict], None]] = None,
         log_info: bool = False,
     ) -> None:
         self._widget = widget
@@ -188,8 +350,11 @@ class InputSender:
             max_rate_hz=max_rate_hz,
             resize_debounce_ms=resize_debounce_ms,
             on_wheel=on_wheel,
+            on_pointer=on_pointer,
             log_info=log_info,
         )
+        # Pointer callback wiring
+        self._on_pointer = on_pointer
         # Set debounce interval explicitly on the timer
         try:
             self._filter._resize_timer.setInterval(int(max(0, resize_debounce_ms)))  # type: ignore[attr-defined]
@@ -197,6 +362,21 @@ class InputSender:
             pass
 
     def start(self) -> None:
+        # Best-effort: remove focus highlight without deep nesting
+        try:
+            self._disable_focus_highlight()
+            self._configure_focus_policies()
+            self._apply_focus_rules_recursively()
+            # Install app-level filter as a safety net to catch late focus/wheel
+            try:
+                app = QtWidgets.QApplication.instance()
+                if app is not None:
+                    app.installEventFilter(self._filter)
+            except Exception:
+                pass
+        except Exception:
+            logger.debug("Failed to disable focus highlight", exc_info=True)
+        # Install event filter last
         try:
             self._widget.installEventFilter(self._filter)
         except Exception:
@@ -213,3 +393,86 @@ class InputSender:
             _ = self._filter._send_json(msg)  # type: ignore[attr-defined]
         except Exception:
             logger.debug("Initial resize send failed", exc_info=True)
+
+    # --- Mouse/Pan ---------------------------------------------------------------
+    
+    def _disable_focus_highlight(self) -> None:
+        # Disable macOS focus ring when possible
+        if hasattr(QtCore.Qt, 'WA_MacShowFocusRect'):
+            self._widget.setAttribute(QtCore.Qt.WA_MacShowFocusRect, False)  # type: ignore[attr-defined]
+        # Suppress outline on focus via stylesheet
+        cur = self._widget.styleSheet() or ""
+        rules = [
+            "QWidget:focus { outline: none; border: 0px; }",
+            "QOpenGLWidget:focus { outline: none; border: 0px; }",
+            "*:focus { outline: none; }",
+        ]
+        extra = "\n".join([r for r in rules if r not in cur])
+        if extra:
+            self._widget.setStyleSheet((cur + ("\n" if cur else "")) + extra)
+
+    def _configure_focus_policies(self) -> None:
+        """Ensure wheel events do not force focus and trigger highlights.
+
+        - Prefer ClickFocus on the canvas widget so wheel does not grant focus.
+        - Set NoFocus on child widgets (e.g., GL subwidgets) to avoid focus rings.
+        - Apply macOS focus ring suppression recursively.
+        """
+        try:
+            self._widget.setFocusPolicy(QtCore.Qt.NoFocus)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        # Recursively apply to child widgets (best-effort)
+        try:
+            children = self._widget.findChildren(QtWidgets.QWidget)  # type: ignore[valid-type]
+        except Exception:
+            children = []
+        for ch in children:
+            try:
+                ch.setFocusPolicy(QtCore.Qt.NoFocus)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                if hasattr(QtCore.Qt, 'WA_MacShowFocusRect'):
+                    ch.setAttribute(QtCore.Qt.WA_MacShowFocusRect, False)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    def _apply_focus_rules_recursively(self) -> None:
+        """Apply NoFocus, disable Mac focus ring, and install event filter on children.
+
+        Called at start and once more shortly after to catch late-created GL widgets.
+        """
+        try:
+            children = self._widget.findChildren(QtWidgets.QWidget)  # type: ignore[valid-type]
+        except Exception:
+            children = []
+        for ch in children:
+            try:
+                ch.setFocusPolicy(QtCore.Qt.NoFocus)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                if hasattr(QtCore.Qt, 'WA_MacShowFocusRect'):
+                    ch.setAttribute(QtCore.Qt.WA_MacShowFocusRect, False)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                ch.installEventFilter(self._filter)
+            except Exception:
+                pass
+        # Re-apply shortly to catch dynamic children
+        try:
+            t = QtCore.QTimer(self._widget)
+            t.setSingleShot(True)
+            t.setInterval(200)
+            def _again() -> None:
+                try:
+                    self._apply_focus_rules_recursively()
+                except Exception:
+                    pass
+            t.timeout.connect(_again)
+            t.start()
+            self._focus_timer = t  # type: ignore[attr-defined]
+        except Exception:
+            pass

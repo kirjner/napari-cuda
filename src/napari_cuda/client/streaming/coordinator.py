@@ -354,6 +354,9 @@ class StreamCoordinator:
             self._evloop_stall_ms = 0
             self._evloop_sample_ms = 100
         self._evloop_mon: Optional[EventLoopMonitor] = None
+        # Video dimensions (from video_config)
+        self._vid_w: Optional[int] = None
+        self._vid_h: Optional[int] = None
         # Dims/Z control (client-initiated)
         try:
             import os as _os
@@ -390,6 +393,19 @@ class StreamCoordinator:
             rate = 60.0
         self._dims_min_dt: float = 1.0 / max(1.0, rate)
         self._last_dims_send: float = 0.0
+        # Camera ops coalescing
+        try:
+            import os as _os
+            cam_rate = float(_os.getenv('NAPARI_CUDA_CAMERA_SET_RATE', '60') or '60')
+        except Exception:
+            cam_rate = 60.0
+        self._cam_min_dt: float = 1.0 / max(1.0, cam_rate)
+        self._last_cam_send: float = 0.0
+        self._dragging: bool = False
+        self._last_wx: float = 0.0
+        self._last_wy: float = 0.0
+        self._pan_dx_accum: float = 0.0
+        self._pan_dy_accum: float = 0.0
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
@@ -439,10 +455,8 @@ class StreamCoordinator:
                     log_input_info = False
                 # Use same flag for dims logging (INFO when enabled, DEBUG otherwise)
                 self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
-                # Optional callback to map wheel -> dims.set
-                wheel_cb = (lambda d: None)
-                if enable_wheel_set_dims:
-                    wheel_cb = self._on_wheel_for_dims
+                # Unified wheel handler: dims.set for plain wheel; zoom for modifiers
+                wheel_cb = self._on_wheel
                 if self._state_channel is not None:
                     sender = InputSender(
                         widget=self._scene_canvas.native,
@@ -450,27 +464,39 @@ class StreamCoordinator:
                         max_rate_hz=max_rate_hz,
                         resize_debounce_ms=resize_debounce_ms,
                         on_wheel=wheel_cb,
+                        on_pointer=self._on_pointer,
                         log_info=log_input_info,
                     )
                     sender.start()
                     self._input_sender = sender  # type: ignore[attr-defined]
-                    logger.info("InputSender attached (wheel+resize)")
+                    logger.info("InputSender attached (wheel+resize+pointer)")
                     # Bind Up/Down shortcuts to step Z using the same dims.set path
                     try:
                         from qtpy import QtWidgets, QtGui, QtCore  # type: ignore
                         parent = self._scene_canvas.native
                         up_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Up), parent)  # type: ignore
                         down_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Down), parent)  # type: ignore
+                        plus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Plus), parent)  # type: ignore
+                        eq_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Equal), parent)  # type: ignore
+                        minus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Minus), parent)  # type: ignore
+                        home_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), parent)  # type: ignore
                         try:
                             up_sc.setAutoRepeat(True)
                             down_sc.setAutoRepeat(True)
+                            plus_sc.setAutoRepeat(True)
+                            eq_sc.setAutoRepeat(True)
+                            minus_sc.setAutoRepeat(True)
                         except Exception:
                             pass
                         up_sc.activated.connect(lambda: self._step_z(+int(self._wheel_step or 1)))  # type: ignore
                         down_sc.activated.connect(lambda: self._step_z(-int(self._wheel_step or 1)))  # type: ignore
+                        plus_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
+                        eq_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
+                        minus_sc.activated.connect(lambda: self._zoom_steps_at_center(-1))  # type: ignore
+                        home_sc.activated.connect(self._reset_camera)  # type: ignore
                         # Keep references to avoid GC
-                        self._shortcuts = [up_sc, down_sc]  # type: ignore[attr-defined]
-                        logger.info("Shortcuts bound: Up/Down → dims.set Z step")
+                        self._shortcuts = [up_sc, down_sc, plus_sc, eq_sc, minus_sc, home_sc]  # type: ignore[attr-defined]
+                        logger.info("Shortcuts bound: Up/Down→dims.set, +/-/=→zoom, Home→reset")
                     except Exception:
                         logger.debug("Failed to bind Up/Down shortcuts", exc_info=True)
             except Exception:
@@ -857,6 +883,13 @@ class StreamCoordinator:
         self._stream_format = fmt
         self._stream_format_set = True
         if w > 0 and h > 0 and avcc_b64:
+            # cache video dimensions for input mapping
+            try:
+                self._vid_w = int(w)
+                self._vid_h = int(h)
+            except Exception:
+                self._vid_w = w
+                self._vid_h = h
             self._init_vt_from_avcc(avcc_b64, w, h)
 
     def _on_dims_update(self, data: dict) -> None:
@@ -877,6 +910,26 @@ class StreamCoordinator:
 
     def _on_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
+
+    # --- Input mapping: unified wheel handler -------------------------------------
+    def _on_wheel(self, data: dict) -> None:
+        # Decide between dims.set (plain) and zoom (modifier)
+        try:
+            mods = int(data.get('mods') or 0)
+        except Exception:
+            mods = 0
+        try:
+            # Prefer explicit check for Ctrl/Meta/Alt; fallback to any modifier
+            ctrl = int(getattr(QtCore.Qt, 'ControlModifier'))
+            meta = int(getattr(QtCore.Qt, 'MetaModifier'))
+            alt = int(getattr(QtCore.Qt, 'AltModifier'))
+            use_zoom = (mods & (ctrl | meta | alt)) != 0
+        except Exception:
+            use_zoom = (mods != 0)
+        if use_zoom:
+            self._on_wheel_for_zoom(data)
+        else:
+            self._on_wheel_for_dims(data)
 
     # --- Input mapping: wheel -> dims.set (Z stepping) -------------------------------
     def _on_wheel_for_dims(self, data: dict) -> None:
@@ -957,6 +1010,174 @@ class StreamCoordinator:
                 logger.info("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
             else:
                 logger.debug("key->dims.set z=%d step=%+d sent=%s", int(self._dims_z), int(dz), bool(ok))
+
+    # --- Camera ops: zoom/pan/reset -----------------------------------------------
+    def _widget_to_video(self, xw: float, yw: float) -> tuple[float, float]:
+        try:
+            vw = float(self._vid_w or 0)
+            vh = float(self._vid_h or 0)
+            ww = float(self._scene_canvas.native.width())
+            wh = float(self._scene_canvas.native.height())
+            try:
+                dpr = float(self._scene_canvas.native.devicePixelRatioF())
+            except Exception:
+                dpr = 1.0
+            if vw <= 0 or vh <= 0 or ww <= 0 or wh <= 0:
+                return (xw, yw)
+            ww_d = ww * dpr; wh_d = wh * dpr
+            xw_d = float(xw) * dpr; yw_d = float(yw) * dpr
+            scale = min(ww_d / vw, wh_d / vh)
+            ox = (ww_d - vw * scale) / 2.0
+            oy = (wh_d - vh * scale) / 2.0
+            xv = (xw_d - ox) / max(1e-6, scale)
+            yv = (yw_d - oy) / max(1e-6, scale)
+            if vw > 0:
+                xv = max(0.0, min(vw, xv))
+            if vh > 0:
+                yv = max(0.0, min(vh, yv))
+            return (xv, yv)
+        except Exception:
+            return (xw, yw)
+
+    def _video_delta_to_canvas(self, dx_v: float, dy_v: float) -> tuple[float, float]:
+        # Map video delta to canvas delta; make vertical drag direction feel natural
+        try:
+            return (float(dx_v), float(dy_v))
+        except Exception:
+            return (dx_v, dy_v)
+
+    def _server_anchor_from_video(self, xv: float, yv: float) -> tuple[float, float]:
+        # Flip Y for bottom-left canvas origin expected by server
+        try:
+            vh = float(self._vid_h or 0)
+            return (float(xv), float(max(0.0, min(vh, vh - yv))))
+        except Exception:
+            return (xv, yv)
+
+    def _zoom_steps_at_center(self, steps: int) -> None:
+        ch = self._state_channel
+        if ch is None:
+            return
+        try:
+            base = float(os.getenv('NAPARI_CUDA_ZOOM_BASE', '1.1') or '1.1')
+        except Exception:
+            base = 1.1
+        try:
+            s = int(steps)
+        except Exception:
+            s = 0
+        if s == 0:
+            return
+        # '+' zooms in, '-' zooms out
+        f = base ** (-s)
+        ax = float(self._vid_w or 0) / 2.0
+        ay = float(self._vid_h or 0) / 2.0
+        ax_s, ay_s = self._server_anchor_from_video(ax, ay)
+        ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(f), 'anchor_px': [float(ax_s), float(ay_s)]})
+        if getattr(self, '_log_dims_info', False):
+            logger.info("key->camera.zoom_at f=%.4f sent=%s", float(f), bool(ok))
+
+    def _reset_camera(self) -> None:
+        ch = self._state_channel
+        if ch is None:
+            return
+        ok = ch.send_json({'type': 'camera.reset'})
+        if getattr(self, '_log_dims_info', False):
+            logger.info("key->camera.reset sent=%s", bool(ok))
+
+    def _on_wheel_for_zoom(self, data: dict) -> None:
+        ch = self._state_channel
+        if ch is None:
+            return
+        try:
+            ay = float(data.get('angle_y') or 0.0)
+            py = float(data.get('pixel_y') or 0.0)
+            xw = float(data.get('x_px') or 0.0)
+            yw = float(data.get('y_px') or 0.0)
+        except Exception:
+            ay = 0.0; py = 0.0; xw = yw = 0.0
+        try:
+            base = float(os.getenv('NAPARI_CUDA_ZOOM_BASE', '1.1') or '1.1')
+        except Exception:
+            base = 1.1
+        if ay != 0.0:
+            s = 1.0 if ay > 0 else -1.0
+            factor = base ** s
+        elif py != 0.0:
+            factor = base ** (py / 30.0)
+        else:
+            return
+        xv, yv = self._widget_to_video(xw, yw)
+        ax, ay = self._server_anchor_from_video(xv, yv)
+        ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay)]})
+        if getattr(self, '_log_dims_info', False):
+            # Single guarded block to collect widget metrics
+            ww = wh = 0
+            dpr = 1.0
+            try:
+                ww = int(self._scene_canvas.native.width())
+                wh = int(self._scene_canvas.native.height())
+                dpr = float(self._scene_canvas.native.devicePixelRatioF())
+            except Exception:
+                logger.debug("zoom log: failed to read widget metrics", exc_info=True)
+            logger.info(
+                "wheel+mod->camera.zoom_at f=%.4f widget=(%.1f,%.1f) video=(%.1f,%.1f) anchorBL=(%.1f,%.1f) widget_wh=%dx%d dpr=%.2f sent=%s",
+                float(factor), float(xw), float(yw), float(xv), float(yv), float(ax), float(ay), int(ww), int(wh), float(dpr), bool(ok)
+            )
+
+    def _on_pointer(self, data: dict) -> None:
+        phase = (data.get('phase') or '').lower()
+        try:
+            xw = float(data.get('x_px') or 0.0)
+            yw = float(data.get('y_px') or 0.0)
+        except Exception:
+            xw = yw = 0.0
+        if phase == 'down':
+            self._dragging = True
+            self._last_wx = xw
+            self._last_wy = yw
+            self._pan_dx_accum = 0.0
+            self._pan_dy_accum = 0.0
+            return
+        if phase == 'move' and self._dragging:
+            # Accumulate pan in video px, then convert to canvas delta
+            xv0, yv0 = self._widget_to_video(self._last_wx, self._last_wy)
+            xv1, yv1 = self._widget_to_video(xw, yw)
+            dx_v = (xv1 - xv0)
+            dy_v = (yv1 - yv0)
+            dx_c, dy_c = self._video_delta_to_canvas(dx_v, dy_v)
+            self._pan_dx_accum += dx_c
+            self._pan_dy_accum += dy_c
+            self._last_wx = xw
+            self._last_wy = yw
+            self._flush_pan_if_due()
+            return
+        if phase == 'up':
+            self._dragging = False
+            # Flush any residual pan
+            self._flush_pan(force=True)
+
+    def _flush_pan_if_due(self) -> None:
+        now = time.perf_counter()
+        if (now - float(self._last_cam_send or 0.0)) >= self._cam_min_dt:
+            self._flush_pan()
+
+    def _flush_pan(self, force: bool = False) -> None:
+        dx = float(self._pan_dx_accum or 0.0)
+        dy = float(self._pan_dy_accum or 0.0)
+        if not force and abs(dx) < 1e-3 and abs(dy) < 1e-3:
+            return
+        ch = self._state_channel
+        if ch is None:
+            self._pan_dx_accum = 0.0
+            self._pan_dy_accum = 0.0
+            return
+        ok = ch.send_json({'type': 'camera.pan_px', 'dx_px': float(dx), 'dy_px': float(dy)})
+        self._last_cam_send = time.perf_counter()
+        self._pan_dx_accum = 0.0
+        self._pan_dy_accum = 0.0
+        if getattr(self, '_log_dims_info', False):
+            logger.info("drag->camera.pan_px dx=%.1f dy=%.1f sent=%s", float(dx), float(dy), bool(ok))
 
     # (no key→dims mapping)
 

@@ -54,10 +54,14 @@ class PixelReceiver:
     async def _run(self) -> None:
         url = f"ws://{self.host}:{self.port}"
         logger.info("Connecting to pixel stream at %s", url)
+        retry_delay = 5.0
+        max_delay = 30.0
         while True:
             try:
                 async with websockets.connect(url) as ws:
                     logger.info("Connected to pixel stream")
+                    # Reset backoff on successful connect
+                    retry_delay = 5.0
                     if self.on_connected:
                         try:
                             self.on_connected()
@@ -93,11 +97,25 @@ class PixelReceiver:
                             except Exception:
                                 logger.debug("on_frame callback failed", exc_info=True)
             except Exception as e:
-                logger.exception("Stream connection lost")
+                # Graceful handling for expected cutoff/restart scenarios
+                msg = str(e) or e.__class__.__name__
+                try:
+                    import websockets as _ws
+                except Exception:
+                    _ws = None  # type: ignore[assignment]
+                if isinstance(e, (EOFError, ConnectionRefusedError)):
+                    logger.info("Pixel stream unavailable (%s); retrying in %.0fs", msg, retry_delay)
+                elif (_ws is not None) and isinstance(e, _ws.exceptions.InvalidMessage):  # type: ignore[attr-defined]
+                    logger.info("Pixel stream handshake failed (%s); retrying in %.0fs", msg, retry_delay)
+                elif isinstance(e, OSError):
+                    logger.info("Pixel stream socket error (%s); retrying in %.0fs", msg, retry_delay)
+                else:
+                    logger.exception("Stream connection lost")
                 if self.on_disconnect:
                     try:
                         self.on_disconnect(e)
                     except Exception:
                         logger.debug("on_disconnect callback failed", exc_info=True)
-                await asyncio.sleep(5)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(max_delay, retry_delay * 1.5)
                 logger.info("Reconnecting to stream...")

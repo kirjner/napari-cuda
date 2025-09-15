@@ -779,7 +779,17 @@ class EGLRendererWorker:
                 anc = getattr(state, 'zoom_anchor_px', None)
                 if zf is not None and float(zf) > 0.0 and anc is not None and hasattr(self.view, 'camera'):
                     try:
+                        cw, ch = (self.canvas.size if (self.canvas is not None and hasattr(self.canvas, 'size')) else (self.width, self.height))
+                        before_center = getattr(cam, 'center', None)
+                        before_zoom = getattr(cam, 'zoom', None)
+                        logger.debug(
+                            "apply_zoom_at: factor=%.4f anchorBL=(%.1f,%.1f) canvas=%dx%d before_center=%s before_zoom=%s",
+                            float(zf), float(anc[0]), float(anc[1]), int(cw), int(ch), before_center, before_zoom
+                        )
                         self.view.camera.zoom(float(zf), center=(float(anc[0]), float(anc[1])))  # type: ignore[call-arg]
+                        after_center = getattr(cam, 'center', None)
+                        after_zoom = getattr(cam, 'zoom', None)
+                        logger.debug("apply_zoom_at: after_center=%s after_zoom=%s", after_center, after_zoom)
                     except Exception as e:
                         logger.debug("camera.zoom_at failed: %s", e)
                 # Pixel-space pan (convert canvas pixel delta to world delta)
