@@ -661,6 +661,63 @@ class StreamingCanvas(VispyCanvas):
             logger.debug('FPS HUD: mem calc failed', exc_info=True)
         if loop_bits:
             txt = txt + "\n" + "  ".join(loop_bits)
+        # Optional 3D view HUD (volume tuning)
+        try:
+            import os as _os
+            view_hud_enabled = (_os.getenv('NAPARI_CUDA_VIEW_HUD') or '0').lower() in ('1','true','yes','on')
+        except Exception:
+            view_hud_enabled = False
+        if view_hud_enabled:
+            try:
+                if hasattr(mgr, 'view_hud_snapshot'):
+                    vs = mgr.view_hud_snapshot()  # type: ignore[attr-defined]
+                else:
+                    vs = None
+            except Exception:
+                vs = None
+            if isinstance(vs, dict) and vs:
+                try:
+                    # First line: mode + zoom/pan quick glance
+                    vol_flag = 'vol' if bool(vs.get('volume')) else 'img'
+                    ndisp = vs.get('ndisplay')
+                    vm = '3D' if bool(vs.get('vol_mode')) else '2D'
+                    zb = vs.get('zoom_base')
+                    zf = vs.get('last_zoom_factor')
+                    pdx = vs.get('last_pan_dx'); pdy = vs.get('last_pan_dy')
+                    line_v1 = f"view:{vol_flag}/{vm} ndisp:{ndisp} zbase:{zb} zfac:{zf:.3f}" if isinstance(zf, (int,float)) else f"view:{vol_flag}/{vm} ndisp:{ndisp} zbase:{zb}"
+                    line_v1 += f" pan:({pdx:.1f},{pdy:.1f})" if isinstance(pdx, (int,float)) and isinstance(pdy, (int,float)) else ""
+                    # Second line: render and multiscale summary
+                    rmode = vs.get('render_mode'); cmap = vs.get('colormap')
+                    clo = vs.get('clim_lo'); chi = vs.get('clim_hi')
+                    opa = vs.get('opacity'); sst = vs.get('sample_step')
+                    ms_pol = vs.get('ms_policy'); ms_lvl = vs.get('ms_level'); ms_n = vs.get('ms_levels')
+                    rbits = []
+                    if rmode: rbits.append(f"mode:{rmode}")
+                    if isinstance(clo,(int,float)) and isinstance(chi,(int,float)):
+                        rbits.append(f"clim:[{clo:.2f},{chi:.2f}]")
+                    if cmap: rbits.append(f"map:{cmap}")
+                    if isinstance(opa,(int,float)): rbits.append(f"opac:{opa:.2f}")
+                    if isinstance(sst,(int,float)): rbits.append(f"step:{sst:.2f}")
+                    msbits = []
+                    if ms_pol: msbits.append(f"pol:{ms_pol}")
+                    if isinstance(ms_lvl,int) and isinstance(ms_n,int): msbits.append(f"lvl:{ms_lvl}/{max(0,ms_n-1)}")
+                    line_v2 = "render: " + " ".join(rbits) if rbits else "render: -"
+                    if msbits:
+                        line_v2 += "  ms: " + " ".join(msbits)
+                    # Third line: last anchors if available
+                    aw = vs.get('last_zoom_widget_px'); av = vs.get('last_zoom_video_px'); asv = vs.get('last_zoom_anchor_px')
+                    line_v3 = None
+                    if isinstance(aw,(list,tuple)) and isinstance(av,(list,tuple)) and isinstance(asv,(list,tuple)):
+                        try:
+                            line_v3 = f"anchor: w:({aw[0]:.1f},{aw[1]:.1f}) v:({av[0]:.1f},{av[1]:.1f}) s:({asv[0]:.1f},{asv[1]:.1f})"
+                        except Exception:
+                            line_v3 = None
+                    # Compose
+                    txt = txt + "\n" + line_v1 + "\n" + line_v2
+                    if line_v3:
+                        txt = txt + "\n" + line_v3
+                except Exception:
+                    logger.debug('FPS HUD: view HUD failed', exc_info=True)
         # Optional jitter line (shown when metrics are present)
         try:
             show_jit = (jit_q is not None) or (jit_deliv_rate is not None) or (jit_sched_mean is not None)

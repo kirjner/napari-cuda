@@ -412,6 +412,13 @@ class StreamCoordinator:
         # Video dimensions (from video_config)
         self._vid_w: Optional[int] = None
         self._vid_h: Optional[int] = None
+        # View HUD diagnostics (for tuning 3D volume controls)
+        self._last_zoom_factor: Optional[float] = None
+        self._last_zoom_widget_px: Optional[tuple[float, float]] = None
+        self._last_zoom_video_px: Optional[tuple[float, float]] = None
+        self._last_zoom_anchor_px: Optional[tuple[float, float]] = None
+        self._last_pan_dx_sent: float = 0.0
+        self._last_pan_dy_sent: float = 0.0
         # Dims/Z control (client-initiated)
         try:
             import os as _os
@@ -1499,6 +1506,79 @@ class StreamCoordinator:
             pass
         return bool(ok)
 
+    # --- View HUD snapshot (for overlay) ----------------------------------------
+    def view_hud_snapshot(self) -> dict:
+        """Return a compact snapshot of 3D view/volume tuning state.
+
+        Safe to call from GUI timer; avoids raising on missing fields.
+        """
+        snap: dict = {}
+        try:
+            snap['ndisplay'] = int(self._dims_meta.get('ndisplay') or 0)
+        except Exception:
+            snap['ndisplay'] = None
+        try:
+            snap['volume'] = bool(self._dims_meta.get('volume'))
+        except Exception:
+            snap['volume'] = None
+        snap['vol_mode'] = bool(self._is_volume_mode())
+        # Render state
+        r = self._dims_meta.get('render') or {}
+        if isinstance(r, dict):
+            snap['render_mode'] = r.get('mode')
+            try:
+                clim = r.get('clim') or []
+                snap['clim_lo'] = float(clim[0]) if len(clim) > 0 else None
+                snap['clim_hi'] = float(clim[1]) if len(clim) > 1 else None
+            except Exception:
+                snap['clim_lo'] = snap['clim_hi'] = None
+            snap['colormap'] = r.get('colormap')
+            try:
+                snap['opacity'] = float(r.get('opacity')) if r.get('opacity') is not None else None
+            except Exception:
+                snap['opacity'] = None
+            try:
+                snap['sample_step'] = float(r.get('sample_step')) if r.get('sample_step') is not None else None
+            except Exception:
+                snap['sample_step'] = None
+        # Multiscale
+        ms = self._dims_meta.get('multiscale') or {}
+        if isinstance(ms, dict):
+            snap['ms_policy'] = ms.get('policy')
+            try:
+                snap['ms_level'] = int(ms.get('current_level')) if ms.get('current_level') is not None else None
+            except Exception:
+                snap['ms_level'] = None
+            try:
+                lv = ms.get('levels')
+                snap['ms_levels'] = int(len(lv)) if isinstance(lv, (list, tuple)) else None
+            except Exception:
+                snap['ms_levels'] = None
+        # Primary axis
+        try:
+            snap['primary_axis'] = int(self._primary_axis_index) if self._primary_axis_index is not None else None
+        except Exception:
+            snap['primary_axis'] = None
+        # Zoom/pan last actions
+        snap['last_zoom_factor'] = self._last_zoom_factor
+        snap['last_zoom_widget_px'] = self._last_zoom_widget_px
+        snap['last_zoom_video_px'] = self._last_zoom_video_px
+        snap['last_zoom_anchor_px'] = self._last_zoom_anchor_px
+        snap['last_pan_dx'] = self._last_pan_dx_sent
+        snap['last_pan_dy'] = self._last_pan_dy_sent
+        # Video size and zoom base
+        try:
+            snap['video_w'] = int(self._vid_w) if self._vid_w is not None else None
+            snap['video_h'] = int(self._vid_h) if self._vid_h is not None else None
+        except Exception:
+            snap['video_w'] = self._vid_w; snap['video_h'] = self._vid_h
+        try:
+            import os as _os
+            snap['zoom_base'] = float(_os.getenv('NAPARI_CUDA_ZOOM_BASE', '1.1') or '1.1')
+        except Exception:
+            snap['zoom_base'] = None
+        return snap
+
     def _mirror_dims_to_viewer(
         self,
         vm_ref,
@@ -1711,6 +1791,14 @@ class StreamCoordinator:
             return
         xv, yv = self._widget_to_video(xw, yw)
         ax, ay = self._server_anchor_from_video(xv, yv)
+        # Stash for HUD
+        try:
+            self._last_zoom_factor = float(factor)
+            self._last_zoom_widget_px = (float(xw), float(yw))
+            self._last_zoom_video_px = (float(xv), float(yv))
+            self._last_zoom_anchor_px = (float(ax), float(ay))
+        except Exception:
+            logger.debug("zoom HUD stash failed", exc_info=True)
         ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay)]})
         if getattr(self, '_log_dims_info', False):
             logger.info("wheel+mod->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s", float(factor), float(ax), float(ay), bool(ok))
@@ -1780,6 +1868,12 @@ class StreamCoordinator:
             self._pan_dy_accum = 0.0
             return
         ok = ch.send_json({'type': 'camera.pan_px', 'dx_px': float(dx), 'dy_px': float(dy)})
+        # Stash for HUD
+        try:
+            self._last_pan_dx_sent = float(dx)
+            self._last_pan_dy_sent = float(dy)
+        except Exception:
+            logger.debug("pan HUD stash failed", exc_info=True)
         self._last_cam_send = time.perf_counter()
         self._pan_dx_accum = 0.0
         self._pan_dy_accum = 0.0
