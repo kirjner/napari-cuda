@@ -276,6 +276,11 @@ class StreamCoordinator:
                 self._wake_timer.timeout.connect(self._on_present_timer)
             except Exception:
                 logger.debug("Wake timer init failed", exc_info=True)
+        # Record GUI thread affinity for safe scheduling from worker threads
+        try:
+            self._gui_thread = self._scene_canvas.native.thread()  # type: ignore[attr-defined]
+        except Exception:
+            self._gui_thread = None  # type: ignore[attr-defined]
 
         def _schedule_next_wake() -> None:
             if self._use_display_loop:
@@ -331,8 +336,9 @@ class StreamCoordinator:
                 self._wake_proxy = _WakeProxy(_schedule_next_wake, self._scene_canvas.native)
                 wake_cb = self._wake_proxy.trigger.emit
             except Exception:
-                logger.debug("WakeProxy init failed; falling back to direct schedule callback", exc_info=True)
-                wake_cb = _schedule_next_wake
+                logger.debug("WakeProxy init failed; using thread-safe scheduler wrapper", exc_info=True)
+                # Fallback to a wrapper that routes scheduling to GUI thread
+                wake_cb = (lambda: self.schedule_next_wake_threadsafe())
         else:
             # External loop owns draw cadence; pipelines don't need to schedule wakes
             wake_cb = (lambda: None)
@@ -505,6 +511,43 @@ class StreamCoordinator:
             settings_rate = 60.0
         self._settings_min_dt: float = 1.0 / max(1.0, settings_rate)
         self._last_settings_send: float = 0.0
+
+    # --- Thread-safe scheduling helpers --------------------------------------
+    def _on_gui_thread(self) -> bool:
+        try:
+            cur = QtCore.QThread.currentThread()
+            gui_thr = getattr(self, '_gui_thread', None)
+            return (gui_thr is None) or (cur == gui_thr)
+        except Exception:
+            return True
+
+    def schedule_next_wake_threadsafe(self) -> None:
+        """Ensure wake scheduling runs on the GUI thread.
+
+        Prefer the wake proxy; fallback to UI call proxy; otherwise no-op.
+        """
+        try:
+            if self._on_gui_thread():
+                self._schedule_next_wake()
+                return
+        except Exception:
+            pass
+        # Otherwise forward via proxies
+        try:
+            wp = getattr(self, '_wake_proxy', None)
+            if wp is not None and hasattr(wp, 'trigger'):
+                wp.trigger.emit()  # type: ignore[attr-defined]
+                return
+        except Exception:
+            logger.debug("threadsafe schedule: wake proxy failed", exc_info=True)
+        try:
+            ui_call = getattr(self, '_ui_call', None)
+            if ui_call is not None and hasattr(ui_call, 'call'):
+                ui_call.call.emit(self._schedule_next_wake)  # type: ignore[attr-defined]
+                return
+        except Exception:
+            logger.debug("threadsafe schedule: ui_call failed", exc_info=True)
+        logger.debug("threadsafe schedule: no proxy available; skipping")
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
@@ -817,7 +860,11 @@ class StreamCoordinator:
             self._last_draw_pc = now_pc
         except Exception:
             logger.debug("draw: pacing metric failed", exc_info=True)
-        # One-shot warmup handled via timer at VT gate lift
+        # Apply warmup ramp/restore on GUI thread (timer-less)
+        try:
+            self._apply_warmup(now_pc)
+        except Exception:
+            logger.debug("draw: apply_warmup failed", exc_info=True)
         # Stats are reported via a dedicated timer now
 
         # VT output is drained continuously by worker; draw focuses on presenting
@@ -898,6 +945,7 @@ class StreamCoordinator:
                     logger.debug("enqueue last PyAV frame failed", exc_info=True)
         # Schedule next wake based on earliest due; avoids relying on a 60 Hz loop
         try:
+            # Safe: draw() runs on GUI thread
             self._schedule_next_wake()
         except Exception:
             logger.debug("draw: schedule_next_wake failed", exc_info=True)
@@ -2025,30 +2073,15 @@ class StreamCoordinator:
                             extra_ms = max(0.0, min(float(self._warmup_max_ms), target_ms - base_ms))
                         extra_s = extra_ms / 1000.0
                         if extra_s > 0.0:
-                            # One-shot warmup: set extra latency once, restore via single-shot timer
+                            # Timer-less warmup: set extra latency and let draw() ramp it down
                             self._presenter.set_latency(self._vt_latency_s + extra_s)
-                            try:
-                                # Cancel prior warmup timer if present
-                                if hasattr(self, '_warmup_reset_timer') and self._warmup_reset_timer is not None:
-                                    self._warmup_reset_timer.stop()
-                            except Exception:
-                                pass
-                            self._warmup_reset_timer = QtCore.QTimer(self._scene_canvas.native)
-                            self._warmup_reset_timer.setSingleShot(True)
-                            self._warmup_reset_timer.setTimerType(QtCore.Qt.PreciseTimer)
-                            self._warmup_reset_timer.setInterval(max(1, int(float(self._warmup_window_s) * 1000.0)))
-                            def _restore_latency() -> None:
-                                try:
-                                    self._presenter.set_latency(self._vt_latency_s)
-                                except Exception:
-                                    logger.debug("Warmup latency restore failed", exc_info=True)
-                            self._warmup_reset_timer.timeout.connect(_restore_latency)
-                            self._warmup_reset_timer.start()
+                            self._warmup_extra_active_s = extra_s
+                            self._warmup_until = time.perf_counter() + float(self._warmup_window_s)
                 except Exception:
                     logger.debug("Warmup latency set failed", exc_info=True)
-                # Schedule first wake after VT becomes active
+                # Schedule first wake after VT becomes active (thread-safe)
                 try:
-                    self._schedule_next_wake()
+                    self.schedule_next_wake_threadsafe()
                 except Exception:
                     logger.debug("schedule_next_wake after VT gate failed", exc_info=True)
             else:

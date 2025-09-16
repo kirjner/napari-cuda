@@ -62,6 +62,7 @@ static void vt_output_cb(void *refcon,
     }
     // Retain for cross-thread handoff
     CFRetain(imageBuffer);
+    __sync_fetch_and_add(&s->retains, 1);
     // Tag buffer with session pointer for later per-session retain/release accounting
     static CFStringRef kNapariVTSessionKey = CFSTR("napari_cuda.vt.session");
     intptr_t sp = (intptr_t)s;
@@ -78,7 +79,10 @@ static void vt_output_cb(void *refcon,
     // drop oldest if full
     if (s->qcount == s->qcap) {
         vt_item_t *old = &s->q[s->qhead];
-        if (old->buf) CFRelease(old->buf);
+        if (old->buf) {
+            vt_release_frame(old->buf);
+            old->buf = NULL;
+        }
         __sync_fetch_and_add(&s->drops, 1);
         s->qhead = (s->qhead + 1) % s->qcap;
         s->qcount--;
@@ -229,7 +233,10 @@ void vt_destroy(vt_session_t* s) {
     if (s->fmt) CFRelease(s->fmt);
     pthread_mutex_lock(&s->mu);
     for (int i=0;i<s->qcap;i++) {
-        if (s->q[i].buf) CFRelease(s->q[i].buf);
+        if (s->q[i].buf) {
+            vt_release_frame(s->q[i].buf);
+            s->q[i].buf = NULL;
+        }
     }
     pthread_mutex_unlock(&s->mu);
     free(s->q);

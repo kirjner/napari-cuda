@@ -114,6 +114,8 @@ class GLRenderer:
         # Accept either numpy RGB frames or a (CVPixelBufferRef, release_cb) tuple
         payload = frame
         release_cb = None
+        release_after_draw_cb: Optional[Callable[[object], None]] = None
+        release_after_draw_payload: Optional[object] = None
         if isinstance(frame, tuple) and len(frame) == 2:
             payload, release_cb = frame  # type: ignore[assignment]
 
@@ -133,15 +135,27 @@ class GLRenderer:
                     if self._vt_cache:
                         vt_attempted = True
                         drew_vt = self._draw_vt_texture(self._vt_cache, payload)
+                        if drew_vt and release_cb is not None:
+                            release_after_draw_cb = release_cb
+                            release_after_draw_payload = payload
+                            release_cb = None
             except Exception:
                 # Not a CVPixelBuffer or VT path failed; fall back below
                 logger.debug("VT zero-copy draw attempt failed; falling back", exc_info=True)
                 drew_vt = False
+        else:
+            logger.debug("draw: payload=%s vt_attempted=%s", type(payload).__name__, vt_attempted)
 
         did_draw = False
         if not drew_vt:
             # If VT was attempted but failed, preserve last frame to avoid flicker
             if vt_attempted and self._has_drawn:
+                if release_cb is not None and payload is not None:
+                    try:
+                        release_cb(payload)  # type: ignore[misc]
+                    except Exception:
+                        logger.debug("VT drop-frame release failed", exc_info=True)
+                    release_cb = None
                 return
             # If no new frame, keep last drawn content to avoid flicker
             if payload is None and self._has_drawn:
@@ -184,6 +198,13 @@ class GLRenderer:
                         self._vid_shape = (h, w)
                     else:
                         self._video_texture.set_data(arr)
+                if release_cb is not None and payload is not None:
+                    try:
+                        release_cb(payload)  # type: ignore[misc]
+                    except Exception:
+                        logger.debug("VT fallback release failed", exc_info=True)
+                    release_cb = None
+                    payload = None
             # Avoid clearing every frame to prevent visible flashes on some drivers
             if not self._has_drawn:
                 ctx.clear('black')
@@ -192,11 +213,11 @@ class GLRenderer:
             did_draw = True
 
         # Invoke release callback (if provided) after submission
-        if release_cb is not None and payload is not None and (drew_vt or did_draw):
+        if release_after_draw_cb is not None and release_after_draw_payload is not None:
             try:
-                release_cb(payload)  # type: ignore[misc]
+                release_after_draw_cb(release_after_draw_payload)  # type: ignore[misc]
             except Exception:
-                logger.debug("release_cb failed after draw", exc_info=True)
+                logger.debug("release_cb failed after VT draw", exc_info=True)
 
     # --- VT helpers ---
     def _compile_glsl(self, vert_src: str, frag_src: str) -> Optional[int]:
@@ -395,6 +416,7 @@ class GLRenderer:
                 pass
             # Release the GL texture object created by VT
             try:
+                logger.debug("VT release tex=%s", hex(name_i))
                 self._vt.gl_release_tex(tex_cap)
             except Exception:
                 logger.debug("gl_release_tex failed", exc_info=True)
