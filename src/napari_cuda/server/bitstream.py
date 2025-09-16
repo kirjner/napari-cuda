@@ -32,6 +32,10 @@ except Exception:
     except Exception:
         _FAST_PACK = None
 
+# Allow disabling the Cython fast packer via env for diagnostics/workarounds
+if os.getenv('NAPARI_CUDA_DISABLE_FAST_PACK', '0') not in ('0', '', 'false', 'False', 'NO', 'no'):
+    _FAST_PACK = None
+
 
 BytesLike = Union[bytes, bytearray, memoryview]
 
