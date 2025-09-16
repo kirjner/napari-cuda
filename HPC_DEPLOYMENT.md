@@ -19,11 +19,11 @@ LOGIN_HOST=login.cluster.mit.edu # Adjust to your login node
 
 ## 1) Configure Your Cluster
 - Copy the sample config: `cp .env.hpc.example .env.hpc` and edit values (partition, memory/CPUs, login host).
-- Required env on compute node: `QT_QPA_PLATFORM=offscreen`, `PYOPENGL_PLATFORM=egl`.
-- If you built a local PyCUDA wheel with OpenGL interop, install it after syncing server deps:
-  - `uv pip install build/wheelhouse/pycuda-*.whl`
-  - or `uv pip install --no-index --find-links build/wheelhouse pycuda`
-  This ensures `pycuda.gl` is available for CUDA–OpenGL interop.
+- Copy `.env.example` to `.env` and update CUDA paths if they differ (e.g., `CUDA_HOME`).
+- Run `make setup-gl` once per node to install Mesa/EGL headers under `build/gl`.
+- `make verify-gl` confirms EGL + PyCUDA interop; it also ensures `.env` carries the right `NAPARI_CUDA_GL_PREFIX`/`NAPARI_CUDA_GL_DRIVERS` values for future runs.
+- Required env on compute node: `QT_QPA_PLATFORM=offscreen`, `PYOPENGL_PLATFORM=egl` (already set via `.env`).
+- Ensure CUDA module is available (e.g., `module load nvhpc/24.5`).
 - Ensure CUDA module is available (e.g., `module load nvhpc/24.5`).
 
 ## 2) Submit a GPU Job
@@ -36,7 +36,7 @@ chmod +x scripts/*.sh
 
 This submits `scripts/run_server_slurm.sh`, which will:
 - Install server deps with `uv sync --extra server`
-- Validate CUDA-OpenGL interop (`scripts/test_cuda_gl.py`)
+- Validate CUDA-OpenGL interop via `make verify-gl`
 - Start `napari-cuda-server` bound to `127.0.0.1`
 
 Monitor with `watch squeue -u $USER` and tail `napari-cuda-<jobid>.log`.

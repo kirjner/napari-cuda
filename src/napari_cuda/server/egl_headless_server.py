@@ -18,6 +18,9 @@ from typing import Optional, Set
 import websockets
 import importlib.resources as ilr
 import socket
+import ctypes
+from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
 
 from .egl_worker import EGLRendererWorker, ServerSceneState
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
@@ -25,6 +28,91 @@ from .metrics import Metrics
 from napari_cuda.utils.env import env_bool
 
 logger = logging.getLogger(__name__)
+
+# Load environment variables from .env/.env.hpc if present so runtime scripts
+# don't require manual exports each session.
+load_dotenv(find_dotenv(filename=".env", usecwd=True), override=False)
+load_dotenv(find_dotenv(filename=".env.hpc", usecwd=True), override=False)
+env_file = os.getenv("NAPARI_CUDA_ENV_FILE")
+if env_file:
+    load_dotenv(env_file, override=False)
+
+
+def _ensure_path(prefix: str, var: str) -> None:
+    """Prepend prefix to path-like env var if not already present."""
+    if not prefix:
+        return
+    current = os.environ.get(var, "")
+    paths = [p for p in current.split(":") if p]
+    if prefix not in paths:
+        os.environ[var] = ":".join([prefix, *paths]) if paths else prefix
+
+
+gl_prefix = os.getenv("NAPARI_CUDA_GL_PREFIX", "")
+_ensure_path(gl_prefix, "LD_LIBRARY_PATH")
+drivers = os.getenv("NAPARI_CUDA_GL_DRIVERS", "")
+_ensure_path(drivers, "LIBGL_DRIVERS_PATH")
+
+
+def _ensure_link(root: str, target: str, link: str) -> None:
+    if not root:
+        return
+    dst = Path(root, link)
+    if dst.exists():
+        return
+    src = Path(root, target)
+    if src.exists():
+        dst.symlink_to(src.name)
+
+
+_ensure_link(gl_prefix, "libEGL.so.1", "libEGL.so")
+_ensure_link(gl_prefix, "libOpenGL.so.0", "libOpenGL.so")
+
+
+def _preload_gl_libs(prefix: str) -> None:
+    if not prefix:
+        return
+    for name in ("libEGL.so.1", "libOpenGL.so.0", "libGLdispatch.so.0"):
+        lib_path = Path(prefix, name)
+        if not lib_path.exists():
+            continue
+        try:
+            ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+        except OSError as exc:
+            logger.debug("Failed to preload %s: %s", lib_path, exc)
+
+
+_preload_gl_libs(gl_prefix)
+
+
+def _apply_encoder_profile(profile: str) -> None:
+    profiles: dict[str, dict[str, str]] = {
+        'latency': {
+            'NAPARI_CUDA_RC': 'cbr',
+        },
+        'quality': {
+            'NAPARI_CUDA_RC': 'vbr',
+            'NAPARI_CUDA_BITRATE': '35000000',
+            'NAPARI_CUDA_MAXBITRATE': '45000000',
+            'NAPARI_CUDA_LOOKAHEAD': '10',
+            'NAPARI_CUDA_AQ': '1',
+            'NAPARI_CUDA_TEMPORALAQ': '1',
+            'NAPARI_CUDA_BFRAMES': '2',
+            'NAPARI_CUDA_PRESET': 'P5',
+            'NAPARI_CUDA_IDR_PERIOD': '120',
+        },
+    }
+    settings = profiles.get(profile)
+    if not settings:
+        return
+    for key, value in settings.items():
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+    try:
+        logger.info("Applied encoder profile '%s' (override via env vars as needed)", profile)
+    except Exception:
+        logger.debug("Failed to log encoder profile %s", profile, exc_info=True)
+
 
 
 @dataclass
@@ -44,7 +132,7 @@ class EGLHeadlessServer:
                  animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False,
                  zarr_path: str | None = None, zarr_level: str | None = None,
                  zarr_axes: str | None = None, zarr_z: int | None = None,
-                 debug: bool = False) -> None:
+                 debug: bool = False, alignment_profile: str | None = None) -> None:
         self.width = width
         self.height = height
         self.use_volume = use_volume
@@ -130,6 +218,22 @@ class EGLHeadlessServer:
             self._zarr_z = _z if _z >= 0 else None
         except Exception:
             self._zarr_z = None
+        self._alignment_profile_spec = alignment_profile or os.getenv('NAPARI_CUDA_ALIGNMENT_PROFILE')
+        self._alignment_profile = None
+        if self._alignment_profile_spec:
+            from .alignment import AlignmentDependencyError, load_alignment_profile
+            try:
+                self._alignment_profile = load_alignment_profile(self._alignment_profile_spec)
+                logger.info("Loaded alignment profile from %s", self._alignment_profile.source)
+            except AlignmentDependencyError as exc:
+                logger.error("Optional alignment dependencies missing: %s", exc)
+                raise
+            except FileNotFoundError:
+                logger.error("Alignment profile %s not found", self._alignment_profile_spec)
+                raise
+            except Exception:  # pragma: no cover - defensive log, re-raise
+                logger.exception("Failed to load alignment profile %s", self._alignment_profile_spec)
+                raise
         # Verbose dims logging control: default debug, upgrade to info with flag
         self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
         # Dedicated debug control for this module only (no dependency loggers)
@@ -1606,17 +1710,23 @@ def main() -> None:
     parser.add_argument('--zarr-level', dest='zarr_level', default=os.getenv('NAPARI_CUDA_ZARR_LEVEL'), help='Dataset level path inside OME-Zarr (e.g., level_02). If omitted, inferred from multiscales.')
     parser.add_argument('--zarr-axes', dest='zarr_axes', default=os.getenv('NAPARI_CUDA_ZARR_AXES', 'zyx'), help='Axes order of the dataset (default: zyx)')
     parser.add_argument('--zarr-z', dest='zarr_z', type=int, default=int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1')), help='Initial Z index for 2D slice (default: mid-slice)')
+    parser.add_argument('--alignment-profile', dest='alignment_profile', default=os.getenv('NAPARI_CUDA_ALIGNMENT_PROFILE'),
+                        help='Path to Allen CCF alignment profile JSON (requires napari-cuda[alignment])')
     parser.add_argument('--log-sends', action='store_true', help='Log per-send timing (seq, send_ts, stamp_ts, delta)')
     parser.add_argument('--debug', action='store_true', help='Enable DEBUG for this server module only')
+    parser.add_argument('--encoder-profile', choices=['latency', 'quality'], default='latency',
+                        help='Apply predefined NVENC configuration (defaults to latency focus)')
     args = parser.parse_args()
 
     async def run():
+        _apply_encoder_profile(args.encoder_profile)
+
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
                                 animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),
                                 zarr_path=args.zarr_path, zarr_level=args.zarr_level,
                                 zarr_axes=args.zarr_axes, zarr_z=(None if int(args.zarr_z) < 0 else int(args.zarr_z)),
-                                debug=bool(args.debug))
+                                debug=bool(args.debug), alignment_profile=args.alignment_profile)
         await srv.start()
 
     asyncio.run(run())

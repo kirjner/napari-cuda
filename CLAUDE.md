@@ -123,7 +123,7 @@ else:
 
 - Mock CUDA components when testing locally without GPU
 - Use `pytest.mark.gpu` for GPU-required tests
-- Validate with `scripts/test_cuda_gl.py` before full integration
+- Validate with `make verify-gl` before full integration
 
 ## NVIDIA Fellowship Context
 

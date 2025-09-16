@@ -289,63 +289,17 @@ pip install .
 echo "Setup complete! Activate with: source venv/bin/activate"
 ```
 
-### Test CUDA-GL Interop (scripts/test_cuda_gl.py)
-```python
-#!/usr/bin/env python
-"""First test to run on HPC - verifies CUDA-GL interop works."""
+### Test CUDA-GL Interop
 
-import os
-os.environ['QT_QPA_PLATFORM'] = 'offscreen'  # For headless
+Run the Makefile target instead of a standalone script—it configures the Mesa
+runtime and validates CUDA↔EGL interop in one step:
 
-import numpy as np
-import napari
-from qtpy.QtCore import QTimer
-import pycuda.driver as cuda
-import pycuda.gl
-
-def test_cuda_gl_interop():
-    # Initialize CUDA
-    cuda.init()
-    device = cuda.Device(0)
-    ctx = device.make_context()
-    
-    # Create viewer with data
-    viewer = napari.Viewer(show=False)
-    data = np.random.rand(512, 512).astype(np.float32)
-    layer = viewer.add_image(data)
-    
-    # Get OpenGL texture from vispy layer
-    vispy_layer = viewer.window._qt_viewer.canvas.layer_to_visual[layer]
-    
-    # Force render
-    viewer.window._qt_viewer.canvas.canvas.render()
-    
-    # Try to get texture
-    if hasattr(vispy_layer.node, '_texture'):
-        texture = vispy_layer.node._texture
-        print(f"✓ Got texture: {texture}")
-        print(f"  Handle: {texture.handle}")
-        print(f"  Size: {texture.shape}")
-        
-        # Try to register with CUDA
-        try:
-            pycuda.gl.init()
-            from pycuda.gl import RegisteredImage
-            reg = RegisteredImage(
-                texture.handle,
-                0x0DE1,  # GL_TEXTURE_2D
-                0
-            )
-            print("✓ CUDA-GL interop working!")
-        except Exception as e:
-            print(f"✗ CUDA-GL interop failed: {e}")
-    
-    ctx.pop()
-
-if __name__ == "__main__":
-    with napari.gui_qt():
-        test_cuda_gl_interop()
+```bash
+make verify-gl
 ```
+
+This relies on `.env` exporting `NAPARI_CUDA_GL_PREFIX` and
+`NAPARI_CUDA_GL_DRIVERS` (populated after `make setup-gl`).
 
 ## Next Steps for HPC Development
 
@@ -355,7 +309,7 @@ if __name__ == "__main__":
    cd ~/napari-cuda
    ./scripts/setup_hpc.sh
    source venv/bin/activate
-   python scripts/test_cuda_gl.py
+   make verify-gl
    ```
 
 2. **Verify NVENC**
@@ -380,7 +334,7 @@ if __name__ == "__main__":
    ```
 
 ### Development Order:
-1. Get CUDA-GL interop working (test_cuda_gl.py)
+1. Get CUDA-GL interop working (`make verify-gl`)
 2. Get NVENC encoding working (standalone test)
 3. Integrate into CudaStreamingLayer
 4. Add WebSocket streaming

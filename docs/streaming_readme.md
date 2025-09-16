@@ -24,6 +24,12 @@ Server
 Client
   uv run python -m napari_cuda.client.minimal_client --host 127.0.0.1 --state-port 8081 --pixel-port 8082
 
+Allen CCF Alignment (optional)
+
+- Install extras: `uv sync --extra alignment` (or `uv pip install "napari-cuda[alignment]"`).
+- Launch server with `--alignment-profile /path/to/profile.json` once importer tooling generates the config.
+- Missing extras raise a clear error so default streaming deployments stay unaffected.
+
 2D Content And Artifacts
 
 - Why random noise looks “patchy/filmy”

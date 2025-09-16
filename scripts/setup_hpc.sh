@@ -208,13 +208,12 @@ cat > start_server.sh << 'EOF'
 # Load modules
 module load cuda/12.4 2>/dev/null || true
 
-# Set environment
-export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export QT_QPA_PLATFORM=offscreen
-export PYOPENGL_PLATFORM=egl
-export CUDA_VISIBLE_DEVICES=0
+# Load project environment if present
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
 
 # Start server
 echo "Starting napari-cuda server..."
@@ -230,18 +229,15 @@ cat > test_interop.sh << 'EOF'
 #!/bin/bash
 # Test CUDA-OpenGL interop
 
-# Load modules
 module load cuda/12.4 2>/dev/null || true
 
-# Set environment
-export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export QT_QPA_PLATFORM=offscreen
-export PYOPENGL_PLATFORM=egl
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
 
-# Run test
-exec uv run python scripts/test_cuda_gl.py
+exec make verify-gl
 EOF
 chmod +x test_interop.sh
 

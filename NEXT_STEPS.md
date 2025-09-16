@@ -19,7 +19,7 @@ However, the actual CUDA-OpenGL interop and streaming implementation are still p
 # On HPC:
 git pull
 ./scripts/setup_hpc.sh
-uv run python scripts/test_cuda_gl.py  # Create standalone test
+make verify-gl  # CUDA↔EGL smoke test
 ```
 
 **Deliverables**:

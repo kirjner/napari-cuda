@@ -50,7 +50,7 @@ watch:
 # =============================================================================
 
 # Configuration
-GL_PREFIX := ./vendor/gl
+GL_PREFIX := ./build/gl
 SSL_CERT_FILE := /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 GL_HEADERS := $(GL_PREFIX)/include/GL/gl.h
 GL_LIBGL := $(GL_PREFIX)/lib/libGL.so
@@ -98,8 +98,8 @@ setup-gl:
 		echo "GL dev already present at $(GL_PREFIX)"; \
 	else \
 		echo "Installing GL dev files to $(GL_PREFIX)..."; \
-		mamba create -y -p $(GL_PREFIX) -c conda-forge \
-		  mesalib libglu xorg-libx11 xorg-libxext xorg-libxfixes xorg-libxau xorg-libxdmcp; \
+	mamba create -y -p $(GL_PREFIX) -c conda-forge \
+	  mesalib libegl libglu xorg-libx11 xorg-libxext xorg-libxfixes xorg-libxau xorg-libxdmcp; \
 	fi
 
 # Rebuild PyCUDA from source with GL support detected via headers/libs above
@@ -118,6 +118,8 @@ install-gl: setup-gl
 # Verify PyCUDA GL and EGL functionality
 verify-gl:
 	@echo "Verifying pycuda.gl and EGL..."
+	LD_LIBRARY_PATH=$(GL_PREFIX)/lib:$$LD_LIBRARY_PATH \
+	LIBGL_DRIVERS_PATH=$(GL_PREFIX)/lib/dri:$$LIBGL_DRIVERS_PATH \
 	uv run python -c "\
 import os; \
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen'); \
