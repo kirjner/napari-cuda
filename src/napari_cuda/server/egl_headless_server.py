@@ -108,6 +108,8 @@ class EGLHeadlessServer:
         self._log_cam_debug: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_DEBUG', False)
         # Logging controls for volume/multiscale intents
         self._log_volume_info: bool = env_bool('NAPARI_CUDA_LOG_VOLUME_INFO', False)
+        # Force IDR on reset (default True)
+        self._idr_on_reset: bool = env_bool('NAPARI_CUDA_IDR_ON_RESET', True)
         
         # Drop/send tracking
         self._drops_total: int = 0
@@ -150,6 +152,11 @@ class EGLHeadlessServer:
             'index_space': 'base',
         }
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
+        # Populate multiscale description from NGFF metadata if available
+        try:
+            self._populate_multiscale_state()
+        except Exception:
+            logger.debug("populate multiscale state failed", exc_info=True)
 
     # --- Logging + Broadcast helpers --------------------------------------------
     def _log_volume_intent(self, fmt: str, *args) -> None:
@@ -236,6 +243,78 @@ class EGLHeadlessServer:
             'policy': str(self._ms_state.get('policy', 'auto') or 'auto'),
             'index_space': 'base',
         }
+
+    def _populate_multiscale_state(self) -> None:
+        """Populate self._ms_state['levels'] from NGFF multiscales if available.
+
+        Stores minimal fields needed by clients and worker switching:
+        - path: dataset subpath (e.g., 'level_03')
+        - downsample: per-axis scale factors ordered as z,y,x when axes present; else [1,1,1]
+        - shape: optional, if inexpensive to obtain (omitted here for speed)
+        """
+        root = self._zarr_path
+        if not root:
+            return
+        try:
+            from pathlib import Path
+            import json as _json
+            zattrs = Path(root) / '.zattrs'
+            if not zattrs.exists():
+                return
+            data = _json.loads(zattrs.read_text())
+            ms = data.get('multiscales') or []
+            if not ms:
+                return
+            entry = ms[0]
+            axes = entry.get('axes') or []
+            ax_names = [a.get('name') if isinstance(a, dict) else str(a) for a in axes] if isinstance(axes, list) else []
+            # Normalize to lower-case
+            ax_names = [str(a or '').lower() for a in ax_names]
+            ds = entry.get('datasets') or []
+            levels: list[dict] = []
+            for d in ds:
+                p = d.get('path') if isinstance(d, dict) else None
+                if not isinstance(p, str):
+                    continue
+                scale_vec = None
+                try:
+                    cts = d.get('coordinateTransformations') or []
+                    for tr in cts:
+                        if isinstance(tr, dict) and str(tr.get('type')).lower() == 'scale':
+                            v = tr.get('scale')
+                            if isinstance(v, (list, tuple)):
+                                scale_vec = [float(x) for x in v]
+                            break
+                except Exception:
+                    scale_vec = None
+                # Map scale_vec to z,y,x order if axes provided; else default
+                dz = dy = dx = 1.0
+                if isinstance(scale_vec, list) and scale_vec:
+                    try:
+                        if ax_names and len(scale_vec) == len(ax_names):
+                            lower = ax_names
+                            dz = float(scale_vec[lower.index('z')]) if 'z' in lower else 1.0
+                            dy = float(scale_vec[lower.index('y')]) if 'y' in lower else 1.0
+                            dx = float(scale_vec[lower.index('x')]) if 'x' in lower else 1.0
+                        else:
+                            # Assume zyx
+                            if len(scale_vec) >= 3:
+                                dz, dy, dx = float(scale_vec[0]), float(scale_vec[1]), float(scale_vec[2])
+                    except Exception:
+                        dz = dy = dx = 1.0
+                levels.append({'path': p, 'downsample': [dz, dy, dx]})
+            if levels:
+                self._ms_state['levels'] = levels
+                # If a specific level is configured, set current_level accordingly
+                try:
+                    if self._zarr_level:
+                        names = [lv.get('path') for lv in levels]
+                        if self._zarr_level in names:
+                            self._ms_state['current_level'] = int(names.index(self._zarr_level))
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug("multiscale NGFF parse failed", exc_info=True)
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
@@ -1041,6 +1120,19 @@ class EGLHeadlessServer:
                         self._ms_state['current_level'] = int(lvl)
                         self._ms_state['policy'] = 'fixed'
                         self._log_volume_intent("intent: multiscale.set_level level=%d client_id=%s seq=%s", int(lvl), client_id, client_seq)
+                        # Instruct worker to switch level (coalesced on render thread)
+                        if self._worker is not None:
+                            try:
+                                levels = self._ms_state.get('levels') or []
+                                path = None
+                                if isinstance(levels, list) and 0 <= int(lvl) < len(levels):
+                                    path = levels[int(lvl)].get('path')
+                                self._worker.request_multiscale_level(int(lvl), path)
+                                # Force a keyframe and bypass pacing once for clean transition
+                                self._worker.force_idr()
+                                self._bypass_until_key = True
+                            except Exception:
+                                logger.exception("multiscale level switch request failed")
                         await self._rebroadcast_meta(client_id)
                 elif t == 'camera.zoom_at':
                     try:
@@ -1137,6 +1229,13 @@ class EGLHeadlessServer:
                             pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0)),
                             reset_view=True,
                         )
+                    # Force IDR on reset for clean visual state (configurable)
+                    if self._idr_on_reset and self._worker is not None:
+                        try:
+                            self._worker.force_idr()
+                        except Exception:
+                            logger.debug("force_idr on reset failed", exc_info=True)
+                        self._bypass_until_key = True
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
                 elif t in ('request_keyframe', 'force_idr'):

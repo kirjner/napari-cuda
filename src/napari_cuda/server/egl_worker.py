@@ -153,6 +153,9 @@ class EGLRendererWorker:
         # Atomic state application
         self._state_lock = threading.Lock()
         self._pending_state: Optional[ServerSceneState] = None
+        # Pending multiscale level switch (coalesced)
+        self._pending_ms_level: Optional[int] = None
+        self._pending_ms_path: Optional[str] = None
 
         # Encoding / instrumentation state
         self._frame_index = 0
@@ -457,6 +460,13 @@ class EGLRendererWorker:
             pass
         # First render after attributes are fully set
         canvas.render()
+        
+    # --- Multiscale: request switch (thread-safe) ---
+    def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
+        """Queue a multiscale level switch; applied on render thread next frame."""
+        with self._state_lock:
+            self._pending_ms_level = int(level)
+            self._pending_ms_path = str(path) if path else None
 
     def _infer_zarr_level(self, root: str) -> Optional[str]:
         """Infer a dataset level path from NGFF .zattrs if level not provided."""
@@ -601,6 +611,44 @@ class EGLRendererWorker:
         slab = (slab - c0) / max(1e-12, (c1 - c0))
         slab = np.clip(slab, 0.0, 1.0, out=slab)
         return slab
+
+    def _apply_multiscale_switch(self, level: int, path: Optional[str]) -> None:
+        """Apply NGFF multiscale level switch on render thread."""
+        if not self._zarr_path:
+            return
+        if path is not None:
+            self._zarr_level = path
+        if self.use_volume:
+            try:
+                vol3d = self._load_zarr_volume3d()
+            except Exception:
+                logger.exception("ms: 3D level switch load failed")
+                return
+            vis = getattr(self, '_visual', None)
+            if vis is not None and hasattr(vis, 'set_data'):
+                vis.set_data(vol3d)  # type: ignore[attr-defined]
+            try:
+                d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
+                self._data_wh = (w, h)
+                self._data_d = int(d)
+            except Exception:
+                logger.debug("ms: 3D update extents failed", exc_info=True)
+            logger.info("ms: switched level=%d path=%s (3D)", int(level), str(self._zarr_level))
+        else:
+            try:
+                arr2d = self._load_zarr_initial_slice()
+            except Exception:
+                logger.exception("ms: 2D level switch load failed")
+                return
+            vis = getattr(self, '_visual', None)
+            if vis is not None and hasattr(vis, 'set_data'):
+                vis.set_data(arr2d)  # type: ignore[attr-defined]
+            try:
+                h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
+                self._data_wh = (w, h)
+            except Exception:
+                logger.debug("ms: 2D update extents failed", exc_info=True)
+            logger.info("ms: switched level=%d path=%s (2D)", int(level), str(self._zarr_level))
 
     def _ensure_capture_buffers(self) -> None:
         if self._texture is None:
@@ -923,6 +971,16 @@ class EGLRendererWorker:
     def _apply_pending_state(self) -> None:
         state: Optional[ServerSceneState] = None
         with self._state_lock:
+            # Apply pending multiscale switch first
+            if self._pending_ms_level is not None:
+                lvl = int(self._pending_ms_level)
+                pth = self._pending_ms_path
+                self._pending_ms_level = None
+                self._pending_ms_path = None
+                try:
+                    self._apply_multiscale_switch(lvl, pth)
+                except Exception:
+                    logger.exception("multiscale switch failed")
             if self._pending_state is not None:
                 state = self._pending_state
                 self._pending_state = None
