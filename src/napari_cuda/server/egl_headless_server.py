@@ -19,6 +19,35 @@ import websockets
 import importlib.resources as ilr
 import socket
 
+# Encoder profile presets for convenient NVENC tuning
+def _apply_encoder_profile(profile: str) -> None:
+    profiles: dict[str, dict[str, str]] = {
+        'latency': {
+            'NAPARI_CUDA_RC': 'cbr',
+        },
+        'quality': {
+            'NAPARI_CUDA_RC': 'vbr',
+            'NAPARI_CUDA_BITRATE': '35000000',
+            'NAPARI_CUDA_MAXBITRATE': '45000000',
+            'NAPARI_CUDA_LOOKAHEAD': '10',
+            'NAPARI_CUDA_AQ': '1',
+            'NAPARI_CUDA_TEMPORALAQ': '1',
+            'NAPARI_CUDA_BFRAMES': '2',
+            'NAPARI_CUDA_PRESET': 'P5',
+            'NAPARI_CUDA_IDR_PERIOD': '120',
+        },
+    }
+    settings = profiles.get((profile or '').lower())
+    if not settings:
+        return
+    for key, value in settings.items():
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+    try:
+        logger.info("Applied encoder profile '%s' (override via env vars as needed)", profile)
+    except Exception:
+        logger.debug("Failed to log encoder profile %s", profile, exc_info=True)
+
 from .egl_worker import EGLRendererWorker, ServerSceneState
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
@@ -1608,9 +1637,13 @@ def main() -> None:
     parser.add_argument('--zarr-z', dest='zarr_z', type=int, default=int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1')), help='Initial Z index for 2D slice (default: mid-slice)')
     parser.add_argument('--log-sends', action='store_true', help='Log per-send timing (seq, send_ts, stamp_ts, delta)')
     parser.add_argument('--debug', action='store_true', help='Enable DEBUG for this server module only')
+    parser.add_argument('--encoder-profile', choices=['latency', 'quality'], default='latency',
+                        help='Apply predefined NVENC configuration (defaults to latency focus)')
     args = parser.parse_args()
 
     async def run():
+        # Apply encoder profile before worker initialization so env vars are honored
+        _apply_encoder_profile(args.encoder_profile)
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
                                 animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),

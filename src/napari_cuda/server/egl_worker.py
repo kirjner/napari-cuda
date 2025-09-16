@@ -31,6 +31,7 @@ except Exception as _da_err:
 
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
 from OpenGL import GL, EGL  # type: ignore
 from vispy import scene  # type: ignore
@@ -735,29 +736,23 @@ class EGLRendererWorker:
             logger.debug("Encoder fmt info log failed: %s", e)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
         # Optional bitrate control for low-jitter CBR; if unsupported, fallback path below will be used
-        try:
-            bitrate = int(os.getenv('NAPARI_CUDA_BITRATE', '10000000'))
-        except Exception:
-            bitrate = None  # type: ignore[assignment]
+        def _parse_int(name: str, default: int | None = None) -> int | None:
+            try:
+                value = os.getenv(name)
+                return int(value) if value is not None and value != '' else default
+            except Exception:
+                return default
+
         # Low-jitter CBR and low-latency settings
         rc_mode = os.getenv('NAPARI_CUDA_RC', 'cbr').lower()
-        try:
-            lookahead = int(os.getenv('NAPARI_CUDA_LOOKAHEAD', '0'))
-        except Exception:
-            lookahead = 0
-        try:
-            aq = int(os.getenv('NAPARI_CUDA_AQ', '0'))
-        except Exception:
-            aq = 0
-        try:
-            temporalaq = int(os.getenv('NAPARI_CUDA_TEMPORALAQ', '0'))
-        except Exception:
-            temporalaq = 0
+        bitrate = _parse_int('NAPARI_CUDA_BITRATE', 10_000_000) or 10_000_000
+        max_bitrate = _parse_int('NAPARI_CUDA_MAXBITRATE')
+        lookahead = _parse_int('NAPARI_CUDA_LOOKAHEAD', 0) or 0
+        aq = _parse_int('NAPARI_CUDA_AQ', 0) or 0
+        temporalaq = _parse_int('NAPARI_CUDA_TEMPORALAQ', 0) or 0
         # Non-ref P frames (low-delay) toggle
-        try:
-            nonrefp = int(os.getenv('NAPARI_CUDA_NONREFP', '0'))
-        except Exception:
-            nonrefp = 0
+        nonrefp = _parse_int('NAPARI_CUDA_NONREFP', 0) or 0
+        bf_override = _parse_int('NAPARI_CUDA_BFRAMES')
         # Preset-based path only (stable, low-variance)
         preset_env = os.getenv('NAPARI_CUDA_PRESET', '')
         # IDR period (frames) for preset path (and for logging fallback)
@@ -777,12 +772,28 @@ class EGLRendererWorker:
             'idrperiod': int(idr_period),
             'rc': rc_mode,
         }
+        # Allow callers to widen headroom; fall back to target bitrate for strict CBR only.
         if bitrate and bitrate > 0:
             kwargs['bitrate'] = int(bitrate)
+        if max_bitrate and max_bitrate > 0:
+            kwargs['maxbitrate'] = int(max_bitrate)
+        elif rc_mode == 'cbr' and bitrate and bitrate > 0:
             kwargs['maxbitrate'] = int(bitrate)
+        # Optional B-frames override
+        bf = max(0, bf_override) if bf_override is not None else 0
+        kwargs['bf'] = int(bf)
         # Also set explicit framerate to align RC pacing with server fps
         kwargs['frameRateNum'] = int(max(1, int(self.fps)))
         kwargs['frameRateDen'] = 1
+        # Optional quality tools
+        if lookahead > 0:
+            kwargs['lookahead'] = int(lookahead)
+        if aq > 0:
+            kwargs['aq'] = int(max(0, aq))
+        if temporalaq > 0:
+            kwargs['temporalaq'] = int(max(0, temporalaq))
+        if nonrefp > 0:
+            kwargs['nonrefp'] = 1
         try:
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
             self._idr_period_cfg = int(idr_period)
@@ -793,8 +804,19 @@ class EGLRendererWorker:
                 logger.debug("Log encoder settings failed", exc_info=True)
             try:
                 logger.info(
-                    "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=0 rc=%s idrperiod=%d repeatspspps=1",
-                    self.width, self.height, self._enc_input_fmt, preset, rc_mode.upper(), int(idr_period)
+                    "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=%d rc=%s bitrate=%s max=%s idrperiod=%d lookahead=%d aq=%d temporalaq=%d",
+                    self.width,
+                    self.height,
+                    self._enc_input_fmt,
+                    preset,
+                    int(bf),
+                    rc_mode.upper(),
+                    kwargs.get('bitrate'),
+                    kwargs.get('maxbitrate'),
+                    int(idr_period),
+                    kwargs.get('lookahead', 0),
+                    kwargs.get('aq', 0),
+                    kwargs.get('temporalaq', 0),
                 )
             except Exception:
                 logger.debug("Encoder creation info log failed", exc_info=True)

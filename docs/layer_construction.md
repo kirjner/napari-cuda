@@ -122,6 +122,27 @@ Clients can ignore `layers` if not needed; HUD may show a compact summary.
 - Track per‑layer switches, memory, timing.
 - Add concise logs on layer changes.
 
+## UI Integration (Client/Dashboard)
+
+The EGL headless server does not host the Qt Layer list UI. We will surface
+equivalent controls via the client and (optionally) the Dash dashboard:
+
+- Client (Qt) overlay controls
+  - Minimal layer HUD: list of layers with visibility toggle and active marker.
+  - Shortcuts (when multi‑layer enabled):
+    - Next/prev layer selection, toggle visibility, and quick opacity up/down.
+  - Wire to existing intents (`layer.intent.set_style`, `multiscale.intent.*`).
+
+- Dashboard (Dash) controls
+  - Add a “Layers” panel with a table:
+    - id, kind, visible (toggle), opacity (slider), colormap/render mode (dropdown),
+      ms level (slider) and policy (auto/fixed toggle).
+  - Interact by issuing the same state intents to the server.
+
+- Backward compatibility
+  - For single‑layer (current default), keep the existing HUD; show a compact
+    summary of layer state without requiring extra UI.
+
 ## Implementation Notes
 
 - Keep server code DRY: centralize zarr multiscale parsing into a helper used by layer construction.

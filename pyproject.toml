@@ -179,6 +179,14 @@ server = [
     "numcodecs>=0.10.0",
 ]
 
+# Optional Allen CCF alignment workflow support (brainreg, brainglobe, ome-zarr tooling)
+alignment = [
+    "brainreg>=1.0.13",
+    "brainreg-segment>=0.2.20",
+    "brainglobe-atlasapi>=2.3.0,<3.0.0",
+    "ome-zarr>=0.9.0",
+]
+
 # Client dependencies (for local machine) — includes dashboard by default
 client = [
     "napari-cuda[streaming]",
@@ -193,6 +201,7 @@ cuda-dev = [
     "napari-cuda[server]",
     "napari-cuda[client]",
     "napari-cuda[cuda]",
+    "napari-cuda[alignment]",
     "pytest-asyncio>=0.21.0",
     "pytest-mock>=3.10.0",
 ]
