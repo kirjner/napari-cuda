@@ -182,6 +182,76 @@ class EGLHeadlessServer:
         except Exception as e:
             logger.debug("rebroadcast meta failed: %s", e)
 
+    async def _ensure_keyframe(self) -> None:
+        """Request a clean keyframe and set up watchdog + pacing bypass.
+
+        Tries a lightweight IDR request first; falls back to encoder reset.
+        Also rebroadcasts current video_config if available.
+        """
+        if self._worker is None:
+            return
+        # Try force IDR; fall back to reset without nesting
+        forced = False
+        try:
+            self._worker.force_idr()
+            forced = True
+        except Exception:
+            logger.debug("force_idr request failed; will reset encoder", exc_info=True)
+        if not forced:
+            try:
+                self._worker.reset_encoder()
+            except Exception:
+                logger.exception("Encoder reset failed in ensure_keyframe")
+                return
+            self._kf_last_reset_ts = time.time()
+        # Bypass pacing once to deliver next keyframe immediately
+        self._bypass_until_key = True
+        # Count encoder force/reset; log failure instead of passing
+        try:
+            self.metrics.inc('napari_cuda_encoder_resets')
+        except Exception:
+            logger.debug("metrics inc failed: napari_cuda_encoder_resets", exc_info=True)
+        # Start/restart watchdog to hard reset if no keyframe within 300 ms
+        self._start_kf_watchdog()
+        # Re-broadcast current video config to tighten resync window
+        if self._last_avcc is not None:
+            msg = {
+                'type': 'video_config',
+                'codec': 'h264',
+                'format': 'avcc',
+                'data': base64.b64encode(self._last_avcc).decode('ascii'),
+                'width': self.width,
+                'height': self.height,
+                'fps': self.cfg.fps,
+            }
+            await self._broadcast_state_json(msg)
+        else:
+            self._needs_config = True
+
+    def _start_kf_watchdog(self) -> None:
+        async def _kf_watchdog(last_key_seq: Optional[int]):
+            await asyncio.sleep(0.30)
+            if self._last_key_seq == last_key_seq and self._worker is not None:
+                now = time.time()
+                if self._kf_last_reset_ts is not None and (now - self._kf_last_reset_ts) < self._kf_watchdog_cooldown_s:
+                    rem = self._kf_watchdog_cooldown_s - (now - self._kf_last_reset_ts)
+                    logger.debug("Keyframe watchdog cooldown active (%.2fs remaining); skip reset", rem)
+                    return
+                logger.warning("Keyframe watchdog fired; resetting encoder")
+                try:
+                    self._worker.reset_encoder()
+                except Exception:
+                    logger.exception("Encoder reset failed during keyframe watchdog")
+                    return
+                self._bypass_until_key = True
+                self._kf_last_reset_ts = now
+        try:
+            if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
+                self._kf_watchdog_task.cancel()
+            self._kf_watchdog_task = asyncio.create_task(_kf_watchdog(self._last_key_seq))
+        except Exception:
+            logger.debug("start watchdog failed", exc_info=True)
+
     # --- Meta builders ------------------------------------------------------------
     def _build_base_dims_meta(self) -> dict:
         meta: dict = {}
@@ -1229,73 +1299,13 @@ class EGLHeadlessServer:
                             pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0)),
                             reset_view=True,
                         )
-                    # Force IDR on reset for clean visual state (configurable)
+                    # Force clean keyframe on reset using the same sequence
                     if self._idr_on_reset and self._worker is not None:
-                        try:
-                            self._worker.force_idr()
-                        except Exception:
-                            logger.debug("force_idr on reset failed", exc_info=True)
-                        self._bypass_until_key = True
+                        await self._ensure_keyframe()
                 elif t == 'ping':
                     await ws.send(json.dumps({'type': 'pong'}))
                 elif t in ('request_keyframe', 'force_idr'):
-                    try:
-                        if self._worker is not None:
-                            try:
-                                # Try lightweight IDR request first
-                                self._worker.force_idr()
-                            except Exception:
-                                # Fallback to full encoder reset
-                                self._worker.reset_encoder()
-                            # Bypass pacing once to deliver next keyframe immediately
-                            self._bypass_until_key = True
-                            # Count encoder resets/force events for diagnostics
-                            try:
-                                self.metrics.inc('napari_cuda_encoder_resets')
-                            except Exception:
-                                pass
-                            # Watchdog: if no keyframe arrives within 300 ms, reset encoder
-                            async def _kf_watchdog(last_key_seq: Optional[int]):
-                                await asyncio.sleep(0.30)
-                                # If no new keyframe observed, hard reset the encoder (with cooldown)
-                                if self._last_key_seq == last_key_seq and self._worker is not None:
-                                    now = time.time()
-                                    # Cooldown: skip if a reset just happened
-                                    if self._kf_last_reset_ts is not None and (now - self._kf_last_reset_ts) < self._kf_watchdog_cooldown_s:
-                                        rem = self._kf_watchdog_cooldown_s - (now - self._kf_last_reset_ts)
-                                        logger.debug("Keyframe watchdog cooldown active (%.2fs remaining); skip reset", rem)
-                                        return
-                                    logger.warning("Keyframe watchdog fired; resetting encoder")
-                                    try:
-                                        self._worker.reset_encoder()
-                                    except Exception:
-                                        logger.exception("Encoder reset failed during keyframe watchdog")
-                                        return
-                                    self._bypass_until_key = True
-                                    self._kf_last_reset_ts = now
-                            try:
-                                # Cancel previous watchdog before starting a new one
-                                if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
-                                    self._kf_watchdog_task.cancel()
-                                self._kf_watchdog_task = asyncio.create_task(_kf_watchdog(self._last_key_seq))
-                            except Exception:
-                                pass
-                            # Re-broadcast current video config if known to tighten init window
-                            if self._last_avcc is not None:
-                                msg = {
-                                    'type': 'video_config',
-                                    'codec': 'h264',
-                                    'format': 'avcc',
-                                    'data': base64.b64encode(self._last_avcc).decode('ascii'),
-                                    'width': self.width,
-                                    'height': self.height,
-                                    'fps': self.cfg.fps,
-                                }
-                                await self._broadcast_state_json(msg)
-                            else:
-                                self._needs_config = True
-                    except Exception as e:
-                        logger.debug("request_keyframe handling failed: %s", e)
+                    await self._ensure_keyframe()
         finally:
             try:
                 await ws.close()
