@@ -345,6 +345,7 @@ class EGLRendererWorker:
                         visual.relative_step_size = float(self.volume_relative_step)
                     d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
                     self._data_wh = (w, h)
+                    self._data_d = int(d)
                     # Ensure initial camera frames the volume so first render is visible
                     try:
                         view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
@@ -416,6 +417,7 @@ class EGLRendererWorker:
                     h = int(self.height)
                     w = int(self.width)
                     self._data_wh = (w, h)
+                    self._data_d = int(d)
                     view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
                     try:
                         self._frame_volume_camera(w, h, d)
@@ -449,6 +451,10 @@ class EGLRendererWorker:
             logger.info("Scene init: source=%s %s", scene_src, scene_meta)
         except Exception:
             logger.debug("Scene init log failed", exc_info=True)
+        try:
+            logger.info("Camera class: %s", type(view.camera).__name__)
+        except Exception:
+            pass
         # First render after attributes are fully set
         canvas.render()
 
@@ -903,6 +909,15 @@ class EGLRendererWorker:
                 pan_dx_px=float(getattr(state, 'pan_dx_px', 0.0) or 0.0),
                 pan_dy_px=float(getattr(state, 'pan_dy_px', 0.0) or 0.0),
                 reset_view=bool(getattr(state, 'reset_view', False)),
+                # Include volume render params if present
+                volume_mode=str(getattr(state, 'volume_mode', None)) if getattr(state, 'volume_mode', None) is not None else None,
+                volume_colormap=str(getattr(state, 'volume_colormap', None)) if getattr(state, 'volume_colormap', None) is not None else None,
+                volume_clim=tuple(getattr(state, 'volume_clim')) if getattr(state, 'volume_clim', None) is not None else None,
+                volume_opacity=float(getattr(state, 'volume_opacity')) if getattr(state, 'volume_opacity', None) is not None else None,
+                volume_sample_step=float(getattr(state, 'volume_sample_step')) if getattr(state, 'volume_sample_step', None) is not None else None,
+                # Include orbit deltas (one-shot)
+                orbit_daz_deg=float(getattr(state, 'orbit_daz_deg')) if getattr(state, 'orbit_daz_deg', None) is not None else None,
+                orbit_del_deg=float(getattr(state, 'orbit_del_deg')) if getattr(state, 'orbit_del_deg', None) is not None else None,
             )
 
     def _apply_pending_state(self) -> None:
@@ -1010,17 +1025,28 @@ class EGLRendererWorker:
                 if bool(getattr(state, 'reset_view', False)) and hasattr(self.view, 'camera'):
                     try:
                         w, h = getattr(self, '_data_wh', (self.width, self.height))
-                        if self._debug_reset:
-                            # Log once with details
-                            rect_before = getattr(self.view.camera, 'rect', None)
-                            self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
-                            rect_after = getattr(self.view.camera, 'rect', None)
-                            logger.info(
-                                "reset_view: data=(%d,%d) rect_before=%s rect_after=%s",
-                                int(w), int(h), str(rect_before), str(rect_after)
-                            )
+                        # If we have depth and a Turntable camera, also reset z range and distance
+                        try:
+                            from vispy.scene.cameras import TurntableCamera  # type: ignore
+                        except Exception:
+                            TurntableCamera = None  # type: ignore
+                        cam = self.view.camera
+                        d = getattr(self, '_data_d', None)
+                        if TurntableCamera is not None and isinstance(cam, TurntableCamera) and d is not None:
+                            # Reset full 3D range and re-frame distance
+                            self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)), z=(0, int(d)))
+                            try:
+                                self._frame_volume_camera(int(w), int(h), int(d))
+                            except Exception:
+                                logger.debug("reset_view: frame camera failed", exc_info=True)
+                            # Reset orbit to defaults
+                            setattr(cam, 'azimuth', 30.0)
+                            setattr(cam, 'elevation', 30.0)
                         else:
+                            # 2D or unknown camera: reset XY range
                             self.view.camera.set_range(x=(0, int(w)), y=(0, int(h)))
+                        if self._debug_reset:
+                            logger.info("reset_view applied: wh=(%d,%d) d=%s", int(w), int(h), str(d))
                     except Exception as e:
                         logger.debug("camera.reset failed: %s", e)
                 # Orbit deltas (degrees) for TurntableCamera
@@ -1054,11 +1080,10 @@ class EGLRendererWorker:
                             setattr(cam, 'azimuth', float(new_az))
                             setattr(cam, 'elevation', float(new_el))
                             if self._debug_orbit:
-                                try:
-                                    logger.info("orbit: daz=%.2f del=%.2f -> az=%.2f el=%.2f (clamp=[%.1f,%.1f])",
-                                                float(daz or 0.0), float(delv or 0.0), float(new_az), float(new_el), float(el_min), float(el_max))
-                                except Exception:
-                                    logger.debug("orbit log failed", exc_info=True)
+                                logger.info(
+                                    "orbit: daz=%.2f del=%.2f -> az=%.2f el=%.2f (clamp=[%.1f,%.1f])",
+                                    float(daz or 0.0), float(delv or 0.0), float(new_az), float(new_el), float(el_min), float(el_max)
+                                )
                         except Exception:
                             logger.debug("camera.orbit apply failed", exc_info=True)
 

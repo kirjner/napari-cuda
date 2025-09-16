@@ -698,15 +698,29 @@ class EGLHeadlessServer:
                         loop.call_soon_threadsafe(
                             lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
                         )
+                        if self._log_dims_info:
+                            logger.info("init: dims.update current_step=%s", obj.get('current_step'))
+                        else:
+                            logger.debug("init: dims.update current_step=%s", obj.get('current_step'))
+                    else:
+                        # Pure 3D volume startup: send baseline dims so client enters volume mode
+                        meta = self._dims_metadata() or {}
                         try:
-                            if self._log_dims_info:
-                                logger.info("init: dims.update current_step=%s", obj.get('current_step'))
-                            else:
-                                logger.debug("init: dims.update current_step=%s", obj.get('current_step'))
+                            nd = int(meta.get('ndim') or 3)
                         except Exception:
-                            pass
-                except Exception as e:
-                    logger.debug("Initial dims_update broadcast failed: %s", e)
+                            nd = 3
+                        step_list = [0 for _ in range(max(1, nd))]
+                        # Do not mutate state.current_step here; worker has no discrete Z
+                        obj = self._build_dims_update_message(step_list, last_client_id=None)
+                        loop.call_soon_threadsafe(
+                            lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
+                        )
+                        if self._log_dims_info:
+                            logger.info("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
+                        else:
+                            logger.debug("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
+                except Exception:
+                    logger.exception("Initial dims_update broadcast failed")
 
                 tick = 1.0 / max(1, self.cfg.fps)
                 next_t = time.perf_counter()
@@ -727,19 +741,26 @@ class EGLHeadlessServer:
                         has_cam_ops = bool(getattr(state, 'reset_view', False)) or \
                                       (getattr(state, 'zoom_factor', None) is not None) or \
                                       (abs(float(getattr(state, 'pan_dx_px', 0.0) or 0.0)) > 1e-6) or \
-                                      (abs(float(getattr(state, 'pan_dy_px', 0.0) or 0.0)) > 1e-6)
+                                      (abs(float(getattr(state, 'pan_dy_px', 0.0) or 0.0)) > 1e-6) or \
+                                      (abs(float(getattr(state, 'orbit_daz_deg', 0.0) or 0.0)) > 1e-6) or \
+                                      (abs(float(getattr(state, 'orbit_del_deg', 0.0) or 0.0)) > 1e-6)
                         if has_cam_ops and (self._log_cam_info or self._log_cam_debug):
                             zf = getattr(state, 'zoom_factor', None)
                             anc = getattr(state, 'zoom_anchor_px', None)
                             dx = float(getattr(state, 'pan_dx_px', 0.0) or 0.0)
                             dy = float(getattr(state, 'pan_dy_px', 0.0) or 0.0)
-                            msg = f"apply: cam reset={bool(getattr(state,'reset_view', False))} zf={zf} anc={anc} pan=({dx:.2f},{dy:.2f})"
+                            daz = float(getattr(state, 'orbit_daz_deg', 0.0) or 0.0)
+                            delv = float(getattr(state, 'orbit_del_deg', 0.0) or 0.0)
+                            msg = (
+                                f"apply: cam reset={bool(getattr(state,'reset_view', False))} "
+                                f"zf={zf} anc={anc} pan=({dx:.2f},{dy:.2f}) orbit=({daz:.2f},{delv:.2f})"
+                            )
                             if self._log_cam_info:
                                 logger.info(msg)
                             else:
                                 logger.debug(msg)
                     except Exception:
-                        pass
+                        logger.debug("apply cam log failed", exc_info=True)
                     self._worker.apply_state(state)
                     
                     timings, pkt, flags, seq = self._worker.capture_and_encode_packet()
@@ -820,17 +841,23 @@ class EGLHeadlessServer:
                 if cur is not None:
                     # Build once so logs match sent payload
                     obj = self._build_dims_update_message(list(cur), last_client_id=None)
-                    # Send authoritative dims.update with nested metadata
-                    await ws.send(json.dumps(obj))
+                else:
+                    # No current_step yet (e.g., pure 3D volume). Send baseline dims.
+                    meta = self._dims_metadata() or {}
                     try:
-                        if self._log_dims_info:
-                            logger.info("connect: dims.update -> current_step=%s", obj.get('current_step'))
-                        else:
-                            logger.debug("connect: dims.update -> current_step=%s", obj.get('current_step'))
+                        nd = int(meta.get('ndim') or 3)
                     except Exception:
-                        pass
-            except Exception as e:
-                logger.debug("Initial dims baseline send failed: %s", e)
+                        nd = 3
+                    step_list = [0 for _ in range(max(1, nd))]
+                    obj = self._build_dims_update_message(step_list, last_client_id=None)
+                # Send authoritative dims.update with nested metadata
+                await ws.send(json.dumps(obj))
+                if self._log_dims_info:
+                    logger.info("connect: dims.update -> current_step=%s", obj.get('current_step'))
+                else:
+                    logger.debug("connect: dims.update -> current_step=%s", obj.get('current_step'))
+            except Exception:
+                logger.exception("Initial dims baseline send failed")
             # Then send latest video config if available
             try:
                 if self._last_avcc is not None:
@@ -844,8 +871,8 @@ class EGLHeadlessServer:
                         'fps': self.cfg.fps,
                     }
                     await ws.send(json.dumps(msg))
-            except Exception as e:
-                logger.debug("Initial state config send failed: %s", e)
+            except Exception:
+                logger.exception("Initial state config send failed")
             async for msg in ws:
                 try:
                     data = json.loads(msg)
@@ -1065,6 +1092,33 @@ class EGLHeadlessServer:
                                 pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0) + dy),
                                 reset_view=bool(getattr(s, 'reset_view', False)),
                             )
+                elif t == 'camera.orbit':
+                    try:
+                        daz = float(data.get('d_az_deg') or 0.0)
+                        delv = float(data.get('d_el_deg') or 0.0)
+                    except Exception:
+                        daz = 0.0; delv = 0.0
+                    if daz != 0.0 or delv != 0.0:
+                        if self._log_cam_info:
+                            logger.info("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
+                        elif self._log_cam_debug:
+                            logger.debug("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
+                        with self._state_lock:
+                            s = self._latest_state
+                            self._latest_state = ServerSceneState(
+                                center=s.center,
+                                zoom=s.zoom,
+                                angles=s.angles,
+                                current_step=s.current_step,
+                                zoom_factor=getattr(s, 'zoom_factor', None),
+                                zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
+                                pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0)),
+                                pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0)),
+                                reset_view=bool(getattr(s, 'reset_view', False)),
+                                orbit_daz_deg=float(getattr(s, 'orbit_daz_deg', 0.0) or 0.0) + float(daz),
+                                orbit_del_deg=float(getattr(s, 'orbit_del_deg', 0.0) or 0.0) + float(delv),
+                            )
+                        self.metrics.inc('napari_cuda_orbit_events')
                 elif t == 'camera.reset':
                     if self._log_cam_info:
                         logger.info("state: camera.reset")
@@ -1461,33 +1515,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-                elif t == 'camera.orbit':
-                    try:
-                        daz = float(data.get('d_az_deg') or 0.0)
-                        delv = float(data.get('d_el_deg') or 0.0)
-                    except Exception:
-                        daz = 0.0; delv = 0.0
-                    if daz != 0.0 or delv != 0.0:
-                        if self._log_cam_info:
-                            logger.info("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
-                        elif self._log_cam_debug:
-                            logger.debug("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
-                        with self._state_lock:
-                            s = self._latest_state
-                            self._latest_state = ServerSceneState(
-                                center=s.center,
-                                zoom=s.zoom,
-                                angles=s.angles,
-                                current_step=s.current_step,
-                                zoom_factor=getattr(s, 'zoom_factor', None),
-                                zoom_anchor_px=getattr(s, 'zoom_anchor_px', None),
-                                pan_dx_px=float(getattr(s, 'pan_dx_px', 0.0)),
-                                pan_dy_px=float(getattr(s, 'pan_dy_px', 0.0)),
-                                reset_view=bool(getattr(s, 'reset_view', False)),
-                                orbit_daz_deg=float(getattr(s, 'orbit_daz_deg', 0.0) or 0.0) + float(daz),
-                                orbit_del_deg=float(getattr(s, 'orbit_del_deg', 0.0) or 0.0) + float(delv),
-                            )
-                        try:
-                            self.metrics.inc('napari_cuda_orbit_events')
-                        except Exception:
-                            pass
