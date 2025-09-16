@@ -186,6 +186,7 @@ github_cache.sqlite
 
 # Project-specific artifacts
 benchmarks/
+archive
 egl_worker_results.json
 napari_cuda_perf_*.csv
 testdata/
