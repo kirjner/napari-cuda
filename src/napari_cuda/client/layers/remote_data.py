@@ -211,7 +211,19 @@ class RemotePreview:
     data: np.ndarray | None = None
 
     def update(self, data: np.ndarray | None) -> None:
-        self.data = None if data is None else np.asarray(data)
+        if data is None:
+            self.data = None
+            return
+        try:
+            arr = np.asarray(data, dtype=np.float32)
+        except Exception:
+            self.data = None
+            return
+        if arr.size == 0:
+            self.data = None
+            return
+        np.clip(arr, 0.0, 1.0, out=arr)
+        self.data = arr
 
     def as_thumbnail(self, rgb: bool, target_shape: Tuple[int, int]) -> np.ndarray:
         """Return a thumbnail-sized preview (RGB or scalar depending on ``rgb``)."""

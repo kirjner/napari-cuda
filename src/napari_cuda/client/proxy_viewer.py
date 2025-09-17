@@ -6,6 +6,7 @@ state channel. No direct sockets or legacy dims.set paths remain here.
 """
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import Optional, TYPE_CHECKING
 
@@ -85,6 +86,7 @@ class ProxyViewer(ViewerModel):
     _dims_tx_interval_ms: int = PrivateAttr(default=10)
     _is_playing: bool = PrivateAttr(default=False)
     _play_axis: Optional[int] = PrivateAttr(default=None)
+    _log_dims_info: bool = PrivateAttr(default=False)
 
     def __init__(self, server_host='localhost', server_port=8081, offline: bool = False, **kwargs):
         """
@@ -124,6 +126,12 @@ class ProxyViewer(ViewerModel):
                 self._dims_tx_interval_ms = max(0, int(iv))
         except Exception:
             pass
+
+        try:
+            flag = (os.getenv('NAPARI_CUDA_LOG_DIMS_INFO') or '').lower()
+            self._log_dims_info = flag in ('1', 'true', 'yes', 'on', 'dbg', 'debug')
+        except Exception:
+            self._log_dims_info = False
         
         logger.info(f"ProxyViewer initialized for {server_host}:{server_port}")
 
@@ -254,9 +262,19 @@ class ProxyViewer(ViewerModel):
 
     def _on_ndisplay_change(self, event=None):
         if self._suppress_forward:
+            if bool(getattr(self, '_log_dims_info', False)):
+                try:
+                    logger.info("ProxyViewer ndisplay change suppressed: value=%s", getattr(event, 'value', None))
+                except Exception:
+                    pass
             return
         sender = self._state_sender
         if sender is None:
+            if bool(getattr(self, '_log_dims_info', False)):
+                try:
+                    logger.info("ProxyViewer ndisplay change (no sender): value=%s", getattr(event, 'value', None))
+                except Exception:
+                    pass
             return
         if event is not None and hasattr(event, 'value'):
             raw_value = event.value
@@ -266,6 +284,11 @@ class ProxyViewer(ViewerModel):
             except IndexError:
                 logger.debug("ProxyViewer: dims.ndisplay access failed", exc_info=True)
                 return
+        if bool(getattr(self, '_log_dims_info', False)):
+            try:
+                logger.info("ProxyViewer ndisplay change -> %s", raw_value)
+            except Exception:
+                pass
         try:
             ndisplay = int(raw_value)
         except (TypeError, ValueError):
@@ -291,6 +314,7 @@ class ProxyViewer(ViewerModel):
         order=None,
         axis_labels=None,
         sizes=None,
+        displayed=None,
     ) -> None:
         """Apply server-driven dims metadata and step into local UI without re-forwarding.
 
@@ -349,6 +373,26 @@ class ProxyViewer(ViewerModel):
                     self.dims.ndisplay = int(ndisplay)
                 except Exception:
                     pass
+            if displayed is not None:
+                try:
+                    disp = [int(x) for x in displayed]
+                    disp = [x for x in disp if 0 <= x < self.dims.ndim]
+                    if disp:
+                        current_order = list(self.dims.order)
+                        if not current_order:
+                            current_order = list(range(self.dims.ndim))
+                        base = [ax for ax in current_order if ax not in disp]
+                        base.extend(ax for ax in disp if ax not in base)
+                        for ax in range(self.dims.ndim):
+                            if ax not in base:
+                                base.insert(0, ax)
+                        if len(base) == len(current_order):
+                            self.dims.order = tuple(base)
+                except Exception:
+                    if bool(getattr(self, '_log_dims_info', False)):
+                        logger.info("ProxyViewer dims order apply failed", exc_info=True)
+                    else:
+                        logger.debug("apply dims.displayed failed", exc_info=True)
             if current_step is not None:
                 # Do not block events here: allow napari UI (sliders) to update.
                 # Loopback is prevented by _suppress_forward above.
@@ -359,6 +403,14 @@ class ProxyViewer(ViewerModel):
                     self._last_step_ui = tuple(int(x) for x in current_step)
             except Exception:
                 self._last_step_ui = current_step
+            if bool(getattr(self, '_log_dims_info', False)):
+                logger.info(
+                    "ProxyViewer dims applied: ndim=%s ndisplay=%s displayed=%s order=%s",
+                    self.dims.ndim,
+                    self.dims.ndisplay,
+                    self.dims.displayed,
+                    self.dims.order,
+                )
         except Exception:
             logger.debug("ProxyViewer mirror dims apply failed", exc_info=True)
 

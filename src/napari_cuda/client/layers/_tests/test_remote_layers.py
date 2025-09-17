@@ -82,6 +82,7 @@ def test_remote_image_layer_applies_spec():
     assert layer.opacity == pytest.approx(0.5)
     assert layer.visible is False
     assert layer.metadata.get("source") == "test"
+    assert "thumbnail" not in layer.metadata
 
 
 def test_remote_preview_handles_none_and_arrays():
@@ -95,6 +96,21 @@ def test_remote_preview_handles_none_and_arrays():
     assert thumb_scalar.shape == (8, 8)
     assert np.isclose(thumb_scalar[0, 0], 0.0)
     assert np.isclose(thumb_scalar.max(), 1.0)
+
+
+def test_remote_image_layer_uses_metadata_thumbnail():
+    preview = np.linspace(0.0, 1.0, 48, dtype=np.float32).reshape(4, 4, 3)
+    spec = make_layer_spec(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": preview.tolist()})
+    layer = RemoteImageLayer(spec)
+    assert layer._remote_preview.data is not None
+    np.testing.assert_allclose(layer._remote_preview.data, preview.astype(np.float32))
+    assert "thumbnail" not in layer.metadata
+    updated_preview = np.zeros_like(preview)
+    updated = make_layer_spec(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": updated_preview.tolist()})
+    layer.update_from_spec(updated)
+    assert layer._remote_preview.data is not None
+    np.testing.assert_allclose(layer._remote_preview.data, updated_preview.astype(np.float32))
+    assert "thumbnail" not in layer.metadata
 
 
 def test_remote_layer_registry_lifecycle():
@@ -112,11 +128,15 @@ def test_remote_layer_registry_lifecycle():
     registry.apply_update(LayerUpdateMessage(layer=update_spec, partial=True))
     updated_record = registry.snapshot().layers[0]
     assert updated_record.layer.opacity == pytest.approx(0.25)
-    new_spec = make_layer_spec(metadata={"added": True})
+    preview = np.ones((4, 4, 1), dtype=np.float32)
+    new_spec = make_layer_spec(metadata={"source": "test", "added": True, "thumbnail": preview.tolist()})
     registry.apply_update(LayerUpdateMessage(layer=new_spec, partial=True))
     latest = registry.snapshot().layers[0]
     assert latest.layer.metadata["added"] is True
     assert latest.layer.metadata["source"] == "test"
+    assert "thumbnail" not in latest.layer.metadata
+    assert latest.layer._remote_preview.data is not None
+    np.testing.assert_allclose(latest.layer._remote_preview.data, preview.astype(np.float32))
     registry.remove_layer(LayerRemoveMessage(layer_id=spec.layer_id))
     assert not registry.snapshot().layers
 
@@ -137,6 +157,26 @@ def test_proxy_viewer_sync_layers():
     empty_snapshot = RegistrySnapshot(layers=tuple())
     viewer._sync_remote_layers(empty_snapshot)
     assert len(viewer.layers) == 0
+
+
+def test_proxy_viewer_applies_displayed_axes():
+    pytest.importorskip("qtpy")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from napari_cuda.client.proxy_viewer import ProxyViewer
+
+    viewer = ProxyViewer(offline=True)
+    viewer._apply_remote_dims_update(
+        current_step=[0, 0, 0],
+        ndisplay=3,
+        ndim=3,
+        dims_range=[(0.0, 3.0, 1.0), (0.0, 31.0, 1.0), (0.0, 47.0, 1.0)],
+        order=[0, 1, 2],
+        axis_labels=["z", "y", "x"],
+        sizes=[4, 32, 48],
+        displayed=[0, 1, 2],
+    )
+    assert viewer.dims.ndisplay == 3
+    assert viewer.dims.displayed == (0, 1, 2)
 
 
 def test_remote_image_layer_updates_thumbnail_from_preview():

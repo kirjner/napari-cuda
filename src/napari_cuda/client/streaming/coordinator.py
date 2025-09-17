@@ -1109,6 +1109,7 @@ class StreamCoordinator:
             volume = data.get('volume')
             render = data.get('render')
             multiscale = data.get('multiscale')
+            displayed = data.get('displayed')
             try:
                 self._dims_meta['ndim'] = int(ndim) if ndim is not None else self._dims_meta.get('ndim')
             except Exception:
@@ -1121,6 +1122,8 @@ class StreamCoordinator:
                 self._dims_meta['range'] = dims_range
             if sizes is not None:
                 self._dims_meta['sizes'] = sizes
+            if displayed is not None:
+                self._dims_meta['displayed'] = displayed
             # New meta facets (volume/render/multiscale)
             try:
                 if volume is not None:
@@ -1165,6 +1168,7 @@ class StreamCoordinator:
                     order,
                     axis_labels,
                     sizes,
+                    displayed,
                 )
         except Exception:
             logger.debug("dims_update parse failed", exc_info=True)
@@ -1237,6 +1241,7 @@ class StreamCoordinator:
             'ndisplay': dims_spec.ndisplay,
             'ndim': dims_spec.ndim,
             'sizes': dims_spec.sizes,
+            'displayed': dims_spec.displayed,
         }
         try:
             self._handle_dims_update(payload)
@@ -1769,6 +1774,7 @@ class StreamCoordinator:
         order,
         axis_labels,
         sizes,
+        displayed,
     ) -> None:
         """Mirror dims metadata/step into an attached viewer on the GUI thread.
 
@@ -1786,6 +1792,7 @@ class StreamCoordinator:
                 order=order,
                 axis_labels=axis_labels,
                 sizes=sizes,
+                displayed=displayed,
             )
         ui_call = getattr(self, '_ui_call', None)
         if ui_call is not None:

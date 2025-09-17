@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -40,6 +40,7 @@ class RemoteImageLayer(Image):
         self._remote_arrays = arrays
         self._remote_preview = RemotePreview()
         metadata = dict(spec.metadata or {})
+        preview = self._preview_from_metadata(metadata)
         metadata.setdefault(self._REMOTE_ID_META_KEY, spec.layer_id)
         init_kwargs = self._build_init_kwargs(spec, metadata)
         super().__init__(data, **init_kwargs)
@@ -50,8 +51,8 @@ class RemoteImageLayer(Image):
         self._keep_auto_contrast = False
         self.visible = bool(spec.render.visibility) if spec.render and spec.render.visibility is not None else False
         self._install_empty_slice()
-        self._remote_preview.update(self._extract_preview())
-        self._update_thumbnail()
+        fallback_preview = self._extract_preview() if preview is None else preview
+        self.update_preview(fallback_preview)
 
     # ------------------------------------------------------------------
     def _build_init_kwargs(self, spec: LayerSpec, metadata: dict) -> dict:
@@ -107,6 +108,7 @@ class RemoteImageLayer(Image):
         self._remote_spec = spec
         self._remote_id = spec.layer_id
         metadata = dict(spec.metadata or {})
+        preview = self._preview_from_metadata(metadata)
         metadata.setdefault(self._REMOTE_ID_META_KEY, spec.layer_id)
         self._update_remote_arrays(spec)
         self._allow_data_update = True
@@ -127,8 +129,8 @@ class RemoteImageLayer(Image):
         self.metadata = metadata
         self._apply_render(spec.render)
         self._install_empty_slice()
-        self._remote_preview.update(self._extract_preview())
-        self._update_thumbnail()
+        fallback_preview = self._extract_preview() if preview is None else preview
+        self.update_preview(fallback_preview)
 
     def _update_remote_arrays(self, spec: LayerSpec) -> None:
         extras = spec.extras or {}
@@ -153,7 +155,6 @@ class RemoteImageLayer(Image):
             self._rebuild_data(spec)
             return
         self._remote_arrays[0].update(shape=spec.shape, dtype=spec.dtype, data_id=data_id, cache_version=cache_version)
-        self._remote_preview.update(self._extract_preview())
 
     def _rebuild_data(self, spec: LayerSpec) -> None:
         data, multiscale = build_remote_data(spec)
@@ -173,7 +174,6 @@ class RemoteImageLayer(Image):
             Image.data.fset(self, new_data)
         finally:
             self._allow_data_update = False
-        self._remote_preview.update(self._extract_preview())
 
     def _apply_render(self, hints: Optional[LayerRenderHints]) -> None:
         if hints is None:
@@ -276,3 +276,20 @@ class RemoteImageLayer(Image):
                 return
         self._apply_preview_to_slice()
         super()._update_thumbnail()
+
+    # ------------------------------------------------------------------
+    def _preview_from_metadata(self, metadata: dict[str, Any]) -> Optional[np.ndarray]:
+        if not metadata:
+            return None
+        raw = metadata.pop("thumbnail", None)
+        if raw is None:
+            return None
+        try:
+            arr = np.asarray(raw, dtype=np.float32)
+        except Exception:
+            logger.debug("RemoteImageLayer: failed to coerce thumbnail metadata", exc_info=True)
+            return None
+        if arr.size == 0:
+            return None
+        np.clip(arr, 0.0, 1.0, out=arr)
+        return arr
