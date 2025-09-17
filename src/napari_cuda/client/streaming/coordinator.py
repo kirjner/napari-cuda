@@ -43,11 +43,13 @@ from napari_cuda.utils.env import env_float, env_str
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
+from napari_cuda.client.layers import RemoteLayerRegistry, RegistrySnapshot
 from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerSpec,
     LayerUpdateMessage,
     SceneSpecMessage,
+    DimsSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,7 +210,9 @@ class StreamCoordinator:
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
         self._latest_scene_spec: Optional[SceneSpecMessage] = None
-        self._scene_layers: Dict[str, LayerSpec] = {}
+        self._scene_dims_spec: Optional[DimsSpec] = None
+        self._layer_registry = RemoteLayerRegistry()
+        self._layer_registry.add_listener(self._on_registry_snapshot)
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         # Monotonic scheduling marker for next due
@@ -1166,40 +1170,92 @@ class StreamCoordinator:
             logger.debug("dims_update parse failed", exc_info=True)
 
     def _on_scene_spec(self, msg: SceneSpecMessage) -> None:
-        """Cache latest scene specification from server."""
+        """Cache latest scene specification and forward to registry."""
         try:
             with self._scene_lock:
                 self._latest_scene_spec = msg
-                self._scene_layers = {layer.layer_id: layer for layer in msg.scene.layers}
+                self._scene_dims_spec = msg.scene.dims
+        except Exception:
+            logger.debug("scene.spec bookkeeping failed", exc_info=True)
+        try:
+            self._layer_registry.apply_scene(msg)
             logger.debug(
                 "scene.spec received: %d layers, capabilities=%s",
                 len(msg.scene.layers),
                 msg.scene.capabilities,
             )
         except Exception:
-            logger.debug("scene.spec handling failed", exc_info=True)
+            logger.debug("scene.spec registry apply failed", exc_info=True)
 
     def _on_layer_update(self, msg: LayerUpdateMessage) -> None:
-        layer = msg.layer
-        if layer is None:
-            return
         try:
-            with self._scene_lock:
-                self._scene_layers[layer.layer_id] = layer
-            logger.debug("layer.update: id=%s partial=%s", layer.layer_id, msg.partial)
+            self._layer_registry.apply_update(msg)
+            layer_id = msg.layer.layer_id if msg.layer else None
+            logger.debug("layer.update: id=%s partial=%s", layer_id, msg.partial)
         except Exception:
             logger.debug("layer.update handling failed", exc_info=True)
 
     def _on_layer_remove(self, msg: LayerRemoveMessage) -> None:
         try:
-            with self._scene_lock:
-                removed = self._scene_layers.pop(msg.layer_id, None)
-            if removed is not None:
-                logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
-            else:
-                logger.debug("layer.remove: id=%s not cached", msg.layer_id)
+            self._layer_registry.remove_layer(msg)
+            logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
         except Exception:
             logger.debug("layer.remove handling failed", exc_info=True)
+
+    def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
+        def _apply() -> None:
+            self._apply_pending_scene_dims()
+            self._sync_remote_layers(snapshot)
+
+        ui_call = getattr(self, '_ui_call', None)
+        if ui_call is not None:
+            try:
+                ui_call.call.emit(_apply)  # type: ignore[attr-defined]
+                return
+            except Exception:
+                logger.debug("schedule remote layer sync failed", exc_info=True)
+        try:
+            _apply()
+        except Exception:
+            logger.debug("remote layer sync failed", exc_info=True)
+
+    def _apply_pending_scene_dims(self) -> None:
+        dims_spec: Optional[DimsSpec]
+        with self._scene_lock:
+            dims_spec = self._scene_dims_spec
+            self._scene_dims_spec = None
+        if dims_spec is None:
+            return
+        payload = {
+            'current_step': dims_spec.current_step,
+            'order': dims_spec.order,
+            'axis_labels': dims_spec.axis_labels,
+            'range': dims_spec.range,
+            'ndisplay': dims_spec.ndisplay,
+            'ndim': dims_spec.ndim,
+            'sizes': dims_spec.sizes,
+        }
+        try:
+            self._handle_dims_update(payload)
+        except Exception:
+            logger.debug("apply pending dims failed", exc_info=True)
+
+    def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
+        try:
+            vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+        except Exception:
+            vm_ref = None
+        if vm_ref is None or not hasattr(vm_ref, '_sync_remote_layers'):
+            return
+
+        def _run() -> None:
+            try:
+                vm_ref._sync_remote_layers(snapshot)  # type: ignore[attr-defined]
+            except Exception:
+                logger.debug("ProxyViewer remote layer sync failed", exc_info=True)
+
+        # We are already on the GUI thread when called from _on_registry_snapshot
+        _run()
 
     def _on_connected(self) -> None:
         self._init_decoder()

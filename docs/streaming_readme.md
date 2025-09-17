@@ -28,16 +28,18 @@ Scene + Layer Handshake (client focus)
 
 - The state channel now emits structured messages in addition to the legacy `video_config` + `dims.update` flow.
   - `scene.spec`: full snapshot of the server scene (layer specs, dims, camera, capability hints).
+    - `scene.metadata` surfaces dataset hints from the server (e.g., zarr path) for debugging/UX.
   - `layer.update`: incremental metadata change for a single layer (name, shape, multiscale state, etc.).
+    - `LayerSpec.extras` now carries server-specific extras like `is_volume`, `zarr_path`, and axis hints.
   - `layer.remove`: notification that a layer was removed on the server.
 - Client responsibilities (current phase):
-  - `StateChannel` dispatches these payloads to optional callbacks; `StreamCoordinator` caches the latest scene/layer specs under a mutex for consumers.
-  - Nothing is rendered locally yet—the streamed texture remains authoritative—but UI code can inspect `_latest_scene_spec`/`_scene_layers` to reason about extents before the remote layer registry lands.
-  - Reconnect handling is automatic: the cached scene is refreshed when a new `scene.spec` arrives after websocket recovery.
+  - `StateChannel` dispatches these payloads into a `RemoteLayerRegistry`; the registry instantiates read-only `RemoteImageLayer` mirrors for each `LayerSpec` and tracks their order.
+  - When a viewer mirror is attached, `StreamCoordinator` replays registry snapshots on the Qt thread so `ProxyViewer` installs the remote layers (hidden by default) and updates dims metadata before local UI events fire. Rendering still comes from the streamed texture.
+  - The cached `SceneSpecMessage` and registry snapshot survive reconnects, allowing the UI to rebuild automatically once a fresh `scene.spec` arrives.
 - Near-term follow-up (tracked separately):
-  1. Introduce a `RemoteLayerRegistry` that builds napari `Layer` proxies from the cached specs so the viewer UI has accurate sliders/icons without waiting for server interactions.
-  2. Mirror layer intents (visibility, rename, etc.) via the same state channel once capability flags advertise support.
-  3. Expand docs with API examples once the registry is in place; for now, the cache is internal but can be inspected for debugging via `StreamCoordinator._scene_layers`.
+  1. Mirror layer intents (visibility toggles, renames, future add/remove) through the registry once capability flags advertise support.
+  2. Extend the registry to cover additional layer types (labels, points) and expose lightweight previews where appropriate.
+  3. Document capability negotiation and provide API hooks for inspecting registry snapshots from plugins/widgets.
 
 2D Content And Artifacts
 
