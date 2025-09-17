@@ -36,6 +36,9 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 from OpenGL import GL, EGL  # type: ignore
 from vispy import scene  # type: ignore
 
+from napari.components.viewer_model import ViewerModel
+from napari._vispy.layers.image import VispyImageLayer
+
 import cupy as cp  # type: ignore
 import pycuda.driver as cuda  # type: ignore
 import pycuda.gl  # type: ignore
@@ -211,7 +214,8 @@ class EGLRendererWorker:
                  volume_depth: int = 64, volume_dtype: str = "float32", volume_relative_step: Optional[float] = None,
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
-                 zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None) -> None:
+                 zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
+                 use_napari_adapter: Optional[bool] = None) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -237,6 +241,17 @@ class EGLRendererWorker:
         self.canvas: Optional[scene.SceneCanvas] = None
         self.view = None
         self._visual = None
+
+        if use_napari_adapter is None:
+            flag = os.getenv('NAPARI_CUDA_USE_NAPARI_ADAPTER')
+            if flag is not None:
+                use_napari_adapter = flag.strip().lower() in {'1', 'true', 'yes', 'on'}
+            else:
+                use_napari_adapter = False
+        self._use_napari_adapter = bool(use_napari_adapter)
+        self._viewer: Optional[ViewerModel] = None
+        self._napari_layer = None
+        self._napari_adapter = None
 
         self._texture: Optional[int] = None
         self._fbo: Optional[int] = None
@@ -378,6 +393,69 @@ class EGLRendererWorker:
         except Exception:
             logger.debug("frame_volume: set distance failed", exc_info=True)
 
+    def _init_adapter_scene(self) -> None:
+        canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
+        view = canvas.central_widget.add_view()
+        self.canvas = canvas
+        self.view = view
+
+        rng = np.random.default_rng(41)
+        viewer = ViewerModel()
+
+        if self.use_volume:
+            volume = rng.random((self.volume_depth, self.height, self.width), dtype=np.float32)
+            layer = viewer.add_image(volume, name="adapter-volume")
+            viewer.dims.ndisplay = 3
+            adapter = VispyImageLayer(layer)
+            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
+            d = int(volume.shape[0])
+            h = int(volume.shape[1])
+            w = int(volume.shape[2])
+            self._data_wh = (w, h)
+            self._data_d = d
+            try:
+                view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
+            except Exception:
+                logger.debug("adapter volume: camera set_range failed", exc_info=True)
+            try:
+                self._frame_volume_camera(w, h, d)
+            except Exception:
+                logger.debug("adapter volume: frame camera failed", exc_info=True)
+            layer.rendering = "mip"
+            scene_src = "napari-adapter-volume"
+        else:
+            image = rng.random((self.height, self.width), dtype=np.float32)
+            layer = viewer.add_image(image, name="adapter-image")
+            viewer.dims.ndisplay = 2
+            adapter = VispyImageLayer(layer)
+            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+            h = int(image.shape[0])
+            w = int(image.shape[1])
+            self._data_wh = (w, h)
+            try:
+                view.camera.set_range(x=(0, w), y=(0, h))
+            except Exception:
+                logger.debug("adapter image: camera set_range failed", exc_info=True)
+            scene_src = "napari-adapter-image"
+
+        node = adapter.node
+        node.parent = view.scene
+        self._visual = node
+        self._viewer = viewer
+        self._napari_layer = layer
+        self._napari_adapter = adapter
+
+        try:
+            logger.info("Scene init: source=%s %dx%d", scene_src, self.width, self.height)
+        except Exception:
+            logger.debug("Adapter scene init log failed", exc_info=True)
+        try:
+            logger.info("Camera class: %s", type(view.camera).__name__)
+        except Exception:
+            pass
+
+        canvas.render()
+
     def _init_egl(self) -> None:
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
         if egl_display == EGL.EGL_NO_DISPLAY:
@@ -429,6 +507,21 @@ class EGLRendererWorker:
         self.cuda_ctx = ctx
 
     def _init_vispy_scene(self) -> None:
+        if self._use_napari_adapter and self._zarr_path:
+            logger.info(
+                "napari adapter path disabled because zarr_path=%s is configured; falling back to legacy visuals",
+                self._zarr_path,
+            )
+            self._use_napari_adapter = False
+
+        if self._use_napari_adapter:
+            try:
+                self._init_adapter_scene()
+                return
+            except Exception:
+                logger.exception("Adapter scene initialization failed; falling back to legacy visuals")
+                self._use_napari_adapter = False
+
         canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
         view = canvas.central_widget.add_view()
         # Ensure attributes are set before any first render
@@ -1679,12 +1772,22 @@ class EGLRendererWorker:
         except Exception as e:
             logger.debug("Cleanup: canvas close failed: %s", e)
         self.canvas = None
+        self._viewer = None
+        self._napari_layer = None
+        self._napari_adapter = None
         try:
             if self.egl_display is not None:
                 EGL.eglTerminate(self.egl_display)
         except Exception as e:
             logger.debug("Cleanup: eglTerminate failed: %s", e)
         self.egl_display = None
+
+    def viewer_model(self) -> Optional[ViewerModel]:
+        """Expose the napari ``ViewerModel`` when adapter mode is active."""
+        return self._viewer
+
+    def using_napari_adapter(self) -> bool:
+        return bool(self._use_napari_adapter and self._viewer is not None)
 
     # --- Debug helpers -------------------------------------------------------------
     def _log_zoom_drift(self, zf: float, anc: tuple[float, float], center_world: tuple[float, float], cw: int, ch: int) -> None:

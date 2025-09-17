@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
+import numpy as np
+
 from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.protocol.messages import (
@@ -43,8 +45,10 @@ class ViewerSceneManager:
         canvas_size: tuple[int, int],
         default_layer_id: str = "layer-0",
         default_layer_name: str = "napari-cuda",
+        viewer: Optional[ViewerModel] = None,
     ) -> None:
-        self._viewer = ViewerModel()
+        self._viewer = viewer or ViewerModel()
+        self._owns_viewer = viewer is None
         self._canvas_size = (int(canvas_size[0]), int(canvas_size[1]))
         self._default_layer_id = default_layer_id
         self._default_layer_name = default_layer_name
@@ -63,17 +67,36 @@ class ViewerSceneManager:
         current_step: Optional[Iterable[int]],
         ndisplay: Optional[int],
         zarr_path: Optional[str],
+        viewer_model: Optional[ViewerModel] = None,
         extras: Optional[Dict[str, Any]] = None,
     ) -> SceneSpec:
         """Refresh the cached scene metadata from the latest server state."""
 
-        worker_info = self._snapshot_worker(worker, ndisplay)
+        if viewer_model is not None and viewer_model is not self._viewer:
+            self._viewer = viewer_model
+            self._owns_viewer = False
+
+        worker_info = self._snapshot_worker(worker, ndisplay, viewer_model=viewer_model)
+
+        adapter_layer = None
+        if viewer_model is not None:
+            try:
+                adapter_layer = viewer_model.layers[0]
+            except Exception:
+                adapter_layer = None
+
+        extras_map: Dict[str, Any] = {}
+        if extras:
+            extras_map.update(extras)
+        if adapter_layer is not None:
+            extras_map.update(self._adapter_layer_extras(adapter_layer))
+
         layer_spec = self._build_layer_spec(
             worker_info,
             multiscale_state=multiscale_state,
             volume_state=volume_state,
             zarr_path=zarr_path,
-            extras=extras,
+            extras=extras_map or None,
         )
         dims_spec = self._build_dims_spec(
             layer_spec, current_step=current_step, ndisplay=ndisplay
@@ -83,8 +106,8 @@ class ViewerSceneManager:
         metadata: Dict[str, Any] = {}
         if zarr_path:
             metadata["zarr_path"] = zarr_path
-        if extras:
-            for key, value in extras.items():
+        if extras_map:
+            for key, value in extras_map.items():
                 if value is not None:
                     metadata[key] = value
 
@@ -151,8 +174,17 @@ class ViewerSceneManager:
     # ------------------------------------------------------------------
     # Internal helpers
     def _snapshot_worker(
-        self, worker: Optional[object], ndisplay: Optional[int]
+        self,
+        worker: Optional[object],
+        ndisplay: Optional[int],
+        *,
+        viewer_model: Optional[ViewerModel] = None,
     ) -> _WorkerSnapshot:
+        if viewer_model is not None:
+            adapter_snapshot = self._snapshot_from_viewer(viewer_model, ndisplay)
+            if adapter_snapshot is not None:
+                return adapter_snapshot
+
         width, height = self._canvas_size
         if worker is None:
             ndim = 2
@@ -212,6 +244,153 @@ class ViewerSceneManager:
             zarr_axes=getattr(worker, "_zarr_axes", None),
             zarr_dtype=getattr(worker, "_zarr_dtype", None),
         )
+
+    def _snapshot_from_viewer(
+        self, viewer: ViewerModel, ndisplay: Optional[int]
+    ) -> Optional[_WorkerSnapshot]:
+        layers = getattr(viewer, "layers", None)
+        if not layers:
+            return None
+        try:
+            layer = layers[0]
+        except Exception:
+            return None
+
+        shape = self._shape_from_data(layer.data)
+        if not shape:
+            shape = [self._canvas_size[1], self._canvas_size[0]]
+        ndim = len(shape)
+        axis_labels = self._normalize_axis_labels(viewer, ndim)
+        dtype = self._dtype_from_layer(layer)
+        zarr_axes = self._zarr_axes_from_layer(layer)
+        zarr_dtype = dtype
+        is_volume = bool((ndisplay if ndisplay is not None else viewer.dims.ndisplay) == 3)
+
+        return _WorkerSnapshot(
+            ndim=ndim,
+            shape=shape,
+            axis_labels=axis_labels,
+            dtype=dtype,
+            is_volume=is_volume,
+            zarr_axes=zarr_axes,
+            zarr_dtype=zarr_dtype,
+        )
+
+    @staticmethod
+    def _shape_from_data(data: Any) -> List[int]:
+        if hasattr(data, "shape"):
+            try:
+                return [int(max(1, s)) for s in tuple(data.shape)]
+            except Exception:
+                return []
+        if isinstance(data, (list, tuple)) and data:
+            return ViewerSceneManager._shape_from_data(data[0])
+        return []
+
+    @staticmethod
+    def _dtype_from_layer(layer: Any) -> Optional[str]:
+        dtype = getattr(layer, "dtype", None)
+        if dtype is None:
+            data = getattr(layer, "data", None)
+            dtype = getattr(data, "dtype", None)
+            if dtype is None and isinstance(data, (list, tuple)) and data:
+                dtype = getattr(data[0], "dtype", None)
+        if dtype is None:
+            return None
+        try:
+            return str(np.dtype(dtype))
+        except Exception:
+            return str(dtype)
+
+    def _normalize_axis_labels(self, viewer: ViewerModel, ndim: int) -> List[str]:
+        defaults: Dict[int, List[str]] = {
+            1: ["x"],
+            2: ["y", "x"],
+            3: ["z", "y", "x"],
+            4: ["t", "z", "y", "x"],
+        }
+        try:
+            labels_source = list(viewer.dims.axis_labels or [])
+        except Exception:
+            labels_source = []
+        normalized: List[str] = []
+        default_labels = defaults.get(ndim, [f"axis-{i}" for i in range(ndim)])
+        for idx in range(ndim):
+            label = None
+            if idx < len(labels_source):
+                label = labels_source[idx]
+            if label is None or str(label).strip() == "":
+                normalized.append(default_labels[idx] if idx < len(default_labels) else f"axis-{idx}")
+            else:
+                normalized.append(str(label))
+        return normalized
+
+    @staticmethod
+    def _zarr_axes_from_layer(layer: Any) -> Optional[str]:
+        metadata = getattr(layer, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        axes = metadata.get("axes")
+        if isinstance(axes, str):
+            return axes
+        if isinstance(axes, (list, tuple)):
+            try:
+                return "".join(str(a) for a in axes)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _adapter_layer_extras(layer: Any) -> Dict[str, Any]:
+        extras: Dict[str, Any] = {"adapter_engine": "napari-vispy"}
+        name = getattr(layer, "name", None)
+        if name:
+            extras["layer_name"] = str(name)
+        try:
+            extras["visible"] = bool(layer.visible)
+        except Exception:
+            pass
+        try:
+            opacity = float(layer.opacity)
+        except Exception:
+            opacity = None
+        if opacity is not None:
+            extras["opacity"] = opacity
+        try:
+            blending = getattr(layer, "blending", None)
+            if blending is not None:
+                extras["blending"] = str(blending)
+        except Exception:
+            pass
+        try:
+            interpolation = getattr(layer, "interpolation", None)
+            if interpolation is not None:
+                extras["interpolation"] = str(interpolation)
+        except Exception:
+            pass
+        try:
+            colormap = getattr(layer, "colormap", None)
+            if colormap is not None:
+                cmap_name = getattr(colormap, "name", None)
+                if cmap_name is None and isinstance(colormap, dict):
+                    cmap_name = colormap.get("name")
+                if cmap_name is not None:
+                    extras["colormap"] = str(cmap_name)
+        except Exception:
+            pass
+        try:
+            rendering = getattr(layer, "rendering", None)
+            if rendering is not None:
+                extras["rendering"] = str(rendering)
+        except Exception:
+            pass
+        try:
+            clim = getattr(layer, "contrast_limits", None)
+            if clim is not None:
+                extras["contrast_limits"] = [float(clim[0]), float(clim[1])]
+        except Exception:
+            pass
+        return {k: v for k, v in extras.items() if v is not None}
 
     def _build_layer_spec(
         self,

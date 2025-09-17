@@ -440,6 +440,14 @@ class EGLHeadlessServer:
             'zarr_axes': getattr(self._worker, '_zarr_axes', None) if self._worker is not None else None,
             'zarr_level': self._zarr_level,
         }
+        viewer_model = None
+        if self._worker is not None and hasattr(self._worker, 'using_napari_adapter'):
+            try:
+                if self._worker.using_napari_adapter():
+                    viewer_model = self._worker.viewer_model()
+                    extras.setdefault('adapter_engine', 'napari-vispy')
+            except Exception:
+                logger.debug('worker adapter detection failed', exc_info=True)
         self._scene_manager.update_from_sources(
             worker=self._worker,
             scene_state=self._latest_state,
@@ -448,6 +456,7 @@ class EGLHeadlessServer:
             current_step=current_step,
             ndisplay=self._current_ndisplay(),
             zarr_path=self._zarr_path,
+            viewer_model=viewer_model,
             extras=extras,
         )
 
@@ -612,6 +621,7 @@ class EGLHeadlessServer:
             self._last_dims_client_id = last_client_id
             obj = self._build_dims_update_message(step_list, last_client_id)
             await self._broadcast_state_json(obj)
+            await self._broadcast_scene_spec(reason="dims")
         except Exception:
             logger.debug("dims update broadcast failed", exc_info=True)
 
@@ -1016,6 +1026,11 @@ class EGLHeadlessServer:
                     logger.debug("connect: dims.update -> current_step=%s", obj.get('current_step'))
             except Exception:
                 logger.exception("Initial dims baseline send failed")
+            # Send the current scene specification so clients hydrate remote layers before video_config
+            try:
+                await self._send_scene_spec(ws, reason="connect")
+            except Exception:
+                logger.exception("Initial scene.spec send failed")
             # Then send latest video config if available
             try:
                 if self._last_avcc is not None:
@@ -1551,6 +1566,43 @@ class EGLHeadlessServer:
             except Exception as e2:
                 logger.debug("Pixel WS close error: %s", e2)
             self._clients.discard(ws)
+
+    def _scene_spec_json(self) -> Optional[str]:
+        try:
+            msg = self._scene_manager.scene_message(time.time())
+            return msg.to_json()
+        except Exception:
+            logger.debug("scene.spec build failed", exc_info=True)
+            return None
+
+    async def _send_scene_spec(self, ws: websockets.WebSocketServerProtocol, *, reason: str) -> None:
+        payload = self._scene_spec_json()
+        if payload is None:
+            return
+        await self._safe_state_send(ws, payload)
+        try:
+            if self._log_dims_info:
+                logger.info("%s: scene.spec sent", reason)
+            else:
+                logger.debug("%s: scene.spec sent", reason)
+        except Exception:
+            pass
+
+    async def _broadcast_scene_spec(self, *, reason: str) -> None:
+        payload = self._scene_spec_json()
+        if payload is None or not self._state_clients:
+            return
+        coros = []
+        for c in list(self._state_clients):
+            coros.append(self._safe_state_send(c, payload))
+        try:
+            await asyncio.gather(*coros, return_exceptions=True)
+            if self._log_dims_info:
+                logger.info("%s: scene.spec broadcast to %d clients", reason, len(coros))
+            else:
+                logger.debug("%s: scene.spec broadcast to %d clients", reason, len(coros))
+        except Exception as e:
+            logger.debug("scene.spec broadcast error: %s", e)
 
     async def _broadcast_state_json(self, obj: dict) -> None:
         data = json.dumps(obj)

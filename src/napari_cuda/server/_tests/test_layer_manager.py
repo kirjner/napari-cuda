@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import pytest
+import numpy as np
+
+from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.server.layer_manager import ViewerSceneManager
 
@@ -132,3 +135,29 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
     assert scene is not None
     assert scene.dims.current_step == [5, 6]
     assert scene.capabilities == ["layer.update", "layer.remove"]
+
+
+def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
+    viewer = ViewerModel()
+    data = np.ones((32, 48), dtype=np.float32)
+    viewer.add_image(data, name="adapter-image")
+    manager.update_from_sources(
+        worker=None,
+        scene_state=None,
+        multiscale_state=None,
+        volume_state=None,
+        current_step=None,
+        ndisplay=2,
+        zarr_path=None,
+        viewer_model=viewer,
+        extras=None,
+    )
+
+    scene = manager.scene_spec()
+    assert scene is not None
+    layer = scene.layers[0]
+    assert layer.shape == [32, 48]
+    assert layer.extras is not None
+    assert layer.extras["adapter_engine"] == "napari-vispy"
+    assert scene.metadata is not None
+    assert scene.metadata["adapter_engine"] == "napari-vispy"
