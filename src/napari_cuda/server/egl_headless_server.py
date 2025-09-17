@@ -177,7 +177,7 @@ class EGLHeadlessServer:
         self._ms_state: dict = {
             'levels': [],            # [{shape: [...], downsample: [...]}]
             'current_level': 0,
-            'policy': 'auto',        # 'auto' | 'fixed'
+            'policy': 'fixed',       # 'auto' | 'fixed' (default fixed until auto is supported)
             'index_space': 'base',
         }
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
@@ -256,6 +256,43 @@ class EGLHeadlessServer:
             await self._broadcast_state_json(msg)
         else:
             self._needs_config = True
+
+    async def _handle_set_ndisplay(self, ndisplay: int, client_id: Optional[str], client_seq: Optional[int]) -> None:
+        """Apply a 2D/3D view toggle request.
+
+        - Normalizes `ndisplay` to 2 or 3.
+        - Requests the worker to switch pipelines if supported.
+        - Forces a keyframe for immediate visual change.
+        - Rebroadcasts dims meta to keep clients synchronized.
+        """
+        try:
+            ndisp = 3 if int(ndisplay) >= 3 else 2
+        except Exception:
+            ndisp = 2
+        try:
+            if self._log_dims_info:
+                logger.info("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
+            else:
+                logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
+        except Exception:
+            pass
+        # Ask worker to apply the mode switch on the render thread
+        if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
+            try:
+                self._worker.request_ndisplay(int(ndisp))  # type: ignore[attr-defined]
+                # Force a keyframe and bypass pacing so the switch is immediate
+                try:
+                    self._worker.force_idr()
+                    self._bypass_until_key = True
+                except Exception:
+                    logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
+            except Exception:
+                logger.exception("view.set_ndisplay: worker request failed")
+        # Re-broadcast dims meta so clients reflect the authoritative state
+        try:
+            await self._rebroadcast_meta(client_id)
+        except Exception:
+            logger.debug("view.set_ndisplay: rebroadcast failed", exc_info=True)
 
     def _start_kf_watchdog(self) -> None:
         async def _kf_watchdog(last_key_seq: Optional[int]):
@@ -339,7 +376,7 @@ class EGLHeadlessServer:
         return {
             'levels': levels,
             'current_level': int(self._ms_state.get('current_level', 0) or 0),
-            'policy': str(self._ms_state.get('policy', 'auto') or 'auto'),
+            'policy': str(self._ms_state.get('policy', 'fixed') or 'fixed'),
             'index_space': 'base',
         }
 
@@ -463,16 +500,22 @@ class EGLHeadlessServer:
         meta: dict = self._build_base_dims_meta()
         # Extend with volume/multiscale fields
         try:
-            use_vol = False
-            try:
-                use_vol = bool(getattr(self._worker, 'use_volume', False) or self.use_volume)
-            except Exception:
+            # Prefer the worker's live state; fall back to server arg only if no worker yet
+            if self._worker is not None:
+                use_vol = bool(getattr(self._worker, 'use_volume', False))
+            else:
                 use_vol = bool(self.use_volume)
             meta['volume'] = bool(use_vol)
+            # Render parameters only apply in volume mode
             if use_vol:
-                # Render params from server state
                 meta['render'] = self._build_render_meta()
-                # Multiscale description
+            # Multiscale description should be present whenever we have levels,
+            # independent of 2D/3D, so HUD can show level in 2D as well.
+            try:
+                levels = self._ms_state.get('levels') or []
+            except Exception:
+                levels = []
+            if isinstance(levels, list) and len(levels) > 0:
                 meta['multiscale'] = self._build_multiscale_meta(meta)
         except Exception:
             logger.debug("extend dims meta with volume/multiscale failed", exc_info=True)
@@ -1233,6 +1276,16 @@ class EGLHeadlessServer:
                             except Exception:
                                 logger.exception("multiscale level switch request failed")
                         await self._rebroadcast_meta(client_id)
+                elif t == 'view.intent.set_ndisplay':
+                    # Switch between 2D and 3D views (PanZoom <-> Turntable)
+                    # Payload: { ndisplay: 2|3, client_id, client_seq }
+                    try:
+                        ndisp_raw = data.get('ndisplay')
+                        ndisp = int(ndisp_raw) if ndisp_raw is not None else 2
+                    except Exception:
+                        ndisp = 2
+                    client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
+                    await self._handle_set_ndisplay(ndisp, client_id, client_seq)
                 elif t == 'camera.zoom_at':
                     try:
                         factor = float(data.get('factor') or 0.0)
