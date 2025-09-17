@@ -49,6 +49,7 @@ def _apply_encoder_profile(profile: str) -> None:
         logger.debug("Failed to log encoder profile %s", profile, exc_info=True)
 
 from .egl_worker import EGLRendererWorker, ServerSceneState
+from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
 from napari_cuda.utils.env import env_bool
@@ -187,6 +188,8 @@ class EGLHeadlessServer:
         except Exception:
             logger.debug("populate multiscale state failed", exc_info=True)
 
+        self._scene_manager = ViewerSceneManager((self.width, self.height))
+
     # --- Logging + Broadcast helpers --------------------------------------------
     def _log_volume_intent(self, fmt: str, *args) -> None:
         try:
@@ -319,67 +322,6 @@ class EGLHeadlessServer:
             logger.debug("start watchdog failed", exc_info=True)
 
     # --- Meta builders ------------------------------------------------------------
-    def _build_base_dims_meta(self) -> dict:
-        meta: dict = {}
-        try:
-            w = self._worker
-            if w is not None:
-                # Prefer OME-Zarr metadata when available
-                zshape = getattr(w, '_zarr_shape', None)
-                if isinstance(zshape, tuple) and len(zshape) == 3:
-                    sizes = [int(zshape[0]), int(zshape[1]), int(zshape[2])]
-                    axes = str(getattr(w, '_zarr_axes', 'zyx') or 'zyx').lower()
-                    order = [c for c in axes]
-                    rng = [[0, max(0, s - 1)] for s in sizes]
-                    return {'ndim': 3, 'order': order, 'sizes': sizes, 'range': rng, 'axis_labels': order}
-                # Synthetic/explicit volume demo when no zarr metadata
-                if bool(getattr(w, 'use_volume', False)):
-                    d = int(getattr(w, 'volume_depth', 0) or 0)
-                    h = int(getattr(w, 'height', 0) or 0)
-                    wi = int(getattr(w, 'width', 0) or 0)
-                    if d > 0 and h > 0 and wi > 0:
-                        sizes = [d, h, wi]
-                        rng = [[0, d - 1], [0, h - 1], [0, wi - 1]]
-                        return {'ndim': 3, 'order': ['z', 'y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['z','y','x']}
-        except Exception:
-            logger.debug("build base dims meta failed", exc_info=True)
-        # 2D fallback to canvas size
-        try:
-            h = int(self.height)
-            wi = int(self.width)
-            if h > 0 and wi > 0:
-                sizes = [h, wi]
-                rng = [[0, h - 1], [0, wi - 1]]
-                return {'ndim': 2, 'order': ['y', 'x'], 'sizes': sizes, 'range': rng, 'axis_labels': ['y','x']}
-        except Exception:
-            logger.debug("dims metadata (2D fallback) build failed", exc_info=True)
-        return {}
-
-    def _build_render_meta(self) -> dict:
-        return {
-            'mode': self._volume_state.get('mode'),
-            'colormap': self._volume_state.get('colormap'),
-            'clim': list(self._volume_state.get('clim') or [0.0, 1.0]),
-            'opacity': float(self._volume_state.get('opacity', 1.0)),
-            'sample_step': float(self._volume_state.get('sample_step', 1.0)),
-        }
-
-    def _build_multiscale_meta(self, base: dict) -> dict:
-        levels = self._ms_state.get('levels') or []
-        if not levels:
-            try:
-                sz = base.get('sizes') or []
-                if isinstance(sz, (list, tuple)) and len(sz) >= int(base.get('ndim') or 0):
-                    levels = [{'shape': list(int(x) for x in sz), 'downsample': [1.0] * len(sz)}]
-            except Exception:
-                logger.debug("synthesize single multiscale level failed", exc_info=True)
-        return {
-            'levels': levels,
-            'current_level': int(self._ms_state.get('current_level', 0) or 0),
-            'policy': str(self._ms_state.get('policy', 'fixed') or 'fixed'),
-            'index_space': 'base',
-        }
-
     def _populate_multiscale_state(self) -> None:
         """Populate self._ms_state['levels'] from NGFF multiscales if available.
 
@@ -483,43 +425,38 @@ class EGLHeadlessServer:
 
     # --- Helper to compute dims metadata for piggyback on dims_update ---------
     def _dims_metadata(self) -> dict:
-        """Build dims metadata including optional volume/multiscale fields.
-
-        Base keys:
-        - ndim: int
-        - order: list[str]
-        - sizes: list[int]
-        - range: list[[lo, hi]] (index bounds per axis)
-        - axis_labels: list[str]
-
-        Extended meta:
-        - volume: bool
-        - render: dict
-        - multiscale: dict
-        """
-        meta: dict = self._build_base_dims_meta()
-        # Extend with volume/multiscale fields
         try:
-            # Prefer the worker's live state; fall back to server arg only if no worker yet
-            if self._worker is not None:
-                use_vol = bool(getattr(self._worker, 'use_volume', False))
-            else:
-                use_vol = bool(self.use_volume)
-            meta['volume'] = bool(use_vol)
-            # Render parameters only apply in volume mode
-            if use_vol:
-                meta['render'] = self._build_render_meta()
-            # Multiscale description should be present whenever we have levels,
-            # independent of 2D/3D, so HUD can show level in 2D as well.
-            try:
-                levels = self._ms_state.get('levels') or []
-            except Exception:
-                levels = []
-            if isinstance(levels, list) and len(levels) > 0:
-                meta['multiscale'] = self._build_multiscale_meta(meta)
+            self._update_scene_manager()
         except Exception:
-            logger.debug("extend dims meta with volume/multiscale failed", exc_info=True)
-        return meta
+            logger.debug("scene manager update failed during dims metadata", exc_info=True)
+        return self._scene_manager.dims_metadata()
+
+    def _update_scene_manager(self) -> None:
+        current_step = None
+        with self._state_lock:
+            if getattr(self._latest_state, 'current_step', None) is not None:
+                current_step = list(self._latest_state.current_step)  # type: ignore[arg-type]
+        extras = {
+            'zarr_axes': getattr(self._worker, '_zarr_axes', None) if self._worker is not None else None,
+            'zarr_level': self._zarr_level,
+        }
+        self._scene_manager.update_from_sources(
+            worker=self._worker,
+            scene_state=self._latest_state,
+            multiscale_state=dict(self._ms_state),
+            volume_state=dict(self._volume_state),
+            current_step=current_step,
+            ndisplay=self._current_ndisplay(),
+            zarr_path=self._zarr_path,
+            extras=extras,
+        )
+
+    def _current_ndisplay(self) -> int:
+        if self._worker is not None and bool(getattr(self._worker, 'use_volume', False)):
+            return 3
+        if bool(self.use_volume):
+            return 3
+        return 2
 
     # --- Validation helpers -------------------------------------------------------
     def _is_valid_render_mode(self, mode: str) -> bool:
