@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple, Any
+from collections import deque
+from contextlib import contextmanager
+from typing import Optional, Tuple, Any, Callable
 
 import numpy as np
 from vispy.gloo import Texture2D, Program
@@ -30,6 +32,69 @@ void main() {
     gl_FragColor = texture2D(texture, v_texcoord);
 }
 """
+
+
+class VTReleaseQueue:
+    """Track VT texture releases until the GPU signals completion."""
+
+    def __init__(self) -> None:
+        # Each entry stores (GLsync handle, tex_cap)
+        self._entries: deque[Tuple[object, object]] = deque()
+
+    def enqueue(self, tex_cap: object) -> bool:
+        try:
+            sync = GL.glFenceSync(GL.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+        except Exception:
+            sync = None
+        if sync is None:
+            return False
+        self._entries.append((sync, tex_cap))
+        return True
+
+    def drain(self, vt_module) -> None:
+        if not self._entries:
+            return
+        # Drain head entries whose fences have signaled
+        for _ in range(len(self._entries)):
+            sync, tex_cap = self._entries[0]
+            finished = False
+            if sync is None:
+                finished = True
+            else:
+                try:
+                    res = GL.glClientWaitSync(sync, 0, 0)
+                    if res in (GL.GL_ALREADY_SIGNALED, GL.GL_CONDITION_SATISFIED):
+                        finished = True
+                except Exception:
+                    finished = True
+            if not finished:
+                break
+            try:
+                if sync is not None:
+                    GL.glDeleteSync(sync)
+            except Exception:
+                logger.debug("VT release queue: glDeleteSync failed", exc_info=True)
+            self._entries.popleft()
+            try:
+                vt_module.gl_release_tex(tex_cap)
+            except Exception:
+                logger.debug("VT release queue: gl_release_tex failed", exc_info=True)
+
+    def reset(self, vt_module) -> None:
+        while self._entries:
+            sync, tex_cap = self._entries.popleft()
+            try:
+                if sync is not None:
+                    GL.glDeleteSync(sync)
+            except Exception:
+                logger.debug("VT release queue reset: glDeleteSync failed", exc_info=True)
+            try:
+                vt_module.gl_release_tex(tex_cap)
+            except Exception:
+                logger.debug("VT release queue reset: gl_release_tex failed", exc_info=True)
+
+    def __len__(self) -> int:
+        return len(self._entries)
 
 
 class GLRenderer:
@@ -68,6 +133,8 @@ class GLRenderer:
         self._gl_vbo: Optional[int] = None
         self._vt_first_draw_logged: bool = False
         self._has_drawn: bool = False
+        self._vt_release_queue = VTReleaseQueue()
+        self._gl_context_id: Optional[int] = None
         # Track current video texture shape for resize detection
         self._vid_shape: Optional[tuple[int, int]] = None
         # Set swap/pacing preferences once to reduce compositor jitter
@@ -109,8 +176,128 @@ class GLRenderer:
         self._video_program['texture'] = self._video_texture
         logger.debug("GLRenderer resources initialized")
 
+    def _current_context_id(self) -> Optional[int]:
+        try:
+            ctx = getattr(self._scene_canvas.context, 'context', None)
+            if ctx is None:
+                return None
+            return id(ctx)
+        except Exception:
+            return None
+
+    def _drain_vt_release_queue(self) -> None:
+        if not self._vt_gl_safe or self._vt is None:
+            return
+        self._vt_release_queue.drain(self._vt)
+
+    def _destroy_raw_gl_resources(self) -> None:
+        try:
+            if self._gl_prog_rect is not None:
+                GL.glDeleteProgram(int(self._gl_prog_rect))
+        except Exception:
+            logger.debug("delete rect program failed", exc_info=True)
+        try:
+            if self._gl_prog_2d is not None:
+                GL.glDeleteProgram(int(self._gl_prog_2d))
+        except Exception:
+            logger.debug("delete 2d program failed", exc_info=True)
+        try:
+            if self._gl_vbo is not None:
+                GL.glDeleteBuffers(1, [int(self._gl_vbo)])
+        except Exception:
+            logger.debug("delete VBO failed", exc_info=True)
+        self._gl_prog_rect = None
+        self._gl_prog_2d = None
+        self._gl_pos_loc_rect = None
+        self._gl_tex_loc_rect = None
+        self._gl_u_tex_size_loc = None
+        self._gl_pos_loc_2d = None
+        self._gl_tex_loc_2d = None
+        self._gl_vbo = None
+
+    def _on_context_changed(self) -> None:
+        if self._vt is not None and len(self._vt_release_queue):
+            self._vt_release_queue.reset(self._vt)
+        self._destroy_raw_gl_resources()
+        self._vt_cache = None
+        self._vt_first_draw_logged = False
+        self._gl_frame_counter = 0
+        try:
+            import os as _os
+            if (_os.getenv('NAPARI_CUDA_VT_GL_DEBUG', '0') or '0') in ('1', 'true', 'yes', 'on'):
+                logger.info("GLRenderer: GL context change detected; resources rebuilt")
+        except Exception:
+            logger.debug("GLRenderer: context-change debug log failed", exc_info=True)
+
+    def _maybe_handle_context_change(self) -> None:
+        ctx_id = self._current_context_id()
+        if ctx_id is None:
+            return
+        if self._gl_context_id is None:
+            self._gl_context_id = ctx_id
+            return
+        if ctx_id != self._gl_context_id:
+            self._on_context_changed()
+            self._gl_context_id = ctx_id
+
+    @contextmanager
+    def _vt_draw_state(self, pos_loc: Optional[int], tex_loc: Optional[int], target: int):
+        try:
+            prev_program = GL.glGetIntegerv(GL.GL_CURRENT_PROGRAM)
+        except Exception:
+            prev_program = None
+            logger.debug("VT draw: query current program failed", exc_info=True)
+        try:
+            prev_buffer = GL.glGetIntegerv(GL.GL_ARRAY_BUFFER_BINDING)
+        except Exception:
+            prev_buffer = None
+            logger.debug("VT draw: query array buffer binding failed", exc_info=True)
+        try:
+            prev_active_tex = GL.glGetIntegerv(GL.GL_ACTIVE_TEXTURE)
+        except Exception:
+            prev_active_tex = None
+            logger.debug("VT draw: query active texture failed", exc_info=True)
+        try:
+            yield
+        finally:
+            if prev_active_tex is not None:
+                try:
+                    GL.glActiveTexture(int(prev_active_tex))
+                except Exception:
+                    logger.debug("VT draw: restore active texture failed", exc_info=True)
+            try:
+                GL.glBindTexture(int(target), 0)
+            except Exception:
+                logger.debug("VT draw: unbind texture failed", exc_info=True)
+            try:
+                if tex_loc is not None and int(tex_loc) != -1:
+                    GL.glDisableVertexAttribArray(int(tex_loc))
+            except Exception:
+                logger.debug("VT draw: disable tex attrib failed", exc_info=True)
+            try:
+                if pos_loc is not None and int(pos_loc) != -1:
+                    GL.glDisableVertexAttribArray(int(pos_loc))
+            except Exception:
+                logger.debug("VT draw: disable pos attrib failed", exc_info=True)
+            try:
+                if prev_buffer is not None:
+                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(prev_buffer))
+                else:
+                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+            except Exception:
+                logger.debug("VT draw: restore array buffer failed", exc_info=True)
+            try:
+                if prev_program is not None:
+                    GL.glUseProgram(int(prev_program))
+                else:
+                    GL.glUseProgram(0)
+            except Exception:
+                logger.debug("VT draw: restore program failed", exc_info=True)
+
     def draw(self, frame: Optional[Any]) -> None:
         ctx = self._scene_canvas.context
+        self._maybe_handle_context_change()
+        self._drain_vt_release_queue()
         # Accept either numpy RGB frames or a (CVPixelBufferRef, release_cb) tuple
         payload = frame
         release_cb = None
@@ -344,6 +531,7 @@ class GLRenderer:
         if not res:
             return False
         tex_cap, name, target, tw, th = res
+        enqueued = False
         try:
             target_i = int(target)
             name_i = int(name)
@@ -356,30 +544,25 @@ class GLRenderer:
                 if not self._vt_first_draw_logged:
                     logger.info("GLRenderer: VT zero-copy draw engaged (RECT target)")
                     self._vt_first_draw_logged = True
-                GL.glUseProgram(prog)
-                # u_tex_size
-                if self._gl_u_tex_size_loc is not None and int(self._gl_u_tex_size_loc) != -1:
-                    GL.glUniform2f(int(self._gl_u_tex_size_loc), float(w_i), float(h_i))
-                GL.glActiveTexture(GL.GL_TEXTURE0)
-                GL.glBindTexture(target_i, name_i)
-                loc_sampler = GL.glGetUniformLocation(prog, 'u_texRect')
-                if int(loc_sampler) != -1:
-                    GL.glUniform1i(loc_sampler, 0)
-                # VBO attributes
-                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
-                stride = 4 * 4
-                import ctypes as _ctypes
-                if self._gl_pos_loc_rect is not None and int(self._gl_pos_loc_rect) != -1:
-                    GL.glEnableVertexAttribArray(int(self._gl_pos_loc_rect))
-                    GL.glVertexAttribPointer(int(self._gl_pos_loc_rect), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(0))
-                if self._gl_tex_loc_rect is not None and int(self._gl_tex_loc_rect) != -1:
-                    GL.glEnableVertexAttribArray(int(self._gl_tex_loc_rect))
-                    GL.glVertexAttribPointer(int(self._gl_tex_loc_rect), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
-                # Draw
-                GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
-                # Cleanup binds
-                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-                GL.glUseProgram(0)
+                with self._vt_draw_state(self._gl_pos_loc_rect, self._gl_tex_loc_rect, target_i):
+                    GL.glUseProgram(prog)
+                    if self._gl_u_tex_size_loc is not None and int(self._gl_u_tex_size_loc) != -1:
+                        GL.glUniform2f(int(self._gl_u_tex_size_loc), float(w_i), float(h_i))
+                    GL.glActiveTexture(GL.GL_TEXTURE0)
+                    GL.glBindTexture(target_i, name_i)
+                    loc_sampler = GL.glGetUniformLocation(prog, 'u_texRect')
+                    if int(loc_sampler) != -1:
+                        GL.glUniform1i(loc_sampler, 0)
+                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
+                    stride = 4 * 4
+                    import ctypes as _ctypes
+                    if self._gl_pos_loc_rect is not None and int(self._gl_pos_loc_rect) != -1:
+                        GL.glEnableVertexAttribArray(int(self._gl_pos_loc_rect))
+                        GL.glVertexAttribPointer(int(self._gl_pos_loc_rect), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(0))
+                    if self._gl_tex_loc_rect is not None and int(self._gl_tex_loc_rect) != -1:
+                        GL.glEnableVertexAttribArray(int(self._gl_tex_loc_rect))
+                        GL.glVertexAttribPointer(int(self._gl_tex_loc_rect), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
+                    GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
             else:
                 # GL_TEXTURE_2D path
                 prog = self._gl_prog_2d
@@ -388,38 +571,36 @@ class GLRenderer:
                 if not self._vt_first_draw_logged:
                     logger.info("GLRenderer: VT zero-copy draw engaged (2D target)")
                     self._vt_first_draw_logged = True
-                GL.glUseProgram(prog)
-                GL.glActiveTexture(GL.GL_TEXTURE0)
-                GL.glBindTexture(target_i, name_i)
-                loc_sampler = GL.glGetUniformLocation(prog, 'u_tex2d')
-                if int(loc_sampler) != -1:
-                    GL.glUniform1i(loc_sampler, 0)
-                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
-                stride = 4 * 4
-                import ctypes as _ctypes
-                if self._gl_pos_loc_2d is not None and int(self._gl_pos_loc_2d) != -1:
-                    GL.glEnableVertexAttribArray(int(self._gl_pos_loc_2d))
-                    GL.glVertexAttribPointer(int(self._gl_pos_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(0))
-                if self._gl_tex_loc_2d is not None and int(self._gl_tex_loc_2d) != -1:
-                    GL.glEnableVertexAttribArray(int(self._gl_tex_loc_2d))
-                    GL.glVertexAttribPointer(int(self._gl_tex_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
-                GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
-                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-                GL.glUseProgram(0)
-            # Ensure GPU finished using the texture if debug safety is enabled
+                with self._vt_draw_state(self._gl_pos_loc_2d, self._gl_tex_loc_2d, target_i):
+                    GL.glUseProgram(prog)
+                    GL.glActiveTexture(GL.GL_TEXTURE0)
+                    GL.glBindTexture(target_i, name_i)
+                    loc_sampler = GL.glGetUniformLocation(prog, 'u_tex2d')
+                    if int(loc_sampler) != -1:
+                        GL.glUniform1i(loc_sampler, 0)
+                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._gl_vbo))
+                    stride = 4 * 4
+                    import ctypes as _ctypes
+                    if self._gl_pos_loc_2d is not None and int(self._gl_pos_loc_2d) != -1:
+                        GL.glEnableVertexAttribArray(int(self._gl_pos_loc_2d))
+                        GL.glVertexAttribPointer(int(self._gl_pos_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(0))
+                    if self._gl_tex_loc_2d is not None and int(self._gl_tex_loc_2d) != -1:
+                        GL.glEnableVertexAttribArray(int(self._gl_tex_loc_2d))
+                        GL.glVertexAttribPointer(int(self._gl_tex_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
+                    GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
             try:
-                if self._vt_gl_safe:
-                    GL.glFinish()
-                else:
-                    GL.glFlush()
+                GL.glFlush()
             except Exception:
-                pass
-            # Release the GL texture object created by VT
-            try:
-                logger.debug("VT release tex=%s", hex(name_i))
+                logger.debug("VT draw: glFlush failed", exc_info=True)
+            # Release the GL texture object created by VT (immediately or deferred)
+            logger.debug("VT release tex=%s", hex(name_i))
+            if self._vt_gl_safe:
+                enqueued = self._vt_release_queue.enqueue(tex_cap)
+                if not enqueued:
+                    logger.debug("VT release queue: enqueue failed; releasing immediately")
+                    self._vt.gl_release_tex(tex_cap)
+            else:
                 self._vt.gl_release_tex(tex_cap)
-            except Exception:
-                logger.debug("gl_release_tex failed", exc_info=True)
             # Optionally flush the texture cache periodically to release internal resources
             try:
                 self._gl_frame_counter += 1
@@ -435,17 +616,19 @@ class GLRenderer:
                     if now - float(self._gl_dbg_last_log or 0.0) >= 1.0:
                         try:
                             creates, releases = self._vt.gl_cache_counts(cache_cap)  # type: ignore[misc]
-                            logger.info("VT GL dbg: cache creates=%d releases=%d", int(creates), int(releases))
+                            queue_depth = len(self._vt_release_queue) if self._vt_gl_safe else 0
+                            logger.info("VT GL dbg: cache creates=%d releases=%d queue=%d", int(creates), int(releases), int(queue_depth))
                         except Exception:
-                            pass
+                            logger.debug("VT draw: cache counts failed", exc_info=True)
                         self._gl_dbg_last_log = now
             except Exception:
-                pass
+                logger.debug("VT draw: debug logging failed", exc_info=True)
             return True
         except Exception:
             logger.debug("VT draw failed", exc_info=True)
-            try:
-                self._vt.gl_release_tex(tex_cap)
-            except Exception:
-                logger.debug("gl_release_tex (cleanup) failed", exc_info=True)
+            if not enqueued:
+                try:
+                    self._vt.gl_release_tex(tex_cap)
+                except Exception:
+                    logger.debug("gl_release_tex (cleanup) failed", exc_info=True)
             return False

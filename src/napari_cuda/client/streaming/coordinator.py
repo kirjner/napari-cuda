@@ -1609,11 +1609,22 @@ class StreamCoordinator:
                 snap['ms_level'] = int(ms.get('current_level')) if ms.get('current_level') is not None else None
             except Exception:
                 snap['ms_level'] = None
-            try:
-                lv = ms.get('levels')
-                snap['ms_levels'] = int(len(lv)) if isinstance(lv, (list, tuple)) else None
-            except Exception:
-                snap['ms_levels'] = None
+            levels_obj = ms.get('levels')
+            total_levels: Optional[int] = None
+            if isinstance(levels_obj, (list, tuple)):
+                total_levels = len(levels_obj)
+            snap['ms_levels'] = int(total_levels) if total_levels is not None else None
+            snap['ms_path'] = None
+            if (
+                isinstance(levels_obj, (list, tuple))
+                and snap.get('ms_level') is not None
+                and 0 <= int(snap['ms_level']) < len(levels_obj)
+            ):
+                entry = levels_obj[int(snap['ms_level'])]
+                if isinstance(entry, dict):
+                    path = entry.get('path')
+                    if isinstance(path, str) and path:
+                        snap['ms_path'] = path
         # Primary axis
         try:
             snap['primary_axis'] = int(self._primary_axis_index) if self._primary_axis_index is not None else None
@@ -1826,6 +1837,18 @@ class StreamCoordinator:
             return False
         lv = self._clamp_level(level)
         return self._send_intent('multiscale.intent.set_level', {'level': int(lv)}, origin)
+
+    def view_set_ndisplay(self, ndisplay: int, *, origin: str = 'ui') -> bool:
+        if not self._dims_ready:
+            return False
+        if self._rate_gate_settings(origin):
+            return False
+        nd_value = int(ndisplay)
+        nd_target = 3 if nd_value >= 3 else 2
+        cur = self._dims_meta.get('ndisplay')
+        if cur is not None and int(cur) == nd_target:
+            return True
+        return self._send_intent('view.intent.set_ndisplay', {'ndisplay': nd_target}, origin)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         ch = self._state_channel

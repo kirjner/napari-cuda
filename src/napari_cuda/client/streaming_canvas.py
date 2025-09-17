@@ -726,7 +726,7 @@ class StreamingCanvas(VispyCanvas):
             rmode = vs.get('render_mode'); cmap = vs.get('colormap')
             clo = vs.get('clim_lo'); chi = vs.get('clim_hi')
             opa = vs.get('opacity'); sst = vs.get('sample_step')
-            ms_pol = vs.get('ms_policy'); ms_lvl = vs.get('ms_level'); ms_n = vs.get('ms_levels')
+            ms_pol = vs.get('ms_policy'); ms_lvl = vs.get('ms_level'); ms_n = vs.get('ms_levels'); ms_path = vs.get('ms_path')
             rbits: list[str] = []
             if rmode:
                 rbits.append(f"mode:{rmode}")
@@ -741,8 +741,11 @@ class StreamingCanvas(VispyCanvas):
             msbits: list[str] = []
             if ms_pol:
                 msbits.append(f"pol:{ms_pol}")
-            if isinstance(ms_lvl, int) and isinstance(ms_n, int):
-                msbits.append(f"lvl:{ms_lvl}/{max(0, ms_n-1)}")
+            if isinstance(ms_lvl, int) and isinstance(ms_n, int) and ms_n > 0:
+                display_lvl = max(0, ms_lvl) + 1
+                msbits.append(f"lvl:{display_lvl}/{ms_n}")
+            if isinstance(ms_path, str) and ms_path:
+                msbits.append(f"path:{ms_path}")
             line_v2 = "render: " + " ".join(rbits) if rbits else "render: -"
             if msbits:
                 line_v2 += "  ms: " + " ".join(msbits)

@@ -109,7 +109,7 @@ class ProxyViewer(ViewerModel):
         self.camera.events.zoom.connect(self._on_camera_change)
         self.camera.events.angles.connect(self._on_camera_change)
         self.dims.events.current_step.connect(self._on_dims_change)
-        self.dims.events.ndisplay.connect(self._on_dims_change)
+        self.dims.events.ndisplay.connect(self._on_ndisplay_change)
         
         # In streaming client, delegate state to coordinator (no direct sockets)
         logger.info("ProxyViewer: thin client mode (coordinator-driven)")
@@ -248,7 +248,30 @@ class ProxyViewer(ViewerModel):
                 logger.debug("ProxyViewer dims send failed", exc_info=True)
             return
         return
-    
+
+    def _on_ndisplay_change(self, event=None):
+        if self._suppress_forward:
+            return
+        sender = self._state_sender
+        if sender is None:
+            return
+        if event is not None and hasattr(event, 'value'):
+            raw_value = event.value
+        else:
+            try:
+                raw_value = self.dims.ndisplay
+            except IndexError:
+                logger.debug("ProxyViewer: dims.ndisplay access failed", exc_info=True)
+                return
+        try:
+            ndisplay = int(raw_value)
+        except (TypeError, ValueError):
+            logger.debug("ProxyViewer: ndisplay value parse failed (%r)", raw_value, exc_info=True)
+            return
+        fn = getattr(sender, 'view_set_ndisplay', None)
+        if callable(fn) and not fn(ndisplay, origin='ui'):
+            logger.debug("ProxyViewer: ndisplay intent send failed")
+
 
     # --- Streaming client bridge -------------------------------------------------
     def attach_state_sender(self, sender) -> None:

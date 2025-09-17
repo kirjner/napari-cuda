@@ -10,6 +10,10 @@ Two parts:
 
 Usage:
   uv run python scripts/vt_gl_sanity.py [width height]
+
+Set `NAPARI_CUDA_VT_GL_SAFE=1` when running the VisPy portion to exercise the
+fence-backed release queue that defers `gl_release_tex` until the GPU signals
+completion.
 """
 
 from __future__ import annotations
