@@ -91,15 +91,25 @@ class ViewerSceneManager:
         if adapter_layer is not None:
             extras_map.update(self._adapter_layer_extras(adapter_layer))
 
+        layer_metadata: Dict[str, Any] = {}
+        if adapter_layer is not None:
+            thumbnail = self._adapter_layer_thumbnail(adapter_layer)
+            if thumbnail is not None:
+                layer_metadata["thumbnail"] = thumbnail
+
         layer_spec = self._build_layer_spec(
             worker_info,
             multiscale_state=multiscale_state,
             volume_state=volume_state,
             zarr_path=zarr_path,
             extras=extras_map or None,
+            metadata=layer_metadata or None,
         )
         dims_spec = self._build_dims_spec(
-            layer_spec, current_step=current_step, ndisplay=ndisplay
+            layer_spec,
+            current_step=current_step,
+            ndisplay=ndisplay,
+            viewer_model=viewer_model,
         )
         camera_spec = self._build_camera_spec(scene_state, ndisplay=ndisplay)
 
@@ -392,6 +402,37 @@ class ViewerSceneManager:
             pass
         return {k: v for k, v in extras.items() if v is not None}
 
+    @staticmethod
+    def _adapter_layer_thumbnail(layer: Any) -> Optional[List[List[List[float]]]]:
+        try:
+            updater = getattr(layer, '_update_thumbnail', None)
+            if callable(updater):
+                updater()
+        except Exception:
+            logger.debug('layer_manager: thumbnail refresh failed', exc_info=True)
+        try:
+            thumbnail = getattr(layer, 'thumbnail', None)
+        except Exception:
+            return None
+        if thumbnail is None:
+            return None
+        try:
+            arr = np.asarray(thumbnail)
+        except Exception:
+            return None
+        if arr.size == 0:
+            return None
+        arr = np.squeeze(arr)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        if arr.ndim != 3:
+            return None
+        try:
+            arr = np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
+        except Exception:
+            arr = arr.astype(np.float32, copy=False)
+        return arr.tolist()
+
     def _build_layer_spec(
         self,
         worker_snapshot: _WorkerSnapshot,
@@ -400,6 +441,7 @@ class ViewerSceneManager:
         volume_state: Optional[Dict[str, Any]],
         zarr_path: Optional[str],
         extras: Optional[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]],
     ) -> LayerSpec:
         multiscale = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
         render_hints = self._build_render_hints(volume_state)
@@ -433,6 +475,7 @@ class ViewerSceneManager:
             contrast_limits=contrast_limits,
             render=render_hints,
             multiscale=multiscale,
+            metadata=metadata,
             extras=layer_extras,
         )
 
@@ -442,6 +485,7 @@ class ViewerSceneManager:
         *,
         current_step: Optional[Iterable[int]],
         ndisplay: Optional[int],
+        viewer_model: Optional[ViewerModel],
     ) -> DimsSpec:
         ndim = int(layer_spec.ndim)
         axis_labels = layer_spec.axis_labels or [f"axis-{i}" for i in range(ndim)]
@@ -449,14 +493,61 @@ class ViewerSceneManager:
         sizes = [int(size) for size in layer_spec.shape]
         ranges = [[0, max(0, int(size) - 1)] for size in sizes]
 
-        current = list(current_step) if current_step is not None else [0 for _ in range(ndim)]
+        viewer_dims = None
+        if viewer_model is not None:
+            try:
+                viewer_dims = viewer_model.dims
+            except Exception:
+                viewer_dims = None
+
+        current: List[int] = []
+        source_current = current_step
+        if source_current is None and viewer_dims is not None:
+            try:
+                source_current = tuple(viewer_dims.current_step)  # type: ignore[attr-defined]
+            except Exception:
+                source_current = None
+        if source_current is not None:
+            try:
+                current = [int(x) for x in list(source_current)]
+            except Exception:
+                current = [0] * ndim
         if len(current) < ndim:
             current.extend([0] * (ndim - len(current)))
+        current = current[:ndim] if current else [0 for _ in range(ndim)]
+
+        viewer_ndisplay = None
+        viewer_displayed: Optional[List[int]] = None
+        if viewer_dims is not None:
+            try:
+                viewer_ndisplay = int(viewer_dims.ndisplay)  # type: ignore[attr-defined]
+            except Exception:
+                viewer_ndisplay = None
+            try:
+                displayed_raw = list(viewer_dims.displayed)  # type: ignore[attr-defined]
+                viewer_displayed = [int(x) for x in displayed_raw]
+            except Exception:
+                viewer_displayed = None
 
         if ndisplay is None:
-            ndisplay = 3 if layer_spec.extras and layer_spec.extras.get("is_volume") else 2
-        ndisplay = max(1, min(int(ndisplay), ndim))
-        displayed_indices = list(range(max(0, ndim - ndisplay), ndim))
+            if viewer_ndisplay is not None:
+                ndisplay = viewer_ndisplay
+            else:
+                ndisplay = 3 if layer_spec.extras and layer_spec.extras.get("is_volume") else 2
+        try:
+            ndisplay_int = int(ndisplay)
+        except Exception:
+            ndisplay_int = 2
+        ndisplay_int = max(1, min(ndisplay_int, ndim))
+
+        displayed_indices: Optional[List[int]] = None
+        if viewer_displayed:
+            filtered = [idx for idx in viewer_displayed if 0 <= idx < ndim]
+            if len(filtered) >= ndisplay_int:
+                displayed_indices = filtered[:ndisplay_int]
+
+        if displayed_indices is None:
+            displayed_indices = list(range(max(0, ndim - ndisplay_int), ndim))
 
         return DimsSpec(
             ndim=ndim,
@@ -466,7 +557,7 @@ class ViewerSceneManager:
             range=ranges,
             current_step=current,
             displayed=displayed_indices,
-            ndisplay=ndisplay,
+            ndisplay=ndisplay_int,
         )
 
     def _build_camera_spec(
@@ -504,9 +595,14 @@ class ViewerSceneManager:
         if not multiscale_state:
             return None
 
-        levels_data = multiscale_state.get("levels") or []
+        levels_data = multiscale_state.get("levels")
+        if not levels_data:
+            return None
+
         levels: List[MultiscaleLevelSpec] = []
         for entry in levels_data:
+            if not isinstance(entry, dict):
+                continue
             shape = entry.get("shape")
             down = entry.get("downsample")
             if not shape and down:
@@ -525,6 +621,9 @@ class ViewerSceneManager:
                     path=entry.get("path"),
                 )
             )
+
+        if not levels:
+            return None
 
         metadata = {
             "policy": multiscale_state.get("policy", "fixed"),

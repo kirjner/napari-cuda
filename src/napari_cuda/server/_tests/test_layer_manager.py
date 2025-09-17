@@ -137,6 +137,27 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
     assert scene.capabilities == ["layer.update", "layer.remove"]
 
 
+def test_empty_multiscale_levels(manager: ViewerSceneManager) -> None:
+    worker = _StubWorker(use_volume=False, data_wh=(32, 32))
+    manager.update_from_sources(
+        worker=worker,
+        scene_state=None,
+        multiscale_state={"levels": []},
+        volume_state=None,
+        current_step=None,
+        ndisplay=2,
+        zarr_path=None,
+        extras=None,
+    )
+
+    meta = manager.dims_metadata()
+    assert meta.get("multiscale") is None
+
+    scene = manager.scene_spec()
+    assert scene is not None
+    assert scene.layers[0].multiscale is None
+
+
 def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
     viewer = ViewerModel()
     data = np.ones((32, 48), dtype=np.float32)
@@ -159,5 +180,43 @@ def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
     assert layer.shape == [32, 48]
     assert layer.extras is not None
     assert layer.extras["adapter_engine"] == "napari-vispy"
+    assert layer.metadata is not None
+    thumb = layer.metadata.get("thumbnail") if isinstance(layer.metadata, dict) else None
+    assert thumb is not None
+    thumb_arr = np.asarray(thumb)
+    assert thumb_arr.ndim == 3
+    assert thumb_arr.shape[-1] in (1, 3, 4)
     assert scene.metadata is not None
     assert scene.metadata["adapter_engine"] == "napari-vispy"
+
+
+def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
+    viewer = ViewerModel()
+    data = np.ones((4, 32, 48), dtype=np.float32)
+    viewer.add_image(data, name="volume")
+    viewer.dims.ndisplay = 3
+    try:
+        viewer.dims.displayed = (0, 1, 2)
+    except Exception:
+        pass
+
+    manager.update_from_sources(
+        worker=None,
+        scene_state=None,
+        multiscale_state=None,
+        volume_state=None,
+        current_step=None,
+        ndisplay=None,
+        zarr_path=None,
+        viewer_model=viewer,
+        extras=None,
+    )
+
+    scene = manager.scene_spec()
+    assert scene is not None
+    assert scene.dims.ndisplay == 3
+    assert scene.layers[0].extras is not None
+    assert bool(scene.layers[0].extras.get("is_volume")) is True
+    assert scene.dims.displayed is not None
+    assert len(scene.dims.displayed) == 3
+
