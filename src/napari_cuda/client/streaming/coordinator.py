@@ -4,9 +4,10 @@ import logging
 import math
 import os
 import queue
+import threading
 import time
 from threading import Thread
-from typing import Optional
+from typing import Dict, Optional
 import weakref
 from dataclasses import dataclass
 
@@ -42,6 +43,12 @@ from napari_cuda.utils.env import env_float, env_str
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
+from napari_cuda.protocol.messages import (
+    LayerRemoveMessage,
+    LayerSpec,
+    LayerUpdateMessage,
+    SceneSpecMessage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +205,10 @@ class StreamCoordinator:
         self._pyav_latency_s = float(pyav_latency_s) if pyav_latency_s is not None else max(0.06, float(vt_latency_s))
         # Default to PyAV latency until VT is proven ready
         self._presenter.set_latency(self._pyav_latency_s)
+        # Scene specification cache for client-side mirroring work
+        self._scene_lock = threading.Lock()
+        self._latest_scene_spec: Optional[SceneSpecMessage] = None
+        self._scene_layers: Dict[str, LayerSpec] = {}
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         # Monotonic scheduling marker for next due
@@ -577,6 +588,9 @@ class StreamCoordinator:
                 self.state_port,
                 self._on_video_config,
                 self._on_dims_update,
+                on_scene_spec=self._on_scene_spec,
+                on_layer_update=self._on_layer_update,
+                on_layer_remove=self._on_layer_remove,
                 on_connected=self._on_state_connected,
                 on_disconnect=self._on_state_disconnect,
             )
@@ -1150,6 +1164,42 @@ class StreamCoordinator:
                 )
         except Exception:
             logger.debug("dims_update parse failed", exc_info=True)
+
+    def _on_scene_spec(self, msg: SceneSpecMessage) -> None:
+        """Cache latest scene specification from server."""
+        try:
+            with self._scene_lock:
+                self._latest_scene_spec = msg
+                self._scene_layers = {layer.layer_id: layer for layer in msg.scene.layers}
+            logger.debug(
+                "scene.spec received: %d layers, capabilities=%s",
+                len(msg.scene.layers),
+                msg.scene.capabilities,
+            )
+        except Exception:
+            logger.debug("scene.spec handling failed", exc_info=True)
+
+    def _on_layer_update(self, msg: LayerUpdateMessage) -> None:
+        layer = msg.layer
+        if layer is None:
+            return
+        try:
+            with self._scene_lock:
+                self._scene_layers[layer.layer_id] = layer
+            logger.debug("layer.update: id=%s partial=%s", layer.layer_id, msg.partial)
+        except Exception:
+            logger.debug("layer.update handling failed", exc_info=True)
+
+    def _on_layer_remove(self, msg: LayerRemoveMessage) -> None:
+        try:
+            with self._scene_lock:
+                removed = self._scene_layers.pop(msg.layer_id, None)
+            if removed is not None:
+                logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
+            else:
+                logger.debug("layer.remove: id=%s not cached", msg.layer_id)
+        except Exception:
+            logger.debug("layer.remove handling failed", exc_info=True)
 
     def _on_connected(self) -> None:
         self._init_decoder()

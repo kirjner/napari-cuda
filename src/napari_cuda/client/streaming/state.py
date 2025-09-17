@@ -9,6 +9,15 @@ import threading
 
 import websockets
 
+from napari_cuda.protocol.messages import (
+    LAYER_REMOVE_TYPE,
+    LAYER_UPDATE_TYPE,
+    SCENE_SPEC_TYPE,
+    LayerRemoveMessage,
+    LayerUpdateMessage,
+    SceneSpecMessage,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +98,9 @@ class StateChannel:
         port: int,
         on_video_config: Optional[Callable[[dict], None]] = None,
         on_dims_update: Optional[Callable[[dict], None]] = None,
+        on_scene_spec: Optional[Callable[[SceneSpecMessage], None]] = None,
+        on_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
+        on_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
         on_connected: Optional[Callable[[], None]] = None,
         on_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
     ) -> None:
@@ -96,6 +108,9 @@ class StateChannel:
         self.port = int(port)
         self.on_video_config = on_video_config
         self.on_dims_update = on_dims_update
+        self.on_scene_spec = on_scene_spec
+        self.on_layer_update = on_layer_update
+        self.on_layer_remove = on_layer_remove
         self.on_connected = on_connected
         self.on_disconnect = on_disconnect
         self._last_key_req: Optional[float] = None
@@ -179,36 +194,10 @@ class StateChannel:
                             data = _json.loads(msg)
                         except _json.JSONDecodeError:
                             continue
-                        t = (data.get('type') or '').lower()
-                        if t == 'video_config':
-                            if self.on_video_config:
-                                try:
-                                    self.on_video_config(data)
-                                except Exception:
-                                    logger.debug("on_video_config callback failed", exc_info=True)
-                        elif t == 'dims.update':
-                            if self.on_dims_update:
-                                try:
-                                    # Normalize new-style dims.update (nested meta) to flattened keys
-                                    meta = data.get('meta') or {}
-                                    cur = _normalize_current_step(data.get('current_step'), meta)
-                                    fwd = {
-                                        'current_step': cur,
-                                        'ndim': meta.get('ndim'),
-                                        'order': meta.get('order'),
-                                        'axis_labels': meta.get('axis_labels'),
-                                        'sizes': meta.get('sizes'),
-                                        'range': meta.get('range'),
-                                        'ndisplay': meta.get('ndisplay'),
-                                        'volume': bool(meta.get('volume')) if 'volume' in meta else None,
-                                        'render': meta.get('render') or None,
-                                        'multiscale': meta.get('multiscale') or None,
-                                        'seq': data.get('seq'),
-                                        'last_client_id': data.get('last_client_id'),
-                                    }
-                                    self.on_dims_update(fwd)
-                                except Exception:
-                                    logger.debug("on_dims_update callback failed", exc_info=True)
+                        try:
+                            self._handle_message(data)
+                        except Exception:
+                            logger.debug("StateChannel message dispatch failed", exc_info=True)
                     # Connection closed: cancel helpers and clear handles
                     try:
                         ping_task.cancel()
@@ -246,6 +235,71 @@ class StateChannel:
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(max_delay, retry_delay * 1.5)
                 logger.info("Reconnecting to state channel...")
+
+    def _handle_message(self, data: dict) -> None:
+        """Dispatch a single decoded message to registered callbacks."""
+
+        raw_type = data.get('type')
+        msg_type = (raw_type or '').lower()
+
+        if msg_type == 'video_config':
+            if self.on_video_config:
+                try:
+                    self.on_video_config(data)
+                except Exception:
+                    logger.debug("on_video_config callback failed", exc_info=True)
+            return
+
+        if msg_type == 'dims.update':
+            if self.on_dims_update:
+                try:
+                    meta = data.get('meta') or {}
+                    cur = _normalize_current_step(data.get('current_step'), meta)
+                    fwd = {
+                        'current_step': cur,
+                        'ndim': meta.get('ndim'),
+                        'order': meta.get('order'),
+                        'axis_labels': meta.get('axis_labels'),
+                        'sizes': meta.get('sizes'),
+                        'range': meta.get('range'),
+                        'ndisplay': meta.get('ndisplay'),
+                        'volume': bool(meta.get('volume')) if 'volume' in meta else None,
+                        'render': meta.get('render') or None,
+                        'multiscale': meta.get('multiscale') or None,
+                        'seq': data.get('seq'),
+                        'last_client_id': data.get('last_client_id'),
+                    }
+                    self.on_dims_update(fwd)
+                except Exception:
+                    logger.debug("on_dims_update callback failed", exc_info=True)
+            return
+
+        if msg_type == SCENE_SPEC_TYPE:
+            if self.on_scene_spec:
+                try:
+                    spec = SceneSpecMessage.from_dict(data)
+                    self.on_scene_spec(spec)
+                except Exception:
+                    logger.debug("on_scene_spec callback failed", exc_info=True)
+            return
+
+        if msg_type == LAYER_UPDATE_TYPE:
+            if self.on_layer_update:
+                try:
+                    update = LayerUpdateMessage.from_dict(data)
+                    self.on_layer_update(update)
+                except Exception:
+                    logger.debug("on_layer_update callback failed", exc_info=True)
+            return
+
+        if msg_type == LAYER_REMOVE_TYPE:
+            if self.on_layer_remove:
+                try:
+                    removal = LayerRemoveMessage.from_dict(data)
+                    self.on_layer_remove(removal)
+                except Exception:
+                    logger.debug("on_layer_remove callback failed", exc_info=True)
+            return
 
     def request_keyframe_once(self) -> None:
         """Best-effort request for a keyframe via state channel (throttled)."""
