@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import time
 from typing import Callable, Optional
 import threading
@@ -19,6 +20,26 @@ from napari_cuda.protocol.messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _maybe_enable_debug_logger() -> bool:
+    flag = (os.getenv('NAPARI_CUDA_STATE_DEBUG') or os.getenv('NAPARI_CUDA_CLIENT_DEBUG') or '').lower()
+    if flag not in ('1', 'true', 'yes', 'on', 'dbg', 'debug'):
+        return False
+    has_local = any(getattr(h, '_napari_cuda_local', False) for h in logger.handlers)
+    if not has_local:
+        handler = logging.StreamHandler()
+        fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
+        handler.setFormatter(logging.Formatter(fmt))
+        handler.setLevel(logging.DEBUG)
+        setattr(handler, '_napari_cuda_local', True)
+        logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    return True
+
+
+_STATE_DEBUG = _maybe_enable_debug_logger()
 
 
 def _normalize_current_step(cur: object, meta: dict) -> object:
@@ -278,6 +299,12 @@ class StateChannel:
             if self.on_scene_spec:
                 try:
                     spec = SceneSpecMessage.from_dict(data)
+                    if _STATE_DEBUG:
+                        logger.debug(
+                            "received scene.spec: layers=%s capabilities=%s",
+                            [layer.layer_id for layer in spec.scene.layers],
+                            spec.scene.capabilities,
+                        )
                     self.on_scene_spec(spec)
                 except Exception:
                     logger.debug("on_scene_spec callback failed", exc_info=True)
@@ -287,6 +314,12 @@ class StateChannel:
             if self.on_layer_update:
                 try:
                     update = LayerUpdateMessage.from_dict(data)
+                    if _STATE_DEBUG:
+                        logger.debug(
+                            "received layer.update: id=%s partial=%s",
+                            update.layer.layer_id if update.layer else None,
+                            update.partial,
+                        )
                     self.on_layer_update(update)
                 except Exception:
                     logger.debug("on_layer_update callback failed", exc_info=True)
@@ -296,6 +329,8 @@ class StateChannel:
             if self.on_layer_remove:
                 try:
                     removal = LayerRemoveMessage.from_dict(data)
+                    if _STATE_DEBUG:
+                        logger.debug("received layer.remove: id=%s reason=%s", removal.layer_id, removal.reason)
                     self.on_layer_remove(removal)
                 except Exception:
                     logger.debug("on_layer_remove callback failed", exc_info=True)

@@ -6,6 +6,7 @@ state channel. No direct sockets or legacy dims.set paths remain here.
 """
 
 import logging
+from contextlib import nullcontext
 from typing import Optional, TYPE_CHECKING
 
 import napari
@@ -18,6 +19,8 @@ except Exception:  # pragma: no cover
     from pydantic import PrivateAttr  # type: ignore
 from napari.components import LayerList, Dims, Camera
 from qtpy import QtCore  # type: ignore
+
+from napari_cuda.client.layers import RegistrySnapshot
 
 if TYPE_CHECKING:
     # This import reveals napari's intentional architectural coupling between
@@ -358,6 +361,44 @@ class ProxyViewer(ViewerModel):
                 self._last_step_ui = current_step
         except Exception:
             logger.debug("ProxyViewer mirror dims apply failed", exc_info=True)
+
+    def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
+        """Synchronize remote layer mirrors with the latest registry snapshot."""
+        blocker = getattr(getattr(self.layers, 'events', None), 'blocker', None)
+        ctx = blocker() if callable(blocker) else nullcontext()
+        self._suppress_forward = True
+        try:
+            with ctx:
+                desired_ids = list(snapshot.ids())
+                existing_layers = list(self.layers)
+                for layer in existing_layers:
+                    remote_id = getattr(layer, 'remote_id', None)
+                    if remote_id and remote_id not in desired_ids:
+                        try:
+                            self.layers.remove(layer)
+                        except ValueError:
+                            continue
+                # Ensure mapping reflects removals
+                for idx, record in enumerate(snapshot.iter()):
+                    layer = record.layer
+                    if layer not in self.layers:
+                        self.layers.insert(idx, layer)
+                    current_index = self.layers.index(layer)
+                    if current_index != idx:
+                        try:
+                            self.layers.move(current_index, idx)
+                        except Exception:
+                            # Fallback to manual reposition
+                            self.layers.pop(current_index)
+                            self.layers.insert(idx, layer)
+                    try:
+                        layer.visible = False
+                    except Exception:
+                        pass
+                try:
+                    self.layers.selection.clear()
+                except Exception:
+                    pass
         finally:
             self._suppress_forward = False
 
