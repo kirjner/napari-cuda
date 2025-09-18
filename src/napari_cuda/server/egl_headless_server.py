@@ -53,6 +53,7 @@ from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
 from napari_cuda.utils.env import env_bool
+from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
 
 logger = logging.getLogger(__name__)
 
@@ -333,66 +334,33 @@ class EGLHeadlessServer:
         root = self._zarr_path
         if not root:
             return
+        axes_override = tuple(self._zarr_axes) if isinstance(self._zarr_axes, str) else None
         try:
-            from pathlib import Path
-            import json as _json
-            zattrs = Path(root) / '.zattrs'
-            if not zattrs.exists():
-                return
-            data = _json.loads(zattrs.read_text())
-            ms = data.get('multiscales') or []
-            if not ms:
-                return
-            entry = ms[0]
-            axes = entry.get('axes') or []
-            ax_names = [a.get('name') if isinstance(a, dict) else str(a) for a in axes] if isinstance(axes, list) else []
-            # Normalize to lower-case
-            ax_names = [str(a or '').lower() for a in ax_names]
-            ds = entry.get('datasets') or []
-            levels: list[dict] = []
-            for d in ds:
-                p = d.get('path') if isinstance(d, dict) else None
-                if not isinstance(p, str):
-                    continue
-                scale_vec = None
-                try:
-                    cts = d.get('coordinateTransformations') or []
-                    for tr in cts:
-                        if isinstance(tr, dict) and str(tr.get('type')).lower() == 'scale':
-                            v = tr.get('scale')
-                            if isinstance(v, (list, tuple)):
-                                scale_vec = [float(x) for x in v]
-                            break
-                except Exception:
-                    scale_vec = None
-                # Map scale_vec to z,y,x order if axes provided; else default
-                dz = dy = dx = 1.0
-                if isinstance(scale_vec, list) and scale_vec:
-                    try:
-                        if ax_names and len(scale_vec) == len(ax_names):
-                            lower = ax_names
-                            dz = float(scale_vec[lower.index('z')]) if 'z' in lower else 1.0
-                            dy = float(scale_vec[lower.index('y')]) if 'y' in lower else 1.0
-                            dx = float(scale_vec[lower.index('x')]) if 'x' in lower else 1.0
-                        else:
-                            # Assume zyx
-                            if len(scale_vec) >= 3:
-                                dz, dy, dx = float(scale_vec[0]), float(scale_vec[1]), float(scale_vec[2])
-                    except Exception:
-                        dz = dy = dx = 1.0
-                levels.append({'path': p, 'downsample': [dz, dy, dx]})
-            if levels:
-                self._ms_state['levels'] = levels
-                # If a specific level is configured, set current_level accordingly
-                try:
-                    if self._zarr_level:
-                        names = [lv.get('path') for lv in levels]
-                        if self._zarr_level in names:
-                            self._ms_state['current_level'] = int(names.index(self._zarr_level))
-                except Exception:
-                    pass
+            source = ZarrSceneSource(root, preferred_level=self._zarr_level, axis_override=axes_override)
+        except ZarrSceneSourceError:
+            logger.debug("multiscale state: invalid Zarr scene source", exc_info=True)
+            return
         except Exception:
-            logger.debug("multiscale NGFF parse failed", exc_info=True)
+            logger.debug("multiscale state: unexpected error building Zarr scene source", exc_info=True)
+            return
+
+        levels: list[dict] = []
+        for desc in source.level_descriptors:
+            levels.append(
+                {
+                    'path': desc.path,
+                    'downsample': list(desc.downsample),
+                    'shape': [int(x) for x in desc.shape],
+                }
+            )
+
+        if levels:
+            self._ms_state['levels'] = levels
+            self._ms_state['current_level'] = int(source.current_level)
+            self._zarr_axes = ''.join(source.axes)
+            current_desc = source.level_descriptors[source.current_level]
+            if current_desc.path:
+                self._zarr_level = current_desc.path
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
@@ -440,6 +408,20 @@ class EGLHeadlessServer:
             'zarr_axes': getattr(self._worker, '_zarr_axes', None) if self._worker is not None else None,
             'zarr_level': self._zarr_level,
         }
+        if self._worker is not None and hasattr(self._worker, '_scene_source'):
+            source = getattr(self._worker, '_scene_source', None)
+            if source is not None:
+                extras['zarr_scale'] = list(source.level_scale(source.current_level))
+                extras['multiscale_levels'] = [
+                    {
+                        'index': desc.index,
+                        'path': desc.path,
+                        'shape': [int(x) for x in desc.shape],
+                        'downsample': list(desc.downsample),
+                    }
+                    for desc in source.level_descriptors
+                ]
+                extras['multiscale_current_level'] = int(source.current_level)
         viewer_model = None
         if self._worker is not None and hasattr(self._worker, 'using_napari_adapter'):
             try:

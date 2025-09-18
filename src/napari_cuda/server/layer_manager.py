@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
@@ -104,6 +104,7 @@ class ViewerSceneManager:
             zarr_path=zarr_path,
             extras=extras_map or None,
             metadata=layer_metadata or None,
+            adapter_layer=adapter_layer,
         )
         dims_spec = self._build_dims_spec(
             layer_spec,
@@ -395,6 +396,12 @@ class ViewerSceneManager:
         except Exception:
             pass
         try:
+            scale = getattr(layer, "scale", None)
+            if scale is not None:
+                extras["scale"] = [float(s) for s in scale]
+        except Exception:
+            pass
+        try:
             clim = getattr(layer, "contrast_limits", None)
             if clim is not None:
                 extras["contrast_limits"] = [float(clim[0]), float(clim[1])]
@@ -442,12 +449,23 @@ class ViewerSceneManager:
         zarr_path: Optional[str],
         extras: Optional[Dict[str, Any]],
         metadata: Optional[Dict[str, Any]],
+        adapter_layer: Optional[Any] = None,
     ) -> LayerSpec:
-        multiscale = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
+        multiscale = self._adapter_multiscale_spec(
+            adapter_layer,
+            extras,
+            worker_snapshot.shape,
+        )
+        if multiscale is None:
+            multiscale = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
         render_hints = self._build_render_hints(volume_state)
 
         contrast_limits = None
-        if isinstance(volume_state, dict):
+        if adapter_layer is not None:
+            clim = getattr(adapter_layer, "contrast_limits", None)
+            if isinstance(clim, (list, tuple)) and len(clim) >= 2:
+                contrast_limits = [float(clim[0]), float(clim[1])]
+        if contrast_limits is None and isinstance(volume_state, dict):
             clim = volume_state.get("clim")
             if isinstance(clim, (list, tuple)) and len(clim) >= 2:
                 try:
@@ -634,6 +652,78 @@ class ViewerSceneManager:
             levels=levels,
             current_level=int(multiscale_state.get("current_level", 0)),
             metadata={k: v for k, v in metadata.items() if v is not None},
+        )
+
+    def _adapter_multiscale_spec(
+        self,
+        layer: Optional[Any],
+        extras: Optional[Dict[str, Any]],
+        base_shape: List[int],
+    ) -> Optional[MultiscaleSpec]:
+        if layer is None or not bool(getattr(layer, "multiscale", False)):
+            return None
+
+        current_level = None
+        if extras and extras.get("multiscale_current_level") is not None:
+            current_level = int(extras["multiscale_current_level"])
+        elif hasattr(layer, "data_level"):
+            current_level = int(getattr(layer, "data_level"))
+        else:
+            current_level = 0
+
+        levels: List[MultiscaleLevelSpec] = []
+        level_entries = extras.get("multiscale_levels") if extras else None
+        if isinstance(level_entries, list) and level_entries:
+            for entry in level_entries:
+                if not isinstance(entry, dict):
+                    continue
+                path = entry.get("path")
+                shape = entry.get("shape") or base_shape
+                downsample = entry.get("downsample") or [1.0] * len(base_shape)
+                levels.append(
+                    MultiscaleLevelSpec(
+                        shape=[int(x) for x in shape],
+                        downsample=[float(x) for x in downsample],
+                        path=str(path) if path else None,
+                    )
+                )
+
+        if not levels:
+            data = getattr(layer, "data", None)
+            data_seq: Optional[Sequence[Any]] = None
+            if isinstance(data, Sequence):
+                try:
+                    if len(data) > 0:
+                        data_seq = data
+                except TypeError:
+                    data_seq = None
+            if data_seq:
+                top_shape = base_shape or list(getattr(data_seq[0], "shape", []))
+                for idx in range(len(data_seq)):
+                    arr = data_seq[idx]
+                    arr_shape = list(getattr(arr, "shape", top_shape))
+                    downsample: List[float] = []
+                    for base, level_dim in zip(top_shape, arr_shape):
+                        if level_dim in (0, None):
+                            downsample.append(1.0)
+                        else:
+                            downsample.append(float(base) / float(level_dim))
+                    levels.append(
+                        MultiscaleLevelSpec(
+                            shape=[int(x) for x in arr_shape],
+                            downsample=downsample or [1.0] * len(arr_shape),
+                            path=None,
+                        )
+                    )
+
+        if not levels:
+            return None
+
+        metadata = {"policy": "fixed", "index_space": "base"}
+        return MultiscaleSpec(
+            levels=levels,
+            current_level=int(current_level or 0),
+            metadata=metadata,
         )
 
     def _build_render_hints(

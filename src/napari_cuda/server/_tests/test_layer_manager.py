@@ -220,3 +220,93 @@ def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
     assert scene.dims.displayed is not None
     assert len(scene.dims.displayed) == 3
 
+
+def test_manager_uses_adapter_multiscale_state(manager: ViewerSceneManager) -> None:
+    viewer = ViewerModel()
+    data = [
+        np.ones((16, 32), dtype=np.float32),
+        np.ones((8, 16), dtype=np.float32),
+    ]
+    layer = viewer.add_image(data, multiscale=True, scale=(0.5, 0.25), name="ms")
+    layer.data_level = 1
+
+    manager.update_from_sources(
+        worker=None,
+        scene_state=None,
+        multiscale_state=None,
+        volume_state=None,
+        current_step=None,
+        ndisplay=2,
+        zarr_path="/tmp/test.zarr",
+        viewer_model=viewer,
+        extras=None,
+    )
+
+    scene = manager.scene_spec()
+    assert scene is not None
+    assert scene.metadata is not None
+    assert scene.metadata["zarr_path"] == "/tmp/test.zarr"
+    layer_spec = scene.layers[0]
+    assert layer_spec.multiscale is not None
+    assert layer_spec.multiscale.current_level == 1
+    assert len(layer_spec.multiscale.levels) == 2
+    assert layer_spec.multiscale.levels[1].downsample == [2.0, 2.0]
+    assert layer_spec.extras is not None
+    assert layer_spec.extras["scale"] == [0.5, 0.25]
+
+
+def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> None:
+    worker = _StubWorker(use_volume=False, data_wh=(64, 32))
+    extras: Dict[str, Any] = {
+        "multiscale_levels": [
+            {
+                "index": 0,
+                "path": "level_0",
+                "shape": [32, 64],
+                "downsample": [1.0, 1.0],
+            },
+            {
+                "index": 1,
+                "path": "level_1",
+                "shape": [16, 32],
+                "downsample": [2.0, 2.0],
+            },
+        ],
+        "multiscale_current_level": 1,
+        "zarr_scale": [0.25, 0.5],
+        "adapter_engine": "napari-vispy",
+    }
+
+    multiscale_state = {
+        "levels": [
+            {"path": "level_0", "downsample": [1.0, 1.0], "shape": [32, 64]},
+            {"path": "level_1", "downsample": [2.0, 2.0], "shape": [16, 32]},
+        ],
+        "current_level": 1,
+        "policy": "fixed",
+        "index_space": "base",
+    }
+
+    manager.update_from_sources(
+        worker=worker,
+        scene_state=None,
+        multiscale_state=multiscale_state,
+        volume_state=None,
+        current_step=None,
+        ndisplay=2,
+        zarr_path="/data/sample.zarr",
+        extras=extras,
+    )
+
+    scene = manager.scene_spec()
+    assert scene is not None
+    layer = scene.layers[0]
+    assert layer.multiscale is not None
+    assert layer.multiscale.current_level == 1
+    assert layer.multiscale.levels[1].path == "level_1"
+    assert layer.multiscale.levels[1].downsample == [2.0, 2.0]
+    assert layer.extras is not None
+    assert layer.extras["multiscale_levels"][0]["path"] == "level_0"
+    assert scene.metadata is not None
+    assert scene.metadata["zarr_scale"] == [0.25, 0.5]
+    assert scene.metadata["adapter_engine"] == "napari-vispy"
