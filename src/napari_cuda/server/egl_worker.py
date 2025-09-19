@@ -16,7 +16,7 @@ import time
 import logging
 import ctypes
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 import threading
 import math
 
@@ -48,7 +48,9 @@ import PyNvVideoCodec as pnvc  # type: ignore
 from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
 from .hw_limits import get_hw_limits
-from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
+from napari_cuda.utils.env import env_bool
+from .zarr_source import ZarrSceneSource
+from napari_cuda.server.rendering.adapter_scene import AdapterScene
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,10 @@ class _CameraOps:
         if isinstance(c, (tuple, list)) and len(c) >= 2:
             cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
 
+class _LevelBudgetError(RuntimeError):
+    """Raised when a multiscale level exceeds memory/voxel budgets."""
+    pass
+
 
 @dataclass
 class FrameTimings:
@@ -214,7 +220,8 @@ class EGLRendererWorker:
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 use_napari_adapter: Optional[bool] = None) -> None:
+                 use_napari_adapter: Optional[bool] = None,
+                 scene_refresh_cb: Optional[Callable[[], None]] = None) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -253,6 +260,11 @@ class EGLRendererWorker:
         self._napari_adapter = None
         self._scene_source: Optional[ZarrSceneSource] = None
         self._active_ms_level: int = 0
+        self._level_downgraded: bool = False
+        self._scene_refresh_cb = scene_refresh_cb
+        self._zoom_accumulator: float = 0.0
+        self._pending_zoom_ratio: Optional[float] = None
+        self._pending_zoom_ts: float = 0.0
 
         self._texture: Optional[int] = None
         self._fbo: Optional[int] = None
@@ -281,8 +293,14 @@ class EGLRendererWorker:
         # Pending multiscale level switch (coalesced)
         self._pending_ms_level: Optional[int] = None
         self._pending_ms_path: Optional[str] = None
+        self._pending_zoom_ratio: Optional[float] = None
+        self._pending_zoom_ts: float = 0.0
         # Pending 2D/3D view switch (coalesced)
         self._pending_ndisplay: Optional[int] = None
+        # Debug gating for ensure_scene_source logging
+        self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
+        self._last_ensure_log_ts: float = 0.0
+        self._ensure_log_interval_s: float = 1.0
 
         # Encoding / instrumentation state
         self._frame_index = 0
@@ -321,6 +339,21 @@ class EGLRendererWorker:
         except Exception:
             self._orbit_el_max = 85.0
 
+        self._log_layer_debug = env_bool('NAPARI_CUDA_LAYER_DEBUG', False)
+        try:
+            self._slice_max_bytes = int(os.getenv('NAPARI_CUDA_MAX_SLICE_BYTES', '0') or '0')
+        except Exception:
+            self._slice_max_bytes = 0
+        try:
+            self._volume_max_bytes = int(os.getenv('NAPARI_CUDA_MAX_VOLUME_BYTES', '0') or '0')
+        except Exception:
+            self._volume_max_bytes = 0
+        try:
+            self._volume_max_voxels = int(os.getenv('NAPARI_CUDA_MAX_VOLUME_VOXELS', '0') or '0')
+        except Exception:
+            self._volume_max_voxels = 0
+        self._last_layer_debug: Optional[tuple[str, int, int]] = None
+
         # Ensure partial initialization is cleaned up if any step fails
         try:
             # Zarr/NGFF dataset configuration (optional)
@@ -337,6 +370,7 @@ class EGLRendererWorker:
             self._zarr_dtype: Optional[str] = None
             self._z_index: Optional[int] = None
             self._zarr_clim: Optional[tuple[float, float]] = None
+            self._hw_limits = get_hw_limits()
 
             self._init_egl()
             self._init_cuda()
@@ -394,106 +428,140 @@ class EGLRendererWorker:
             logger.debug("frame_volume: set distance failed", exc_info=True)
 
     def _init_adapter_scene(self, source: Optional[ZarrSceneSource]) -> None:
-        canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
-        view = canvas.central_widget.add_view()
+        adapter = AdapterScene(self)
+        canvas, view, viewer = adapter.init(source)
+        # Mirror attributes for call sites expecting them
         self.canvas = canvas
         self.view = view
+        self._viewer = viewer
 
-        rng = np.random.default_rng(41)
-        viewer = ViewerModel()
+    def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
+        """Set napari dims.range to match the chosen level shape.
 
-        if source is not None and not self.use_volume:
-            level_arrays = source.levels
-            is_multiscale = len(level_arrays) > 1
-            layer_data = level_arrays if is_multiscale else level_arrays[0]
-            clims = source.estimate_clims()
-            layer = viewer.add_image(
-                layer_data,
-                name="zarr-image",
-                multiscale=is_multiscale,
-                contrast_limits=clims,
-                scale=source.level_scale(0),
-            )
-            viewer.dims.axis_labels = tuple(source.axes)
-            init_step = source.initial_step(self._zarr_init_z)
-            viewer.dims.current_step = init_step
-            axes = source.axes
-            self._z_index = init_step[axes.index("z")] if "z" in axes else init_step[0]
-            viewer.dims.ndisplay = 2
-            adapter = VispyImageLayer(layer)
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            shape = source.level_shape(source.current_level)
-            y_pos = axes.index("y") if "y" in axes else max(0, len(shape) - 2)
-            x_pos = axes.index("x") if "x" in axes else max(0, len(shape) - 1)
-            h = int(shape[y_pos])
-            w = int(shape[x_pos])
-            self._data_wh = (w, h)
-            view.camera.set_range(x=(0, w), y=(0, h))
-            self._scene_source = source
-            self._napari_layer = layer
-            self._napari_adapter = adapter
-            self._viewer = viewer
-            self._zarr_clim = clims
-            scene_src = "napari-zarr-adapter"
-        elif self.use_volume:
-            volume = rng.random((self.volume_depth, self.height, self.width), dtype=np.float32)
-            layer = viewer.add_image(volume, name="adapter-volume")
-            viewer.dims.ndisplay = 3
-            adapter = VispyImageLayer(layer)
-            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
-            d = int(volume.shape[0])
-            h = int(volume.shape[1])
-            w = int(volume.shape[2])
-            self._data_wh = (w, h)
-            self._data_d = d
-            try:
-                view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-            except Exception:
-                logger.debug("adapter volume: camera set_range failed", exc_info=True)
-            try:
-                self._frame_volume_camera(w, h, d)
-            except Exception:
-                logger.debug("adapter volume: frame camera failed", exc_info=True)
-            layer.rendering = "mip"
-            scene_src = "napari-adapter-volume"
-            self._viewer = viewer
-            self._napari_layer = layer
-            self._napari_adapter = adapter
+        This avoids Z slider reflecting base-resolution depth when rendering
+        a coarser level.
+        """
+        if not self.using_napari_adapter() or self._viewer is None:
+            return
+        descriptor = source.level_descriptors[level]
+        shape = tuple(int(s) for s in descriptor.shape)
+        ranges = tuple((0, max(0, s - 1), 1) for s in shape)
+        try:
+            self._viewer.dims.range = ranges
+            if self._log_layer_debug:
+                logger.info(
+                    "dims range set: level=%d ranges=%s", int(level), str(ranges)
+                )
+        except Exception:
+            logger.debug("set_dims_range_for_level failed", exc_info=True)
+
+    def _set_level_with_budget(self, desired_level: int, *, reason: str) -> None:
+        source = self._ensure_scene_source()
+        levels_count = len(source.level_descriptors)
+        if levels_count == 0:
+            return
+        desired_level = max(0, min(int(desired_level), levels_count - 1))
+
+        candidates: List[int]
+        if self.use_volume:
+            candidates = list(range(desired_level, levels_count))
         else:
-            image = rng.random((self.height, self.width), dtype=np.float32)
-            layer = viewer.add_image(image, name="adapter-image")
-            viewer.dims.ndisplay = 2
-            adapter = VispyImageLayer(layer)
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            h = int(image.shape[0])
-            w = int(image.shape[1])
-            self._data_wh = (w, h)
+            # Allow graceful downgrade for 2D slices when over slice budget
+            candidates = list(range(desired_level, levels_count))
+
+        for idx, level in enumerate(candidates):
             try:
-                view.camera.set_range(x=(0, w), y=(0, h))
-            except Exception:
-                logger.debug("adapter image: camera set_range failed", exc_info=True)
-            scene_src = "napari-adapter-image"
+                # Enforce budgets prior to any data compute
+                if self.use_volume:
+                    self._volume_budget_allows(source, level)
+                else:
+                    self._slice_budget_allows(source, level)
+                self._apply_level_internal(source, level)
+                self._level_downgraded = (level != desired_level)
+                if self._level_downgraded:
+                    try:
+                        logger.info(
+                            "level downgrade: requested=%d active=%d reason=%s",
+                            desired_level,
+                            level,
+                            reason,
+                        )
+                    except Exception:
+                        logger.debug("level downgrade log failed", exc_info=True)
+                else:
+                    self._level_downgraded = False
+                return
+            except _LevelBudgetError as exc:
+                if self._log_layer_debug:
+                    try:
+                        logger.info(
+                            "budget reject: mode=%s level=%d reason=%s",
+                            'volume' if self.use_volume else 'slice',
+                            int(level),
+                            str(exc),
+                        )
+                    except Exception:
+                        logger.debug("budget reject log failed", exc_info=True)
+                if idx == len(candidates) - 1:
+                    raise
+                logger.debug("level %d rejected by budget: %s", level, exc)
+                continue
 
-        node = adapter.node
-        node.parent = view.scene
-        self._visual = node
-        if self._viewer is None:
-            self._viewer = viewer
-        if self._napari_layer is None:
-            self._napari_layer = layer
-        if self._napari_adapter is None:
-            self._napari_adapter = adapter
+        raise RuntimeError("Unable to select multiscale level within budget")
 
+    def _consume_zoom_delta(self, levels_count: int) -> int:
+        ratio = self._pending_zoom_ratio
+        self._pending_zoom_ratio = None
+        if ratio is None or ratio <= 0.0 or levels_count <= 1:
+            return 0
         try:
-            logger.info("Scene init: source=%s %dx%d", scene_src, self.width, self.height)
-        except Exception:
-            logger.debug("Adapter scene init log failed", exc_info=True)
-        try:
-            logger.info("Camera class: %s", type(view.camera).__name__)
-        except Exception:
-            pass
+            delta = math.log2(float(ratio))
+        except ValueError:
+            return 0
+        self._zoom_accumulator += delta
+        delta_levels = 0
+        threshold = 0.75
+        while self._zoom_accumulator > threshold and (self._active_ms_level + delta_levels) > 0:
+            self._zoom_accumulator -= threshold
+            delta_levels -= 1
+        while self._zoom_accumulator < -threshold and (self._active_ms_level + delta_levels) < levels_count - 1:
+            self._zoom_accumulator += threshold
+            delta_levels += 1
+        # Clamp accumulator to avoid runaway drift
+        self._zoom_accumulator = max(-threshold, min(threshold, self._zoom_accumulator))
+        return delta_levels
 
-        canvas.render()
+    def _apply_zoom_based_level_switch(self) -> None:
+        if not self.using_napari_adapter():
+            self._pending_zoom_ratio = None
+            return
+        try:
+            source = self._ensure_scene_source()
+        except Exception:
+            logger.debug("zoom level switch: no scene source available")
+            return
+        levels_count = len(source.level_descriptors)
+        delta_levels = self._consume_zoom_delta(levels_count)
+        if delta_levels == 0:
+            return
+        desired = self._active_ms_level + delta_levels
+        desired = max(0, min(desired, levels_count - 1))
+        if desired == self._active_ms_level:
+            return
+        try:
+            prev = int(self._active_ms_level)
+            self._set_level_with_budget(desired, reason="zoom")
+            if self._log_layer_debug and prev != int(self._active_ms_level):
+                try:
+                    logger.info(
+                        "zoom switch: requested=%d applied=%d",
+                        int(desired), int(self._active_ms_level),
+                    )
+                except Exception:
+                    logger.debug("zoom switch log failed", exc_info=True)
+        except _LevelBudgetError:
+            logger.debug("zoom-driven level switch aborted: budget exceeded")
+        # Adapter path handles view updates; no scene re-init or forced render here
 
     def _init_egl(self) -> None:
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
@@ -546,52 +614,71 @@ class EGLRendererWorker:
         self.cuda_ctx = ctx
 
     def _create_scene_source(self) -> Optional[ZarrSceneSource]:
-        if self._zarr_path is None or da is None:
+        if self._zarr_path is None:
             return None
+        if da is None:
+            raise RuntimeError("ZarrSceneSource requires dask.array to be available")
         axes_override = tuple(self._zarr_axes) if isinstance(self._zarr_axes, str) else None
-        try:
-            source = ZarrSceneSource(
-                self._zarr_path,
-                preferred_level=self._zarr_level,
-                axis_override=axes_override,
-            )
-            return source
-        except ZarrSceneSourceError as exc:
-            logger.warning("Failed to build ZarrSceneSource: %s", exc)
-        except Exception:
-            logger.exception("Unexpected error while building ZarrSceneSource")
-        return None
-
-    def _ensure_scene_source(self) -> ZarrSceneSource:
-        source = self._scene_source
-        if source is None:
-            source = self._create_scene_source()
-            if source is None:
-                raise RuntimeError("ZarrSceneSource is required but unavailable")
-            self._scene_source = source
-        if self._zarr_level:
-            target = source.level_index_for_path(self._zarr_level)
-            if target != source.current_level:
-                source.set_current_level(target)
-        self._active_ms_level = int(source.current_level)
+        source = ZarrSceneSource(
+            self._zarr_path,
+            preferred_level=self._zarr_level,
+            axis_override=axes_override,
+        )
         return source
 
-    def _slice_from_source(self, source: ZarrSceneSource, level: int, z_index: int) -> np.ndarray:
-        axes = source.axes
-        arr = source.get_level(level)
-        z_pos = axes.index('z') if 'z' in axes else 0
-        indexer: List[slice | int] = [slice(None)] * arr.ndim
-        indexer[z_pos] = int(z_index)
-        slab = arr[tuple(indexer)].astype('float32').compute()
-        clims = self._zarr_clim or source.estimate_clims(level=level)
-        self._zarr_clim = clims
-        c0, c1 = clims
-        scale = max(1e-12, (c1 - c0))
-        slab = (slab - c0) / scale
-        np.clip(slab, 0.0, 1.0, out=slab)
-        h, w = int(slab.shape[-2]), int(slab.shape[-1])
-        self._data_wh = (w, h)
-        return slab
+    def _ensure_scene_source(self) -> ZarrSceneSource:
+        """Return a valid ZarrSceneSource and sync metadata.
+
+        Raises a clear runtime error if Zarr is not configured or dask is missing.
+        """
+        if not self._zarr_path:
+            raise RuntimeError("No OME-Zarr path configured for scene source")
+        if da is None:
+            raise RuntimeError("ZarrSceneSource requires dask.array to be available")
+        source = self._scene_source
+        if source is None:
+            created = self._create_scene_source()
+            if created is None:
+                raise RuntimeError("Failed to create ZarrSceneSource")
+            source = created
+            self._scene_source = source
+
+        target = source.current_level
+        if self._zarr_level:
+            target = source.level_index_for_path(self._zarr_level)
+        if self._log_layer_debug:
+            try:
+                # Log only on change (no periodic spam) and at DEBUG level
+                key = (int(source.current_level), str(self._zarr_level) if self._zarr_level else None)
+                if self._last_ensure_log != key:
+                    logger.debug(
+                        "ensure_source: current=%d target=%d path=%s",
+                        int(source.current_level), int(target), self._zarr_level,
+                    )
+                    self._last_ensure_log = key
+                    self._last_ensure_log_ts = time.perf_counter()
+            except Exception:
+                logger.debug("ensure_source debug log failed", exc_info=True)
+
+        with self._state_lock:
+            step = source.set_current_level(target, step=source.current_step)
+
+        descriptor = source.level_descriptors[source.current_level]
+        self._active_ms_level = int(source.current_level)
+        self._zarr_level = descriptor.path or None
+        self._zarr_axes = ''.join(source.axes)
+        self._zarr_shape = descriptor.shape
+        self._zarr_dtype = str(source.dtype)
+
+        axes_lower = [str(ax).lower() for ax in source.axes]
+        if step:
+            if 'z' in axes_lower:
+                z_pos = axes_lower.index('z')
+                self._z_index = int(step[z_pos])
+            else:
+                self._z_index = int(step[0])
+
+        return source
 
     def _init_vispy_scene(self) -> None:
         source = self._create_scene_source()
@@ -631,68 +718,46 @@ class EGLRendererWorker:
 
         if self._zarr_path and self.use_volume:
             try:
-                # 3D volume from OME-Zarr (axes assumed zyx unless overridden)
+                source = self._ensure_scene_source()
+                self._set_level_with_budget(self._active_ms_level, reason="init")
+                vol3d = source.level_volume(self._active_ms_level, compute=True)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
-                vol3d = self._load_zarr_volume3d()
-                # Normalize to float32 0..1 already performed by loader
                 visual = scene.visuals.Volume(vol3d, parent=view.scene, method="mip", cmap="grays")
-                try:
-                    if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
-                        visual.relative_step_size = float(self.volume_relative_step)
-                    d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
-                    self._data_wh = (w, h)
-                    self._data_d = int(d)
-                    # Ensure initial camera frames the volume so first render is visible
-                    try:
-                        view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-                    except Exception as e:
-                        # Fallback to XY only if TurntableCamera lacks z-range
-                        try:
-                            view.camera.set_range(x=(0, w), y=(0, h))
-                        except Exception:
-                            logger.debug("zarr-volume: initial camera set_range(xy) failed", exc_info=True)
-                    # Stabilize initial pan/zoom by framing center + distance
-                    try:
-                        self._frame_volume_camera(w, h, d)
-                    except Exception:
-                        logger.debug("zarr-volume: frame camera failed", exc_info=True)
-                    scene_src = "zarr-volume"
-                    scene_meta = f"level={self._zarr_level or 'auto'} shape={d}x{h}x{w}"
-                except Exception as e:
-                    logger.debug("zarr-volume metadata set failed", exc_info=True)
+                if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
+                    visual.relative_step_size = float(self.volume_relative_step)
+                d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
+                self._data_wh = (w, h)
+                self._data_d = int(d)
+                view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
+                self._frame_volume_camera(w, h, d)
+                scene_src = "zarr-volume"
+                scene_meta = f"level={self._zarr_level or 'auto'} shape={d}x{h}x{w}"
             except Exception as e:
                 logger.exception("Failed to initialize OME-Zarr volume; falling back to 2D slice: %s", e)
-                # Fall through to 2D slice fallback
                 self.use_volume = False
 
-        elif self._zarr_path and not self.use_volume:
+        if self._zarr_path and not self.use_volume:
             try:
-                # 2D slice mode from OME-Zarr (axes assumed zyx unless overridden)
+                source = self._ensure_scene_source()
+                self._set_level_with_budget(self._active_ms_level, reason="init")
+                z_idx = self._z_index or 0
+                arr2d = source.slice(self._active_ms_level, z_idx, compute=True)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-                arr2d = self._load_zarr_initial_slice()
                 visual = scene.visuals.Image(arr2d, parent=view.scene, cmap='grays', clim=None, method='auto')
-                # Camera range to data extents (note: array is (H, W))
-                try:
-                    h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
-                    self._data_wh = (w, h)
-                    view.camera.set_range(x=(0, w), y=(0, h))
-                    scene_src = "zarr"
-                    scene_meta = f"level={self._zarr_level or 'auto'} z={self._z_index} shape={h}x{w}"
-                except Exception as e:
-                    logger.debug("set_range(zarr) failed: %s", e)
+                h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
+                self._data_wh = (w, h)
+                view.camera.set_range(x=(0, w), y=(0, h))
+                scene_src = "zarr"
+                scene_meta = f"level={self._zarr_level or 'auto'} z={self._z_index} shape={h}x{w}"
             except Exception as e:
                 logger.exception("Failed to initialize OME-Zarr slice; falling back to synthetic image: %s", e)
-                # Fallback to synthetic 2D image
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
                 image = make_rgba_image(self.width, self.height)
                 visual = scene.visuals.Image(image, parent=view.scene)
-                try:
-                    self._data_wh = (self.width, self.height)
-                    view.camera.set_range(x=(0, self.width), y=(0, self.height))
-                    scene_src = "synthetic"
-                    scene_meta = f"shape={self.height}x{self.width}"
-                except Exception:
-                    logger.debug("synthetic 2D: initial camera set_range failed", exc_info=True)
+                self._data_wh = (self.width, self.height)
+                view.camera.set_range(x=(0, self.width), y=(0, self.height))
+                scene_src = "synthetic"
+                scene_meta = f"shape={self.height}x{self.width}"
         elif self.use_volume:
             # 3D volume demo
             view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60, distance=500)
@@ -761,139 +826,234 @@ class EGLRendererWorker:
             self._pending_ms_level = int(level)
             self._pending_ms_path = str(path) if path else None
 
-    def _load_zarr_initial_slice(self) -> np.ndarray:
-        source = self._ensure_scene_source()
-        descriptor = source.level_descriptors[source.current_level]
-        self._zarr_shape = descriptor.shape
-        self._zarr_dtype = str(source.dtype)
+    def _notify_scene_refresh(self) -> None:
+        cb = self._scene_refresh_cb
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            logger.debug("scene refresh callback failed", exc_info=True)
 
-        axes = source.axes
-        z_pos = axes.index('z') if 'z' in axes else 0
-        z_max = int(descriptor.shape[z_pos]) - 1
-        if self._zarr_init_z is None:
-            z_init = descriptor.shape[z_pos] // 2
-        else:
-            z_init = max(0, min(int(self._zarr_init_z), z_max))
-
-        self._z_index = int(z_init)
-        self._active_ms_level = int(source.current_level)
-        self._zarr_clim = source.estimate_clims(level=source.current_level)
-
-        slab = self._slice_from_source(source, source.current_level, int(z_init))
-        return slab
-
-    def _load_zarr_volume3d(self) -> np.ndarray:
-        source = self._ensure_scene_source()
-        level = source.current_level
+    def _plane_wh_for_level(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
         descriptor = source.level_descriptors[level]
-        self._zarr_shape = descriptor.shape
-        self._zarr_dtype = str(source.dtype)
+        axes = source.axes
+        axes_lower = [str(ax).lower() for ax in axes]
+        try:
+            y_pos = axes_lower.index('y')
+        except ValueError:
+            y_pos = max(0, len(descriptor.shape) - 2)
+        try:
+            x_pos = axes_lower.index('x')
+        except ValueError:
+            x_pos = max(0, len(descriptor.shape) - 1)
+        h = int(descriptor.shape[y_pos]) if 0 <= y_pos < len(descriptor.shape) else int(descriptor.shape[-2])
+        w = int(descriptor.shape[x_pos]) if 0 <= x_pos < len(descriptor.shape) else int(descriptor.shape[-1])
+        return h, w
 
-        hz, hy, hx = (int(descriptor.shape[0]), int(descriptor.shape[1]), int(descriptor.shape[2]))
-        vox = hz * hy * hx
-        limits = get_hw_limits()
-        if vox > limits.volume_max_voxels:
-            raise RuntimeError(
-                f"Volume too large for budget: {hz}x{hy}x{hx} vox={vox} > cap={limits.volume_max_voxels}"
+    def _plane_scale_for_level(self, source: ZarrSceneSource, level: int) -> tuple[float, float]:
+        axes = source.axes
+        axes_lower = [str(ax).lower() for ax in axes]
+        scale = source.level_scale(level)
+        try:
+            y_pos = axes_lower.index('y')
+        except ValueError:
+            y_pos = max(0, len(scale) - 2)
+        try:
+            x_pos = axes_lower.index('x')
+        except ValueError:
+            x_pos = max(0, len(scale) - 1)
+        sy = float(scale[y_pos]) if 0 <= y_pos < len(scale) else float(scale[-2])
+        sx = float(scale[x_pos]) if 0 <= x_pos < len(scale) else float(scale[-1])
+        return sy, sx
+
+    def _estimate_level_bytes(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
+        descriptor = source.level_descriptors[level]
+        voxels = 1
+        for dim in descriptor.shape:
+            voxels *= max(1, int(dim))
+        dtype_size = np.dtype(source.dtype).itemsize
+        return int(voxels), int(voxels * dtype_size)
+
+    def _volume_budget_allows(self, source: ZarrSceneSource, level: int) -> None:
+        voxels, bytes_est = self._estimate_level_bytes(source, level)
+        limit_bytes = self._volume_max_bytes or self._hw_limits.volume_max_bytes
+        limit_voxels = self._volume_max_voxels or self._hw_limits.volume_max_voxels
+        if limit_voxels and voxels > limit_voxels:
+            msg = f"voxels={voxels} exceeds cap={limit_voxels}"
+            if self._log_layer_debug:
+                logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> REJECT: %s", level, voxels, bytes_est, msg)
+            raise _LevelBudgetError(msg)
+        if limit_bytes and bytes_est > limit_bytes:
+            msg = f"bytes={bytes_est} exceeds cap={limit_bytes}"
+            if self._log_layer_debug:
+                logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> REJECT: %s", level, voxels, bytes_est, msg)
+            raise _LevelBudgetError(msg)
+        if self._log_layer_debug:
+            logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> OK", level, voxels, bytes_est)
+
+    def _slice_budget_allows(self, source: ZarrSceneSource, level: int) -> None:
+        """Enforce optional max-bytes budget for a single 2D slice.
+
+        Uses YX plane dimensions and the source dtype size. Only applies when
+        NAPARI_CUDA_MAX_SLICE_BYTES is non-zero.
+        """
+        limit_bytes = int(self._slice_max_bytes or 0)
+        if limit_bytes <= 0:
+            return
+        h, w = self._plane_wh_for_level(source, level)
+        dtype_size = int(np.dtype(source.dtype).itemsize)
+        bytes_est = int(h) * int(w) * dtype_size
+        if bytes_est > limit_bytes:
+            msg = f"slice bytes={bytes_est} exceeds cap={limit_bytes} at level={level}"
+            if self._log_layer_debug:
+                logger.info(
+                    "budget check (slice): level=%d h=%d w=%d dtype=%s bytes=%d -> REJECT: %s",
+                    level, h, w, str(source.dtype), bytes_est, msg,
+                )
+            raise _LevelBudgetError(msg)
+        if self._log_layer_debug:
+            logger.info(
+                "budget check (slice): level=%d h=%d w=%d dtype=%s bytes=%d -> OK",
+                level, h, w, str(source.dtype), bytes_est,
             )
 
-        clims = source.estimate_clims(level=level)
-        vol = source.get_level(level).astype('float32').compute()
-        c0, c1 = clims
-        vol = (vol - c0) / max(1e-12, (c1 - c0))
-        np.clip(vol, 0.0, 1.0, out=vol)
-        self._zarr_clim = clims
-        return vol
+    def _get_level_volume(self, source: ZarrSceneSource, level: int) -> np.ndarray:
+        self._volume_budget_allows(source, level)
+        volume = source.level_volume(level, compute=True)
+        if not isinstance(volume, np.ndarray):
+            volume = np.asarray(volume, dtype=np.float32)
+        return volume
 
-    def _load_zarr_slice(self, z: int) -> np.ndarray:
-        source = self._ensure_scene_source()
-        level = source.current_level
+    def _log_layer_assignment(
+        self,
+        mode: str,
+        level: int,
+        z_index: Optional[int],
+        shape: tuple[int, ...],
+        contrast: tuple[float, float],
+    ) -> None:
+        if not self._log_layer_debug or not logger.isEnabledFor(logging.INFO):
+            return
+        key = (mode, level, int(z_index) if z_index is not None else -1)
+        if key == self._last_layer_debug:
+            return
+        self._last_layer_debug = key
+        try:
+            logger.info(
+                "layer assign: mode=%s level=%d z=%s shape=%s contrast=(%.4f, %.4f) downgraded=%s",
+                mode,
+                level,
+                z_index if z_index is not None else 'na',
+                'x'.join(str(int(x)) for x in shape),
+                float(contrast[0]),
+                float(contrast[1]),
+                self._level_downgraded,
+            )
+        except Exception:
+            logger.debug("layer debug log failed", exc_info=True)
+
+    def _apply_level_internal(self, source: ZarrSceneSource, level: int) -> None:
         descriptor = source.level_descriptors[level]
-        z_clamped = max(0, min(int(z), int(descriptor.shape[0]) - 1))
-        self._z_index = int(z_clamped)
-        return self._slice_from_source(source, level, int(z_clamped))
+        axes = source.axes
+        axes_lower = [str(ax).lower() for ax in axes]
+
+        step_hint: Optional[Sequence[int]] = None
+        if self._viewer is not None:
+            try:
+                step_hint = tuple(self._viewer.dims.current_step)
+            except Exception:
+                step_hint = None
+
+        with self._state_lock:
+            step = source.set_current_level(level, step=step_hint)
+
+        self._active_ms_level = level
+        self._zarr_level = descriptor.path or None
+        self._zarr_shape = descriptor.shape
+        self._zarr_axes = ''.join(axes)
+        self._zarr_dtype = str(source.dtype)
+
+        if axes_lower and 'z' in axes_lower and len(step) > axes_lower.index('z'):
+            self._z_index = int(step[axes_lower.index('z')])
+        elif step:
+            self._z_index = int(step[0])
+        else:
+            self._z_index = None
+
+        if self._viewer is not None:
+            self._viewer.dims.current_step = tuple(int(x) for x in step)
+            # Keep dims ranges consistent with the active level
+            try:
+                self._set_dims_range_for_level(source, level)
+            except Exception:
+                logger.debug("apply_level: set dims range failed", exc_info=True)
+
+        # Ensure contrast cache/limits are updated regardless of napari layer presence
+        contrast = source.ensure_contrast(level=level)
+        self._zarr_clim = contrast
+
+        layer = self._napari_layer
+        if layer is None:
+            # Even without a napari layer, propagate metadata and notify listeners
+            self._notify_scene_refresh()
+            return
+
+        if self.use_volume:
+            volume = self._get_level_volume(source, level)
+            layer.data = volume
+            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
+            d, h, w = int(volume.shape[0]), int(volume.shape[1]), int(volume.shape[2])
+            self._data_wh = (w, h)
+            self._data_d = d
+            self._log_layer_assignment('volume', level, None, (d, h, w), contrast)
+        else:
+            # Always feed a concrete 2D slab for reliability in headless mode
+            z_idx = self._z_index or 0
+            slab = source.slice(level, z_idx, compute=True)
+            if self._log_layer_debug:
+                try:
+                    smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
+                    smax = float(np.nanmax(slab)) if hasattr(np, 'nanmax') else float(np.max(slab))
+                    smea = float(np.mean(slab))
+                    logger.info(
+                        "apply slab: level=%d z=%d shape=%sx%s dtype=%s min=%.6f max=%.6f mean=%.6f",
+                        int(level), int(z_idx), int(slab.shape[0]), int(slab.shape[1]),
+                        str(getattr(slab, 'dtype', 'na')), smin, smax, smea,
+                    )
+                except Exception:
+                    logger.debug("apply slab stats failed", exc_info=True)
+            layer.data = slab
+            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
+            h, w = self._plane_wh_for_level(source, level)
+            self._data_wh = (w, h)
+            try:
+                sy, sx = self._plane_scale_for_level(source, level)
+                layer.scale = (sy, sx)
+                # Update camera world range to match scaled layer extents
+                if self.view is not None and hasattr(self.view, 'camera'):
+                    world_w = float(w) * float(sx)
+                    world_h = float(h) * float(sy)
+                    try:
+                        self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+                    except Exception:
+                        logger.debug("apply_level: camera set_range failed", exc_info=True)
+            except Exception:
+                logger.debug("apply_level: setting 2D layer scale failed", exc_info=True)
+            self._log_layer_assignment('slice', level, self._z_index, (h, w), contrast)
+
+        self._notify_scene_refresh()
 
     def _apply_multiscale_switch(self, level: int, path: Optional[str]) -> None:
         """Apply NGFF multiscale level switch on render thread."""
         if not self._zarr_path:
             return
 
-        if self._scene_source is not None and self.using_napari_adapter():
-            assert self._napari_layer is not None
-            source = self._ensure_scene_source()
-            if path:
-                index = source.level_index_for_path(path)
-            else:
-                index = max(0, min(int(level), len(source.level_descriptors) - 1))
-            source.set_current_level(index)
-            descriptor = source.level_descriptors[index]
-            self._active_ms_level = index
-            self._zarr_level = descriptor.path or None
-
-            layer = self._napari_layer
-            if getattr(layer, 'multiscale', False):
-                layer.data_level = index  # type: ignore[attr-defined]
-            else:
-                layer.data = source.get_level(index)
-            layer.contrast_limits = source.estimate_clims(level=index)
-
-            axes = source.axes
-            y_pos = axes.index('y') if 'y' in axes else max(0, len(descriptor.shape) - 2)
-            x_pos = axes.index('x') if 'x' in axes else max(0, len(descriptor.shape) - 1)
-            h = int(descriptor.shape[y_pos])
-            w = int(descriptor.shape[x_pos])
-            self._data_wh = (w, h)
-
-            if self._viewer is not None:
-                dims = list(self._viewer.dims.current_step)
-                while len(dims) < len(descriptor.shape):
-                    dims.append(0)
-                if 'z' in axes:
-                    z_pos = axes.index('z')
-                    dims[z_pos] = min(dims[z_pos], max(0, descriptor.shape[z_pos] - 1))
-                    self._z_index = int(dims[z_pos])
-                self._viewer.dims.current_step = tuple(int(x) for x in dims)
-
-            logger.info(
-                "ms: switched level=%d path=%s (napari adapter)",
-                int(index),
-                self._zarr_level,
-            )
-            return
-
-        if path is not None:
-            self._zarr_level = path
-        if self.use_volume:
-            try:
-                vol3d = self._load_zarr_volume3d()
-            except Exception:
-                logger.exception("ms: 3D level switch load failed")
-                return
-            vis = getattr(self, '_visual', None)
-            if vis is not None and hasattr(vis, 'set_data'):
-                vis.set_data(vol3d)  # type: ignore[attr-defined]
-            try:
-                d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
-                self._data_wh = (w, h)
-                self._data_d = int(d)
-            except Exception:
-                logger.debug("ms: 3D update extents failed", exc_info=True)
-            logger.info("ms: switched level=%d path=%s (3D)", int(level), str(self._zarr_level))
-        else:
-            try:
-                arr2d = self._load_zarr_initial_slice()
-            except Exception:
-                logger.exception("ms: 2D level switch load failed")
-                return
-            vis = getattr(self, '_visual', None)
-            if vis is not None and hasattr(vis, 'set_data'):
-                vis.set_data(arr2d)  # type: ignore[attr-defined]
-            try:
-                h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
-                self._data_wh = (w, h)
-            except Exception:
-                logger.debug("ms: 2D update extents failed", exc_info=True)
-            logger.info("ms: switched level=%d path=%s (2D)", int(level), str(self._zarr_level))
+        source = self._ensure_scene_source()
+        target = level
+        if path:
+            target = source.level_index_for_path(path)
+        self._set_level_with_budget(int(target), reason="intent")
 
     def _clear_visual(self) -> None:
         if self._visual is not None and hasattr(self._visual, 'parent'):
@@ -905,7 +1065,9 @@ class EGLRendererWorker:
         self.view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
         if self._zarr_path:
             try:
-                vol3d = self._load_zarr_volume3d()
+                source = self._ensure_scene_source()
+                self._set_level_with_budget(self._active_ms_level, reason="ndisplay")
+                vol3d = source.level_volume(self._active_ms_level, compute=True)
             except Exception as e:
                 # Fall back to synthetic if dataset load fails
                 logger.debug("3D: zarr load failed; fallback to synthetic: %s", e)
@@ -920,6 +1082,7 @@ class EGLRendererWorker:
                 self.view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
                 self._frame_volume_camera(w, h, d)
                 self._visual = vis
+                self._notify_scene_refresh()
                 return
         # Synthetic volume path
         dtype = np.float16 if self.volume_dtype == "float16" else (np.uint8 if self.volume_dtype == "uint8" else np.float32)
@@ -939,15 +1102,16 @@ class EGLRendererWorker:
         self.view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
         if self._zarr_path:
             try:
-                if self._z_index is None:
-                    arr2d = self._load_zarr_initial_slice()
-                else:
-                    arr2d = self._load_zarr_slice(self._z_index)
+                source = self._ensure_scene_source()
+                self._set_level_with_budget(self._active_ms_level, reason="ndisplay")
+                z_idx = self._z_index or 0
+                arr2d = source.slice(self._active_ms_level, z_idx, compute=True)
                 vis = scene.visuals.Image(arr2d, parent=self.view.scene, cmap='grays', clim=None, method='auto')
                 h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
                 self._data_wh = (w, h)
                 self.view.camera.set_range(x=(0, w), y=(0, h))
                 self._visual = vis
+                self._notify_scene_refresh()
                 return
             except Exception as e:
                 logger.debug("2D: zarr slice load failed; fallback to synthetic: %s", e)
@@ -1295,6 +1459,13 @@ class EGLRendererWorker:
     def apply_state(self, state: ServerSceneState) -> None:
         """Queue a complete scene state snapshot for the next frame."""
         with self._state_lock:
+            # capture zoom factor to drive level heuristic
+            if getattr(state, 'zoom_factor', None) is not None:
+                try:
+                    self._pending_zoom_ratio = float(state.zoom_factor)
+                    self._pending_zoom_ts = time.perf_counter()
+                except Exception:
+                    self._pending_zoom_ratio = None
             self._pending_state = ServerSceneState(
                 center=tuple(state.center) if state.center is not None else None,
                 zoom=float(state.zoom) if state.zoom is not None else None,
@@ -1342,7 +1513,9 @@ class EGLRendererWorker:
                 self._pending_state = None
         if state is None:
             return
-        # Apply pending state to the current scene (camera ops and 2D slice)
+
+        self._apply_zoom_based_level_switch()
+
         cam = getattr(self.view, 'camera', None)
         # Update 2D slice when in slice mode and a new index is provided
         if not bool(self.use_volume) and state.current_step is not None:
@@ -1369,7 +1542,9 @@ class EGLRendererWorker:
                 else:
                     z_idx = self._z_index or 0
                 if self._z_index is None or int(z_idx) != int(self._z_index):
-                    slab = self._load_zarr_slice(int(z_idx))
+                    source = self._ensure_scene_source()
+                    self._set_level_with_budget(self._active_ms_level, reason="step")
+                    slab = source.slice(self._active_ms_level, int(z_idx), compute=True)
                     vis = getattr(self, '_visual', None)
                     if vis is not None and hasattr(vis, 'set_data'):
                         vis.set_data(slab)  # type: ignore[attr-defined]
@@ -1377,6 +1552,8 @@ class EGLRendererWorker:
                     if getattr(self, '_data_wh', None) != (w, h) and cam is not None and hasattr(cam, 'set_range'):
                         cam.set_range(x=(0, w), y=(0, h))
                     self._data_wh = (w, h)
+                    self._z_index = int(z_idx)
+                    self._notify_scene_refresh()
 
         # Volume render parameters in 3D mode
         if bool(self.use_volume):

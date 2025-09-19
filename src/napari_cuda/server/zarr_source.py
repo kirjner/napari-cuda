@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
+import threading
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import dask.array as da
@@ -57,8 +58,10 @@ class ZarrSceneSource:
         self._axes = tuple(axis_override) if axis_override else None
         self._levels: List[da.Array] = []
         self._level_descriptors: List[LevelDescriptor] = []
-        self._contrast_limits: Optional[Tuple[float, float]] = None
+        self._contrast_cache: Dict[int, Tuple[float, float]] = {}
+        self._lock = threading.Lock()
         self._current_level: int = 0
+        self._current_step: Optional[Tuple[int, ...]] = None
 
         try:
             meta = self._read_zattrs(self._root / ".zattrs")
@@ -132,6 +135,10 @@ class ZarrSceneSource:
                     self._preferred_level_name,
                 )
 
+        if self._level_descriptors:
+            with self._lock:
+                self._current_step = self.initial_step(level=self._current_level)
+
     @property
     def axes(self) -> Tuple[str, ...]:
         return self._axes or DEFAULT_AXES[: self.ndim]
@@ -158,12 +165,25 @@ class ZarrSceneSource:
 
     @property
     def current_level(self) -> int:
-        return self._current_level
+        with self._lock:
+            return self._current_level
 
-    def set_current_level(self, index: int) -> None:
-        if not 0 <= index < len(self._levels):
-            raise ValueError(f"Level index out of range: {index}")
-        self._current_level = int(index)
+    @property
+    def current_step(self) -> Optional[Tuple[int, ...]]:
+        with self._lock:
+            return tuple(self._current_step) if self._current_step is not None else None
+
+    def set_current_level(
+        self,
+        index: int,
+        step: Optional[Sequence[int]] = None,
+    ) -> Tuple[int, ...]:
+        lvl = self._validate_level(index)
+        clamped = self.initial_step(level=lvl, step=step)
+        with self._lock:
+            self._current_level = lvl
+            self._current_step = tuple(clamped)
+        return tuple(clamped)
 
     def level_index_for_path(self, path: str) -> int:
         for descriptor in self._level_descriptors:
@@ -172,11 +192,8 @@ class ZarrSceneSource:
         raise ValueError(f"No level with path={path!r}")
 
     def get_level(self, index: int | None = None) -> da.Array:
-        if index is None:
-            index = self._current_level
-        if not 0 <= index < len(self._levels):
-            raise ValueError(f"Level index out of range: {index}")
-        return self._levels[index]
+        lvl = self._validate_level(index)
+        return self._levels[lvl]
 
     def level_shape(self, index: int | None = None) -> Tuple[int, ...]:
         descriptor = self._descriptor(index)
@@ -190,67 +207,175 @@ class ZarrSceneSource:
         descriptor = self._descriptor(index)
         return descriptor.scale
 
-    def initial_step(self, z_index: Optional[int] = None) -> Tuple[int, ...]:
-        shape = self.level_shape(0 if self._levels else None)
+    def initial_step(
+        self,
+        step_or_z: Optional[Sequence[int] | int] = None,
+        *,
+        level: Optional[int] = None,
+        step: Optional[Sequence[int]] = None,
+    ) -> Tuple[int, ...]:
+        lvl = self._validate_level(level)
+        descriptor = self._descriptor(lvl)
+        shape = descriptor.shape
         axes = self.axes
-        steps = [0] * len(shape)
-        try:
-            z_pos = axes.index("z")
-        except ValueError:
-            z_pos = 0
-        if shape:
-            if z_index is None:
-                steps[z_pos] = int(shape[z_pos] // 2)
+        axes_lower = [str(ax).lower() for ax in axes]
+
+        z_override: Optional[int] = None
+        if step_or_z is not None and step is None:
+            if isinstance(step_or_z, Sequence) and not isinstance(step_or_z, (str, bytes)):
+                step = step_or_z  # type: ignore[assignment]
             else:
-                steps[z_pos] = max(0, min(int(z_index), int(shape[z_pos]) - 1))
-        return tuple(steps)
+                z_override = int(step_or_z)
 
-    def estimate_clims(self, *, level: Optional[int] = None, percentiles: Tuple[float, float] = (0.5, 99.5)) -> Tuple[float, float]:
-        if self._contrast_limits is not None:
-            return self._contrast_limits
+        values = [0] * len(shape)
+        if step is not None:
+            seq = list(step)
+            for idx in range(min(len(shape), len(seq))):
+                values[idx] = int(seq[idx])
 
-        if level is None:
-            level = self._current_level
-        array = self.get_level(level)
-        if array.ndim < 2:
-            data = array.astype("float32").compute()
+        z_pos = axes_lower.index("z") if "z" in axes_lower else 0
+
+        if z_override is not None and len(shape) > z_pos:
+            values[z_pos] = int(z_override)
+        elif step is None and len(shape) > 0:
+            values[z_pos] = int(shape[z_pos] // 2)
+
+        clamped: List[int] = []
+        for idx, dim in enumerate(shape):
+            hi = max(0, int(dim) - 1)
+            if hi <= 0:
+                clamped.append(0)
+            else:
+                clamped.append(max(0, min(int(values[idx]), hi)))
+        return tuple(clamped)
+
+    def ensure_contrast(
+        self,
+        level: Optional[int] = None,
+        percentiles: Tuple[float, float] = (0.5, 99.5),
+    ) -> Tuple[float, float]:
+        lvl = self._validate_level(level)
+        with self._lock:
+            cached = self._contrast_cache.get(lvl)
+        if cached is not None:
+            return cached
+
+        array = self.get_level(lvl)
+        sample: da.Array
+        if array.ndim <= 2:
+            sample = array.astype("float32")
         else:
             axes = self.axes
-            try:
-                z_pos = axes.index("z")
-            except ValueError:
-                z_pos = 0
+            axes_lower = [str(ax).lower() for ax in axes]
+            z_pos = axes_lower.index("z") if "z" in axes_lower else 0
             plane_index = int(array.shape[z_pos] // 2)
             indexer: List[slice | int] = [slice(None)] * array.ndim
             indexer[z_pos] = plane_index
-            slice_da = array[tuple(indexer)].astype("float32")
-            data = slice_da.compute()
-        data = np.asarray(data, dtype="float32")
+            sample = array[tuple(indexer)].astype("float32")
+
+        data = np.asarray(sample.compute(), dtype="float32")
         if data.size == 0:
-            self._contrast_limits = (0.0, 1.0)
-            return self._contrast_limits
-        try:
-            lo, hi = np.percentile(data, list(percentiles))
-        except Exception as exc:
-            logger.debug("zarr_source: percentile failed; falling back to min/max", exc_info=exc)
-            lo, hi = float(np.nanmin(data)), float(np.nanmax(data))
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            lo = float(np.nanmin(data))
-            hi = float(np.nanmax(data))
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            lo, hi = 0.0, 1.0
-        self._contrast_limits = (float(lo), float(hi))
-        return self._contrast_limits
+            result = (0.0, 1.0)
+        else:
+            try:
+                lo, hi = np.percentile(data, list(percentiles))
+            except Exception as exc:
+                logger.debug("zarr_source: percentile failed; falling back to min/max", exc_info=exc)
+                lo, hi = float(np.nanmin(data)), float(np.nanmax(data))
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                lo = float(np.nanmin(data))
+                hi = float(np.nanmax(data))
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                lo, hi = 0.0, 1.0
+            result = (float(lo), float(hi))
+
+        with self._lock:
+            self._contrast_cache[lvl] = result
+        return result
+
+    def estimate_clims(
+        self,
+        *,
+        level: Optional[int] = None,
+        percentiles: Tuple[float, float] = (0.5, 99.5),
+    ) -> Tuple[float, float]:
+        return self.ensure_contrast(level=level, percentiles=percentiles)
+
+    def slice(
+        self,
+        level: Optional[int],
+        z_index: int,
+        *,
+        compute: bool = False,
+    ) -> da.Array | np.ndarray:
+        lvl = self._validate_level(level)
+        array = self.get_level(lvl)
+        axes = self.axes
+        axes_lower = [str(ax).lower() for ax in axes]
+        if array.ndim <= 2 or "z" not in axes_lower:
+            view = array.astype("float32")
+        else:
+            z_pos = axes_lower.index("z") if "z" in axes_lower else 0
+            dim = int(array.shape[z_pos])
+            if dim <= 0:
+                raise ValueError("Slice request on empty Z dimension")
+            zi = max(0, min(int(z_index), dim - 1))
+            indexer: List[slice | int] = [slice(None)] * array.ndim
+            indexer[z_pos] = zi
+            view = array[tuple(indexer)].astype("float32")
+
+            with self._lock:
+                base = list(self._current_step) if self._current_step is not None else list(self.initial_step(level=lvl))
+                if len(base) < len(array.shape):
+                    base.extend([0] * (len(array.shape) - len(base)))
+                base[z_pos] = zi
+                self._current_step = tuple(base)
+
+        if not compute:
+            return view
+
+        lo, hi = self.ensure_contrast(level=lvl)
+        slab = view.compute() if isinstance(view, da.Array) else np.asarray(view)
+        slab = np.asarray(slab, dtype="float32")
+        scale = max(1e-12, hi - lo)
+        slab = (slab - lo) / scale
+        np.clip(slab, 0.0, 1.0, out=slab)
+        return slab
+
+    def level_volume(
+        self,
+        level: Optional[int] = None,
+        *,
+        compute: bool = False,
+    ) -> da.Array | np.ndarray:
+        lvl = self._validate_level(level)
+        array = self.get_level(lvl).astype("float32")
+        if not compute:
+            return array
+        lo, hi = self.ensure_contrast(level=lvl)
+        volume = array.compute()
+        volume = np.asarray(volume, dtype="float32")
+        scale = max(1e-12, hi - lo)
+        volume = (volume - lo) / scale
+        np.clip(volume, 0.0, 1.0, out=volume)
+        return volume
 
     # ------------------------------------------------------------------
     # Internal helpers
 
     def _descriptor(self, index: int | None) -> LevelDescriptor:
+        lvl = self._validate_level(index)
+        return self._level_descriptors[lvl]
+
+    def _validate_level(self, index: int | None) -> int:
         if index is None:
-            index = self._current_level
-        if not 0 <= index < len(self._level_descriptors):
-            raise ValueError(f"Level index out of range: {index}")
-        return self._level_descriptors[index]
+            with self._lock:
+                lvl = self._current_level
+        else:
+            lvl = int(index)
+        if not 0 <= lvl < len(self._level_descriptors):
+            raise ValueError(f"Level index out of range: {lvl}")
+        return lvl
 
     @staticmethod
     def _read_zattrs(path: Path) -> Dict[str, object]:
@@ -308,4 +433,3 @@ __all__ = [
     "ZarrSceneSource",
     "ZarrSceneSourceError",
 ]
-

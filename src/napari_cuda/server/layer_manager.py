@@ -194,6 +194,21 @@ class ViewerSceneManager:
         if viewer_model is not None:
             adapter_snapshot = self._snapshot_from_viewer(viewer_model, ndisplay)
             if adapter_snapshot is not None:
+                try:
+                    if worker is not None and not bool(getattr(worker, "use_volume", False)):
+                        zshape = getattr(worker, "_zarr_shape", None)
+                        if isinstance(zshape, tuple) and len(zshape) >= 3:
+                            return _WorkerSnapshot(
+                                ndim=3,
+                                shape=[int(zshape[0]), int(zshape[1]), int(zshape[2])],
+                                axis_labels=["z", "y", "x"],
+                                dtype=adapter_snapshot.dtype,
+                                is_volume=False,
+                                zarr_axes=getattr(worker, "_zarr_axes", None),
+                                zarr_dtype=getattr(worker, "_zarr_dtype", None),
+                            )
+                except Exception:
+                    logger.debug("_snapshot_worker: adapter 2D->3D dims adjust failed", exc_info=True)
                 return adapter_snapshot
 
         width, height = self._canvas_size
@@ -230,13 +245,22 @@ class ViewerSceneManager:
             if len(axis_labels) != len(shape):
                 axis_labels = ["z", "y", "x"]
         else:
-            if isinstance(zarr_shape, tuple) and len(zarr_shape) >= 2:
+            # Prefer exposing a Z axis when slicing a 3D Zarr volume so the client
+            # can show a proper Z slider with the active level's depth range.
+            if isinstance(zarr_shape, tuple) and len(zarr_shape) >= 3:
+                # Keep conventional order Z, Y, X for 3D metadata even in 2D render
+                shape = [int(zarr_shape[0]), int(zarr_shape[1]), int(zarr_shape[2])]
+                if len(axis_labels) != 3:
+                    axis_labels = ["z", "y", "x"]
+            elif isinstance(zarr_shape, tuple) and len(zarr_shape) >= 2:
                 shape = [int(zarr_shape[-2]), int(zarr_shape[-1])]
+                if len(axis_labels) != 2:
+                    axis_labels = ["y", "x"]
             else:
                 w, h = getattr(worker, "_data_wh", (self._canvas_size[0], self._canvas_size[1]))
                 shape = [int(h), int(w)]
-            if len(axis_labels) != len(shape):
-                axis_labels = ["y", "x"]
+                if len(axis_labels) != 2:
+                    axis_labels = ["y", "x"]
 
         dtype = getattr(worker, "_zarr_dtype", None) or getattr(worker, "volume_dtype", None)
         if dtype is not None:

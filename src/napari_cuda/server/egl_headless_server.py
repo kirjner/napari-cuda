@@ -422,6 +422,24 @@ class EGLHeadlessServer:
                     for desc in source.level_descriptors
                 ]
                 extras['multiscale_current_level'] = int(source.current_level)
+                # Keep multiscale server state in sync so client HUD reflects live level
+                try:
+                    # Advertise adaptive policy while adapter is active to reflect zoom-driven switches
+                    self._ms_state['policy'] = 'auto'
+                    self._ms_state['current_level'] = int(source.current_level)
+                    # Refresh levels if descriptor count changed (defensive)
+                    levels = self._ms_state.get('levels') or []
+                    if not isinstance(levels, list) or len(levels) != len(source.level_descriptors):
+                        self._ms_state['levels'] = [
+                            {
+                                'path': desc.path,
+                                'downsample': list(desc.downsample),
+                                'shape': [int(x) for x in desc.shape],
+                            }
+                            for desc in source.level_descriptors
+                        ]
+                except Exception:
+                    logger.debug('ms_state sync failed', exc_info=True)
         viewer_model = None
         if self._worker is not None and hasattr(self._worker, 'using_napari_adapter'):
             try:
@@ -603,7 +621,9 @@ class EGLHeadlessServer:
             self._last_dims_client_id = last_client_id
             obj = self._build_dims_update_message(step_list, last_client_id)
             await self._broadcast_state_json(obj)
-            await self._broadcast_scene_spec(reason="dims")
+            # Intentionally skip scene.spec here to avoid client layer churn on
+            # pure dims changes. Scene spec is sent on init and when topology/
+            # render configuration changes, not on slider steps.
         except Exception:
             logger.debug("dims update broadcast failed", exc_info=True)
 
