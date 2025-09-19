@@ -50,6 +50,13 @@ class StateController:
         t.start()
         return ch, t
 
+    def stop(self, channel: StateChannel, thread: Thread, timeout: float = 2.0) -> None:
+        try:
+            channel.stop()
+        except Exception:
+            pass
+        thread.join(timeout)
+
 
 @dataclass
 class ReceiveController:

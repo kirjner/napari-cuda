@@ -120,7 +120,7 @@ class AdapterScene:
                 scene_meta = f"level={self._b._zarr_level or current_level} shape={d}x{h}x{w}"
             else:
                 z_idx = self._b._z_index or 0
-                slab2d = source.slice(current_level, int(z_idx), compute=True)
+                slab2d = self._b._load_slice_with_metrics(source, current_level, int(z_idx))
                 if self._b._log_layer_debug:
                     try:
                         smin = float(np.nanmin(slab2d)) if hasattr(np, 'nanmin') else float(np.min(slab2d))

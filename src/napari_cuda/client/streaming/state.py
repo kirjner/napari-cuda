@@ -138,6 +138,7 @@ class StateChannel:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._out_q: Optional[asyncio.Queue[str]] = None
+        self._stop = False
 
     def run(self) -> None:
         """Start the state channel event loop and keep reconnecting.
@@ -166,7 +167,7 @@ class StateChannel:
         logger.info("Connecting to state channel at %s", url)
         retry_delay = 5.0
         max_delay = 30.0
-        while True:
+        while not self._stop:
             try:
                 async with websockets.connect(url) as ws:
                     logger.info("Connected to state channel")
@@ -253,9 +254,42 @@ class StateChannel:
                         self.on_disconnect(e)
                     except Exception:
                         logger.debug("on_disconnect callback failed (state-exc)", exc_info=True)
+                if self._stop:
+                    break
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(max_delay, retry_delay * 1.5)
                 logger.info("Reconnecting to state channel...")
+
+    def stop(self) -> None:
+        """Request the channel loop to shut down."""
+
+        self._stop = True
+        loop = self._loop
+        if loop is None:
+            return
+
+        def _schedule_shutdown() -> None:
+            async def _shutdown() -> None:
+                try:
+                    if self._ws is not None and not self._ws.closed:
+                        await self._ws.close()
+                except Exception:
+                    logger.debug("StateChannel.stop: close failed", exc_info=True)
+                if self._out_q is not None:
+                    try:
+                        self._out_q.put_nowait('{"type":"shutdown"}')
+                    except Exception:
+                        logger.debug("StateChannel.stop: queue notify failed", exc_info=True)
+
+            try:
+                loop.create_task(_shutdown())
+            except Exception:
+                logger.debug("StateChannel.stop: schedule failed", exc_info=True)
+
+        try:
+            loop.call_soon_threadsafe(_schedule_shutdown)
+        except Exception:
+            logger.debug("StateChannel.stop: loop notify failed", exc_info=True)
 
     def _handle_message(self, data: dict) -> None:
         """Dispatch a single decoded message to registered callbacks."""

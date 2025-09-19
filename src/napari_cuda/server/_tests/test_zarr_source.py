@@ -8,6 +8,7 @@ import pytest
 import zarr
 
 from napari_cuda.server.zarr_source import ZarrSceneSource, ZarrSceneSourceError
+from napari_cuda.server.scene_types import SliceROI
 
 
 def _write_multiscale(root: Path, datasets: list[dict]) -> None:
@@ -140,3 +141,39 @@ def test_zarr_scene_source_missing_path(tmp_path):
 
     with pytest.raises(ZarrSceneSourceError):
         ZarrSceneSource(root)
+
+
+def test_slice_with_roi_and_metrics(tmp_path):
+    root = tmp_path / "roi.zarr"
+    store = zarr.open_group(str(root), mode="w")
+
+    data = np.arange(3 * 8 * 10, dtype=np.uint16).reshape(3, 8, 10)
+    store.create_dataset("level_0", data=data, chunks=(1, 4, 5))
+
+    _write_multiscale(
+        root,
+        [
+            {
+                "path": "level_0",
+                "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0]}],
+            }
+        ],
+    )
+
+    source = ZarrSceneSource(root)
+
+    roi = SliceROI(2, 6, 3, 8)
+    slab = source.slice(0, 1, compute=True, roi=roi)
+    assert slab.shape == (roi.height, roi.width)
+
+    metrics = source.estimate_slice_io(0, 1, roi=roi)
+    assert metrics.bytes_est == roi.height * roi.width * data.dtype.itemsize
+    assert metrics.chunks == 4  # two chunks along Y and two along X, single Z chunk
+    assert metrics.roi == roi.clamp(8, 10)
+
+    # ROI larger than plane clamps to bounds
+    wide_roi = SliceROI(-5, 20, -3, 50)
+    wide_metrics = source.estimate_slice_io(0, 0, roi=wide_roi)
+    assert wide_metrics.roi == SliceROI(0, 8, 0, 10)
+    wide_slab = source.slice(0, 0, compute=True, roi=wide_roi)
+    assert wide_slab.shape == (8, 10)

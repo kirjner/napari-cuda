@@ -506,14 +506,52 @@ class ViewerSceneManager:
         if extras:
             layer_extras.update({k: v for k, v in extras.items() if v is not None})
 
+        # Prefer the active multiscale level's shape when available so that
+        # downstream dims.sizes/range reflect the current level (e.g. Z extent)
+        # rather than the full-resolution base level.
+        layer_shape = list(worker_snapshot.shape)
+        layer_ndim = int(worker_snapshot.ndim)
+        if multiscale is not None and isinstance(multiscale, MultiscaleSpec):
+            try:
+                cur = int(multiscale.current_level)
+                if 0 <= cur < len(multiscale.levels):
+                    lvl_shape = list(multiscale.levels[cur].shape or [])
+                    if lvl_shape:
+                        layer_shape = [int(x) for x in lvl_shape]
+                        layer_ndim = len(layer_shape)
+            except Exception:
+                # Keep fallback to worker snapshot shape on any inconsistency
+                logger.debug("layer_manager: using base shape for layer; multiscale level shape unavailable", exc_info=True)
+
+        # Align axis labels length with the effective layer ndim/shape. If the
+        # worker advertises a Z axis but the active multiscale level is 2D, we
+        # must drop the leading non-displayed axis (e.g., 'z') so downstream
+        # dims metadata is self-consistent and the client slider bounds derive
+        # from the active level's shape.
+        axis_labels = list(worker_snapshot.axis_labels)
+        if len(axis_labels) != layer_ndim:
+            try:
+                if len(axis_labels) > layer_ndim:
+                    axis_labels = axis_labels[-layer_ndim:]
+                else:
+                    defaults: Dict[int, List[str]] = {
+                        1: ["x"],
+                        2: ["y", "x"],
+                        3: ["z", "y", "x"],
+                        4: ["t", "z", "y", "x"],
+                    }
+                    axis_labels = list(defaults.get(layer_ndim, [f"axis-{i}" for i in range(layer_ndim)]))
+            except Exception:
+                axis_labels = [f"axis-{i}" for i in range(layer_ndim)]
+
         return LayerSpec(
             layer_id=self._default_layer_id,
             layer_type="image",
             name=self._default_layer_name,
-            ndim=worker_snapshot.ndim,
-            shape=worker_snapshot.shape,
+            ndim=layer_ndim,
+            shape=layer_shape,
             dtype=worker_snapshot.dtype,
-            axis_labels=worker_snapshot.axis_labels,
+            axis_labels=axis_labels,
             contrast_limits=contrast_limits,
             render=render_hints,
             multiscale=multiscale,

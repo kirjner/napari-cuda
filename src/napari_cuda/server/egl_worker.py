@@ -15,8 +15,9 @@ import os
 import time
 import logging
 import ctypes
+from collections import deque
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Mapping
 import threading
 import math
 
@@ -50,7 +51,9 @@ from .debug_tools import DebugConfig, DebugDumper
 from .hw_limits import get_hw_limits
 from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource
+from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
+from . import policy as level_policy
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +224,8 @@ class EGLRendererWorker:
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
                  use_napari_adapter: Optional[bool] = None,
-                 scene_refresh_cb: Optional[Callable[[], None]] = None) -> None:
+                 scene_refresh_cb: Optional[Callable[[], None]] = None,
+                 policy_name: Optional[str] = None) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -253,7 +257,7 @@ class EGLRendererWorker:
             if flag is not None:
                 use_napari_adapter = flag.strip().lower() in {'1', 'true', 'yes', 'on'}
             else:
-                use_napari_adapter = False
+                use_napari_adapter = True
         self._use_napari_adapter = bool(use_napari_adapter)
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
@@ -301,6 +305,9 @@ class EGLRendererWorker:
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts: float = 0.0
         self._ensure_log_interval_s: float = 1.0
+        self._render_tick_required: bool = False
+        self._prime_enabled: bool = env_bool('NAPARI_CUDA_MS_PRIME', True)
+        self._prime_complete: bool = False
 
         # Encoding / instrumentation state
         self._frame_index = 0
@@ -338,6 +345,20 @@ class EGLRendererWorker:
             self._orbit_el_max = float(os.getenv('NAPARI_CUDA_ORBIT_ELEV_MAX', '85.0') or '85.0')
         except Exception:
             self._orbit_el_max = 85.0
+
+        self._policy_func = level_policy.resolve_policy('latency')
+        self._policy_name = 'latency'
+        self._policy_metrics = level_policy.LevelMetricsWindow()
+        self._policy_metrics_lock = threading.Lock()
+        self._last_policy_decision: Dict[str, object] = {}
+        self._policy_history: Deque[Dict[str, object]] = deque(maxlen=128)
+        self._last_interaction_ts = time.perf_counter()
+
+        if policy_name:
+            try:
+                self.set_policy(policy_name)
+            except Exception:
+                logger.exception("policy init set failed; continuing with default")
 
         self._log_layer_debug = env_bool('NAPARI_CUDA_LAYER_DEBUG', False)
         try:
@@ -471,11 +492,13 @@ class EGLRendererWorker:
 
         for idx, level in enumerate(candidates):
             try:
+                prev_level = int(self._active_ms_level)
                 # Enforce budgets prior to any data compute
                 if self.use_volume:
                     self._volume_budget_allows(source, level)
                 else:
                     self._slice_budget_allows(source, level)
+                start = time.perf_counter()
                 self._apply_level_internal(source, level)
                 self._level_downgraded = (level != desired_level)
                 if self._level_downgraded:
@@ -490,6 +513,18 @@ class EGLRendererWorker:
                         logger.debug("level downgrade log failed", exc_info=True)
                 else:
                     self._level_downgraded = False
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                try:
+                    self._log_ms_switch(
+                        previous=prev_level,
+                        applied=int(self._active_ms_level),
+                        source=source,
+                        elapsed_ms=elapsed_ms,
+                        reason=reason,
+                    )
+                except Exception:
+                    logger.debug("ms.switch logging failed", exc_info=True)
+                self._mark_render_tick_needed()
                 return
             except _LevelBudgetError as exc:
                 if self._log_layer_debug:
@@ -542,20 +577,39 @@ class EGLRendererWorker:
             return
         levels_count = len(source.level_descriptors)
         delta_levels = self._consume_zoom_delta(levels_count)
-        if delta_levels == 0:
-            return
-        desired = self._active_ms_level + delta_levels
+        tentative = self._active_ms_level + delta_levels
+        tentative = max(0, min(tentative, levels_count - 1))
+        ctx = self._build_policy_context(source, intent_level=tentative)
+        try:
+            selected = self._policy_func(ctx)
+        except Exception:
+            logger.exception("multiscale policy select failed; using tentative level")
+            selected = tentative
+        desired = tentative if selected is None else int(selected)
         desired = max(0, min(desired, levels_count - 1))
         if desired == self._active_ms_level:
             return
         try:
             prev = int(self._active_ms_level)
-            self._set_level_with_budget(desired, reason="zoom")
+            reason = "policy" if ctx.intent_level is not None else "zoom"
+            self._set_level_with_budget(desired, reason=reason)
+            self._record_policy_decision(
+                policy=self._policy_name,
+                intent_level=ctx.intent_level,
+                selected_level=selected,
+                desired_level=desired,
+                applied_level=int(self._active_ms_level),
+                reason=reason,
+                idle_ms=ctx.idle_ms,
+                oversampling=ctx.level_oversampling,
+            )
             if self._log_layer_debug and prev != int(self._active_ms_level):
                 try:
                     logger.info(
-                        "zoom switch: requested=%d applied=%d",
-                        int(desired), int(self._active_ms_level),
+                        "policy switch: policy=%s intent=%d applied=%d",
+                        self._policy_name,
+                        int(ctx.intent_level) if ctx.intent_level is not None else prev,
+                        int(self._active_ms_level),
                     )
                 except Exception:
                     logger.debug("zoom switch log failed", exc_info=True)
@@ -697,6 +751,7 @@ class EGLRendererWorker:
         if self._use_napari_adapter:
             try:
                 self._init_adapter_scene(source)
+                self._maybe_prime_multiscale()
                 return
             except Exception:
                 logger.exception("Adapter scene initialization failed; falling back to legacy visuals")
@@ -720,7 +775,7 @@ class EGLRendererWorker:
             try:
                 source = self._ensure_scene_source()
                 self._set_level_with_budget(self._active_ms_level, reason="init")
-                vol3d = source.level_volume(self._active_ms_level, compute=True)
+                vol3d = self._load_volume_with_metrics(source, self._active_ms_level)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
                 visual = scene.visuals.Volume(vol3d, parent=view.scene, method="mip", cmap="grays")
                 if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
@@ -741,12 +796,15 @@ class EGLRendererWorker:
                 source = self._ensure_scene_source()
                 self._set_level_with_budget(self._active_ms_level, reason="init")
                 z_idx = self._z_index or 0
-                arr2d = source.slice(self._active_ms_level, z_idx, compute=True)
-                view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+                arr2d = self._load_slice_with_metrics(source, self._active_ms_level, z_idx)
                 visual = scene.visuals.Image(arr2d, parent=view.scene, cmap='grays', clim=None, method='auto')
                 h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
                 self._data_wh = (w, h)
-                view.camera.set_range(x=(0, w), y=(0, h))
+                if not isinstance(view.camera, scene.cameras.PanZoomCamera):
+                    self._ensure_panzoom_camera(reason="init-2d")
+                cam = getattr(view, "camera", None)
+                if isinstance(cam, scene.cameras.PanZoomCamera):
+                    cam.set_range(x=(0, w), y=(0, h))
                 scene_src = "zarr"
                 scene_meta = f"level={self._zarr_level or 'auto'} z={self._z_index} shape={h}x{w}"
             except Exception as e:
@@ -808,6 +866,7 @@ class EGLRendererWorker:
 
         # Assign visual before first draw and log concise init info
         self._visual = visual
+        self._maybe_prime_multiscale()
         try:
             logger.info("Scene init: source=%s %s", scene_src, scene_meta)
         except Exception:
@@ -823,8 +882,12 @@ class EGLRendererWorker:
     def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
         """Queue a multiscale level switch; applied on render thread next frame."""
         with self._state_lock:
+            if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+                logger.info("request multiscale level: level=%d path=%s", int(level), str(path) if path else "<default>")
             self._pending_ms_level = int(level)
             self._pending_ms_path = str(path) if path else None
+            self._last_interaction_ts = time.perf_counter()
+        self._mark_render_tick_needed()
 
     def _notify_scene_refresh(self) -> None:
         cb = self._scene_refresh_cb
@@ -834,6 +897,92 @@ class EGLRendererWorker:
             cb()
         except Exception:
             logger.debug("scene refresh callback failed", exc_info=True)
+
+    def _mark_render_tick_needed(self) -> None:
+        self._render_tick_required = True
+
+    def set_policy(self, name: str) -> None:
+        new_name = str(name or '').strip().lower()
+        if new_name != 'latency':
+            raise ValueError(f"Unsupported policy: {new_name}")
+        func = level_policy.resolve_policy('latency')
+        with self._policy_metrics_lock:
+            self._policy_name = new_name
+            self._policy_func = func
+            self._last_policy_decision = {}
+            self._policy_history.clear()
+        if self._log_layer_debug:
+            logger.info("policy set: name=%s", new_name)
+
+    def _format_level_roi(self, source: ZarrSceneSource, level: int) -> str:
+        if self.use_volume:
+            return "volume"
+        try:
+            roi = self._viewport_roi_for_level(source, level)
+        except Exception:
+            return "roi=error"
+        if roi.is_empty():
+            return "full"
+        return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
+
+    def _log_ms_switch(self, *, previous: int, applied: int, source: ZarrSceneSource, elapsed_ms: float, reason: str) -> None:
+        if not self._log_layer_debug or not logger.isEnabledFor(logging.INFO):
+            return
+        try:
+            roi_desc = self._format_level_roi(source, applied)
+        except Exception:
+            roi_desc = "roi=error"
+        try:
+            logger.info(
+                "ms.switch: level=%d->%d roi=%s reason=%s elapsed=%.2fms",
+                int(previous),
+                int(applied),
+                roi_desc,
+                reason,
+                float(elapsed_ms),
+            )
+        except Exception:
+            logger.debug("ms.switch log failed", exc_info=True)
+
+    def _maybe_prime_multiscale(self) -> None:
+        if not self._prime_enabled or self._prime_complete:
+            return
+        try:
+            self._prime_multiscale_levels()
+        except Exception:
+            logger.exception("multiscale prime failed")
+
+    def _prime_multiscale_levels(self) -> None:
+        if not self._zarr_path:
+            self._prime_complete = True
+            return
+        try:
+            source = self._ensure_scene_source()
+        except Exception:
+            logger.debug("multiscale prime skipped: no scene source", exc_info=True)
+            return
+        descriptors = list(source.level_descriptors)
+        if not descriptors:
+            self._prime_complete = True
+            return
+        original_level = int(self._active_ms_level)
+        original_downgraded = bool(self._level_downgraded)
+        original_reason = "prime-restore"
+        for desc in descriptors:
+            level = int(desc.index)
+            try:
+                self._set_level_with_budget(level, reason="prime")
+            except Exception:
+                logger.exception("multiscale prime: level=%d failed", level)
+                continue
+        if self._active_ms_level != original_level:
+            try:
+                self._set_level_with_budget(original_level, reason=original_reason)
+            except Exception:
+                logger.exception("multiscale prime: failed to restore level=%d", original_level)
+        self._level_downgraded = original_downgraded
+        self._prime_complete = True
+        self._mark_render_tick_needed()
 
     def _plane_wh_for_level(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
         descriptor = source.level_descriptors[level]
@@ -866,6 +1015,405 @@ class EGLRendererWorker:
         sy = float(scale[y_pos]) if 0 <= y_pos < len(scale) else float(scale[-2])
         sx = float(scale[x_pos]) if 0 <= x_pos < len(scale) else float(scale[-1])
         return sy, sx
+
+    def _physical_scale_for_level(self, source: ZarrSceneSource, level: int) -> tuple[float, float, float]:
+        try:
+            scale = source.level_scale(level)
+        except Exception:
+            return (1.0, 1.0, 1.0)
+        values = [float(s) for s in scale]
+        if not values:
+            return (1.0, 1.0, 1.0)
+        if len(values) >= 3:
+            return (values[-3], values[-2], values[-1])
+        if len(values) == 2:
+            return (1.0, values[0], values[1])
+        # single element; reuse across axes
+        return (values[0], values[0], values[0])
+
+    def _oversampling_for_level(self, source: ZarrSceneSource, level: int) -> float:
+        try:
+            roi = self._viewport_roi_for_level(source, level)
+            if roi.is_empty():
+                h, w = self._plane_wh_for_level(source, level)
+            else:
+                h, w = roi.height, roi.width
+        except Exception:
+            h, w = self.height, self.width
+        vh = max(1, int(self.height))
+        vw = max(1, int(self.width))
+        return float(max(h / vh, w / vw))
+
+    def _ensure_panzoom_camera(self, *, reason: str) -> Optional[scene.cameras.PanZoomCamera]:
+        if self.use_volume:
+            return None
+        view = getattr(self, "view", None)
+        if view is None:
+            return None
+        cam = getattr(view, "camera", None)
+        if isinstance(cam, scene.cameras.PanZoomCamera):
+            return cam
+        if self._log_layer_debug and cam is not None:
+            logger.info(
+                "ensure panzoom camera: reason=%s current=%s",
+                reason,
+                cam.__class__.__name__,
+            )
+        try:
+            panzoom = scene.cameras.PanZoomCamera(aspect=1.0)
+            view.camera = panzoom
+            data_wh = getattr(self, "_data_wh", None)
+            if data_wh:
+                try:
+                    w, h = data_wh
+                    panzoom.set_range(x=(0, float(w)), y=(0, float(h)))
+                except Exception:
+                    logger.debug("ensure_panzoom: data_wh set_range failed", exc_info=True)
+            else:
+                try:
+                    panzoom.set_range(x=(0, float(self.width)), y=(0, float(self.height)))
+                except Exception:
+                    logger.debug("ensure_panzoom: canvas set_range failed", exc_info=True)
+            return panzoom
+        except Exception:
+            logger.debug("ensure_panzoom_camera failed", exc_info=True)
+            return None
+
+    def _viewport_debug_snapshot(self) -> Dict[str, Any]:
+        info: Dict[str, Any] = {
+            "canvas_size": (int(self.width), int(self.height)),
+            "data_wh": tuple(int(v) for v in self._data_wh) if self._data_wh else None,
+            "data_depth": int(self._data_d) if getattr(self, "_data_d", None) is not None else None,
+        }
+        view = getattr(self, "view", None)
+        if view is not None:
+            info["view_class"] = view.__class__.__name__
+            try:
+                cam = getattr(view, "camera", None)
+                if cam is not None:
+                    cam_info: Dict[str, Any] = {"type": cam.__class__.__name__}
+                    rect = getattr(cam, "rect", None)
+                    if rect is not None:
+                        try:
+                            cam_info["rect"] = tuple(float(v) for v in rect)
+                        except Exception:
+                            cam_info["rect"] = str(rect)
+                    center = getattr(cam, "center", None)
+                    if center is not None:
+                        try:
+                            cam_info["center"] = tuple(float(v) for v in center)
+                        except Exception:
+                            cam_info["center"] = str(center)
+                    if hasattr(cam, "zoom"):
+                        try:
+                            cam_info["zoom"] = float(cam.zoom)  # type: ignore[arg-type]
+                        except Exception:
+                            cam_info["zoom"] = str(cam.zoom)
+                    if hasattr(cam, "scale"):
+                        try:
+                            cam_info["scale"] = tuple(float(v) for v in cam.scale)
+                        except Exception:
+                            cam_info["scale"] = str(cam.scale)
+                    if hasattr(cam, "_viewbox"):
+                        try:
+                            vb = cam._viewbox
+                            cam_info["viewbox_size"] = tuple(float(v) for v in getattr(vb, "size", ()) or ())
+                        except Exception:
+                            cam_info["viewbox_size"] = "unavailable"
+                    info["camera"] = cam_info
+            except Exception:
+                info["camera"] = "error"
+            try:
+                transform = getattr(view, "scene", None)
+                if transform is not None and hasattr(transform, "transform"):
+                    xform = transform.transform
+                    if hasattr(xform, "matrix"):
+                        mat = getattr(xform, "matrix")
+                        try:
+                            info["transform_matrix"] = tuple(float(v) for v in mat.ravel())
+                        except Exception:
+                            info["transform_matrix"] = str(mat)
+            except Exception:
+                info["transform"] = "error"
+        else:
+            info["view"] = None
+        return info
+
+    def _log_roi_fallback(
+        self,
+        *,
+        level: int,
+        reason: str,
+        plane_h: int,
+        plane_w: int,
+        scale: tuple[float, float],
+    ) -> None:
+        if not self._log_layer_debug or not logger.isEnabledFor(logging.INFO):
+            return
+        snapshot = self._viewport_debug_snapshot()
+        logger.info(
+            "viewport ROI fallback: level=%d reason=%s dims=%dx%d scale=(%.6f,%.6f) snapshot=%s",
+            level,
+            reason,
+            plane_h,
+            plane_w,
+            scale[0],
+            scale[1],
+            snapshot,
+        )
+
+    def _viewport_world_bounds(self) -> Optional[tuple[float, float, float, float]]:
+        view = getattr(self, "view", None)
+        if view is None or not hasattr(view, "camera"):
+            return None
+        try:
+            transform = view.scene.transform
+            corners = (
+                (0.0, 0.0),
+                (float(self.width), 0.0),
+                (0.0, float(self.height)),
+                (float(self.width), float(self.height)),
+            )
+            world_pts = [transform.imap((float(x), float(y), 0.0)) for x, y in corners]
+            xs = [float(pt[0]) for pt in world_pts]
+            ys = [float(pt[1]) for pt in world_pts]
+            return (min(xs), max(xs), min(ys), max(ys))
+        except Exception:
+            if self._log_layer_debug:
+                logger.debug("viewport_world_bounds failed", exc_info=True)
+            return None
+
+    def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int) -> SliceROI:
+        h, w = self._plane_wh_for_level(source, level)
+        sy, sx = self._plane_scale_for_level(source, level)
+        if self.view is None or not hasattr(self.view, 'camera'):
+            self._log_roi_fallback(level=level, reason="no-view", plane_h=h, plane_w=w, scale=(sy, sx))
+            return SliceROI(0, h, 0, w)
+        cam = self.view.camera
+        if not isinstance(cam, scene.cameras.PanZoomCamera):
+            ensured = self._ensure_panzoom_camera(reason="roi-request")
+            cam = ensured or cam
+        if not isinstance(cam, scene.cameras.PanZoomCamera):
+            self._log_roi_fallback(level=level, reason="no-panzoom", plane_h=h, plane_w=w, scale=(sy, sx))
+            return SliceROI(0, h, 0, w)
+        sx_world = max(1e-12, float(sx))
+        sy_world = max(1e-12, float(sy))
+        try:
+            bounds = self._viewport_world_bounds()
+            if bounds is None:
+                self._log_roi_fallback(
+                    level=level,
+                    reason="no-bounds",
+                    plane_h=h,
+                    plane_w=w,
+                    scale=(sy_world, sx_world),
+                )
+                return SliceROI(0, h, 0, w)
+            x0, x1, y0, y1 = bounds
+            x_start = int(math.floor(min(x0, x1) / sx_world))
+            x_stop = int(math.ceil(max(x0, x1) / sx_world))
+            y_start = int(math.floor(min(y0, y1) / sy_world))
+            y_stop = int(math.ceil(max(y0, y1) / sy_world))
+            roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
+            if self._log_layer_debug:
+                logger.info(
+                    "viewport ROI level=%d world=(%.3f,%.3f)-(%.3f,%.3f) px=(%d,%d)->(%d,%d) dims=%dx%d scale=(%.6f,%.6f)",
+                    level,
+                    min(x0, x1),
+                    min(y0, y1),
+                    max(x0, x1),
+                    max(y0, y1),
+                    roi.y_start,
+                    roi.y_stop,
+                    roi.x_start,
+                    roi.x_stop,
+                    h,
+                    w,
+                    sy_world,
+                    sx_world,
+                )
+            if roi.is_empty():
+                self._log_roi_fallback(level=level, reason="empty", plane_h=h, plane_w=w, scale=(sy_world, sx_world))
+                return SliceROI(0, h, 0, w)
+            return roi
+        except Exception:
+            if self._log_layer_debug:
+                logger.exception(
+                    "viewport ROI computation failed; returning full frame (level=%d dims=%dx%d)",
+                    level,
+                    h,
+                    w,
+                )
+            return SliceROI(0, h, 0, w)
+
+    def _estimate_volume_io(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
+        chunk_count = 0
+        bytes_est = 0
+        try:
+            arr = source.get_level(level)
+        except Exception:
+            return chunk_count, bytes_est
+
+        try:
+            dtype_size = int(np.dtype(getattr(arr, 'dtype', source.dtype)).itemsize)
+        except Exception:
+            dtype_size = int(np.dtype(source.dtype).itemsize) if hasattr(source, 'dtype') else 0
+
+        try:
+            shape = tuple(int(s) for s in getattr(arr, 'shape', ()))
+            voxels = 1
+            for dim in shape:
+                voxels *= max(1, dim)
+            bytes_est = int(voxels) * int(dtype_size)
+        except Exception:
+            bytes_est = 0
+
+        chunks_attr = getattr(arr, 'chunks', None)
+        if chunks_attr is None:
+            return chunk_count, bytes_est
+
+        try:
+            chunk_count = 1
+            for axis_chunks in list(chunks_attr):
+                chunk_count *= max(1, len(axis_chunks))
+        except Exception:
+            chunk_count = 0
+        return int(chunk_count), int(bytes_est)
+
+    def _record_policy_metrics(self, level: int, elapsed_ms: float, chunks: int, bytes_est: int) -> None:
+        if level < 0:
+            return
+        with self._policy_metrics_lock:
+            self._policy_metrics.observe_time(level, float(elapsed_ms))
+            if chunks >= 0:
+                self._policy_metrics.observe_chunks(level, int(chunks))
+            if bytes_est >= 0:
+                self._policy_metrics.observe_bytes(level, int(bytes_est))
+
+    def _record_policy_decision(
+        self,
+        *,
+        policy: str,
+        intent_level: Optional[int],
+        selected_level: Optional[int],
+        desired_level: int,
+        applied_level: int,
+        reason: str,
+        idle_ms: float,
+        oversampling: Mapping[int, float] | None,
+    ) -> None:
+        with self._policy_metrics_lock:
+            desired_stats = self._policy_metrics.stats_for_level(desired_level)
+            applied_stats = self._policy_metrics.stats_for_level(applied_level)
+            overs = {int(k): float(v) for k, v in (oversampling or {}).items()}
+            self._last_policy_decision = {
+                'timestamp_ms': time.time() * 1000.0,
+                'policy': str(policy),
+                'intent_level': int(intent_level) if intent_level is not None else -1,
+                'selected_level': int(selected_level) if selected_level is not None else -1,
+                'desired_level': int(desired_level),
+                'applied_level': int(applied_level),
+                'reason': str(reason),
+                'idle_ms': float(idle_ms),
+                'oversampling': overs,
+                'desired_stats': desired_stats,
+                'applied_stats': applied_stats,
+                'downgraded': bool(self._level_downgraded),
+            }
+            self._policy_history.append(dict(self._last_policy_decision))
+
+    def policy_metrics_snapshot(self) -> Dict[str, object]:
+        with self._policy_metrics_lock:
+            return {
+                'levels': self._policy_metrics.snapshot(),
+                'last_decision': dict(self._last_policy_decision),
+                'history': list(self._policy_history),
+                'policy': self._policy_name,
+                'active_level': int(self._active_ms_level),
+                'level_downgraded': bool(self._level_downgraded),
+                'prime_enabled': bool(self._prime_enabled),
+                'prime_complete': bool(self._prime_complete),
+            }
+
+    def _load_slice_with_metrics(
+        self,
+        source: ZarrSceneSource,
+        level: int,
+        z_idx: int,
+    ) -> np.ndarray:
+        roi = self._viewport_roi_for_level(source, level)
+        io_metrics = source.estimate_slice_io(level, z_idx, roi=roi)
+        t0 = time.perf_counter()
+        slab = source.slice(level, z_idx, compute=True, roi=io_metrics.roi)
+        t1 = time.perf_counter()
+        elapsed_ms = (t1 - t0) * 1000.0
+        if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+            roi_obj = io_metrics.roi
+            if roi_obj is None:
+                roi_desc = "full"
+            else:
+                roi_desc = f"y={roi_obj.y_start}:{roi_obj.y_stop} x={roi_obj.x_start}:{roi_obj.x_stop}"
+            logger.info(
+                "load slice: level=%d z=%d roi=%s chunks=%d bytes=%d elapsed=%.2fms",
+                level,
+                z_idx,
+                roi_desc,
+                io_metrics.chunks,
+                io_metrics.bytes_est,
+                elapsed_ms,
+            )
+        self._record_policy_metrics(level, elapsed_ms, io_metrics.chunks, io_metrics.bytes_est)
+        if not isinstance(slab, np.ndarray):
+            slab = np.asarray(slab, dtype=np.float32)
+        return slab
+
+    def _load_volume_with_metrics(self, source: ZarrSceneSource, level: int) -> np.ndarray:
+        chunks, bytes_est = self._estimate_volume_io(source, level)
+        t0 = time.perf_counter()
+        volume = source.level_volume(level, compute=True)
+        t1 = time.perf_counter()
+        elapsed_ms = (t1 - t0) * 1000.0
+        self._record_policy_metrics(level, elapsed_ms, chunks, bytes_est)
+        if not isinstance(volume, np.ndarray):
+            volume = np.asarray(volume, dtype=np.float32)
+        return volume
+
+    def _build_policy_context(
+        self,
+        source: ZarrSceneSource,
+        *,
+        intent_level: Optional[int],
+    ) -> level_policy.LevelSelectionContext:
+        idle_ms = max(0.0, (time.perf_counter() - self._last_interaction_ts) * 1000.0)
+        ms_state = {
+            'current_level': int(self._active_ms_level),
+            'policy': self._policy_name,
+            'downgraded': bool(self._level_downgraded),
+        }
+        levels = tuple(source.level_descriptors)
+        overs_map: Dict[int, float] = {}
+        for descriptor in levels:
+            try:
+                lvl = int(descriptor.index)
+            except Exception:
+                lvl = int(levels.index(descriptor))
+            try:
+                overs_map[lvl] = self._oversampling_for_level(source, lvl)
+            except Exception:
+                overs_map[lvl] = float('nan')
+        return level_policy.LevelSelectionContext(
+            levels=levels,
+            viewport_px=(self.width, self.height),
+            physical_scale=self._physical_scale_for_level(source, self._active_ms_level),
+            oversampling=overs_map.get(int(self._active_ms_level), 1.0),
+            current_level=int(self._active_ms_level),
+            idle_ms=idle_ms,
+            use_volume=bool(self.use_volume),
+            ms_state=ms_state,
+            metrics=self._policy_metrics,
+            intent_level=int(intent_level) if intent_level is not None else None,
+            level_oversampling=overs_map,
+        )
 
     def _estimate_level_bytes(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
         descriptor = source.level_descriptors[level]
@@ -920,10 +1468,7 @@ class EGLRendererWorker:
 
     def _get_level_volume(self, source: ZarrSceneSource, level: int) -> np.ndarray:
         self._volume_budget_allows(source, level)
-        volume = source.level_volume(level, compute=True)
-        if not isinstance(volume, np.ndarray):
-            volume = np.asarray(volume, dtype=np.float32)
-        return volume
+        return self._load_volume_with_metrics(source, level)
 
     def _log_layer_assignment(
         self,
@@ -993,24 +1538,29 @@ class EGLRendererWorker:
         contrast = source.ensure_contrast(level=level)
         self._zarr_clim = contrast
 
+        try:
+            overs = self._oversampling_for_level(source, level)
+            with self._policy_metrics_lock:
+                self._policy_metrics.observe_oversampling(level, overs)
+        except Exception:
+            logger.debug("policy oversampling observe failed", exc_info=True)
+
         layer = self._napari_layer
-        if layer is None:
-            # Even without a napari layer, propagate metadata and notify listeners
-            self._notify_scene_refresh()
-            return
+        update_layer = layer is not None
 
         if self.use_volume:
             volume = self._get_level_volume(source, level)
-            layer.data = volume
-            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
             d, h, w = int(volume.shape[0]), int(volume.shape[1]), int(volume.shape[2])
             self._data_wh = (w, h)
             self._data_d = d
+            if update_layer:
+                layer.data = volume
+                layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
             self._log_layer_assignment('volume', level, None, (d, h, w), contrast)
         else:
             # Always feed a concrete 2D slab for reliability in headless mode
             z_idx = self._z_index or 0
-            slab = source.slice(level, z_idx, compute=True)
+            slab = self._load_slice_with_metrics(source, level, z_idx)
             if self._log_layer_debug:
                 try:
                     smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
@@ -1023,13 +1573,15 @@ class EGLRendererWorker:
                     )
                 except Exception:
                     logger.debug("apply slab stats failed", exc_info=True)
-            layer.data = slab
-            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
+            if update_layer:
+                layer.data = slab
+                layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
             h, w = self._plane_wh_for_level(source, level)
             self._data_wh = (w, h)
             try:
                 sy, sx = self._plane_scale_for_level(source, level)
-                layer.scale = (sy, sx)
+                if update_layer:
+                    layer.scale = (sy, sx)
                 # Update camera world range to match scaled layer extents
                 if self.view is not None and hasattr(self.view, 'camera'):
                     world_w = float(w) * float(sx)
@@ -1053,7 +1605,18 @@ class EGLRendererWorker:
         target = level
         if path:
             target = source.level_index_for_path(path)
+        ctx = self._build_policy_context(source, intent_level=int(target))
         self._set_level_with_budget(int(target), reason="intent")
+        self._record_policy_decision(
+            policy=self._policy_name,
+            intent_level=int(target),
+            selected_level=int(target),
+            desired_level=int(target),
+            applied_level=int(self._active_ms_level),
+            reason="intent",
+            idle_ms=ctx.idle_ms,
+            oversampling=ctx.level_oversampling,
+        )
 
     def _clear_visual(self) -> None:
         if self._visual is not None and hasattr(self._visual, 'parent'):
@@ -1067,7 +1630,7 @@ class EGLRendererWorker:
             try:
                 source = self._ensure_scene_source()
                 self._set_level_with_budget(self._active_ms_level, reason="ndisplay")
-                vol3d = source.level_volume(self._active_ms_level, compute=True)
+                vol3d = self._load_volume_with_metrics(source, self._active_ms_level)
             except Exception as e:
                 # Fall back to synthetic if dataset load fails
                 logger.debug("3D: zarr load failed; fallback to synthetic: %s", e)
@@ -1105,7 +1668,7 @@ class EGLRendererWorker:
                 source = self._ensure_scene_source()
                 self._set_level_with_budget(self._active_ms_level, reason="ndisplay")
                 z_idx = self._z_index or 0
-                arr2d = source.slice(self._active_ms_level, z_idx, compute=True)
+                arr2d = self._load_slice_with_metrics(source, self._active_ms_level, z_idx)
                 vis = scene.visuals.Image(arr2d, parent=self.view.scene, cmap='grays', clim=None, method='auto')
                 h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
                 self._data_wh = (w, h)
@@ -1455,6 +2018,7 @@ class EGLRendererWorker:
             self.view.camera.azimuth = float(azimuth_deg)
         self._apply_pending_state()
         self.canvas.render()
+        self._render_tick_required = False
 
     def apply_state(self, state: ServerSceneState) -> None:
         """Queue a complete scene state snapshot for the next frame."""
@@ -1466,6 +2030,7 @@ class EGLRendererWorker:
                     self._pending_zoom_ts = time.perf_counter()
                 except Exception:
                     self._pending_zoom_ratio = None
+            self._last_interaction_ts = time.perf_counter()
             self._pending_state = ServerSceneState(
                 center=tuple(state.center) if state.center is not None else None,
                 zoom=float(state.zoom) if state.zoom is not None else None,
@@ -1544,7 +2109,7 @@ class EGLRendererWorker:
                 if self._z_index is None or int(z_idx) != int(self._z_index):
                     source = self._ensure_scene_source()
                     self._set_level_with_budget(self._active_ms_level, reason="step")
-                    slab = source.slice(self._active_ms_level, int(z_idx), compute=True)
+                    slab = self._load_slice_with_metrics(source, self._active_ms_level, int(z_idx))
                     vis = getattr(self, '_visual', None)
                     if vis is not None and hasattr(vis, 'set_data'):
                         vis.set_data(slab)  # type: ignore[attr-defined]
@@ -1741,6 +2306,7 @@ class EGLRendererWorker:
                     logger.debug("Animate(2D) failed: %s", e)
         self._apply_pending_state()
         self.canvas.render()
+        self._render_tick_required = False
         t_r1 = time.perf_counter()
         render_ms = (t_r1 - t_r0) * 1000.0
         # Blit timing (GPU + CPU)

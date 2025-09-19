@@ -131,3 +131,31 @@ Default for first cut: keep lowest resolution in 3D for stability; add the heuri
 - CLIM/colormap continuity: we preserve current behavior by reusing cached CLIM per dataset; OK for now.
 - Axis conventions: ensure NGFF axes mapping (z,y,x) → displayed dims is handled consistently for downsample vectors.
 
+## Current Gaps & Near-Term Fix Plan (2025-09-19)
+
+Instrumentation of the latency harness shows that our worker still only records timing data for multiscale level 0 even after emitting `multiscale.intent.set_level` intents for levels 1 and 2. The log entries confirm that we enqueue the switch (`request multiscale level: level=2 path=level_03`) but we never observe the follow-on `load slice: level=1/2 …` events, so the policy’s metric window remains empty for coarser mips and the auto selector never downgrades.
+
+The debugging runs also surfaced a second usability issue: to populate timings we currently rely on the harness issuing an explicit sequence of level intents. In practice every fresh server session should “prime” itself automatically so downstream clients don’t have to worry about warm-up ordering.
+
+We’re addressing both gaps with the following steps:
+
+1. **Worker-side priming helper**
+   - Add a method (e.g. `_prime_multiscale_levels`) that iterates over every available level right after the initial scene load.
+   - For each level, invoke `_load_slice_with_metrics` with the current ROI so the timing/cost metrics are populated in `LevelMetricsWindow`.
+   - Restore the viewer to its configured default level (finest for 2D, coarsest for volume) when the cycle completes.
+   - Gate the behavior behind an env flag (`NAPARI_CUDA_MS_PRIME=1`) so we can disable it for specialized benchmarks.
+
+2. **Render-thread enforcement of pending level switches**
+   - Ensure `_apply_pending_state` always forces a render tick after queuing `_pending_ms_level`. Today the warm-up intents can queue switches before the first pixel client attaches, so the worker never advances the state machine.
+   - Solution: trigger an immediate `canvas.render()` (or enqueue a one-shot frame) whenever we set `_pending_ms_level`, guaranteeing `_apply_multiscale_switch` runs even before the pixel drain connects.
+   - Record a debug log (`ms.switch: level=<from>→<to> roi=<…> elapsed=<…>ms`) once `_load_slice_with_metrics` finishes so it’s obvious in the server log that the priming switch executed.
+
+3. **Latency policy bootstrap**
+   - Update `select_latency_aware` so that when a level has zero samples it can still be evaluated using the most recent `_estimate_slice_io` result (bytes/chunks) instead of automatically deferring to the requested level.
+   - With primed timings the policy will quickly converge, but this fallback keeps first-frame behavior reasonable if someone disables priming.
+
+4. **Documentation & UX**
+   - Keep the harness in sync with the priming behavior but make it optional: if the worker advertises `ms_state.prime_complete=True`, the harness can skip its own warm-up sequence.
+   - Surface the active level (and whether it was downgraded) in `metrics.json` so we can regress-test level switches without scraping logs.
+
+Execution order: implement the worker priming helper and render tick enforcement first (this resolves the missing timing samples we observed), then update the latency policy heuristics, and finally hook up the UX/telemetry improvements.

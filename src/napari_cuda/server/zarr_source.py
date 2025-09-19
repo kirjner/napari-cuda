@@ -19,6 +19,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import dask.array as da
 import numpy as np
 
+from .scene_types import SliceROI, SliceIOMetrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -307,22 +309,40 @@ class ZarrSceneSource:
         z_index: int,
         *,
         compute: bool = False,
+        roi: Optional[SliceROI] = None,
     ) -> da.Array | np.ndarray:
         lvl = self._validate_level(level)
         array = self.get_level(lvl)
         axes = self.axes
         axes_lower = [str(ax).lower() for ax in axes]
+        descriptor = self._descriptor(lvl)
+
+        def _axis_limit(axis_name: str, default_index: int) -> int:
+            if axis_name in axes_lower:
+                idx = axes_lower.index(axis_name)
+                if 0 <= idx < len(descriptor.shape):
+                    return int(descriptor.shape[idx])
+            if descriptor.shape:
+                idx = default_index if -len(descriptor.shape) <= default_index < len(descriptor.shape) else -1
+                return int(descriptor.shape[idx])
+            return 0
+
+        y_limit = _axis_limit("y", max(-2, -len(descriptor.shape)))
+        x_limit = _axis_limit("x", max(-1, -len(descriptor.shape)))
+        roi_slice: Optional[SliceROI] = None
+        if roi is not None:
+            roi_slice = roi.clamp(y_limit, x_limit)
+
         if array.ndim <= 2 or "z" not in axes_lower:
-            view = array.astype("float32")
+            indexer: List[slice | int] = [slice(None)] * array.ndim
         else:
             z_pos = axes_lower.index("z") if "z" in axes_lower else 0
             dim = int(array.shape[z_pos])
             if dim <= 0:
                 raise ValueError("Slice request on empty Z dimension")
             zi = max(0, min(int(z_index), dim - 1))
-            indexer: List[slice | int] = [slice(None)] * array.ndim
+            indexer = [slice(None)] * array.ndim
             indexer[z_pos] = zi
-            view = array[tuple(indexer)].astype("float32")
 
             with self._lock:
                 base = list(self._current_step) if self._current_step is not None else list(self.initial_step(level=lvl))
@@ -330,6 +350,19 @@ class ZarrSceneSource:
                     base.extend([0] * (len(array.shape) - len(base)))
                 base[z_pos] = zi
                 self._current_step = tuple(base)
+
+        if roi_slice is not None and not roi_slice.is_empty():
+            try:
+                if "y" in axes_lower:
+                    y_pos = axes_lower.index("y")
+                    indexer[y_pos] = slice(int(roi_slice.y_start), int(roi_slice.y_stop))
+                if "x" in axes_lower:
+                    x_pos = axes_lower.index("x")
+                    indexer[x_pos] = slice(int(roi_slice.x_start), int(roi_slice.x_stop))
+            except Exception:
+                logger.debug("slice: ROI indexing failed; falling back to full slice", exc_info=True)
+
+        view = array[tuple(indexer)].astype("float32")
 
         if not compute:
             return view
@@ -341,6 +374,76 @@ class ZarrSceneSource:
         slab = (slab - lo) / scale
         np.clip(slab, 0.0, 1.0, out=slab)
         return slab
+
+    def estimate_slice_io(
+        self,
+        level: int,
+        z_index: int,
+        roi: Optional[SliceROI] = None,
+    ) -> SliceIOMetrics:
+        lvl = self._validate_level(level)
+        arr = self.get_level(lvl)
+        axes_lower = [str(ax).lower() for ax in self.axes]
+        descriptor = self._descriptor(lvl)
+        dtype_size = int(np.dtype(getattr(arr, "dtype", self.dtype)).itemsize)
+
+        def _axis_limit(axis_name: str, fallback_index: int) -> int:
+            if axis_name in axes_lower:
+                idx = axes_lower.index(axis_name)
+                if 0 <= idx < len(descriptor.shape):
+                    return int(descriptor.shape[idx])
+            return int(descriptor.shape[fallback_index])
+
+        y_limit = _axis_limit("y", max(0, len(descriptor.shape) - 2))
+        x_limit = _axis_limit("x", max(0, len(descriptor.shape) - 1))
+        roi_slice = roi.clamp(y_limit, x_limit) if roi is not None else SliceROI(0, y_limit, 0, x_limit)
+
+        if roi_slice.is_empty():
+            return SliceIOMetrics(chunks=0, bytes_est=0, roi=roi_slice)
+
+        height = max(1, int(roi_slice.height))
+        width = max(1, int(roi_slice.width))
+        bytes_est = height * width * dtype_size
+
+        chunks_attr = getattr(arr, "chunks", None)
+        if chunks_attr is None:
+            return SliceIOMetrics(chunks=0, bytes_est=bytes_est, roi=roi_slice)
+
+        def _chunks_touched(chunk_sizes: Sequence[int], start: int, stop: int) -> int:
+            if start >= stop:
+                return 0
+            offset = 0
+            touched = 0
+            for size in chunk_sizes:
+                next_offset = offset + int(size)
+                if stop <= offset:
+                    break
+                if start < next_offset:
+                    touched += 1
+                offset = next_offset
+                if stop <= offset:
+                    break
+            return max(1, touched)
+
+        chunk_count = 1
+        for axis, chunk_sizes in enumerate(chunks_attr):
+            sizes = tuple(int(s) for s in chunk_sizes)
+            if not sizes:
+                continue
+            if axis < len(axes_lower):
+                axis_name = axes_lower[axis]
+            else:
+                axis_name = ""
+            if axis_name == "z":
+                chunk_count *= _chunks_touched(sizes, int(z_index), int(z_index) + 1)
+            elif axis_name == "y":
+                chunk_count *= _chunks_touched(sizes, int(roi_slice.y_start), int(roi_slice.y_stop))
+            elif axis_name == "x":
+                chunk_count *= _chunks_touched(sizes, int(roi_slice.x_start), int(roi_slice.x_stop))
+            else:
+                chunk_count *= max(1, len(sizes))
+
+        return SliceIOMetrics(chunks=int(chunk_count), bytes_est=int(bytes_est), roi=roi_slice)
 
     def level_volume(
         self,

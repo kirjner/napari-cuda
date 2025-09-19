@@ -13,7 +13,8 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Set
+from pathlib import Path
+from typing import Dict, Optional, Set
 
 import websockets
 import importlib.resources as ilr
@@ -141,7 +142,7 @@ class EGLHeadlessServer:
         self._log_volume_info: bool = env_bool('NAPARI_CUDA_LOG_VOLUME_INFO', False)
         # Force IDR on reset (default True)
         self._idr_on_reset: bool = env_bool('NAPARI_CUDA_IDR_ON_RESET', True)
-        
+
         # Drop/send tracking
         self._drops_total: int = 0
         self._last_send_ts: Optional[float] = None
@@ -151,7 +152,7 @@ class EGLHeadlessServer:
             self._log_sends = bool(log_sends or int(os.getenv('NAPARI_CUDA_LOG_SENDS', '0') or '0'))
         except Exception:
             self._log_sends = bool(log_sends)
-        
+
         # Data configuration (optional OME-Zarr dataset for real data)
         self._zarr_path = zarr_path or os.getenv('NAPARI_CUDA_ZARR_PATH') or None
         self._zarr_level = zarr_level or os.getenv('NAPARI_CUDA_ZARR_LEVEL') or None
@@ -161,6 +162,7 @@ class EGLHeadlessServer:
             self._zarr_z = _z if _z >= 0 else None
         except Exception:
             self._zarr_z = None
+        self._policy_metrics_snapshot: Dict[str, object] = {}
         # Verbose dims logging control: default debug, upgrade to info with flag
         self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
         # Dedicated debug control for this module only (no dependency loggers)
@@ -408,6 +410,8 @@ class EGLHeadlessServer:
             'zarr_axes': getattr(self._worker, '_zarr_axes', None) if self._worker is not None else None,
             'zarr_level': self._zarr_level,
         }
+        if self._policy_metrics_snapshot:
+            extras['policy_metrics'] = self._policy_metrics_snapshot
         if self._worker is not None and hasattr(self._worker, '_scene_source'):
             source = getattr(self._worker, '_scene_source', None)
             if source is not None:
@@ -848,6 +852,7 @@ class EGLHeadlessServer:
                     zarr_level=self._zarr_level,
                     zarr_axes=self._zarr_axes,
                     zarr_z=self._zarr_z,
+                    policy_name=self._ms_state.get('policy'),
                 )
                 # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
                 try:
@@ -1205,16 +1210,32 @@ class EGLHeadlessServer:
                 elif t == 'multiscale.intent.set_policy':
                     pol = str(data.get('policy') or '').lower()
                     client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
-                    if pol in ('auto', 'fixed'):
-                        self._ms_state['policy'] = pol
-                        self._log_volume_intent("intent: multiscale.set_policy policy=%s client_id=%s seq=%s", pol, client_id, client_seq)
-                        await self._rebroadcast_meta(client_id)
+                    if pol != 'latency':
+                        self._log_volume_intent(
+                            "intent: multiscale.set_policy rejected policy=%s client_id=%s seq=%s",
+                            pol,
+                            client_id,
+                            client_seq,
+                        )
+                        continue
+                    self._ms_state['policy'] = 'latency'
+                    self._log_volume_intent(
+                        "intent: multiscale.set_policy policy=latency client_id=%s seq=%s",
+                        client_id,
+                        client_seq,
+                    )
+                    if self._worker is not None:
+                        try:
+                            self._worker.set_policy('latency')
+                        except Exception:
+                            logger.exception("worker set_policy failed for latency")
+                    await self._rebroadcast_meta(client_id)
                 elif t == 'multiscale.intent.set_level':
                     lvl = self._clamp_level(data.get('level'))
                     client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
                     if lvl is not None:
                         self._ms_state['current_level'] = int(lvl)
-                        self._ms_state['policy'] = 'fixed'
+                        self._ms_state['policy'] = 'latency'
                         self._log_volume_intent("intent: multiscale.set_level level=%d client_id=%s seq=%s", int(lvl), client_id, client_seq)
                         # Instruct worker to switch level (coalesced on render thread)
                         if self._worker is not None:
@@ -1637,6 +1658,94 @@ class EGLHeadlessServer:
             # We could track state clients separately if desired; here we reuse pixel_clients for demo
         except Exception:
             pass
+        self._publish_policy_metrics()
+
+    def _publish_policy_metrics(self) -> None:
+        worker = self._worker
+        if worker is None:
+            return
+        try:
+            snapshot = worker.policy_metrics_snapshot()
+        except Exception:
+            logger.debug('policy metrics snapshot failed', exc_info=True)
+            return
+
+        if not isinstance(snapshot, dict):
+            return
+
+        self._policy_metrics_snapshot = snapshot
+        try:
+            self._ms_state['prime_complete'] = bool(snapshot.get('prime_complete'))
+            if 'active_level' in snapshot:
+                self._ms_state['current_level'] = int(snapshot['active_level'])
+            self._ms_state['downgraded'] = bool(snapshot.get('level_downgraded'))
+        except Exception:
+            logger.debug('ms_state prime update failed', exc_info=True)
+        try:
+            out = Path('tmp/policy_metrics_latest.json')
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(snapshot, indent=2))
+        except Exception:
+            logger.debug('policy metrics file write failed', exc_info=True)
+
+        levels = snapshot.get('levels') if isinstance(snapshot.get('levels'), dict) else {}
+        if isinstance(levels, dict):
+            for level, stats in levels.items():
+                try:
+                    lvl = int(level)
+                except Exception:
+                    continue
+                if not isinstance(stats, dict):
+                    continue
+                prefix = f'napari_cuda_policy_level_{lvl}'
+                mean_time = float(stats.get('mean_time_ms', 0.0))
+                last_time = float(stats.get('last_time_ms', 0.0))
+                overs = float(stats.get('latest_oversampling', 0.0))
+                mean_bytes = float(stats.get('mean_bytes', 0.0))
+                samples = float(stats.get('samples', 0.0))
+                try:
+                    self.metrics.set(f'{prefix}_mean_time_ms', mean_time)
+                    self.metrics.set(f'{prefix}_last_time_ms', last_time)
+                    self.metrics.set(f'{prefix}_oversampling', overs)
+                    self.metrics.set(f'{prefix}_mean_bytes', mean_bytes)
+                    self.metrics.set(f'{prefix}_samples', samples)
+                except Exception:
+                    logger.debug('policy metrics gauge update failed for level %s', lvl, exc_info=True)
+
+        try:
+            self.metrics.set('napari_cuda_ms_prime_complete', 1.0 if self._ms_state.get('prime_complete') else 0.0)
+            self.metrics.set('napari_cuda_ms_active_level', float(self._ms_state.get('current_level', 0)))
+        except Exception:
+            logger.debug('prime metrics update failed', exc_info=True)
+
+        decision = snapshot.get('last_decision')
+        if isinstance(decision, dict) and decision:
+            try:
+                intent = float(decision.get('intent_level', -1))
+            except Exception:
+                intent = -1.0
+            try:
+                desired = float(decision.get('desired_level', -1))
+            except Exception:
+                desired = -1.0
+            try:
+                applied = float(decision.get('applied_level', -1))
+            except Exception:
+                applied = -1.0
+            try:
+                idle_ms = float(decision.get('idle_ms', 0.0))
+            except Exception:
+                idle_ms = 0.0
+            try:
+                self.metrics.set('napari_cuda_policy_intent_level', intent)
+                self.metrics.set('napari_cuda_policy_desired_level', desired)
+                self.metrics.set('napari_cuda_policy_applied_level', applied)
+                self.metrics.set('napari_cuda_policy_idle_ms', idle_ms)
+                self.metrics.set(
+                    'napari_cuda_policy_downgraded', 1.0 if decision.get('downgraded') else 0.0
+                )
+            except Exception:
+                logger.debug('policy decision gauge update failed', exc_info=True)
 
     async def _start_metrics_server(self):
         # Start Dash/Plotly dashboard on a background thread with a Flask server.
