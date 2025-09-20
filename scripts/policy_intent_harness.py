@@ -20,6 +20,7 @@ def _await_connection(channel, timeout_s: float = 10.0) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if getattr(channel, "_out_q", None) is not None:
+            logger.info("state channel ready")
             return
         time.sleep(0.05)
     raise RuntimeError("state channel did not become ready")
@@ -44,6 +45,10 @@ def run_harness(
     idle_delay: float = 0.25,
     level_delay: float = 0.0,
 ) -> None:
+    policies = [str(p).lower() for p in policies if str(p).lower() == "latency"]
+    if not policies:
+        policies = ["latency"]
+
     scenes: List[dict] = []
     dims_updates: List[dict] = []
 
@@ -55,6 +60,7 @@ def run_harness(
 
     def on_dims(meta: dict) -> None:
         dims_updates.append(meta)
+        logger.info("received dims.update seq=%s", meta.get('seq'))
 
     ctrl = StateController(host, state_port, on_scene_spec=on_scene, on_dims_update=on_dims)
     channel, thread = ctrl.start()
@@ -78,10 +84,17 @@ def run_harness(
             if isinstance(lvl, (int, float)):
                 level_val = float(lvl)
         policy_metrics = metrics.get('policy_metrics')
+        reason = None
+        applied_stats = None
         if level_val is None and isinstance(policy_metrics, dict):
             lvl = policy_metrics.get('active_level')
             if isinstance(lvl, (int, float)):
                 level_val = float(lvl)
+        if isinstance(policy_metrics, dict):
+            last_decision = policy_metrics.get('last_decision')
+            if isinstance(last_decision, dict):
+                reason = last_decision.get('reason')
+                applied_stats = last_decision
         if level_val is None:
             return
         current = int(level_val)
@@ -89,7 +102,22 @@ def run_harness(
             last_active_level = current
             return
         if current != last_active_level:
-            print(f"[switch] {tag}: level {last_active_level} -> {current}")
+            extra = ""
+            if applied_stats:
+                intent_level = applied_stats.get('intent_level')
+                selected_level = applied_stats.get('selected_level')
+                desired_level = applied_stats.get('desired_level')
+                reason_text = reason or applied_stats.get('reason')
+                extra = (
+                    f" intent={int(intent_level)}" if isinstance(intent_level, (int, float)) else ""
+                )
+                if isinstance(selected_level, (int, float)):
+                    extra += f" selected={int(selected_level)}"
+                if isinstance(desired_level, (int, float)):
+                    extra += f" desired={int(desired_level)}"
+                if reason_text:
+                    extra += f" reason={reason_text}"
+            print(f"[switch] {tag}: level {last_active_level} -> {current}{extra}")
             last_active_level = current
 
     def send(payload: Dict[str, object]) -> None:
@@ -163,6 +191,8 @@ def run_harness(
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO,
+                        format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s')
     parser = argparse.ArgumentParser(description="Exercise napari-cuda multiscale policies via state intents")
     parser.add_argument("--host", default="127.0.0.1", help="Server host (state channel)")
     parser.add_argument("--state-port", type=int, default=8081, help="State channel port")
@@ -174,8 +204,8 @@ def main() -> None:
     parser.add_argument(
         "--policies",
         nargs="*",
-        default=["budget", "screen_pixel", "latency", "coarse_first"],
-        help="Policies to cycle through",
+        default=["latency"],
+        help="Policies to cycle through (latency only)",
     )
     parser.add_argument(
         "--levels",

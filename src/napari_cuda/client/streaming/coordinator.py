@@ -1944,7 +1944,11 @@ class StreamCoordinator:
             return False
         if self._rate_gate_settings(origin):
             return False
-        return self._send_intent('multiscale.intent.set_policy', {'policy': str(policy)}, origin)
+        pol = str(policy).lower()
+        if pol != 'latency':
+            logger.debug("multiscale_set_policy rejected: policy=%s", pol)
+            return False
+        return self._send_intent('multiscale.intent.set_policy', {'policy': 'latency'}, origin)
 
     def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
         if not self._dims_ready:

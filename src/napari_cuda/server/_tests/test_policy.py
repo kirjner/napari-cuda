@@ -28,9 +28,11 @@ def _ctx(
     current: int,
     overs: dict[int, float],
     metrics: policy.LevelMetricsWindow | None = None,
+    primed: dict[int, policy.PrimedLevelMetrics] | None = None,
 ) -> policy.LevelSelectionContext:
+    level_count = max(1, len(overs))
     return policy.LevelSelectionContext(
-        levels=_make_levels(len(overs) or 1),
+        levels=_make_levels(level_count),
         viewport_px=(1920, 1080),
         physical_scale=(1.0, 1.0, 1.0),
         oversampling=overs.get(current, 1.0),
@@ -41,6 +43,7 @@ def _ctx(
         metrics=metrics or policy.LevelMetricsWindow(),
         intent_level=intent,
         level_oversampling=overs,
+        primed_metrics=primed,
     )
 
 
@@ -78,26 +81,71 @@ def test_level_metrics_snapshot() -> None:
     assert level_stats['last_bytes'] == 256.0
 
 
-def test_policy_registry_round_trip() -> None:
-    names = list(policy.available_policies())
-    assert "budget" in names
-
-    overs = {0: 3.0, 1: 1.4, 2: 0.7}
-    ctx = _ctx(intent=None, current=0, overs=overs)
-
-    screen = policy.resolve_policy("screen_pixel")
-    assert screen(ctx) == 1
-
-    coarse = policy.resolve_policy("coarse_first")
-    assert coarse(ctx) == 1
-
+def test_latency_policy_prefers_measured_level_within_budget() -> None:
+    overs = {0: 3.0, 1: 1.2, 2: 0.6}
     metrics = policy.LevelMetricsWindow()
-    metrics.observe_time(0, 25.0)
     metrics.observe_time(1, 12.0)
-    metrics.observe_time(2, 8.0)
-    lat_ctx = _ctx(intent=None, current=0, overs=overs, metrics=metrics)
-    latency = policy.resolve_policy("latency")
-    assert latency(lat_ctx) == 1
+    metrics.observe_bytes(1, 200_000)
+    ctx = _ctx(intent=None, current=0, overs=overs, metrics=metrics)
+    assert policy.select_latency_aware(ctx) == 1
 
-    budget = policy.resolve_policy("budget")
-    assert budget(_ctx(intent=5, current=0, overs=overs)) == 5
+
+def test_latency_policy_uses_prediction_when_unmeasured() -> None:
+    overs = {0: 3.0, 1: 1.1, 2: 0.6}
+    metrics = policy.LevelMetricsWindow()
+    metrics.observe_time(0, 30.0)
+    metrics.observe_bytes(0, 1_000_000)
+    metrics.observe_bytes(1, 200_000)
+    metrics.observe_bytes(2, 100_000)
+    ctx = _ctx(intent=None, current=0, overs=overs, metrics=metrics)
+    # Predicted time for level 1 should be 6 ms (within 18 budget)
+    assert policy.select_latency_aware(ctx) == 1
+
+
+def test_latency_policy_falls_back_to_intent_when_no_data() -> None:
+    overs = {0: 2.5, 1: 1.4}
+    ctx = _ctx(intent=1, current=0, overs=overs)
+    assert policy.select_latency_aware(ctx) == 1
+
+
+def test_latency_policy_uses_primed_latency_when_no_live_samples() -> None:
+    overs = {0: 3.0, 1: 1.1, 2: 0.6}
+    primed = {
+        1: policy.PrimedLevelMetrics(
+            latency_ms=12.0,
+            bytes_est=200_000,
+            chunks=128,
+            oversampling=overs[1],
+            viewport_px=(1920, 1080),
+            timestamp_ms=0.0,
+        )
+    }
+    ctx = _ctx(intent=None, current=0, overs=overs, primed=primed)
+    assert policy.select_latency_aware(ctx) == 1
+
+
+def test_latency_policy_uses_primed_bytes_for_prediction() -> None:
+    overs = {0: 3.0, 1: 1.2, 2: 0.7}
+    metrics = policy.LevelMetricsWindow()
+    metrics.observe_time(0, 30.0)
+    metrics.observe_bytes(0, 1_000_000)
+    primed = {
+        1: policy.PrimedLevelMetrics(
+            latency_ms=0.0,
+            bytes_est=200_000,
+            chunks=64,
+            oversampling=overs[1],
+            viewport_px=(1920, 1080),
+            timestamp_ms=0.0,
+        ),
+        2: policy.PrimedLevelMetrics(
+            latency_ms=0.0,
+            bytes_est=600_000,
+            chunks=32,
+            oversampling=overs[2],
+            viewport_px=(1920, 1080),
+            timestamp_ms=0.0,
+        ),
+    }
+    ctx = _ctx(intent=None, current=0, overs=overs, metrics=metrics, primed=primed)
+    assert policy.select_latency_aware(ctx) == 1

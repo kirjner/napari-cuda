@@ -706,7 +706,7 @@ class ViewerSceneManager:
             return None
 
         metadata = {
-            "policy": multiscale_state.get("policy", "fixed"),
+            "policy": multiscale_state.get("policy", "latency"),
             "index_space": multiscale_state.get("index_space", "base"),
         }
 
@@ -781,7 +781,7 @@ class ViewerSceneManager:
         if not levels:
             return None
 
-        metadata = {"policy": "fixed", "index_space": "base"}
+        metadata = {"policy": "latency", "index_space": "base"}
         return MultiscaleSpec(
             levels=levels,
             current_level=int(current_level or 0),

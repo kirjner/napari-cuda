@@ -43,7 +43,7 @@ legacy HUD continues to work alongside the richer scene spec.
             {"shape": [10, 20, 30], "downsample": [1.0, 2.0, 2.0], "path": "level_1"}
           ],
           "current_level": 0,
-          "metadata": {"policy": "fixed", "index_space": "base"}
+          "metadata": {"policy": "latency", "index_space": "base"}
         },
         "extras": {"is_volume": true, "zarr_path": "/data/sample.zarr"}
       }

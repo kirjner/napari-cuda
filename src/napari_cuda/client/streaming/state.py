@@ -198,7 +198,9 @@ class StateChannel:
                         while True:
                             try:
                                 msg = await self._out_q.get()  # type: ignore[arg-type]
+                                logger.info("StateChannel sender -> %s", msg)
                                 await ws.send(msg)
+                                logger.info("StateChannel sender delivered")
                             except Exception:
                                 logger.debug("State sender failed; stopping", exc_info=True)
                                 break

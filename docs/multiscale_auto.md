@@ -80,7 +80,7 @@ Default for first cut: keep lowest resolution in 3D for stability; add the heuri
 ## Server Changes
 
 - Add a worker→server callback (set once when starting worker) for `on_ms_level_changed(level)` that:
-  - Sets `self._ms_state['current_level'] = level; self._ms_state['policy'] = 'auto'`
+  - Sets `self._ms_state['current_level'] = level; self._ms_state['policy'] = 'latency'`
   - Calls `await self._rebroadcast_meta(last_client_id=None)`
   - Triggers `_ensure_keyframe()` to make the change immediate.
 - Expose env flags for auto enable/tuning: `NAPARI_CUDA_MS_AUTO=1`, thresholds above.
@@ -159,3 +159,9 @@ We’re addressing both gaps with the following steps:
    - Surface the active level (and whether it was downgraded) in `metrics.json` so we can regress-test level switches without scraping logs.
 
 Execution order: implement the worker priming helper and render tick enforcement first (this resolves the missing timing samples we observed), then update the latency policy heuristics, and finally hook up the UX/telemetry improvements.
+
+## Implementation Notes (2025-09-20)
+
+- Worker priming now executes the level switches synchronously on the render thread, records slice timing/IO in a new `PrimedLevelMetrics` cache, and restores the original level without relying on the pixel drain loop.
+- `select_latency_aware` consumes those primed metrics immediately so fresh sessions can downgrade based on budget before live samples accumulate.
+- Telemetry exposes the cache under `policy_metrics.primed_metrics`, and the latency harness prints switch transitions including policy reasons/intents for fast validation.

@@ -65,7 +65,7 @@ def _multiscale_state() -> Dict[str, Any]:
             {"path": "level_1", "downsample": [1.0, 2.0, 2.0]},
         ],
         "current_level": 0,
-        "policy": "fixed",
+        "policy": "latency",
         "index_space": "base",
     }
 
@@ -96,7 +96,7 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
     assert meta["volume"] is True
     assert meta["render"]["mode"] == "mip"
     assert meta["multiscale"]["current_level"] == 0
-    assert meta["multiscale"]["policy"] == "fixed"
+    assert meta["multiscale"]["policy"] == "latency"
 
     scene = manager.scene_spec()
     assert scene is not None
@@ -283,7 +283,7 @@ def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> N
             {"path": "level_1", "downsample": [2.0, 2.0], "shape": [16, 32]},
         ],
         "current_level": 1,
-        "policy": "fixed",
+        "policy": "latency",
         "index_space": "base",
     }
 
