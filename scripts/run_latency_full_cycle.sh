@@ -15,7 +15,10 @@ IDLE_DELAY=${IDLE_DELAY:-1.0}
 RUN_TAG=${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}
 RUN_DIR="tmp/policy_runs/${RUN_TAG}"
 LOG_PATH="${RUN_DIR}/headless_server.log"
-export NAPARI_CUDA_LEVEL_THRESHOLDS="${NAPARI_CUDA_LEVEL_THRESHOLDS:-0:1.3,1:2.6}"
+export NAPARI_CUDA_LEVEL_THRESHOLDS="${NAPARI_CUDA_LEVEL_THRESHOLDS:-0:1.3,1:1.2}"
+export NAPARI_CUDA_USE_NAPARI_ADAPTER="${NAPARI_CUDA_USE_NAPARI_ADAPTER:-1}"
+export NAPARI_CUDA_POLICY_EVENT_PATH="${RUN_DIR}/policy_events.jsonl"
+export NAPARI_CUDA_MS_PRIME="${NAPARI_CUDA_MS_PRIME:-0}"
 METRICS_URL="http://${HOST}:${METRICS_PORT}/metrics.json"
 
 mkdir -p "${RUN_DIR}"
@@ -87,18 +90,20 @@ PIXEL_PID=$!
 
 sleep 3
 
-printf 'Running combined zoom sweeps\n'
+printf 'Running simple zoom in/out sweep\n'
 uv run python scripts/policy_intent_harness.py \
   --host "${HOST}" \
   --state-port "${STATE_PORT}" \
   --metrics-url "${METRICS_URL}" \
-  --policies oversampling \
-  --prime-levels \
+  --reset-camera \
   --idle-delay "${IDLE_DELAY}" \
-  --level-delay 0.4 \
-  --levels 2 1 0 \
-  --zoom-factors 0.6 0.9 1.2 1.8 2.5 4.0 6.0 9.0 6.0 3.5 1.8 1.0 0.7 0.6 \
-  --output-prefix "${RUN_DIR}/latency_zoom"
+  --factor-in 0.5 \
+  --repeats-in 6 \
+  --factor-out 2.0 \
+  --repeats-out 10 \
+  --finalize-return \
+  --final-zoom 1.01 \
+  --output-prefix "${RUN_DIR}/zoom_simplest"
 
 printf 'Waiting for pixel driver to finish\n'
 if ! wait "${PIXEL_PID}"; then
@@ -114,6 +119,13 @@ fi
 
 if [[ -f tmp/policy_metrics_latest.json ]]; then
   cp tmp/policy_metrics_latest.json "${RUN_DIR}/policy_metrics_latest.json"
+fi
+
+# Copy policy events file if present
+if [[ -f "${RUN_DIR}/policy_events.jsonl" ]]; then
+  : # already in RUN_DIR by env override
+elif [[ -f tmp/policy_events.jsonl ]]; then
+  cp tmp/policy_events.jsonl "${RUN_DIR}/policy_events.jsonl"
 fi
 
 printf '\nRun artifacts stored in %s:\n' "${RUN_DIR}"

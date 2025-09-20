@@ -120,7 +120,9 @@ class AdapterScene:
                 scene_meta = f"level={self._bridge._zarr_level or current_level} shape={d}x{h}x{w}"
             else:
                 z_idx = self._bridge._z_index or 0
-                slice_array, _ = self._bridge._load_slice_with_metrics(source, current_level, int(z_idx))
+                # Load initial 2D slab using the worker's slice helper.
+                # Metrics plumbing was removed; we no longer return a metrics tuple here.
+                slice_array = self._bridge._load_slice(source, current_level, int(z_idx))
                 if self._bridge._log_layer_debug:
                     try:
                         smin = float(np.nanmin(slice_array)) if hasattr(np, 'nanmin') else float(np.min(slice_array))

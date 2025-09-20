@@ -15,7 +15,7 @@ import os
 import time
 import logging
 import ctypes
-from collections import deque
+ 
 from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Mapping, Sequence, Tuple, Literal
 import threading
@@ -353,10 +353,30 @@ class EGLRendererWorker:
         self._policy_func = level_policy.resolve_policy('oversampling')
         self._policy_name = 'oversampling'
         self._last_policy_decision: Dict[str, object] = {}
-        self._policy_history: Deque[Dict[str, object]] = deque(maxlen=128)
         self._last_interaction_ts = time.perf_counter()
         self._last_policy_ctx_log_ts: float = 0.0
+        self._decision_seq: int = 0
         self._log_layer_debug = env_bool('NAPARI_CUDA_LAYER_DEBUG', False)
+        # Focused selector logging without enabling full layer debug
+        try:
+            self._log_policy_eval = env_bool('NAPARI_CUDA_LOG_POLICY_EVAL', False)
+        except Exception:
+            self._log_policy_eval = False
+        # Preserve current camera view on level switches (avoid resetting zoom)
+        try:
+            self._preserve_view_on_switch = env_bool('NAPARI_CUDA_PRESERVE_VIEW', True)
+        except Exception:
+            self._preserve_view_on_switch = True
+        # Change-detection signature for apply_state-driven policy eval
+        self._last_state_sig: Optional[tuple] = None
+        # Coalesce selection to run once after a render when camera changed
+        self._eval_after_render: bool = False
+        # Defer initial policy evaluation until first user interaction (zoom/pan/orbit)
+        try:
+            self._defer_policy_init = env_bool('NAPARI_CUDA_DEFER_POLICY_INIT', True)
+        except Exception:
+            self._defer_policy_init = True
+        self._user_interaction_seen: bool = False
 
         if policy_name:
             try:
@@ -571,12 +591,14 @@ class EGLRendererWorker:
         delta_levels = 0
         threshold = 0.75
         eps = 1e-6
-        while self._zoom_accumulator >= (threshold - eps) and (self._active_ms_level + delta_levels) > 0:
-            self._zoom_accumulator -= threshold
-            delta_levels -= 1
-        while self._zoom_accumulator <= -(threshold - eps) and (self._active_ms_level + delta_levels) < levels_count - 1:
+        # Interpret factor<1 (zoom in) as selecting a finer level (lower index)
+        # and factor>1 (zoom out) as selecting a coarser level (higher index).
+        while self._zoom_accumulator <= -(threshold - eps) and (self._active_ms_level + delta_levels) > 0:
             self._zoom_accumulator += threshold
-            delta_levels += 1
+            delta_levels -= 1  # finer
+        while self._zoom_accumulator >= (threshold - eps) and (self._active_ms_level + delta_levels) < levels_count - 1:
+            self._zoom_accumulator -= threshold
+            delta_levels += 1  # coarser
         # Clamp accumulator to avoid runaway drift while keeping sign information
         self._zoom_accumulator = max(-threshold, min(threshold, self._zoom_accumulator))
         if log_zoom_info and delta_levels != 0:
@@ -591,7 +613,7 @@ class EGLRendererWorker:
         return delta_levels
 
     def _apply_zoom_based_level_switch(self) -> None:
-        if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+        if (self._log_layer_debug or getattr(self, '_log_policy_eval', False)) and logger.isEnabledFor(logging.INFO):
             try:
                 logger.info("policy eval: using_adapter=%s", self.using_napari_adapter())
             except Exception:
@@ -613,7 +635,7 @@ class EGLRendererWorker:
         if not should_log_ctx:
             if self._last_policy_ctx_log_ts == 0.0 or (log_now - self._last_policy_ctx_log_ts) >= log_ctx_interval:
                 should_log_ctx = True
-        if should_log_ctx and self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+        if should_log_ctx and (self._log_layer_debug or getattr(self, '_log_policy_eval', False)) and logger.isEnabledFor(logging.INFO):
             try:
                 overs_log = {int(k): float(v) for k, v in ctx.level_oversampling.items()}
                 roi_log: Dict[int, tuple[int, int, int, int] | str] = {}
@@ -631,7 +653,13 @@ class EGLRendererWorker:
                 logger.debug("policy ctx log failed", exc_info=True)
         try:
             selected = self._policy_func(ctx)
-            if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+            # Reduce spam: only log selection when it differs from current
+            if (
+                (self._log_layer_debug or getattr(self, '_log_policy_eval', False))
+                and logger.isEnabledFor(logging.INFO)
+                and selected is not None
+                and int(selected) != int(self._active_ms_level)
+            ):
                 try:
                     logger.info(
                         "policy select: intent=%s current=%d selected=%s overs=%s",
@@ -645,6 +673,12 @@ class EGLRendererWorker:
             selected = tentative
         desired = tentative if selected is None else int(selected)
         desired = max(0, min(desired, levels_count - 1))
+        # Stepwise clamp: move at most one level per evaluation for clarity
+        cur = int(self._active_ms_level)
+        if desired > cur + 1:
+            desired = cur + 1
+        elif desired < cur - 1:
+            desired = cur - 1
         if desired == self._active_ms_level:
             return
         try:
@@ -661,6 +695,7 @@ class EGLRendererWorker:
                 reason=reason,
                 idle_ms=idle_ms,
                 oversampling=ctx.level_oversampling,
+                from_level=prev,
             )
             if self._log_layer_debug and prev != int(self._active_ms_level):
                 try:
@@ -813,7 +848,15 @@ class EGLRendererWorker:
                 self._maybe_prime_multiscale()
                 return
             except Exception:
-                logger.exception("Adapter scene initialization failed; falling back to legacy visuals")
+                # Enforce adapter path by default; only allow fallback when explicitly enabled
+                logger.exception("Adapter scene initialization failed")
+                allow_legacy = env_bool('NAPARI_CUDA_ALLOW_LEGACY', False)
+                if not allow_legacy:
+                    # Fail fast so the error is visible to the caller
+                    raise
+                logger.error(
+                    "Adapter failed; falling back to legacy visuals (allowed by NAPARI_CUDA_ALLOW_LEGACY=1)"
+                )
                 self._use_napari_adapter = False
 
         canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
@@ -979,7 +1022,7 @@ class EGLRendererWorker:
         # Map all aliases to the same selector
         self._policy_func = level_policy.resolve_policy(new_name)
         self._last_policy_decision = {}
-        self._policy_history.clear()
+        # No history maintenance; snapshot excludes history
         if self._log_layer_debug:
             logger.info("policy set: name=%s", new_name)
 
@@ -995,8 +1038,6 @@ class EGLRendererWorker:
         return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
     def _log_ms_switch(self, *, previous: int, applied: int, source: ZarrSceneSource, elapsed_ms: float, reason: str) -> None:
-        if not self._log_layer_debug or not logger.isEnabledFor(logging.INFO):
-            return
         try:
             roi_desc = self._format_level_roi(source, applied)
         except Exception:
@@ -1359,26 +1400,30 @@ class EGLRendererWorker:
         reason: str,
         idle_ms: float,
         oversampling: Mapping[int, float] | None,
+        from_level: Optional[int] = None,
     ) -> None:
         overs = {int(k): float(v) for k, v in (oversampling or {}).items()}
+        self._decision_seq += 1
         self._last_policy_decision = {
             'timestamp_ms': time.time() * 1000.0,
+            'seq': int(self._decision_seq),
             'policy': str(policy),
-            'intent_level': int(intent_level) if intent_level is not None else -1,
-            'selected_level': int(selected_level) if selected_level is not None else -1,
+            'intent_level': int(intent_level) if intent_level is not None else None,
+            'selected_level': int(selected_level) if selected_level is not None else None,
             'desired_level': int(desired_level),
             'applied_level': int(applied_level),
+            'from_level': int(from_level) if from_level is not None else None,
             'reason': str(reason),
             'idle_ms': float(idle_ms),
             'oversampling': overs,
             'downgraded': bool(self._level_downgraded),
         }
-        self._policy_history.append(dict(self._last_policy_decision))
+        # No history maintenance; events are the source of truth
 
     def policy_metrics_snapshot(self) -> Dict[str, object]:
+        # Minimal, stable snapshot for external consumers
         return {
             'last_decision': dict(self._last_policy_decision),
-            'history': list(self._policy_history),
             'policy': self._policy_name,
             'active_level': int(self._active_ms_level),
             'level_downgraded': bool(self._level_downgraded),
@@ -1611,14 +1656,15 @@ class EGLRendererWorker:
                 sy, sx = self._plane_scale_for_level(source, level)
                 if update_layer:
                     layer.scale = (sy, sx)
-                # Update camera world range to match scaled layer extents
-                if self.view is not None and hasattr(self.view, 'camera'):
-                    world_w = float(w) * float(sx)
-                    world_h = float(h) * float(sy)
-                    try:
-                        self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-                    except Exception:
-                        logger.debug("apply_level: camera set_range failed", exc_info=True)
+                # Optionally preserve current view; avoid resetting zoom on each switch
+                if not getattr(self, '_preserve_view_on_switch', True):
+                    if self.view is not None and hasattr(self.view, 'camera'):
+                        world_w = float(w) * float(sx)
+                        world_h = float(h) * float(sy)
+                        try:
+                            self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+                        except Exception:
+                            logger.debug("apply_level: camera set_range failed", exc_info=True)
             except Exception:
                 logger.debug("apply_level: setting 2D layer scale failed", exc_info=True)
             self._log_layer_assignment('slice', level, self._z_index, (h, w), contrast)
@@ -1641,6 +1687,7 @@ class EGLRendererWorker:
             source = self._ensure_scene_source()
         target_level = int(target_level)
         ctx = self._build_policy_context(source, intent_level=target_level)
+        prev = int(self._active_ms_level)
         self._set_level_with_budget(target_level, reason=reason)
         idle_ms = max(0.0, (time.perf_counter() - self._last_interaction_ts) * 1000.0)
         self._record_policy_decision(
@@ -1652,6 +1699,7 @@ class EGLRendererWorker:
             reason=reason,
             idle_ms=idle_ms,
             oversampling=ctx.level_oversampling,
+            from_level=prev,
         )
 
     def _apply_multiscale_switch(self, level: int, path: Optional[str]) -> None:
@@ -1755,6 +1803,11 @@ class EGLRendererWorker:
             self.use_volume = False
             self._switch_to_2d()
             logger.info("ndisplay switch: 2D")
+        # Evaluate policy once after display mode changes
+        try:
+            self._apply_zoom_based_level_switch()
+        except Exception:
+            logger.debug("ndisplay policy eval failed", exc_info=True)
 
     def _ensure_capture_buffers(self) -> None:
         if self._texture is None:
@@ -2093,6 +2146,7 @@ class EGLRendererWorker:
     def process_camera_commands(self, commands: Sequence[CameraCommand]) -> None:
         if not commands:
             return
+        self._user_interaction_seen = True
         logger.debug("worker processing %d camera command(s)", len(commands))
         cam = getattr(self.view, 'camera', None)
         if cam is None:
@@ -2113,6 +2167,7 @@ class EGLRendererWorker:
         self._mark_render_tick_needed()
 
         touched = False
+        policy_touch = False
 
         for cmd in commands:
             kind = cmd.kind
@@ -2128,6 +2183,7 @@ class EGLRendererWorker:
                 else:
                     _CameraOps.apply_zoom_2d(cam, factor, (float(anchor[0]), float(anchor[1])), canvas_wh, self.view)
                 touched = True
+                policy_touch = True
                 if self._debug_zoom_drift and logger.isEnabledFor(logging.INFO):
                     try:
                         logger.info("command zoom factor=%.4f anchor=(%.1f,%.1f)", factor, float(anchor[0]), float(anchor[1]))
@@ -2143,6 +2199,7 @@ class EGLRendererWorker:
                 else:
                     _CameraOps.apply_pan_2d(cam, dx, dy, canvas_wh, self.view)
                 touched = True
+                policy_touch = True
                 if self._debug_pan and logger.isEnabledFor(logging.INFO):
                     try:
                         logger.info("command pan dx=%.2f dy=%.2f", dx, dy)
@@ -2155,6 +2212,7 @@ class EGLRendererWorker:
                     continue
                 _CameraOps.apply_orbit(cam, daz, delv)
                 touched = True
+                policy_touch = True
                 if self._debug_orbit and logger.isEnabledFor(logging.INFO):
                     try:
                         logger.info("command orbit daz=%.2f del=%.2f", daz, delv)
@@ -2170,18 +2228,32 @@ class EGLRendererWorker:
                         logger.debug("reset command log failed", exc_info=True)
 
         if touched:
+            # Schedule a render tick and a single post-render selection if camera actually changed
             self._mark_render_tick_needed()
+            if policy_touch:
+                self._eval_after_render = True
 
     def _apply_camera_reset(self, cam) -> None:
         if cam is None or not hasattr(cam, 'set_range'):
             return
         w, h = getattr(self, '_data_wh', (self.width, self.height))
         d = getattr(self, '_data_d', None)
+        # Convert pixel dims to world extents using current level scale
+        sx = sy = 1.0
+        try:
+            if self._scene_source is not None and not self.use_volume:
+                sy, sx = self._plane_scale_for_level(self._scene_source, int(self._active_ms_level))
+        except Exception:
+            pass
         if d is not None:
+            # 3D: set full volume range
             cam.set_range(x=(0, int(w)), y=(0, int(h)), z=(0, int(d)))
             self._frame_volume_camera(int(w), int(h), int(d))
         else:
-            cam.set_range(x=(0, int(w)), y=(0, int(h)))
+            # 2D: set full world extents (shape * scale)
+            world_w = float(w) * float(max(1e-12, sx))
+            world_h = float(h) * float(max(1e-12, sy))
+            cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
     def _apply_pending_state(self) -> None:
         state: Optional[ServerSceneState] = None
@@ -2286,7 +2358,8 @@ class EGLRendererWorker:
                     vis.relative_step_size = float(max(0.1, min(4.0, float(ss))))  # type: ignore[attr-defined]
 
         if cam is None:
-            self._apply_zoom_based_level_switch()
+            if (not getattr(self, '_defer_policy_init', False)) or getattr(self, '_user_interaction_seen', False):
+                self._apply_zoom_based_level_switch()
             return
 
         # Legacy absolute camera fields
@@ -2297,7 +2370,24 @@ class EGLRendererWorker:
         if state.angles is not None and hasattr(cam, 'angles'):
             cam.angles = state.angles  # type: ignore[attr-defined]
 
-        self._apply_zoom_based_level_switch()
+        # Evaluate policy only if the absolute state actually changed
+        try:
+            new_sig = (
+                tuple(state.center) if state.center is not None else None,
+                float(state.zoom) if state.zoom is not None else None,
+                tuple(state.angles) if state.angles is not None else None,
+                tuple(state.current_step) if state.current_step is not None else None,
+            )
+        except Exception:
+            new_sig = None
+        # Only evaluate on real state change
+        if new_sig is None:
+            return
+        if self._last_state_sig is not None and new_sig == self._last_state_sig:
+            return
+        self._last_state_sig = new_sig
+        if (not getattr(self, '_defer_policy_init', False)) or getattr(self, '_user_interaction_seen', False):
+            self._apply_zoom_based_level_switch()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
@@ -2409,12 +2499,14 @@ class EGLRendererWorker:
                 except Exception as e:
                     logger.debug("Animate(2D) failed: %s", e)
         self._apply_pending_state()
-        # Evaluate oversampling policy after any pending state/commands so camera changes can trigger switches
-        try:
-            self._apply_zoom_based_level_switch()
-        except Exception:
-            logger.debug("zoom-based level switch evaluation failed", exc_info=True)
         self.canvas.render()
+        # If camera changed this frame, run exactly one selection with fresh transforms
+        if self._eval_after_render:
+            try:
+                self._eval_after_render = False
+                self._apply_zoom_based_level_switch()
+            except Exception:
+                logger.debug("post-render policy eval failed", exc_info=True)
         self._render_tick_required = False
         self._render_loop_started = True
         t_r1 = time.perf_counter()

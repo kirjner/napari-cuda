@@ -146,6 +146,8 @@ class EGLHeadlessServer:
             self._log_cam_info,
             self._log_cam_debug,
         )
+        # State trace toggles (per-message start/end logs)
+        self._log_state_traces: bool = env_bool('NAPARI_CUDA_LOG_STATE_TRACES', False)
         # Logging controls for volume/multiscale intents
         self._log_volume_info: bool = env_bool('NAPARI_CUDA_LOG_VOLUME_INFO', False)
         # Force IDR on reset (default True)
@@ -171,6 +173,12 @@ class EGLHeadlessServer:
         except Exception:
             self._zarr_z = None
         self._policy_metrics_snapshot: Dict[str, object] = {}
+        # Policy event writer state (single-writer JSONL)
+        try:
+            self._last_written_decision_seq: int = 0
+        except Exception:
+            self._last_written_decision_seq = 0
+        self._policy_event_path: Path = Path(os.getenv('NAPARI_CUDA_POLICY_EVENT_PATH', 'tmp/policy_events.jsonl'))
         # Verbose dims logging control: default debug, upgrade to info with flag
         self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
         # Dedicated debug control for this module only (no dependency loggers)
@@ -189,7 +197,7 @@ class EGLHeadlessServer:
         self._ms_state: dict = {
             'levels': [],            # [{shape: [...], downsample: [...]}]
             'current_level': 0,
-            'policy': 'fixed',       # 'auto' | 'fixed' (default fixed until auto is supported)
+            'policy': 'oversampling',  # simplified policy; legacy 'fixed' removed
             'index_space': 'base',
         }
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
@@ -950,7 +958,7 @@ class EGLHeadlessServer:
                             current_step=queued.current_step,
                         )
                     if commands:
-                        logger.info("frame commands snapshot count=%d", len(commands))
+                        logger.debug("frame commands snapshot count=%d", len(commands))
                     state = ServerSceneState(
                         center=queued.center,
                         zoom=queued.zoom,
@@ -1015,11 +1023,20 @@ class EGLHeadlessServer:
                     # Forward the encoder output along with the capture wall timestamp
                     cap_ts = getattr(timings, 'capture_wall_ts', None)
                     on_frame(pkt, flags, cap_ts, seq)
-                    # Refresh policy metrics snapshot for external consumers (per-frame)
+                    # Refresh policy metrics + append event if new decision was recorded
                     try:
                         self._publish_policy_metrics()
+                        snap = self._policy_metrics_snapshot if isinstance(self._policy_metrics_snapshot, dict) else {}
+                        last = snap.get('last_decision') if isinstance(snap, dict) else None
+                        if isinstance(last, dict):
+                            seq_dec = int(last.get('seq') or 0)
+                            if seq_dec > self._last_written_decision_seq:
+                                self._policy_event_path.parent.mkdir(parents=True, exist_ok=True)
+                                with self._policy_event_path.open('a', encoding='utf-8') as f:
+                                    f.write(json.dumps(last) + "\n")
+                                self._last_written_decision_seq = seq_dec
                     except Exception:
-                        logger.debug('per-frame policy metrics publish failed', exc_info=True)
+                        logger.debug('policy metrics/event publish failed', exc_info=True)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
                     if sleep > 0:
@@ -1115,7 +1132,9 @@ class EGLHeadlessServer:
             except Exception:
                 logger.exception("Initial state config send failed")
             remote = getattr(ws, 'remote_address', None)
-            logger.info("state client loop start remote=%s id=%s", remote, id(ws))
+            (logger.info if self._log_state_traces else logger.debug)(
+                "state client loop start remote=%s id=%s", remote, id(ws)
+            )
             try:
                 async for msg in ws:
                     try:
@@ -1144,7 +1163,9 @@ class EGLHeadlessServer:
     async def _process_state_message(self, data: dict, ws: websockets.WebSocketServerProtocol) -> None:
         t = data.get('type')
         seq = data.get('client_seq')
-        logger.info("state message start type=%s seq=%s", t, seq)
+        (logger.info if self._log_state_traces else logger.debug)(
+            "state message start type=%s seq=%s", t, seq
+        )
         handled = False
         try:
             if t == 'set_camera':
@@ -1359,9 +1380,13 @@ class EGLHeadlessServer:
                 )
                 if self._worker is not None:
                     try:
-                        logger.info("state: set_policy -> worker.set_policy start")
+                        (logger.info if self._log_state_traces else logger.debug)(
+                            "state: set_policy -> worker.set_policy start"
+                        )
                         self._worker.set_policy(pol)
-                        logger.info("state: set_policy -> worker.set_policy done")
+                        (logger.info if self._log_state_traces else logger.debug)(
+                            "state: set_policy -> worker.set_policy done"
+                        )
                     except Exception:
                         logger.exception("worker set_policy failed for %s", pol)
                 self._schedule_coro(
@@ -1386,12 +1411,20 @@ class EGLHeadlessServer:
                         path = None
                         if isinstance(levels, list) and 0 <= int(lvl) < len(levels):
                             path = levels[int(lvl)].get('path')
-                        logger.info("state: set_level -> worker.request level=%s start", lvl)
+                        (logger.info if self._log_state_traces else logger.debug)(
+                            "state: set_level -> worker.request level=%s start", lvl
+                        )
                         self._worker.request_multiscale_level(int(lvl), path)
-                        logger.info("state: set_level -> worker.request done")
-                        logger.info("state: set_level -> worker.force_idr start")
+                        (logger.info if self._log_state_traces else logger.debug)(
+                            "state: set_level -> worker.request done"
+                        )
+                        (logger.info if self._log_state_traces else logger.debug)(
+                            "state: set_level -> worker.force_idr start"
+                        )
                         self._worker.force_idr()
-                        logger.info("state: set_level -> worker.force_idr done")
+                        (logger.info if self._log_state_traces else logger.debug)(
+                            "state: set_level -> worker.force_idr done"
+                        )
                         self._bypass_until_key = True
                     except Exception:
                         logger.exception("multiscale level switch request failed")
@@ -1501,7 +1534,9 @@ class EGLHeadlessServer:
 
             logger.debug("state message ignored type=%s", t)
         finally:
-            logger.info("state message end type=%s seq=%s handled=%s", t, seq, handled)
+            (logger.info if self._log_state_traces else logger.debug)(
+                "state message end type=%s seq=%s handled=%s", t, seq, handled
+            )
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
         self._update_client_gauges()

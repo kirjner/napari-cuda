@@ -1,4 +1,11 @@
-"""Drive multiscale policy intents against a running napari-cuda server."""
+"""Simplest zoom harness: reset, set policy, zoom in xN, zoom out xM.
+
+Radically simplified for predictable, readable runs:
+- No priming, no forced level overrides
+- One policy: oversampling
+- Fixed center anchor
+- Minimal outputs: sent commands + optional metrics snapshot
+"""
 
 from __future__ import annotations
 
@@ -36,28 +43,20 @@ def run_harness(
     host: str,
     state_port: int,
     metrics_url: str,
-    policies: List[str],
-    levels: List[int],
-    zoom_factors: List[float],
     output_prefix: Path,
-    idle_delay: float = 0.25,
-    level_delay: float = 0.0,
-    prime_levels: bool = False,
+    factor_in: float = 0.5,
+    repeats_in: int = 4,
+    factor_out: float = 2.0,
+    repeats_out: int = 4,
+    idle_delay: float = 0.4,
+    reset_camera: bool = True,
+    finalize_return: bool = True,
+    final_zoom: float = 1.01,
     verbose: bool = False,
 ) -> None:
-    policies = [p for p in (str(pol).lower() for pol in policies) if p]
-    policy = policies[0] if policies else "oversampling"
-
     records: List[Dict[str, object]] = []
-    scenes: List[dict] = []
 
-    def on_scene(spec) -> None:
-        try:
-            scenes.append(spec.to_dict())
-        except Exception:
-            scenes.append({"error": "scene serialization failed"})
-
-    controller = StateController(host, state_port, on_scene_spec=on_scene)
+    controller = StateController(host, state_port)
     channel, _thread = controller.start()
     _await_connection(channel)
 
@@ -79,37 +78,27 @@ def run_harness(
         if idle_delay > 0:
             time.sleep(idle_delay)
 
-    send({"type": "multiscale.intent.set_policy", "policy": policy}, f"set_policy({policy})")
+    # Known baseline: reset camera and set oversampling policy
+    if reset_camera:
+        send({"type": "camera.reset"}, "camera.reset")
+    send({"type": "multiscale.intent.set_policy", "policy": "oversampling"}, "set_policy(oversampling)")
 
-    if prime_levels and levels:
-        seen: set[int] = set()
-        prime_sequence: list[int] = []
-        for raw in levels:
-            lvl = int(raw)
-            if lvl in seen:
-                continue
-            seen.add(lvl)
-            prime_sequence.append(lvl)
-        for level in prime_sequence:
-            send({"type": "multiscale.intent.set_level", "level": int(level)}, f"prime:set_level({level})")
-            if level_delay > 0:
-                time.sleep(level_delay)
+    # Zoom in (factor < 1) N times, then zoom out (factor > 1) M times
+    anchor = [960.0, 540.0]
+    for _ in range(max(0, int(repeats_in))):
+        send({"type": "camera.zoom_at", "factor": float(factor_in), "anchor_px": anchor}, f"zoom_in({factor_in})")
+    for _ in range(max(0, int(repeats_out))):
+        send({"type": "camera.zoom_at", "factor": float(factor_out), "anchor_px": anchor}, f"zoom_out({factor_out})")
 
-    anchors = [(960.0, 540.0), (540.0, 300.0)]
-    for idx, factor in enumerate(zoom_factors):
-        anchor = anchors[idx % len(anchors)]
-        send(
-            {
-                "type": "camera.zoom_at",
-                "factor": float(factor),
-                "anchor_px": [float(anchor[0]), float(anchor[1])],
-            },
-            f"camera.zoom_at({factor})",
-        )
+    # Finale: return to a known baseline and trigger one policy eval at full view
+    if finalize_return:
+        send({"type": "camera.reset"}, "camera.reset")
+        # Send two tiny zooms to allow stepwise clamp to traverse 0->1 and 1->2 if needed
+        send({"type": "camera.zoom_at", "factor": float(final_zoom), "anchor_px": anchor}, f"final_zoom({final_zoom})")
+        send({"type": "camera.zoom_at", "factor": float(final_zoom), "anchor_px": anchor}, f"final_zoom({final_zoom})")
 
     summary = {
         "commands": records,
-        "scenes": scenes,
         "metrics": _fetch_metrics(metrics_url),
     }
 
@@ -125,14 +114,17 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--state-port", type=int, default=8081)
     parser.add_argument("--metrics-url", default="http://127.0.0.1:8083/metrics.json")
-    parser.add_argument("--policies", nargs="*", default=["oversampling"], help="Policy name (oversampling; 'latency' kept as alias)")
-    parser.add_argument("--levels", nargs="*", type=int, default=[2, 1, 0], help="Level sequence used for optional priming")
-    parser.add_argument("--zoom-factors", nargs="*", type=float, default=[0.6, 1.0, 1.8, 3.0])
+    # Simplified zoom plan: in xN, out xM, then finalize
+    parser.add_argument("--factor-in", type=float, default=0.5, help="Zoom-in factor (<1)")
+    parser.add_argument("--repeats-in", type=int, default=4, help="Number of zoom-in steps")
+    parser.add_argument("--factor-out", type=float, default=2.0, help="Zoom-out factor (>1)")
+    parser.add_argument("--repeats-out", type=int, default=4, help="Number of zoom-out steps")
     parser.add_argument("--output-prefix", type=Path, default=Path("tmp/policy_harness"))
     parser.add_argument("--idle-delay", type=float, default=0.25, help="Seconds to sleep after each command")
-    parser.add_argument("--level-delay", type=float, default=0.0, help="Extra pause between prime level commands")
-    parser.add_argument("--prime-levels", action="store_true", help="Cycle through --levels before sending zoom commands")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--reset-camera", action="store_true", help="Send camera.reset before zooms (default: off)")
+    parser.add_argument("--finalize-return", action="store_true", help="After sweeps: camera.reset then a tiny zoom to trigger policy eval at full view")
+    parser.add_argument("--final-zoom", type=float, default=1.01, help="Final tiny zoom factor (>0) used after reset to trigger selection")
 
     args = parser.parse_args()
 
@@ -142,13 +134,15 @@ def main() -> None:
         host=str(args.host),
         state_port=int(args.state_port),
         metrics_url=str(args.metrics_url),
-        policies=list(args.policies),
-        levels=list(args.levels),
-        zoom_factors=list(args.zoom_factors),
         output_prefix=Path(args.output_prefix),
+        factor_in=float(args.factor_in),
+        repeats_in=int(args.repeats_in),
+        factor_out=float(args.factor_out),
+        repeats_out=int(args.repeats_out),
         idle_delay=float(args.idle_delay),
-        level_delay=float(args.level_delay),
-        prime_levels=bool(args.prime_levels),
+        reset_camera=bool(args.reset_camera),
+        finalize_return=bool(args.finalize_return),
+        final_zoom=float(args.final_zoom),
         verbose=bool(args.verbose),
     )
 
