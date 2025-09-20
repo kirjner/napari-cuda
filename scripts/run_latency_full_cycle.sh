@@ -15,6 +15,7 @@ IDLE_DELAY=${IDLE_DELAY:-1.0}
 RUN_TAG=${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}
 RUN_DIR="tmp/policy_runs/${RUN_TAG}"
 LOG_PATH="${RUN_DIR}/headless_server.log"
+export NAPARI_CUDA_LEVEL_THRESHOLDS="${NAPARI_CUDA_LEVEL_THRESHOLDS:-0:1.3,1:2.6}"
 METRICS_URL="http://${HOST}:${METRICS_PORT}/metrics.json"
 
 mkdir -p "${RUN_DIR}"
@@ -91,10 +92,11 @@ uv run python scripts/policy_intent_harness.py \
   --host "${HOST}" \
   --state-port "${STATE_PORT}" \
   --metrics-url "${METRICS_URL}" \
-  --policies latency \
+  --policies oversampling \
+  --prime-levels \
   --idle-delay "${IDLE_DELAY}" \
   --level-delay 0.4 \
-  --levels 2 1 0 0 1 2 0 1 2 2 1 0 \
+  --levels 2 1 0 \
   --zoom-factors 0.6 0.9 1.2 1.8 2.5 4.0 6.0 9.0 6.0 3.5 1.8 1.0 0.7 0.6 \
   --output-prefix "${RUN_DIR}/latency_zoom"
 

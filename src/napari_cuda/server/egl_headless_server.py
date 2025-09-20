@@ -1015,6 +1015,11 @@ class EGLHeadlessServer:
                     # Forward the encoder output along with the capture wall timestamp
                     cap_ts = getattr(timings, 'capture_wall_ts', None)
                     on_frame(pkt, flags, cap_ts, seq)
+                    # Refresh policy metrics snapshot for external consumers (per-frame)
+                    try:
+                        self._publish_policy_metrics()
+                    except Exception:
+                        logger.debug('per-frame policy metrics publish failed', exc_info=True)
                     next_t += tick
                     sleep = next_t - time.perf_counter()
                     if sleep > 0:
@@ -1337,7 +1342,8 @@ class EGLHeadlessServer:
             if t == 'multiscale.intent.set_policy':
                 pol = str(data.get('policy') or '').lower()
                 client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
-                if pol != 'latency':
+                allowed = {'oversampling', 'thresholds', 'ratio'}
+                if pol not in allowed:
                     self._log_volume_intent(
                         "intent: multiscale.set_policy rejected policy=%s client_id=%s seq=%s",
                         pol,
@@ -1346,19 +1352,18 @@ class EGLHeadlessServer:
                     )
                     handled = True
                     return
-                self._ms_state['policy'] = 'latency'
+                self._ms_state['policy'] = pol
                 self._log_volume_intent(
-                    "intent: multiscale.set_policy policy=latency client_id=%s seq=%s",
-                    client_id,
-                    client_seq,
+                    "intent: multiscale.set_policy policy=%s client_id=%s seq=%s",
+                    pol, client_id, client_seq,
                 )
                 if self._worker is not None:
                     try:
                         logger.info("state: set_policy -> worker.set_policy start")
-                        self._worker.set_policy('latency')
+                        self._worker.set_policy(pol)
                         logger.info("state: set_policy -> worker.set_policy done")
                     except Exception:
-                        logger.exception("worker set_policy failed for latency")
+                        logger.exception("worker set_policy failed for %s", pol)
                 self._schedule_coro(
                     self._rebroadcast_meta(client_id),
                     'rebroadcast-policy',
@@ -1373,7 +1378,7 @@ class EGLHeadlessServer:
                     handled = True
                     return
                 self._ms_state['current_level'] = int(lvl)
-                self._ms_state['policy'] = 'latency'
+                # Keep ms_state policy unchanged
                 self._log_volume_intent("intent: multiscale.set_level level=%d client_id=%s seq=%s", int(lvl), client_id, client_seq)
                 if self._worker is not None:
                     try:

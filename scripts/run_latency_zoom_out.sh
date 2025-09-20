@@ -9,7 +9,7 @@ uv run python scripts/policy_intent_harness.py \
   --host "$HOST" \
   --state-port "$STATE_PORT" \
   --metrics-url "$METRICS_URL" \
-  --policies latency \
+  --policies oversampling \
   --levels 2 1 0 \
   --zoom-factors 2.0 1.6 1.2 1.0 0.75 0.5 \
   --idle-delay 1.0 \

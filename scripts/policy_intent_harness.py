@@ -8,10 +8,9 @@ import logging
 import time
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from napari_cuda.client.streaming.controllers import StateController
-
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +19,6 @@ def _await_connection(channel, timeout_s: float = 10.0) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if getattr(channel, "_out_q", None) is not None:
-            logger.info("state channel ready")
             return
         time.sleep(0.05)
     raise RuntimeError("state channel did not become ready")
@@ -44,212 +42,114 @@ def run_harness(
     output_prefix: Path,
     idle_delay: float = 0.25,
     level_delay: float = 0.0,
+    prime_levels: bool = False,
+    verbose: bool = False,
 ) -> None:
-    policies = [str(p).lower() for p in policies if str(p).lower() == "latency"]
-    if not policies:
-        policies = ["latency"]
+    policies = [p for p in (str(pol).lower() for pol in policies) if p]
+    policy = policies[0] if policies else "oversampling"
 
+    records: List[Dict[str, object]] = []
     scenes: List[dict] = []
-    dims_updates: List[dict] = []
 
     def on_scene(spec) -> None:
         try:
             scenes.append(spec.to_dict())
         except Exception:
-            scenes.append({'error': 'scene.to_dict failed'})
+            scenes.append({"error": "scene serialization failed"})
 
-    def on_dims(meta: dict) -> None:
-        dims_updates.append(meta)
-        logger.info("received dims.update seq=%s", meta.get('seq'))
-
-    ctrl = StateController(host, state_port, on_scene_spec=on_scene, on_dims_update=on_dims)
-    channel, thread = ctrl.start()
+    controller = StateController(host, state_port, on_scene_spec=on_scene)
+    channel, _thread = controller.start()
     _await_connection(channel)
 
-    seq_counter = 1
-    results: List[Dict[str, object]] = []
-    last_active_level: Optional[int] = None
+    seq = 1
 
-    def maybe_log_level_change(tag: str) -> None:
-        nonlocal last_active_level
-        metrics = _fetch_metrics(metrics_url)
-        if not isinstance(metrics, dict):
-            return
-        gauges = metrics.get('gauges')
-        level_val: Optional[float] = None
-        if isinstance(gauges, dict):
-            lvl = gauges.get('napari_cuda_policy_applied_level')
-            if lvl is None:
-                lvl = gauges.get('napari_cuda_ms_active_level')
-            if isinstance(lvl, (int, float)):
-                level_val = float(lvl)
-        policy_metrics = metrics.get('policy_metrics')
-        reason = None
-        applied_stats = None
-        if level_val is None and isinstance(policy_metrics, dict):
-            lvl = policy_metrics.get('active_level')
-            if isinstance(lvl, (int, float)):
-                level_val = float(lvl)
-        if isinstance(policy_metrics, dict):
-            last_decision = policy_metrics.get('last_decision')
-            if isinstance(last_decision, dict):
-                reason = last_decision.get('reason')
-                applied_stats = last_decision
-        if level_val is None:
-            return
-        current = int(level_val)
-        if last_active_level is None:
-            last_active_level = current
-            return
-        if current != last_active_level:
-            extra = ""
-            if applied_stats:
-                intent_level = applied_stats.get('intent_level')
-                selected_level = applied_stats.get('selected_level')
-                desired_level = applied_stats.get('desired_level')
-                reason_text = reason or applied_stats.get('reason')
-                extra = (
-                    f" intent={int(intent_level)}" if isinstance(intent_level, (int, float)) else ""
-                )
-                if isinstance(selected_level, (int, float)):
-                    extra += f" selected={int(selected_level)}"
-                if isinstance(desired_level, (int, float)):
-                    extra += f" desired={int(desired_level)}"
-                if reason_text:
-                    extra += f" reason={reason_text}"
-            print(f"[switch] {tag}: level {last_active_level} -> {current}{extra}")
-            last_active_level = current
+    def send(payload: Dict[str, object], label: str) -> None:
+        nonlocal seq
+        message = {
+            "client_id": "policy-harness",
+            "client_seq": seq,
+            "origin": "harness",
+            **payload,
+        }
+        ok = bool(channel.send_json(message))
+        if verbose:
+            logger.info("[%03d] %s -> %s", seq, label, ok)
+        records.append({"seq": seq, "label": label, "ok": ok, "payload": message})
+        seq += 1
+        if idle_delay > 0:
+            time.sleep(idle_delay)
 
-    def send(payload: Dict[str, object]) -> None:
-        nonlocal seq_counter
-        full = dict(payload)
-        full.update(
-            {
-                "client_id": "policy-harness",
-                "client_seq": seq_counter,
-                "origin": "harness",
-            }
-        )
-        ok = channel.send_json(full)
-        results.append(
-            {
-                "seq": seq_counter,
-                "type": full.get("type"),
-                "ok": bool(ok),
-                "payload": full,
-            }
-        )
-        print(f"[{seq_counter:03d}] {full['type']} -> {ok}")
-        seq_counter += 1
-        time.sleep(0.12)
-        t = full.get('type')
-        if t in {'camera.zoom_at', 'multiscale.intent.set_level'}:
-            tag = f"{t}({full.get('level', full.get('factor'))})"
-            maybe_log_level_change(tag)
+    send({"type": "multiscale.intent.set_policy", "policy": policy}, f"set_policy({policy})")
 
-    for policy_name in policies:
-        send({"type": "multiscale.intent.set_policy", "policy": policy_name})
-        for level in levels:
-            send({"type": "multiscale.intent.set_level", "level": int(level)})
+    if prime_levels and levels:
+        seen: set[int] = set()
+        prime_sequence: list[int] = []
+        for raw in levels:
+            lvl = int(raw)
+            if lvl in seen:
+                continue
+            seen.add(lvl)
+            prime_sequence.append(lvl)
+        for level in prime_sequence:
+            send({"type": "multiscale.intent.set_level", "level": int(level)}, f"prime:set_level({level})")
             if level_delay > 0:
                 time.sleep(level_delay)
-        for idx, factor in enumerate(zoom_factors):
-            anchor = [960.0, 540.0] if (idx % 2 == 0) else [540.0, 300.0]
-            send({"type": "camera.zoom_at", "factor": float(factor), "anchor_px": anchor})
-            if idx in (2, len(zoom_factors) - 3):  # deep zoom in and beginning of zoom out
-                send({"type": "multiscale.intent.set_level", "level": 1})
-            if idle_delay > 0:
-                time.sleep(idle_delay)
-        send({"type": "dims.intent.set_index", "axis": 0, "value": 0})
-        send({"type": "dims.intent.set_index", "axis": 0, "value": 10})
-        send({"type": "view.intent.set_ndisplay", "ndisplay": 3})
-        send({"type": "view.intent.set_ndisplay", "ndisplay": 2})
 
-    print("Waiting for server to process intents...")
-    time.sleep(3.0)
+    anchors = [(960.0, 540.0), (540.0, 300.0)]
+    for idx, factor in enumerate(zoom_factors):
+        anchor = anchors[idx % len(anchors)]
+        send(
+            {
+                "type": "camera.zoom_at",
+                "factor": float(factor),
+                "anchor_px": [float(anchor[0]), float(anchor[1])],
+            },
+            f"camera.zoom_at({factor})",
+        )
 
-    metrics = _fetch_metrics(metrics_url)
+    summary = {
+        "commands": records,
+        "scenes": scenes,
+        "metrics": _fetch_metrics(metrics_url),
+    }
 
-    prefix = output_prefix
-    prefix.parent.mkdir(parents=True, exist_ok=True)
-    intent_path = prefix.parent / f"{prefix.name}_intents.json"
-    metrics_path = prefix.parent / f"{prefix.name}_metrics.json"
-    scenes_path = prefix.parent / f"{prefix.name}_scenes.json"
-    dims_path = prefix.parent / f"{prefix.name}_dims.json"
-    intent_path.write_text(json.dumps(results, indent=2))
-    metrics_path.write_text(json.dumps(metrics, indent=2))
-    if scenes:
-        scenes_path.write_text(json.dumps(scenes, indent=2))
-    if dims_updates:
-        dims_path.write_text(json.dumps(dims_updates, indent=2))
-    print(f"Wrote {intent_path} and {metrics_path}")
-
-    try:
-        ctrl.stop(channel, thread, timeout=2.0)
-    except Exception:
-        logger.debug("policy harness: failed to stop state controller", exc_info=True)
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    output_path = output_prefix.with_suffix(".json")
+    output_path.write_text(json.dumps(summary, indent=2))
+    if verbose:
+        logger.info("summary saved to %s", output_path)
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO,
-                        format='[%(asctime)s] %(name)s - %(levelname)s - %(message)s')
-    parser = argparse.ArgumentParser(description="Exercise napari-cuda multiscale policies via state intents")
-    parser.add_argument("--host", default="127.0.0.1", help="Server host (state channel)")
-    parser.add_argument("--state-port", type=int, default=8081, help="State channel port")
-    parser.add_argument(
-        "--metrics-url",
-        default="http://127.0.0.1:8083/metrics.json",
-        help="Metrics endpoint (default http://127.0.0.1:8083/metrics.json)",
-    )
-    parser.add_argument(
-        "--policies",
-        nargs="*",
-        default=["latency"],
-        help="Policies to cycle through (latency only)",
-    )
-    parser.add_argument(
-        "--levels",
-        nargs="*",
-        type=int,
-        default=[0, 1, 2, 3],
-        help="Level indices to request per policy",
-    )
-    parser.add_argument(
-        "--zoom-factors",
-        nargs="*",
-        type=float,
-        default=[0.6, 0.9, 1.2, 1.8, 2.5, 4.0, 6.0, 9.0],
-        help="Zoom factors to sweep for each policy",
-    )
-    parser.add_argument(
-        "--output-prefix",
-        default="tmp/policy_harness",
-        help="File prefix for JSON outputs",
-    )
-    parser.add_argument(
-        "--idle-delay",
-        type=float,
-        default=0.25,
-        help="Sleep (seconds) between successive zoom intents",
-    )
-    parser.add_argument(
-        "--level-delay",
-        type=float,
-        default=0.0,
-        help="Additional sleep (seconds) after each multiscale level intent",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--state-port", type=int, default=8081)
+    parser.add_argument("--metrics-url", default="http://127.0.0.1:8083/metrics.json")
+    parser.add_argument("--policies", nargs="*", default=["oversampling"], help="Policy name (oversampling; 'latency' kept as alias)")
+    parser.add_argument("--levels", nargs="*", type=int, default=[2, 1, 0], help="Level sequence used for optional priming")
+    parser.add_argument("--zoom-factors", nargs="*", type=float, default=[0.6, 1.0, 1.8, 3.0])
+    parser.add_argument("--output-prefix", type=Path, default=Path("tmp/policy_harness"))
+    parser.add_argument("--idle-delay", type=float, default=0.25, help="Seconds to sleep after each command")
+    parser.add_argument("--level-delay", type=float, default=0.0, help="Extra pause between prime level commands")
+    parser.add_argument("--prime-levels", action="store_true", help="Cycle through --levels before sending zoom commands")
+    parser.add_argument("--verbose", action="store_true")
 
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
+
     run_harness(
-        host=args.host,
-        state_port=args.state_port,
-        metrics_url=args.metrics_url,
+        host=str(args.host),
+        state_port=int(args.state_port),
+        metrics_url=str(args.metrics_url),
         policies=list(args.policies),
         levels=list(args.levels),
         zoom_factors=list(args.zoom_factors),
         output_prefix=Path(args.output_prefix),
         idle_delay=float(args.idle_delay),
         level_delay=float(args.level_delay),
+        prime_levels=bool(args.prime_levels),
+        verbose=bool(args.verbose),
     )
 
 
