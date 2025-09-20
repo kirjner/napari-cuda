@@ -43,7 +43,8 @@ fi
 printf 'Starting headless server (logs -> %s)\n' "${LOG_PATH}"
 QT_QPA_PLATFORM=offscreen \
 PYOPENGL_PLATFORM=egl \
-uv run napari-cuda-server \
+PYTHONUNBUFFERED=1 \
+stdbuf -oL -eL uv run napari-cuda-server \
   --host "${HOST}" \
   --state-port "${STATE_PORT}" \
   --pixel-port "${PIXEL_PORT}" \
@@ -79,7 +80,7 @@ printf 'Server ready at %s\n' "${METRICS_URL}"
 
 # Prime latency policy with timing samples for each multiscale level.
 printf 'Launching pixel drain (frames=%s)\n' "${FRAMES}"
-uv run python scripts/pixel_drain.py \
+PYTHONUNBUFFERED=1 stdbuf -oL -eL uv run python -u scripts/pixel_drain.py \
   --host "${HOST}" \
   --pixel-port "${PIXEL_PORT}" \
   --frames "${FRAMES}" \
@@ -91,7 +92,7 @@ PIXEL_PID=$!
 sleep 3
 
 printf 'Running simple zoom in/out sweep\n'
-uv run python scripts/policy_intent_harness.py \
+PYTHONUNBUFFERED=1 stdbuf -oL -eL uv run python -u scripts/policy_intent_harness.py \
   --host "${HOST}" \
   --state-port "${STATE_PORT}" \
   --metrics-url "${METRICS_URL}" \

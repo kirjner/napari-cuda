@@ -225,7 +225,6 @@ class EGLRendererWorker:
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 use_napari_adapter: Optional[bool] = None,
                  scene_refresh_cb: Optional[Callable[[], None]] = None,
                  policy_name: Optional[str] = None) -> None:
         self.width = int(width)
@@ -254,16 +253,8 @@ class EGLRendererWorker:
         self.view = None
         self._visual = None
 
-        if use_napari_adapter is None:
-            flag = os.getenv('NAPARI_CUDA_USE_NAPARI_ADAPTER')
-            if flag is not None:
-                use_napari_adapter = flag.strip().lower() in {'1', 'true', 'yes', 'on'}
-            else:
-                use_napari_adapter = True
-        self._use_napari_adapter = bool(use_napari_adapter)
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
-        self._napari_adapter = None
         self._scene_source: Optional[ZarrSceneSource] = None
         self._active_ms_level: int = 0
         self._level_downgraded: bool = False
@@ -310,8 +301,7 @@ class EGLRendererWorker:
         self._ensure_log_interval_s: float = 1.0
         self._render_tick_required: bool = False
         self._render_loop_started: bool = False
-        self._prime_enabled: bool = env_bool('NAPARI_CUDA_MS_PRIME', True)
-        self._prime_complete: bool = False
+        # Priming retired: removed
 
         # Encoding / instrumentation state
         self._frame_index = 0
@@ -436,14 +426,11 @@ class EGLRendererWorker:
             self._debug.log_env_once()
             self._debug.ensure_out_dir()
         # Log format/size once for clarity
-        try:
-            logger.info(
-                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
-                self.width, self.height, getattr(self, '_enc_input_fmt', 'unknown'), self.fps, self._animate,
-                bool(self._zarr_path),
-            )
-        except Exception as e:
-            logger.debug("Init info log failed: %s", e)
+        logger.info(
+            "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
+            self.width, self.height, getattr(self, '_enc_input_fmt', 'unknown'), self.fps, self._animate,
+            bool(self._zarr_path),
+        )
 
     def _frame_volume_camera(self, w: int, h: int, d: int) -> None:
         """Choose stable initial center and distance for TurntableCamera.
@@ -452,23 +439,14 @@ class EGLRendererWorker:
         in view (adds a small margin). This avoids dead pan response before the
         first zoom and prevents the initial zoom from overshooting.
         """
-        try:
-            cam = self.view.camera
-        except Exception:
-            return
+        cam = self.view.camera
         if not isinstance(cam, scene.cameras.TurntableCamera):
             return
-        try:
-            cam.center = (float(w) * 0.5, float(h) * 0.5, float(d) * 0.5)  # type: ignore[attr-defined]
-        except Exception:
-            logger.debug("frame_volume: set center failed", exc_info=True)
-        try:
-            fov_deg = float(getattr(cam, 'fov', 60.0) or 60.0)
-            fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
-            dist = (0.5 * float(h)) / max(1e-6, math.tan(0.5 * fov_rad))
-            cam.distance = float(dist * 1.1)  # type: ignore[attr-defined]
-        except Exception:
-            logger.debug("frame_volume: set distance failed", exc_info=True)
+        cam.center = (float(w) * 0.5, float(h) * 0.5, float(d) * 0.5)  # type: ignore[attr-defined]
+        fov_deg = float(getattr(cam, 'fov', 60.0) or 60.0)
+        fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
+        dist = (0.5 * float(h)) / max(1e-6, math.tan(0.5 * fov_rad))
+        cam.distance = float(dist * 1.1)  # type: ignore[attr-defined]
 
     def _init_adapter_scene(self, source: Optional[ZarrSceneSource]) -> None:
         adapter = AdapterScene(self)
@@ -484,19 +462,14 @@ class EGLRendererWorker:
         This avoids Z slider reflecting base-resolution depth when rendering
         a coarser level.
         """
-        if not self.using_napari_adapter() or self._viewer is None:
+        if self._viewer is None:
             return
         descriptor = source.level_descriptors[level]
         shape = tuple(int(s) for s in descriptor.shape)
         ranges = tuple((0, max(0, s - 1), 1) for s in shape)
-        try:
-            self._viewer.dims.range = ranges
-            if self._log_layer_debug:
-                logger.info(
-                    "dims range set: level=%d ranges=%s", int(level), str(ranges)
-                )
-        except Exception:
-            logger.debug("set_dims_range_for_level failed", exc_info=True)
+        self._viewer.dims.range = ranges
+        if self._log_layer_debug:
+            logger.info("dims range set: level=%d ranges=%s", int(level), str(ranges))
 
     def _set_level_with_budget(self, desired_level: int, *, reason: str) -> None:
         source = self._ensure_scene_source()
@@ -524,41 +497,32 @@ class EGLRendererWorker:
                 self._apply_level_internal(source, level)
                 self._level_downgraded = (level != desired_level)
                 if self._level_downgraded:
-                    try:
-                        logger.info(
-                            "level downgrade: requested=%d active=%d reason=%s",
-                            desired_level,
-                            level,
-                            reason,
-                        )
-                    except Exception:
-                        logger.debug("level downgrade log failed", exc_info=True)
+                    logger.info(
+                        "level downgrade: requested=%d active=%d reason=%s",
+                        desired_level,
+                        level,
+                        reason,
+                    )
                 else:
                     self._level_downgraded = False
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
-                try:
-                    self._log_ms_switch(
-                        previous=prev_level,
-                        applied=int(self._active_ms_level),
-                        source=source,
-                        elapsed_ms=elapsed_ms,
-                        reason=reason,
-                    )
-                except Exception:
-                    logger.debug("ms.switch logging failed", exc_info=True)
+                self._log_ms_switch(
+                    previous=prev_level,
+                    applied=int(self._active_ms_level),
+                    source=source,
+                    elapsed_ms=elapsed_ms,
+                    reason=reason,
+                )
                 self._mark_render_tick_needed()
                 return
             except _LevelBudgetError as exc:
                 if self._log_layer_debug:
-                    try:
-                        logger.info(
-                            "budget reject: mode=%s level=%d reason=%s",
-                            'volume' if self.use_volume else 'slice',
-                            int(level),
-                            str(exc),
-                        )
-                    except Exception:
-                        logger.debug("budget reject log failed", exc_info=True)
+                    logger.info(
+                        "budget reject: mode=%s level=%d reason=%s",
+                        'volume' if self.use_volume else 'slice',
+                        int(level),
+                        str(exc),
+                    )
                 if idx == len(candidates) - 1:
                     raise
                 logger.debug("level %d rejected by budget: %s", level, exc)
@@ -602,23 +566,20 @@ class EGLRendererWorker:
         # Clamp accumulator to avoid runaway drift while keeping sign information
         self._zoom_accumulator = max(-threshold, min(threshold, self._zoom_accumulator))
         if log_zoom_info and delta_levels != 0:
-            try:
-                logger.info(
-                    "zoom delta: delta_levels=%d post_accum=%.6f",
-                    int(delta_levels),
-                    float(self._zoom_accumulator),
-                )
-            except Exception:
-                logger.debug("zoom delta final log failed", exc_info=True)
+            logger.info(
+                "zoom delta: delta_levels=%d post_accum=%.6f",
+                int(delta_levels),
+                float(self._zoom_accumulator),
+            )
         return delta_levels
 
     def _apply_zoom_based_level_switch(self) -> None:
-        if (self._log_layer_debug or getattr(self, '_log_policy_eval', False)) and logger.isEnabledFor(logging.INFO):
-            try:
-                logger.info("policy eval: using_adapter=%s", self.using_napari_adapter())
-            except Exception:
-                logger.debug("policy eval log failed", exc_info=True)
-        # Allow policy evaluation in both adapter and direct VisPy paths
+        # Demote to DEBUG by default; elevate to INFO only when explicitly enabled
+        if logger.isEnabledFor(logging.DEBUG):
+            if getattr(self, '_log_policy_eval', False):
+                logger.info("policy eval: adapter path active")
+            else:
+                logger.debug("policy eval: adapter path active")
         try:
             source = self._ensure_scene_source()
         except Exception:
@@ -635,39 +596,39 @@ class EGLRendererWorker:
         if not should_log_ctx:
             if self._last_policy_ctx_log_ts == 0.0 or (log_now - self._last_policy_ctx_log_ts) >= log_ctx_interval:
                 should_log_ctx = True
-        if should_log_ctx and (self._log_layer_debug or getattr(self, '_log_policy_eval', False)) and logger.isEnabledFor(logging.INFO):
-            try:
-                overs_log = {int(k): float(v) for k, v in ctx.level_oversampling.items()}
-                roi_log: Dict[int, tuple[int, int, int, int] | str] = {}
-                for idx, desc in enumerate(source.level_descriptors):
-                    lvl = int(getattr(desc, 'index', idx))
-                    roi = self._viewport_roi_for_level(source, lvl)
-                    if roi.is_empty():
-                        roi_log[lvl] = 'full'
-                    else:
-                        roi_log[lvl] = (int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop))
-                intent_val = int(ctx.intent_level) if ctx.intent_level is not None else -1
+        if should_log_ctx and logger.isEnabledFor(logging.DEBUG):
+            overs_log = {int(k): float(v) for k, v in ctx.level_oversampling.items()}
+            roi_log: Dict[int, tuple[int, int, int, int] | str] = {}
+            for idx, desc in enumerate(source.level_descriptors):
+                lvl = int(getattr(desc, 'index', idx))
+                roi = self._viewport_roi_for_level(source, lvl)
+                if roi.is_empty():
+                    roi_log[lvl] = 'full'
+                else:
+                    roi_log[lvl] = (int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop))
+            intent_val = int(ctx.intent_level) if ctx.intent_level is not None else -1
+            if getattr(self, '_log_policy_eval', False):
                 logger.info("policy ctx: intent=%d delta=%d overs=%s roi=%s", intent_val, int(delta_levels), overs_log, roi_log)
-                self._last_policy_ctx_log_ts = log_now
-            except Exception:
-                logger.debug("policy ctx log failed", exc_info=True)
+            else:
+                logger.debug("policy ctx: intent=%d delta=%d overs=%s roi=%s", intent_val, int(delta_levels), overs_log, roi_log)
+            self._last_policy_ctx_log_ts = log_now
         try:
             selected = self._policy_func(ctx)
             # Reduce spam: only log selection when it differs from current
             if (
-                (self._log_layer_debug or getattr(self, '_log_policy_eval', False))
-                and logger.isEnabledFor(logging.INFO)
+                logger.isEnabledFor(logging.DEBUG)
                 and selected is not None
                 and int(selected) != int(self._active_ms_level)
             ):
-                try:
-                    logger.info(
-                        "policy select: intent=%s current=%d selected=%s overs=%s",
-                        str(ctx.intent_level), int(self._active_ms_level), str(selected),
-                        {int(k): float(v) for k, v in ctx.level_oversampling.items()},
-                    )
-                except Exception:
-                    logger.debug("policy select log failed", exc_info=True)
+                msg = (
+                    "policy select: intent=%s current=%d selected=%s overs=%s",
+                    str(ctx.intent_level), int(self._active_ms_level), str(selected),
+                    {int(k): float(v) for k, v in ctx.level_oversampling.items()},
+                )
+                if getattr(self, '_log_policy_eval', False):
+                    logger.info(*msg)
+                else:
+                    logger.debug(*msg)
         except Exception:
             logger.exception("multiscale policy select failed; using tentative level")
             selected = tentative
@@ -795,18 +756,15 @@ class EGLRendererWorker:
         if self._zarr_level:
             target = source.level_index_for_path(self._zarr_level)
         if self._log_layer_debug:
-            try:
-                # Log only on change (no periodic spam) and at DEBUG level
-                key = (int(source.current_level), str(self._zarr_level) if self._zarr_level else None)
-                if self._last_ensure_log != key:
-                    logger.debug(
-                        "ensure_source: current=%d target=%d path=%s",
-                        int(source.current_level), int(target), self._zarr_level,
-                    )
-                    self._last_ensure_log = key
-                    self._last_ensure_log_ts = time.perf_counter()
-            except Exception:
-                logger.debug("ensure_source debug log failed", exc_info=True)
+            # Log only on change (no periodic spam) and at DEBUG level
+            key = (int(source.current_level), str(self._zarr_level) if self._zarr_level else None)
+            if self._last_ensure_log != key:
+                logger.debug(
+                    "ensure_source: current=%d target=%d path=%s",
+                    int(source.current_level), int(target), self._zarr_level,
+                )
+                self._last_ensure_log = key
+                self._last_ensure_log_ts = time.perf_counter()
 
         with self._state_lock:
             step = source.set_current_level(target, step=source.current_step)
@@ -829,10 +787,10 @@ class EGLRendererWorker:
         return source
 
     def _init_vispy_scene(self) -> None:
+        """Adapter-only scene initialization (legacy path removed)."""
         source = self._create_scene_source()
         if source is not None:
             self._scene_source = source
-            # Track NGFF metadata for downstream consumers
             try:
                 self._zarr_shape = source.level_shape(0)
                 self._zarr_dtype = str(source.dtype)
@@ -842,143 +800,12 @@ class EGLRendererWorker:
             except Exception:
                 logger.debug("scene source metadata bootstrap failed", exc_info=True)
 
-        if self._use_napari_adapter:
-            try:
-                self._init_adapter_scene(source)
-                self._maybe_prime_multiscale()
-                return
-            except Exception:
-                # Enforce adapter path by default; only allow fallback when explicitly enabled
-                logger.exception("Adapter scene initialization failed")
-                allow_legacy = env_bool('NAPARI_CUDA_ALLOW_LEGACY', False)
-                if not allow_legacy:
-                    # Fail fast so the error is visible to the caller
-                    raise
-                logger.error(
-                    "Adapter failed; falling back to legacy visuals (allowed by NAPARI_CUDA_ALLOW_LEGACY=1)"
-                )
-                self._use_napari_adapter = False
-
-        canvas = scene.SceneCanvas(size=(self.width, self.height), bgcolor="black", show=False, app="egl")
-        view = canvas.central_widget.add_view()
-        # Ensure attributes are set before any first render
-        self.canvas = canvas
-        self.view = view
-
-        # Determine scene content in priority order:
-        # 1) OME-Zarr 3D volume (when --volume with --zarr is provided)
-        # 2) OME-Zarr 2D slice (preferred fallback for real data MVP)
-        # 3) Explicit synthetic 3D volume demo if requested
-        # 4) Synthetic 2D image pattern (fallback)
-        scene_src = "synthetic"
-        scene_meta = ""
-
-        if self._zarr_path and self.use_volume:
-            try:
-                source = self._ensure_scene_source()
-                self._set_level_with_budget(self._active_ms_level, reason="init")
-                vol3d = self._load_volume(source, self._active_ms_level)
-                view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
-                visual = scene.visuals.Volume(vol3d, parent=view.scene, method="mip", cmap="grays")
-                if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
-                    visual.relative_step_size = float(self.volume_relative_step)
-                d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
-                self._data_wh = (w, h)
-                self._data_d = int(d)
-                view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-                self._frame_volume_camera(w, h, d)
-                scene_src = "zarr-volume"
-                scene_meta = f"level={self._zarr_level or 'auto'} shape={d}x{h}x{w}"
-            except Exception as e:
-                logger.exception("Failed to initialize OME-Zarr volume; falling back to 2D slice: %s", e)
-                self.use_volume = False
-
-        if self._zarr_path and not self.use_volume:
-            try:
-                source = self._ensure_scene_source()
-                self._set_level_with_budget(self._active_ms_level, reason="init")
-                z_idx = self._z_index or 0
-                arr2d = self._load_slice(source, self._active_ms_level, z_idx)
-                visual = scene.visuals.Image(arr2d, parent=view.scene, cmap='grays', clim=None, method='auto')
-                h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
-                self._data_wh = (w, h)
-                if not isinstance(view.camera, scene.cameras.PanZoomCamera):
-                    self._ensure_panzoom_camera(reason="init-2d")
-                cam = getattr(view, "camera", None)
-                if isinstance(cam, scene.cameras.PanZoomCamera):
-                    cam.set_range(x=(0, w), y=(0, h))
-                scene_src = "zarr"
-                scene_meta = f"level={self._zarr_level or 'auto'} z={self._z_index} shape={h}x{w}"
-            except Exception as e:
-                logger.exception("Failed to initialize OME-Zarr slice; falling back to synthetic image: %s", e)
-                view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-                image = make_rgba_image(self.width, self.height)
-                visual = scene.visuals.Image(image, parent=view.scene)
-                self._data_wh = (self.width, self.height)
-                view.camera.set_range(x=(0, self.width), y=(0, self.height))
-                scene_src = "synthetic"
-                scene_meta = f"shape={self.height}x{self.width}"
-        elif self.use_volume:
-            # 3D volume demo
-            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60, distance=500)
-            if self.volume_dtype == "float16":
-                dtype = np.float16
-            elif self.volume_dtype == "uint8":
-                dtype = np.uint8
-            else:
-                dtype = np.float32
-            volume = np.random.rand(self.volume_depth, self.height, self.width).astype(dtype)
-            visual = scene.visuals.Volume(volume, parent=view.scene, method="mip", cmap="viridis")
-            try:
-                if self.volume_relative_step is not None and hasattr(visual, "relative_step_size"):
-                    visual.relative_step_size = float(self.volume_relative_step)
-                # Frame the synthetic volume to avoid needing a manual reset
-                try:
-                    d = int(self.volume_depth)
-                    h = int(self.height)
-                    w = int(self.width)
-                    self._data_wh = (w, h)
-                    self._data_d = int(d)
-                    view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-                    try:
-                        self._frame_volume_camera(w, h, d)
-                    except Exception:
-                        logger.debug("synthetic volume: frame camera failed", exc_info=True)
-                except Exception:
-                    try:
-                        view.camera.set_range(x=(0, self.width), y=(0, self.height))
-                    except Exception:
-                        logger.debug("synthetic volume: initial camera set_range fallback failed", exc_info=True)
-                scene_src = "volume"
-                scene_meta = f"depth={self.volume_depth} shape={self.height}x{self.width} dtype={self.volume_dtype}"
-            except Exception as e:
-                logger.debug("Set volume relative_step_size failed: %s", e)
-        else:
-            # 2D synthetic image fallback
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            image = make_rgba_image(self.width, self.height)
-            visual = scene.visuals.Image(image, parent=view.scene)
-            try:
-                self._data_wh = (self.width, self.height)
-                view.camera.set_range(x=(0, self.width), y=(0, self.height))
-                scene_src = "synthetic"
-                scene_meta = f"shape={self.height}x{self.width}"
-            except Exception as e:
-                logger.debug("PanZoom set_range failed: %s", e)
-
-        # Assign visual before first draw and log concise init info
-        self._visual = visual
-        self._maybe_prime_multiscale()
         try:
-            logger.info("Scene init: source=%s %s", scene_src, scene_meta)
+            self._init_adapter_scene(source)
         except Exception:
-            logger.debug("Scene init log failed", exc_info=True)
-        try:
-            logger.info("Camera class: %s", type(view.camera).__name__)
-        except Exception:
-            pass
-        # First render after attributes are fully set
-        canvas.render()
+            logger.exception("Adapter scene initialization failed (legacy path removed)")
+            # Fail fast: adapter is mandatory
+            raise
         
     # --- Multiscale: request switch (thread-safe) ---
     def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
@@ -1029,69 +856,23 @@ class EGLRendererWorker:
     def _format_level_roi(self, source: ZarrSceneSource, level: int) -> str:
         if self.use_volume:
             return "volume"
-        try:
-            roi = self._viewport_roi_for_level(source, level)
-        except Exception:
-            return "roi=error"
+        roi = self._viewport_roi_for_level(source, level)
         if roi.is_empty():
             return "full"
         return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
     def _log_ms_switch(self, *, previous: int, applied: int, source: ZarrSceneSource, elapsed_ms: float, reason: str) -> None:
-        try:
-            roi_desc = self._format_level_roi(source, applied)
-        except Exception:
-            roi_desc = "roi=error"
-        try:
-            logger.info(
-                "ms.switch: level=%d->%d roi=%s reason=%s elapsed=%.2fms",
-                int(previous),
-                int(applied),
-                roi_desc,
-                reason,
-                float(elapsed_ms),
-            )
-        except Exception:
-            logger.debug("ms.switch log failed", exc_info=True)
+        roi_desc = self._format_level_roi(source, applied)
+        logger.info(
+            "ms.switch: level=%d->%d roi=%s reason=%s elapsed=%.2fms",
+            int(previous),
+            int(applied),
+            roi_desc,
+            reason,
+            float(elapsed_ms),
+        )
 
-    def _maybe_prime_multiscale(self) -> None:
-        if not self._prime_enabled or self._prime_complete:
-            return
-        try:
-            self._prime_multiscale_levels()
-        except Exception:
-            logger.exception("multiscale prime failed")
-
-    def _prime_multiscale_levels(self) -> None:
-        if not self._zarr_path:
-            self._prime_complete = True
-            return
-        try:
-            source = self._ensure_scene_source()
-        except Exception:
-            logger.debug("multiscale prime skipped: no scene source", exc_info=True)
-            return
-        descriptors = list(source.level_descriptors)
-        if not descriptors:
-            self._prime_complete = True
-            return
-        original_level = int(self._active_ms_level)
-        original_downgraded = bool(self._level_downgraded)
-        for desc in descriptors:
-            level = int(desc.index)
-            try:
-                self._set_level_with_budget(level, reason="prime")
-            except Exception:
-                logger.exception("multiscale prime: level=%d failed", level)
-                continue
-        if self._active_ms_level != original_level:
-            try:
-                self._set_level_with_budget(original_level, reason="prime-restore")
-            except Exception:
-                logger.exception("multiscale prime: failed to restore level=%d", original_level)
-        self._level_downgraded = original_downgraded
-        self._prime_complete = True
-        self._mark_render_tick_needed()
+    # Priming retired: method removed
 
 
     def _plane_wh_for_level(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
@@ -1427,8 +1208,6 @@ class EGLRendererWorker:
             'policy': self._policy_name,
             'active_level': int(self._active_ms_level),
             'level_downgraded': bool(self._level_downgraded),
-            'prime_enabled': bool(self._prime_enabled),
-            'prime_complete': bool(self._prime_complete),
         }
 
     def _load_slice(
@@ -1599,11 +1378,7 @@ class EGLRendererWorker:
 
         if self._viewer is not None:
             self._viewer.dims.current_step = tuple(int(x) for x in step)
-            # Keep dims ranges consistent with the active level
-            try:
-                self._set_dims_range_for_level(source, level)
-            except Exception:
-                logger.debug("apply_level: set dims range failed", exc_info=True)
+            self._set_dims_range_for_level(source, level)
 
         # Ensure contrast cache/limits are updated regardless of napari layer presence
         contrast = source.ensure_contrast(level=level)
@@ -1628,7 +1403,6 @@ class EGLRendererWorker:
                 layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
             self._log_layer_assignment('volume', level, None, (d, h, w), contrast)
         else:
-            # Always feed a concrete 2D slab for reliability in headless mode
             z_idx = self._z_index or 0
             slab = self._load_slice(
                 source,
@@ -1656,15 +1430,11 @@ class EGLRendererWorker:
                 sy, sx = self._plane_scale_for_level(source, level)
                 if update_layer:
                     layer.scale = (sy, sx)
-                # Optionally preserve current view; avoid resetting zoom on each switch
                 if not getattr(self, '_preserve_view_on_switch', True):
                     if self.view is not None and hasattr(self.view, 'camera'):
                         world_w = float(w) * float(sx)
                         world_h = float(h) * float(sy)
-                        try:
-                            self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-                        except Exception:
-                            logger.debug("apply_level: camera set_range failed", exc_info=True)
+                        self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             except Exception:
                 logger.debug("apply_level: setting 2D layer scale failed", exc_info=True)
             self._log_layer_assignment('slice', level, self._z_index, (h, w), contrast)
@@ -1703,7 +1473,6 @@ class EGLRendererWorker:
         )
 
     def _apply_multiscale_switch(self, level: int, path: Optional[str]) -> None:
-        """Apply NGFF multiscale level switch on render thread (queued intent)."""
         if not self._zarr_path:
             return
         source = self._ensure_scene_source()
@@ -1723,86 +1492,18 @@ class EGLRendererWorker:
             self._visual.parent = None  # type: ignore[attr-defined]
         self._visual = None
 
-    def _switch_to_3d(self) -> None:
-        """Switch to Turntable + Volume (OME-Zarr preferred, else synthetic)."""
-        self.view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
-        if self._zarr_path:
-            try:
-                source = self._ensure_scene_source()
-                self._set_level_with_budget(self._active_ms_level, reason="ndisplay")
-                vol3d = self._load_volume(source, self._active_ms_level)
-            except Exception as e:
-                # Fall back to synthetic if dataset load fails
-                logger.debug("3D: zarr load failed; fallback to synthetic: %s", e)
-                vol3d = None
-            if vol3d is not None:
-                vis = scene.visuals.Volume(vol3d, parent=self.view.scene, method="mip", cmap="grays")
-                if self.volume_relative_step is not None and hasattr(vis, "relative_step_size"):
-                    vis.relative_step_size = float(self.volume_relative_step)
-                d, h, w = int(vol3d.shape[0]), int(vol3d.shape[1]), int(vol3d.shape[2])
-                self._data_wh = (w, h)
-                self._data_d = int(d)
-                self.view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-                self._frame_volume_camera(w, h, d)
-                self._visual = vis
-                self._notify_scene_refresh()
-                return
-        # Synthetic volume path
-        dtype = np.float16 if self.volume_dtype == "float16" else (np.uint8 if self.volume_dtype == "uint8" else np.float32)
-        volume = np.random.rand(self.volume_depth, self.height, self.width).astype(dtype)
-        vis = scene.visuals.Volume(volume, parent=self.view.scene, method="mip", cmap="viridis")
-        if self.volume_relative_step is not None and hasattr(vis, "relative_step_size"):
-            vis.relative_step_size = float(self.volume_relative_step)
-        d, h, w = int(self.volume_depth), int(self.height), int(self.width)
-        self._data_wh = (w, h)
-        self._data_d = int(d)
-        self.view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-        self._frame_volume_camera(w, h, d)
-        self._visual = vis
-
-    def _switch_to_2d(self) -> None:
-        """Switch to PanZoom + 2D Image (OME-Zarr slice preferred, else synthetic)."""
-        self.view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-        if self._zarr_path:
-            try:
-                source = self._ensure_scene_source()
-                self._set_level_with_budget(self._active_ms_level, reason="ndisplay")
-                z_idx = self._z_index or 0
-                arr2d = self._load_slice(source, self._active_ms_level, z_idx)
-                vis = scene.visuals.Image(arr2d, parent=self.view.scene, cmap='grays', clim=None, method='auto')
-                h, w = int(arr2d.shape[0]), int(arr2d.shape[1])
-                self._data_wh = (w, h)
-                self.view.camera.set_range(x=(0, w), y=(0, h))
-                self._visual = vis
-                self._notify_scene_refresh()
-                return
-            except Exception as e:
-                logger.debug("2D: zarr slice load failed; fallback to synthetic: %s", e)
-        # Synthetic 2D path
-        image = make_rgba_image(self.width, self.height)
-        vis = scene.visuals.Image(image, parent=self.view.scene)
-        self._data_wh = (self.width, self.height)
-        self.view.camera.set_range(x=(0, self.width), y=(0, self.height))
-        self._visual = vis
-        # Clear depth attribute if present
-        if hasattr(self, '_data_d'):
-            try:
-                delattr(self, '_data_d')
-            except Exception:
-                pass
-
     def _apply_ndisplay_switch(self, ndisplay: int) -> None:
         """Apply 2D/3D toggle on the render thread."""
         assert self.view is not None and hasattr(self.view, 'scene'), "VisPy view must be initialized"
-        self._clear_visual()
-        if int(ndisplay) >= 3:
-            self.use_volume = True
-            self._switch_to_3d()
-            logger.info("ndisplay switch: 3D")
-        else:
-            self.use_volume = False
-            self._switch_to_2d()
-            logger.info("ndisplay switch: 2D")
+        # Adapter-only: do not rebuild visuals; just update viewer dims
+        target = 3 if int(ndisplay) >= 3 else 2
+        self.use_volume = bool(target == 3)
+        if self._viewer is not None:
+            try:
+                self._viewer.dims.ndisplay = target
+            except Exception:
+                logger.debug("ndisplay update via viewer failed", exc_info=True)
+        logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
         # Evaluate policy once after display mode changes
         try:
             self._apply_zoom_based_level_switch()
@@ -1859,39 +1560,24 @@ class EGLRendererWorker:
         self._dst_pitch_bytes = int(self._torch_frame.stride(0) * self._torch_frame.element_size())
         row_bytes = int(self.width * 4)
         # Optional override to force tight pitch (debug/testing)
-        try:
-            if int(os.getenv('NAPARI_CUDA_FORCE_TIGHT_PITCH', '0')):
-                self._dst_pitch_bytes = row_bytes
-        except Exception as e:
-            logger.debug("Reading NAPARI_CUDA_FORCE_TIGHT_PITCH failed: %s", e)
-        try:
-            logger.info("CUDA dst pitch: %d bytes (expected %d)", self._dst_pitch_bytes, row_bytes)
-        except Exception as e:
-            logger.debug("Pitch info log failed: %s", e)
+        if int(os.getenv('NAPARI_CUDA_FORCE_TIGHT_PITCH', '0') or '0'):
+            self._dst_pitch_bytes = row_bytes
+        logger.info("CUDA dst pitch: %d bytes (expected %d)", self._dst_pitch_bytes, row_bytes)
         if self._dst_pitch_bytes != row_bytes:
-            try:
-                logger.warning(
-                    "Non-tight pitch: dst_pitch=%d, expected=%d (width*4). This may cause right-edge artifacts.",
-                    self._dst_pitch_bytes, row_bytes,
-                )
-            except Exception as e:
-                logger.debug("Pitch warn log failed: %s", e)
+            logger.warning(
+                "Non-tight pitch: dst_pitch=%d, expected=%d (width*4). This may cause right-edge artifacts.",
+                self._dst_pitch_bytes, row_bytes,
+            )
         # Warn on odd dimensions which can cause crop issues in H.264 4:2:0
         if (self.width % 2) or (self.height % 2):
-            try:
-                logger.warning("Odd dimensions %dx%d may reveal right/bottom padding without SPS cropping.", self.width, self.height)
-            except Exception as e:
-                logger.debug("Odd-dimension warn log failed: %s", e)
+            logger.warning("Odd dimensions %dx%d may reveal right/bottom padding without SPS cropping.", self.width, self.height)
 
     def _init_encoder(self) -> None:
         # Encoder input format: allow YUV444 (default), NV12 (4:2:0), or ARGB/ABGR (packed RGB)
         self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'YUV444').upper()
         if self._enc_input_fmt not in {'YUV444', 'NV12', 'ARGB', 'ABGR'}:
             self._enc_input_fmt = 'YUV444'
-        try:
-            logger.info("Encoder input format: %s", self._enc_input_fmt)
-        except Exception as e:
-            logger.debug("Encoder fmt info log failed: %s", e)
+        logger.info("Encoder input format: %s", self._enc_input_fmt)
         # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
         # Optional bitrate control for low-jitter CBR; if unsupported, fallback path below will be used
         def _parse_int(name: str, default: int | None = None) -> int | None:
@@ -1952,46 +1638,46 @@ class EGLRendererWorker:
             kwargs['temporalaq'] = int(max(0, temporalaq))
         if nonrefp > 0:
             kwargs['nonrefp'] = 1
+        logger.info(
+            "Creating NVENC encoder: %dx%d fmt=%s preset=%s rc=%s",
+            self.width, self.height, self._enc_input_fmt, preset, rc_mode
+        )
         try:
             self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
-            self._idr_period_cfg = int(idr_period)
-            try:
-                if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
-                    self._log_encoder_settings('preset', kwargs)
-            except Exception:
-                logger.debug("Log encoder settings failed", exc_info=True)
-            try:
-                logger.info(
-                    "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=%d rc=%s bitrate=%s max=%s idrperiod=%d lookahead=%d aq=%d temporalaq=%d",
-                    self.width,
-                    self.height,
-                    self._enc_input_fmt,
-                    preset,
-                    int(bf),
-                    rc_mode.upper(),
-                    kwargs.get('bitrate'),
-                    kwargs.get('maxbitrate'),
-                    int(idr_period),
-                    kwargs.get('lookahead', 0),
-                    kwargs.get('aq', 0),
-                    kwargs.get('temporalaq', 0),
-                )
-            except Exception:
-                logger.debug("Encoder creation info log failed", exc_info=True)
-            # Force IDR next frame
-            self._force_next_idr = True
-            return
         except Exception as e:
             logger.warning("Preset NVENC path failed (%s)", e, exc_info=True)
+        else:
+            self._idr_period_cfg = int(idr_period)
+            if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
+                self._log_encoder_settings('preset', kwargs)
+            logger.info(
+                "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=%d rc=%s bitrate=%s max=%s idrperiod=%d lookahead=%d aq=%d temporalaq=%d",
+                self.width,
+                self.height,
+                self._enc_input_fmt,
+                preset,
+                int(bf),
+                rc_mode.upper(),
+                kwargs.get('bitrate'),
+                kwargs.get('maxbitrate'),
+                int(idr_period),
+                kwargs.get('lookahead', 0),
+                kwargs.get('aq', 0),
+                kwargs.get('temporalaq', 0),
+            )
+            self._force_next_idr = True
+            return
 
         # If preset path fails for any reason, fall back to minimal encoder without tuning
         enc = getattr(self, '_encoder', None)
         if enc is None:
+            logger.info("Creating NVENC fallback encoder (no preset kwargs)")
             try:
                 self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
-                logger.warning("NVENC encoder created without preset kwargs; cadence may vary")
             except Exception as e:
                 logger.exception("NVENC fallback encoder creation failed: %s", e)
+            else:
+                logger.warning("NVENC encoder created without preset kwargs; cadence may vary")
 
     def _log_encoder_settings(self, path: str, init_kwargs: dict) -> None:
         """Emit a single-line summary of encoder settings.
@@ -2001,14 +1687,13 @@ class EGLRendererWorker:
 
         path label used in logs (e.g., 'preset').
         """
-        try:
-            # Canonicalize known fields from init kwargs
-            k = {**init_kwargs}
-            canon: dict[str, object] = {}
-            def take(src_key: str, dst_key: str | None = None):
-                dst_key = dst_key or src_key
-                if src_key in k and k[src_key] is not None:
-                    canon[dst_key] = k[src_key]
+        # Canonicalize known fields from init kwargs
+        k = {**init_kwargs}
+        canon: dict[str, object] = {}
+        def take(src_key: str, dst_key: str | None = None):
+            dst_key = dst_key or src_key
+            if src_key in k and k[src_key] is not None:
+                canon[dst_key] = k[src_key]
 
             # Common
             take('codec', 'codec')
@@ -2040,19 +1725,15 @@ class EGLRendererWorker:
             take('vbvInitialDelay', 'vbvInitialDelay')
 
             # Merge in live reconfigure params if available
-            live = {}
-            try:
-                if hasattr(self._encoder, 'GetEncodeReconfigureParams'):
-                    params = self._encoder.GetEncodeReconfigureParams()
-                    # Pull known fields if present
-                    for attr in (
-                        'rateControlMode', 'averageBitrate', 'maxBitRate',
-                        'vbvBufferSize', 'vbvInitialDelay', 'frameRateNum', 'frameRateDen', 'multiPass',
-                    ):
-                        if hasattr(params, attr):
-                            live[attr] = getattr(params, attr)
-            except Exception:
-                logger.debug("GetEncodeReconfigureParams failed", exc_info=True)
+        live = {}
+        if hasattr(self._encoder, 'GetEncodeReconfigureParams'):
+            params = self._encoder.GetEncodeReconfigureParams()
+            for attr in (
+                'rateControlMode', 'averageBitrate', 'maxBitRate',
+                'vbvBufferSize', 'vbvInitialDelay', 'frameRateNum', 'frameRateDen', 'multiPass',
+            ):
+                if hasattr(params, attr):
+                    live[attr] = getattr(params, attr)
 
             # Compose a flat, readable line
             # Prefer explicit canon values; supplement with live where not present
@@ -2080,16 +1761,9 @@ class EGLRendererWorker:
             for key in order:
                 if key in canon:
                     parts.append(f"{key}={canon[key]}")
-            logger.info("Encoder settings (%s): %s", path, ", ".join(parts))
-        except Exception:
-            # Best-effort only
-            pass
+        logger.info("Encoder settings (%s): %s", path, ", ".join(parts))
 
     def reset_encoder(self) -> None:
-        """Tear down and recreate the encoder to force a new GOP/IDR.
-
-        Guarded by a lock to avoid races with concurrent Encode() calls.
-        """
         with self._enc_lock:
             try:
                 if self._encoder is not None:
@@ -2106,7 +1780,6 @@ class EGLRendererWorker:
                 logger.exception("Failed to reset NVENC encoder: %s", e)
 
     def force_idr(self) -> None:
-        """Best-effort request to force next frame as IDR via Reconfigure."""
         logger.debug("Requesting encoder force IDR")
         try:
             if hasattr(self._encoder, 'GetEncodeReconfigureParams') and hasattr(self._encoder, 'Reconfigure'):
@@ -2185,10 +1858,7 @@ class EGLRendererWorker:
                 touched = True
                 policy_touch = True
                 if self._debug_zoom_drift and logger.isEnabledFor(logging.INFO):
-                    try:
-                        logger.info("command zoom factor=%.4f anchor=(%.1f,%.1f)", factor, float(anchor[0]), float(anchor[1]))
-                    except Exception:
-                        logger.debug("zoom command log failed", exc_info=True)
+                    logger.info("command zoom factor=%.4f anchor=(%.1f,%.1f)", factor, float(anchor[0]), float(anchor[1]))
             elif kind == 'pan':
                 dx = float(cmd.dx_px)
                 dy = float(cmd.dy_px)
@@ -2201,10 +1871,7 @@ class EGLRendererWorker:
                 touched = True
                 policy_touch = True
                 if self._debug_pan and logger.isEnabledFor(logging.INFO):
-                    try:
-                        logger.info("command pan dx=%.2f dy=%.2f", dx, dy)
-                    except Exception:
-                        logger.debug("pan command log failed", exc_info=True)
+                    logger.info("command pan dx=%.2f dy=%.2f", dx, dy)
             elif kind == 'orbit':
                 daz = float(cmd.d_az_deg)
                 delv = float(cmd.d_el_deg)
@@ -2214,18 +1881,12 @@ class EGLRendererWorker:
                 touched = True
                 policy_touch = True
                 if self._debug_orbit and logger.isEnabledFor(logging.INFO):
-                    try:
-                        logger.info("command orbit daz=%.2f del=%.2f", daz, delv)
-                    except Exception:
-                        logger.debug("orbit command log failed", exc_info=True)
+                    logger.info("command orbit daz=%.2f del=%.2f", daz, delv)
             elif kind == 'reset':
                 self._apply_camera_reset(cam)
                 touched = True
                 if self._debug_reset and logger.isEnabledFor(logging.INFO):
-                    try:
-                        logger.info("command reset view")
-                    except Exception:
-                        logger.debug("reset command log failed", exc_info=True)
+                    logger.info("command reset view")
 
         if touched:
             # Schedule a render tick and a single post-render selection if camera actually changed
@@ -2293,7 +1954,7 @@ class EGLRendererWorker:
         cam = getattr(self.view, 'camera', None)
         # Update 2D slice when in slice mode and a new index is provided
         if not bool(self.use_volume) and state.current_step is not None:
-            if self.using_napari_adapter() and self._viewer is not None:
+            if self._viewer is not None:
                 try:
                     steps = tuple(int(x) for x in state.current_step)
                     self._viewer.dims.current_step = steps
@@ -2396,14 +2057,11 @@ class EGLRendererWorker:
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         try:
-            # Ensure we have a pair of timer queries
             if self._query_ids is None:
                 ids = GL.glGenQueries(2)
-                # PyOpenGL may return a list/tuple or single int for count=2
                 if isinstance(ids, (list, tuple)) and len(ids) == 2:
                     self._query_ids = (int(ids[0]), int(ids[1]))
                 else:
-                    # Fallback: generate individually
                     q0 = int(GL.glGenQueries(1))
                     q1 = int(GL.glGenQueries(1))
                     self._query_ids = (q0, q1)
@@ -2412,10 +2070,8 @@ class EGLRendererWorker:
             cur = self._query_idx
             prev = 1 - cur
 
-            # Begin query for this frame
             GL.glBeginQuery(GL.GL_TIME_ELAPSED, qids[cur])
 
-            # Perform the blit
             bound_fbo = GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING)
             read_fbo = int(bound_fbo)
             draw_fbo = int(self._fbo)
@@ -2423,25 +2079,20 @@ class EGLRendererWorker:
             GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, draw_fbo)
             GL.glBlitFramebuffer(0, 0, self.width, self.height, 0, 0, self.width, self.height, GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST)
 
-            # End this frame's query
             GL.glEndQuery(GL.GL_TIME_ELAPSED)
 
-            # Read previous frame's result (blocking only if needed, typically ready)
             gpu_ns = None
             if self._query_started:
                 result = GL.GLuint64(0)
                 GL.glGetQueryObjectui64v(qids[prev], GL.GL_QUERY_RESULT, result)
                 gpu_ns = int(result.value)
             else:
-                # First frame: nothing to read yet
                 self._query_started = True
 
-            # Restore default binds
             GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, read_fbo)
             GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, read_fbo)
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, read_fbo)
 
-            # Swap query index for next frame
             self._query_idx = prev
             return gpu_ns
         except Exception as e:
@@ -2727,11 +2378,7 @@ class EGLRendererWorker:
 
     # (packer is now provided by bitstream.py)
 
-    @staticmethod
-    def _torch_from_cupy(arr: cp.ndarray):
-        # Legacy helper not used; kept for compatibility if needed elsewhere
-        dl = arr.toDlpack()
-        return torch.utils.dlpack.from_dlpack(dl)
+    # Removed legacy _torch_from_cupy helper (unused)
 
     def cleanup(self) -> None:
         try:
@@ -2774,7 +2421,6 @@ class EGLRendererWorker:
         self.canvas = None
         self._viewer = None
         self._napari_layer = None
-        self._napari_adapter = None
         try:
             if self.egl_display is not None:
                 EGL.eglTerminate(self.egl_display)
@@ -2786,8 +2432,7 @@ class EGLRendererWorker:
         """Expose the napari ``ViewerModel`` when adapter mode is active."""
         return self._viewer
 
-    def using_napari_adapter(self) -> bool:
-        return bool(self._use_napari_adapter and self._viewer is not None)
+    # Adapter is always used; legacy path removed
 
     # --- Debug helpers -------------------------------------------------------------
     def _log_zoom_drift(self, zf: float, anc: tuple[float, float], center_world: tuple[float, float], cw: int, ch: int) -> None:

@@ -70,18 +70,12 @@ class AdapterScene:
                 chosen_level = found if found is not None else (len(levels) - 1)
             current_level = int(chosen_level)
             if self._bridge._log_layer_debug:
-                try:
-                    logger.info("adapter init: nlevels=%d chosen=%d use_volume=%s", len(levels), int(current_level), bool(self._bridge.use_volume))
-                except Exception:
-                    logger.debug("adapter init debug log failed", exc_info=True)
-                try:
-                    for li, desc in enumerate(levels):
-                        h, w = self._bridge._plane_wh_for_level(source, li)
-                        dtype_size = int(np.dtype(source.dtype).itemsize)
-                        bytes_est = int(h) * int(w) * dtype_size
-                        logger.info("adapter levels: idx=%d shape=%s plane=%dx%d dtype=%s slice_bytes=%d", int(li), 'x'.join(str(int(x)) for x in desc.shape), int(h), int(w), str(source.dtype), bytes_est)
-                except Exception:
-                    logger.debug("adapter init level listing failed", exc_info=True)
+                logger.info("adapter init: nlevels=%d chosen=%d use_volume=%s", len(levels), int(current_level), bool(self._bridge.use_volume))
+                for li, desc in enumerate(levels):
+                    h, w = self._bridge._plane_wh_for_level(source, li)
+                    dtype_size = int(np.dtype(source.dtype).itemsize)
+                    bytes_est = int(h) * int(w) * dtype_size
+                    logger.info("adapter levels: idx=%d shape=%s plane=%dx%d dtype=%s slice_bytes=%d", int(li), 'x'.join(str(int(x)) for x in desc.shape), int(h), int(w), str(source.dtype), bytes_est)
 
             init_step = source.initial_step(step_or_z=self._bridge._zarr_init_z, level=current_level)
             step = source.set_current_level(current_level, step=init_step)
@@ -210,40 +204,25 @@ class AdapterScene:
 
         node = adapter.node
         node.parent = view.scene
-        try:
-            # Force draw order to front to avoid accidental occlusion
-            setattr(node, 'order', 10_000)
-        except Exception:
-            logger.debug("adapter: set node.order failed", exc_info=True)
+        # Force draw order to front to avoid accidental occlusion
+        setattr(node, 'order', 10_000)
         self._bridge._visual = node
         self._bridge._viewer = viewer
         self._bridge._napari_layer = layer
-        self._bridge._napari_adapter = adapter
+        
 
         if self._bridge._log_layer_debug:
-            try:
-                logger.info("adapter node: type=%s visible=%s parent_is_scene=%s layer_visible=%s", type(node).__name__, getattr(node, 'visible', None), bool(getattr(node, 'parent', None) is view.scene), getattr(layer, 'visible', None))
-            except Exception:
-                logger.debug("adapter node visibility log failed", exc_info=True)
+            logger.info("adapter node: type=%s visible=%s parent_is_scene=%s layer_visible=%s", type(node).__name__, getattr(node, 'visible', None), bool(getattr(node, 'parent', None) is view.scene), getattr(layer, 'visible', None))
 
-        try:
-            if int(os.getenv('NAPARI_CUDA_DEBUG_OVERLAY', '0') or '0'):
-                from vispy.visuals import Rectangle
-                overlay = Rectangle(center=(20, 20), width=30, height=30, color=(1, 0, 0, 1), parent=view.scene)
-                setattr(self._bridge, '_debug_overlay', overlay)
-                logger.info("debug overlay created (red square)")
-        except Exception:
-            logger.debug("debug overlay creation failed", exc_info=True)
+        if int(os.getenv('NAPARI_CUDA_DEBUG_OVERLAY', '0') or '0'):
+            from vispy.visuals import Rectangle
+            overlay = Rectangle(center=(20, 20), width=30, height=30, color=(1, 0, 0, 1), parent=view.scene)
+            setattr(self._bridge, '_debug_overlay', overlay)
+            logger.info("debug overlay created (red square)")
 
         self._bridge._notify_scene_refresh()
 
-        try:
-            logger.info("Scene init: source=%s %s", scene_src, scene_meta)
-        except Exception:
-            logger.debug("Scene init log failed", exc_info=True)
-        try:
-            logger.info("Camera class: %s", type(view.camera).__name__)
-        except Exception:
-            pass
+        logger.info("Scene init: source=%s %s", scene_src, scene_meta)
+        logger.info("Camera class: %s", type(view.camera).__name__)
         canvas.render()
         return canvas, view, viewer

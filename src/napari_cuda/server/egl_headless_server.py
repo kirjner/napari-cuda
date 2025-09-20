@@ -489,13 +489,13 @@ class EGLHeadlessServer:
                 except Exception:
                     logger.debug('ms_state sync failed', exc_info=True)
         viewer_model = None
-        if self._worker is not None and hasattr(self._worker, 'using_napari_adapter'):
+        if self._worker is not None:
             try:
-                if self._worker.using_napari_adapter():
-                    viewer_model = self._worker.viewer_model()
+                viewer_model = self._worker.viewer_model()
+                if viewer_model is not None:
                     extras.setdefault('adapter_engine', 'napari-vispy')
             except Exception:
-                logger.debug('worker adapter detection failed', exc_info=True)
+                logger.debug('worker viewer_model fetch failed', exc_info=True)
         self._scene_manager.update_from_sources(
             worker=self._worker,
             scene_state=self._latest_state,
@@ -899,47 +899,41 @@ class EGLHeadlessServer:
                     policy_name=self._ms_state.get('policy'),
                 )
                 # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
-                try:
-                    z0 = getattr(self._worker, '_z_index', None)
-                    if z0 is not None:
-                        with self._state_lock:
-                            s = self._latest_state
-                            self._latest_state = ServerSceneState(
-                                center=s.center,
-                                zoom=s.zoom,
-                                angles=s.angles,
-                                current_step=(int(z0),),
-                            )
-                        # Build the authoritative dims.update once so logs match the sent payload
-                        step_list = [int(z0)]
-                        obj = self._build_dims_update_message(step_list, last_client_id=None)
-                        # Schedule broadcast of this exact object on the asyncio loop thread
-                        loop.call_soon_threadsafe(
-                            lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
+                z0 = getattr(self._worker, '_z_index', None)
+                if z0 is not None:
+                    with self._state_lock:
+                        s = self._latest_state
+                        self._latest_state = ServerSceneState(
+                            center=s.center,
+                            zoom=s.zoom,
+                            angles=s.angles,
+                            current_step=(int(z0),),
                         )
-                        if self._log_dims_info:
-                            logger.info("init: dims.update current_step=%s", obj.get('current_step'))
-                        else:
-                            logger.debug("init: dims.update current_step=%s", obj.get('current_step'))
+                    # Build the authoritative dims.update once so logs match the sent payload
+                    step_list = [int(z0)]
+                    obj = self._build_dims_update_message(step_list, last_client_id=None)
+                    # Schedule broadcast of this exact object on the asyncio loop thread
+                    loop.call_soon_threadsafe(
+                        lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
+                    )
+                    if self._log_dims_info:
+                        logger.info("init: dims.update current_step=%s", obj.get('current_step'))
                     else:
-                        # Pure 3D volume startup: send baseline dims so client enters volume mode
-                        meta = self._dims_metadata() or {}
-                        try:
-                            nd = int(meta.get('ndim') or 3)
-                        except Exception:
-                            nd = 3
-                        step_list = [0 for _ in range(max(1, nd))]
-                        # Do not mutate state.current_step here; worker has no discrete Z
-                        obj = self._build_dims_update_message(step_list, last_client_id=None)
-                        loop.call_soon_threadsafe(
-                            lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
-                        )
-                        if self._log_dims_info:
-                            logger.info("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
-                        else:
-                            logger.debug("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
-                except Exception:
-                    logger.exception("Initial dims_update broadcast failed")
+                        logger.debug("init: dims.update current_step=%s", obj.get('current_step'))
+                else:
+                    # Pure 3D volume startup: send baseline dims so client enters volume mode
+                    meta = self._dims_metadata() or {}
+                    nd = int(meta.get('ndim') or 3)
+                    step_list = [0 for _ in range(max(1, nd))]
+                    # Do not mutate state.current_step here; worker has no discrete Z
+                    obj = self._build_dims_update_message(step_list, last_client_id=None)
+                    loop.call_soon_threadsafe(
+                        lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
+                    )
+                    if self._log_dims_info:
+                        logger.info("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
+                    else:
+                        logger.debug("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
 
                 tick = 1.0 / max(1, self.cfg.fps)
                 next_t = time.perf_counter()
@@ -971,33 +965,30 @@ class EGLHeadlessServer:
                         volume_sample_step=getattr(queued, 'volume_sample_step', None),
                     )
                     if commands and (self._log_cam_info or self._log_cam_debug):
-                        try:
-                            summaries: List[str] = []
-                            for cmd in commands:
-                                if cmd.kind == 'zoom':
-                                    factor = cmd.factor if cmd.factor is not None else 0.0
-                                    if cmd.anchor_px is not None:
-                                        ax, ay = cmd.anchor_px
-                                        summaries.append(
-                                            f"zoom factor={factor:.4f} anchor=({ax:.1f},{ay:.1f})"
-                                        )
-                                    else:
-                                        summaries.append(f"zoom factor={factor:.4f}")
-                                elif cmd.kind == 'pan':
-                                    summaries.append(f"pan dx={cmd.dx_px:.2f} dy={cmd.dy_px:.2f}")
-                                elif cmd.kind == 'orbit':
-                                    summaries.append(f"orbit daz={cmd.d_az_deg:.2f} del={cmd.d_el_deg:.2f}")
-                                elif cmd.kind == 'reset':
-                                    summaries.append('reset')
+                        summaries: List[str] = []
+                        for cmd in commands:
+                            if cmd.kind == 'zoom':
+                                factor = cmd.factor if cmd.factor is not None else 0.0
+                                if cmd.anchor_px is not None:
+                                    ax, ay = cmd.anchor_px
+                                    summaries.append(
+                                        f"zoom factor={factor:.4f} anchor=({ax:.1f},{ay:.1f})"
+                                    )
                                 else:
-                                    summaries.append(cmd.kind)
-                            msg = "apply: cam cmds=" + "; ".join(summaries)
-                            if self._log_cam_info:
-                                logger.info(msg)
+                                    summaries.append(f"zoom factor={factor:.4f}")
+                            elif cmd.kind == 'pan':
+                                summaries.append(f"pan dx={cmd.dx_px:.2f} dy={cmd.dy_px:.2f}")
+                            elif cmd.kind == 'orbit':
+                                summaries.append(f"orbit daz={cmd.d_az_deg:.2f} del={cmd.d_el_deg:.2f}")
+                            elif cmd.kind == 'reset':
+                                summaries.append('reset')
                             else:
-                                logger.debug(msg)
-                        except Exception:
-                            logger.debug("apply cam command log failed", exc_info=True)
+                                summaries.append(cmd.kind)
+                        msg = "apply: cam cmds=" + "; ".join(summaries)
+                        if self._log_cam_info:
+                            logger.info(msg)
+                        else:
+                            logger.debug(msg)
                     self._worker.apply_state(state)
                     if commands:
                         self._worker.process_camera_commands(commands)
@@ -1442,9 +1433,13 @@ class EGLHeadlessServer:
                 except Exception:
                     ndisp = 2
                 client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
-                logger.info("state: set_ndisplay start target=%s", ndisp)
+                (logger.info if self._log_state_traces else logger.debug)(
+                    "state: set_ndisplay start target=%s", ndisp
+                )
                 await self._handle_set_ndisplay(ndisp, client_id, client_seq)
-                logger.info("state: set_ndisplay done target=%s", ndisp)
+                (logger.info if self._log_state_traces else logger.debug)(
+                    "state: set_ndisplay done target=%s", ndisp
+                )
                 handled = True
                 return
 
