@@ -180,6 +180,21 @@ class ViewerSceneManager:
                 if index_space is not None:
                     ms_dict["index_space"] = index_space
                 meta["multiscale"] = ms_dict
+            # Robustly derive sizes/range from active level when available.
+            try:
+                eff_shape = None
+                if layer.multiscale is not None and layer.multiscale.levels:
+                    cur = int(layer.multiscale.current_level or 0)
+                    levels = layer.multiscale.levels
+                    if 0 <= cur < len(levels) and levels[cur].shape:
+                        eff_shape = [int(s) for s in levels[cur].shape or []]
+                if not eff_shape and layer.shape:
+                    eff_shape = [int(s) for s in layer.shape]
+                if eff_shape:
+                    meta["sizes"] = list(eff_shape)
+                    meta["range"] = [[0, max(0, int(s) - 1)] for s in eff_shape]
+            except Exception:
+                logger.debug("dims_metadata: shape/range reconciliation failed", exc_info=True)
         return {key: value for key, value in meta.items() if value is not None}
 
     # ------------------------------------------------------------------

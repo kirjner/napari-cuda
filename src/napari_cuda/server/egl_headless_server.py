@@ -247,6 +247,48 @@ class EGLHeadlessServer:
 
         task.add_done_callback(_log_task_result)
 
+    async def _await_adapter_level_ready(self, timeout_s: float = 0.5) -> None:
+        """Wait briefly for the adapter's multiscale level to stabilize.
+
+        This reduces races where the first dims.update after connect is built
+        before the adapter selects the intended level. Returns after timeout or
+        when two consecutive reads of (current_level, level_shape) match.
+        """
+        start = time.perf_counter()
+        last: tuple[int | None, tuple[int, ...] | None] | None = None
+        # Wait for worker and scene source to appear, then for level/shape to stabilize
+        while (time.perf_counter() - start) < max(0.0, float(timeout_s)):
+            try:
+                if self._worker is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                src = getattr(self._worker, '_scene_source', None)
+                if src is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                lvl = None
+                try:
+                    lvl = int(getattr(src, 'current_level', 0))
+                except Exception:
+                    lvl = None
+                shp: tuple[int, ...] | None = None
+                try:
+                    descs = getattr(src, 'level_descriptors', [])
+                    if isinstance(descs, list) and descs and lvl is not None and 0 <= lvl < len(descs):
+                        s = getattr(descs[int(lvl)], 'shape', None)
+                        if isinstance(s, (list, tuple)):
+                            shp = tuple(int(x) for x in s)
+                except Exception:
+                    shp = None
+                cur: tuple[int | None, tuple[int, ...] | None] = (lvl, shp)
+                if last is not None and cur == last:
+                    return
+                last = cur
+            except Exception:
+                break
+            await asyncio.sleep(0.01)
+        return
+
     async def _rebroadcast_meta(self, client_id: Optional[str]) -> None:
         """Re-broadcast a dims.update with current_step and updated meta.
 
@@ -591,7 +633,14 @@ class EGLHeadlessServer:
             logger.debug("resolve axis failed", exc_info=True)
         return None
 
-    def _build_dims_update_message(self, step_list: list[int], last_client_id: Optional[str]) -> dict:
+    def _build_dims_update_message(
+        self,
+        step_list: list[int],
+        last_client_id: Optional[str],
+        *,
+        ack: bool = False,
+        intent_seq: Optional[int] = None,
+    ) -> dict:
         """Build dims.update payload with nested metadata.
 
         {'type':'dims.update', 'seq':..., 'last_client_id':..., 'current_step':[...], 'meta':{...}}
@@ -651,23 +700,145 @@ class EGLHeadlessServer:
         # New shape with nested meta
         seq_val = int(self._dims_seq) & 0x7FFFFFFF
         self._dims_seq = (int(self._dims_seq) + 1) & 0x7FFFFFFF
-        new_msg = {
+        # Build base message
+        new_msg: dict = {
             'type': 'dims.update',
             'seq': seq_val,
             'last_client_id': last_client_id,
             'current_step': list(int(x) for x in full),
             'meta': {**meta, 'ndisplay': int(ndisp)},
         }
+        # Enrich meta with flattened, per-level details when available
+        try:
+            src = getattr(self._worker, '_scene_source', None) if self._worker is not None else None
+            if src is not None:
+                try:
+                    lvl = int(getattr(src, 'current_level', 0))
+                    new_msg['meta']['level'] = lvl
+                except Exception:
+                    pass
+                try:
+                    descs = getattr(src, 'level_descriptors', [])
+                    if isinstance(descs, list) and descs:
+                        cur = lvl if (0 <= lvl < len(descs)) else 0
+                        shape = getattr(descs[cur], 'shape', None)
+                        if shape is not None:
+                            new_msg['meta']['level_shape'] = [int(s) for s in shape]
+                except Exception:
+                    pass
+                try:
+                    dt = getattr(src, 'dtype', None)
+                    if dt is not None:
+                        new_msg['meta']['dtype'] = str(dt)
+                except Exception:
+                    pass
+                # For 2D slice path we normalize slabs to [0,1]
+                try:
+                    normalized = (not bool(getattr(self._worker, 'use_volume', False)))
+                    new_msg['meta']['normalized'] = bool(normalized)
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug('dims.update meta enrichment failed', exc_info=True)
+        # Ensure sizes/range reflect the active adapter-selected level, overriding any stale cache.
+        # We derive a fresh multiscale descriptor from the live scene source when available.
+        try:
+            meta_obj = new_msg.get('meta') if isinstance(new_msg.get('meta'), dict) else None
+            if isinstance(meta_obj, dict):
+                eff_shape = None
+                # Hard source of truth: live adapter source
+                src = getattr(self._worker, '_scene_source', None) if self._worker is not None else None
+                if src is not None:
+                    try:
+                        cur = int(getattr(src, 'current_level', 0))
+                    except Exception:
+                        cur = 0
+                    try:
+                        descs = getattr(src, 'level_descriptors', [])
+                    except Exception:
+                        descs = []
+                    # Overwrite/construct multiscale meta from descriptors
+                    if isinstance(descs, list) and descs:
+                        levels_meta: list[dict] = []
+                        for d in descs:
+                            try:
+                                levels_meta.append({
+                                    'shape': [int(s) for s in (getattr(d, 'shape', []) or [])],
+                                    'downsample': list(getattr(d, 'downsample', []) or []),
+                                    'path': getattr(d, 'path', None),
+                                })
+                            except Exception:
+                                levels_meta.append({'shape': list(getattr(d, 'shape', []) or [])})
+                        meta_obj['multiscale'] = {
+                            'levels': levels_meta,
+                            'current_level': cur,
+                            'policy': (self._ms_state.get('policy') if isinstance(self._ms_state, dict) else None) or 'auto',
+                            'index_space': 'base',
+                        }
+                        if 0 <= cur < len(levels_meta):
+                            sh = levels_meta[cur].get('shape')
+                            if isinstance(sh, (list, tuple)):
+                                eff_shape = [int(max(1, int(s))) for s in sh]
+                # Secondary: explicit level_shape from earlier enrichment
+                if eff_shape is None:
+                    lvl_shape = meta_obj.get('level_shape')
+                    if isinstance(lvl_shape, (list, tuple)) and len(lvl_shape) > 0:
+                        eff_shape = [int(max(1, int(s))) for s in lvl_shape]
+                # Tertiary: cached multiscale block, if consistent
+                if eff_shape is None:
+                    ms = meta_obj.get('multiscale')
+                    if isinstance(ms, dict):
+                        cur = int(ms.get('current_level', 0))
+                        levels = ms.get('levels')
+                        if isinstance(levels, (list, tuple)) and 0 <= cur < len(levels):
+                            entry = levels[cur]
+                            if isinstance(entry, dict):
+                                sh = entry.get('shape')
+                                if isinstance(sh, (list, tuple)):
+                                    eff_shape = [int(max(1, int(s))) for s in sh]
+                if eff_shape:
+                    meta_obj['sizes'] = list(eff_shape)
+                    meta_obj['range'] = [[0, max(0, int(s) - 1)] for s in eff_shape]
+        except Exception:
+            logger.debug('dims.update: live level reconciliation failed', exc_info=True)
+        # Optional verbose meta log to diagnose slider bounds/ranges
+        try:
+            if getattr(self, '_log_dims_info', False):
+                meta_dbg = new_msg.get('meta', {}) if isinstance(new_msg.get('meta'), dict) else {}
+                logger.info(
+                    "dims.update meta: level=%s level_shape=%s sizes=%s range=%s",
+                    meta_dbg.get('level'),
+                    meta_dbg.get('level_shape'),
+                    meta_dbg.get('sizes'),
+                    meta_dbg.get('range'),
+                )
+        except Exception:
+            logger.debug('dims.update: meta logging failed', exc_info=True)
+        # Provide both 'range' and 'ranges' aliases for client normalization
+        try:
+            rng = new_msg.get('meta', {}).get('range')
+            if rng is not None and isinstance(new_msg.get('meta'), dict):
+                new_msg['meta']['ranges'] = rng
+        except Exception:
+            logger.debug('dims.update ranges alias failed', exc_info=True)
+        # ACK fields for deterministic client reconciliation
+        try:
+            if ack:
+                new_msg['ack'] = True
+                if intent_seq is not None:
+                    new_msg['intent_seq'] = int(intent_seq)
+        except Exception:
+            logger.debug('dims.update ack/intent_seq set failed', exc_info=True)
         return new_msg
 
-    async def _broadcast_dims_update(self, step_list: list[int], last_client_id: Optional[str]) -> None:
+    async def _broadcast_dims_update(self, step_list: list[int], last_client_id: Optional[str], *, ack: bool = False, intent_seq: Optional[int] = None) -> None:
         """Broadcast dims update in both new and legacy formats.
 
         Never raises; logs and continues on failure.
         """
         try:
             self._last_dims_client_id = last_client_id
-            obj = self._build_dims_update_message(step_list, last_client_id)
+            obj = self._build_dims_update_message(step_list, last_client_id, ack=ack, intent_seq=intent_seq)
             await self._broadcast_state_json(obj)
             # Intentionally skip scene.spec here to avoid client layer churn on
             # pure dims changes. Scene spec is sent on init and when topology/
@@ -782,6 +953,10 @@ class EGLHeadlessServer:
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
         def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
+            # Hold pixel emission until worker orientation is ready to avoid a momentary inverted frame
+            if self._worker is not None:
+                if getattr(self._worker, '_orientation_ready', True) is False:
+                    return
             # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
             # Optional: raw NAL summary before packing for diagnostics
             try:
@@ -885,6 +1060,17 @@ class EGLHeadlessServer:
 
         def worker_loop() -> None:
             try:
+                # Scene refresh callback: rebroadcast current dims/meta on worker-driven changes
+                def _on_scene_refresh() -> None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = asyncio.get_event_loop()
+                    # Fire-and-forget dims rebroadcast with latest state
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self._rebroadcast_meta(client_id=None))
+                    )
+
                 self._worker = EGLRendererWorker(
                     width=self.width,
                     height=self.height,
@@ -897,6 +1083,7 @@ class EGLHeadlessServer:
                     zarr_axes=self._zarr_axes,
                     zarr_z=self._zarr_z,
                     policy_name=self._ms_state.get('policy'),
+                    scene_refresh_cb=_on_scene_refresh,
                 )
                 # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
                 z0 = getattr(self._worker, '_z_index', None)
@@ -1079,6 +1266,7 @@ class EGLHeadlessServer:
                 pass
             # Send current dims baseline FIRST so client can gate inputs and inflate UI deterministically
             try:
+                await self._await_adapter_level_ready(0.5)
                 cur = None
                 with self._state_lock:
                     cur = getattr(self._latest_state, 'current_step', None)
@@ -1203,8 +1391,12 @@ class EGLHeadlessServer:
                 try:
                     new_step = self._apply_dims_intent(axis=axis, step_delta=delta, set_value=None)
                     if new_step is not None:
+                        try:
+                            intent_i = int(client_seq) if client_seq is not None else None
+                        except Exception:
+                            intent_i = None
                         self._schedule_coro(
-                            self._broadcast_dims_update(new_step, last_client_id=client_id),
+                            self._broadcast_dims_update(new_step, last_client_id=client_id, ack=True, intent_seq=intent_i),
                             'dims_update-step',
                         )
                 except Exception as e:
@@ -1230,8 +1422,12 @@ class EGLHeadlessServer:
                 try:
                     new_step = self._apply_dims_intent(axis=axis, step_delta=None, set_value=value)
                     if new_step is not None:
+                        try:
+                            intent_i = int(client_seq) if client_seq is not None else None
+                        except Exception:
+                            intent_i = None
                         self._schedule_coro(
-                            self._broadcast_dims_update(new_step, last_client_id=client_id),
+                            self._broadcast_dims_update(new_step, last_client_id=client_id, ack=True, intent_seq=intent_i),
                             'dims_update-set_index',
                         )
                 except Exception as e:
@@ -1753,7 +1949,27 @@ class EGLHeadlessServer:
 
     def _scene_spec_json(self) -> Optional[str]:
         try:
+            # Refresh scene manager from live sources to avoid stale dims in scene.spec
+            try:
+                self._update_scene_manager()
+            except Exception:
+                logger.debug("scene manager update failed before scene.spec", exc_info=True)
             msg = self._scene_manager.scene_message(time.time())
+            if self._log_dims_info:
+                try:
+                    dims = msg.scene.dims.to_dict() if msg.scene and msg.scene.dims else {}
+                    ms = None
+                    if msg.scene and msg.scene.layers:
+                        layer0 = msg.scene.layers[0]
+                        ms = layer0.multiscale.to_dict() if layer0.multiscale else None
+                    logger.info(
+                        "scene.spec dims: sizes=%s range=%s ms_level=%s",
+                        dims.get('sizes'),
+                        dims.get('range'),
+                        (ms or {}).get('current_level') if isinstance(ms, dict) else None,
+                    )
+                except Exception:
+                    logger.debug("scene.spec dims log failed", exc_info=True)
             return msg.to_json()
         except Exception:
             logger.debug("scene.spec build failed", exc_info=True)

@@ -252,6 +252,8 @@ class EGLRendererWorker:
         self.canvas: Optional[scene.SceneCanvas] = None
         self.view = None
         self._visual = None
+        # Track EGL ownership when adopting a backend-provided context
+        self._owns_egl: bool = False
 
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
@@ -275,6 +277,8 @@ class EGLRendererWorker:
 
         # Track current data extents in world units (W,H)
         self._data_wh: tuple[int, int] = (int(width), int(height))
+        # Gate pixel streaming until orientation/camera are settled and a non-black frame is observed
+        self._orientation_ready: bool = False
 
         # Timer query double-buffering for capture blit
         self._query_ids = None  # type: Optional[tuple]
@@ -352,13 +356,37 @@ class EGLRendererWorker:
             self._log_policy_eval = env_bool('NAPARI_CUDA_LOG_POLICY_EVAL', False)
         except Exception:
             self._log_policy_eval = False
+        # Optional: disable zoom-driven policy changes entirely
+        try:
+            self._disable_zoom_policy = env_bool('NAPARI_CUDA_DISABLE_ZOOM_POLICY', False)
+        except Exception:
+            self._disable_zoom_policy = False
+        # Optional: allow policy changes on pan-only events (off by default)
+        try:
+            self._allow_pan_policy = env_bool('NAPARI_CUDA_ALLOW_PAN_POLICY', False)
+        except Exception:
+            self._allow_pan_policy = False
+        # Optional: lock multiscale level (int index) to keep client/server in sync
+        try:
+            _lock = os.getenv('NAPARI_CUDA_LOCK_LEVEL')
+            self._lock_level: Optional[int] = int(_lock) if (_lock is not None and _lock != '') else None
+        except Exception:
+            self._lock_level = None
         # Preserve current camera view on level switches (avoid resetting zoom)
         try:
             self._preserve_view_on_switch = env_bool('NAPARI_CUDA_PRESERVE_VIEW', True)
         except Exception:
             self._preserve_view_on_switch = True
+        # Keep contrast limits stable across pans/level switches unless disabled
+        try:
+            self._sticky_contrast = env_bool('NAPARI_CUDA_STICKY_CONTRAST', True)
+        except Exception:
+            self._sticky_contrast = True
         # Change-detection signature for apply_state-driven policy eval
         self._last_state_sig: Optional[tuple] = None
+        # Last known dims.current_step from intents; used to preserve Z across
+        # multiscale level switches regardless of viewer timing.
+        self._last_step: Optional[tuple[int, ...]] = None
         # Coalesce selection to run once after a render when camera changed
         self._eval_after_render: bool = False
         # Defer initial policy evaluation until first user interaction (zoom/pan/orbit)
@@ -367,6 +395,43 @@ class EGLRendererWorker:
         except Exception:
             self._defer_policy_init = True
         self._user_interaction_seen: bool = False
+        # One-shot safety: reset camera if initial frames are black
+        try:
+            self._auto_reset_on_black = env_bool('NAPARI_CUDA_AUTO_RESET_ON_BLACK', True)
+        except Exception:
+            self._auto_reset_on_black = True
+        self._black_reset_done: bool = False
+        # Min time between level switches to avoid shimmering during pan
+        try:
+            self._level_switch_cooldown_ms = float(os.getenv('NAPARI_CUDA_LEVEL_SWITCH_COOLDOWN_MS', '150') or '150')
+        except Exception:
+            self._level_switch_cooldown_ms = 150.0
+        self._last_level_switch_ts: float = 0.0
+        # Use a one-shot init ROI bypass: first ROI uses full frame to avoid black
+        self._disable_init_roi = True
+        self._init_roi_used = False
+        # Cache the last ROI computed per level keyed by a transform signature.
+        # Value: (transform_signature, roi)
+        self._roi_cache: Dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
+        # Throttle ROI logging by tracking the most recent (roi, ts) we logged per level
+        self._roi_log_state: Dict[int, tuple[SliceROI, float]] = {}
+        self._roi_log_interval = 0.25  # seconds
+        # Minimum ROI edge movement (pixels) to accept a new ROI and avoid shimmering
+        try:
+            self._roi_edge_threshold = int(os.getenv('NAPARI_CUDA_ROI_EDGE_THRESHOLD', '4') or '4')
+        except Exception:
+            self._roi_edge_threshold = 4
+        # Optionally align ROI to level chunk/grid boundaries to stabilize sampling
+        try:
+            self._roi_align_chunks = env_bool('NAPARI_CUDA_ROI_ALIGN_CHUNKS', False)
+        except Exception:
+            self._roi_align_chunks = False
+        # On level switches, bypass ROI for a few frames to avoid blanking
+        try:
+            self._switch_fullframe_horizon = int(os.getenv('NAPARI_CUDA_SWITCH_FULLFRAME_FRAMES', '2') or '2')
+        except Exception:
+            self._switch_fullframe_horizon = 2
+        self._switch_fullframe_frames: int = 0
 
         if policy_name:
             try:
@@ -405,9 +470,12 @@ class EGLRendererWorker:
             self._zarr_clim: Optional[tuple[float, float]] = None
             self._hw_limits = get_hw_limits()
 
-            self._init_egl()
+            # Initialize CUDA first (independent of GL)
             self._init_cuda()
+            # Create VisPy SceneCanvas (EGL backend) which makes a GL context current
             self._init_vispy_scene()
+            # Adopt the current EGL context created by VisPy for capture
+            self._init_egl()
             self._init_capture()
             self._init_cuda_interop()
             self._init_encoder()
@@ -455,6 +523,12 @@ class EGLRendererWorker:
         self.canvas = canvas
         self.view = view
         self._viewer = viewer
+        # Ensure the camera frames current data extents on first init
+        try:
+            if hasattr(self, 'view') and hasattr(self.view, 'camera'):
+                self._apply_camera_reset(self.view.camera)
+        except Exception:
+            logger.debug("initial camera reset after adapter init failed", exc_info=True)
 
     def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
         """Set napari dims.range to match the chosen level shape.
@@ -494,7 +568,13 @@ class EGLRendererWorker:
                 else:
                     self._slice_budget_allows(source, level)
                 start = time.perf_counter()
+                # Expose previous level to allow proportional Z remap in apply
+                self._pending_prev_level = prev_level
                 self._apply_level_internal(source, level)
+                try:
+                    del self._pending_prev_level
+                except Exception:
+                    self._pending_prev_level = None
                 self._level_downgraded = (level != desired_level)
                 if self._level_downgraded:
                     logger.info(
@@ -574,6 +654,9 @@ class EGLRendererWorker:
         return delta_levels
 
     def _apply_zoom_based_level_switch(self) -> None:
+        # Respect explicit lock or disable flag
+        if getattr(self, '_lock_level', None) is not None or getattr(self, '_disable_zoom_policy', False):
+            return
         # Demote to DEBUG by default; elevate to INFO only when explicitly enabled
         if logger.isEnabledFor(logging.DEBUG):
             if getattr(self, '_log_policy_eval', False):
@@ -601,7 +684,7 @@ class EGLRendererWorker:
             roi_log: Dict[int, tuple[int, int, int, int] | str] = {}
             for idx, desc in enumerate(source.level_descriptors):
                 lvl = int(getattr(desc, 'index', idx))
-                roi = self._viewport_roi_for_level(source, lvl)
+                roi = self._viewport_roi_for_level(source, lvl, quiet=True)
                 if roi.is_empty():
                     roi_log[lvl] = 'full'
                 else:
@@ -612,6 +695,9 @@ class EGLRendererWorker:
             else:
                 logger.debug("policy ctx: intent=%d delta=%d overs=%s roi=%s", intent_val, int(delta_levels), overs_log, roi_log)
             self._last_policy_ctx_log_ts = log_now
+        # If no zoom-driven change is requested, do not switch levels on pan-only updates.
+        if delta_levels == 0 and not getattr(self, '_allow_pan_policy', False):
+            return
         try:
             selected = self._policy_func(ctx)
             # Reduce spam: only log selection when it differs from current
@@ -642,10 +728,22 @@ class EGLRendererWorker:
             desired = cur - 1
         if desired == self._active_ms_level:
             return
+        # Enforce a cooldown between level switches to reduce visual shimmer
+        now_ts = time.perf_counter()
+        if self._last_level_switch_ts > 0.0:
+            elapsed_ms = (now_ts - self._last_level_switch_ts) * 1000.0
+            if elapsed_ms < float(getattr(self, '_level_switch_cooldown_ms', 150.0)):
+                return
         try:
             prev = int(self._active_ms_level)
             reason = "policy" if ctx.intent_level is not None else "zoom"
             self._set_level_with_budget(desired, reason=reason)
+            self._last_level_switch_ts = now_ts
+            # After a level switch, force full-frame ROI for a few frames to avoid transient black
+            try:
+                self._switch_fullframe_frames = int(max(0, getattr(self, '_switch_fullframe_horizon', 2)))
+            except Exception:
+                self._switch_fullframe_frames = 2
             idle_ms = max(0.0, (time.perf_counter() - self._last_interaction_ts) * 1000.0)
             self._record_policy_decision(
                 policy=self._policy_name,
@@ -673,6 +771,35 @@ class EGLRendererWorker:
         # Adapter path handles view updates; no scene re-init or forced render here
 
     def _init_egl(self) -> None:
+        # If a GL context is already current (e.g., created by VisPy's EGL
+        # backend), adopt it instead of creating our own. This ensures a single
+        # context is used for both drawing and capture.
+        try:
+            cur_ctx = EGL.eglGetCurrentContext()
+        except Exception:
+            cur_ctx = None
+        if cur_ctx and cur_ctx != EGL.EGL_NO_CONTEXT:
+            try:
+                self.egl_display = EGL.eglGetCurrentDisplay()
+                # Track draw surface; read is typically the same for pbuffers
+                self.egl_surface = EGL.eglGetCurrentSurface(EGL.EGL_DRAW)
+                self.egl_context = cur_ctx
+                # Mark that we do not own the EGL lifecycle created elsewhere
+                self._owns_egl = False
+                # Ensure we read from the right default buffer for pbuffers
+                try:
+                    dbl = bool(GL.glGetBooleanv(GL.GL_DOUBLEBUFFER))
+                except Exception:
+                    dbl = False
+                try:
+                    GL.glReadBuffer(GL.GL_BACK if dbl else GL.GL_FRONT)
+                    logger.debug("Adopted EGL ctx: GL_DOUBLEBUFFER=%s -> GL_READ_BUFFER=%s", dbl, 'BACK' if dbl else 'FRONT')
+                except Exception:
+                    logger.debug("Setting GL_READ_BUFFER failed on adopted ctx", exc_info=True)
+                return
+            except Exception:
+                logger.debug("Adopting current EGL context failed; creating our own", exc_info=True)
+        # No context current; create our own headless EGL pbuffer context
         egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
         if egl_display == EGL.EGL_NO_DISPLAY:
             raise RuntimeError("Failed to get EGL display")
@@ -714,6 +841,17 @@ class EGLRendererWorker:
         self.egl_display = egl_display
         self.egl_context = egl_context
         self.egl_surface = egl_surface
+        self._owns_egl = True
+        # Ensure correct read buffer for single/double buffered surfaces
+        try:
+            dbl = bool(GL.glGetBooleanv(GL.GL_DOUBLEBUFFER))
+        except Exception:
+            dbl = False
+        try:
+            GL.glReadBuffer(GL.GL_BACK if dbl else GL.GL_FRONT)
+            logger.debug("Created EGL ctx: GL_DOUBLEBUFFER=%s -> GL_READ_BUFFER=%s", dbl, 'BACK' if dbl else 'FRONT')
+        except Exception:
+            logger.debug("Setting GL_READ_BUFFER failed on created ctx", exc_info=True)
 
     def _init_cuda(self) -> None:
         cuda.init()
@@ -810,6 +948,10 @@ class EGLRendererWorker:
     # --- Multiscale: request switch (thread-safe) ---
     def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
         """Queue a multiscale level switch; applied on render thread next frame."""
+        if getattr(self, '_lock_level', None) is not None:
+            if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+                logger.info("request_multiscale_level ignored due to lock_level=%s", str(self._lock_level))
+            return
         if self._state_lock.acquire(blocking=False):
             try:
                 if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
@@ -862,6 +1004,9 @@ class EGLRendererWorker:
         return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
     def _log_ms_switch(self, *, previous: int, applied: int, source: ZarrSceneSource, elapsed_ms: float, reason: str) -> None:
+        # Suppress no-op logs when level doesn't change
+        if int(previous) == int(applied):
+            return
         roi_desc = self._format_level_roi(source, applied)
         logger.info(
             "ms.switch: level=%d->%d roi=%s reason=%s elapsed=%.2fms",
@@ -924,7 +1069,7 @@ class EGLRendererWorker:
 
     def _oversampling_for_level(self, source: ZarrSceneSource, level: int) -> float:
         try:
-            roi = self._viewport_roi_for_level(source, level)
+            roi = self._viewport_roi_for_level(source, level, quiet=True)
             if roi.is_empty():
                 h, w = self._plane_wh_for_level(source, level)
             else:
@@ -1074,7 +1219,38 @@ class EGLRendererWorker:
                 logger.debug("viewport_world_bounds failed", exc_info=True)
             return None
 
-    def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int) -> SliceROI:
+    def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int, *, quiet: bool = False) -> SliceROI:
+        # Attempt to reuse cached ROI when the view transform has not changed
+        view = getattr(self, "view", None)
+        xform_sig: Optional[tuple[float, ...]] = None
+        if view is not None and hasattr(view, "scene") and hasattr(view.scene, "transform"):
+            try:
+                xform = view.scene.transform
+                if hasattr(xform, "matrix"):
+                    mat = getattr(xform, "matrix")
+                    # Flatten a small signature; convert to float tuple to make hashable and stable
+                    xform_sig = tuple(float(v) for v in mat.ravel())
+            except Exception:
+                xform_sig = None
+
+        cached = self._roi_cache.get(int(level))
+        if cached is not None and cached[0] is not None and xform_sig is not None and cached[0] == xform_sig:
+            # Cached ROI is valid for this transform signature
+            return cached[1]
+        # During the first few frames after a level switch, force full frame for active level
+        try:
+            if int(level) == int(getattr(self, '_active_ms_level', level)) and int(self._switch_fullframe_frames) > 0:
+                h, w = self._plane_wh_for_level(source, level)
+                return SliceROI(0, h, 0, w)
+        except Exception:
+            pass
+        if self._disable_init_roi and not self._init_roi_used:
+            # One-shot: use full frame ROI to guarantee visible content on init
+            self._init_roi_used = True
+            h, w = self._plane_wh_for_level(source, level)
+            if self._log_layer_debug:
+                logger.info("viewport ROI init-bypass: using full frame %dx%d (level=%d)", h, w, level)
+            return SliceROI(0, h, 0, w)
         h, w = self._plane_wh_for_level(source, level)
         sy, sx = self._plane_scale_for_level(source, level)
         if self.view is None or not hasattr(self.view, 'camera'):
@@ -1106,26 +1282,89 @@ class EGLRendererWorker:
             y_start = int(math.floor(min(y0, y1) / sy_world))
             y_stop = int(math.ceil(max(y0, y1) / sy_world))
             roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
-            if self._log_layer_debug:
-                logger.info(
-                    "viewport ROI level=%d world=(%.3f,%.3f)-(%.3f,%.3f) px=(%d,%d)->(%d,%d) dims=%dx%d scale=(%.6f,%.6f)",
-                    level,
-                    min(x0, x1),
-                    min(y0, y1),
-                    max(x0, x1),
-                    max(y0, y1),
-                    roi.y_start,
-                    roi.y_stop,
-                    roi.x_start,
-                    roi.x_stop,
-                    h,
-                    w,
-                    sy_world,
-                    sx_world,
-                )
+            # Align ROI to chunk boundaries to avoid sub-chunk phasing artifacts when panning
+            if getattr(self, '_roi_align_chunks', True):
+                try:
+                    arr = source.get_level(level)
+                    chunks = getattr(arr, 'chunks', None)
+                    axes = source.axes
+                    axes_lower = [str(ax).lower() for ax in axes]
+                    if chunks is not None:
+                        if 'y' in axes_lower:
+                            y_pos = axes_lower.index('y')
+                        else:
+                            y_pos = max(0, len(chunks) - 2)
+                        if 'x' in axes_lower:
+                            x_pos = axes_lower.index('x')
+                        else:
+                            x_pos = max(0, len(chunks) - 1)
+                        cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
+                        cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
+                        cy = max(1, cy)
+                        cx = max(1, cx)
+                        # Snap start to floor(chunk) and stop to ceil(chunk)
+                        ys = (roi.y_start // cy) * cy
+                        ye = ((roi.y_stop + cy - 1) // cy) * cy
+                        xs = (roi.x_start // cx) * cx
+                        xe = ((roi.x_stop + cx - 1) // cx) * cx
+                        roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
+                except Exception:
+                    logger.debug('roi chunk alignment failed', exc_info=True)
+            # Apply small-movement hysteresis against last logged ROI to reduce shimmering
+            try:
+                prev_logged = self._roi_log_state.get(int(level))
+                if prev_logged is not None:
+                    prev_roi, _ = prev_logged
+                    thr = int(getattr(self, '_roi_edge_threshold', 4))
+                    if (
+                        abs(roi.y_start - prev_roi.y_start) < thr and
+                        abs(roi.y_stop  - prev_roi.y_stop)  < thr and
+                        abs(roi.x_start - prev_roi.x_start) < thr and
+                        abs(roi.x_stop  - prev_roi.x_stop)  < thr
+                    ):
+                        roi = prev_roi
+            except Exception:
+                pass
+            if (not quiet) and self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+                # Only log when ROI changes or enough time passes
+                prev = self._roi_log_state.get(int(level))
+                now = time.perf_counter()
+                should_log = False
+                if prev is None:
+                    should_log = True
+                else:
+                    prev_roi, prev_ts = prev
+                    if (
+                        roi.y_start != prev_roi.y_start or roi.y_stop != prev_roi.y_stop or
+                        roi.x_start != prev_roi.x_start or roi.x_stop != prev_roi.x_stop
+                    ):
+                        should_log = True
+                    elif (now - prev_ts) >= self._roi_log_interval:
+                        should_log = True
+                if should_log:
+                    logger.info(
+                        "viewport ROI level=%d world=(%.3f,%.3f)-(%.3f,%.3f) px=(%d,%d)->(%d,%d) dims=%dx%d scale=(%.6f,%.6f)",
+                        level,
+                        min(x0, x1),
+                        min(y0, y1),
+                        max(x0, x1),
+                        max(y0, y1),
+                        roi.y_start,
+                        roi.y_stop,
+                        roi.x_start,
+                        roi.x_stop,
+                        h,
+                        w,
+                        sy_world,
+                        sx_world,
+                    )
+                    self._roi_log_state[int(level)] = (roi, now)
             if roi.is_empty():
                 self._log_roi_fallback(level=level, reason="empty", plane_h=h, plane_w=w, scale=(sy_world, sx_world))
                 return SliceROI(0, h, 0, w)
+            # Update cache against the current transform signature
+            if xform_sig is not None:
+                self._roi_cache[int(level)] = (xform_sig, roi)
             return roi
         except Exception:
             if self._log_layer_debug:
@@ -1217,6 +1456,12 @@ class EGLRendererWorker:
         z_idx: int,
     ) -> np.ndarray:
         roi = self._viewport_roi_for_level(source, level)
+        # Consume one frame of the full-frame horizon after switches when applicable
+        try:
+            if int(level) == int(getattr(self, '_active_ms_level', level)) and int(self._switch_fullframe_frames) > 0:
+                self._switch_fullframe_frames = int(self._switch_fullframe_frames) - 1
+        except Exception:
+            pass
         slab = source.slice(level, z_idx, compute=True, roi=roi)
         if not isinstance(slab, np.ndarray):
             slab = np.asarray(slab, dtype=np.float32)
@@ -1353,17 +1598,67 @@ class EGLRendererWorker:
         axes = source.axes
         axes_lower = [str(ax).lower() for ax in axes]
 
+        # Preserve current Z (and other indices) across level switches.
         step_hint: Optional[Sequence[int]] = None
-        if self._viewer is not None:
+        # 1) Use last dims step received from intents, if any
+        if self._last_step is not None:
+            step_hint = tuple(int(x) for x in self._last_step)
+        # 2) Else fall back to viewer's dims if available
+        if step_hint is None and self._viewer is not None:
             try:
-                step_hint = tuple(self._viewer.dims.current_step)
+                step_hint = tuple(int(x) for x in self._viewer.dims.current_step)
             except Exception:
                 step_hint = None
+        # 3) Else use source current step
+        if step_hint is None:
+            step_hint = source.current_step
+
+        # Proportional Z remap when switching between levels with different Z depth
+        try:
+            prev_level = getattr(self, '_pending_prev_level', None)
+            if prev_level is not None and 'z' in axes_lower:
+                zi = axes_lower.index('z')
+                try:
+                    prev_desc = source.level_descriptors[int(prev_level)]
+                    z_src = int(prev_desc.shape[zi]) if 0 <= zi < len(prev_desc.shape) else int(prev_desc.shape[0])
+                except Exception:
+                    z_src = None
+                try:
+                    z_tgt = int(descriptor.shape[zi]) if 0 <= zi < len(descriptor.shape) else int(descriptor.shape[0])
+                except Exception:
+                    z_tgt = None
+                if (z_src is not None and z_tgt is not None and z_src > 0 and z_tgt > 0):
+                    cur_z = None
+                    if self._z_index is not None:
+                        cur_z = int(self._z_index)
+                    elif step_hint is not None and len(step_hint) > zi:
+                        cur_z = int(step_hint[zi])
+                    else:
+                        cur_z = 0
+                    if z_src <= 1:
+                        new_z = 0
+                    else:
+                        new_z = int(round(float(cur_z) * float(max(0, z_tgt - 1)) / float(max(1, z_src - 1))))
+                    new_z = max(0, min(int(new_z), int(z_tgt - 1)))
+                    sh = list(step_hint) if step_hint is not None else [0] * len(descriptor.shape)
+                    if len(sh) < len(descriptor.shape):
+                        sh.extend([0] * (len(descriptor.shape) - len(sh)))
+                    sh[zi] = int(new_z)
+                    step_hint = tuple(int(x) for x in sh)
+        except Exception:
+            logger.debug("proportional Z remap failed", exc_info=True)
 
         with self._state_lock:
             step = source.set_current_level(level, step=step_hint)
 
         self._active_ms_level = level
+        # Keep viewer slider aligned with the applied level's clamped step
+        if self._viewer is not None:
+            try:
+                self._viewer.dims.current_step = tuple(int(x) for x in step)
+                self._last_step = tuple(int(x) for x in step)
+            except Exception:
+                logger.debug("apply_level: syncing viewer dims failed", exc_info=True)
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
         self._zarr_axes = ''.join(axes)
@@ -1423,7 +1718,22 @@ class EGLRendererWorker:
                     logger.debug("apply slab stats failed", exc_info=True)
             if update_layer:
                 layer.data = slab
-                layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
+                # Optionally keep existing contrast limits stable across pans/level switches
+                try:
+                    if not getattr(self, '_sticky_contrast', True):
+                        smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
+                        smax = float(np.nanmax(slab)) if hasattr(np, 'nanmax') else float(np.max(slab))
+                        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
+                            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
+                        else:
+                            if 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
+                                layer.contrast_limits = [0.0, 1.0]
+                            else:
+                                layer.contrast_limits = [smin, smax]
+                except Exception:
+                    # If sticky, leave as-is; else fallback to provided contrast
+                    if not getattr(self, '_sticky_contrast', True):
+                        layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
             h, w = self._plane_wh_for_level(source, level)
             self._data_wh = (w, h)
             try:
@@ -1452,6 +1762,10 @@ class EGLRendererWorker:
     ) -> None:
         """Switch level immediately and record policy decision."""
         if not self._zarr_path:
+            return
+        if getattr(self, '_lock_level', None) is not None:
+            if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+                logger.info("perform_level_switch ignored due to lock_level=%s", str(self._lock_level))
             return
         if source is None:
             source = self._ensure_scene_source()
@@ -1848,7 +2162,11 @@ class EGLRendererWorker:
                 factor = float(cmd.factor) if cmd.factor is not None else 0.0
                 if factor <= 0.0:
                     continue
-                self._pending_zoom_ratio = float(factor)
+                # Gate policy switching by env; still apply camera zoom
+                if getattr(self, '_disable_zoom_policy', False):
+                    self._pending_zoom_ratio = None
+                else:
+                    self._pending_zoom_ratio = float(factor)
                 self._pending_zoom_ts = time.perf_counter()
                 anchor = cmd.anchor_px or (canvas_wh[0] * 0.5, canvas_wh[1] * 0.5)
                 if isinstance(cam, scene.cameras.TurntableCamera):
@@ -1893,6 +2211,7 @@ class EGLRendererWorker:
             self._mark_render_tick_needed()
             if policy_touch:
                 self._eval_after_render = True
+            # No additional camera clamping beyond core mapping
 
     def _apply_camera_reset(self, cam) -> None:
         if cam is None or not hasattr(cam, 'set_range'):
@@ -1957,13 +2276,88 @@ class EGLRendererWorker:
             if self._viewer is not None:
                 try:
                     steps = tuple(int(x) for x in state.current_step)
-                    self._viewer.dims.current_step = steps
+                    # Remember last dims for preserving indices across switches
+                    self._last_step = steps
+                    # Compute intended z index based on axes
+                    z_new = None
                     if self._scene_source is not None:
                         axes = self._scene_source.axes
                         if 'z' in axes:
-                            idx = axes.index('z')
-                            if idx < len(steps):
-                                self._z_index = int(steps[idx])
+                            zi = axes.index('z')
+                            if zi < len(steps):
+                                z_new = int(steps[zi])
+                    # Apply dims to viewer
+                    self._viewer.dims.current_step = steps
+                    # If z changed, update the slab immediately and mark a render
+                    if z_new is not None and (self._z_index is None or int(z_new) != int(self._z_index)):
+                        try:
+                            source = self._ensure_scene_source()
+                            self._set_level_with_budget(self._active_ms_level, reason="step")
+                            # On Z change, bypass ROI once to guarantee visible content
+                            try:
+                                slab = source.slice(self._active_ms_level, int(z_new), compute=True, roi=None)
+                                if not isinstance(slab, np.ndarray):
+                                    slab = np.asarray(slab, dtype=np.float32)
+                            except Exception:
+                                slab = self._load_slice(source, self._active_ms_level, int(z_new))
+                            layer = getattr(self, '_napari_layer', None)
+                            if layer is not None:
+                                layer.data = slab
+                                try:
+                                    layer.visible = True
+                                    layer.opacity = 1.0
+                                    layer.blending = 'opaque'
+                                except Exception:
+                                    pass
+                                # Update contrast limits for the new Z slice unless sticky
+                                try:
+                                    if not getattr(self, '_sticky_contrast', True):
+                                        smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
+                                        smax = float(np.nanmax(slab)) if hasattr(np, 'nanmax') else float(np.max(slab))
+                                        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
+                                            layer.contrast_limits = [0.0, 1.0]
+                                        else:
+                                            if 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
+                                                layer.contrast_limits = [0.0, 1.0]
+                                            else:
+                                                layer.contrast_limits = [smin, smax]
+                                except Exception:
+                                    logger.debug("apply_state: contrast update failed", exc_info=True)
+                            vis = getattr(self, '_visual', None)
+                            if vis is not None and hasattr(vis, 'set_data'):
+                                vis.set_data(slab)  # type: ignore[attr-defined]
+                            h, w = int(slab.shape[0]), int(slab.shape[1])
+                            cam = getattr(self.view, 'camera', None)
+                            # Ensure camera sees the new slice only if not preserving view
+                            if cam is not None and hasattr(cam, 'set_range') and not getattr(self, '_preserve_view_on_switch', True):
+                                try:
+                                    sy, sx = (1.0, 1.0)
+                                    if self._scene_source is not None:
+                                        sy, sx = self._plane_scale_for_level(self._scene_source, int(self._active_ms_level))
+                                    world_w = max(1.0, float(w) * float(max(1e-12, sx)))
+                                    world_h = max(1.0, float(h) * float(max(1e-12, sy)))
+                                    cam.set_range(x=(0.0, world_w), y=(0.0, world_h))
+                                except Exception:
+                                    logger.debug("apply_state: camera set_range on z-change failed", exc_info=True)
+                            self._data_wh = (w, h)
+                            self._z_index = int(z_new)
+                            # Ensure subsequent frames also bypass ROI for a few frames to stabilize view
+                            self._z_fullframe_frames = int(max(0, self._z_fullframe_horizon))
+                            # Optionally force IDR on Z for immediate visibility on clients
+                            if getattr(self, '_idr_on_z', False):
+                                try:
+                                    self._force_next_idr = True
+                                except Exception:
+                                    pass
+                            self._notify_scene_refresh()
+                            self._mark_render_tick_needed()
+                            if self._log_layer_debug:
+                                logger.info("apply_state: z updated -> %d (level=%d)", int(self._z_index), int(self._active_ms_level))
+                        except Exception:
+                            logger.debug("apply_state: immediate slab update failed", exc_info=True)
+                    else:
+                        # Even if z didn’t change, ensure a render to reflect dims
+                        self._mark_render_tick_needed()
                 except Exception:
                     logger.debug("apply_state: viewer dims update failed", exc_info=True)
             elif self._scene_source is not None:
@@ -2228,6 +2622,22 @@ class EGLRendererWorker:
                         "Pre-encode channel means: R=%.3f G=%.3f B=%.3f | Y=%.3f Cb=%.3f Cr=%.3f",
                         rm, gm, bm, ym, cbm, crm,
                     )
+                    # If the very first captured frame is black-ish, try a one-shot camera reset
+                    try:
+                        if (
+                            getattr(self, '_auto_reset_on_black', False)
+                            and not getattr(self, '_black_reset_done', False)
+                            and (rm + gm + bm) < 1e-4
+                        ):
+                            logger.info("Detected black initial frame; applying one-shot camera reset")
+                            if hasattr(self, 'view') and hasattr(self.view, 'camera'):
+                                self._apply_camera_reset(self.view.camera)
+                            self._black_reset_done = True
+                        # Mark orientation ready once we see a non-black frame
+                        if (rm + gm + bm) >= 1e-4:
+                            self._orientation_ready = True
+                    except Exception:
+                        logger.debug("auto-reset-on-black failed", exc_info=True)
                     setattr(self, '_logged_swizzle_stats', True)
             except Exception as e:
                 logger.debug("Swizzle stats log failed: %s", e)
@@ -2422,7 +2832,10 @@ class EGLRendererWorker:
         self._viewer = None
         self._napari_layer = None
         try:
-            if self.egl_display is not None:
+            # Only terminate EGL display if we created/own it. When adopting a
+            # context from a backend (e.g., VisPy EGL), the backend manages its
+            # own EGL lifecycle.
+            if getattr(self, '_owns_egl', False) and self.egl_display is not None:
                 EGL.eglTerminate(self.egl_display)
         except Exception as e:
             logger.debug("Cleanup: eglTerminate failed: %s", e)
