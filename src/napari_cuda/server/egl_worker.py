@@ -250,6 +250,11 @@ class EGLRendererWorker:
         self._last_policy_ctx_log_ts: float = 0.0
         self._decision_seq: int = 0
         self._log_layer_debug = env_bool('NAPARI_CUDA_LAYER_DEBUG', False)
+        # Focused logging for ROI anchor/center reconciliation without all layer debug
+        try:
+            self._log_roi_anchor = env_bool('NAPARI_CUDA_LOG_ROI_ANCHOR', False)
+        except Exception:
+            self._log_roi_anchor = False
         # Focused selector logging without enabling full layer debug
         try:
             self._log_policy_eval = env_bool('NAPARI_CUDA_LOG_POLICY_EVAL', False)
@@ -331,6 +336,8 @@ class EGLRendererWorker:
         except Exception:
             self._switch_fullframe_horizon = 2
         self._switch_fullframe_frames: int = 0
+        # Last applied ROI for the active level (for placement/translate)
+        self._last_roi: Optional[tuple[int, SliceROI]] = None
 
         if policy_name:
             try:
@@ -437,8 +444,6 @@ class EGLRendererWorker:
         shape = tuple(int(s) for s in descriptor.shape)
         ranges = tuple((0, max(0, s - 1), 1) for s in shape)
         self._viewer.dims.range = ranges
-        if self._log_layer_debug:
-            logger.info("dims range set: level=%d ranges=%s", int(level), str(ranges))
 
     def _set_level_with_budget(self, desired_level: int, *, reason: str) -> None:
         source = self._ensure_scene_source()
@@ -454,6 +459,9 @@ class EGLRendererWorker:
             # Allow graceful downgrade for 2D slices when over slice budget
             candidates = list(range(desired_level, levels_count))
 
+        # Capture current viewport center in world space to reconcile ROI after switch
+        # No center-anchored correction: placement uses layer.translate; keep ROI simple
+
         for idx, level in enumerate(candidates):
             try:
                 prev_level = int(self._active_ms_level)
@@ -463,6 +471,18 @@ class EGLRendererWorker:
                 else:
                     self._slice_budget_allows(source, level)
                 start = time.perf_counter()
+                # Prepare full-frame ROI horizon and clear any stale ROI cache for target level
+                try:
+                    self._switch_fullframe_frames = int(max(0, getattr(self, '_switch_fullframe_horizon', 2)))
+                except Exception:
+                    self._switch_fullframe_frames = 2
+                try:
+                    if hasattr(self, '_roi_cache'):
+                        self._roi_cache.pop(int(level), None)
+                    if hasattr(self, '_roi_log_state'):
+                        self._roi_log_state.pop(int(level), None)
+                except Exception:
+                    pass
                 # Expose previous level to allow proportional Z remap in apply
                 self._pending_prev_level = prev_level
                 self._apply_level_internal(source, level)
@@ -632,13 +652,9 @@ class EGLRendererWorker:
         try:
             prev = int(self._active_ms_level)
             reason = "policy" if ctx.intent_level is not None else "zoom"
+            # Apply without forcing full-frame ROI to avoid visible ROI jumps
             self._set_level_with_budget(desired, reason=reason)
             self._last_level_switch_ts = now_ts
-            # After a level switch, force full-frame ROI for a few frames to avoid transient black
-            try:
-                self._switch_fullframe_frames = int(max(0, getattr(self, '_switch_fullframe_horizon', 2)))
-            except Exception:
-                self._switch_fullframe_frames = 2
             idle_ms = max(0.0, (time.perf_counter() - self._last_interaction_ts) * 1000.0)
             self._record_policy_decision(
                 policy=self._policy_name,
@@ -868,7 +884,28 @@ class EGLRendererWorker:
         cb = self._scene_refresh_cb
         if cb is None:
             return
+        # Try to provide the most authoritative step we have
+        step_hint = None
         try:
+            src = getattr(self, '_scene_source', None)
+            if src is not None:
+                st = getattr(src, 'current_step', None)
+                if st is not None:
+                    step_hint = tuple(int(x) for x in st)
+        except Exception:
+            step_hint = None
+        if step_hint is None:
+            try:
+                if self._viewer is not None:
+                    step_hint = tuple(int(x) for x in self._viewer.dims.current_step)
+            except Exception:
+                step_hint = None
+        if step_hint is None and self._z_index is not None:
+            step_hint = (int(self._z_index),)
+        # Pass step hint directly to server callback if supported
+        try:
+            cb(step_hint)  # type: ignore[misc]
+        except TypeError:
             cb()
         except Exception:
             logger.debug("scene refresh callback failed", exc_info=True)
@@ -964,7 +1001,8 @@ class EGLRendererWorker:
 
     def _oversampling_for_level(self, source: ZarrSceneSource, level: int) -> float:
         try:
-            roi = self._viewport_roi_for_level(source, level, quiet=True)
+            # For policy calculations, ignore full-frame horizon and ROI hysteresis
+            roi = self._viewport_roi_for_level(source, level, quiet=True, for_policy=True)
             if roi.is_empty():
                 h, w = self._plane_wh_for_level(source, level)
             else:
@@ -1114,7 +1152,10 @@ class EGLRendererWorker:
                 logger.debug("viewport_world_bounds failed", exc_info=True)
             return None
 
-    def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int, *, quiet: bool = False) -> SliceROI:
+    # Note: we previously computed a world-space viewport center for a one-shot
+    # ROI reconciliation. With layer.translate placement, this is no longer used.
+
+    def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int, *, quiet: bool = False, for_policy: bool = False) -> SliceROI:
         # Attempt to reuse cached ROI when the view transform has not changed
         view = getattr(self, "view", None)
         xform_sig: Optional[tuple[float, ...]] = None
@@ -1132,13 +1173,15 @@ class EGLRendererWorker:
         if cached is not None and cached[0] is not None and xform_sig is not None and cached[0] == xform_sig:
             # Cached ROI is valid for this transform signature
             return cached[1]
-        # During the first few frames after a level switch, force full frame for active level
-        try:
-            if int(level) == int(getattr(self, '_active_ms_level', level)) and int(self._switch_fullframe_frames) > 0:
-                h, w = self._plane_wh_for_level(source, level)
-                return SliceROI(0, h, 0, w)
-        except Exception:
-            pass
+        # During the first few frames after a level switch, force full frame for active level.
+        # However, policy/oversampling computation should ignore this to avoid oscillation.
+        if not bool(for_policy):
+            try:
+                if int(level) == int(getattr(self, '_active_ms_level', level)) and int(self._switch_fullframe_frames) > 0:
+                    h, w = self._plane_wh_for_level(source, level)
+                    return SliceROI(0, h, 0, w)
+            except Exception:
+                pass
         if self._disable_init_roi and not self._init_roi_used:
             # One-shot: use full frame ROI to guarantee visible content on init
             self._init_roi_used = True
@@ -1177,8 +1220,18 @@ class EGLRendererWorker:
             y_start = int(math.floor(min(y0, y1) / sy_world))
             y_stop = int(math.ceil(max(y0, y1) / sy_world))
             roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
+            if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
+                # Log initial world bounds and resulting index ROI
+                cx_i = 0.5 * (roi.x_start + roi.x_stop)
+                cy_i = 0.5 * (roi.y_start + roi.y_stop)
+                logger.info(
+                    "roi.initial: level=%d world=(x=[%.2f,%.2f], y=[%.2f,%.2f]) scale=(%.6f,%.6f) index=(y=%d:%d x=%d:%d) center_i=(%.2f,%.2f)",
+                    int(level), float(x0), float(x1), float(y0), float(y1), float(sy_world), float(sx_world),
+                    int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop),
+                    float(cx_i), float(cy_i)
+                )
             # Align ROI to chunk boundaries to avoid sub-chunk phasing artifacts when panning
-            if getattr(self, '_roi_align_chunks', True):
+            if (not for_policy) and getattr(self, '_roi_align_chunks', True):
                 try:
                     arr = source.get_level(level)
                     chunks = getattr(arr, 'chunks', None)
@@ -1197,63 +1250,46 @@ class EGLRendererWorker:
                         cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
                         cy = max(1, cy)
                         cx = max(1, cx)
-                        # Snap start to floor(chunk) and stop to ceil(chunk)
+                        # Snap start to floor(chunk) and stop to ceil(chunk), with small symmetric padding
                         ys = (roi.y_start // cy) * cy
                         ye = ((roi.y_stop + cy - 1) // cy) * cy
                         xs = (roi.x_start // cx) * cx
                         xe = ((roi.x_stop + cx - 1) // cx) * cx
+                        pad_chunks = int(getattr(self, '_roi_pad_chunks', 1))
+                        ys = max(0, ys - pad_chunks * cy)
+                        ye = min(h, ye + pad_chunks * cy)
+                        xs = max(0, xs - pad_chunks * cx)
+                        xe = min(w, xe + pad_chunks * cx)
+                        pre = roi
                         roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
+                        if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
+                            logger.info(
+                                "roi.aligned: level=%d chunks=(y=%d,x=%d) pre=(y=%d:%d x=%d:%d) -> aligned=(y=%d:%d x=%d:%d)",
+                                int(level), int(cy), int(cx),
+                                int(pre.y_start), int(pre.y_stop), int(pre.x_start), int(pre.x_stop),
+                                int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop)
+                            )
                 except Exception:
                     logger.debug('roi chunk alignment failed', exc_info=True)
-            # Apply small-movement hysteresis against last logged ROI to reduce shimmering
-            try:
-                prev_logged = self._roi_log_state.get(int(level))
-                if prev_logged is not None:
-                    prev_roi, _ = prev_logged
-                    thr = int(getattr(self, '_roi_edge_threshold', 4))
-                    if (
-                        abs(roi.y_start - prev_roi.y_start) < thr and
-                        abs(roi.y_stop  - prev_roi.y_stop)  < thr and
-                        abs(roi.x_start - prev_roi.x_start) < thr and
-                        abs(roi.x_stop  - prev_roi.x_stop)  < thr
-                    ):
-                        roi = prev_roi
-            except Exception:
-                pass
-            if (not quiet) and self._log_layer_debug and logger.isEnabledFor(logging.INFO):
-                # Only log when ROI changes or enough time passes
-                prev = self._roi_log_state.get(int(level))
-                now = time.perf_counter()
-                should_log = False
-                if prev is None:
-                    should_log = True
-                else:
-                    prev_roi, prev_ts = prev
-                    if (
-                        roi.y_start != prev_roi.y_start or roi.y_stop != prev_roi.y_stop or
-                        roi.x_start != prev_roi.x_start or roi.x_stop != prev_roi.x_stop
-                    ):
-                        should_log = True
-                    elif (now - prev_ts) >= self._roi_log_interval:
-                        should_log = True
-                if should_log:
-                    logger.info(
-                        "viewport ROI level=%d world=(%.3f,%.3f)-(%.3f,%.3f) px=(%d,%d)->(%d,%d) dims=%dx%d scale=(%.6f,%.6f)",
-                        level,
-                        min(x0, x1),
-                        min(y0, y1),
-                        max(x0, x1),
-                        max(y0, y1),
-                        roi.y_start,
-                        roi.y_stop,
-                        roi.x_start,
-                        roi.x_stop,
-                        h,
-                        w,
-                        sy_world,
-                        sx_world,
-                    )
-                    self._roi_log_state[int(level)] = (roi, now)
+            # Apply small-move hysteresis only for rendering, not for policy decisions
+            if not for_policy:
+                try:
+                    prev_logged = self._roi_log_state.get(int(level))
+                    if prev_logged is not None:
+                        prev_roi, _ = prev_logged
+                        thr = int(getattr(self, '_roi_edge_threshold', 4))
+                        if (
+                            abs(roi.y_start - prev_roi.y_start) < thr and
+                            abs(roi.y_stop  - prev_roi.y_stop)  < thr and
+                            abs(roi.x_start - prev_roi.x_start) < thr and
+                            abs(roi.x_stop  - prev_roi.x_stop)  < thr
+                        ):
+                            roi = prev_roi
+                except Exception:
+                    pass
+
+            # Center-anchored reconciliation removed; placement uses layer.translate now
+            # (ROI verbose logging removed)
             if roi.is_empty():
                 self._log_roi_fallback(level=level, reason="empty", plane_h=h, plane_w=w, scale=(sy_world, sx_world))
                 return SliceROI(0, h, 0, w)
@@ -1357,6 +1393,11 @@ class EGLRendererWorker:
                 self._switch_fullframe_frames = int(self._switch_fullframe_frames) - 1
         except Exception:
             pass
+        # Remember ROI used for this level so we can place the slab in world coords
+        try:
+            self._last_roi = (int(level), roi)
+        except Exception:
+            self._last_roi = None
         slab = source.slice(level, z_idx, compute=True, roi=roi)
         if not isinstance(slab, np.ndarray):
             slab = np.asarray(slab, dtype=np.float32)
@@ -1508,10 +1549,10 @@ class EGLRendererWorker:
         if step_hint is None:
             step_hint = source.current_step
 
-        # Proportional Z remap when switching between levels with different Z depth
+        # Proportional Z remap only when switching between different levels (depth may change)
         try:
             prev_level = getattr(self, '_pending_prev_level', None)
-            if prev_level is not None and 'z' in axes_lower:
+            if prev_level is not None and int(prev_level) != int(level) and 'z' in axes_lower:
                 zi = axes_lower.index('z')
                 try:
                     prev_desc = source.level_descriptors[int(prev_level)]
@@ -1524,10 +1565,11 @@ class EGLRendererWorker:
                     z_tgt = None
                 if (z_src is not None and z_tgt is not None and z_src > 0 and z_tgt > 0):
                     cur_z = None
-                    if self._z_index is not None:
-                        cur_z = int(self._z_index)
-                    elif step_hint is not None and len(step_hint) > zi:
+                    # Prefer explicit step_hint (e.g., from a dims intent) over stale cached z_index
+                    if step_hint is not None and len(step_hint) > zi:
                         cur_z = int(step_hint[zi])
+                    elif self._z_index is not None:
+                        cur_z = int(self._z_index)
                     else:
                         cur_z = 0
                     if z_src <= 1:
@@ -1535,6 +1577,7 @@ class EGLRendererWorker:
                     else:
                         new_z = int(round(float(cur_z) * float(max(0, z_tgt - 1)) / float(max(1, z_src - 1))))
                     new_z = max(0, min(int(new_z), int(z_tgt - 1)))
+                    # (diagnostic logging removed)
                     sh = list(step_hint) if step_hint is not None else [0] * len(descriptor.shape)
                     if len(sh) < len(descriptor.shape):
                         sh.extend([0] * (len(descriptor.shape) - len(sh)))
@@ -1548,8 +1591,10 @@ class EGLRendererWorker:
 
         self._active_ms_level = level
         # Keep viewer slider aligned with the applied level's clamped step
+        # IMPORTANT: set dims.range first to avoid clamping against previous level
         if self._viewer is not None:
             try:
+                self._set_dims_range_for_level(source, level)
                 self._viewer.dims.current_step = tuple(int(x) for x in step)
                 self._last_step = tuple(int(x) for x in step)
             except Exception:
@@ -1566,9 +1611,12 @@ class EGLRendererWorker:
         else:
             self._z_index = None
 
+        # (diagnostic logging removed)
+
         if self._viewer is not None:
-            self._viewer.dims.current_step = tuple(int(x) for x in step)
+            # Ensure range is applied before setting step to avoid transient clamp
             self._set_dims_range_for_level(source, level)
+            self._viewer.dims.current_step = tuple(int(x) for x in step)
 
         # Ensure contrast cache/limits are updated regardless of napari layer presence
         contrast = source.ensure_contrast(level=level)
@@ -1594,23 +1642,38 @@ class EGLRendererWorker:
             self._log_layer_assignment('volume', level, None, (d, h, w), contrast)
         else:
             z_idx = self._z_index or 0
+            # Apply per-level scale to the layer BEFORE computing ROI/slab so
+            # world->index mapping is consistent across level changes.
+            try:
+                sy, sx = self._plane_scale_for_level(source, level)
+                if update_layer:
+                    layer.scale = (sy, sx)
+            except Exception:
+                logger.debug("apply_level: setting 2D layer scale pre-slab failed", exc_info=True)
+                sy = sx = 1.0
             slab = self._load_slice(
                 source,
                 level,
                 z_idx,
             )
-            if self._log_layer_debug:
+            # Place the ROI slab at its world offset so the view doesn't nudge
+            if update_layer:
                 try:
-                    smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
-                    smax = float(np.nanmax(slab)) if hasattr(np, 'nanmax') else float(np.max(slab))
-                    smea = float(np.mean(slab))
-                    logger.info(
-                        "apply slab: level=%d z=%d shape=%sx%s dtype=%s min=%.6f max=%.6f mean=%.6f",
-                        int(level), int(z_idx), int(slab.shape[0]), int(slab.shape[1]),
-                        str(getattr(slab, 'dtype', 'na')), smin, smax, smea,
-                    )
+                    roi_for_layer = None
+                    try:
+                        if getattr(self, '_last_roi', None) is not None and int(self._last_roi[0]) == int(level):
+                            roi_for_layer = self._last_roi[1]
+                    except Exception:
+                        roi_for_layer = None
+                    if roi_for_layer is not None:
+                        yoff = float(roi_for_layer.y_start) * float(max(1e-12, sy))
+                        xoff = float(roi_for_layer.x_start) * float(max(1e-12, sx))
+                        layer.translate = (yoff, xoff)
+                    else:
+                        layer.translate = (0.0, 0.0)
                 except Exception:
-                    logger.debug("apply slab stats failed", exc_info=True)
+                    logger.debug("apply_level: setting 2D layer translate failed", exc_info=True)
+            # (slab statistics logging removed)
             if update_layer:
                 layer.data = slab
                 # Optionally keep existing contrast limits stable across pans/level switches
@@ -1632,16 +1695,13 @@ class EGLRendererWorker:
             h, w = self._plane_wh_for_level(source, level)
             self._data_wh = (w, h)
             try:
-                sy, sx = self._plane_scale_for_level(source, level)
-                if update_layer:
-                    layer.scale = (sy, sx)
                 if not getattr(self, '_preserve_view_on_switch', True):
                     if self.view is not None and hasattr(self.view, 'camera'):
-                        world_w = float(w) * float(sx)
-                        world_h = float(h) * float(sy)
+                        world_w = float(w) * float(max(1e-12, sx))
+                        world_h = float(h) * float(max(1e-12, sy))
                         self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             except Exception:
-                logger.debug("apply_level: setting 2D layer scale failed", exc_info=True)
+                logger.debug("apply_level: camera set_range failed", exc_info=True)
             self._log_layer_assignment('slice', level, self._z_index, (h, w), contrast)
 
         self._notify_scene_refresh()
@@ -2197,11 +2257,23 @@ class EGLRendererWorker:
                                 z_new = int(steps[zi])
                     # Apply dims to viewer
                     self._viewer.dims.current_step = steps
-                    # If z changed, update the slab immediately and mark a render
+                    # If z changed, update source/viewer and slab immediately and mark a render
                     if z_new is not None and (self._z_index is None or int(z_new) != int(self._z_index)):
                         try:
                             source = self._ensure_scene_source()
-                            self._set_level_with_budget(self._active_ms_level, reason="step")
+                            # Apply the z change directly without re-running level selection
+                            try:
+                                axes = source.axes
+                                zi = axes.index('z') if 'z' in axes else 0
+                                # Build a step with the new z, preserving other indices when available
+                                base = list(source.current_step or steps)
+                                if len(base) < len(source.level_shape(self._active_ms_level)):
+                                    base = base + [0] * (len(source.level_shape(self._active_ms_level)) - len(base))
+                                base[zi] = int(z_new)
+                                with self._state_lock:
+                                    _ = source.set_current_level(self._active_ms_level, step=tuple(int(x) for x in base))
+                            except Exception:
+                                logger.debug("apply_state: set_current_level(z) failed; will proceed to load slab", exc_info=True)
                             # On Z change, bypass ROI once to guarantee visible content
                             try:
                                 slab = source.slice(self._active_ms_level, int(z_new), compute=True, roi=None)
@@ -2281,7 +2353,18 @@ class EGLRendererWorker:
                     z_idx = self._z_index or 0
                 if self._z_index is None or int(z_idx) != int(self._z_index):
                     source = self._ensure_scene_source()
-                    self._set_level_with_budget(self._active_ms_level, reason="step")
+                    # Directly set source/viewer to requested z without level re-apply
+                    try:
+                        axes = source.axes
+                        zi = axes.index('z') if 'z' in axes else 0
+                        base = list(source.current_step or [0] * len(source.level_shape(self._active_ms_level)))
+                        if len(base) < len(source.level_shape(self._active_ms_level)):
+                            base = base + [0] * (len(source.level_shape(self._active_ms_level)) - len(base))
+                        base[zi] = int(z_idx)
+                        with self._state_lock:
+                            _ = source.set_current_level(self._active_ms_level, step=tuple(int(x) for x in base))
+                    except Exception:
+                        logger.debug("apply_state: set_current_level(z) failed (no viewer)", exc_info=True)
                     slab = self._load_slice(source, self._active_ms_level, int(z_idx))
                     vis = getattr(self, '_visual', None)
                     if vis is not None and hasattr(vis, 'set_data'):
@@ -2718,6 +2801,25 @@ class EGLRendererWorker:
         except Exception:
             hyst = 0.0
         selected = stabilize_level(int(desired), int(current), hysteresis=hyst)
+        # Direction-sensitive band to avoid alternating near the boundary
+        try:
+            thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
+        except Exception:
+            thr_in = 1.05
+        try:
+            thr_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
+        except Exception:
+            thr_out = 1.35
+        sel = int(selected)
+        if sel < current:
+            # Zooming in: only allow stepping to a finer level if that level is clearly under target
+            if overs_map.get(sel, float('inf')) > thr_in:
+                sel = current
+        elif sel > current:
+            # Zooming out: only allow stepping to a coarser level if current level is clearly over target
+            if overs_map.get(current, 0.0) < thr_out:
+                sel = current
+        selected = sel
         reason = 'napari'
         # Lock override
         lock = getattr(self, '_lock_level', None)
@@ -2726,9 +2828,20 @@ class EGLRendererWorker:
             reason = 'locked'
         # Apply if changed; budgets enforced inside _set_level_with_budget
         if int(selected) != int(current):
+            # Enforce a cooldown between level switches to avoid oscillation
+            now_ts = time.perf_counter()
+            try:
+                cool_ms = float(getattr(self, '_level_switch_cooldown_ms', 150.0))
+            except Exception:
+                cool_ms = 150.0
+            if self._last_level_switch_ts > 0.0:
+                elapsed_ms = (now_ts - float(self._last_level_switch_ts)) * 1000.0
+                if elapsed_ms < float(cool_ms):
+                    return
             prev = current
             try:
                 self._set_level_with_budget(int(selected), reason=reason)
+                self._last_level_switch_ts = now_ts
                 logger.info(
                     "ms.switch: %d -> %d (reason=%s) overs=%s",
                     int(prev), int(self._active_ms_level), reason,

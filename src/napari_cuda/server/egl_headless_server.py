@@ -292,11 +292,74 @@ class EGLHeadlessServer:
         Safe to call after mutating volume/multiscale state. Never raises.
         """
         try:
-            cur = None
+            # Gather steps from server state, worker viewer, and source
+            state_step: list[int] | None = None
             with self._state_lock:
                 cur = self._latest_state.current_step
-            step_list = list(cur) if isinstance(cur, (list, tuple)) else [0]
-            await self._broadcast_dims_update(step_list, last_client_id=client_id)
+                state_step = list(cur) if isinstance(cur, (list, tuple)) else None
+
+            w_step = None
+            try:
+                if self._worker is not None:
+                    vm = self._worker.viewer_model()
+                    if vm is not None:
+                        w_step = tuple(int(x) for x in vm.dims.current_step)  # type: ignore[attr-defined]
+            except Exception:
+                w_step = None
+
+            s_step = None
+            try:
+                src = getattr(self._worker, '_scene_source', None) if self._worker is not None else None
+                if src is not None:
+                    s_step = tuple(int(x) for x in (src.current_step or ()))
+            except Exception:
+                s_step = None
+
+            # Choose authoritative step: prefer source, then worker viewer, then server state
+            chosen: list[int] = []
+            source_of_truth = 'server'
+            if s_step is not None and len(s_step) > 0:
+                chosen = [int(x) for x in s_step]
+                source_of_truth = 'source'
+            elif w_step is not None and len(w_step) > 0:
+                chosen = [int(x) for x in w_step]
+                source_of_truth = 'viewer'
+            elif state_step is not None:
+                chosen = [int(x) for x in state_step]
+                source_of_truth = 'server'
+            else:
+                chosen = [0]
+                source_of_truth = 'default'
+
+            # Synchronize server state with chosen step to keep intents consistent
+            try:
+                with self._state_lock:
+                    s = self._latest_state
+                    self._latest_state = ServerSceneState(
+                        center=s.center,
+                        zoom=s.zoom,
+                        angles=s.angles,
+                        current_step=tuple(chosen),
+                    )
+            except Exception:
+                logger.debug('rebroadcast: failed to sync server state step', exc_info=True)
+
+            # Diagnostics: compare and note source of truth
+            try:
+                if self._log_dims_info:
+                    logger.info(
+                        "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
+                        source_of_truth, chosen, state_step, w_step, s_step,
+                    )
+                else:
+                    logger.debug(
+                        "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
+                        source_of_truth, chosen, state_step, w_step, s_step,
+                    )
+            except Exception:
+                pass
+
+            await self._broadcast_dims_update(chosen, last_client_id=client_id, ack=True)
         except Exception as e:
             logger.debug("rebroadcast meta failed: %s", e)
 
@@ -1070,15 +1133,32 @@ class EGLHeadlessServer:
         def worker_loop() -> None:
             try:
                 # Scene refresh callback: rebroadcast current dims/meta on worker-driven changes
-                def _on_scene_refresh() -> None:
+                def _on_scene_refresh(step: object = None) -> None:
+                    # If worker provided an explicit step, broadcast it directly; else rebroadcast meta
                     try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = asyncio.get_event_loop()
-                    # Fire-and-forget dims rebroadcast with latest state
-                    loop.call_soon_threadsafe(
-                        lambda: asyncio.create_task(self._rebroadcast_meta(client_id=None))
-                    )
+                        if step is not None and isinstance(step, (list, tuple)):
+                            chosen = [int(x) for x in step]
+                            # Synchronize server state so future intents use this baseline
+                            try:
+                                with self._state_lock:
+                                    s = self._latest_state
+                                    self._latest_state = ServerSceneState(
+                                        center=s.center,
+                                        zoom=s.zoom,
+                                        angles=s.angles,
+                                        current_step=tuple(int(x) for x in chosen),
+                                    )
+                            except Exception:
+                                logger.debug("scene.refresh: failed to sync server state step", exc_info=True)
+                            loop.call_soon_threadsafe(
+                                lambda c=chosen: asyncio.create_task(self._broadcast_dims_update(c, last_client_id=None, ack=True))
+                            )
+                        else:
+                            loop.call_soon_threadsafe(
+                                lambda: asyncio.create_task(self._rebroadcast_meta(client_id=None))
+                            )
+                    except Exception:
+                        logger.debug("scene.refresh scheduling failed", exc_info=True)
 
                 self._worker = EGLRendererWorker(
                     width=self.width,
@@ -1148,8 +1228,9 @@ class EGLHeadlessServer:
                             angles=queued.angles,
                             current_step=queued.current_step,
                         )
-                    if commands:
-                        logger.debug("frame commands snapshot count=%d", len(commands))
+                    # Only log command snapshots when state trace logging is enabled
+                    if commands and self._log_state_traces:
+                        logger.info("frame commands snapshot count=%d", len(commands))
                     state = ServerSceneState(
                         center=queued.center,
                         zoom=queued.zoom,

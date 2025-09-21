@@ -397,13 +397,13 @@ def apply_level(
 
     step = source.set_current_level(int(target_level), step=tuple(step_hint))
 
-    # Sync viewer
+    # Sync viewer: set range first, then current_step to avoid clamping to old range
     if viewer is not None:
         try:
+            set_dims_range_for_level(viewer, source, int(target_level))
             viewer.dims.current_step = tuple(int(x) for x in step)
         except Exception:
             logger.debug("apply_level: syncing viewer dims failed", exc_info=True)
-        set_dims_range_for_level(viewer, source, int(target_level))
 
     # Contrast and scale
     contrast = source.ensure_contrast(level=int(target_level))
@@ -441,4 +441,3 @@ __all__ = [
     "apply_level",
     "set_dims_range_for_level",
 ]
-
