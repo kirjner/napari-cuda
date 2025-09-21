@@ -501,12 +501,12 @@ class EGLHeadlessServer:
             if getattr(self._latest_state, 'current_step', None) is not None:
                 current_step = list(self._latest_state.current_step)  # type: ignore[arg-type]
         extras = {
-            'zarr_axes': getattr(self._worker, '_zarr_axes', None) if self._worker is not None else None,
+            'zarr_axes': (self._worker._zarr_axes if self._worker is not None else None),
             'zarr_level': self._zarr_level,
         }
         if self._policy_metrics_snapshot:
             extras['policy_metrics'] = self._policy_metrics_snapshot
-        if self._worker is not None and hasattr(self._worker, '_scene_source'):
+        if self._worker is not None:
             source = getattr(self._worker, '_scene_source', None)
             if source is not None:
                 extras['zarr_scale'] = list(source.level_scale(source.current_level))
@@ -522,7 +522,7 @@ class EGLHeadlessServer:
                 extras['multiscale_current_level'] = int(source.current_level)
                 # Keep multiscale server state in sync so client HUD reflects live level
                 try:
-                    # Advertise adaptive policy while adapter is active to reflect zoom-driven switches
+                    # Advertise adaptive policy; reflect zoom-driven switches
                     self._ms_state['policy'] = 'auto'
                     self._ms_state['current_level'] = int(source.current_level)
                     # Refresh levels if descriptor count changed (defensive)

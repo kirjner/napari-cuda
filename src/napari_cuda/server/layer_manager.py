@@ -20,6 +20,7 @@ from napari_cuda.protocol.messages import (
     SceneSpec,
     SceneSpecMessage,
 )
+from napari_cuda.server import scene_spec as _scene
 
 
 logger = logging.getLogger(__name__)
@@ -490,89 +491,56 @@ class ViewerSceneManager:
         metadata: Optional[Dict[str, Any]],
         adapter_layer: Optional[Any] = None,
     ) -> LayerSpec:
-        multiscale = self._adapter_multiscale_spec(
-            adapter_layer,
-            extras,
-            worker_snapshot.shape,
-        )
-        if multiscale is None:
-            multiscale = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
+        # Collect multiscale descriptors
+        ms_adapt = self._adapter_multiscale_spec(adapter_layer, extras, worker_snapshot.shape)
+        ms_state = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
+        levels: Optional[List[Dict[str, Any]]] = None
+        cur_level: Optional[int] = None
+        if ms_adapt is not None:
+            try:
+                levels = [lvl.to_dict() for lvl in ms_adapt.levels]
+                cur_level = int(ms_adapt.current_level)
+            except Exception:
+                logger.debug("layer_manager: adapt ms to_dict failed", exc_info=True)
+        elif ms_state is not None:
+            try:
+                levels = [lvl.to_dict() for lvl in ms_state.levels]
+                cur_level = int(ms_state.current_level)
+            except Exception:
+                logger.debug("layer_manager: state ms to_dict failed", exc_info=True)
+
         render_hints = self._build_render_hints(volume_state)
-
-        contrast_limits = None
-        if adapter_layer is not None:
-            clim = getattr(adapter_layer, "contrast_limits", None)
-            if isinstance(clim, (list, tuple)) and len(clim) >= 2:
-                contrast_limits = [float(clim[0]), float(clim[1])]
-        if contrast_limits is None and isinstance(volume_state, dict):
-            clim = volume_state.get("clim")
-            if isinstance(clim, (list, tuple)) and len(clim) >= 2:
-                try:
-                    contrast_limits = [float(clim[0]), float(clim[1])]
-                except (TypeError, ValueError) as exc:
-                    logger.debug("layer_manager: invalid contrast limits %s", clim, exc_info=exc)
-                    contrast_limits = None
-
-        layer_extras: Dict[str, Any] = {
-            "is_volume": worker_snapshot.is_volume,
-            "zarr_path": zarr_path,
-            "zarr_axes": worker_snapshot.zarr_axes,
-        }
+        # Compose extras map
+        layer_extras: Dict[str, Any] = {"zarr_axes": worker_snapshot.zarr_axes}
         if extras:
             layer_extras.update({k: v for k, v in extras.items() if v is not None})
 
-        # Prefer the active multiscale level's shape when available so that
-        # downstream dims.sizes/range reflect the current level (e.g. Z extent)
-        # rather than the full-resolution base level.
-        layer_shape = list(worker_snapshot.shape)
-        layer_ndim = int(worker_snapshot.ndim)
-        if multiscale is not None and isinstance(multiscale, MultiscaleSpec):
-            try:
-                cur = int(multiscale.current_level)
-                if 0 <= cur < len(multiscale.levels):
-                    lvl_shape = list(multiscale.levels[cur].shape or [])
-                    if lvl_shape:
-                        layer_shape = [int(x) for x in lvl_shape]
-                        layer_ndim = len(layer_shape)
-            except Exception:
-                # Keep fallback to worker snapshot shape on any inconsistency
-                logger.debug("layer_manager: using base shape for layer; multiscale level shape unavailable", exc_info=True)
-
-        # Align axis labels length with the effective layer ndim/shape. If the
-        # worker advertises a Z axis but the active multiscale level is 2D, we
-        # must drop the leading non-displayed axis (e.g., 'z') so downstream
-        # dims metadata is self-consistent and the client slider bounds derive
-        # from the active level's shape.
-        axis_labels = list(worker_snapshot.axis_labels)
-        if len(axis_labels) != layer_ndim:
-            try:
-                if len(axis_labels) > layer_ndim:
-                    axis_labels = axis_labels[-layer_ndim:]
-                else:
-                    defaults: Dict[int, List[str]] = {
-                        1: ["x"],
-                        2: ["y", "x"],
-                        3: ["z", "y", "x"],
-                        4: ["t", "z", "y", "x"],
-                    }
-                    axis_labels = list(defaults.get(layer_ndim, [f"axis-{i}" for i in range(layer_ndim)]))
-            except Exception:
-                axis_labels = [f"axis-{i}" for i in range(layer_ndim)]
-
-        return LayerSpec(
-            layer_id=self._default_layer_id,
-            layer_type="image",
-            name=self._default_layer_name,
-            ndim=layer_ndim,
-            shape=layer_shape,
-            dtype=worker_snapshot.dtype,
-            axis_labels=axis_labels,
-            contrast_limits=contrast_limits,
-            render=render_hints,
-            multiscale=multiscale,
-            metadata=metadata,
-            extras=layer_extras,
+        spec = _scene.build_layer_spec(
+            shape=worker_snapshot.shape,
+            is_volume=worker_snapshot.is_volume,
+            zarr_path=zarr_path,
+            multiscale_levels=levels,
+            multiscale_current_level=cur_level,
+            render_hints=render_hints.to_dict() if render_hints else None,  # type: ignore[arg-type]
+            extras=layer_extras or None,
+            metadata=metadata or None,
         )
+        # Preserve dtype and axis labels from snapshot logic
+        spec.dtype = worker_snapshot.dtype
+        spec.axis_labels = list(worker_snapshot.axis_labels)
+        # Preserve any contrast limits derived earlier
+        if adapter_layer is not None and hasattr(adapter_layer, "contrast_limits"):
+            clim = adapter_layer.contrast_limits  # type: ignore[attr-defined]
+            if isinstance(clim, (list, tuple)) and len(clim) >= 2:
+                spec.contrast_limits = [float(clim[0]), float(clim[1])]
+        elif isinstance(volume_state, dict):
+            clim_vs = volume_state.get("clim")
+            if isinstance(clim_vs, (list, tuple)) and len(clim_vs) >= 2:
+                try:
+                    spec.contrast_limits = [float(clim_vs[0]), float(clim_vs[1])]
+                except Exception:
+                    pass
+        return spec
 
     def _build_dims_spec(
         self,
@@ -582,77 +550,18 @@ class ViewerSceneManager:
         ndisplay: Optional[int],
         viewer_model: Optional[ViewerModel],
     ) -> DimsSpec:
-        ndim = int(layer_spec.ndim)
-        axis_labels = layer_spec.axis_labels or [f"axis-{i}" for i in range(ndim)]
-        order = axis_labels
-        sizes = [int(size) for size in layer_spec.shape]
-        ranges = [[0, max(0, int(size) - 1)] for size in sizes]
+        # Preserve viewer-provided current_step and ndisplay when available
+        viewer_dims = viewer_model.dims if viewer_model is not None else None
+        if current_step is None and viewer_dims is not None:
+            current_step = tuple(viewer_dims.current_step)
+        if ndisplay is None and viewer_dims is not None:
+            ndisplay = int(viewer_dims.ndisplay)
 
-        viewer_dims = None
-        if viewer_model is not None:
-            try:
-                viewer_dims = viewer_model.dims
-            except Exception:
-                viewer_dims = None
-
-        current: List[int] = []
-        source_current = current_step
-        if source_current is None and viewer_dims is not None:
-            try:
-                source_current = tuple(viewer_dims.current_step)  # type: ignore[attr-defined]
-            except Exception:
-                source_current = None
-        if source_current is not None:
-            try:
-                current = [int(x) for x in list(source_current)]
-            except Exception:
-                current = [0] * ndim
-        if len(current) < ndim:
-            current.extend([0] * (ndim - len(current)))
-        current = current[:ndim] if current else [0 for _ in range(ndim)]
-
-        viewer_ndisplay = None
-        viewer_displayed: Optional[List[int]] = None
-        if viewer_dims is not None:
-            try:
-                viewer_ndisplay = int(viewer_dims.ndisplay)  # type: ignore[attr-defined]
-            except Exception:
-                viewer_ndisplay = None
-            try:
-                displayed_raw = list(viewer_dims.displayed)  # type: ignore[attr-defined]
-                viewer_displayed = [int(x) for x in displayed_raw]
-            except Exception:
-                viewer_displayed = None
-
-        if ndisplay is None:
-            if viewer_ndisplay is not None:
-                ndisplay = viewer_ndisplay
-            else:
-                ndisplay = 3 if layer_spec.extras and layer_spec.extras.get("is_volume") else 2
-        try:
-            ndisplay_int = int(ndisplay)
-        except Exception:
-            ndisplay_int = 2
-        ndisplay_int = max(1, min(ndisplay_int, ndim))
-
-        displayed_indices: Optional[List[int]] = None
-        if viewer_displayed:
-            filtered = [idx for idx in viewer_displayed if 0 <= idx < ndim]
-            if len(filtered) >= ndisplay_int:
-                displayed_indices = filtered[:ndisplay_int]
-
-        if displayed_indices is None:
-            displayed_indices = list(range(max(0, ndim - ndisplay_int), ndim))
-
-        return DimsSpec(
-            ndim=ndim,
-            axis_labels=axis_labels,
-            order=order,
-            sizes=sizes,
-            range=ranges,
-            current_step=current,
-            displayed=displayed_indices,
-            ndisplay=ndisplay_int,
+        return _scene.build_dims_spec(
+            layer_spec=layer_spec.to_dict(),
+            current_step=current_step,
+            ndisplay=ndisplay,
+            axis_labels=layer_spec.axis_labels,
         )
 
     def _build_camera_spec(
@@ -660,26 +569,14 @@ class ViewerSceneManager:
     ) -> Optional[CameraSpec]:
         if scene_state is None:
             return None
-
-        center = getattr(scene_state, "center", None)
-        zoom = getattr(scene_state, "zoom", None)
-        angles = getattr(scene_state, "angles", None)
-        try:
-            center_list = list(center) if center is not None else None
-        except (TypeError, ValueError) as exc:
-            logger.debug("layer_manager: invalid camera center %r", center, exc_info=exc)
-            center_list = None
-        try:
-            angles_list = list(angles) if angles is not None else None
-        except (TypeError, ValueError) as exc:
-            logger.debug("layer_manager: invalid camera angles %r", angles, exc_info=exc)
-            angles_list = None
-
-        return CameraSpec(
-            center=center_list,
-            zoom=float(zoom) if zoom is not None else None,
-            angles=angles_list,
-            ndisplay=int(ndisplay) if ndisplay is not None else None,
+        center = scene_state.center  # type: ignore[attr-defined]
+        zoom = scene_state.zoom  # type: ignore[attr-defined]
+        angles = scene_state.angles  # type: ignore[attr-defined]
+        return _scene.build_camera_spec(
+            center=center,
+            zoom=zoom,
+            angles=angles,
+            ndisplay=ndisplay,
         )
 
     def _build_multiscale_spec(
