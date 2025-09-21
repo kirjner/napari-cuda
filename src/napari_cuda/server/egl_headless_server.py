@@ -486,7 +486,14 @@ class EGLHeadlessServer:
             self._update_scene_manager()
         except Exception:
             logger.debug("scene manager update failed during dims metadata", exc_info=True)
-        return self._scene_manager.dims_metadata()
+        try:
+            # Prefer using scene_spec helper to keep logic centralized
+            from napari_cuda.server import scene_spec as _scn
+            scene = self._scene_manager.scene_spec()
+            return _scn.dims_metadata(scene)
+        except Exception:
+            logger.debug("dims_metadata via scene_spec failed; falling back to manager", exc_info=True)
+            return self._scene_manager.dims_metadata()
 
     def _update_scene_manager(self) -> None:
         current_step = None
