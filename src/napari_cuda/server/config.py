@@ -213,9 +213,94 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     )
 
 
+@dataclass(frozen=True)
+class ServerCtx:
+    """Resolved server runtime context.
+
+    Wraps the structured `ServerConfig` and collects additional operational
+    toggles that were previously read ad-hoc from the environment. Built once
+    at startup and passed around (observe-only at first, then authoritative).
+    """
+
+    cfg: ServerConfig
+
+    # Queuing / dumps / watchdogs
+    frame_queue: int = 1
+    dump_bitstream: int = 0
+    dump_dir: str = "benchmarks/bitstreams"
+    kf_watchdog_cooldown_s: float = 2.0
+
+    # Logging toggles
+    log_camera_info: bool = False
+    log_camera_debug: bool = False
+    log_state_traces: bool = False
+    log_volume_info: bool = False
+    log_dims_info: bool = False
+    debug: bool = False
+    log_sends_env: bool = False
+
+    # Metrics UI
+    metrics_port: int = 8083
+    metrics_refresh_ms: int = 1000
+
+    # Policy event path
+    policy_event_path: str = "tmp/policy_events.jsonl"
+
+
+def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
+    """Build a `ServerCtx` by reading environment once.
+
+    Note: This does not mutate the process environment and is side-effect free.
+    """
+    env = env or os.environ
+    cfg = load_server_config(env)
+
+    frame_queue = max(1, _env_int(env, "NAPARI_CUDA_FRAME_QUEUE", 1))
+    dump_bitstream = max(0, _env_int(env, "NAPARI_CUDA_DUMP_BITSTREAM", 0))
+    dump_dir = _env_str(env, "NAPARI_CUDA_DUMP_DIR", "benchmarks/bitstreams") or "benchmarks/bitstreams"
+
+    _cool = _env_str(env, "NAPARI_CUDA_KF_WATCHDOG_COOLDOWN")
+    try:
+        kf_watchdog_cooldown_s = float(_cool) if _cool is not None and _cool != "" else 2.0
+    except Exception:
+        kf_watchdog_cooldown_s = 2.0
+
+    log_camera_info = _env_bool(env, "NAPARI_CUDA_LOG_CAMERA_INFO", False)
+    log_camera_debug = _env_bool(env, "NAPARI_CUDA_LOG_CAMERA_DEBUG", False)
+    log_state_traces = _env_bool(env, "NAPARI_CUDA_LOG_STATE_TRACES", False)
+    log_volume_info = _env_bool(env, "NAPARI_CUDA_LOG_VOLUME_INFO", False)
+    log_dims_info = _env_bool(env, "NAPARI_CUDA_LOG_DIMS_INFO", False)
+    debug = _env_bool(env, "NAPARI_CUDA_DEBUG", False)
+    log_sends_env = _env_bool(env, "NAPARI_CUDA_LOG_SENDS", False)
+
+    metrics_port = _env_int(env, "NAPARI_CUDA_METRICS_PORT", 8083)
+    metrics_refresh_ms = _env_int(env, "NAPARI_CUDA_METRICS_REFRESH_MS", 1000)
+
+    policy_event_path = _env_str(env, "NAPARI_CUDA_POLICY_EVENT_PATH", "tmp/policy_events.jsonl") or "tmp/policy_events.jsonl"
+
+    return ServerCtx(
+        cfg=cfg,
+        frame_queue=frame_queue,
+        dump_bitstream=dump_bitstream,
+        dump_dir=dump_dir,
+        kf_watchdog_cooldown_s=kf_watchdog_cooldown_s,
+        log_camera_info=log_camera_info,
+        log_camera_debug=log_camera_debug,
+        log_state_traces=log_state_traces,
+        log_volume_info=log_volume_info,
+        log_dims_info=log_dims_info,
+        debug=debug,
+        log_sends_env=log_sends_env,
+        metrics_port=metrics_port,
+        metrics_refresh_ms=metrics_refresh_ms,
+        policy_event_path=policy_event_path,
+    )
+
+
 __all__ = [
     "EncodeCfg",
     "ServerConfig",
+    "ServerCtx",
     "load_server_config",
+    "load_server_ctx",
 ]
-

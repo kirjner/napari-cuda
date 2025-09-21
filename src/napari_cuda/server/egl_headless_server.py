@@ -57,7 +57,11 @@ from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
 from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
-from napari_cuda.server.config import load_server_config, ServerConfig
+from napari_cuda.server.config import (
+    ServerConfig,
+    ServerCtx,
+    load_server_ctx,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,13 @@ class EGLHeadlessServer:
                  zarr_path: str | None = None, zarr_level: str | None = None,
                  zarr_axes: str | None = None, zarr_z: int | None = None,
                  debug: bool = False) -> None:
+        # Build once: resolved runtime context (observe-only for now)
+        try:
+            self._ctx: ServerCtx = load_server_ctx()
+        except Exception:
+            # Fallback to minimal defaults if ctx load fails for any reason
+            self._ctx = load_server_ctx({})  # type: ignore[arg-type]
+
         self.width = width
         self.height = height
         self.use_volume = use_volume
@@ -96,11 +107,8 @@ class EGLHeadlessServer:
         self.metrics = Metrics()
         self._clients: Set[websockets.WebSocketServerProtocol] = set()
         self._state_clients: Set[websockets.WebSocketServerProtocol] = set()
-        try:
-            # Keep queue size at 1 for latest-wins, never-block behavior
-            qsize = int(os.getenv('NAPARI_CUDA_FRAME_QUEUE', '1'))
-        except Exception:
-            qsize = 1
+        # Keep queue size at 1 for latest-wins, never-block behavior
+        qsize = int(self._ctx.frame_queue)
         # Queue holds tuples of (payload_bytes, flags, seq, stamp_ts)
         # stamp_ts is minted post-pack in on_frame to keep encode/pack jitter common-mode
         self._frame_q: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
@@ -117,11 +125,8 @@ class EGLHeadlessServer:
         self._needs_config = True
         self._last_avcc: Optional[bytes] = None
         # Optional bitstream dump for validation
-        try:
-            self._dump_remaining = int(os.getenv('NAPARI_CUDA_DUMP_BITSTREAM', '0'))
-        except Exception:
-            self._dump_remaining = 0
-        self._dump_dir = os.getenv('NAPARI_CUDA_DUMP_DIR', 'benchmarks/bitstreams')
+        self._dump_remaining = int(self._ctx.dump_bitstream)
+        self._dump_dir = self._ctx.dump_dir
         self._dump_path: Optional[str] = None
         # Track last keyframe for metrics only
         self._last_key_seq: Optional[int] = None
@@ -132,58 +137,49 @@ class EGLHeadlessServer:
         self._bypass_until_key: bool = False
         # Keyframe watchdog cooldown to avoid rapid encoder resets
         self._kf_last_reset_ts: Optional[float] = None
-        _cool = os.getenv('NAPARI_CUDA_KF_WATCHDOG_COOLDOWN')
-        try:
-            self._kf_watchdog_cooldown_s = float(_cool) if _cool else 2.0
-        except ValueError:
-            self._kf_watchdog_cooldown_s = 2.0
+        self._kf_watchdog_cooldown_s = float(self._ctx.kf_watchdog_cooldown_s)
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.Lock()
         # Logging controls for camera ops
-        self._log_cam_info: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_INFO', False)
-        self._log_cam_debug: bool = env_bool('NAPARI_CUDA_LOG_CAMERA_DEBUG', False)
+        self._log_cam_info = bool(self._ctx.log_camera_info)
+        self._log_cam_debug = bool(self._ctx.log_camera_debug)
         logger.info(
             "camera logging flags info=%s debug=%s",
             self._log_cam_info,
             self._log_cam_debug,
         )
         # State trace toggles (per-message start/end logs)
-        self._log_state_traces: bool = env_bool('NAPARI_CUDA_LOG_STATE_TRACES', False)
+        self._log_state_traces = bool(self._ctx.log_state_traces)
         # Logging controls for volume/multiscale intents
-        self._log_volume_info: bool = env_bool('NAPARI_CUDA_LOG_VOLUME_INFO', False)
+        self._log_volume_info = bool(self._ctx.log_volume_info)
         # Force IDR on reset (default True)
-        self._idr_on_reset: bool = env_bool('NAPARI_CUDA_IDR_ON_RESET', True)
+        self._idr_on_reset = bool(self._ctx.cfg.idr_on_reset)
 
         # Drop/send tracking
         self._drops_total: int = 0
         self._last_send_ts: Optional[float] = None
         self._send_count: int = 0
         # Optional detailed per-send logging (seq, send_ts, stamp_ts, delta)
-        try:
-            self._log_sends = bool(log_sends or int(os.getenv('NAPARI_CUDA_LOG_SENDS', '0') or '0'))
-        except Exception:
-            self._log_sends = bool(log_sends)
+        self._log_sends = bool(log_sends or self._ctx.log_sends_env)
 
         # Data configuration (optional OME-Zarr dataset for real data)
-        self._zarr_path = zarr_path or os.getenv('NAPARI_CUDA_ZARR_PATH') or None
-        self._zarr_level = zarr_level or os.getenv('NAPARI_CUDA_ZARR_LEVEL') or None
-        self._zarr_axes = zarr_axes or os.getenv('NAPARI_CUDA_ZARR_AXES') or None
-        try:
-            _z = zarr_z if zarr_z is not None else int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1'))
-            self._zarr_z = _z if _z >= 0 else None
-        except Exception:
-            self._zarr_z = None
+        self._zarr_path = zarr_path or self._ctx.cfg.zarr_path or None
+        self._zarr_level = zarr_level or self._ctx.cfg.zarr_level or None
+        self._zarr_axes = zarr_axes or self._ctx.cfg.zarr_axes or None
+        _z_fallback = self._ctx.cfg.zarr_z
+        _z_resolved = zarr_z if zarr_z is not None else _z_fallback
+        self._zarr_z = (_z_resolved if (_z_resolved is not None and int(_z_resolved) >= 0) else None)
         self._policy_metrics_snapshot: Dict[str, object] = {}
         # Policy event writer state (single-writer JSONL)
         try:
             self._last_written_decision_seq: int = 0
         except Exception:
             self._last_written_decision_seq = 0
-        self._policy_event_path: Path = Path(os.getenv('NAPARI_CUDA_POLICY_EVENT_PATH', 'tmp/policy_events.jsonl'))
+        self._policy_event_path = Path(self._ctx.policy_event_path)
         # Verbose dims logging control: default debug, upgrade to info with flag
-        self._log_dims_info: bool = env_bool('NAPARI_CUDA_LOG_DIMS_INFO', False)
+        self._log_dims_info = bool(self._ctx.log_dims_info)
         # Dedicated debug control for this module only (no dependency loggers)
-        self._debug_only_this_logger: bool = bool(debug) or env_bool('NAPARI_CUDA_DEBUG', False)
+        self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug)
         # Dims intent/update tracking (server-authoritative dims seq and last client)
         self._dims_seq: int = 0
         self._last_dims_client_id: Optional[str] = None
@@ -298,7 +294,7 @@ class EGLHeadlessServer:
         try:
             cur = None
             with self._state_lock:
-                cur = getattr(self._latest_state, 'current_step', None)
+                cur = self._latest_state.current_step
             step_list = list(cur) if isinstance(cur, (list, tuple)) else [0]
             await self._broadcast_dims_update(step_list, last_client_id=client_id)
         except Exception as e:
@@ -494,7 +490,7 @@ class EGLHeadlessServer:
     def _update_scene_manager(self) -> None:
         current_step = None
         with self._state_lock:
-            if getattr(self._latest_state, 'current_step', None) is not None:
+            if self._latest_state.current_step is not None:
                 current_step = list(self._latest_state.current_step)  # type: ignore[arg-type]
         extras = {
             'zarr_axes': (self._worker._zarr_axes if self._worker is not None else None),
@@ -857,7 +853,7 @@ class EGLHeadlessServer:
         """
         # Capture current step and infer length
         with self._state_lock:
-            cur = getattr(self._latest_state, 'current_step', None)
+            cur = self._latest_state.current_step
         meta = self._dims_metadata() or {}
         try:
             ndim = int(meta.get('ndim') or (len(cur) if cur is not None else 0))
@@ -925,13 +921,13 @@ class EGLHeadlessServer:
         self._maybe_enable_debug_logger()
         # Observe-only: resolve and log ServerConfig with visibility
         try:
-            _cfg: ServerConfig = load_server_config()
+            _cfg: ServerConfig = self._ctx.cfg
             if self._debug_only_this_logger:
                 logger.info("Resolved ServerConfig: %s", _cfg)
             else:
                 logger.debug("Resolved ServerConfig: %s", _cfg)
         except Exception:
-            logger.debug("ServerConfig load/log failed", exc_info=True)
+            logger.debug("ServerConfig log failed", exc_info=True)
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._start_worker(loop)
@@ -950,9 +946,9 @@ class EGLHeadlessServer:
             self.host,
             self.pixel_port,
             self.host,
-            os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'),
+            str(self._ctx.metrics_port),
             self.host,
-            os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'),
+            str(self._ctx.metrics_port),
         )
         broadcaster = asyncio.create_task(self._broadcast_loop())
         try:
@@ -968,7 +964,7 @@ class EGLHeadlessServer:
         def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
             # Hold pixel emission until worker orientation is ready to avoid a momentary inverted frame
             if self._worker is not None:
-                if getattr(self._worker, '_orientation_ready', True) is False:
+                if self._worker._orientation_ready is False:
                     return
             # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
             # Optional: raw NAL summary before packing for diagnostics
@@ -1097,9 +1093,10 @@ class EGLHeadlessServer:
                     zarr_z=self._zarr_z,
                     policy_name=self._ms_state.get('policy'),
                     scene_refresh_cb=_on_scene_refresh,
+                    ctx=self._ctx,
                 )
                 # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
-                z0 = getattr(self._worker, '_z_index', None)
+                z0 = self._worker._z_index
                 if z0 is not None:
                     with self._state_lock:
                         s = self._latest_state
@@ -1282,7 +1279,7 @@ class EGLHeadlessServer:
                 await self._await_adapter_level_ready(0.5)
                 cur = None
                 with self._state_lock:
-                    cur = getattr(self._latest_state, 'current_step', None)
+                    cur = self._latest_state.current_step
                 if cur is not None:
                     # Build once so logs match sent payload
                     obj = self._build_dims_update_message(list(cur), last_client_id=None)
@@ -2139,14 +2136,8 @@ class EGLHeadlessServer:
 
     async def _start_metrics_server(self):
         # Start Dash/Plotly dashboard on a background thread with a Flask server.
-        try:
-            port = int(os.getenv('NAPARI_CUDA_METRICS_PORT', '8083'))
-        except Exception:
-            port = 8083
-        try:
-            refresh_ms = int(os.getenv('NAPARI_CUDA_METRICS_REFRESH_MS', '1000'))
-        except Exception:
-            refresh_ms = 1000
+        port = int(self._ctx.metrics_port)
+        refresh_ms = int(self._ctx.metrics_refresh_ms)
         try:
             # Import here to allow running without dash installed (graceful fallback)
             from .dash_dashboard import start_dash_dashboard  # type: ignore

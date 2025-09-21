@@ -55,6 +55,7 @@ from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
+from napari_cuda.server.config import ServerCtx
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,8 @@ class EGLRendererWorker:
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
                  scene_refresh_cb: Optional[Callable[[], None]] = None,
-                 policy_name: Optional[str] = None) -> None:
+                 policy_name: Optional[str] = None,
+                 ctx: Optional[ServerCtx] = None) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -129,6 +131,7 @@ class EGLRendererWorker:
         self.volume_depth = int(volume_depth)
         self.volume_dtype = str(volume_dtype)
         self.volume_relative_step = volume_relative_step
+        self._ctx: Optional[ServerCtx] = ctx
         # Optional simple turntable animation
         self._animate = bool(animate)
         try:
@@ -349,15 +352,11 @@ class EGLRendererWorker:
 
         # Ensure partial initialization is cleaned up if any step fails
         try:
-            # Zarr/NGFF dataset configuration (optional)
-            self._zarr_path: Optional[str] = zarr_path or os.getenv('NAPARI_CUDA_ZARR_PATH') or None
-            self._zarr_level: Optional[str] = zarr_level or os.getenv('NAPARI_CUDA_ZARR_LEVEL') or None
-            self._zarr_axes: str = (zarr_axes or os.getenv('NAPARI_CUDA_ZARR_AXES') or 'zyx')
-            try:
-                _z = zarr_z if zarr_z is not None else int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1'))
-                self._zarr_init_z: Optional[int] = _z if _z >= 0 else None
-            except Exception:
-                self._zarr_init_z = None
+            # Zarr/NGFF dataset configuration (optional); prefer explicit args from server
+            self._zarr_path = zarr_path
+            self._zarr_level = zarr_level
+            self._zarr_axes = (zarr_axes or 'zyx')
+            self._zarr_init_z = (zarr_z if (zarr_z is not None and int(zarr_z) >= 0) else None)
 
             self._zarr_shape: Optional[tuple[int, ...]] = None
             self._zarr_dtype: Optional[str] = None
@@ -1798,7 +1797,15 @@ class EGLRendererWorker:
 
         # Low-jitter CBR and low-latency settings
         rc_mode = os.getenv('NAPARI_CUDA_RC', 'cbr').lower()
-        bitrate = _parse_int('NAPARI_CUDA_BITRATE', 10_000_000) or 10_000_000
+        # Use ctx.encode.bitrate as the default if available; env overrides still win
+        _ctx_bitrate = None
+        try:
+            if self._ctx is not None:
+                _ctx_bitrate = int(getattr(self._ctx.cfg.encode, 'bitrate', 10_000_000))
+        except Exception:
+            _ctx_bitrate = None
+        bitrate_default = _ctx_bitrate if (_ctx_bitrate is not None and _ctx_bitrate > 0) else 10_000_000
+        bitrate = _parse_int('NAPARI_CUDA_BITRATE', bitrate_default) or bitrate_default
         max_bitrate = _parse_int('NAPARI_CUDA_MAXBITRATE')
         lookahead = _parse_int('NAPARI_CUDA_LOOKAHEAD', 0) or 0
         aq = _parse_int('NAPARI_CUDA_AQ', 0) or 0
@@ -1810,6 +1817,7 @@ class EGLRendererWorker:
         preset_env = os.getenv('NAPARI_CUDA_PRESET', '')
         # IDR period (frames) for preset path (and for logging fallback)
         try:
+            # Preserve existing default (600) for parity; env may override.
             idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600') or '600')
         except Exception:
             idr_period = 600
@@ -1836,7 +1844,12 @@ class EGLRendererWorker:
         bf = max(0, bf_override) if bf_override is not None else 0
         kwargs['bf'] = int(bf)
         # Also set explicit framerate to align RC pacing with server fps
-        kwargs['frameRateNum'] = int(max(1, int(self.fps)))
+        # Default to ctx.encode.fps if fps not explicitly set
+        fps_num = int(self.fps) if int(self.fps) > 0 else (
+            int(getattr(getattr(self._ctx, 'cfg', None), 'encode', getattr(self._ctx, 'encode', None)).fps)  # type: ignore[attr-defined]
+            if self._ctx is not None else 60
+        )
+        kwargs['frameRateNum'] = int(max(1, fps_num))
         kwargs['frameRateDen'] = 1
         # Optional quality tools
         if lookahead > 0:
