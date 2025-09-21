@@ -58,40 +58,7 @@ from . import policy as level_policy
 
 logger = logging.getLogger(__name__)
 
-class _CameraOps:
-    """Small helper for 2D/3D camera math and mapping.
-
-    Keeps EGLRendererWorker readable by centralizing anchor mapping,
-    per-pixel scaling, and application of orbit/zoom/pan.
-    """
-
-    @staticmethod
-    def anchor_to_world(ax_px: float, ay_px: float, canvas_wh: tuple[int, int], view) -> tuple[float, float]:
-        return camops.anchor_to_world(ax_px, ay_px, canvas_wh, view)
-
-    @staticmethod
-    def per_pixel_world_scale_3d(cam, canvas_wh: tuple[int, int]) -> tuple[float, float]:
-        return camops.per_pixel_world_scale_3d(cam, canvas_wh)
-
-    @staticmethod
-    def apply_orbit(cam, daz: float, delv: float) -> None:
-        return camops.apply_orbit(cam, daz, delv)
-
-    @staticmethod
-    def apply_zoom_3d(cam, factor: float) -> None:
-        return camops.apply_zoom_3d(cam, factor)
-
-    @staticmethod
-    def apply_zoom_2d(cam, factor: float, anchor_px: tuple[float, float], canvas_wh: tuple[int, int], view) -> None:
-        return camops.apply_zoom_2d(cam, factor, anchor_px, canvas_wh, view)
-
-    @staticmethod
-    def apply_pan_3d(cam, dx_px: float, dy_px: float, canvas_wh: tuple[int, int]) -> None:
-        return camops.apply_pan_3d(cam, dx_px, dy_px, canvas_wh)
-
-    @staticmethod
-    def apply_pan_2d(cam, dx_px: float, dy_px: float, canvas_wh: tuple[int, int], view) -> None:
-        return camops.apply_pan_2d(cam, dx_px, dy_px, canvas_wh, view)
+## Camera ops now live in napari_cuda.server.camera_ops as free functions.
 
 class _LevelBudgetError(RuntimeError):
     """Raised when a multiscale level exceeds memory/voxel budgets."""
@@ -2098,9 +2065,9 @@ class EGLRendererWorker:
                 self._pending_zoom_ts = time.perf_counter()
                 anchor = cmd.anchor_px or (canvas_wh[0] * 0.5, canvas_wh[1] * 0.5)
                 if isinstance(cam, scene.cameras.TurntableCamera):
-                    _CameraOps.apply_zoom_3d(cam, factor)
+                    camops.apply_zoom_3d(cam, factor)
                 else:
-                    _CameraOps.apply_zoom_2d(cam, factor, (float(anchor[0]), float(anchor[1])), canvas_wh, self.view)
+                    camops.apply_zoom_2d(cam, factor, (float(anchor[0]), float(anchor[1])), canvas_wh, self.view)
                 touched = True
                 policy_touch = True
                 if self._debug_zoom_drift and logger.isEnabledFor(logging.INFO):
@@ -2111,9 +2078,9 @@ class EGLRendererWorker:
                 if dx == 0.0 and dy == 0.0:
                     continue
                 if isinstance(cam, scene.cameras.TurntableCamera):
-                    _CameraOps.apply_pan_3d(cam, dx, dy, canvas_wh)
+                    camops.apply_pan_3d(cam, dx, dy, canvas_wh)
                 else:
-                    _CameraOps.apply_pan_2d(cam, dx, dy, canvas_wh, self.view)
+                    camops.apply_pan_2d(cam, dx, dy, canvas_wh, self.view)
                 touched = True
                 policy_touch = True
                 if self._debug_pan and logger.isEnabledFor(logging.INFO):
@@ -2123,7 +2090,7 @@ class EGLRendererWorker:
                 delv = float(cmd.d_el_deg)
                 if not isinstance(cam, scene.cameras.TurntableCamera):
                     continue
-                _CameraOps.apply_orbit(cam, daz, delv)
+                camops.apply_orbit(cam, daz, delv)
                 touched = True
                 policy_touch = True
                 if self._debug_orbit and logger.isEnabledFor(logging.INFO):
