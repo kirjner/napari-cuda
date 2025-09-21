@@ -2423,19 +2423,56 @@ class EGLRendererWorker:
         # Capture wall and monotonic timestamps at frame start
         wall_ts = time.time()
         t0 = time.perf_counter()
+        render_ms = self._render_frame_and_maybe_eval()
+        # Blit timing (GPU + CPU)
+        t_b0 = time.perf_counter()
+        blit_gpu_ns = self._capture_blit_gpu_ns()
+        t_b1 = time.perf_counter()
+        blit_cpu_ms = (t_b1 - t_b0) * 1000.0
+        map_ms, copy_ms = self._map_and_copy_to_torch()
+        dst, convert_ms = self._convert_for_encoder()
+        with self._enc_lock:
+            enc = self._encoder
+        if enc is None:
+            pkt_obj = None
+        else:
+            pkt_obj, encode_ms, pack_ms = self._encode_frame(dst, enc)
+        if enc is None:
+            encode_ms = 0.0
+            pack_ms = 0.0
+        total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
+        pkt_bytes = None
+        timings = FrameTimings(
+            render_ms,
+            blit_gpu_ns,
+            blit_cpu_ms,
+            map_ms,
+            copy_ms,
+            convert_ms,
+            encode_ms,
+            pack_ms,
+            total_ms,
+            pkt_bytes,
+            wall_ts,
+        )
+        flags = 0
+        # Use the worker's frame index as the capture-indexed sequence number
+        seq = int(self._frame_index)
+        return timings, pkt_obj, flags, seq
+
+    # ---- C5 helpers (pure refactor; no behavior change) ---------------------
+    def _render_frame_and_maybe_eval(self) -> float:
         t_r0 = time.perf_counter()
         # Optional animation
         if self._animate and hasattr(self.view, "camera"):
             t = time.perf_counter() - self._anim_start
             cam = self.view.camera
-            # 3D: simple turntable
             if isinstance(cam, scene.cameras.TurntableCamera):
                 try:
                     cam.azimuth = (self._animate_dps * t) % 360.0
                 except Exception as e:
                     logger.debug("Animate(3D) failed: %s", e)
             else:
-                # 2D PanZoom: gentle pan + zoom pulse around center
                 try:
                     cx = self.width * 0.5
                     cy = self.height * 0.5
@@ -2453,7 +2490,6 @@ class EGLRendererWorker:
                     logger.debug("Animate(2D) failed: %s", e)
         self._apply_pending_state()
         self.canvas.render()
-        # If camera changed this frame, run exactly one selection with fresh transforms
         if self._eval_after_render:
             try:
                 self._eval_after_render = False
@@ -2463,19 +2499,15 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
         t_r1 = time.perf_counter()
-        render_ms = (t_r1 - t_r0) * 1000.0
-        # Blit timing (GPU + CPU)
-        t_b0 = time.perf_counter()
-        blit_gpu_ns = self._capture_blit_gpu_ns()
-        t_b1 = time.perf_counter()
-        blit_cpu_ms = (t_b1 - t_b0) * 1000.0
+        return (t_r1 - t_r0) * 1000.0
+
+    def _map_and_copy_to_torch(self) -> tuple[float, float]:
         t_m0 = time.perf_counter()
         mapping = self._registered_tex.map()
         cuda_array = mapping.array(0, 0)
         t_m1 = time.perf_counter()
         map_ms = (t_m1 - t_m0) * 1000.0
-        start_evt = cuda.Event()
-        end_evt = cuda.Event()
+        start_evt = cuda.Event(); end_evt = cuda.Event()
         start_evt.record()
         m = cuda.Memcpy2D()
         m.set_src_array(cuda_array)
@@ -2484,20 +2516,19 @@ class EGLRendererWorker:
         m.height = self.height
         m.dst_pitch = self._dst_pitch_bytes if self._dst_pitch_bytes is not None else (self.width * 4)
         m(aligned=True)
-        end_evt.record()
-        end_evt.synchronize()
+        end_evt.record(); end_evt.synchronize()
         copy_ms = start_evt.time_till(end_evt)
         try:
-            # Optional deep debug: unified triplet dump
             if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
                 self._debug.dump_triplet(int(self._texture), self.width, self.height, self._torch_frame)
         except Exception as e:
             logger.warning("Debug triplet failed: %s", e, exc_info=True)
         finally:
             mapping.unmap()
-        # Measure color conversion (swizzle) and NVENC separately
+        return map_ms, copy_ms
+
+    def _convert_for_encoder(self):
         t_c0 = time.perf_counter()
-        # Optional pre-encode raw dump (RGBA) for isolation
         try:
             dump_raw = int(os.getenv('NAPARI_CUDA_DUMP_RAW', '0'))
         except Exception:
@@ -2508,7 +2539,6 @@ class EGLRendererWorker:
                 os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as e:
                 logger.debug("Pre-encode raw dump failed: %s", e)
-        # Convert RGBA (GL) -> encoder input format (BT.709 limited) on GPU
         src = self._torch_frame
         try:
             r = src[..., 0].float() / 255.0
@@ -2520,28 +2550,15 @@ class EGLRendererWorker:
             cr = torch.clamp(128.0 + 224.0 * (r - y_n) / 1.5748, 0.0, 255.0)
             try:
                 if not hasattr(self, '_logged_swizzle_stats'):
-                    rm = float(r.mean().item())
-                    gm = float(g.mean().item())
-                    bm = float(b.mean().item())
-                    ym = float(y.mean().item())
-                    cbm = float(cb.mean().item())
-                    crm = float(cr.mean().item())
-                    logger.info(
-                        "Pre-encode channel means: R=%.3f G=%.3f B=%.3f | Y=%.3f Cb=%.3f Cr=%.3f",
-                        rm, gm, bm, ym, cbm, crm,
-                    )
-                    # If the very first captured frame is black-ish, try a one-shot camera reset
+                    rm = float(r.mean().item()); gm = float(g.mean().item()); bm = float(b.mean().item())
+                    ym = float(y.mean().item()); cbm = float(cb.mean().item()); crm = float(cr.mean().item())
+                    logger.info("Pre-encode channel means: R=%.3f G=%.3f B=%.3f | Y=%.3f Cb=%.3f Cr=%.3f", rm, gm, bm, ym, cbm, crm)
                     try:
-                        if (
-                            getattr(self, '_auto_reset_on_black', False)
-                            and not getattr(self, '_black_reset_done', False)
-                            and (rm + gm + bm) < 1e-4
-                        ):
+                        if (getattr(self, '_auto_reset_on_black', False) and not getattr(self, '_black_reset_done', False) and (rm + gm + bm) < 1e-4):
                             logger.info("Detected black initial frame; applying one-shot camera reset")
                             if hasattr(self, 'view') and hasattr(self.view, 'camera'):
                                 self._apply_camera_reset(self.view.camera)
                             self._black_reset_done = True
-                        # Mark orientation ready once we see a non-black frame
                         if (rm + gm + bm) >= 1e-4:
                             self._orientation_ready = True
                     except Exception:
@@ -2562,137 +2579,91 @@ class EGLRendererWorker:
                 if not hasattr(self, '_logged_swizzle'):
                     logger.info("Pre-encode swizzle: RGBA -> %s (packed)", self._enc_input_fmt)
                     setattr(self, '_logged_swizzle', True)
-                # Reorder channels only; keep interleaved 4-channel layout
-                if self._enc_input_fmt == 'ARGB':
-                    dst = src[..., [3, 0, 1, 2]].contiguous()
-                else:
-                    # ABGR
-                    dst = src[..., [3, 2, 1, 0]].contiguous()
+                dst = src[..., [3, 0, 1, 2]].contiguous() if self._enc_input_fmt == 'ARGB' else src[..., [3, 2, 1, 0]].contiguous()
             else:
-                # NV12 (4:2:0): Y plane HxW + interleaved UV plane (H/2 x W)
                 if not hasattr(self, '_logged_swizzle'):
                     logger.info("Pre-encode swizzle: RGBA -> NV12 (BT709 LIMITED, 4:2:0 UV interleaved)")
                     setattr(self, '_logged_swizzle', True)
-                # Average pool Cb/Cr over 2x2 blocks
                 cb2 = F.avg_pool2d(cb.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2).squeeze()
                 cr2 = F.avg_pool2d(cr.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2).squeeze()
                 H2, W2 = cb2.shape
                 dst = torch.empty((H + H2, W), dtype=torch.uint8, device=src.device)
                 dst[0:H, :] = y.to(torch.uint8)
                 uv = dst[H:, :]
-                # Interleave subsampled chroma: U at even columns, V at odd columns
                 uv[:, 0::2] = cb2.to(torch.uint8)
                 uv[:, 1::2] = cr2.to(torch.uint8)
         except Exception as e:
             logger.exception("Pre-encode color conversion failed: %s", e)
             dst = src[..., [3, 0, 1, 2]]
-        # Ensure GPU kernels complete before timing conversion cost
         try:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception:
             logger.debug("torch.cuda.synchronize failed", exc_info=True)
         t_c1 = time.perf_counter()
-        convert_ms = (t_c1 - t_c0) * 1000.0
-        with self._enc_lock:
-            enc = self._encoder
-        if enc is None:
-            pkt_obj = None
-        else:
-            t_e0 = time.perf_counter()
-            # Force IDR on first frame after init/reset for decoder sync
-            pic_flags = 0
-            try:
-                if getattr(self, '_force_next_idr', False):
-                    pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.FORCEIDR)
-                    pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.OUTPUT_SPSPPS)
-                    self._force_next_idr = False
-            except Exception:
-                logger.debug("force_next_idr flag check failed", exc_info=True)
-            if pic_flags:
-                pkt_obj = enc.Encode(dst, pic_flags)
-            else:
-                pkt_obj = enc.Encode(dst)
-            t_e1 = time.perf_counter()
-            t_p0 = t_e1
-            t_p1 = t_e1
-            # Increment index and optional keyframe logging
-            try:
-                self._frame_index += 1
-                if self._log_keyframes:
-                    def _packet_is_keyframe(obj) -> bool:
-                        try:
-                            data = bytes(obj)
-                        except Exception:
-                            return False
-                        # Try Annex B (start codes)
-                        i = 0
-                        n = len(data)
-                        seen = False
-                        while i + 3 < n:
-                            if data[i] == 0 and data[i+1] == 0 and data[i+2] == 1:
-                                if i + 3 < n:
-                                    nal_type = data[i+3] & 0x1F
-                                    if nal_type == 5:
-                                        seen = True
-                                i += 3
-                            elif i + 4 < n and data[i] == 0 and data[i+1] == 0 and data[i+2] == 0 and data[i+3] == 1:
-                                if i + 4 < n:
-                                    nal_type = data[i+4] & 0x1F
-                                    if nal_type == 5:
-                                        seen = True
-                                i += 4
-                            else:
-                                i += 1
-                        if seen:
-                            return True
-                        # Try AVCC (length-prefixed)
-                        i = 0
-                        while i + 4 <= n:
-                            ln = int.from_bytes(data[i:i+4], 'big')
-                            i += 4
-                            if ln <= 0 or i + ln > n:
-                                break
-                            nal_type = data[i] & 0x1F if ln >= 1 else 0
-                            if nal_type == 5:
-                                return True
-                            i += ln
-                        return False
+        return dst, (t_c1 - t_c0) * 1000.0
 
-                    keyframe = False
-                    if pkt_obj is not None:
-                        if isinstance(pkt_obj, (list, tuple)):
-                            for part in pkt_obj:
-                                if _packet_is_keyframe(part):
-                                    keyframe = True
-                                    break
+    def _encode_frame(self, dst, enc) -> tuple[Optional[object], float, float]:
+        t_e0 = time.perf_counter()
+        pic_flags = 0
+        try:
+            if getattr(self, '_force_next_idr', False):
+                pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.FORCEIDR)
+                pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.OUTPUT_SPSPPS)
+                self._force_next_idr = False
+        except Exception:
+            logger.debug("force_next_idr flag check failed", exc_info=True)
+        pkt_obj = enc.Encode(dst, pic_flags) if pic_flags else enc.Encode(dst)
+        t_e1 = time.perf_counter()
+        t_p0 = t_e1; t_p1 = t_e1
+        try:
+            self._frame_index += 1
+            if self._log_keyframes:
+                def _packet_is_keyframe(obj) -> bool:
+                    try:
+                        data = bytes(obj)
+                    except Exception:
+                        return False
+                    i = 0; n = len(data); seen = False
+                    while i + 3 < n:
+                        if data[i] == 0 and data[i+1] == 0 and data[i+2] == 1:
+                            if i + 3 < n:
+                                nal_type = data[i+3] & 0x1F
+                                if nal_type == 5:
+                                    seen = True
+                            i += 3
+                        elif i + 4 < n and data[i] == 0 and data[i+1] == 0 and data[i+2] == 0 and data[i+3] == 1:
+                            if i + 4 < n:
+                                nal_type = data[i+4] & 0x1F
+                                if nal_type == 5:
+                                    seen = True
+                            i += 4
                         else:
-                            keyframe = _packet_is_keyframe(pkt_obj)
-                    logger.debug("Encode frame %d: keyframe=%s", self._frame_index, bool(keyframe))
-            except Exception as e:
-                logger.debug("Keyframe instrumentation skipped: %s", e)
-        # If encoder wasn't available, set NVENC time to 0
-        encode_ms = ((t_e1 - t_e0) * 1000.0) if enc is not None else 0.0
-        pack_ms = ((t_p1 - t_p0) * 1000.0) if enc is not None else 0.0
-        total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
-        pkt_bytes = None
-        timings = FrameTimings(
-            render_ms,
-            blit_gpu_ns,
-            blit_cpu_ms,
-            map_ms,
-            copy_ms,
-            convert_ms,
-            encode_ms,
-            pack_ms,
-            total_ms,
-            pkt_bytes,
-            wall_ts,
-        )
-        flags = 0
-        # Use the worker's frame index as the capture-indexed sequence number
-        seq = int(self._frame_index)
-        return timings, pkt_obj, flags, seq
+                            i += 1
+                    if seen:
+                        return True
+                    i = 0
+                    while i + 4 <= n:
+                        ln = int.from_bytes(data[i:i+4], 'big'); i += 4
+                        if ln <= 0 or i + ln > n: break
+                        nal_type = data[i] & 0x1F if ln >= 1 else 0
+                        if nal_type == 5: return True
+                        i += ln
+                    return False
+                keyframe = False
+                if pkt_obj is not None:
+                    if isinstance(pkt_obj, (list, tuple)):
+                        for part in pkt_obj:
+                            if _packet_is_keyframe(part):
+                                keyframe = True; break
+                    else:
+                        keyframe = _packet_is_keyframe(pkt_obj)
+                logger.debug("Encode frame %d: keyframe=%s", self._frame_index, bool(keyframe))
+        except Exception as e:
+            logger.debug("Keyframe instrumentation skipped: %s", e)
+        encode_ms = (t_e1 - t_e0) * 1000.0
+        pack_ms = (t_p1 - t_p0) * 1000.0
+        return pkt_obj, encode_ms, pack_ms
 
     # (packer is now provided by bitstream.py)
 
