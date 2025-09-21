@@ -2637,6 +2637,48 @@ class EGLRendererWorker:
                 except Exception as e:
                     logger.debug("Animate(2D) failed: %s", e)
         self._apply_pending_state()
+        # If in 2D slice mode, update the slab when panning moves the viewport
+        # outside the last ROI or beyond the hysteresis threshold.
+        try:
+            if not self.use_volume and self._scene_source is not None and self._napari_layer is not None:
+                source = self._scene_source
+                level = int(self._active_ms_level)
+                # Compute current render ROI (render-only path guarantees viewport containment)
+                roi = self._viewport_roi_for_level(source, level)
+                # Decide whether to fetch a new slab
+                need_update = False
+                last = getattr(self, '_last_roi', None)
+                thr = int(getattr(self, '_roi_edge_threshold', 4))
+                if last is None or int(last[0]) != level:
+                    need_update = True
+                else:
+                    prev = last[1]
+                    if (
+                        abs(int(roi.y_start) - int(prev.y_start)) >= thr or
+                        abs(int(roi.y_stop)  - int(prev.y_stop))  >= thr or
+                        abs(int(roi.x_start) - int(prev.x_start)) >= thr or
+                        abs(int(roi.x_stop)  - int(prev.x_stop))  >= thr
+                    ):
+                        need_update = True
+                if need_update:
+                    z_idx = int(self._z_index or 0)
+                    slab = self._load_slice(source, level, z_idx)
+                    # Place slab using current ROI
+                    try:
+                        sy, sx = self._plane_scale_for_level(source, level)
+                    except Exception:
+                        sy = sx = 1.0
+                    try:
+                        self._napari_layer.translate = (
+                            float(roi.y_start) * float(max(1e-12, sy)),
+                            float(roi.x_start) * float(max(1e-12, sx)),
+                        )
+                    except Exception:
+                        logger.debug("render-frame: set translate failed", exc_info=True)
+                    self._napari_layer.data = slab
+                    self._last_roi = (level, roi)
+        except Exception:
+            logger.debug("render-frame: slab update on pan failed", exc_info=True)
         self.canvas.render()
         if self._eval_after_render:
             try:
