@@ -53,6 +53,7 @@ from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource
 from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
+from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
 
 logger = logging.getLogger(__name__)
@@ -66,104 +67,31 @@ class _CameraOps:
 
     @staticmethod
     def anchor_to_world(ax_px: float, ay_px: float, canvas_wh: tuple[int, int], view) -> tuple[float, float]:
-        cw, ch = canvas_wh
-        # Guard missing attributes upfront
-        if not hasattr(view, 'transform') or not hasattr(view, 'scene') or not hasattr(view.scene, 'transform'):
-            return float(ax_px), float(ay_px)
-        # Map bottom-left origin (incoming) to top-left for vispy
-        ay_tl = float(ch) - float(ay_px)
-        tr = view.transform * view.scene.transform
-        try:
-            mapped = tr.imap([float(ax_px), ay_tl, 0, 1])
-        except Exception:
-            logger.debug("anchor_to_world: transform mapping failed", exc_info=True)
-            return float(ax_px), float(ay_px)
-        return float(mapped[0]), float(mapped[1])
+        return camops.anchor_to_world(ax_px, ay_px, canvas_wh, view)
 
     @staticmethod
     def per_pixel_world_scale_3d(cam, canvas_wh: tuple[int, int]) -> tuple[float, float]:
-        cw, ch = canvas_wh
-        fov_deg = getattr(cam, 'fov', 60.0)
-        dist = getattr(cam, 'distance', 1.0)
-        try:
-            fov_rad = math.radians(max(1e-3, min(179.0, float(fov_deg))))
-            denom = max(1e-6, float(ch))
-            sy = 2.0 * float(dist) * math.tan(0.5 * fov_rad) / denom
-            sx = sy * (float(cw) / denom)
-        except (TypeError, ValueError) as e:
-            logger.debug("per_pixel_world_scale_3d: bad params fov=%r dist=%r: %s", fov_deg, dist, e)
-            return 0.01, 0.01
-        return sx, sy
+        return camops.per_pixel_world_scale_3d(cam, canvas_wh)
 
     @staticmethod
     def apply_orbit(cam, daz: float, delv: float) -> None:
-        if (daz == 0.0 and delv == 0.0) or not hasattr(cam, 'azimuth'):
-            return
-        cur_az = float(getattr(cam, 'azimuth', 0.0) or 0.0)
-        cur_el = float(getattr(cam, 'elevation', 0.0) or 0.0)
-        cam.azimuth = cur_az + float(daz)  # type: ignore[attr-defined]
-        cam.elevation = cur_el + float(delv)  # type: ignore[attr-defined]
+        return camops.apply_orbit(cam, daz, delv)
 
     @staticmethod
     def apply_zoom_3d(cam, factor: float) -> None:
-        if factor <= 0.0 or not hasattr(cam, 'distance'):
-            return
-        cur_d = float(getattr(cam, 'distance', 1.0) or 1.0)
-        cam.distance = max(1e-6, cur_d * float(factor))  # type: ignore[attr-defined]
+        return camops.apply_zoom_3d(cam, factor)
 
     @staticmethod
     def apply_zoom_2d(cam, factor: float, anchor_px: tuple[float, float], canvas_wh: tuple[int, int], view) -> None:
-        if factor <= 0.0:
-            return
-        wx, wy = _CameraOps.anchor_to_world(anchor_px[0], anchor_px[1], canvas_wh, view)
-        try:
-            cam.zoom(float(factor), center=(wx, wy))  # type: ignore[call-arg]
-        except Exception:
-            logger.debug("apply_zoom_2d: cam.zoom failed", exc_info=True)
+        return camops.apply_zoom_2d(cam, factor, anchor_px, canvas_wh, view)
 
     @staticmethod
     def apply_pan_3d(cam, dx_px: float, dy_px: float, canvas_wh: tuple[int, int]) -> None:
-        if (dx_px == 0.0 and dy_px == 0.0):
-            return
-        sx, sy = _CameraOps.per_pixel_world_scale_3d(cam, canvas_wh)
-        # Lateral pan from horizontal drag
-        dwx = dx_px * sx
-        # Dolly from vertical drag (down/positive -> closer)
-        if dy_px != 0.0 and hasattr(cam, 'distance'):
-            dist = float(getattr(cam, 'distance', 1.0) or 1.0)
-            cam.distance = float(max(1e-6, dist - (dy_px * sy)))  # type: ignore[attr-defined]
-        c = getattr(cam, 'center', None)
-        if isinstance(c, (tuple, list)) and len(c) >= 2:
-            cam.center = (float(c[0]) - dwx, float(c[1]))  # type: ignore[attr-defined]
+        return camops.apply_pan_3d(cam, dx_px, dy_px, canvas_wh)
 
     @staticmethod
     def apply_pan_2d(cam, dx_px: float, dy_px: float, canvas_wh: tuple[int, int], view) -> None:
-        if (dx_px == 0.0 and dy_px == 0.0):
-            return
-        cw, ch = canvas_wh
-        if hasattr(view, 'transform') and hasattr(view, 'scene') and hasattr(view.scene, 'transform'):
-            try:
-                cx_px = float(cw) * 0.5
-                cy_px = float(ch) * 0.5
-                tr = view.transform * view.scene.transform
-                p0 = tr.imap((cx_px, cy_px))
-                p1 = tr.imap((cx_px + dx_px, cy_px + dy_px))
-                dwx = float(p1[0] - p0[0])
-                dwy = float(p1[1] - p0[1])
-            except Exception:
-                logger.debug("apply_pan_2d: transform mapping failed", exc_info=True)
-                z = float(getattr(cam, 'zoom', 1.0) or 1.0)
-                inv = 1.0 / max(1e-6, z)
-                dwx = dx_px * inv
-                dwy = dy_px * inv
-        else:
-            z = float(getattr(cam, 'zoom', 1.0) or 1.0)
-            inv = 1.0 / max(1e-6, z)
-            dwx = dx_px * inv
-            dwy = dy_px * inv
-        c = getattr(cam, 'center', None)
-        if isinstance(c, (tuple, list)) and len(c) >= 2:
-            cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
+        return camops.apply_pan_2d(cam, dx_px, dy_px, canvas_wh, view)
 
 class _LevelBudgetError(RuntimeError):
     """Raised when a multiscale level exceeds memory/voxel budgets."""

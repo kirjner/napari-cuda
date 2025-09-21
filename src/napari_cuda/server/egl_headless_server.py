@@ -57,6 +57,7 @@ from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics
 from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
+from napari_cuda.server.config import load_server_config, ServerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -919,6 +920,15 @@ class EGLHeadlessServer:
         )
         # Apply module-only debug after basicConfig so our handler takes precedence
         self._maybe_enable_debug_logger()
+        # Observe-only: resolve and log ServerConfig with visibility
+        try:
+            _cfg: ServerConfig = load_server_config()
+            if self._debug_only_this_logger:
+                logger.info("Resolved ServerConfig: %s", _cfg)
+            else:
+                logger.debug("Resolved ServerConfig: %s", _cfg)
+        except Exception:
+            logger.debug("ServerConfig load/log failed", exc_info=True)
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._start_worker(loop)
