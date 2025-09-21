@@ -330,6 +330,11 @@ class EGLRendererWorker:
             self._roi_align_chunks = env_bool('NAPARI_CUDA_ROI_ALIGN_CHUNKS', False)
         except Exception:
             self._roi_align_chunks = False
+        # Ensure the render ROI always contains the current viewport to avoid black edges while panning
+        try:
+            self._roi_ensure_contains_viewport = env_bool('NAPARI_CUDA_ROI_ENSURE_CONTAINS_VIEWPORT', True)
+        except Exception:
+            self._roi_ensure_contains_viewport = True
         # On level switches, bypass ROI for a few frames to avoid blanking
         try:
             self._switch_fullframe_horizon = int(os.getenv('NAPARI_CUDA_SWITCH_FULLFRAME_FRAMES', '2') or '2')
@@ -1219,6 +1224,9 @@ class EGLRendererWorker:
             x_stop = int(math.ceil(max(x0, x1) / sx_world))
             y_start = int(math.floor(min(y0, y1) / sy_world))
             y_stop = int(math.ceil(max(y0, y1) / sy_world))
+            # Keep a copy of viewport index bounds so we can guarantee containment later
+            vp_x_start, vp_x_stop = x_start, x_stop
+            vp_y_start, vp_y_stop = y_start, y_stop
             roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
             if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
                 # Log initial world bounds and resulting index ROI
@@ -1278,15 +1286,60 @@ class EGLRendererWorker:
                     if prev_logged is not None:
                         prev_roi, _ = prev_logged
                         thr = int(getattr(self, '_roi_edge_threshold', 4))
+                        # Only accept prev_roi when it still covers the current viewport
+                        prev_covers_view = (
+                            int(prev_roi.y_start) <= int(vp_y_start) and int(prev_roi.y_stop) >= int(vp_y_stop) and
+                            int(prev_roi.x_start) <= int(vp_x_start) and int(prev_roi.x_stop) >= int(vp_x_stop)
+                        )
                         if (
                             abs(roi.y_start - prev_roi.y_start) < thr and
                             abs(roi.y_stop  - prev_roi.y_stop)  < thr and
                             abs(roi.x_start - prev_roi.x_start) < thr and
-                            abs(roi.x_stop  - prev_roi.x_stop)  < thr
+                            abs(roi.x_stop  - prev_roi.x_stop)  < thr and
+                            prev_covers_view
                         ):
                             roi = prev_roi
                 except Exception:
                     pass
+
+            # Ensure ROI fully contains the current viewport to avoid black edges during pan
+            if not for_policy and getattr(self, '_roi_ensure_contains_viewport', True):
+                try:
+                    ys = min(int(roi.y_start), int(vp_y_start))
+                    ye = max(int(roi.y_stop),  int(vp_y_stop))
+                    xs = min(int(roi.x_start), int(vp_x_start))
+                    xe = max(int(roi.x_stop),  int(vp_x_stop))
+                    # If chunk alignment is enabled, expand to chunk boundaries (outward only)
+                    if getattr(self, '_roi_align_chunks', True):
+                        try:
+                            arr = source.get_level(level)
+                            chunks = getattr(arr, 'chunks', None)
+                            if chunks is not None:
+                                axes = source.axes
+                                axes_lower = [str(ax).lower() for ax in axes]
+                                y_pos = axes_lower.index('y') if 'y' in axes_lower else max(0, len(chunks) - 2)
+                                x_pos = axes_lower.index('x') if 'x' in axes_lower else max(0, len(chunks) - 1)
+                                cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
+                                cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
+                                cy = max(1, cy)
+                                cx = max(1, cx)
+                                ys = (ys // cy) * cy
+                                ye = ((ye + cy - 1) // cy) * cy
+                                xs = (xs // cx) * cx
+                                xe = ((xe + cx - 1) // cx) * cx
+                        except Exception:
+                            logger.debug('roi ensure-contains: chunk align failed', exc_info=True)
+                    pre = roi
+                    roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
+                    if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            'roi.ensure_viewport: level=%d pre=(y=%d:%d x=%d:%d) vp=(y=%d:%d x=%d:%d) -> final=(y=%d:%d x=%d:%d)',
+                            int(level), int(pre.y_start), int(pre.y_stop), int(pre.x_start), int(pre.x_stop),
+                            int(vp_y_start), int(vp_y_stop), int(vp_x_start), int(vp_x_stop),
+                            int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop)
+                        )
+                except Exception:
+                    logger.debug('roi ensure-contains failed', exc_info=True)
 
             # Center-anchored reconciliation removed; placement uses layer.translate now
             # (ROI verbose logging removed)
@@ -2274,16 +2327,28 @@ class EGLRendererWorker:
                                     _ = source.set_current_level(self._active_ms_level, step=tuple(int(x) for x in base))
                             except Exception:
                                 logger.debug("apply_state: set_current_level(z) failed; will proceed to load slab", exc_info=True)
-                            # On Z change, bypass ROI once to guarantee visible content
-                            try:
-                                slab = source.slice(self._active_ms_level, int(z_new), compute=True, roi=None)
-                                if not isinstance(slab, np.ndarray):
-                                    slab = np.asarray(slab, dtype=np.float32)
-                            except Exception:
-                                slab = self._load_slice(source, self._active_ms_level, int(z_new))
+                            # On Z change, keep ROI-based slab to preserve world alignment
+                            slab = self._load_slice(source, self._active_ms_level, int(z_new))
                             layer = getattr(self, '_napari_layer', None)
                             if layer is not None:
                                 layer.data = slab
+                                # Ensure translate matches the ROI placement
+                                try:
+                                    sy, sx = self._plane_scale_for_level(source, int(self._active_ms_level))
+                                except Exception:
+                                    sy = sx = 1.0
+                                try:
+                                    roi_for_layer = None
+                                    if getattr(self, '_last_roi', None) is not None and int(self._last_roi[0]) == int(self._active_ms_level):
+                                        roi_for_layer = self._last_roi[1]
+                                    if roi_for_layer is not None:
+                                        yoff = float(roi_for_layer.y_start) * float(max(1e-12, sy))
+                                        xoff = float(roi_for_layer.x_start) * float(max(1e-12, sx))
+                                        layer.translate = (yoff, xoff)
+                                    else:
+                                        layer.translate = (0.0, 0.0)
+                                except Exception:
+                                    logger.debug("apply_state: setting layer.translate on z-change failed", exc_info=True)
                                 try:
                                     layer.visible = True
                                     layer.opacity = 1.0
@@ -2322,8 +2387,7 @@ class EGLRendererWorker:
                                     logger.debug("apply_state: camera set_range on z-change failed", exc_info=True)
                             self._data_wh = (w, h)
                             self._z_index = int(z_new)
-                            # Ensure subsequent frames also bypass ROI for a few frames to stabilize view
-                            self._z_fullframe_frames = int(max(0, self._z_fullframe_horizon))
+                            # Do not force fullframe horizon on Z; keep ROI for stability
                             # Optionally force IDR on Z for immediate visibility on clients
                             if getattr(self, '_idr_on_z', False):
                                 try:
