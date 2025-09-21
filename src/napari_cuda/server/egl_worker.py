@@ -55,6 +55,7 @@ from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
+from napari_cuda.server.lod import stabilize_level
 from napari_cuda.server.config import ServerCtx
 
 logger = logging.getLogger(__name__)
@@ -554,9 +555,9 @@ class EGLRendererWorker:
         # Demote to DEBUG by default; elevate to INFO only when explicitly enabled
         if logger.isEnabledFor(logging.DEBUG):
             if getattr(self, '_log_policy_eval', False):
-                logger.info("policy eval: adapter path active")
+                logger.info("policy eval: adapter path active (legacy)")
             else:
-                logger.debug("policy eval: adapter path active")
+                logger.debug("policy eval: adapter path active (legacy)")
         try:
             source = self._ensure_scene_source()
         except Exception:
@@ -1714,9 +1715,9 @@ class EGLRendererWorker:
         logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
         # Evaluate policy once after display mode changes
         try:
-            self._apply_zoom_based_level_switch()
+            self._maybe_select_level()
         except Exception:
-            logger.debug("ndisplay policy eval failed", exc_info=True)
+            logger.debug("ndisplay selection failed", exc_info=True)
 
     def _ensure_capture_buffers(self) -> None:
         if self._texture is None:
@@ -2322,7 +2323,7 @@ class EGLRendererWorker:
 
         if cam is None:
             if (not getattr(self, '_defer_policy_init', False)) or getattr(self, '_user_interaction_seen', False):
-                self._apply_zoom_based_level_switch()
+                self._maybe_select_level()
             return
 
         # Legacy absolute camera fields
@@ -2350,7 +2351,7 @@ class EGLRendererWorker:
             return
         self._last_state_sig = new_sig
         if (not getattr(self, '_defer_policy_init', False)) or getattr(self, '_user_interaction_seen', False):
-            self._apply_zoom_based_level_switch()
+            self._maybe_select_level()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
@@ -2493,7 +2494,7 @@ class EGLRendererWorker:
         if self._eval_after_render:
             try:
                 self._eval_after_render = False
-                self._apply_zoom_based_level_switch()
+                self._maybe_select_level()
             except Exception:
                 logger.debug("post-render policy eval failed", exc_info=True)
         self._render_tick_required = False
@@ -2664,6 +2665,87 @@ class EGLRendererWorker:
         encode_ms = (t_e1 - t_e0) * 1000.0
         pack_ms = (t_p1 - t_p0) * 1000.0
         return pkt_obj, encode_ms, pack_ms
+
+    # ---- C6 selection (napari-anchored) -------------------------------------
+    def _maybe_select_level(self) -> None:
+        """Select and apply a multiscale level based on current view.
+
+        Uses an oversampling estimate per level and a small stabilizer to avoid
+        oscillation. Enforces budgets via existing helpers and preserves Z
+        proportionally in apply.
+        """
+        if not self._zarr_path:
+            return
+        try:
+            source = self._ensure_scene_source()
+        except Exception:
+            logger.debug("ensure_scene_source failed in selection", exc_info=True)
+            return
+        levels = list(range(len(source.level_descriptors)))
+        if not levels:
+            return
+        # Build oversampling map: viewport-to-slice size ratio per level
+        overs_map: Dict[int, float] = {}
+        for lvl in levels:
+            try:
+                overs_map[int(lvl)] = float(self._oversampling_for_level(source, int(lvl)))
+            except Exception:
+                continue
+        if not overs_map:
+            return
+        # Choose finest level whose oversampling is close to 1:1
+        target_ratio = 1.2
+        desired = None
+        for lvl in sorted(overs_map.keys()):
+            val = overs_map[lvl]
+            if val <= target_ratio:
+                desired = lvl
+                break
+        if desired is None:
+            desired = max(overs_map.keys())
+        current = int(self._active_ms_level)
+        # Zoom direction logs
+        try:
+            if desired < current:
+                logger.info("lod.zoom_in: current=%d -> desired=%d overs=%.3f", current, desired, overs_map.get(desired, float('nan')))
+            elif desired > current:
+                logger.info("lod.zoom_out: current=%d -> desired=%d overs=%.3f", current, desired, overs_map.get(desired, float('nan')))
+        except Exception:
+            logger.debug("lod zoom log failed", exc_info=True)
+        # Stabilize against previous level to avoid jitter
+        try:
+            hyst = float(os.getenv('NAPARI_CUDA_LEVEL_HYST', '0.0') or '0.0')
+        except Exception:
+            hyst = 0.0
+        selected = stabilize_level(int(desired), int(current), hysteresis=hyst)
+        reason = 'napari'
+        # Lock override
+        lock = getattr(self, '_lock_level', None)
+        if lock is not None:
+            selected = int(lock)
+            reason = 'locked'
+        # Apply if changed; budgets enforced inside _set_level_with_budget
+        if int(selected) != int(current):
+            prev = current
+            try:
+                self._set_level_with_budget(int(selected), reason=reason)
+                logger.info(
+                    "ms.switch: %d -> %d (reason=%s) overs=%s",
+                    int(prev), int(self._active_ms_level), reason,
+                    '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+                )
+            except Exception as e:
+                logger.info("ms.switch: hold=%d (budget reject %s)", int(current), str(e))
+        else:
+            # No change; emit a compact decision trace to aid testing
+            try:
+                logger.debug(
+                    "lod.hold: level=%d desired=%d selected=%d overs=%s",
+                    int(current), int(desired), int(selected),
+                    '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+                )
+            except Exception:
+                logger.debug("lod.hold log failed", exc_info=True)
 
     # (packer is now provided by bitstream.py)
 
