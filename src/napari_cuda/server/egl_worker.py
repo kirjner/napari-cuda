@@ -247,7 +247,7 @@ class EGLRendererWorker:
         self._policy_name = 'oversampling'
         self._last_policy_decision: Dict[str, object] = {}
         self._last_interaction_ts = time.perf_counter()
-        self._last_policy_ctx_log_ts: float = 0.0
+        # Legacy policy logging state removed
         self._decision_seq: int = 0
         self._log_layer_debug = env_bool('NAPARI_CUDA_LAYER_DEBUG', False)
         # Focused logging for ROI anchor/center reconciliation without all layer debug
@@ -260,16 +260,7 @@ class EGLRendererWorker:
             self._log_policy_eval = env_bool('NAPARI_CUDA_LOG_POLICY_EVAL', False)
         except Exception:
             self._log_policy_eval = False
-        # Optional: disable zoom-driven policy changes entirely
-        try:
-            self._disable_zoom_policy = env_bool('NAPARI_CUDA_DISABLE_ZOOM_POLICY', False)
-        except Exception:
-            self._disable_zoom_policy = False
-        # Optional: allow policy changes on pan-only events (off by default)
-        try:
-            self._allow_pan_policy = env_bool('NAPARI_CUDA_ALLOW_PAN_POLICY', False)
-        except Exception:
-            self._allow_pan_policy = False
+        # Legacy zoom-policy toggles removed; selection uses viewport oversampling
         # Optional: lock multiscale level (int index) to keep client/server in sync
         try:
             _lock = os.getenv('NAPARI_CUDA_LOCK_LEVEL')
@@ -293,12 +284,7 @@ class EGLRendererWorker:
         self._last_step: Optional[tuple[int, ...]] = None
         # Coalesce selection to run once after a render when camera changed
         self._eval_after_render: bool = False
-        # Defer initial policy evaluation until first user interaction (zoom/pan/orbit)
-        try:
-            self._defer_policy_init = env_bool('NAPARI_CUDA_DEFER_POLICY_INIT', True)
-        except Exception:
-            self._defer_policy_init = True
-        self._user_interaction_seen: bool = False
+        # Policy init happens naturally; no deferral needed
         # One-shot safety: reset camera if initial frames are black
         try:
             self._auto_reset_on_black = env_bool('NAPARI_CUDA_AUTO_RESET_ON_BLACK', True)
@@ -311,9 +297,7 @@ class EGLRendererWorker:
         except Exception:
             self._level_switch_cooldown_ms = 150.0
         self._last_level_switch_ts: float = 0.0
-        # Use a one-shot init ROI bypass: first ROI uses full frame to avoid black
-        self._disable_init_roi = True
-        self._init_roi_used = False
+        # Initial ROI bypass removed; we now guarantee viewport containment
         # Cache the last ROI computed per level keyed by a transform signature.
         # Value: (transform_signature, roi)
         self._roi_cache: Dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
@@ -335,12 +319,7 @@ class EGLRendererWorker:
             self._roi_ensure_contains_viewport = env_bool('NAPARI_CUDA_ROI_ENSURE_CONTAINS_VIEWPORT', True)
         except Exception:
             self._roi_ensure_contains_viewport = True
-        # On level switches, bypass ROI for a few frames to avoid blanking
-        try:
-            self._switch_fullframe_horizon = int(os.getenv('NAPARI_CUDA_SWITCH_FULLFRAME_FRAMES', '2') or '2')
-        except Exception:
-            self._switch_fullframe_horizon = 2
-        self._switch_fullframe_frames: int = 0
+        # No full-frame horizon on level switches; keep ROI consistent
         # Last applied ROI for the active level (for placement/translate)
         self._last_roi: Optional[tuple[int, SliceROI]] = None
 
@@ -476,11 +455,7 @@ class EGLRendererWorker:
                 else:
                     self._slice_budget_allows(source, level)
                 start = time.perf_counter()
-                # Prepare full-frame ROI horizon and clear any stale ROI cache for target level
-                try:
-                    self._switch_fullframe_frames = int(max(0, getattr(self, '_switch_fullframe_horizon', 2)))
-                except Exception:
-                    self._switch_fullframe_frames = 2
+                # Clear any stale ROI cache for target level
                 try:
                     if hasattr(self, '_roi_cache'):
                         self._roi_cache.pop(int(level), None)
@@ -530,161 +505,9 @@ class EGLRendererWorker:
 
         raise RuntimeError("Unable to select multiscale level within budget")
 
-    def _consume_zoom_delta(self, levels_count: int) -> int:
-        ratio = self._pending_zoom_ratio
-        self._pending_zoom_ratio = None
-        if ratio is None or ratio <= 0.0 or levels_count <= 1:
-            return 0
-        log_zoom_debug = self._log_layer_debug and logger.isEnabledFor(logging.DEBUG)
-        log_zoom_info = self._log_layer_debug and logger.isEnabledFor(logging.INFO)
-        if log_zoom_debug and not math.isclose(ratio, 1.0, rel_tol=1e-3):
-            try:
-                logger.debug(
-                    "zoom delta input: ratio=%.6f accum=%.6f level=%d",
-                    float(ratio),
-                    float(self._zoom_accumulator),
-                    int(self._active_ms_level),
-                )
-            except Exception:
-                logger.debug("zoom delta log failed", exc_info=True)
-        try:
-            delta = math.log2(float(ratio))
-        except ValueError:
-            return 0
-        self._zoom_accumulator += delta
-        delta_levels = 0
-        threshold = 0.75
-        eps = 1e-6
-        # Interpret factor<1 (zoom in) as selecting a finer level (lower index)
-        # and factor>1 (zoom out) as selecting a coarser level (higher index).
-        while self._zoom_accumulator <= -(threshold - eps) and (self._active_ms_level + delta_levels) > 0:
-            self._zoom_accumulator += threshold
-            delta_levels -= 1  # finer
-        while self._zoom_accumulator >= (threshold - eps) and (self._active_ms_level + delta_levels) < levels_count - 1:
-            self._zoom_accumulator -= threshold
-            delta_levels += 1  # coarser
-        # Clamp accumulator to avoid runaway drift while keeping sign information
-        self._zoom_accumulator = max(-threshold, min(threshold, self._zoom_accumulator))
-        if log_zoom_info and delta_levels != 0:
-            logger.info(
-                "zoom delta: delta_levels=%d post_accum=%.6f",
-                int(delta_levels),
-                float(self._zoom_accumulator),
-            )
-        return delta_levels
+    # Legacy zoom-delta policy path removed; selection uses oversampling + stabilizer
 
-    def _apply_zoom_based_level_switch(self) -> None:
-        # Respect explicit lock or disable flag
-        if getattr(self, '_lock_level', None) is not None or getattr(self, '_disable_zoom_policy', False):
-            return
-        # Demote to DEBUG by default; elevate to INFO only when explicitly enabled
-        if logger.isEnabledFor(logging.DEBUG):
-            if getattr(self, '_log_policy_eval', False):
-                logger.info("policy eval: adapter path active (legacy)")
-            else:
-                logger.debug("policy eval: adapter path active (legacy)")
-        try:
-            source = self._ensure_scene_source()
-        except Exception:
-            logger.debug("zoom level switch: no scene source available")
-            return
-        levels_count = len(source.level_descriptors)
-        delta_levels = self._consume_zoom_delta(levels_count)
-        tentative = self._active_ms_level + delta_levels
-        tentative = max(0, min(tentative, levels_count - 1))
-        ctx = self._build_policy_context(source, intent_level=tentative)
-        log_now = time.perf_counter()
-        log_ctx_interval = 2.0
-        should_log_ctx = delta_levels != 0
-        if not should_log_ctx:
-            if self._last_policy_ctx_log_ts == 0.0 or (log_now - self._last_policy_ctx_log_ts) >= log_ctx_interval:
-                should_log_ctx = True
-        if should_log_ctx and logger.isEnabledFor(logging.DEBUG):
-            overs_log = {int(k): float(v) for k, v in ctx.level_oversampling.items()}
-            roi_log: Dict[int, tuple[int, int, int, int] | str] = {}
-            for idx, desc in enumerate(source.level_descriptors):
-                lvl = int(getattr(desc, 'index', idx))
-                roi = self._viewport_roi_for_level(source, lvl, quiet=True)
-                if roi.is_empty():
-                    roi_log[lvl] = 'full'
-                else:
-                    roi_log[lvl] = (int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop))
-            intent_val = int(ctx.intent_level) if ctx.intent_level is not None else -1
-            if getattr(self, '_log_policy_eval', False):
-                logger.info("policy ctx: intent=%d delta=%d overs=%s roi=%s", intent_val, int(delta_levels), overs_log, roi_log)
-            else:
-                logger.debug("policy ctx: intent=%d delta=%d overs=%s roi=%s", intent_val, int(delta_levels), overs_log, roi_log)
-            self._last_policy_ctx_log_ts = log_now
-        # If no zoom-driven change is requested, do not switch levels on pan-only updates.
-        if delta_levels == 0 and not getattr(self, '_allow_pan_policy', False):
-            return
-        try:
-            selected = self._policy_func(ctx)
-            # Reduce spam: only log selection when it differs from current
-            if (
-                logger.isEnabledFor(logging.DEBUG)
-                and selected is not None
-                and int(selected) != int(self._active_ms_level)
-            ):
-                msg = (
-                    "policy select: intent=%s current=%d selected=%s overs=%s",
-                    str(ctx.intent_level), int(self._active_ms_level), str(selected),
-                    {int(k): float(v) for k, v in ctx.level_oversampling.items()},
-                )
-                if getattr(self, '_log_policy_eval', False):
-                    logger.info(*msg)
-                else:
-                    logger.debug(*msg)
-        except Exception:
-            logger.exception("multiscale policy select failed; using tentative level")
-            selected = tentative
-        desired = tentative if selected is None else int(selected)
-        desired = max(0, min(desired, levels_count - 1))
-        # Stepwise clamp: move at most one level per evaluation for clarity
-        cur = int(self._active_ms_level)
-        if desired > cur + 1:
-            desired = cur + 1
-        elif desired < cur - 1:
-            desired = cur - 1
-        if desired == self._active_ms_level:
-            return
-        # Enforce a cooldown between level switches to reduce visual shimmer
-        now_ts = time.perf_counter()
-        if self._last_level_switch_ts > 0.0:
-            elapsed_ms = (now_ts - self._last_level_switch_ts) * 1000.0
-            if elapsed_ms < float(getattr(self, '_level_switch_cooldown_ms', 150.0)):
-                return
-        try:
-            prev = int(self._active_ms_level)
-            reason = "policy" if ctx.intent_level is not None else "zoom"
-            # Apply without forcing full-frame ROI to avoid visible ROI jumps
-            self._set_level_with_budget(desired, reason=reason)
-            self._last_level_switch_ts = now_ts
-            idle_ms = max(0.0, (time.perf_counter() - self._last_interaction_ts) * 1000.0)
-            self._record_policy_decision(
-                policy=self._policy_name,
-                intent_level=ctx.intent_level,
-                selected_level=selected,
-                desired_level=desired,
-                applied_level=int(self._active_ms_level),
-                reason=reason,
-                idle_ms=idle_ms,
-                oversampling=ctx.level_oversampling,
-                from_level=prev,
-            )
-            if self._log_layer_debug and prev != int(self._active_ms_level):
-                try:
-                    logger.info(
-                        "policy switch: policy=%s intent=%d applied=%d",
-                        self._policy_name,
-                        int(ctx.intent_level) if ctx.intent_level is not None else prev,
-                        int(self._active_ms_level),
-                    )
-                except Exception:
-                    logger.debug("zoom switch log failed", exc_info=True)
-        except _LevelBudgetError:
-            logger.debug("zoom-driven level switch aborted: budget exceeded")
-        # Adapter path handles view updates; no scene re-init or forced render here
+    # Legacy _apply_zoom_based_level_switch removed
 
     def _init_egl(self) -> None:
         # If a GL context is already current (e.g., created by VisPy's EGL
@@ -1180,20 +1003,7 @@ class EGLRendererWorker:
             return cached[1]
         # During the first few frames after a level switch, force full frame for active level.
         # However, policy/oversampling computation should ignore this to avoid oscillation.
-        if not bool(for_policy):
-            try:
-                if int(level) == int(getattr(self, '_active_ms_level', level)) and int(self._switch_fullframe_frames) > 0:
-                    h, w = self._plane_wh_for_level(source, level)
-                    return SliceROI(0, h, 0, w)
-            except Exception:
-                pass
-        if self._disable_init_roi and not self._init_roi_used:
-            # One-shot: use full frame ROI to guarantee visible content on init
-            self._init_roi_used = True
-            h, w = self._plane_wh_for_level(source, level)
-            if self._log_layer_debug:
-                logger.info("viewport ROI init-bypass: using full frame %dx%d (level=%d)", h, w, level)
-            return SliceROI(0, h, 0, w)
+        # No fullframe overrides; compute ROI from viewport and guarantee containment
         h, w = self._plane_wh_for_level(source, level)
         sy, sx = self._plane_scale_for_level(source, level)
         if self.view is None or not hasattr(self.view, 'camera'):
@@ -1440,12 +1250,6 @@ class EGLRendererWorker:
         z_idx: int,
     ) -> np.ndarray:
         roi = self._viewport_roi_for_level(source, level)
-        # Consume one frame of the full-frame horizon after switches when applicable
-        try:
-            if int(level) == int(getattr(self, '_active_ms_level', level)) and int(self._switch_fullframe_frames) > 0:
-                self._switch_fullframe_frames = int(self._switch_fullframe_frames) - 1
-        except Exception:
-            pass
         # Remember ROI used for this level so we can place the slab in world coords
         try:
             self._last_roi = (int(level), roi)
@@ -2155,6 +1959,7 @@ class EGLRendererWorker:
     def process_camera_commands(self, commands: Sequence[CameraCommand]) -> None:
         if not commands:
             return
+        # Interaction observed (kept for future metrics)
         self._user_interaction_seen = True
         logger.debug("worker processing %d camera command(s)", len(commands))
         cam = getattr(self.view, 'camera', None)
@@ -2185,11 +1990,6 @@ class EGLRendererWorker:
                 if factor <= 0.0:
                     continue
                 # Gate policy switching by env; still apply camera zoom
-                if getattr(self, '_disable_zoom_policy', False):
-                    self._pending_zoom_ratio = None
-                else:
-                    self._pending_zoom_ratio = float(factor)
-                self._pending_zoom_ts = time.perf_counter()
                 anchor = cmd.anchor_px or (canvas_wh[0] * 0.5, canvas_wh[1] * 0.5)
                 if isinstance(cam, scene.cameras.TurntableCamera):
                     camops.apply_zoom_3d(cam, factor)
@@ -2469,8 +2269,7 @@ class EGLRendererWorker:
                     vis.relative_step_size = float(max(0.1, min(4.0, float(ss))))  # type: ignore[attr-defined]
 
         if cam is None:
-            if (not getattr(self, '_defer_policy_init', False)) or getattr(self, '_user_interaction_seen', False):
-                self._maybe_select_level()
+            self._maybe_select_level()
             return
 
         # Legacy absolute camera fields
@@ -2497,8 +2296,7 @@ class EGLRendererWorker:
         if self._last_state_sig is not None and new_sig == self._last_state_sig:
             return
         self._last_state_sig = new_sig
-        if (not getattr(self, '_defer_policy_init', False)) or getattr(self, '_user_interaction_seen', False):
-            self._maybe_select_level()
+        self._maybe_select_level()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
