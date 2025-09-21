@@ -1352,9 +1352,8 @@ class EGLHeadlessServer:
     async def _process_state_message(self, data: dict, ws: websockets.WebSocketServerProtocol) -> None:
         t = data.get('type')
         seq = data.get('client_seq')
-        (logger.info if self._log_state_traces else logger.debug)(
-            "state message start type=%s seq=%s", t, seq
-        )
+        if self._log_state_traces:
+            logger.info("state message start type=%s seq=%s", t, seq)
         handled = False
         try:
             if t == 'set_camera':
@@ -1733,11 +1732,11 @@ class EGLHeadlessServer:
                 handled = True
                 return
 
-            logger.debug("state message ignored type=%s", t)
+            if self._log_state_traces:
+                logger.info("state message ignored type=%s", t)
         finally:
-            (logger.info if self._log_state_traces else logger.debug)(
-                "state message end type=%s seq=%s handled=%s", t, seq, handled
-            )
+            if self._log_state_traces:
+                logger.info("state message end type=%s seq=%s handled=%s", t, seq, handled)
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         self._clients.add(ws)
         self._update_client_gauges()
