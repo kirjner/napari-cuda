@@ -230,7 +230,7 @@ class EGLHeadlessServer:
             else:
                 logger.debug(fmt, *args)
         except Exception:
-            pass
+            logger.debug("volume intent log failed", exc_info=True)
 
     def _schedule_coro(self, coro: Awaitable[None], label: str) -> None:
         try:
