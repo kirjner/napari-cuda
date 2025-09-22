@@ -9,7 +9,7 @@ import time
 from threading import Thread
 from typing import Callable, Dict, Optional
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from qtpy import QtCore
@@ -139,7 +139,21 @@ class _SyncState:
         return False
 
 
-class StreamCoordinator:
+@dataclass
+class LoopState:
+    """Aggregate threads, channel, and cached state for the client loop."""
+
+    threads: list[Thread] = field(default_factory=list)
+    state_channel: 'StateChannel | None' = None
+    state_thread: Thread | None = None
+    pixel_receiver: 'PixelReceiver | None' = None
+    pixel_thread: Thread | None = None
+    pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
+    last_dims_seq: int | None = None
+    last_dims_payload: dict[str, object] | None = None
+
+
+class ClientStreamLoop:
     """Orchestrates receiver, state, decoders, presenter, and renderer.
 
     This is a slim re-hosting of the logic previously embedded in
@@ -171,17 +185,13 @@ class StreamCoordinator:
         self._client_cfg = client_cfg
         self._first_dims_ready_cb = on_first_dims_ready
         self._first_dims_notified = False
-        self._pending_intents: dict[int, dict[str, object]] = {}
-        self._last_dims_seq: Optional[int] = None
-        self._last_dims_payload: Optional[dict[str, object]] = None
+        self._loop_state = LoopState()
         self.server_host = server_host
         self.server_port = int(server_port)
         self.state_port = int(state_port)
         self._stream_format = stream_format
         self._stream_format_set = False
         # Thread/state handles
-        self._threads: list[Thread] = []
-        self._state_channel: Optional[StateChannel] = None
         # Optional weakref to a ViewerModel mirror (e.g., ProxyViewer)
         self._viewer_mirror = None  # type: ignore[var-annotated]
         # UI call proxy to marshal updates to the GUI thread
@@ -603,8 +613,10 @@ class StreamCoordinator:
                 handle_connected=self._on_state_connected,
                 handle_disconnect=self._on_state_disconnect,
             )
-            self._state_channel, t_state = st.start()
-            self._threads.append(t_state)
+            state_channel, t_state = st.start()
+            self._loop_state.state_channel = state_channel
+            self._loop_state.state_thread = t_state
+            self._loop_state.threads.append(t_state)
             # Attach input forwarding (wheel + resize) now that state channel exists
             try:
                 # Env knobs
@@ -629,10 +641,10 @@ class StreamCoordinator:
                 self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
                 # Unified wheel handler: dims intent step for plain wheel; zoom for modifiers
                 wheel_cb = self._on_wheel
-                if self._state_channel is not None:
+                if self._loop_state.state_channel is not None:
                     sender = InputSender(
                         widget=self._scene_canvas.native,
-                        post=self._state_channel.post,
+                        post=self._loop_state.state_channel.post,
                         max_rate_hz=max_rate_hz,
                         resize_debounce_ms=resize_debounce_ms,
                         on_wheel=wheel_cb,
@@ -708,7 +720,7 @@ class StreamCoordinator:
 
         # Receiver thread or smoke mode
         if self._vt_smoke:
-            logger.info("StreamCoordinator in smoke test mode (offline)")
+            logger.info("ClientStreamLoop in smoke test mode (offline)")
             # Ensure PyAV decoder is ready if targeting pyav
             smoke_source = (os.getenv('NAPARI_CUDA_SMOKE_SOURCE') or 'vt').lower()
             if smoke_source == 'pyav':
@@ -784,8 +796,10 @@ class StreamCoordinator:
                 on_frame=self._on_frame,
                 on_disconnect=self._handle_disconnect,
             )
-            self._receiver, t_rx = rc.start()
-            self._threads.append(t_rx)
+            receiver, t_rx = rc.start()
+            self._loop_state.pixel_receiver = receiver
+            self._loop_state.pixel_thread = t_rx
+            self._loop_state.threads.append(t_rx)
 
         # Dedicated 1 Hz presenter stats timer (decoupled from draw loop)
         if self._stats_level is not None:
@@ -1080,7 +1094,7 @@ class StreamCoordinator:
             logger.error("VT live init failed: %s", e)
 
     def _request_keyframe_once(self) -> None:
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is not None:
             ch.request_keyframe_once()
 
@@ -1109,7 +1123,7 @@ class StreamCoordinator:
             except Exception:
                 seq_val = None
             if seq_val is not None:
-                self._last_dims_seq = seq_val
+                self._loop_state.last_dims_seq = seq_val
             cur = data.get('current_step')
             # Cache metadata and compute primary axis index
             ndisp = data.get('ndisplay')
@@ -1203,7 +1217,7 @@ class StreamCoordinator:
                 except Exception:
                     seq_i = None
                 if seq_i is not None:
-                    info = self._pending_intents.pop(seq_i, None)
+                    info = self._loop_state.pending_intents.pop(seq_i, None)
                     if info is not None:
                         if ack_val is False:
                             logger.warning("dims_update ack=false for intent_seq=%s info=%s", seq_i, info)
@@ -1211,7 +1225,7 @@ class StreamCoordinator:
                             logger.debug("dims_update ack: intent_seq=%s info=%s", seq_i, info)
 
             # Remember the latest payload for newly attached viewers.
-            self._last_dims_payload = {
+            self._loop_state.last_dims_payload = {
                 'current_step': cur,
                 'ndisplay': ndisp,
                 'ndim': ndim,
@@ -1250,10 +1264,10 @@ class StreamCoordinator:
 
     def _record_pending_intent(self, seq: int, info: dict[str, object]) -> None:
         """Track in-flight intents so we can reconcile on server ACKs."""
-        self._pending_intents[seq] = info
+        self._loop_state.pending_intents[seq] = info
 
     def _replay_last_dims_payload(self) -> None:
-        payload = self._last_dims_payload
+        payload = self._loop_state.last_dims_payload
         if not payload:
             return
         try:
@@ -1366,9 +1380,9 @@ class StreamCoordinator:
         try:
             self._dims_ready = False
             self._primary_axis_index = None
-            self._pending_intents.clear()
-            self._last_dims_seq = None
-            self._last_dims_payload = None
+            self._loop_state.pending_intents.clear()
+            self._loop_state.last_dims_seq = None
+            self._loop_state.last_dims_payload = None
             logger.info("StateChannel disconnected: %s; dims intents gated", exc)
         except Exception:
             logger.debug("_on_state_disconnect failed", exc_info=True)
@@ -1474,7 +1488,7 @@ class StreamCoordinator:
             return (xv, yv)
 
     def _zoom_steps_at_center(self, steps: int) -> None:
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return
         try:
@@ -1507,7 +1521,7 @@ class StreamCoordinator:
             )
 
     def _reset_camera(self) -> None:
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return
         logger.info("key->camera.reset (sending)")
@@ -1584,12 +1598,12 @@ class StreamCoordinator:
         self._replay_last_dims_payload()
 
     def post(self, obj: dict) -> bool:
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         return bool(ch.post(obj)) if ch is not None else False
 
     def reset_camera(self, origin: str = 'ui') -> bool:
         """Send a camera.reset to the server (used by UI bindings)."""
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return False
         try:
@@ -1609,7 +1623,7 @@ class StreamCoordinator:
         Prefer using zoom_at/pan_px/reset ops for interactions; this is
         intended for explicit UI actions that set a known state.
         """
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return False
         payload: dict = {'type': 'set_camera'}
@@ -1741,7 +1755,7 @@ class StreamCoordinator:
             return int(level) if isinstance(level, (int, float)) else 0
 
     def _send_intent(self, type_str: str, fields: dict, origin: str) -> bool:
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return False
         payload = {'type': type_str}
@@ -1909,7 +1923,7 @@ class StreamCoordinator:
         if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
             logger.debug("dims.intent.step gated by rate limiter (%s)", origin)
             return False
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return False
         payload = {
@@ -1955,7 +1969,7 @@ class StreamCoordinator:
             # Allow coalescing on caller side; treat as not sent
             logger.debug("dims.intent.set_index gated by rate limiter (%s)", origin)
             return False
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return False
         payload = {
@@ -2075,7 +2089,7 @@ class StreamCoordinator:
         return self._send_intent('view.intent.set_ndisplay', {'ndisplay': nd_target}, origin)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             return
         try:
@@ -2221,7 +2235,7 @@ class StreamCoordinator:
         dy = float(self._pan_dy_accum or 0.0)
         if not force and abs(dx) < 1e-3 and abs(dy) < 1e-3:
             return
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             self._pan_dx_accum = 0.0
             self._pan_dy_accum = 0.0
@@ -2250,7 +2264,7 @@ class StreamCoordinator:
         delv = float(self._orbit_del_accum or 0.0)
         if not force and abs(daz) < 1e-2 and abs(delv) < 1e-2:
             return
-        ch = self._state_channel
+        ch = self._loop_state.state_channel
         if ch is None:
             self._orbit_daz_accum = 0.0
             self._orbit_del_accum = 0.0

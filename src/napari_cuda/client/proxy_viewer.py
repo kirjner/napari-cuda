@@ -1,7 +1,7 @@
 """
 ProxyViewer - Thin client viewer that mirrors server state via the coordinator.
 
-All authoritative state is routed through the StreamCoordinator over a single
+All authoritative state is routed through the ClientStreamLoop over a single
 state channel. No direct sockets or legacy dims.set paths remain here.
 """
 

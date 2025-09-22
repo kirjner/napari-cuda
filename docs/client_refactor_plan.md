@@ -1,7 +1,7 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/coordinator.py`: 2,441 LOC (still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/client_stream_loop.py`: 2,441 LOC (still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
@@ -77,11 +77,11 @@
 
 ## Metrics & Checkpoints
 - Phase A: drive `client/streaming/state.py` to ≤350 LOC (today ~490) and keep `controllers.py` under 200 LOC while adding loop/ack tests.
-- Phase B: after rename, cap `streaming/coordinator.py` (future `ClientStreamLoop`) at 900–1,000 LOC with <25 `try` and <20 `getattr` calls; break out helper modules ≤200 LOC each.
+- Phase B: after rename, cap `streaming/client_stream_loop.py` at 900–1,000 LOC with <25 `try` and <20 `getattr` calls; break out helper modules ≤200 LOC each.
 - Phase C: trim `streaming_canvas.py` to ≤500 LOC by outsourcing presenter/VT glue into helpers capped at 200 LOC.
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Land the `ClientStreamLoop` rename + `LoopState` skeleton (no behavioural change).
-2. Extract the scheduler/wake helpers into `client_loop/scheduler.py` with unit tests covering coalescing + Qt dispatch.
-3. Stage the VT/PyAV pipeline helper modules and move env parsing into `client_loop_config.py` ahead of logic edits.
+1. Extract the scheduler/wake helpers into `client_loop/scheduler.py`, delete `_CallProxy`/`_WakeProxy`, and cover GUI dispatch with unit tests.
+2. Split VT/PyAV gatekeeping into `client_loop/pipeline_vt.py` and `client_loop/pipeline_pyav.py`, wiring asserts in place of defensive `getattr` checks.
+3. Move loop env parsing into `client_loop_config.py`, then sweep the remaining in-loop `try`/`getattr` usage to boundary-only assertions.

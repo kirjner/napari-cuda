@@ -63,7 +63,7 @@ def launch_streaming_client(server_host='localhost',
     
     # Create ProxyViewer (inherits from ViewerModel, no Window created)
     # In the streaming client, keep ProxyViewer offline and forward state
-    # via the StreamCoordinator to avoid dual sockets/drift.
+    # via the ClientStreamLoop to avoid dual sockets/drift.
     proxy_viewer = ProxyViewer(
         server_host=server_host,
         server_port=state_port,
@@ -157,7 +157,7 @@ def launch_streaming_client(server_host='localhost',
             # Avoid duplicate connections by lambdas with default arg
             rvb.clicked.connect(lambda _=False, m=mgr: m.reset_camera(origin='ui'))
     except Exception:
-        logger.debug("launcher: failed to bind Home button to coordinator.reset_camera", exc_info=True)
+        logger.debug("launcher: failed to bind Home button to loop.reset_camera", exc_info=True)
 
     logger.info("Client launched successfully")
     

@@ -1,28 +1,28 @@
 from __future__ import annotations
 
-from napari_cuda.client.streaming.coordinator import StreamCoordinator
+from napari_cuda.client.streaming.client_stream_loop import LoopState, ClientStreamLoop
 
 
-def _make_coordinator() -> StreamCoordinator:
-    coord = StreamCoordinator.__new__(StreamCoordinator)
-    coord._dims_meta = {}
-    coord._dims_ready = False
-    coord._log_dims_info = False
-    coord._primary_axis_index = None
-    coord._pending_intents = {}
-    coord._viewer_mirror = lambda: None
-    coord._mirror_dims_to_viewer = lambda *args, **kwargs: None
-    coord._first_dims_ready_cb = None
-    coord._first_dims_notified = False
-    coord._ui_call = None
-    coord._last_dims_payload = None
-    coord._compute_primary_axis_index = lambda: 0
-    return coord
+def _make_loop() -> ClientStreamLoop:
+    loop = ClientStreamLoop.__new__(ClientStreamLoop)
+    loop._dims_meta = {}
+    loop._dims_ready = False
+    loop._log_dims_info = False
+    loop._primary_axis_index = None
+    loop._loop_state = LoopState()
+    loop._viewer_mirror = lambda: None
+    loop._mirror_dims_to_viewer = lambda *args, **kwargs: None
+    loop._first_dims_ready_cb = None
+    loop._first_dims_notified = False
+    loop._ui_call = None
+    loop._loop_state.last_dims_payload = None
+    loop._compute_primary_axis_index = lambda: 0
+    return loop
 
 
 def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
-    coordinator = _make_coordinator()
-    coordinator._pending_intents = {41: {'kind': 'dims'}}
+    loop = _make_loop()
+    loop._loop_state.pending_intents = {41: {'kind': 'dims'}}
 
     payload = {
         'seq': 7,
@@ -38,11 +38,11 @@ def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
         'intent_seq': 41,
     }
 
-    coordinator._handle_dims_update(payload)
+    loop._handle_dims_update(payload)
 
-    assert coordinator._pending_intents == {}
-    assert coordinator._last_dims_seq == 7
-    assert coordinator._last_dims_payload == {
+    assert loop._loop_state.pending_intents == {}
+    assert loop._loop_state.last_dims_seq == 7
+    assert loop._loop_state.last_dims_payload == {
         'current_step': [1, 2],
         'ndisplay': 2,
         'ndim': 3,
@@ -52,20 +52,20 @@ def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
         'sizes': [11, 6, 4],
         'displayed': [1, 2],
     }
-    assert coordinator._dims_ready is True
+    assert loop._dims_ready is True
 
 
 def test_replay_last_dims_payload_forwards_to_viewer() -> None:
     mirror_calls: list[tuple] = []
     viewer = object()
-    coordinator = _make_coordinator()
-    coordinator._viewer_mirror = lambda: viewer
+    loop = _make_loop()
+    loop._viewer_mirror = lambda: viewer
 
     def _mirror_dims_to_viewer(vm, cur, ndisp, ndim, dims_range, order, axis_labels, sizes, displayed):
         mirror_calls.append((vm, cur, ndisp, ndim, dims_range, order, axis_labels, sizes, displayed))
 
-    coordinator._mirror_dims_to_viewer = _mirror_dims_to_viewer
-    coordinator._last_dims_payload = {
+    loop._mirror_dims_to_viewer = _mirror_dims_to_viewer
+    loop._loop_state.last_dims_payload = {
         'current_step': [3, 1],
         'ndisplay': 2,
         'ndim': 3,
@@ -76,7 +76,7 @@ def test_replay_last_dims_payload_forwards_to_viewer() -> None:
         'displayed': [2, 1],
     }
 
-    coordinator._replay_last_dims_payload()
+    loop._replay_last_dims_payload()
 
     assert mirror_calls == [
         (

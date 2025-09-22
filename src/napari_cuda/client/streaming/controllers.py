@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-"""
-Lightweight controllers to keep the StreamCoordinator slim.
+"""Lightweight controllers used by :class:`ClientStreamLoop`.
 
-Procedural style with small dataclasses that wrap starting threads for
-state and pixel receivers. Behavior mirrors the existing inline closures.
+Provide small dataclasses that wrap starting threads for state and pixel
+receivers so the loop can delegate orchestration to pure helpers.
 """
 
 from dataclasses import dataclass

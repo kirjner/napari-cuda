@@ -31,13 +31,13 @@ Scene + Layer Handshake (client focus)
   - `layer.update`: incremental metadata change for a single layer (name, shape, multiscale state, etc.).
   - `layer.remove`: notification that a layer was removed on the server.
 - Client responsibilities (current phase):
-  - `StateChannel` dispatches these payloads to optional callbacks; `StreamCoordinator` caches the latest scene/layer specs under a mutex for consumers.
+  - `StateChannel` dispatches these payloads to optional callbacks; `ClientStreamLoop` caches the latest scene/layer specs under a mutex for consumers.
   - Nothing is rendered locally yet—the streamed texture remains authoritative—but UI code can inspect `_latest_scene_spec`/`_scene_layers` to reason about extents before the remote layer registry lands.
   - Reconnect handling is automatic: the cached scene is refreshed when a new `scene.spec` arrives after websocket recovery.
 - Near-term follow-up (tracked separately):
   1. Introduce a `RemoteLayerRegistry` that builds napari `Layer` proxies from the cached specs so the viewer UI has accurate sliders/icons without waiting for server interactions.
   2. Mirror layer intents (visibility, rename, etc.) via the same state channel once capability flags advertise support.
-  3. Expand docs with API examples once the registry is in place; for now, the cache is internal but can be inspected for debugging via `StreamCoordinator._scene_layers`.
+  3. Expand docs with API examples once the registry is in place; for now, the cache is internal but can be inspected for debugging via `ClientStreamLoop._scene_layers`.
 
 2D Content And Artifacts
 
