@@ -1,7 +1,7 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/client_stream_loop.py`: 2,426 LOC (down ~15 after proxy extraction; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/client_stream_loop.py`: 2,395 LOC (down another 31 after pipeline helpers; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
@@ -44,7 +44,7 @@
   2. ✓ Unit coverage (`client_loop/_tests/test_scheduler.py`) locks in GUI-thread delivery from worker threads.
   3. Optionally evolve toward a `ClientLoopBus(QtCore.QObject)` that exposes typed signals (`wake_requested`, `apply_snapshot`, `invoke`); revisit only after latency instrumentation is in place (see `#scheduler-spike`).
 - **Pipeline + telemetry helpers**
-  1. Split VT/PyAV gate logic into helper modules (≤200 LOC each) returning simple dataclasses of callbacks; keep behaviour unchanged.
+  1. ✓ VT/PyAV pipeline factories now live in `client_loop/pipelines.py`; behaviour unchanged and still schedule wakes via the canvas.
   2. Funnel metrics/logging toggles through a lightweight facade so Phase E can reuse the surface.
   3. Write regression tests that simulate keyframe gating + dims replay to ensure `_last_dims_payload` survives each extraction.
 - **Config & env plumbing**
@@ -90,6 +90,6 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Extract VT/PyAV helper modules so gatekeeping logic leaves `ClientStreamLoop` without altering functionality.
-2. Introduce `client_loop_config.py`, migrate env parsing there, then start replacing in-loop `try`/`getattr` with assertions once helpers are in place.
+1. Introduce `client_loop_config.py`, migrate env parsing there, then start replacing in-loop `try`/`getattr` with assertions once helpers are in place.
+2. Funnel metrics/logging toggles through a lightweight facade (Phase B bullet 2) so we can measure wake latency before deeper refactors.
 3. After helpers land, sweep the loop for dead code (e.g., orphaned proxy variants) and capture LOC + try counts to track progress toward the ≤1,000 LOC target.

@@ -23,8 +23,6 @@ from napari_cuda.client.streaming.types import Source, SubmittedFrame
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
-from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
-from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
 from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
 from napari_cuda.client.streaming.metrics import ClientMetrics
 from napari_cuda.client.streaming.eventloop_monitor import EventLoopMonitor
@@ -41,6 +39,10 @@ from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.utils.env import env_float, env_str
 from napari_cuda.client.streaming.client_loop.scheduler import CallProxy, WakeProxy
+from napari_cuda.client.streaming.client_loop.pipelines import (
+    build_pyav_pipeline,
+    build_vt_pipeline,
+)
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
@@ -237,20 +239,6 @@ class ClientStreamLoop:
         # VT pipeline replaces inline queues/workers
         self._vt_backlog_trigger = int(vt_backlog_trigger)
         self._vt_enqueued = 0
-        # Callbacks for VT pipeline coordination
-        def _is_vt_gated() -> bool:
-            return bool(self._vt_wait_keyframe)
-        def _on_vt_backlog_gate() -> None:
-            self._vt_wait_keyframe = True
-        def _req_keyframe() -> None:
-            self._request_keyframe_once()
-        def _on_cache_last(pb: object, persistent: bool) -> None:
-            try:
-                # Keep local cache for draw fallback
-                self._last_vt_payload = pb
-                self._last_vt_persistent = bool(persistent)
-            except Exception:
-                logger.debug("cache last VT payload callback failed", exc_info=True)
         # Client metrics (optional, env-controlled)
         try:
             metrics_enabled = (os.getenv('NAPARI_CUDA_CLIENT_METRICS', '0') or '0').lower() in ('1', 'true', 'yes')
@@ -343,29 +331,10 @@ class ClientStreamLoop:
         else:
             # External loop owns draw cadence; pipelines don't need to schedule wakes
             wake_cb = (lambda: None)
-        self._vt_pipeline = VTPipeline(
-            presenter=self._presenter,
-            source_mux=self._source_mux,
-            scene_canvas=self._scene_canvas,
-            backlog_trigger=self._vt_backlog_trigger,
-            is_gated=_is_vt_gated,
-            on_backlog_gate=_on_vt_backlog_gate,
-            request_keyframe=_req_keyframe,
-            on_cache_last=_on_cache_last,
-            metrics=self._metrics,
-            schedule_next_wake=wake_cb,
-        )
+        self._vt_pipeline = build_vt_pipeline(self, schedule_next_wake=wake_cb, logger=logger)
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
         self._pyav_enqueued = 0
-        self._pyav_pipeline = PyAVPipeline(
-            presenter=self._presenter,
-            source_mux=self._source_mux,
-            scene_canvas=self._scene_canvas,
-            backlog_trigger=self._pyav_backlog_trigger,
-            latency_s=self._pyav_latency_s,
-            metrics=self._metrics,
-            schedule_next_wake=wake_cb,
-        )
+        self._pyav_pipeline = build_pyav_pipeline(self, schedule_next_wake=wake_cb)
         self._pyav_wait_keyframe: bool = False
 
         # Last-frame caches for redraw fallback
