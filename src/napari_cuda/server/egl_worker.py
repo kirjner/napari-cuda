@@ -1572,8 +1572,6 @@ class EGLRendererWorker:
         else:
             canvas_wh = (self.width, self.height)
 
-        self._last_interaction_ts = time.perf_counter()
-
         debug_flags = CameraDebugFlags(
             zoom=self._debug_zoom_drift,
             pan=self._debug_pan,
@@ -1590,7 +1588,13 @@ class EGLRendererWorker:
         )
 
         if outcome.zoom_intent is not None:
-            self._scene_state_machine.record_zoom_intent(float(outcome.zoom_intent))
+            zoom_ratio = float(outcome.zoom_intent)
+            if zoom_ratio > 1.0:
+                # Napari emits factors >1 for zoom-in; selector expects <1.0 to mean zoom-in.
+                zoom_ratio = 1.0 / zoom_ratio
+            self._scene_state_machine.record_zoom_intent(zoom_ratio)
+
+        self._last_interaction_ts = time.perf_counter()
 
         if outcome.camera_changed:
             self._mark_render_tick_needed()
