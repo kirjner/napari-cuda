@@ -2123,7 +2123,7 @@ class EGLRendererWorker:
         current = int(self._active_ms_level)
         max_level = max(overs_map.keys())
         if napari_reason == 'zoom-in':
-            thr_in = min(1.15, base_thr_in)
+            thr_in = min(1.20, base_thr_in)
             thr_out = base_thr_out
         elif napari_reason == 'zoom-out':
             thr_in = base_thr_in
