@@ -1,9 +1,9 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/coordinator.py`: 2,444 LOC (still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/coordinator.py`: 2,441 LOC (still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
-- `streaming/state.py`: 489 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
+- `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
 - Tests exist only for the websocket shim. No coverage for intent ack bookkeeping, presenter scheduling, or dims replay.
 
@@ -23,9 +23,9 @@
 ## Phase Plan
 
 ### Phase A — State Channel & Dims Intake
-- Extract payload normalisation into `streaming/dims_payload.py` with pure functions, covered by `_tests/test_dims_payload.py`.
-- Replace `_normalize_meta` and `_normalize_current_step` with straight helpers; remove broad exception swallowing.
-- Introduce a lightweight `StateClient` struct to own websocket handles; rename callbacks (`handle_scene_spec`, `handle_layer_update`).
+- [done] Extracted payload normalisation into `streaming/dims_payload.py` (2025-09-22) with `_tests/test_dims_payload.py`.
+- [done] Replaced `_normalize_meta` and `_normalize_current_step` with straight helpers in `streaming/state.py`.
+- [done] Introduced a lightweight `StateChannelLoop` wrapper and renamed callbacks (`handle_scene_spec`, `handle_layer_update`).
 - Add tests covering dims ack handling and scene caching.
 
 ### Phase B — Client Stream Loop Degodification
@@ -33,6 +33,24 @@
 - Extract VT/PyAV pipeline toggles into module-level helpers returning simple structs (no classes unless absolutely required by Qt).
 - Delete `_CallProxy`/`_WakeProxy`; replace with direct `QtCore.QMetaObject.invokeMethod` usage.
 - Assert invariants (e.g. decoder readiness) instead of logging-only fallbacks.
+
+#### Phase B Work Plan (target: three PRs, ≤1,000 LOC in `ClientStreamLoop` post-split)
+- **Bootstrap & rename**
+  1. Cut `ClientStreamLoop` scaffolding: introduce a `LoopState` dataclass bundling threads, channel references, and cached payloads.
+  2. Rename the class + public surface (`attach_viewer_mirror`, `post`, etc.) without behaviour changes; snapshot metrics (`LOC`, `try`, `getattr`).
+  3. Move the lingering env reads for rate limits and watchdogs into a `client_loop_config.py` helper with colocated unit tests.
+- **Scheduler & wake extraction**
+  1. Lift `_schedule_next_wake`, `_WakeProxy`, `_CallProxy`, and the timer bookkeeping into `client_loop/scheduler.py`; expose a pure `schedule_next_wake(loop_state, when)` API with unit tests covering coalescing and error handling.
+  2. Replace inline Qt signal wiring with `QtCore.QMetaObject.invokeMethod`, asserting GUI-thread dispatch in tests via a minimal Qt harness.
+  3. Gate pipelines through the new scheduler module and document cross-thread guarantees.
+- **Pipeline + telemetry helpers**
+  1. Split VT/PyAV gate logic into `client_loop/pipeline_vt.py` and `client_loop/pipeline_pyav.py` helpers (≤200 LOC each) returning simple dataclasses of callbacks.
+  2. Funnel metrics/logging toggles through a `ClientMetricsFacade` wrapper so Phase E can reuse the surface.
+  3. Write regression tests that simulate keyframe gating + dims replay to ensure `_last_dims_payload` survives the refactor.
+- **Exit criteria**
+  - `ClientStreamLoop` ≤1,000 LOC with `<25` `try` blocks and `<20` `getattr` calls.
+  - New helper modules each ≤200 LOC with ≥85 % coverage.
+  - No direct Qt objects stored on the loop; lifetime owned by the scene canvas.
 
 ### Phase C — Presentation & Canvas Simplification
 - Formalise a `ClientConfig` struct resolved once at canvas init; drop dummy keymap layers and env re-reads.
@@ -58,12 +76,12 @@
 - Tests follow the same vocabulary (`test_dims_payload_normalises_axes`).
 
 ## Metrics & Checkpoints
-- Reduce `client/streaming/coordinator.py` under 1,000 LOC by Phase C; track `try` count <25 and `getattr` <20.
-- Limit `streaming_canvas.py` to ≤500 LOC after presenter extraction.
-- Achieve >85% coverage on new helpers (`dims_payload`, presenter policy, intent throttle).
-- Record metrics snapshots per phase inside this doc.
+- Phase A: drive `client/streaming/state.py` to ≤350 LOC (today ~490) and keep `controllers.py` under 200 LOC while adding loop/ack tests.
+- Phase B: after rename, cap `streaming/coordinator.py` (future `ClientStreamLoop`) at 900–1,000 LOC with <25 `try` and <20 `getattr` calls; break out helper modules ≤200 LOC each.
+- Phase C: trim `streaming_canvas.py` to ≤500 LOC by outsourcing presenter/VT glue into helpers capped at 200 LOC.
+- Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Commit/stash current local changes on `layer-sync-phase2` and branch `client-refactor`.
-2. Promote this document to source control alongside the new branch.
-3. Begin Phase A by extracting dims payload helpers and backfilling tests using `dims_update.json` as a fixture.
+1. Land the `ClientStreamLoop` rename + `LoopState` skeleton (no behavioural change).
+2. Extract the scheduler/wake helpers into `client_loop/scheduler.py` with unit tests covering coalescing + Qt dispatch.
+3. Stage the VT/PyAV pipeline helper modules and move env parsing into `client_loop_config.py` ahead of logic edits.

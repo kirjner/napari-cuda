@@ -21,7 +21,7 @@ def state_channel() -> StateChannel:
 
 def test_state_channel_scene_callback(state_channel):
     received = []
-    state_channel.on_scene_spec = received.append
+    state_channel.handle_scene_spec = received.append
 
     layer = LayerSpec(layer_id='a', layer_type='image', name='demo', ndim=2, shape=[32, 32])
     scene_msg = SceneSpecMessage(scene=SceneSpec(layers=[layer]))
@@ -35,7 +35,7 @@ def test_state_channel_scene_callback(state_channel):
 
 def test_state_channel_layer_update_callback(state_channel):
     received = []
-    state_channel.on_layer_update = received.append
+    state_channel.handle_layer_update = received.append
 
     layer = LayerSpec(layer_id='layer-1', layer_type='image', name='demo', ndim=2, shape=[16, 16])
     update_msg = LayerUpdateMessage(layer=layer, partial=False)
@@ -49,7 +49,7 @@ def test_state_channel_layer_update_callback(state_channel):
 
 def test_state_channel_layer_remove_callback(state_channel):
     received = []
-    state_channel.on_layer_remove = received.append
+    state_channel.handle_layer_remove = received.append
 
     removal = LayerRemoveMessage(layer_id='layer-2', reason='test')
 
@@ -62,7 +62,7 @@ def test_state_channel_layer_remove_callback(state_channel):
 
 def test_state_channel_dims_update_normalisation():
     captured: list[dict] = []
-    sc = StateChannel('localhost', 8081, on_dims_update=captured.append)
+    sc = StateChannel('localhost', 8081, handle_dims_update=captured.append)
 
     payload = {
         'type': 'dims.update',

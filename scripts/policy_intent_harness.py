@@ -70,7 +70,7 @@ def run_harness(
             "origin": "harness",
             **payload,
         }
-        ok = bool(channel.send_json(message))
+        ok = bool(channel.post(message))
         if verbose:
             logger.info("[%03d] %s -> %s", seq, label, ok)
         records.append({"seq": seq, "label": label, "ok": ok, "payload": message})

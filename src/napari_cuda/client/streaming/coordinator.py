@@ -595,13 +595,13 @@ class StreamCoordinator:
             st = StateController(
                 self.server_host,
                 self.state_port,
-                self._on_video_config,
-                self._on_dims_update,
-                on_scene_spec=self._on_scene_spec,
-                on_layer_update=self._on_layer_update,
-                on_layer_remove=self._on_layer_remove,
-                on_connected=self._on_state_connected,
-                on_disconnect=self._on_state_disconnect,
+                handle_video_config=self._handle_video_config,
+                handle_dims_update=self._handle_dims_update,
+                handle_scene_spec=self._handle_scene_spec,
+                handle_layer_update=self._handle_layer_update,
+                handle_layer_remove=self._handle_layer_remove,
+                handle_connected=self._on_state_connected,
+                handle_disconnect=self._on_state_disconnect,
             )
             self._state_channel, t_state = st.start()
             self._threads.append(t_state)
@@ -632,7 +632,7 @@ class StreamCoordinator:
                 if self._state_channel is not None:
                     sender = InputSender(
                         widget=self._scene_canvas.native,
-                        send_json=self._state_channel.send_json,
+                        post=self._state_channel.post,
                         max_rate_hz=max_rate_hz,
                         resize_debounce_ms=resize_debounce_ms,
                         on_wheel=wheel_cb,
@@ -780,9 +780,9 @@ class StreamCoordinator:
             rc = ReceiveController(
                 self.server_host,
                 self.server_port,
-                on_connected=self._on_connected,
+                on_connected=self._handle_connected,
                 on_frame=self._on_frame,
-                on_disconnect=self._on_disconnect,
+                on_disconnect=self._handle_disconnect,
             )
             self._receiver, t_rx = rc.start()
             self._threads.append(t_rx)
@@ -1085,7 +1085,7 @@ class StreamCoordinator:
             ch.request_keyframe_once()
 
     # Extracted helpers
-    def _on_video_config(self, data: dict) -> None:
+    def _handle_video_config(self, data: dict) -> None:
         w, h, fps, fmt, avcc_b64 = extract_video_config(data)
         if fps > 0:
             self._fps = fps
@@ -1224,9 +1224,6 @@ class StreamCoordinator:
         except Exception:
             logger.debug("dims_update parse failed", exc_info=True)
 
-    def _on_dims_update(self, data: dict) -> None:
-        self._handle_dims_update(data)
-
     def _notify_first_dims_ready(self) -> None:
         if self._first_dims_notified:
             return
@@ -1280,7 +1277,7 @@ class StreamCoordinator:
         except Exception:
             logger.debug("replay last dims payload failed", exc_info=True)
 
-    def _on_scene_spec(self, msg: SceneSpecMessage) -> None:
+    def _handle_scene_spec(self, msg: SceneSpecMessage) -> None:
         """Cache latest scene specification and forward to registry."""
         try:
             with self._scene_lock:
@@ -1297,7 +1294,7 @@ class StreamCoordinator:
         except Exception:
             logger.debug("scene.spec registry apply failed", exc_info=True)
 
-    def _on_layer_update(self, msg: LayerUpdateMessage) -> None:
+    def _handle_layer_update(self, msg: LayerUpdateMessage) -> None:
         try:
             self._layer_registry.apply_update(msg)
             layer_id = msg.layer.layer_id if msg.layer else None
@@ -1305,7 +1302,7 @@ class StreamCoordinator:
         except Exception:
             logger.debug("layer.update handling failed", exc_info=True)
 
-    def _on_layer_remove(self, msg: LayerRemoveMessage) -> None:
+    def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
         try:
             self._layer_registry.remove_layer(msg)
             logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
@@ -1347,12 +1344,12 @@ class StreamCoordinator:
         # We are already on the GUI thread when called from _on_registry_snapshot
         _run()
 
-    def _on_connected(self) -> None:
+    def _handle_connected(self) -> None:
         self._init_decoder()
         dec = self.decoder.decode if self.decoder else None
         self._pyav_pipeline.set_decoder(dec)
 
-    def _on_disconnect(self, exc: Exception | None) -> None:
+    def _handle_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
 
     # State channel lifecycle: gate dims intents safely across reconnects
@@ -1502,7 +1499,7 @@ class StreamCoordinator:
             cy = float(self._vid_h or 0) / 2.0
             xv, yv = cx, cy
         ax_s, ay_s = self._server_anchor_from_video(xv, yv)
-        ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(f), 'anchor_px': [float(ax_s), float(ay_s)]})
+        ok = ch.post({'type': 'camera.zoom_at', 'factor': float(f), 'anchor_px': [float(ax_s), float(ay_s)]})
         if getattr(self, '_log_dims_info', False):
             logger.info(
                 "key->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s",
@@ -1514,7 +1511,7 @@ class StreamCoordinator:
         if ch is None:
             return
         logger.info("key->camera.reset (sending)")
-        ok = ch.send_json({'type': 'camera.reset'})
+        ok = ch.post({'type': 'camera.reset'})
         logger.info("key->camera.reset sent=%s", bool(ok))
 
     def _on_key_event(self, data: dict) -> bool:
@@ -1586,9 +1583,9 @@ class StreamCoordinator:
             self._viewer_mirror = None
         self._replay_last_dims_payload()
 
-    def send_json(self, obj: dict) -> bool:
+    def post(self, obj: dict) -> bool:
         ch = self._state_channel
-        return bool(ch.send_json(obj)) if ch is not None else False
+        return bool(ch.post(obj)) if ch is not None else False
 
     def reset_camera(self, origin: str = 'ui') -> bool:
         """Send a camera.reset to the server (used by UI bindings)."""
@@ -1599,7 +1596,7 @@ class StreamCoordinator:
             logger.info("%s->camera.reset (sending)", origin)
         except Exception:
             pass
-        ok = ch.send_json({'type': 'camera.reset'})
+        ok = ch.post({'type': 'camera.reset'})
         try:
             logger.info("%s->camera.reset sent=%s", origin, bool(ok))
         except Exception:
@@ -1632,7 +1629,7 @@ class StreamCoordinator:
             logger.info("%s->set_camera %s", origin, {k: v for k, v in payload.items() if k != 'type'})
         except Exception:
             pass
-        ok = ch.send_json(payload)
+        ok = ch.post(payload)
         return bool(ok)
 
     # --- Intents API --------------------------------------------------------------
@@ -1757,7 +1754,7 @@ class StreamCoordinator:
         payload['client_id'] = self._client_id
         payload['client_seq'] = self._next_client_seq()
         payload['origin'] = str(origin)
-        ok = ch.send_json(payload)
+        ok = ch.post(payload)
         try:
             # Log without the 'type' field for brevity
             fields_to_log = {k: v for k, v in payload.items() if k not in ('type', 'client_id', 'client_seq', 'origin')}
@@ -1924,7 +1921,7 @@ class StreamCoordinator:
             'origin': str(origin),
         }
         seq_val = int(payload['client_seq'])
-        ok = ch.send_json(payload)
+        ok = ch.post(payload)
         if ok:
             self._record_pending_intent(
                 seq_val,
@@ -1970,7 +1967,7 @@ class StreamCoordinator:
             'origin': str(origin),
         }
         seq_val = int(payload['client_seq'])
-        ok = ch.send_json(payload)
+        ok = ch.post(payload)
         if ok:
             self._record_pending_intent(
                 seq_val,
@@ -2109,7 +2106,7 @@ class StreamCoordinator:
             self._last_zoom_anchor_px = (float(ax), float(ay))
         except Exception:
             logger.debug("zoom HUD stash failed", exc_info=True)
-        ok = ch.send_json({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay)]})
+        ok = ch.post({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay)]})
         if getattr(self, '_log_dims_info', False):
             logger.info("wheel+mod->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s", float(factor), float(ax), float(ay), bool(ok))
 
@@ -2229,7 +2226,7 @@ class StreamCoordinator:
             self._pan_dx_accum = 0.0
             self._pan_dy_accum = 0.0
             return
-        ok = ch.send_json({'type': 'camera.pan_px', 'dx_px': float(dx), 'dy_px': float(dy)})
+        ok = ch.post({'type': 'camera.pan_px', 'dx_px': float(dx), 'dy_px': float(dy)})
         # Stash for HUD
         try:
             self._last_pan_dx_sent = float(dx)
@@ -2258,7 +2255,7 @@ class StreamCoordinator:
             self._orbit_daz_accum = 0.0
             self._orbit_del_accum = 0.0
             return
-        ok = ch.send_json({'type': 'camera.orbit', 'd_az_deg': float(daz), 'd_el_deg': float(delv)})
+        ok = ch.post({'type': 'camera.orbit', 'd_az_deg': float(daz), 'd_el_deg': float(delv)})
         self._last_cam_send = time.perf_counter()
         self._orbit_daz_accum = 0.0
         self._orbit_del_accum = 0.0

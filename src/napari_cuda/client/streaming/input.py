@@ -14,13 +14,13 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
 
     - Coalesces high-rate wheel events to a target max rate.
     - Debounces resize events to avoid thrash while the user drags.
-    - Sends messages via the provided send_json callable.
+    - Sends messages via the provided `post` callable.
     """
 
     def __init__(
         self,
         widget: QtWidgets.QWidget,  # type: ignore[valid-type]
-        send_json: Callable[[dict], bool],
+        post: Callable[[dict], bool],
         *,
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
@@ -31,7 +31,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
     ) -> None:
         super().__init__(widget)
         self._widget = widget
-        self._send_json = send_json
+        self._post = post
         self._max_rate_hz = float(max(1.0, max_rate_hz))
         self._min_dt = 1.0 / self._max_rate_hz
         self._last_wheel_send: float = 0.0
@@ -172,7 +172,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             'dpr': float(dpr),
             'ts': float(time.time()),
         }
-        ok = self._send_json(msg)
+        ok = self._post(msg)
         if self._log_info:
             logger.info(
                 "input.wheel sent: ay=%d py=%d mods=%d pos=(%.1f,%.1f)",
@@ -227,7 +227,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
             'dpr': float(dpr),
             'ts': float(time.time()),
         }
-        _ = self._send_json(msg)
+        _ = self._post(msg)
         if self._log_info:
             logger.info("view.resize sent: %dx%d dpr=%.2f", int(w), int(h), float(dpr))
 
@@ -344,7 +344,7 @@ class InputSender:
     def __init__(
         self,
         widget: QtWidgets.QWidget,  # type: ignore[valid-type]
-        send_json: Callable[[dict], bool],
+        post: Callable[[dict], bool],
         *,
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
@@ -356,7 +356,7 @@ class InputSender:
         self._widget = widget
         self._filter = _EventFilter(
             widget,
-            send_json,
+            post,
             max_rate_hz=max_rate_hz,
             resize_debounce_ms=resize_debounce_ms,
             on_wheel=on_wheel,
@@ -395,7 +395,7 @@ class InputSender:
             except Exception:
                 dpr = 1.0
             msg = {'type': 'view.resize', 'width_px': w, 'height_px': h, 'dpr': dpr, 'ts': float(time.time())}
-            _ = self._filter._send_json(msg)  # type: ignore[attr-defined]
+            _ = self._filter._post(msg)  # type: ignore[attr-defined]
         except Exception:
             logger.debug("Initial resize send failed", exc_info=True)
 
