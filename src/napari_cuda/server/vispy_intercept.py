@@ -10,10 +10,14 @@ GL timer queries. Designed to be attached to napari's VispyCanvas.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from OpenGL import GL
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,11 +73,11 @@ class GLFrameInterceptor:
         try:
             self._scene_canvas.events.draw.disconnect(self._on_draw)
         except Exception:
-            pass
+            logger.debug("vispy_intercept: draw disconnect failed", exc_info=True)
         try:
             self._scene_canvas.events.resize.disconnect(self._on_resize)
         except Exception:
-            pass
+            logger.debug("vispy_intercept: resize disconnect failed", exc_info=True)
         self._delete_buffers()
         self._attached = False
 
@@ -101,7 +105,7 @@ class GLFrameInterceptor:
                 try:
                     self._scene_canvas.context.make_current()
                 except Exception:
-                    pass  # Context may not be ready
+                    logger.debug("vispy_intercept: make_current failed", exc_info=True)
             
             # Create or resize texture and FBO
             if self._texture is None:
@@ -148,13 +152,13 @@ class GLFrameInterceptor:
                 try:
                     GL.glDeleteFramebuffers(int(self._fbo))
                 except Exception:
-                    pass
+                    logger.debug("vispy_intercept: delete framebuffer failed", exc_info=True)
                 self._fbo = None
             if self._texture is not None:
                 try:
                     GL.glDeleteTextures(int(self._texture))
                 except Exception:
-                    pass
+                    logger.debug("vispy_intercept: delete texture failed", exc_info=True)
                 self._texture = None
             return False  # Will retry on next draw
 
@@ -245,7 +249,7 @@ class GLFrameInterceptor:
                     0, 0, width, height, 0, 0, width, height, GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST
                 )
             except Exception:
-                pass
+                logger.debug("vispy_intercept: fallback blit failed", exc_info=True)
         finally:
             # Restore default bind
             try:
@@ -253,11 +257,11 @@ class GLFrameInterceptor:
                 GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, read_fbo)
                 GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, read_fbo)
             except Exception:
-                pass
+                logger.debug("vispy_intercept: restore bind failed", exc_info=True)
             if query_id is not None:
                 try:
                     GL.glDeleteQueries(1, [query_id])
                 except Exception:
-                    pass
+                    logger.debug("vispy_intercept: delete query failed", exc_info=True)
 
         self._last_stats = CaptureStats(width=width, height=height, gpu_time_ns=gpu_time_ns)

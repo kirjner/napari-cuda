@@ -397,56 +397,43 @@ class ViewerSceneManager:
         name = getattr(layer, "name", None)
         if name:
             extras["layer_name"] = str(name)
-        try:
-            extras["visible"] = bool(layer.visible)
-        except Exception:
-            pass
-        try:
-            opacity = float(layer.opacity)
-        except Exception:
-            opacity = None
-        if opacity is not None:
-            extras["opacity"] = opacity
-        try:
-            blending = getattr(layer, "blending", None)
-            if blending is not None:
-                extras["blending"] = str(blending)
-        except Exception:
-            pass
-        try:
-            interpolation = getattr(layer, "interpolation", None)
-            if interpolation is not None:
-                extras["interpolation"] = str(interpolation)
-        except Exception:
-            pass
-        try:
-            colormap = getattr(layer, "colormap", None)
-            if colormap is not None:
-                cmap_name = getattr(colormap, "name", None)
-                if cmap_name is None and isinstance(colormap, dict):
-                    cmap_name = colormap.get("name")
-                if cmap_name is not None:
-                    extras["colormap"] = str(cmap_name)
-        except Exception:
-            pass
-        try:
-            rendering = getattr(layer, "rendering", None)
-            if rendering is not None:
-                extras["rendering"] = str(rendering)
-        except Exception:
-            pass
-        try:
-            scale = getattr(layer, "scale", None)
-            if scale is not None:
+        visible = getattr(layer, "visible", None)
+        if visible is not None:
+            extras["visible"] = bool(visible)
+        opacity_val = getattr(layer, "opacity", None)
+        if opacity_val is not None:
+            try:
+                extras["opacity"] = float(opacity_val)
+            except Exception:
+                logger.debug("layer_manager: opacity coercion failed", exc_info=True)
+        blending = getattr(layer, "blending", None)
+        if blending is not None:
+            extras["blending"] = str(blending)
+        interpolation = getattr(layer, "interpolation", None)
+        if interpolation is not None:
+            extras["interpolation"] = str(interpolation)
+        colormap = getattr(layer, "colormap", None)
+        if colormap is not None:
+            cmap_name = getattr(colormap, "name", None)
+            if cmap_name is None and isinstance(colormap, dict):
+                cmap_name = colormap.get("name")
+            if cmap_name is not None:
+                extras["colormap"] = str(cmap_name)
+        rendering = getattr(layer, "rendering", None)
+        if rendering is not None:
+            extras["rendering"] = str(rendering)
+        scale = getattr(layer, "scale", None)
+        if scale is not None:
+            try:
                 extras["scale"] = [float(s) for s in scale]
-        except Exception:
-            pass
-        try:
-            clim = getattr(layer, "contrast_limits", None)
-            if clim is not None:
+            except Exception:
+                logger.debug("layer_manager: scale coercion failed", exc_info=True)
+        clim = getattr(layer, "contrast_limits", None)
+        if clim is not None:
+            try:
                 extras["contrast_limits"] = [float(clim[0]), float(clim[1])]
-        except Exception:
-            pass
+            except Exception:
+                logger.debug("layer_manager: contrast_limits coercion failed", exc_info=True)
         return {k: v for k, v in extras.items() if v is not None}
 
     @staticmethod
@@ -496,18 +483,21 @@ class ViewerSceneManager:
         ms_state = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
         levels: Optional[List[Dict[str, Any]]] = None
         cur_level: Optional[int] = None
+        ms_metadata: Optional[Dict[str, Any]] = None
         if ms_adapt is not None:
             try:
                 levels = [lvl.to_dict() for lvl in ms_adapt.levels]
                 cur_level = int(ms_adapt.current_level)
             except Exception:
                 logger.debug("layer_manager: adapt ms to_dict failed", exc_info=True)
+            ms_metadata = getattr(ms_adapt, "metadata", None)
         elif ms_state is not None:
             try:
                 levels = [lvl.to_dict() for lvl in ms_state.levels]
                 cur_level = int(ms_state.current_level)
             except Exception:
                 logger.debug("layer_manager: state ms to_dict failed", exc_info=True)
+            ms_metadata = getattr(ms_state, "metadata", None)
 
         render_hints = self._build_render_hints(volume_state)
         # Compose extras map
@@ -525,6 +515,8 @@ class ViewerSceneManager:
             extras=layer_extras or None,
             metadata=metadata or None,
         )
+        if spec.multiscale is not None and ms_metadata:
+            spec.multiscale.metadata = dict(ms_metadata)
         # Preserve dtype and axis labels from snapshot logic
         spec.dtype = worker_snapshot.dtype
         spec.axis_labels = list(worker_snapshot.axis_labels)
@@ -539,7 +531,7 @@ class ViewerSceneManager:
                 try:
                     spec.contrast_limits = [float(clim_vs[0]), float(clim_vs[1])]
                 except Exception:
-                    pass
+                    logger.debug("layer_manager: volume-state contrast coercion failed", exc_info=True)
         return spec
 
     def _build_dims_spec(

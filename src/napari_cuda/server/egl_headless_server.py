@@ -345,19 +345,16 @@ class EGLHeadlessServer:
                 logger.debug('rebroadcast: failed to sync server state step', exc_info=True)
 
             # Diagnostics: compare and note source of truth
-            try:
-                if self._log_dims_info:
-                    logger.info(
-                        "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
-                        source_of_truth, chosen, state_step, w_step, s_step,
-                    )
-                else:
-                    logger.debug(
-                        "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
-                        source_of_truth, chosen, state_step, w_step, s_step,
-                    )
-            except Exception:
-                pass
+            if self._log_dims_info:
+                logger.info(
+                    "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
+                    source_of_truth, chosen, state_step, w_step, s_step,
+                )
+            else:
+                logger.debug(
+                    "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
+                    source_of_truth, chosen, state_step, w_step, s_step,
+                )
 
             await self._broadcast_dims_update(chosen, last_client_id=client_id, ack=True)
         except Exception as e:
@@ -421,13 +418,10 @@ class EGLHeadlessServer:
             ndisp = 3 if int(ndisplay) >= 3 else 2
         except Exception:
             ndisp = 2
-        try:
-            if self._log_dims_info:
-                logger.info("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
-            else:
-                logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
-        except Exception:
-            pass
+        if self._log_dims_info:
+            logger.info("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
+        else:
+            logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:
@@ -680,18 +674,16 @@ class EGLHeadlessServer:
                 ax = axis.strip().lower()
                 order = meta.get('order') or []
                 if isinstance(order, (list, tuple)):
-                    try:
-                        pos = [str(x).lower() for x in order].index(ax)
+                    lowered = [str(x).lower() for x in order]
+                    if ax in lowered:
+                        pos = lowered.index(ax)
                         return pos if 0 <= pos < max(0, int(cur_len)) else None
-                    except Exception:
-                        pass
                 labels = meta.get('axis_labels') or []
                 if isinstance(labels, (list, tuple)):
-                    try:
-                        pos = [str(x).lower() for x in labels].index(ax)
+                    lowered = [str(x).lower() for x in labels]
+                    if ax in lowered:
+                        pos = lowered.index(ax)
                         return pos if 0 <= pos < max(0, int(cur_len)) else None
-                    except Exception:
-                        pass
         except Exception:
             logger.debug("resolve axis failed", exc_info=True)
         return None
@@ -779,7 +771,7 @@ class EGLHeadlessServer:
                     lvl = int(getattr(src, 'current_level', 0))
                     new_msg['meta']['level'] = lvl
                 except Exception:
-                    pass
+                    logger.debug('dims.update meta: level lookup failed', exc_info=True)
                 try:
                     descs = getattr(src, 'level_descriptors', [])
                     if isinstance(descs, list) and descs:
@@ -788,19 +780,17 @@ class EGLHeadlessServer:
                         if shape is not None:
                             new_msg['meta']['level_shape'] = [int(s) for s in shape]
                 except Exception:
-                    pass
+                    logger.debug('dims.update meta: shape enrichment failed', exc_info=True)
                 try:
                     dt = getattr(src, 'dtype', None)
                     if dt is not None:
                         new_msg['meta']['dtype'] = str(dt)
                 except Exception:
-                    pass
+                    logger.debug('dims.update meta: dtype enrichment failed', exc_info=True)
                 # For 2D slice path we normalize slabs to [0,1]
-                try:
-                    normalized = (not bool(getattr(self._worker, 'use_volume', False)))
-                    new_msg['meta']['normalized'] = bool(normalized)
-                except Exception:
-                    pass
+                if self._worker is not None:
+                    normalized = not bool(self._worker.use_volume)
+                    new_msg['meta']['normalized'] = normalized
         except Exception:
             logger.debug('dims.update meta enrichment failed', exc_info=True)
         # Ensure sizes/range reflect the active adapter-selected level, overriding any stale cache.
@@ -1054,7 +1044,7 @@ class EGLHeadlessServer:
             try:
                 self.metrics.observe_ms('napari_cuda_pack_ms', (t_p1 - t_p0) * 1000.0)
             except Exception:
-                pass
+                logger.debug('metrics observe napari_cuda_pack_ms failed', exc_info=True)
             try:
                 if int(os.getenv('NAPARI_CUDA_LOG_NALS', '0')) and avcc_pkt is not None:
                     from .bitstream import parse_nals
@@ -1085,7 +1075,7 @@ class EGLHeadlessServer:
                     try:
                         self.metrics.inc('napari_cuda_video_config_sends')
                     except Exception:
-                        pass
+                        logger.debug('metrics inc napari_cuda_video_config_sends failed', exc_info=True)
                 except Exception as e:
                     logger.debug("Failed to schedule video_config broadcast: %s", e)
             # Optional payload dump (AVCC payload)
@@ -1115,7 +1105,7 @@ class EGLHeadlessServer:
                     try:
                         self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
                     except Exception:
-                        pass
+                        logger.debug('metrics set frame_queue_depth failed', exc_info=True)
                 except asyncio.QueueFull:
                     try:
                         self._drain_and_put((avcc_pkt, flags, seq_val, stamp_ts))
@@ -1125,7 +1115,7 @@ class EGLHeadlessServer:
                             if (self._drops_total % 100) == 1:
                                 logger.info("Pixel queue full: dropped oldest (total drops=%d)", self._drops_total)
                         except Exception:
-                            pass
+                            logger.debug('metrics inc frames_dropped failed', exc_info=True)
                     except Exception as e:
                         logger.debug("Failed to drain and enqueue frame: %s", e)
             loop.call_soon_threadsafe(_enqueue)
@@ -1286,7 +1276,7 @@ class EGLHeadlessServer:
                         self.metrics.observe_ms('napari_cuda_pack_ms', getattr(timings, 'pack_ms', 0.0))
                         self.metrics.observe_ms('napari_cuda_total_ms', timings.total_ms)
                     except Exception:
-                        pass
+                        logger.debug('metrics observe render timings failed', exc_info=True)
                     # Track last keyframe timestamp/seq for metrics if needed
                     # Keyframe tracking is handled after AVCC packing in on_frame
                     # Forward the encoder output along with the capture wall timestamp
@@ -1354,7 +1344,7 @@ class EGLHeadlessServer:
                 if sock is not None:
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except Exception:
-                pass
+                logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
             # Send current dims baseline FIRST so client can gate inputs and inflate UI deterministically
             try:
                 await self._await_adapter_level_ready(0.5)
@@ -1441,13 +1431,10 @@ class EGLHeadlessServer:
                 center = data.get('center')
                 zoom = data.get('zoom')
                 angles = data.get('angles')
-                try:
-                    if self._log_cam_info:
-                        logger.info("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
-                    elif self._log_cam_debug:
-                        logger.debug("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
-                except Exception:
-                    pass
+                if self._log_cam_info:
+                    logger.info("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
+                elif self._log_cam_debug:
+                    logger.debug("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
                 with self._state_lock:
                     self._latest_state = ServerSceneState(
                         center=tuple(center) if center else None,
@@ -1459,10 +1446,7 @@ class EGLHeadlessServer:
                 return
 
             if t == 'dims.set' or t == 'set_dims':
-                try:
-                    logger.info("state: dims.set ignored (use dims.intent.*)")
-                except Exception:
-                    pass
+                logger.debug("state: dims.set ignored (use dims.intent.*)")
                 handled = True
                 return
 
@@ -1471,13 +1455,10 @@ class EGLHeadlessServer:
                 delta = int(data.get('delta') or 0)
                 client_seq = data.get('client_seq')
                 client_id = data.get('client_id') or None
-                try:
-                    if self._log_dims_info:
-                        logger.info("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
-                    else:
-                        logger.debug("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
-                except Exception:
-                    pass
+                if self._log_dims_info:
+                    logger.info("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
+                else:
+                    logger.debug("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
                 try:
                     new_step = self._apply_dims_intent(axis=axis, step_delta=delta, set_value=None)
                     if new_step is not None:
@@ -1502,13 +1483,10 @@ class EGLHeadlessServer:
                     value = 0
                 client_seq = data.get('client_seq')
                 client_id = data.get('client_id') or None
-                try:
-                    if self._log_dims_info:
-                        logger.info("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
-                    else:
-                        logger.debug("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
-                except Exception:
-                    pass
+                if self._log_dims_info:
+                    logger.info("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
+                else:
+                    logger.debug("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
                 try:
                     new_step = self._apply_dims_intent(axis=axis, step_delta=None, set_value=value)
                     if new_step is not None:
@@ -1827,7 +1805,7 @@ class EGLHeadlessServer:
             if sock is not None:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
-            pass
+            logger.debug('pixel ws: TCP_NODELAY toggle failed', exc_info=True)
         # Reset encoder on new client to guarantee an immediate keyframe
         try:
             if self._worker is not None:
@@ -1857,7 +1835,7 @@ class EGLHeadlessServer:
                 try:
                     self.metrics.inc('napari_cuda_encoder_resets')
                 except Exception:
-                    pass
+                    logger.debug('metrics inc encoder_resets failed', exc_info=True)
         except Exception as e:
             logger.debug("Encoder reset on client connect failed: %s", e)
         try:
@@ -1951,19 +1929,19 @@ class EGLHeadlessServer:
                                     self.metrics.set('napari_cuda_last_key_seq', float(self._last_key_seq))
                                     self.metrics.set('napari_cuda_last_key_ts', float(self._last_key_ts))
                                 except Exception:
-                                    pass
+                                    logger.debug('metrics set last_key_* failed', exc_info=True)
                                 # Cancel any pending keyframe watchdog once a keyframe is observed
                                 try:
                                     if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
                                         self._kf_watchdog_task.cancel()
                                 except Exception:
-                                    pass
+                                    logger.debug('keyframe watchdog cancel failed', exc_info=True)
                             if self._log_sends:
                                 # Keep broadcaster-to-stamp delta for observability
                                 stamp_to_send_ms = (send_ts_wall - float(stamp_ts)) * 1000.0
                                 logger.info("Send frame seq=%d send_ts=%.6f stamp_ts=%.6f delta=%.3f ms (bypass)", seq32, send_ts_mono, float(stamp_ts), stamp_to_send_ms)
                         except Exception:
-                            pass
+                            logger.debug('metrics update (bypass) failed', exc_info=True)
                     latest = None
                     self._bypass_until_key = False
                     next_t = loop.time() + tick
@@ -1999,19 +1977,19 @@ class EGLHeadlessServer:
                                 self.metrics.set('napari_cuda_last_key_seq', float(self._last_key_seq))
                                 self.metrics.set('napari_cuda_last_key_ts', float(self._last_key_ts))
                             except Exception:
-                                pass
+                                logger.debug('metrics set last_key_* failed', exc_info=True)
                             # Cancel any pending keyframe watchdog once a keyframe is observed
                             try:
                                 if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
                                     self._kf_watchdog_task.cancel()
                             except Exception:
-                                pass
+                                logger.debug('keyframe watchdog cancel failed', exc_info=True)
                         if self._log_sends:
                             # Keep broadcaster-to-stamp delta for observability
                             stamp_to_send_ms = (send_ts_wall - float(stamp_ts)) * 1000.0
                             logger.info("Send frame seq=%d send_ts=%.6f stamp_ts=%.6f delta=%.3f ms", seq32, send_ts_mono, float(stamp_ts), stamp_to_send_ms)
                     except Exception:
-                        pass
+                        logger.debug('metrics update (paced) failed', exc_info=True)
                     # Simple send timing log for smoothing diagnostics
                     try:
                         now2 = loop.time()
@@ -2022,7 +2000,7 @@ class EGLHeadlessServer:
                                 logger.debug("Pixel send dt=%.3f s (target=%.3f), drops=%d", dt, 1.0/max(1, self.cfg.fps), self._drops_total)
                         self._last_send_ts = now2
                     except Exception:
-                        pass
+                        logger.debug('send timing update failed', exc_info=True)
                 latest = None
             next_t += tick
 
@@ -2070,13 +2048,10 @@ class EGLHeadlessServer:
         if payload is None:
             return
         await self._safe_state_send(ws, payload)
-        try:
-            if self._log_dims_info:
-                logger.info("%s: scene.spec sent", reason)
-            else:
-                logger.debug("%s: scene.spec sent", reason)
-        except Exception:
-            pass
+        if self._log_dims_info:
+            logger.info("%s: scene.spec sent", reason)
+        else:
+            logger.debug("%s: scene.spec sent", reason)
 
     async def _broadcast_scene_spec(self, *, reason: str) -> None:
         payload = self._scene_spec_json()
@@ -2124,7 +2099,7 @@ class EGLHeadlessServer:
             self.metrics.set('napari_cuda_pixel_clients', float(len(self._clients)))
             # We could track state clients separately if desired; here we reuse pixel_clients for demo
         except Exception:
-            pass
+            logger.debug('metrics set pixel_clients failed', exc_info=True)
         self._publish_policy_metrics()
 
     def _publish_policy_metrics(self) -> None:

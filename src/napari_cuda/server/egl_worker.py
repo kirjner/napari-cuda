@@ -194,8 +194,6 @@ class EGLRendererWorker:
         self._pending_ms_level: Optional[int] = None
         self._pending_ms_path: Optional[str] = None
         self._ms_backlog: Optional[tuple[int, Optional[str]]] = None
-        self._pending_zoom_ratio: Optional[float] = None
-        self._pending_zoom_ts: float = 0.0
         # Pending 2D/3D view switch (coalesced)
         self._pending_ndisplay: Optional[int] = None
         # Debug gating for ensure_scene_source logging
@@ -456,20 +454,13 @@ class EGLRendererWorker:
                     self._slice_budget_allows(source, level)
                 start = time.perf_counter()
                 # Clear any stale ROI cache for target level
-                try:
-                    if hasattr(self, '_roi_cache'):
-                        self._roi_cache.pop(int(level), None)
-                    if hasattr(self, '_roi_log_state'):
-                        self._roi_log_state.pop(int(level), None)
-                except Exception:
-                    pass
-                # Expose previous level to allow proportional Z remap in apply
-                self._pending_prev_level = prev_level
-                self._apply_level_internal(source, level)
-                try:
-                    del self._pending_prev_level
-                except Exception:
-                    self._pending_prev_level = None
+                cache = getattr(self, '_roi_cache', None)
+                if isinstance(cache, dict):
+                    cache.pop(int(level), None)
+                roi_log = getattr(self, '_roi_log_state', None)
+                if isinstance(roi_log, dict):
+                    roi_log.pop(int(level), None)
+                self._apply_level_internal(source, level, prev_level=prev_level)
                 self._level_downgraded = (level != desired_level)
                 if self._level_downgraded:
                     logger.info(
@@ -1091,8 +1082,9 @@ class EGLRendererWorker:
                     logger.debug('roi chunk alignment failed', exc_info=True)
             # Apply small-move hysteresis only for rendering, not for policy decisions
             if not for_policy:
-                try:
-                    prev_logged = self._roi_log_state.get(int(level))
+                roi_log = getattr(self, '_roi_log_state', None)
+                if isinstance(roi_log, dict):
+                    prev_logged = roi_log.get(int(level))
                     if prev_logged is not None:
                         prev_roi, _ = prev_logged
                         thr = int(getattr(self, '_roi_edge_threshold', 4))
@@ -1109,8 +1101,6 @@ class EGLRendererWorker:
                             prev_covers_view
                         ):
                             roi = prev_roi
-                except Exception:
-                    pass
 
             # Ensure ROI fully contains the current viewport to avoid black edges during pan
             if not for_policy and getattr(self, '_roi_ensure_contains_viewport', True):
@@ -1386,6 +1376,8 @@ class EGLRendererWorker:
         self,
         source: ZarrSceneSource,
         level: int,
+        *,
+        prev_level: Optional[int] = None,
     ) -> None:
         descriptor = source.level_descriptors[level]
         axes = source.axes
@@ -1408,7 +1400,6 @@ class EGLRendererWorker:
 
         # Proportional Z remap only when switching between different levels (depth may change)
         try:
-            prev_level = getattr(self, '_pending_prev_level', None)
             if prev_level is not None and int(prev_level) != int(level) and 'z' in axes_lower:
                 zi = axes_lower.index('z')
                 try:
@@ -2046,7 +2037,7 @@ class EGLRendererWorker:
             if self._scene_source is not None and not self.use_volume:
                 sy, sx = self._plane_scale_for_level(self._scene_source, int(self._active_ms_level))
         except Exception:
-            pass
+            logger.debug('camera reset: level scale lookup failed', exc_info=True)
         if d is not None:
             # 3D: set full volume range
             cam.set_range(x=(0, int(w)), y=(0, int(h)), z=(0, int(d)))
@@ -2154,7 +2145,7 @@ class EGLRendererWorker:
                                     layer.opacity = 1.0
                                     layer.blending = 'opaque'
                                 except Exception:
-                                    pass
+                                    logger.debug("apply_state: ensuring layer visibility failed", exc_info=True)
                                 # Update contrast limits for the new Z slice unless sticky
                                 try:
                                     if not getattr(self, '_sticky_contrast', True):
@@ -2190,10 +2181,7 @@ class EGLRendererWorker:
                             # Do not force fullframe horizon on Z; keep ROI for stability
                             # Optionally force IDR on Z for immediate visibility on clients
                             if getattr(self, '_idr_on_z', False):
-                                try:
-                                    self._force_next_idr = True
-                                except Exception:
-                                    pass
+                                self._force_next_idr = True
                             self._notify_scene_refresh()
                             self._mark_render_tick_needed()
                             if self._log_layer_debug:
@@ -2680,17 +2668,52 @@ class EGLRendererWorker:
                 continue
         if not overs_map:
             return
-        # Choose finest level whose oversampling is close to 1:1
-        target_ratio = 1.2
+        # Prefer napari's own selected level when available; fall back to heuristic
         desired = None
-        for lvl in sorted(overs_map.keys()):
-            val = overs_map[lvl]
-            if val <= target_ratio:
-                desired = lvl
-                break
-        if desired is None:
-            desired = max(overs_map.keys())
+        napari_reason = None
+        try:
+            layer = getattr(self, '_napari_layer', None)
+            if layer is not None and hasattr(layer, 'data_level'):
+                nap = int(getattr(layer, 'data_level'))
+                if nap in overs_map:
+                    desired = nap
+                    napari_reason = 'napari-layer'
+        except Exception:
+            desired = None
+            napari_reason = None
         current = int(self._active_ms_level)
+        max_level = max(overs_map.keys())
+        try:
+            thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
+        except Exception:
+            thr_in = 1.05
+        try:
+            thr_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
+        except Exception:
+            thr_out = 1.35
+        fine_threshold = max(thr_in, 1.05)
+
+        if desired is None:
+            # Heuristic: step one level finer when its oversampling is within threshold,
+            # otherwise consider stepping coarser if current slice is oversampled.
+            desired = current
+            if current > 0:
+                finer = current - 1
+                ratio = overs_map.get(finer)
+                if ratio is not None and ratio <= fine_threshold:
+                    desired = finer
+            if desired == current and current < max_level:
+                ratio_cur = overs_map.get(current)
+                if ratio_cur is not None and ratio_cur < thr_out:
+                    desired = current + 1
+            napari_reason = 'heuristic'
+        else:
+            # Napari hint: only allow single-step moves to avoid leaps.
+            desired = max(0, min(int(desired), max_level))
+            if desired < current:
+                desired = max(desired, current - 1)
+            elif desired > current:
+                desired = min(desired, current + 1)
         # Zoom direction logs
         try:
             if desired < current:
@@ -2706,14 +2729,6 @@ class EGLRendererWorker:
             hyst = 0.0
         selected = stabilize_level(int(desired), int(current), hysteresis=hyst)
         # Direction-sensitive band to avoid alternating near the boundary
-        try:
-            thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
-        except Exception:
-            thr_in = 1.05
-        try:
-            thr_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
-        except Exception:
-            thr_out = 1.35
         sel = int(selected)
         if sel < current:
             # Zooming in: only allow stepping to a finer level if that level is clearly under target
@@ -2724,7 +2739,7 @@ class EGLRendererWorker:
             if overs_map.get(current, 0.0) < thr_out:
                 sel = current
         selected = sel
-        reason = 'napari'
+        reason = napari_reason or 'napari'
         # Lock override
         lock = getattr(self, '_lock_level', None)
         if lock is not None:
