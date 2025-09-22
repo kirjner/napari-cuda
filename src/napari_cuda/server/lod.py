@@ -19,16 +19,13 @@ import numpy as np
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.zarr_source import ZarrSceneSource
 from napari_cuda.server.roi import plane_scale_for_level
+from napari_cuda.server.level_budget import LevelBudgetError
 
 
 logger = logging.getLogger(__name__)
 
 
 # ---- Types -------------------------------------------------------------------
-
-
-class LevelBudgetError(RuntimeError):
-    """Raised when a multiscale level exceeds configured budgets."""
 
 
 @dataclass(frozen=True)
@@ -382,8 +379,57 @@ def apply_level(
     )
 
 
+def apply_level_with_budget(
+    *,
+    desired_level: int,
+    use_volume: bool,
+    source: ZarrSceneSource,
+    current_level: int,
+    log_layer_debug: bool,
+    budget_check: Callable[[ZarrSceneSource, int], None],
+    apply_level_cb: Callable[[ZarrSceneSource, int, Optional[int]], None],
+    on_switch: Callable[[int, int, float], None],
+    logger_ref: logging.Logger = logger,
+) -> tuple[int, bool]:
+    """Select a level under budgets, apply it, and report the downgrade flag."""
+
+    level_count = len(source.level_descriptors)
+    if level_count == 0:
+        return current_level, False
+
+    desired_level = max(0, min(int(desired_level), level_count - 1))
+    cand = range(desired_level, level_count)
+    total = len(cand)
+
+    for idx, level in enumerate(cand):
+        try:
+            budget_check(source, level)
+            start = time.perf_counter()
+            apply_level_cb(source, level, current_level)
+            downgraded = level != desired_level
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            on_switch(current_level, level, elapsed_ms)
+            if downgraded and log_layer_debug:
+                logger_ref.info(
+                    "level downgrade: requested=%d active=%d", desired_level, level
+                )
+            return level, downgraded
+        except LevelBudgetError as exc:
+            if idx == total - 1:
+                raise
+            if log_layer_debug:
+                logger_ref.info(
+                    "budget reject: mode=%s level=%d reason=%s",
+                    'volume' if use_volume else 'slice',
+                    int(level),
+                    str(exc),
+                )
+            continue
+
+    raise RuntimeError("Unable to select multiscale level within budget")
+
+
 __all__ = [
-    "LevelBudgetError",
     "AppliedLevel",
     "LevelPolicyConfig",
     "LevelPolicyDecision",

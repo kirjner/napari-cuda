@@ -16,7 +16,7 @@ import time
 import logging
 
 from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, List, Optional, Mapping, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple
 import threading
 import math
 
@@ -48,13 +48,14 @@ from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
 from napari_cuda.server.lod import apply_level
+from napari_cuda.server.level_budget import apply_level_with_budget, LevelBudgetError
 from napari_cuda.server.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.capture import CaptureFacade
 from napari_cuda.server.roi_applier import SliceUpdatePlanner
 from napari_cuda.server.roi import (
-    compute_viewport_roi,
+    cached_viewport_roi,
     plane_scale_for_level,
     plane_wh_for_level,
 )
@@ -383,72 +384,50 @@ class EGLRendererWorker:
 
     def _set_level_with_budget(self, desired_level: int, *, reason: str) -> None:
         source = self._ensure_scene_source()
-        levels_count = len(source.level_descriptors)
-        if levels_count == 0:
-            return
-        desired_level = max(0, min(int(desired_level), levels_count - 1))
 
-        candidates: List[int]
-        if self.use_volume:
-            candidates = list(range(desired_level, levels_count))
-        else:
-            # Allow graceful downgrade for 2D slices when over slice budget
-            candidates = list(range(desired_level, levels_count))
-
-        # Capture current viewport center in world space to reconcile ROI after switch
-        # No center-anchored correction: placement uses layer.translate; keep ROI simple
-
-        for idx, level in enumerate(candidates):
+        def _budget_check(scene: ZarrSceneSource, level: int) -> None:
             try:
-                prev_level = int(self._active_ms_level)
-                # Enforce budgets prior to any data compute
                 if self.use_volume:
-                    self._volume_budget_allows(source, level)
+                    self._volume_budget_allows(scene, level)
                 else:
-                    self._slice_budget_allows(source, level)
-                start = time.perf_counter()
-                # Clear any stale ROI cache for target level
-                cache = getattr(self, '_roi_cache', None)
-                if isinstance(cache, dict):
-                    cache.pop(int(level), None)
-                roi_log = getattr(self, '_roi_log_state', None)
-                if isinstance(roi_log, dict):
-                    roi_log.pop(int(level), None)
-                self._apply_level_internal(source, level, prev_level=prev_level)
-                self._level_downgraded = (level != desired_level)
-                if self._level_downgraded:
-                    logger.info(
-                        "level downgrade: requested=%d active=%d reason=%s",
-                        desired_level,
-                        level,
-                        reason,
-                    )
-                else:
-                    self._level_downgraded = False
-                elapsed_ms = (time.perf_counter() - start) * 1000.0
-                self._log_ms_switch(
-                    previous=prev_level,
-                    applied=int(self._active_ms_level),
-                    source=source,
-                    elapsed_ms=elapsed_ms,
-                    reason=reason,
-                )
-                self._mark_render_tick_needed()
-                return
+                    self._slice_budget_allows(scene, level)
             except _LevelBudgetError as exc:
-                if self._log_layer_debug:
-                    logger.info(
-                        "budget reject: mode=%s level=%d reason=%s",
-                        'volume' if self.use_volume else 'slice',
-                        int(level),
-                        str(exc),
-                    )
-                if idx == len(candidates) - 1:
-                    raise
-                logger.debug("level %d rejected by budget: %s", level, exc)
-                continue
+                raise LevelBudgetError(str(exc)) from exc
 
-        raise RuntimeError("Unable to select multiscale level within budget")
+        def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> None:
+            cache = getattr(self, '_roi_cache', None)
+            if isinstance(cache, dict):
+                cache.pop(int(level), None)
+            roi_log = getattr(self, '_roi_log_state', None)
+            if isinstance(roi_log, dict):
+                roi_log.pop(int(level), None)
+            self._apply_level_internal(scene, level, prev_level=prev_level)
+
+        def _on_switch(prev_level: int, applied: int, elapsed_ms: float) -> None:
+            self._log_ms_switch(
+                previous=prev_level,
+                applied=applied,
+                source=source,
+                elapsed_ms=elapsed_ms,
+                reason=reason,
+            )
+            self._mark_render_tick_needed()
+
+        try:
+            applied_level, downgraded = apply_level_with_budget(
+                desired_level=desired_level,
+                use_volume=self.use_volume,
+                source=source,
+                current_level=int(self._active_ms_level),
+                log_layer_debug=self._log_layer_debug,
+                budget_check=_budget_check,
+                apply_level_cb=_apply,
+                on_switch=_on_switch,
+            )
+        except LevelBudgetError as exc:
+            raise _LevelBudgetError(str(exc)) from exc
+        self._active_ms_level = int(applied_level)
+        self._level_downgraded = bool(downgraded)
 
     # Legacy zoom-delta policy path removed; selection uses oversampling + stabilizer
 
@@ -817,24 +796,15 @@ class EGLRendererWorker:
             except Exception:
                 signature = None
 
-        cached = self._roi_cache.get(int(level))
-        if cached is not None and signature is not None and cached[0] == signature:
-            return cached[1]
-
         align_chunks = (not for_policy) and bool(getattr(self, "_roi_align_chunks", True))
         ensure_contains = (not for_policy) and bool(getattr(self, "_roi_ensure_contains_viewport", True))
         edge_threshold = int(getattr(self, "_roi_edge_threshold", 4))
         chunk_pad = int(getattr(self, "_roi_pad_chunks", 1))
 
-        prev_logged: Optional[SliceROI] = None
-        if not for_policy:
-            roi_log = getattr(self, "_roi_log_state", None)
-            if isinstance(roi_log, dict):
-                logged = roi_log.get(int(level))
-                if logged is not None:
-                    prev_logged = logged[0]
+        roi_log = getattr(self, "_roi_log_state", None)
+        log_state = roi_log if isinstance(roi_log, dict) else None
 
-        result = compute_viewport_roi(
+        return cached_viewport_roi(
             view=view,
             canvas_size=(int(self.width), int(self.height)),
             source=source,
@@ -843,23 +813,12 @@ class EGLRendererWorker:
             chunk_pad=chunk_pad,
             ensure_contains_viewport=ensure_contains,
             edge_threshold=edge_threshold,
-            prev_roi=prev_logged,
             for_policy=for_policy,
+            cache=self._roi_cache,
+            log_state=log_state,
+            clock=time.perf_counter,
             transform_signature=signature,
         )
-
-        roi = result.roi
-        assert not roi.is_empty(), "compute_viewport_roi returned an empty ROI"
-
-        if result.transform_signature is not None:
-            self._roi_cache[int(level)] = (result.transform_signature, roi)
-
-        if not for_policy:
-            roi_log = getattr(self, "_roi_log_state", None)
-            if isinstance(roi_log, dict):
-                roi_log[int(level)] = (roi, time.perf_counter())
-
-        return roi
 
     def _estimate_volume_io(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
         chunk_count = 0

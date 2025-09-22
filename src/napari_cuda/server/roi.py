@@ -8,8 +8,9 @@ worker sheds its bespoke implementations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Callable, MutableMapping, Optional, Sequence, Tuple
 import math
+import time
 
 from vispy import scene
 
@@ -206,9 +207,66 @@ def compute_viewport_roi(
     return ViewportROIResult(roi, transform_signature)
 
 
+def cached_viewport_roi(
+    *,
+    view: Any,
+    canvas_size: Tuple[int, int],
+    source: ZarrSceneSource,
+    level: int,
+    align_chunks: bool,
+    chunk_pad: int,
+    ensure_contains_viewport: bool,
+    edge_threshold: int,
+    for_policy: bool,
+    cache: MutableMapping[int, tuple[Optional[tuple[float, ...]], SliceROI]] | None,
+    log_state: MutableMapping[int, tuple[SliceROI, float]] | None,
+    clock: Callable[[], float] = time.perf_counter,
+    transform_signature: Optional[tuple[float, ...]] = None,
+) -> SliceROI:
+    """Compute or reuse viewport ROI while maintaining cache/log state."""
+
+    if cache is not None and transform_signature is not None:
+        cached = cache.get(int(level))
+        if cached is not None and cached[0] == transform_signature:
+            return cached[1]
+
+    prev_logged: Optional[SliceROI] = None
+    if not for_policy and log_state is not None:
+        logged = log_state.get(int(level))
+        if logged is not None:
+            prev_logged = logged[0]
+
+    result = compute_viewport_roi(
+        view=view,
+        canvas_size=canvas_size,
+        source=source,
+        level=level,
+        align_chunks=align_chunks,
+        chunk_pad=chunk_pad,
+        ensure_contains_viewport=ensure_contains_viewport,
+        edge_threshold=edge_threshold,
+        prev_roi=prev_logged,
+        for_policy=for_policy,
+        transform_signature=transform_signature,
+    )
+
+    roi = result.roi
+    if roi.is_empty():
+        raise RuntimeError("cached_viewport_roi produced an empty ROI")
+
+    if cache is not None and result.transform_signature is not None:
+        cache[int(level)] = (result.transform_signature, roi)
+
+    if not for_policy and log_state is not None:
+        log_state[int(level)] = (roi, clock())
+
+    return roi
+
+
 __all__ = [
     "ViewportROIResult",
     "compute_viewport_roi",
     "plane_scale_for_level",
     "plane_wh_for_level",
+    "cached_viewport_roi",
 ]
