@@ -40,6 +40,7 @@ from napari_cuda.codec.avcc import (
 from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.utils.env import env_float, env_str
+from napari_cuda.client.streaming.client_loop.scheduler import CallProxy, WakeProxy
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
@@ -81,36 +82,6 @@ def _maybe_enable_debug_logger() -> None:
         # Don't let logging issues affect runtime
         pass
 
-
-class _WakeProxy(QtCore.QObject):
-    """Qt signal proxy to safely schedule wakes from any thread.
-
-    Emitting `trigger` from worker threads posts a queued call to the GUI
-    thread where `_schedule_next_wake` runs and arms the QTimer.
-    """
-
-    trigger = QtCore.Signal()
-
-    def __init__(self, slot, parent=None) -> None:  # type: ignore[no-untyped-def]
-        super().__init__(parent)
-        self.trigger.connect(slot)
-
-
-class _CallProxy(QtCore.QObject):
-    """Post callables to the GUI thread via queued signal delivery."""
-
-    call = QtCore.Signal(object)
-
-    def __init__(self, parent=None) -> None:  # type: ignore[no-untyped-def]
-        super().__init__(parent)
-        self.call.connect(self._on_call)
-
-    def _on_call(self, fn) -> None:  # type: ignore[no-untyped-def]
-        try:
-            if callable(fn):
-                fn()
-        except Exception:
-            logger.debug("_CallProxy execution failed", exc_info=True)
 
 @dataclass
 class _SyncState:
@@ -196,7 +167,7 @@ class ClientStreamLoop:
         self._viewer_mirror = None  # type: ignore[var-annotated]
         # UI call proxy to marshal updates to the GUI thread
         try:
-            self._ui_call = _CallProxy(getattr(self._scene_canvas, 'native', None))
+            self._ui_call = CallProxy(getattr(self._scene_canvas, 'native', None))
         except Exception:
             self._ui_call = None
 
@@ -363,7 +334,7 @@ class ClientStreamLoop:
         # Create a wake proxy so pipelines can nudge scheduling from any thread
         if not self._use_display_loop:
             try:
-                self._wake_proxy = _WakeProxy(_schedule_next_wake, self._scene_canvas.native)
+                self._wake_proxy = WakeProxy(_schedule_next_wake, self._scene_canvas.native)
                 wake_cb = self._wake_proxy.trigger.emit
             except Exception:
                 logger.debug("WakeProxy init failed; using thread-safe scheduler wrapper", exc_info=True)

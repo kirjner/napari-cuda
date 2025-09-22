@@ -1,7 +1,7 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/client_stream_loop.py`: 2,441 LOC (still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/client_stream_loop.py`: 2,426 LOC (down ~15 after proxy extraction; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
@@ -34,23 +34,26 @@
 - Delete `_CallProxy`/`_WakeProxy`; replace with direct `QtCore.QMetaObject.invokeMethod` usage.
 - Assert invariants (e.g. decoder readiness) instead of logging-only fallbacks.
 
-#### Phase B Work Plan (target: three PRs, ≤1,000 LOC in `ClientStreamLoop` post-split)
-- **Bootstrap & rename**
-  1. Cut `ClientStreamLoop` scaffolding: introduce a `LoopState` dataclass bundling threads, channel references, and cached payloads.
-  2. Rename the class + public surface (`attach_viewer_mirror`, `post`, etc.) without behaviour changes; snapshot metrics (`LOC`, `try`, `getattr`).
-  3. Move the lingering env reads for rate limits and watchdogs into a `client_loop_config.py` helper with colocated unit tests.
-- **Scheduler & wake extraction**
-  1. Lift `_schedule_next_wake`, `_WakeProxy`, `_CallProxy`, and the timer bookkeeping into `client_loop/scheduler.py`; expose a pure `schedule_next_wake(loop_state, when)` API with unit tests covering coalescing and error handling.
-  2. Replace inline Qt signal wiring with `QtCore.QMetaObject.invokeMethod`, asserting GUI-thread dispatch in tests via a minimal Qt harness.
-  3. Gate pipelines through the new scheduler module and document cross-thread guarantees.
+#### Phase B Work Plan (target: ≤1,000 LOC in `ClientStreamLoop` post-split)
+- **Bootstrap & rename** *(done)*
+  1. `LoopState` dataclass introduced to gather threads, channel refs, and cached payloads.
+  2. Class/public rename to `ClientStreamLoop`; docs/tests/imports updated.
+  3. `send_json` renamed to `post` across channel/controller layers.
+- **Scheduler & wake helper**
+  1. ✓ `_WakeProxy`/`_CallProxy` now live in `client_loop/scheduler.py`, still canvas-owned; behaviour untouched pending tests.
+  2. Add unit coverage proving GUI-thread dispatch via the proxies before considering any redesign.
+  3. Optionally evolve toward a `ClientLoopBus(QtCore.QObject)` that exposes typed signals (`wake_requested`, `apply_snapshot`, `invoke`); revisit only after latency instrumentation is in place (see `#scheduler-spike`).
 - **Pipeline + telemetry helpers**
-  1. Split VT/PyAV gate logic into `client_loop/pipeline_vt.py` and `client_loop/pipeline_pyav.py` helpers (≤200 LOC each) returning simple dataclasses of callbacks.
-  2. Funnel metrics/logging toggles through a `ClientMetricsFacade` wrapper so Phase E can reuse the surface.
-  3. Write regression tests that simulate keyframe gating + dims replay to ensure `_last_dims_payload` survives the refactor.
+  1. Split VT/PyAV gate logic into helper modules (≤200 LOC each) returning simple dataclasses of callbacks; keep behaviour unchanged.
+  2. Funnel metrics/logging toggles through a lightweight facade so Phase E can reuse the surface.
+  3. Write regression tests that simulate keyframe gating + dims replay to ensure `_last_dims_payload` survives each extraction.
+- **Config & env plumbing**
+  1. Move loop-specific env parsing into `client_loop_config.py` (pure helper + tests).
+  2. After env centralisation, sweep remaining `try`/`getattr` usage in the loop to boundary-only assertions.
 - **Exit criteria**
   - `ClientStreamLoop` ≤1,000 LOC with `<25` `try` blocks and `<20` `getattr` calls.
   - New helper modules each ≤200 LOC with ≥85 % coverage.
-  - No direct Qt objects stored on the loop; lifetime owned by the scene canvas.
+  - Qt objects (proxies/bus) remain canvas-owned; lifetimes explicit.
 
 ### Phase C — Presentation & Canvas Simplification
 - Formalise a `ClientConfig` struct resolved once at canvas init; drop dummy keymap layers and env re-reads.
@@ -67,6 +70,11 @@
 - Ensure every boundary catch logs via `logger.exception`; hot path logs use `logger.debug(..., stacklevel=2)`.
 - Align metrics with the new surfaces (`metrics.ClientMetrics.record_presenter_latency`) and add tests for metric increments.
 
+### Scheduler Spike Notes (#scheduler-spike)
+- Replacing `_WakeProxy`/`_CallProxy` with `QTimer.singleShot` significantly increased wake latency and broke dims slider replay. See `docs/archive_local/scheduler_spike.md` for details.
+- Keep the existing Qt proxies during Phase B extractions; any redesign must preserve GUI-thread delivery and be backed by latency instrumentation.
+- Potential follow-up: a `ClientLoopBus(QtCore.QObject)` exposing typed signals (`wake_requested`, `apply_snapshot`, `invoke`) while still leveraging Qt's queued connections.
+
 ## Naming Targets
 - `StreamCoordinator` → `ClientStreamLoop`
 - `_dims_meta` → `dims_state`
@@ -82,6 +90,6 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Extract the scheduler/wake helpers into `client_loop/scheduler.py`, delete `_CallProxy`/`_WakeProxy`, and cover GUI dispatch with unit tests.
-2. Split VT/PyAV gatekeeping into `client_loop/pipeline_vt.py` and `client_loop/pipeline_pyav.py`, wiring asserts in place of defensive `getattr` checks.
-3. Move loop env parsing into `client_loop_config.py`, then sweep the remaining in-loop `try`/`getattr` usage to boundary-only assertions.
+1. Add scheduler proxy tests that assert queued-signal delivery (use QtBot harness) so the helper stays locked down.
+2. Extract VT/PyAV helper modules so gatekeeping logic leaves `ClientStreamLoop` without altering functionality.
+3. Introduce `client_loop_config.py`, migrate env parsing there, then start replacing in-loop `try`/`getattr` with assertions once helpers are in place.
