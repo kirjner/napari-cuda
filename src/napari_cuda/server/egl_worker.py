@@ -14,9 +14,9 @@ from __future__ import annotations
 import os
 import time
 import logging
- 
+
 from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Mapping, Sequence, Tuple, Literal
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Mapping, Sequence, Tuple
 import threading
 import math
 
@@ -39,7 +39,6 @@ from napari._vispy.layers.image import VispyImageLayer
 import pycuda.driver as cuda  # type: ignore
 import torch  # type: ignore
 import torch.nn.functional as F  # type: ignore
-import PyNvVideoCodec as pnvc  # type: ignore
 # Bitstream packing happens in the server layer
 from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
@@ -55,6 +54,13 @@ from napari_cuda.server.config import ServerCtx
 from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
+from napari_cuda.server.rendering.encoder import Encoder
+from napari_cuda.server.state_machine import (
+    CameraCommand,
+    PendingSceneUpdates,
+    SceneStateMachine,
+    ServerSceneState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,37 +85,6 @@ class FrameTimings:
     packet_bytes: Optional[int]
     # Wall-clock timestamp (seconds) at frame capture start (server clock)
     capture_wall_ts: float = 0.0
-
-
-@dataclass
-class ServerSceneState:
-    """Minimal scene state snapshot applied atomically per frame."""
-
-    # Absolute camera state (legacy compatibility for napari viewer sync)
-    center: Optional[tuple[float, float, float]] = None
-    zoom: Optional[float] = None
-    angles: Optional[tuple[float, float, float]] = None
-    # Dims/Z state
-    current_step: Optional[tuple[int, ...]] = None
-    # One-shot volume render params (applied on render thread)
-    volume_mode: Optional[str] = None
-    volume_colormap: Optional[str] = None
-    volume_clim: Optional[tuple[float, float]] = None
-    volume_opacity: Optional[float] = None
-    volume_sample_step: Optional[float] = None
-
-
-@dataclass
-class CameraCommand:
-    """Queued camera command consumed by the render thread."""
-
-    kind: Literal['zoom', 'pan', 'orbit', 'reset']
-    factor: Optional[float] = None
-    anchor_px: Optional[tuple[float, float]] = None
-    dx_px: float = 0.0
-    dy_px: float = 0.0
-    d_az_deg: float = 0.0
-    d_el_deg: float = 0.0
 
 
 class EGLRendererWorker:
@@ -154,13 +129,12 @@ class EGLRendererWorker:
         self._level_downgraded: bool = False
         self._scene_refresh_cb = scene_refresh_cb
         self._zoom_accumulator: float = 0.0
-        self._pending_zoom_ratio: Optional[float] = None
-        self._pending_zoom_ts: float = 0.0
 
         self._gl_capture = GLCapture(self.width, self.height)
         self._cuda = CudaInterop(self.width, self.height)
 
-        self._encoder = None
+        self._encoder: Optional[Encoder] = None
+        self._enc_input_fmt: str = "YUV444"
 
         # Track current data extents in world units (W,H)
         self._data_wh: tuple[int, int] = (int(width), int(height))
@@ -172,13 +146,7 @@ class EGLRendererWorker:
 
         # Atomic state application
         self._state_lock = threading.Lock()
-        self._pending_state: Optional[ServerSceneState] = None
-        # Pending multiscale level switch (coalesced)
-        self._pending_ms_level: Optional[int] = None
-        self._pending_ms_path: Optional[str] = None
-        self._ms_backlog: Optional[tuple[int, Optional[str]]] = None
-        # Pending 2D/3D view switch (coalesced)
-        self._pending_ndisplay: Optional[int] = None
+        self._scene_state_machine = SceneStateMachine()
         # Debug gating for ensure_scene_source logging
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts: float = 0.0
@@ -188,12 +156,6 @@ class EGLRendererWorker:
         # Priming retired: removed
 
         # Encoding / instrumentation state
-        self._frame_index = 0
-        self._force_next_idr = False
-        try:
-            self._log_keyframes = bool(int(os.getenv('NAPARI_CUDA_LOG_KEYFRAMES', '0') or '0'))
-        except Exception:
-            self._log_keyframes = False
         # Zoom drift debug flag (INFO-level logs on zoom_at)
         try:
             self._debug_zoom_drift = bool(int(os.getenv('NAPARI_CUDA_DEBUG_ZOOM_DRIFT', '0') or '0'))
@@ -258,8 +220,6 @@ class EGLRendererWorker:
             self._sticky_contrast = env_bool('NAPARI_CUDA_STICKY_CONTRAST', True)
         except Exception:
             self._sticky_contrast = True
-        # Change-detection signature for apply_state-driven policy eval
-        self._last_state_sig: Optional[tuple] = None
         # Last known dims.current_step from intents; used to preserve Z across
         # multiscale level switches regardless of viewer timing.
         self._last_step: Optional[tuple[int, ...]] = None
@@ -585,21 +545,14 @@ class EGLRendererWorker:
             if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
                 logger.info("request_multiscale_level ignored due to lock_level=%s", str(self._lock_level))
             return
-        if self._state_lock.acquire(blocking=False):
-            try:
-                if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
-                    logger.info("request multiscale level: level=%d path=%s (immediate)",
-                                int(level), str(path) if path else "<default>")
-                self._pending_ms_level = int(level)
-                self._pending_ms_path = str(path) if path else None
-                self._last_interaction_ts = time.perf_counter()
-            finally:
-                self._state_lock.release()
-        else:
-            # Worker is currently holding the lock; remember the latest request for later.
-            self._ms_backlog = (int(level), str(path) if path else None)
-            if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
-                logger.info("request multiscale level queued: level=%d path=%s", int(level), str(path) if path else "<default>")
+        if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "request multiscale level: level=%d path=%s",
+                int(level),
+                str(path) if path else "<default>",
+            )
+        self._scene_state_machine.queue_multiscale_level(int(level), str(path) if path else None)
+        self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
     def _notify_scene_refresh(self) -> None:
@@ -1538,237 +1491,37 @@ class EGLRendererWorker:
         self._cuda.initialize(tex)
 
     def _init_encoder(self) -> None:
-        # Encoder input format: allow YUV444 (default), NV12 (4:2:0), or ARGB/ABGR (packed RGB)
-        self._enc_input_fmt = os.getenv('NAPARI_CUDA_ENCODER_INPUT_FMT', 'YUV444').upper()
-        if self._enc_input_fmt not in {'YUV444', 'NV12', 'ARGB', 'ABGR'}:
-            self._enc_input_fmt = 'YUV444'
-        logger.info("Encoder input format: %s", self._enc_input_fmt)
-        # Configure encoder for low-latency streaming; repeat SPS/PPS on keyframes
-        # Optional bitrate control for low-jitter CBR; if unsupported, fallback path below will be used
-        def _parse_int(name: str, default: int | None = None) -> int | None:
-            try:
-                value = os.getenv(name)
-                return int(value) if value is not None and value != '' else default
-            except Exception:
-                return default
-
-        # Low-jitter CBR and low-latency settings
-        rc_mode = os.getenv('NAPARI_CUDA_RC', 'cbr').lower()
-        # Use ctx.encode.bitrate as the default if available; env overrides still win
-        _ctx_bitrate = None
-        try:
-            if self._ctx is not None:
-                _ctx_bitrate = int(getattr(self._ctx.cfg.encode, 'bitrate', 10_000_000))
-        except Exception:
-            _ctx_bitrate = None
-        bitrate_default = _ctx_bitrate if (_ctx_bitrate is not None and _ctx_bitrate > 0) else 10_000_000
-        bitrate = _parse_int('NAPARI_CUDA_BITRATE', bitrate_default) or bitrate_default
-        max_bitrate = _parse_int('NAPARI_CUDA_MAXBITRATE')
-        lookahead = _parse_int('NAPARI_CUDA_LOOKAHEAD', 0) or 0
-        aq = _parse_int('NAPARI_CUDA_AQ', 0) or 0
-        temporalaq = _parse_int('NAPARI_CUDA_TEMPORALAQ', 0) or 0
-        # Non-ref P frames (low-delay) toggle
-        nonrefp = _parse_int('NAPARI_CUDA_NONREFP', 0) or 0
-        bf_override = _parse_int('NAPARI_CUDA_BFRAMES')
-        # Preset-based path only (stable, low-variance)
-        preset_env = os.getenv('NAPARI_CUDA_PRESET', '')
-        # IDR period (frames) for preset path (and for logging fallback)
-        try:
-            # Preserve existing default (600) for parity; env may override.
-            idr_period = int(os.getenv('NAPARI_CUDA_IDR_PERIOD', '600') or '600')
-        except Exception:
-            idr_period = 600
-
-        # Preset/tuning path: low-latency tuning, explicit preset, no B-frames, repeat SPS/PPS, fixed IDR period
-        preset = preset_env.strip() if preset_env.strip() else 'P3'
-        kwargs = {
-            'codec': 'h264',
-            'tuning_info': 'low_latency',
-            'preset': preset,
-            'bf': 0,
-            'repeatspspps': 1,
-            'idrperiod': int(idr_period),
-            'rc': rc_mode,
-        }
-        # Allow callers to widen headroom; fall back to target bitrate for strict CBR only.
-        if bitrate and bitrate > 0:
-            kwargs['bitrate'] = int(bitrate)
-        if max_bitrate and max_bitrate > 0:
-            kwargs['maxbitrate'] = int(max_bitrate)
-        elif rc_mode == 'cbr' and bitrate and bitrate > 0:
-            kwargs['maxbitrate'] = int(bitrate)
-        # Optional B-frames override
-        bf = max(0, bf_override) if bf_override is not None else 0
-        kwargs['bf'] = int(bf)
-        # Also set explicit framerate to align RC pacing with server fps
-        # Default to ctx.encode.fps if fps not explicitly set
-        fps_num = int(self.fps) if int(self.fps) > 0 else (
-            int(getattr(getattr(self._ctx, 'cfg', None), 'encode', getattr(self._ctx, 'encode', None)).fps)  # type: ignore[attr-defined]
-            if self._ctx is not None else 60
-        )
-        kwargs['frameRateNum'] = int(max(1, fps_num))
-        kwargs['frameRateDen'] = 1
-        # Optional quality tools
-        if lookahead > 0:
-            kwargs['lookahead'] = int(lookahead)
-        if aq > 0:
-            kwargs['aq'] = int(max(0, aq))
-        if temporalaq > 0:
-            kwargs['temporalaq'] = int(max(0, temporalaq))
-        if nonrefp > 0:
-            kwargs['nonrefp'] = 1
-        logger.info(
-            "Creating NVENC encoder: %dx%d fmt=%s preset=%s rc=%s",
-            self.width, self.height, self._enc_input_fmt, preset, rc_mode
-        )
-        try:
-            self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False, **kwargs)
-        except Exception as e:
-            logger.warning("Preset NVENC path failed (%s)", e, exc_info=True)
-        else:
-            self._idr_period_cfg = int(idr_period)
-            if int(os.getenv('NAPARI_CUDA_LOG_ENCODER_SETTINGS', '1') or '1'):
-                self._log_encoder_settings('preset', kwargs)
-            logger.info(
-                "NVENC encoder created (preset): %dx%d fmt=%s preset=%s tuning=low_latency bf=%d rc=%s bitrate=%s max=%s idrperiod=%d lookahead=%d aq=%d temporalaq=%d",
-                self.width,
-                self.height,
-                self._enc_input_fmt,
-                preset,
-                int(bf),
-                rc_mode.upper(),
-                kwargs.get('bitrate'),
-                kwargs.get('maxbitrate'),
-                int(idr_period),
-                kwargs.get('lookahead', 0),
-                kwargs.get('aq', 0),
-                kwargs.get('temporalaq', 0),
-            )
-            self._force_next_idr = True
-            return
-
-        # If preset path fails for any reason, fall back to minimal encoder without tuning
-        enc = getattr(self, '_encoder', None)
-        if enc is None:
-            logger.info("Creating NVENC fallback encoder (no preset kwargs)")
-            try:
-                self._encoder = pnvc.CreateEncoder(width=self.width, height=self.height, fmt=self._enc_input_fmt, usecpuinputbuffer=False)
-            except Exception as e:
-                logger.exception("NVENC fallback encoder creation failed: %s", e)
-            else:
-                logger.warning("NVENC encoder created without preset kwargs; cadence may vary")
-
-    def _log_encoder_settings(self, path: str, init_kwargs: dict) -> None:
-        """Emit a single-line summary of encoder settings.
-
-        Combines the initialization kwargs we passed to NVENC with any
-        reconfigurable params reported by the encoder at runtime.
-
-        path label used in logs (e.g., 'preset').
-        """
-        # Canonicalize known fields from init kwargs
-        k = {**init_kwargs}
-        canon: dict[str, object] = {}
-        def take(src_key: str, dst_key: str | None = None):
-            dst_key = dst_key or src_key
-            if src_key in k and k[src_key] is not None:
-                canon[dst_key] = k[src_key]
-
-            # Common
-            take('codec', 'codec')
-            # Preset keys
-            take('preset', 'preset')
-            take('tuning_info', 'tuning')
-            take('bf', 'bf')
-            take('repeatspspps', 'repeatSPSPPS')
-            take('idrperiod', 'idrPeriod')
-            take('rc', 'rcMode')
-            take('bitrate', 'bitrate')
-            take('maxbitrate', 'maxBitrate')
-            # Modern keys
-            take('frameIntervalP', 'frameIntervalP')
-            take('repeatSPSPPS', 'repeatSPSPPS')
-            take('gopLength', 'gopLength')
-            take('idrPeriod', 'idrPeriod')
-            take('rcMode', 'rcMode')
-            take('enablePTD', 'enablePTD')
-            take('enableLookahead', 'enableLookahead')
-            take('enableAQ', 'enableAQ')
-            take('enableTemporalAQ', 'enableTemporalAQ')
-            take('enableNonRefP', 'enableNonRefP')
-            take('frameRateNum', 'frameRateNum')
-            take('frameRateDen', 'frameRateDen')
-            take('enableIntraRefresh', 'enableIntraRefresh')
-            take('maxNumRefFrames', 'maxNumRefFrames')
-            take('vbvBufferSize', 'vbvBufferSize')
-            take('vbvInitialDelay', 'vbvInitialDelay')
-
-            # Merge in live reconfigure params if available
-        live = {}
-        if hasattr(self._encoder, 'GetEncodeReconfigureParams'):
-            params = self._encoder.GetEncodeReconfigureParams()
-            for attr in (
-                'rateControlMode', 'averageBitrate', 'maxBitRate',
-                'vbvBufferSize', 'vbvInitialDelay', 'frameRateNum', 'frameRateDen', 'multiPass',
-            ):
-                if hasattr(params, attr):
-                    live[attr] = getattr(params, attr)
-
-            # Compose a flat, readable line
-            # Prefer explicit canon values; supplement with live where not present
-            for src, dst in (
-                ('rateControlMode', 'rcMode'),
-                ('averageBitrate', 'bitrate'),
-                ('maxBitRate', 'maxBitrate'),
-                ('vbvBufferSize', 'vbvBufferSize'),
-                ('vbvInitialDelay', 'vbvInitialDelay'),
-                ('frameRateNum', 'frameRateNum'),
-                ('frameRateDen', 'frameRateDen'),
-            ):
-                if dst not in canon and src in live:
-                    canon[dst] = live[src]
-
-            # Stable order for readability
-            order = [
-                'codec','preset','tuning','frameIntervalP','bf','maxNumRefFrames',
-                'gopLength','idrPeriod','repeatSPSPPS',
-                'rcMode','bitrate','maxBitrate','vbvBufferSize','vbvInitialDelay',
-                'enablePTD','enableLookahead','enableAQ','enableTemporalAQ','enableNonRefP',
-                'frameRateNum','frameRateDen','enableIntraRefresh'
-            ]
-            parts = []
-            for key in order:
-                if key in canon:
-                    parts.append(f"{key}={canon[key]}")
-        logger.info("Encoder settings (%s): %s", path, ", ".join(parts))
+        with self._enc_lock:
+            if self._encoder is None:
+                self._encoder = Encoder(self.width, self.height, fps_hint=int(self.fps))
+            encoder = self._encoder
+            encoder.set_fps_hint(int(self.fps))
+            encoder.setup(self._ctx)
+            self._enc_input_fmt = encoder.input_format
 
     def reset_encoder(self) -> None:
         with self._enc_lock:
-            try:
-                if self._encoder is not None:
-                    try:
-                        self._encoder.EndEncode()
-                    except Exception as e:
-                        logger.debug("EndEncode failed during reset: %s", e)
-            finally:
-                self._encoder = None
-            try:
-                self._init_encoder()
-                logger.debug("NVENC encoder reset; next frame should include IDR")
-            except Exception as e:
-                logger.exception("Failed to reset NVENC encoder: %s", e)
+            encoder = self._encoder
+            if encoder is None:
+                return
+            encoder.set_fps_hint(int(self.fps))
+            encoder.reset(self._ctx)
+            self._enc_input_fmt = encoder.input_format
 
     def force_idr(self) -> None:
         logger.debug("Requesting encoder force IDR")
-        try:
-            if hasattr(self._encoder, 'GetEncodeReconfigureParams') and hasattr(self._encoder, 'Reconfigure'):
-                params = self._encoder.GetEncodeReconfigureParams()
-                # Some bindings expose forceIDR; ignore if not present
-                if hasattr(params, 'forceIDR'):
-                    setattr(params, 'forceIDR', 1)
-                self._encoder.Reconfigure(params)
-        except Exception as e:
-            logger.debug("force_idr not supported: %s", e)
+        with self._enc_lock:
+            encoder = self._encoder
+            if encoder is None:
+                return
+            encoder.force_idr()
+
+    def _request_encoder_idr(self) -> None:
+        with self._enc_lock:
+            encoder = self._encoder
+            if encoder is None:
+                return
+            encoder.request_idr()
 
     def render_frame(self, azimuth_deg: Optional[float] = None) -> None:
         if azimuth_deg is not None and hasattr(self.view, "camera"):
@@ -1778,22 +1531,22 @@ class EGLRendererWorker:
         self.canvas.render()
         self._render_tick_required = False
         self._render_loop_started = True
+
     def apply_state(self, state: ServerSceneState) -> None:
         """Queue a complete scene state snapshot for the next frame."""
-        with self._state_lock:
-            self._last_interaction_ts = time.perf_counter()
-            self._pending_state = ServerSceneState(
-                center=tuple(state.center) if state.center is not None else None,
-                zoom=float(state.zoom) if state.zoom is not None else None,
-                angles=tuple(state.angles) if state.angles is not None else None,
-                current_step=tuple(state.current_step) if state.current_step is not None else None,
-                # Include volume render params if present
-                volume_mode=str(getattr(state, 'volume_mode', None)) if getattr(state, 'volume_mode', None) is not None else None,
-                volume_colormap=str(getattr(state, 'volume_colormap', None)) if getattr(state, 'volume_colormap', None) is not None else None,
-                volume_clim=tuple(getattr(state, 'volume_clim')) if getattr(state, 'volume_clim', None) is not None else None,
-                volume_opacity=float(getattr(state, 'volume_opacity')) if getattr(state, 'volume_opacity', None) is not None else None,
-                volume_sample_step=float(getattr(state, 'volume_sample_step')) if getattr(state, 'volume_sample_step', None) is not None else None,
-            )
+        self._last_interaction_ts = time.perf_counter()
+        normalized = ServerSceneState(
+            center=tuple(state.center) if state.center is not None else None,
+            zoom=float(state.zoom) if state.zoom is not None else None,
+            angles=tuple(state.angles) if state.angles is not None else None,
+            current_step=tuple(state.current_step) if state.current_step is not None else None,
+            volume_mode=str(getattr(state, 'volume_mode', None)) if getattr(state, 'volume_mode', None) is not None else None,
+            volume_colormap=str(getattr(state, 'volume_colormap', None)) if getattr(state, 'volume_colormap', None) is not None else None,
+            volume_clim=tuple(getattr(state, 'volume_clim')) if getattr(state, 'volume_clim', None) is not None else None,
+            volume_opacity=float(getattr(state, 'volume_opacity')) if getattr(state, 'volume_opacity', None) is not None else None,
+            volume_sample_step=float(getattr(state, 'volume_sample_step')) if getattr(state, 'volume_sample_step', None) is not None else None,
+        )
+        self._scene_state_machine.queue_scene_state(normalized)
 
     def process_camera_commands(self, commands: Sequence[CameraCommand]) -> None:
         if not commands:
@@ -1806,8 +1559,7 @@ class EGLRendererWorker:
             # Still capture zoom ratio so policy can react once camera is available
             for cmd in commands:
                 if cmd.kind == 'zoom' and cmd.factor and cmd.factor > 0.0:
-                    self._pending_zoom_ratio = float(cmd.factor)
-                    self._pending_zoom_ts = time.perf_counter()
+                    self._scene_state_machine.record_zoom_intent(float(cmd.factor))
             return
 
         canvas_wh: tuple[int, int]
@@ -1897,37 +1649,23 @@ class EGLRendererWorker:
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
     def _apply_pending_state(self) -> None:
-        state: Optional[ServerSceneState] = None
-        pending_ndisplay: Optional[int] = None
-        pending_ms: Optional[tuple[int, Optional[str]]] = None
-        with self._state_lock:
-            if self._pending_ndisplay is not None:
-                pending_ndisplay = int(self._pending_ndisplay)
-                self._pending_ndisplay = None
-            if self._ms_backlog is not None:
-                self._pending_ms_level, self._pending_ms_path = self._ms_backlog
-                self._ms_backlog = None
-            if self._pending_ms_level is not None:
-                pending_ms = (int(self._pending_ms_level), self._pending_ms_path)
-                self._pending_ms_level = None
-                self._pending_ms_path = None
-            if self._pending_state is not None:
-                state = self._pending_state
-                self._pending_state = None
+        updates: PendingSceneUpdates = self._scene_state_machine.drain_pending_updates()
 
-        if pending_ndisplay is not None:
+        if updates.display_mode is not None:
             try:
-                self._apply_ndisplay_switch(pending_ndisplay)
+                self._apply_ndisplay_switch(updates.display_mode)
             except Exception:
                 logger.exception("ndisplay switch failed")
 
-        if pending_ms is not None:
-            lvl, pth = pending_ms
+        if updates.multiscale is not None:
+            lvl = int(updates.multiscale.level)
+            pth = updates.multiscale.path
             try:
                 self._apply_multiscale_switch(lvl, pth)
             except Exception:
                 logger.exception("multiscale switch failed")
 
+        state = updates.scene_state
         if state is None:
             return
 
@@ -2029,7 +1767,7 @@ class EGLRendererWorker:
                             # Do not force fullframe horizon on Z; keep ROI for stability
                             # Optionally force IDR on Z for immediate visibility on clients
                             if getattr(self, '_idr_on_z', False):
-                                self._force_next_idr = True
+                                self._request_encoder_idr()
                             self._notify_scene_refresh()
                             self._mark_render_tick_needed()
                             if self._log_layer_debug:
@@ -2117,27 +1855,13 @@ class EGLRendererWorker:
             cam.angles = state.angles  # type: ignore[attr-defined]
 
         # Evaluate policy only if the absolute state actually changed
-        try:
-            new_sig = (
-                tuple(state.center) if state.center is not None else None,
-                float(state.zoom) if state.zoom is not None else None,
-                tuple(state.angles) if state.angles is not None else None,
-                tuple(state.current_step) if state.current_step is not None else None,
-            )
-        except Exception:
-            new_sig = None
-        # Only evaluate on real state change
-        if new_sig is None:
-            return
-        if self._last_state_sig is not None and new_sig == self._last_state_sig:
-            return
-        self._last_state_sig = new_sig
-        self._maybe_select_level()
+        if self._scene_state_machine.update_state_signature(state):
+            self._maybe_select_level()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
         """Queue a 2D/3D view switch to apply on the render thread."""
-        self._pending_ndisplay = (3 if int(ndisplay) >= 3 else 2)
+        self._scene_state_machine.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return self._gl_capture.blit_with_timing()
@@ -2161,14 +1885,15 @@ class EGLRendererWorker:
         map_ms, copy_ms = self._map_and_copy_to_torch()
         dst, convert_ms = self._convert_for_encoder()
         with self._enc_lock:
-            enc = self._encoder
-        if enc is None:
+            encoder = self._encoder
+        if encoder is None or not encoder.is_ready:
             pkt_obj = None
-        else:
-            pkt_obj, encode_ms, pack_ms = self._encode_frame(dst, enc)
-        if enc is None:
             encode_ms = 0.0
             pack_ms = 0.0
+        else:
+            pkt_obj, timings = encoder.encode(dst)
+            encode_ms = timings.encode_ms
+            pack_ms = timings.pack_ms
         total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
         pkt_bytes = None
         timings = FrameTimings(
@@ -2186,7 +1911,7 @@ class EGLRendererWorker:
         )
         flags = 0
         # Use the worker's frame index as the capture-indexed sequence number
-        seq = int(self._frame_index)
+        seq = int(encoder.frame_index) if encoder is not None else 0
         return timings, pkt_obj, flags, seq
 
     # ---- C5 helpers (pure refactor; no behavior change) ---------------------
@@ -2358,68 +2083,6 @@ class EGLRendererWorker:
         t_c1 = time.perf_counter()
         return dst, (t_c1 - t_c0) * 1000.0
 
-    def _encode_frame(self, dst, enc) -> tuple[Optional[object], float, float]:
-        t_e0 = time.perf_counter()
-        pic_flags = 0
-        try:
-            if getattr(self, '_force_next_idr', False):
-                pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.FORCEIDR)
-                pic_flags |= int(pnvc.NV_ENC_PIC_FLAGS.OUTPUT_SPSPPS)
-                self._force_next_idr = False
-        except Exception:
-            logger.debug("force_next_idr flag check failed", exc_info=True)
-        pkt_obj = enc.Encode(dst, pic_flags) if pic_flags else enc.Encode(dst)
-        t_e1 = time.perf_counter()
-        t_p0 = t_e1; t_p1 = t_e1
-        try:
-            self._frame_index += 1
-            if self._log_keyframes:
-                def _packet_is_keyframe(obj) -> bool:
-                    try:
-                        data = bytes(obj)
-                    except Exception:
-                        return False
-                    i = 0; n = len(data); seen = False
-                    while i + 3 < n:
-                        if data[i] == 0 and data[i+1] == 0 and data[i+2] == 1:
-                            if i + 3 < n:
-                                nal_type = data[i+3] & 0x1F
-                                if nal_type == 5:
-                                    seen = True
-                            i += 3
-                        elif i + 4 < n and data[i] == 0 and data[i+1] == 0 and data[i+2] == 0 and data[i+3] == 1:
-                            if i + 4 < n:
-                                nal_type = data[i+4] & 0x1F
-                                if nal_type == 5:
-                                    seen = True
-                            i += 4
-                        else:
-                            i += 1
-                    if seen:
-                        return True
-                    i = 0
-                    while i + 4 <= n:
-                        ln = int.from_bytes(data[i:i+4], 'big'); i += 4
-                        if ln <= 0 or i + ln > n: break
-                        nal_type = data[i] & 0x1F if ln >= 1 else 0
-                        if nal_type == 5: return True
-                        i += ln
-                    return False
-                keyframe = False
-                if pkt_obj is not None:
-                    if isinstance(pkt_obj, (list, tuple)):
-                        for part in pkt_obj:
-                            if _packet_is_keyframe(part):
-                                keyframe = True; break
-                    else:
-                        keyframe = _packet_is_keyframe(pkt_obj)
-                logger.debug("Encode frame %d: keyframe=%s", self._frame_index, bool(keyframe))
-        except Exception as e:
-            logger.debug("Keyframe instrumentation skipped: %s", e)
-        encode_ms = (t_e1 - t_e0) * 1000.0
-        pack_ms = (t_p1 - t_p0) * 1000.0
-        return pkt_obj, encode_ms, pack_ms
-
     # ---- C6 selection (napari-anchored) -------------------------------------
     def _maybe_select_level(self) -> None:
         """Select and apply a multiscale level based on current view.
@@ -2453,11 +2116,9 @@ class EGLRendererWorker:
 
         # Recent zoom command (explicit user intent) takes precedence
         zoom_ratio = None
-        if self._pending_zoom_ratio is not None:
-            dt = time.perf_counter() - float(self._pending_zoom_ts)
-            if dt <= 0.5:
-                zoom_ratio = float(self._pending_zoom_ratio)
-            self._pending_zoom_ratio = None
+        zoom_hint = self._scene_state_machine.consume_zoom_intent(max_age=0.5)
+        if zoom_hint is not None:
+            zoom_ratio = float(zoom_hint.ratio)
         if zoom_ratio is not None:
             eps = 1e-3
             if zoom_ratio < 1.0 - eps and current > 0:
@@ -2585,16 +2246,10 @@ class EGLRendererWorker:
         except Exception:
             logger.debug("Cleanup: GL capture cleanup failed", exc_info=True)
 
-        try:
-            with self._enc_lock:
-                if self._encoder is not None:
-                    try:
-                        self._encoder.EndEncode()
-                    except Exception:
-                        logger.debug("Cleanup: encoder EndEncode failed", exc_info=True)
-                self._encoder = None
-        except Exception:
-            logger.debug("Cleanup: encoder cleanup lock failed", exc_info=True)
+        with self._enc_lock:
+            encoder = self._encoder
+            if encoder is not None:
+                encoder.shutdown()
 
         try:
             if self.cuda_ctx is not None:
