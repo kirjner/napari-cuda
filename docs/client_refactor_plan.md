@@ -41,7 +41,7 @@
   3. `send_json` renamed to `post` across channel/controller layers.
 - **Scheduler & wake helper**
   1. ✓ `_WakeProxy`/`_CallProxy` now live in `client_loop/scheduler.py`, still canvas-owned; behaviour untouched pending tests.
-  2. Add unit coverage proving GUI-thread dispatch via the proxies before considering any redesign.
+  2. ✓ Unit coverage (`client_loop/_tests/test_scheduler.py`) locks in GUI-thread delivery from worker threads.
   3. Optionally evolve toward a `ClientLoopBus(QtCore.QObject)` that exposes typed signals (`wake_requested`, `apply_snapshot`, `invoke`); revisit only after latency instrumentation is in place (see `#scheduler-spike`).
 - **Pipeline + telemetry helpers**
   1. Split VT/PyAV gate logic into helper modules (≤200 LOC each) returning simple dataclasses of callbacks; keep behaviour unchanged.
@@ -90,6 +90,6 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Add scheduler proxy tests that assert queued-signal delivery (use QtBot harness) so the helper stays locked down.
-2. Extract VT/PyAV helper modules so gatekeeping logic leaves `ClientStreamLoop` without altering functionality.
-3. Introduce `client_loop_config.py`, migrate env parsing there, then start replacing in-loop `try`/`getattr` with assertions once helpers are in place.
+1. Extract VT/PyAV helper modules so gatekeeping logic leaves `ClientStreamLoop` without altering functionality.
+2. Introduce `client_loop_config.py`, migrate env parsing there, then start replacing in-loop `try`/`getattr` with assertions once helpers are in place.
+3. After helpers land, sweep the loop for dead code (e.g., orphaned proxy variants) and capture LOC + try counts to track progress toward the ≤1,000 LOC target.
