@@ -24,7 +24,6 @@ from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
 from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
-from napari_cuda.client.streaming.metrics import ClientMetrics
 from napari_cuda.client.streaming.eventloop_monitor import EventLoopMonitor
 from napari_cuda.client.streaming.input import InputSender
 from napari_cuda.codec.avcc import (
@@ -41,6 +40,12 @@ from napari_cuda.client.streaming.client_loop.scheduler import CallProxy, WakePr
 from napari_cuda.client.streaming.client_loop.pipelines import (
     build_pyav_pipeline,
     build_vt_pipeline,
+)
+from napari_cuda.client.streaming.client_loop.telemetry import (
+    build_telemetry_config,
+    create_metrics,
+    start_metrics_timer,
+    start_stats_timer,
 )
 from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
 from napari_cuda.client.streaming.smoke.generators import make_generator
@@ -157,6 +162,11 @@ class ClientStreamLoop:
         # Phase 0: stash client config for future phases (no behavior change)
         self._client_cfg = client_cfg
         self._env_cfg = load_client_loop_config()
+        self._telemetry_cfg = build_telemetry_config(
+            stats_mode=self._env_cfg.vt_stats_mode,
+            metrics_enabled=self._env_cfg.metrics_enabled,
+            metrics_interval_ms=self._env_cfg.metrics_interval_ms,
+        )
         self._first_dims_ready_cb = on_first_dims_ready
         self._first_dims_notified = False
         self._loop_state = LoopState()
@@ -241,7 +251,7 @@ class ClientStreamLoop:
         self._vt_backlog_trigger = int(vt_backlog_trigger)
         self._vt_enqueued = 0
         # Client metrics (optional, env-controlled)
-        self._metrics = ClientMetrics(enabled=self._env_cfg.metrics_enabled)
+        self._metrics = create_metrics(self._telemetry_cfg)
 
         # Presenter-owned wake scheduling: single-shot QTimer owned by the GUI thread,
         # optionally disabled when an external fixed-cadence display loop is active.
@@ -343,13 +353,7 @@ class ClientStreamLoop:
         self._stream_seen_keyframe = False
 
         # Stats/logging and diagnostics
-        lvl_env = self._env_cfg.vt_stats_mode
-        if lvl_env in ('1', 'true', 'yes', 'info'):
-            self._stats_level = logging.INFO
-        elif lvl_env in ('debug', 'dbg'):
-            self._stats_level = logging.DEBUG
-        else:
-            self._stats_level = None
+        self._stats_level = self._telemetry_cfg.stats_level
         self._last_stats_time: float = 0.0
         self._stats_timer = None
         self._metrics_timer = None
@@ -679,27 +683,20 @@ class ClientStreamLoop:
             self._loop_state.threads.append(t_rx)
 
         # Dedicated 1 Hz presenter stats timer (decoupled from draw loop)
-        if self._stats_level is not None:
-            try:
-                self._stats_timer = QtCore.QTimer(self._scene_canvas.native)
-                self._stats_timer.setTimerType(QtCore.Qt.PreciseTimer)
-                self._stats_timer.setInterval(1000)
-                self._stats_timer.timeout.connect(self._log_stats)
-                self._stats_timer.start()
-            except Exception:
-                logger.debug("Failed to start stats timer; falling back to draw-based logging", exc_info=True)
+        self._stats_timer = start_stats_timer(
+            self._scene_canvas.native,
+            stats_level=self._stats_level,
+            callback=self._log_stats,
+            logger=logger,
+        )
 
         # Client metrics CSV dump timer (independent of stats log level)
-        if getattr(self._metrics, 'enabled', False):
-            try:
-                interval_ms = self._env_cfg.metrics_interval_ms
-                self._metrics_timer = QtCore.QTimer(self._scene_canvas.native)
-                self._metrics_timer.setTimerType(QtCore.Qt.PreciseTimer)
-                self._metrics_timer.setInterval(interval_ms)
-                self._metrics_timer.timeout.connect(self._metrics.dump_csv_row)  # type: ignore[arg-type]
-                self._metrics_timer.start()
-            except Exception:
-                logger.debug("Failed to start client metrics timer", exc_info=True)
+        self._metrics_timer = start_metrics_timer(
+            self._scene_canvas.native,
+            config=self._telemetry_cfg,
+            metrics=self._metrics,
+            logger=logger,
+        )
         # Optional draw watchdog: if no draw observed for threshold, kick an update
         if self._watchdog_ms > 0:
             try:
@@ -2264,27 +2261,6 @@ class ClientStreamLoop:
                 frac = remain / max(1e-6, self._warmup_window_s)
                 cur = self._vt_latency_s + self._warmup_extra_active_s * frac
                 self._presenter.set_latency(cur)
-
-    def _start_stats_timer(self) -> None:
-        try:
-            self._stats_timer = QtCore.QTimer(self._scene_canvas.native)
-            self._stats_timer.setTimerType(QtCore.Qt.PreciseTimer)
-            self._stats_timer.setInterval(1000)
-            self._stats_timer.timeout.connect(self._log_stats)
-            self._stats_timer.start()
-        except Exception:
-            logger.debug("Failed to start stats timer; falling back to draw-based logging", exc_info=True)
-
-    def _start_metrics_timer(self) -> None:
-        try:
-            interval_ms = self._env_cfg.metrics_interval_ms
-            self._metrics_timer = QtCore.QTimer(self._scene_canvas.native)
-            self._metrics_timer.setTimerType(QtCore.Qt.PreciseTimer)
-            self._metrics_timer.setInterval(interval_ms)
-            self._metrics_timer.timeout.connect(self._metrics.dump_csv_row)  # type: ignore[arg-type]
-            self._metrics_timer.start()
-        except Exception:
-            logger.debug("Failed to start client metrics timer", exc_info=True)
 
     def stop(self) -> None:
         try:

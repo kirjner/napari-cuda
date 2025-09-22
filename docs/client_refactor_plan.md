@@ -1,7 +1,7 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/client_stream_loop.py`: 2,330 LOC (down 65 with env config + pipelines; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/client_stream_loop.py`: 2,306 LOC (down 89 with config + telemetry helpers; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
@@ -45,7 +45,7 @@
   3. Optionally evolve toward a `ClientLoopBus(QtCore.QObject)` that exposes typed signals (`wake_requested`, `apply_snapshot`, `invoke`); revisit only after latency instrumentation is in place (see `#scheduler-spike`).
 - **Pipeline + telemetry helpers**
   1. ✓ VT/PyAV pipeline factories now live in `client_loop/pipelines.py`; behaviour unchanged and still schedule wakes via the canvas.
-  2. Funnel metrics/logging toggles through a lightweight facade so Phase E can reuse the surface.
+  2. ✓ Telemetry helpers (`client_loop/telemetry.py`) centralise stats/log timers and metrics enablement with `_tests/test_telemetry.py` coverage.
   3. Write regression tests that simulate keyframe gating + dims replay to ensure `_last_dims_payload` survives each extraction.
 - **Config & env plumbing**
   1. ✓ `client_loop_config.py` now loads warmup, metrics, dims, and input env knobs once; loop ctor consumes the struct and `_tests/test_config.py` locks parsing behaviour.
@@ -90,6 +90,6 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Funnel metrics/logging toggles through a lightweight facade so presenter timers and wake instrumentation share one surface before Phase E.
-2. Start pruning hot-path `try`/`getattr` calls that the new config makes redundant; replace them with assertions and explicit error paths.
-3. Continue env consolidation for smoke-mode helpers, then snapshot LOC + try counts to confirm progress toward the ≤1,000 LOC target.
+1. Start pruning hot-path `try`/`getattr` calls that the new config + telemetry helpers make redundant; replace them with assertions and explicit error paths.
+2. Continue env consolidation for smoke-mode helpers, then snapshot LOC + try counts to confirm progress toward the ≤1,000 LOC target.
+3. Draft the Phase C presenter facade proposal while current metrics hooks are fresh (document expected surfaces before editing `streaming_canvas.py`).
