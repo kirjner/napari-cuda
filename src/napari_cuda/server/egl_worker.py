@@ -56,6 +56,11 @@ from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.roi_applier import SliceUpdatePlanner
+from napari_cuda.server.roi import (
+    compute_viewport_roi,
+    plane_scale_for_level,
+    plane_wh_for_level,
+)
 from napari_cuda.server.scene_state_applier import (
     SceneStateApplier,
     SceneStateApplyContext,
@@ -641,38 +646,6 @@ class EGLRendererWorker:
     # Priming retired: method removed
 
 
-    def _plane_wh_for_level(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
-        descriptor = source.level_descriptors[level]
-        axes = source.axes
-        axes_lower = [str(ax).lower() for ax in axes]
-        try:
-            y_pos = axes_lower.index('y')
-        except ValueError:
-            y_pos = max(0, len(descriptor.shape) - 2)
-        try:
-            x_pos = axes_lower.index('x')
-        except ValueError:
-            x_pos = max(0, len(descriptor.shape) - 1)
-        h = int(descriptor.shape[y_pos]) if 0 <= y_pos < len(descriptor.shape) else int(descriptor.shape[-2])
-        w = int(descriptor.shape[x_pos]) if 0 <= x_pos < len(descriptor.shape) else int(descriptor.shape[-1])
-        return h, w
-
-    def _plane_scale_for_level(self, source: ZarrSceneSource, level: int) -> tuple[float, float]:
-        axes = source.axes
-        axes_lower = [str(ax).lower() for ax in axes]
-        scale = source.level_scale(level)
-        try:
-            y_pos = axes_lower.index('y')
-        except ValueError:
-            y_pos = max(0, len(scale) - 2)
-        try:
-            x_pos = axes_lower.index('x')
-        except ValueError:
-            x_pos = max(0, len(scale) - 1)
-        sy = float(scale[y_pos]) if 0 <= y_pos < len(scale) else float(scale[-2])
-        sx = float(scale[x_pos]) if 0 <= x_pos < len(scale) else float(scale[-1])
-        return sy, sx
-
     def _physical_scale_for_level(self, source: ZarrSceneSource, level: int) -> tuple[float, float, float]:
         try:
             scale = source.level_scale(level)
@@ -693,7 +666,7 @@ class EGLRendererWorker:
             # For policy calculations, ignore full-frame horizon and ROI hysteresis
             roi = self._viewport_roi_for_level(source, level, quiet=True, for_policy=True)
             if roi.is_empty():
-                h, w = self._plane_wh_for_level(source, level)
+                h, w = plane_wh_for_level(source, level)
             else:
                 h, w = roi.height, roi.width
         except Exception:
@@ -845,190 +818,91 @@ class EGLRendererWorker:
     # ROI reconciliation. With layer.translate placement, this is no longer used.
 
     def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int, *, quiet: bool = False, for_policy: bool = False) -> SliceROI:
-        # Attempt to reuse cached ROI when the view transform has not changed
         view = getattr(self, "view", None)
-        xform_sig: Optional[tuple[float, ...]] = None
-        if view is not None and hasattr(view, "scene") and hasattr(view.scene, "transform"):
-            try:
-                xform = view.scene.transform
-                if hasattr(xform, "matrix"):
-                    mat = getattr(xform, "matrix")
-                    # Flatten a small signature; convert to float tuple to make hashable and stable
-                    xform_sig = tuple(float(v) for v in mat.ravel())
-            except Exception:
-                xform_sig = None
+        plane_h, plane_w = plane_wh_for_level(source, level)
+        scale = plane_scale_for_level(source, level)
 
-        cached = self._roi_cache.get(int(level))
-        if cached is not None and cached[0] is not None and xform_sig is not None and cached[0] == xform_sig:
-            # Cached ROI is valid for this transform signature
-            return cached[1]
-        # During the first few frames after a level switch, force full frame for active level.
-        # However, policy/oversampling computation should ignore this to avoid oscillation.
-        # No fullframe overrides; compute ROI from viewport and guarantee containment
-        h, w = self._plane_wh_for_level(source, level)
-        sy, sx = self._plane_scale_for_level(source, level)
-        if self.view is None or not hasattr(self.view, 'camera'):
-            self._log_roi_fallback(level=level, reason="no-view", plane_h=h, plane_w=w, scale=(sy, sx))
-            return SliceROI(0, h, 0, w)
-        cam = self.view.camera
+        if view is None or not hasattr(view, "camera"):
+            if not quiet:
+                self._log_roi_fallback(level=level, reason="no-view", plane_h=plane_h, plane_w=plane_w, scale=scale)
+            return SliceROI(0, plane_h, 0, plane_w)
+
+        cam = view.camera
         if not isinstance(cam, scene.cameras.PanZoomCamera):
             ensured = self._ensure_panzoom_camera(reason="roi-request")
             cam = ensured or cam
         if not isinstance(cam, scene.cameras.PanZoomCamera):
-            self._log_roi_fallback(level=level, reason="no-panzoom", plane_h=h, plane_w=w, scale=(sy, sx))
-            return SliceROI(0, h, 0, w)
-        sx_world = max(1e-12, float(sx))
-        sy_world = max(1e-12, float(sy))
+            if not quiet:
+                self._log_roi_fallback(level=level, reason="no-panzoom", plane_h=plane_h, plane_w=plane_w, scale=scale)
+            return SliceROI(0, plane_h, 0, plane_w)
+
+        signature: Optional[tuple[float, ...]] = None
+        scene_graph = getattr(view, "scene", None)
+        transform = getattr(scene_graph, "transform", None)
+        if transform is not None and hasattr(transform, "matrix"):
+            try:
+                signature = tuple(float(v) for v in transform.matrix.ravel())
+            except Exception:
+                signature = None
+
+        cached = self._roi_cache.get(int(level))
+        if cached is not None and signature is not None and cached[0] == signature:
+            return cached[1]
+
+        align_chunks = (not for_policy) and bool(getattr(self, "_roi_align_chunks", True))
+        ensure_contains = (not for_policy) and bool(getattr(self, "_roi_ensure_contains_viewport", True))
+        edge_threshold = int(getattr(self, "_roi_edge_threshold", 4))
+        chunk_pad = int(getattr(self, "_roi_pad_chunks", 1))
+
+        prev_logged: Optional[SliceROI] = None
+        if not for_policy:
+            roi_log = getattr(self, "_roi_log_state", None)
+            if isinstance(roi_log, dict):
+                logged = roi_log.get(int(level))
+                if logged is not None:
+                    prev_logged = logged[0]
+
         try:
-            bounds = self._viewport_world_bounds()
-            if bounds is None:
-                self._log_roi_fallback(
-                    level=level,
-                    reason="no-bounds",
-                    plane_h=h,
-                    plane_w=w,
-                    scale=(sy_world, sx_world),
-                )
-                return SliceROI(0, h, 0, w)
-            x0, x1, y0, y1 = bounds
-            x_start = int(math.floor(min(x0, x1) / sx_world))
-            x_stop = int(math.ceil(max(x0, x1) / sx_world))
-            y_start = int(math.floor(min(y0, y1) / sy_world))
-            y_stop = int(math.ceil(max(y0, y1) / sy_world))
-            # Keep a copy of viewport index bounds so we can guarantee containment later
-            vp_x_start, vp_x_stop = x_start, x_stop
-            vp_y_start, vp_y_stop = y_start, y_stop
-            roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
-            if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
-                # Log initial world bounds and resulting index ROI
-                cx_i = 0.5 * (roi.x_start + roi.x_stop)
-                cy_i = 0.5 * (roi.y_start + roi.y_stop)
-                logger.info(
-                    "roi.initial: level=%d world=(x=[%.2f,%.2f], y=[%.2f,%.2f]) scale=(%.6f,%.6f) index=(y=%d:%d x=%d:%d) center_i=(%.2f,%.2f)",
-                    int(level), float(x0), float(x1), float(y0), float(y1), float(sy_world), float(sx_world),
-                    int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop),
-                    float(cx_i), float(cy_i)
-                )
-            # Align ROI to chunk boundaries to avoid sub-chunk phasing artifacts when panning
-            if (not for_policy) and getattr(self, '_roi_align_chunks', True):
-                try:
-                    arr = source.get_level(level)
-                    chunks = getattr(arr, 'chunks', None)
-                    axes = source.axes
-                    axes_lower = [str(ax).lower() for ax in axes]
-                    if chunks is not None:
-                        if 'y' in axes_lower:
-                            y_pos = axes_lower.index('y')
-                        else:
-                            y_pos = max(0, len(chunks) - 2)
-                        if 'x' in axes_lower:
-                            x_pos = axes_lower.index('x')
-                        else:
-                            x_pos = max(0, len(chunks) - 1)
-                        cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-                        cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-                        cy = max(1, cy)
-                        cx = max(1, cx)
-                        # Snap start to floor(chunk) and stop to ceil(chunk), with small symmetric padding
-                        ys = (roi.y_start // cy) * cy
-                        ye = ((roi.y_stop + cy - 1) // cy) * cy
-                        xs = (roi.x_start // cx) * cx
-                        xe = ((roi.x_stop + cx - 1) // cx) * cx
-                        pad_chunks = int(getattr(self, '_roi_pad_chunks', 1))
-                        ys = max(0, ys - pad_chunks * cy)
-                        ye = min(h, ye + pad_chunks * cy)
-                        xs = max(0, xs - pad_chunks * cx)
-                        xe = min(w, xe + pad_chunks * cx)
-                        pre = roi
-                        roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
-                        if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
-                            logger.info(
-                                "roi.aligned: level=%d chunks=(y=%d,x=%d) pre=(y=%d:%d x=%d:%d) -> aligned=(y=%d:%d x=%d:%d)",
-                                int(level), int(cy), int(cx),
-                                int(pre.y_start), int(pre.y_stop), int(pre.x_start), int(pre.x_stop),
-                                int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop)
-                            )
-                except Exception:
-                    logger.debug('roi chunk alignment failed', exc_info=True)
-            # Apply small-move hysteresis only for rendering, not for policy decisions
-            if not for_policy:
-                roi_log = getattr(self, '_roi_log_state', None)
-                if isinstance(roi_log, dict):
-                    prev_logged = roi_log.get(int(level))
-                    if prev_logged is not None:
-                        prev_roi, _ = prev_logged
-                        thr = int(getattr(self, '_roi_edge_threshold', 4))
-                        # Only accept prev_roi when it still covers the current viewport
-                        prev_covers_view = (
-                            int(prev_roi.y_start) <= int(vp_y_start) and int(prev_roi.y_stop) >= int(vp_y_stop) and
-                            int(prev_roi.x_start) <= int(vp_x_start) and int(prev_roi.x_stop) >= int(vp_x_stop)
-                        )
-                        if (
-                            abs(roi.y_start - prev_roi.y_start) < thr and
-                            abs(roi.y_stop  - prev_roi.y_stop)  < thr and
-                            abs(roi.x_start - prev_roi.x_start) < thr and
-                            abs(roi.x_stop  - prev_roi.x_stop)  < thr and
-                            prev_covers_view
-                        ):
-                            roi = prev_roi
-
-            # Ensure ROI fully contains the current viewport to avoid black edges during pan
-            if not for_policy and getattr(self, '_roi_ensure_contains_viewport', True):
-                try:
-                    ys = min(int(roi.y_start), int(vp_y_start))
-                    ye = max(int(roi.y_stop),  int(vp_y_stop))
-                    xs = min(int(roi.x_start), int(vp_x_start))
-                    xe = max(int(roi.x_stop),  int(vp_x_stop))
-                    # If chunk alignment is enabled, expand to chunk boundaries (outward only)
-                    if getattr(self, '_roi_align_chunks', True):
-                        try:
-                            arr = source.get_level(level)
-                            chunks = getattr(arr, 'chunks', None)
-                            if chunks is not None:
-                                axes = source.axes
-                                axes_lower = [str(ax).lower() for ax in axes]
-                                y_pos = axes_lower.index('y') if 'y' in axes_lower else max(0, len(chunks) - 2)
-                                x_pos = axes_lower.index('x') if 'x' in axes_lower else max(0, len(chunks) - 1)
-                                cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-                                cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-                                cy = max(1, cy)
-                                cx = max(1, cx)
-                                ys = (ys // cy) * cy
-                                ye = ((ye + cy - 1) // cy) * cy
-                                xs = (xs // cx) * cx
-                                xe = ((xe + cx - 1) // cx) * cx
-                        except Exception:
-                            logger.debug('roi ensure-contains: chunk align failed', exc_info=True)
-                    pre = roi
-                    roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
-                    if (self._log_layer_debug or getattr(self, '_log_roi_anchor', False)) and logger.isEnabledFor(logging.INFO):
-                        logger.info(
-                            'roi.ensure_viewport: level=%d pre=(y=%d:%d x=%d:%d) vp=(y=%d:%d x=%d:%d) -> final=(y=%d:%d x=%d:%d)',
-                            int(level), int(pre.y_start), int(pre.y_stop), int(pre.x_start), int(pre.x_stop),
-                            int(vp_y_start), int(vp_y_stop), int(vp_x_start), int(vp_x_stop),
-                            int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop)
-                        )
-                except Exception:
-                    logger.debug('roi ensure-contains failed', exc_info=True)
-
-            # Center-anchored reconciliation removed; placement uses layer.translate now
-            # (ROI verbose logging removed)
-            if roi.is_empty():
-                self._log_roi_fallback(level=level, reason="empty", plane_h=h, plane_w=w, scale=(sy_world, sx_world))
-                return SliceROI(0, h, 0, w)
-            # Update cache against the current transform signature
-            if xform_sig is not None:
-                self._roi_cache[int(level)] = (xform_sig, roi)
-            return roi
+            result = compute_viewport_roi(
+                view=view,
+                canvas_size=(int(self.width), int(self.height)),
+                source=source,
+                level=int(level),
+                align_chunks=align_chunks,
+                chunk_pad=chunk_pad,
+                ensure_contains_viewport=ensure_contains,
+                edge_threshold=edge_threshold,
+                prev_roi=prev_logged,
+                for_policy=for_policy,
+                transform_signature=signature,
+            )
         except Exception:
-            if self._log_layer_debug:
+            if not quiet and self._log_layer_debug:
                 logger.exception(
                     "viewport ROI computation failed; returning full frame (level=%d dims=%dx%d)",
                     level,
-                    h,
-                    w,
+                    plane_h,
+                    plane_w,
                 )
-            return SliceROI(0, h, 0, w)
+            if not quiet:
+                self._log_roi_fallback(level=level, reason="compute-failed", plane_h=plane_h, plane_w=plane_w, scale=scale)
+            return SliceROI(0, plane_h, 0, plane_w)
+
+        roi = result.roi
+        if roi.is_empty():
+            if not quiet:
+                self._log_roi_fallback(level=level, reason="empty", plane_h=plane_h, plane_w=plane_w, scale=scale)
+            return SliceROI(0, plane_h, 0, plane_w)
+
+        if result.transform_signature is not None:
+            self._roi_cache[int(level)] = (result.transform_signature, roi)
+
+        if not for_policy:
+            roi_log = getattr(self, "_roi_log_state", None)
+            if isinstance(roi_log, dict):
+                roi_log[int(level)] = (roi, time.perf_counter())
+
+        return roi
 
     def _estimate_volume_io(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
         chunk_count = 0
@@ -1189,7 +1063,7 @@ class EGLRendererWorker:
         limit_bytes = int(self._slice_max_bytes or 0)
         if limit_bytes <= 0:
             return
-        h, w = self._plane_wh_for_level(source, level)
+        h, w = plane_wh_for_level(source, level)
         dtype_size = int(np.dtype(source.dtype).itemsize)
         bytes_est = int(h) * int(w) * dtype_size
         if bytes_est > limit_bytes:
@@ -1360,7 +1234,7 @@ class EGLRendererWorker:
             # Apply per-level scale to the layer BEFORE computing ROI/slab so
             # world->index mapping is consistent across level changes.
             try:
-                sy, sx = self._plane_scale_for_level(source, level)
+                sy, sx = plane_scale_for_level(source, level)
                 if update_layer:
                     layer.scale = (sy, sx)
             except Exception:
@@ -1407,7 +1281,7 @@ class EGLRendererWorker:
                     # If sticky, leave as-is; else fallback to provided contrast
                     if not getattr(self, '_sticky_contrast', True):
                         layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
-            h, w = self._plane_wh_for_level(source, level)
+            h, w = plane_wh_for_level(source, level)
             self._data_wh = (w, h)
             try:
                 if not getattr(self, '_preserve_view_on_switch', True):
@@ -1624,7 +1498,7 @@ class EGLRendererWorker:
         sx = sy = 1.0
         try:
             if self._scene_source is not None and not self.use_volume:
-                sy, sx = self._plane_scale_for_level(self._scene_source, int(self._active_ms_level))
+                sy, sx = plane_scale_for_level(self._scene_source, int(self._active_ms_level))
         except Exception:
             logger.debug('camera reset: level scale lookup failed', exc_info=True)
         if d is not None:
@@ -1654,7 +1528,7 @@ class EGLRendererWorker:
             data_wh=self._data_wh,
             state_lock=self._state_lock,
             ensure_scene_source=self._ensure_scene_source,
-            plane_scale_for_level=self._plane_scale_for_level,
+            plane_scale_for_level=plane_scale_for_level,
             load_slice=self._load_slice,
             notify_scene_refresh=self._notify_scene_refresh,
             mark_render_tick_needed=self._mark_render_tick_needed,

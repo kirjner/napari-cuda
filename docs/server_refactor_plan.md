@@ -33,10 +33,11 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   - Method renames landed: `_apply_pending_state` → `drain_scene_updates`, `_render_frame_and_maybe_eval` → `render_tick`, clarifying responsibilities for future refactors.
   - Zoom intent handling normalized (factor >1 ⇒ invert) and rate-limited; LOD thresholds soften to 1.20 during active zoom hints.
   - Unit coverage exists for the state machine, camera controller, and `SceneStateApplier` helpers.
+  - `roi.py` now owns viewport ROI math and plane helpers; the worker simply wraps caching/log bookkeeping, eliminating the bespoke ROI code path and associated guard soup.
 - **In progress**:
   - Worker naming cleanup (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
 - **Next extraction targets**:
-  - **ROI refresh integration**: with `render_tick` calling into `SceneStateApplier`, follow up by deleting residual ROI translate/contrast code once Phase C extractions land.
+- **ROI refresh integration**: follow through on translating remaining ROI fetches (policy, capture) to use the new helper consistently so no worker path pokes at napari internals directly.
   - **Guard audit**: continue removing remaining defensive branches in ROI math once helper coverage lands.
 - **Tests still to add**:
   - Integration-style test exercising level selection under a sequence of zoom hints to lock the relaxed thresholds in place.

@@ -8,6 +8,7 @@ import numpy as np
 from vispy import scene
 from napari.components.viewer_model import ViewerModel
 
+from napari_cuda.server.roi import plane_scale_for_level, plane_wh_for_level
 from napari_cuda.server.zarr_source import ZarrSceneSource
 
 logger = logging.getLogger(__name__)
@@ -16,8 +17,9 @@ logger = logging.getLogger(__name__)
 class AdapterScene:
     """Thin wrapper around the napari/vispy adapter scene setup.
 
-    This class delegates helper computations back to the worker via the provided
-    bridge (an EGLRendererWorker-like object) to avoid logic duplication.
+    This class still delegates lifecycle hooks back to the worker via ``bridge``
+    but relies on shared helpers for plane geometry so scale/ROI math remains in
+    a single module.
     """
 
     def __init__(self, bridge) -> None:
@@ -80,7 +82,7 @@ class AdapterScene:
             if self._bridge._log_layer_debug:
                 logger.info("adapter init: nlevels=%d chosen=%d use_volume=%s", len(levels), int(current_level), bool(self._bridge.use_volume))
                 for li, desc in enumerate(levels):
-                    h, w = self._bridge._plane_wh_for_level(source, li)
+                    h, w = plane_wh_for_level(source, li)
                     dtype_size = int(np.dtype(source.dtype).itemsize)
                     bytes_est = int(h) * int(w) * dtype_size
                     logger.info("adapter levels: idx=%d shape=%s plane=%dx%d dtype=%s slice_bytes=%d", int(li), 'x'.join(str(int(x)) for x in desc.shape), int(h), int(w), str(source.dtype), bytes_est)
@@ -145,7 +147,7 @@ class AdapterScene:
                         logger.debug("init slab stats failed", exc_info=True)
                 # slice_array is normalized to [0,1] by ZarrSceneSource.slice(compute=True),
                 # so use fixed contrast_limits=(0,1) to avoid black output from raw-domain clims.
-                sy, sx = self._bridge._plane_scale_for_level(source, current_level)
+                sy, sx = plane_scale_for_level(source, current_level)
                 layer = viewer.add_image(
                     slice_array,
                     name="zarr-image",
@@ -178,8 +180,8 @@ class AdapterScene:
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-                h, w = self._bridge._plane_wh_for_level(source, current_level)
-                sy, sx = self._bridge._plane_scale_for_level(source, current_level)
+                h, w = plane_wh_for_level(source, current_level)
+                sy, sx = plane_scale_for_level(source, current_level)
                 self._bridge._data_wh = (w, h)
                 # Use world extents (shape * scale) so the image falls within the view frustum
                 world_w = float(w) * float(sx)

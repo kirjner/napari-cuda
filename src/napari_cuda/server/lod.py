@@ -20,6 +20,7 @@ import numpy as np
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.zarr_source import ZarrSceneSource
 from napari_cuda.server.scene_types import SliceROI
+from napari_cuda.server.roi import plane_scale_for_level, plane_wh_for_level
 
 
 logger = logging.getLogger(__name__)
@@ -79,40 +80,6 @@ def stabilize_level(napari_level: int, prev_level: int, *, hysteresis: float = 0
 # ---- ROI computation ---------------------------------------------------------
 
 
-def _plane_wh_for_level(source: ZarrSceneSource, level: int) -> Tuple[int, int]:
-    desc = source.level_descriptors[level]
-    axes = source.axes
-    lower = [str(a).lower() for a in axes]
-    try:
-        y_pos = lower.index("y")
-    except ValueError:
-        y_pos = max(0, len(desc.shape) - 2)
-    try:
-        x_pos = lower.index("x")
-    except ValueError:
-        x_pos = max(0, len(desc.shape) - 1)
-    h = int(desc.shape[y_pos]) if 0 <= y_pos < len(desc.shape) else int(desc.shape[-2])
-    w = int(desc.shape[x_pos]) if 0 <= x_pos < len(desc.shape) else int(desc.shape[-1])
-    return h, w
-
-
-def _plane_scale_for_level(source: ZarrSceneSource, level: int) -> Tuple[float, float]:
-    axes = source.axes
-    lower = [str(a).lower() for a in axes]
-    scale = source.level_scale(level)
-    try:
-        y_pos = lower.index("y")
-    except ValueError:
-        y_pos = max(0, len(scale) - 2)
-    try:
-        x_pos = lower.index("x")
-    except ValueError:
-        x_pos = max(0, len(scale) - 1)
-    sy = float(scale[y_pos]) if 0 <= y_pos < len(scale) else float(scale[-2])
-    sx = float(scale[x_pos]) if 0 <= x_pos < len(scale) else float(scale[-1])
-    return sy, sx
-
-
 def compute_viewport_roi(
     *,
     viewer: ViewerModel,
@@ -132,7 +99,7 @@ def compute_viewport_roi(
     - If ``init_fullframe`` is True, returns a full-frame ROI for the very
       first call to guarantee visible content.
     """
-    h, w = _plane_wh_for_level(source, level)
+    h, w = plane_wh_for_level(source, level)
     if init_fullframe:
         return SliceROI(0, h, 0, w)
 
@@ -147,7 +114,7 @@ def compute_viewport_roi(
         canvas = getattr(viewer, "_canvas")
 
     # We expect a vispy ViewBox with a scene graph; compute world-space bounds
-    sy, sx = _plane_scale_for_level(source, level)
+    sy, sx = plane_scale_for_level(source, level)
     sy = max(1e-12, float(sy))
     sx = max(1e-12, float(sx))
 
