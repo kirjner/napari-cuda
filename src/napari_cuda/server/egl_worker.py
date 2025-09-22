@@ -48,7 +48,7 @@ from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
 from napari_cuda.server.lod import apply_level
-from napari_cuda.server.config import ServerCtx
+from napari_cuda.server.config import LevelPolicySettings, ServerCtx, load_server_ctx
 from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
@@ -113,6 +113,8 @@ class EGLRendererWorker:
                  scene_refresh_cb: Optional[Callable[[], None]] = None,
                  policy_name: Optional[str] = None,
                  ctx: Optional[ServerCtx] = None) -> None:
+        if ctx is None:
+            ctx = load_server_ctx()
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -120,7 +122,7 @@ class EGLRendererWorker:
         self.volume_depth = int(volume_depth)
         self.volume_dtype = str(volume_dtype)
         self.volume_relative_step = volume_relative_step
-        self._ctx: Optional[ServerCtx] = ctx
+        self._ctx: ServerCtx = ctx
         # Optional simple turntable animation
         self._animate = bool(animate)
         try:
@@ -222,10 +224,8 @@ class EGLRendererWorker:
         except Exception:
             self._log_roi_anchor = False
         # Focused selector logging without enabling full layer debug
-        try:
-            self._log_policy_eval = env_bool('NAPARI_CUDA_LOG_POLICY_EVAL', False)
-        except Exception:
-            self._log_policy_eval = False
+        policy_cfg = self._ctx.policy
+        self._log_policy_eval = bool(policy_cfg.log_policy_eval)
         # Legacy zoom-policy toggles removed; selection uses viewport oversampling
         # Optional: lock multiscale level (int index) to keep client/server in sync
         try:
@@ -233,29 +233,14 @@ class EGLRendererWorker:
             self._lock_level: Optional[int] = int(_lock) if (_lock is not None and _lock != '') else None
         except Exception:
             self._lock_level = None
-        try:
-            self._level_threshold_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
-        except Exception:
-            self._level_threshold_in = 1.05
-        try:
-            self._level_threshold_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
-        except Exception:
-            self._level_threshold_out = 1.35
-        try:
-            self._level_hysteresis = float(os.getenv('NAPARI_CUDA_LEVEL_HYST', '0.0') or '0.0')
-        except Exception:
-            self._level_hysteresis = 0.0
-        self._level_fine_threshold = max(self._level_threshold_in, 1.05)
+        self._level_threshold_in = float(policy_cfg.threshold_in)
+        self._level_threshold_out = float(policy_cfg.threshold_out)
+        self._level_hysteresis = float(policy_cfg.hysteresis)
+        self._level_fine_threshold = float(policy_cfg.fine_threshold)
         # Preserve current camera view on level switches (avoid resetting zoom)
-        try:
-            self._preserve_view_on_switch = env_bool('NAPARI_CUDA_PRESERVE_VIEW', True)
-        except Exception:
-            self._preserve_view_on_switch = True
+        self._preserve_view_on_switch = bool(policy_cfg.preserve_view_on_switch)
         # Keep contrast limits stable across pans/level switches unless disabled
-        try:
-            self._sticky_contrast = env_bool('NAPARI_CUDA_STICKY_CONTRAST', True)
-        except Exception:
-            self._sticky_contrast = True
+        self._sticky_contrast = bool(policy_cfg.sticky_contrast)
         # Last known dims.current_step from intents; used to preserve Z across
         # multiscale level switches regardless of viewer timing.
         self._last_step: Optional[tuple[int, ...]] = None
@@ -270,10 +255,7 @@ class EGLRendererWorker:
         self._frame_pipeline.configure_auto_reset(self._auto_reset_on_black)
         self._black_reset_done: bool = False
         # Min time between level switches to avoid shimmering during pan
-        try:
-            self._level_switch_cooldown_ms = float(os.getenv('NAPARI_CUDA_LEVEL_SWITCH_COOLDOWN_MS', '150') or '150')
-        except Exception:
-            self._level_switch_cooldown_ms = 150.0
+        self._level_switch_cooldown_ms = float(policy_cfg.cooldown_ms)
         self._last_level_switch_ts: float = 0.0
         # Initial ROI bypass removed; we now guarantee viewport containment
         # Cache the last ROI computed per level keyed by a transform signature.

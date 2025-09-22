@@ -214,6 +214,20 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
 
 
 @dataclass(frozen=True)
+class LevelPolicySettings:
+    """Level selection policy configuration resolved from environment."""
+
+    threshold_in: float = 1.05
+    threshold_out: float = 1.35
+    hysteresis: float = 0.0
+    fine_threshold: float = 1.05
+    cooldown_ms: float = 150.0
+    log_policy_eval: bool = False
+    preserve_view_on_switch: bool = True
+    sticky_contrast: bool = True
+
+
+@dataclass(frozen=True)
 class ServerCtx:
     """Resolved server runtime context.
 
@@ -245,6 +259,9 @@ class ServerCtx:
 
     # Policy event path
     policy_event_path: str = "tmp/policy_events.jsonl"
+
+    # Level policy settings
+    policy: LevelPolicySettings = LevelPolicySettings()
 
 
 def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
@@ -278,6 +295,28 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
 
     policy_event_path = _env_str(env, "NAPARI_CUDA_POLICY_EVENT_PATH", "tmp/policy_events.jsonl") or "tmp/policy_events.jsonl"
 
+    policy_threshold_in = _env_float(env, "NAPARI_CUDA_LEVEL_THRESHOLD_IN", 1.05)
+    policy_threshold_out = _env_float(env, "NAPARI_CUDA_LEVEL_THRESHOLD_OUT", 1.35)
+    policy_hysteresis = _env_float(env, "NAPARI_CUDA_LEVEL_HYST", 0.0)
+    fine_default = max(policy_threshold_in, 1.05)
+    policy_fine_threshold = _env_float(env, "NAPARI_CUDA_LEVEL_FINE_THRESHOLD", fine_default)
+    policy_fine_threshold = max(policy_threshold_in, policy_fine_threshold)
+    policy_cooldown_ms = _env_float(env, "NAPARI_CUDA_LEVEL_SWITCH_COOLDOWN_MS", 150.0)
+    policy_log_eval = _env_bool(env, "NAPARI_CUDA_LOG_POLICY_EVAL", False)
+    policy_preserve_view = _env_bool(env, "NAPARI_CUDA_PRESERVE_VIEW", True)
+    policy_sticky_contrast = _env_bool(env, "NAPARI_CUDA_STICKY_CONTRAST", True)
+
+    policy_settings = LevelPolicySettings(
+        threshold_in=float(policy_threshold_in),
+        threshold_out=float(policy_threshold_out),
+        hysteresis=float(policy_hysteresis),
+        fine_threshold=float(policy_fine_threshold),
+        cooldown_ms=float(policy_cooldown_ms),
+        log_policy_eval=bool(policy_log_eval),
+        preserve_view_on_switch=bool(policy_preserve_view),
+        sticky_contrast=bool(policy_sticky_contrast),
+    )
+
     return ServerCtx(
         cfg=cfg,
         frame_queue=frame_queue,
@@ -294,11 +333,13 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         metrics_port=metrics_port,
         metrics_refresh_ms=metrics_refresh_ms,
         policy_event_path=policy_event_path,
+        policy=policy_settings,
     )
 
 
 __all__ = [
     "EncodeCfg",
+    "LevelPolicySettings",
     "ServerConfig",
     "ServerCtx",
     "load_server_config",
