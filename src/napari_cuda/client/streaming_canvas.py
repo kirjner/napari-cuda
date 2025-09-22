@@ -102,6 +102,11 @@ class StreamingCanvas(VispyCanvas):
         # Forward to base canvas
         super().__init__(viewer, key_map_handler, **kwargs)
 
+        self._proxy_viewer = viewer
+        self._deferred_window = None
+        self._window_show_timer = None
+        self._first_dims_ready = False
+
         self.server_host = server_host
         self.server_port = server_port
         self.state_port = int(
@@ -240,6 +245,7 @@ class StreamingCanvas(VispyCanvas):
                 ),
                 vt_smoke=self._vt_smoke,
                 client_cfg=getattr(self, '_client_cfg', None),
+                on_first_dims_ready=self._on_first_dims_ready,
             )
             self._manager.start()
             # Bridge coordinator with ProxyViewer for unified state path
@@ -320,6 +326,59 @@ class StreamingCanvas(VispyCanvas):
             self._vt_stats_level = logging.DEBUG
         else:
             self._vt_stats_level = None
+
+    def defer_window_show(self, window) -> None:
+        """Delay window visibility until first dims.update arrives (fallback timer)."""
+        if window is None:
+            return
+        self._deferred_window = window
+        if self._first_dims_ready:
+            self._show_deferred_window()
+            return
+        try:
+            window.hide()
+        except Exception:
+            logger.debug('StreamingCanvas: initial window.hide failed', exc_info=True)
+        if self._window_show_timer is None:
+            timer = QtCore.QTimer(window)
+            timer.setSingleShot(True)
+            timer.setTimerType(QtCore.Qt.PreciseTimer)  # type: ignore[attr-defined]
+            # Allow ample time for dims.update to arrive before falling back.
+            timer.setInterval(5000)
+
+            def _fallback() -> None:
+                logger.warning('StreamingCanvas: dims.update not received within fallback window; showing UI anyway')
+                self._show_deferred_window()
+
+            timer.timeout.connect(_fallback)
+            self._window_show_timer = timer
+        try:
+            self._window_show_timer.start()
+        except Exception:
+            logger.debug('StreamingCanvas: window timer start failed', exc_info=True)
+            self._show_deferred_window()
+
+    def _cancel_window_timer(self) -> None:
+        timer = self._window_show_timer
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+    def _show_deferred_window(self) -> None:
+        window = self._deferred_window
+        if window is None:
+            return
+        self._cancel_window_timer()
+        try:
+            window.show()
+        except Exception:
+            logger.debug('StreamingCanvas: deferred window show failed', exc_info=True)
+
+    def _on_first_dims_ready(self) -> None:
+        self._first_dims_ready = True
+        if self._deferred_window is None:
+            self._cancel_window_timer()
+            return
+        self._show_deferred_window()
 
     # No state-channel helpers here; StreamCoordinator owns StateChannel
 

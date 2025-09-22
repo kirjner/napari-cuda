@@ -142,8 +142,12 @@ def launch_streaming_client(server_host='localhost',
         except Exception:
             logger.debug("launcher: cleanup old canvas native failed", exc_info=True)
     
-    # Now show the window
-    window.show()
+    # Delay showing the window until the first authoritative dims.update arrives.
+    try:
+        streaming_canvas.defer_window_show(window)
+    except Exception:
+        logger.debug("launcher: deferred window show failed; showing immediately", exc_info=True)
+        window.show()
 
     # Wire the Home button to remote camera.reset via coordinator
     try:

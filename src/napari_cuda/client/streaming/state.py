@@ -19,6 +19,40 @@ from napari_cuda.protocol.messages import (
     SceneSpecMessage,
 )
 
+
+def _normalize_meta(meta_raw: dict) -> dict:
+    """Return a shallow copy with a few backwards-compatible aliases expanded."""
+    meta = dict(meta_raw)
+    axes = meta_raw.get('axes')
+    if axes is not None and meta.get('axis_labels') is None:
+        labels: list[str] = []
+        order: list[int] = []
+        try:
+            if isinstance(axes, dict):
+                label = axes.get('label') or axes.get('name')
+                if label is not None:
+                    labels.append(str(label))
+                    order.append(int(axes.get('index', 0)))
+            elif isinstance(axes, (list, tuple)):
+                for idx, entry in enumerate(axes):
+                    if isinstance(entry, dict):
+                        label = entry.get('label') or entry.get('name') or entry.get('id')
+                        labels.append(str(label) if label is not None else str(idx))
+                        order.append(int(entry.get('index', idx)))
+                    else:
+                        labels.append(str(entry))
+                        order.append(idx)
+            if labels:
+                meta['axis_labels'] = labels
+            if order and meta.get('order') is None:
+                meta['order'] = order
+        except Exception:
+            logger.debug("dims.update axes normalisation failed", exc_info=True)
+    displayed = meta_raw.get('displayed_axes')
+    if displayed is not None and meta.get('displayed') is None:
+        meta['displayed'] = displayed
+    return meta
+
 logger = logging.getLogger(__name__)
 
 
@@ -310,8 +344,16 @@ class StateChannel:
         if msg_type == 'dims.update':
             if self.on_dims_update:
                 try:
-                    meta = data.get('meta') or {}
+                    meta_raw = data.get('meta') or {}
+                    logger.info(
+                        "dims.update raw meta: level=%s level_shape=%s range=%s",
+                        meta_raw.get('level'),
+                        meta_raw.get('level_shape') or meta_raw.get('sizes'),
+                        meta_raw.get('range') or meta_raw.get('ranges'),
+                    )
+                    meta = _normalize_meta(data.get('meta') or {})
                     cur = _normalize_current_step(data.get('current_step'), meta)
+                    ack_val = data.get('ack') if isinstance(data.get('ack'), bool) else None
                     fwd = {
                         'current_step': cur,
                         'ndim': meta.get('ndim'),
@@ -320,9 +362,16 @@ class StateChannel:
                         'sizes': meta.get('sizes'),
                         'range': meta.get('range'),
                         'ndisplay': meta.get('ndisplay'),
+                        'displayed': meta.get('displayed'),
                         'volume': bool(meta.get('volume')) if 'volume' in meta else None,
                         'render': meta.get('render') or None,
                         'multiscale': meta.get('multiscale') or None,
+                        'level': meta.get('level'),
+                        'level_shape': meta.get('level_shape'),
+                        'dtype': meta.get('dtype'),
+                        'normalized': meta.get('normalized'),
+                        'ack': ack_val,
+                        'intent_seq': data.get('intent_seq'),
                         'seq': data.get('seq'),
                         'last_client_id': data.get('last_client_id'),
                     }

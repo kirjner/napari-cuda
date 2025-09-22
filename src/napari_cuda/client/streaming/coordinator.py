@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from threading import Thread
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 import weakref
 from dataclasses import dataclass
 
@@ -49,7 +49,6 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     SceneSpecMessage,
-    DimsSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,6 +160,8 @@ class StreamCoordinator:
         pyav_backlog_trigger: int = 16,
         vt_smoke: bool = False,
         client_cfg: object | None = None,
+        *,
+        on_first_dims_ready: Optional[Callable[[], None]] = None,
     ) -> None:
         self._scene_canvas = scene_canvas
         _maybe_enable_debug_logger()
@@ -168,6 +169,11 @@ class StreamCoordinator:
         self._vt_smoke = bool(vt_smoke)
         # Phase 0: stash client config for future phases (no behavior change)
         self._client_cfg = client_cfg
+        self._first_dims_ready_cb = on_first_dims_ready
+        self._first_dims_notified = False
+        self._pending_intents: dict[int, dict[str, object]] = {}
+        self._last_dims_seq: Optional[int] = None
+        self._last_dims_payload: Optional[dict[str, object]] = None
         self.server_host = server_host
         self.server_port = int(server_port)
         self.state_port = int(state_port)
@@ -210,7 +216,6 @@ class StreamCoordinator:
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
         self._latest_scene_spec: Optional[SceneSpecMessage] = None
-        self._scene_dims_spec: Optional[DimsSpec] = None
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
         # Keep-last-frame fallback default enabled for smoother presentation
@@ -1098,6 +1103,13 @@ class StreamCoordinator:
 
     def _handle_dims_update(self, data: dict) -> None:
         try:
+            seq_raw = data.get('seq')
+            try:
+                seq_val = int(seq_raw) if seq_raw is not None else None
+            except Exception:
+                seq_val = None
+            if seq_val is not None:
+                self._last_dims_seq = seq_val
             cur = data.get('current_step')
             # Cache metadata and compute primary axis index
             ndisp = data.get('ndisplay')
@@ -1110,6 +1122,12 @@ class StreamCoordinator:
             render = data.get('render')
             multiscale = data.get('multiscale')
             displayed = data.get('displayed')
+            level = data.get('level')
+            level_shape = data.get('level_shape')
+            dtype = data.get('dtype')
+            normalized = data.get('normalized')
+            ack_val = data.get('ack') if isinstance(data.get('ack'), bool) else None
+            intent_seq = data.get('intent_seq')
             try:
                 self._dims_meta['ndim'] = int(ndim) if ndim is not None else self._dims_meta.get('ndim')
             except Exception:
@@ -1124,6 +1142,14 @@ class StreamCoordinator:
                 self._dims_meta['sizes'] = sizes
             if displayed is not None:
                 self._dims_meta['displayed'] = displayed
+            if level is not None:
+                self._dims_meta['level'] = level
+            if level_shape is not None:
+                self._dims_meta['level_shape'] = level_shape
+            if dtype is not None:
+                self._dims_meta['dtype'] = dtype
+            if normalized is not None:
+                self._dims_meta['normalized'] = normalized
             # New meta facets (volume/render/multiscale)
             try:
                 if volume is not None:
@@ -1142,6 +1168,7 @@ class StreamCoordinator:
             if not self._dims_ready and (ndim is not None or order is not None):
                 self._dims_ready = True
                 logger.info("dims.update: metadata received; client intents enabled")
+                self._notify_first_dims_ready()
             # Compute primary axis (first non-displayed axis)
             try:
                 self._primary_axis_index = self._compute_primary_axis_index()
@@ -1170,18 +1197,94 @@ class StreamCoordinator:
                     sizes,
                     displayed,
                 )
+            if intent_seq is not None:
+                try:
+                    seq_i = int(intent_seq)
+                except Exception:
+                    seq_i = None
+                if seq_i is not None:
+                    info = self._pending_intents.pop(seq_i, None)
+                    if info is not None:
+                        if ack_val is False:
+                            logger.warning("dims_update ack=false for intent_seq=%s info=%s", seq_i, info)
+                        elif bool(getattr(self, '_log_dims_info', False)):
+                            logger.debug("dims_update ack: intent_seq=%s info=%s", seq_i, info)
+
+            # Remember the latest payload for newly attached viewers.
+            self._last_dims_payload = {
+                'current_step': cur,
+                'ndisplay': ndisp,
+                'ndim': ndim,
+                'dims_range': dims_range,
+                'order': order,
+                'axis_labels': axis_labels,
+                'sizes': sizes,
+                'displayed': displayed,
+            }
         except Exception:
             logger.debug("dims_update parse failed", exc_info=True)
 
     def _on_dims_update(self, data: dict) -> None:
         self._handle_dims_update(data)
 
+    def _notify_first_dims_ready(self) -> None:
+        if self._first_dims_notified:
+            return
+        cb = self._first_dims_ready_cb
+        if not callable(cb):
+            self._first_dims_notified = True
+            return
+
+        def _invoke() -> None:
+            try:
+                cb()
+            except Exception:
+                logger.debug("first dims ready callback failed", exc_info=True)
+
+        self._first_dims_notified = True
+        proxy = getattr(self, '_ui_call', None)
+        if proxy is not None:
+            try:
+                proxy.call.emit(_invoke)
+                return
+            except Exception:
+                logger.debug("schedule first dims callback failed", exc_info=True)
+        _invoke()
+
+    def _record_pending_intent(self, seq: int, info: dict[str, object]) -> None:
+        """Track in-flight intents so we can reconcile on server ACKs."""
+        self._pending_intents[seq] = info
+
+    def _replay_last_dims_payload(self) -> None:
+        payload = self._last_dims_payload
+        if not payload:
+            return
+        try:
+            vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+        except Exception:
+            vm_ref = None
+        if vm_ref is None:
+            return
+        try:
+            self._mirror_dims_to_viewer(
+                vm_ref,
+                payload.get('current_step'),
+                payload.get('ndisplay'),
+                payload.get('ndim'),
+                payload.get('dims_range'),
+                payload.get('order'),
+                payload.get('axis_labels'),
+                payload.get('sizes'),
+                payload.get('displayed'),
+            )
+        except Exception:
+            logger.debug("replay last dims payload failed", exc_info=True)
+
     def _on_scene_spec(self, msg: SceneSpecMessage) -> None:
         """Cache latest scene specification and forward to registry."""
         try:
             with self._scene_lock:
                 self._latest_scene_spec = msg
-                self._scene_dims_spec = msg.scene.dims
         except Exception:
             logger.debug("scene.spec bookkeeping failed", exc_info=True)
         try:
@@ -1211,8 +1314,9 @@ class StreamCoordinator:
 
     def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
         def _apply() -> None:
-            self._apply_pending_scene_dims()
             self._sync_remote_layers(snapshot)
+            self._replay_last_dims_payload()
+            self._replay_last_dims_payload()
 
         ui_call = getattr(self, '_ui_call', None)
         if ui_call is not None:
@@ -1225,28 +1329,6 @@ class StreamCoordinator:
             _apply()
         except Exception:
             logger.debug("remote layer sync failed", exc_info=True)
-
-    def _apply_pending_scene_dims(self) -> None:
-        dims_spec: Optional[DimsSpec]
-        with self._scene_lock:
-            dims_spec = self._scene_dims_spec
-            self._scene_dims_spec = None
-        if dims_spec is None:
-            return
-        payload = {
-            'current_step': dims_spec.current_step,
-            'order': dims_spec.order,
-            'axis_labels': dims_spec.axis_labels,
-            'range': dims_spec.range,
-            'ndisplay': dims_spec.ndisplay,
-            'ndim': dims_spec.ndim,
-            'sizes': dims_spec.sizes,
-            'displayed': dims_spec.displayed,
-        }
-        try:
-            self._handle_dims_update(payload)
-        except Exception:
-            logger.debug("apply pending dims failed", exc_info=True)
 
     def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
         try:
@@ -1287,6 +1369,9 @@ class StreamCoordinator:
         try:
             self._dims_ready = False
             self._primary_axis_index = None
+            self._pending_intents.clear()
+            self._last_dims_seq = None
+            self._last_dims_payload = None
             logger.info("StateChannel disconnected: %s; dims intents gated", exc)
         except Exception:
             logger.debug("_on_state_disconnect failed", exc_info=True)
@@ -1499,6 +1584,7 @@ class StreamCoordinator:
             self._viewer_mirror = weakref.ref(viewer)  # type: ignore[attr-defined]
         except Exception:
             self._viewer_mirror = None
+        self._replay_last_dims_payload()
 
     def send_json(self, obj: dict) -> bool:
         ch = self._state_channel
@@ -1837,7 +1923,17 @@ class StreamCoordinator:
             'client_seq': self._next_client_seq(),
             'origin': str(origin),
         }
+        seq_val = int(payload['client_seq'])
         ok = ch.send_json(payload)
+        if ok:
+            self._record_pending_intent(
+                seq_val,
+                {
+                    'kind': 'step',
+                    'axis': int(idx),
+                    'origin': str(origin),
+                },
+            )
         self._last_dims_send = now
         return bool(ok)
 
@@ -1873,7 +1969,18 @@ class StreamCoordinator:
             'client_seq': self._next_client_seq(),
             'origin': str(origin),
         }
+        seq_val = int(payload['client_seq'])
         ok = ch.send_json(payload)
+        if ok:
+            self._record_pending_intent(
+                seq_val,
+                {
+                    'kind': 'set_index',
+                    'axis': int(idx),
+                    'value': int(value),
+                    'origin': str(origin),
+                },
+            )
         self._last_dims_send = now
         return bool(ok)
 

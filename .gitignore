@@ -1,4 +1,3 @@
-docs
 tmp
 vendor/gl/
 # Byte-compiled / optimized / DLL files
@@ -185,6 +184,7 @@ tools/perfmon/*/traces-*.json
 github_cache.sqlite
 
 # Project-specific artifacts
+docs/archive_local/
 benchmarks/
 archive
 egl_worker_results.json
