@@ -2085,6 +2085,9 @@ class EGLRendererWorker:
                 continue
         if not overs_map:
             return
+        current = int(self._active_ms_level)
+        max_level = max(overs_map.keys())
+
         # Prefer napari's own selected level when available; fall back to heuristic
         desired = None
         napari_reason = 'heuristic'
@@ -2102,8 +2105,6 @@ class EGLRendererWorker:
             elif zoom_ratio > 1.0 + eps and current < max_level:
                 desired = current + 1
                 napari_reason = 'zoom-out'
-        current = int(self._active_ms_level)
-        max_level = max(overs_map.keys())
         try:
             thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
         except Exception:
