@@ -7,9 +7,10 @@ unchanged while making the math testable and reusable.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable, Any
 import logging
 import math
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,42 @@ def apply_pan_2d(cam, dx_px: float, dy_px: float, canvas_wh: Tuple[int, int], vi
         cam.center = (float(c[0]) - dwx, float(c[1]) - dwy)  # type: ignore[attr-defined]
 
 
+def animate_camera(
+    *,
+    camera: Any,
+    width: int,
+    height: int,
+    animate_dps: float,
+    anim_start: float,
+    clock: Callable[[], float] = time.perf_counter,
+) -> None:
+    """Advance the camera animation for both 2D and 3D modes."""
+
+    if camera is None:
+        return
+
+    t = clock() - float(anim_start)
+
+    if hasattr(camera, "azimuth") and hasattr(camera, "elevation"):
+        camera.azimuth = (float(animate_dps) * t) % 360.0  # type: ignore[attr-defined]
+        return
+
+    cx = float(width) * 0.5
+    cy = float(height) * 0.5
+    pan_ax = float(width) * 0.05
+    pan_ay = float(height) * 0.05
+    ox = pan_ax * math.sin(0.6 * t)
+    oy = pan_ay * math.cos(0.4 * t)
+    s = 1.0 + 0.08 * math.sin(0.8 * t)
+    half_w = (float(width) * 0.5) / max(1e-6, s)
+    half_h = (float(height) * 0.5) / max(1e-6, s)
+    x_rng = (cx + ox - half_w, cx + ox + half_w)
+    y_rng = (cy + oy - half_h, cy + oy + half_h)
+    if not hasattr(camera, "set_range"):
+        raise AttributeError("camera must expose set_range for 2D animation")
+    camera.set_range(x=x_rng, y=y_rng)
+
+
 __all__ = [
     "anchor_to_world",
     "per_pixel_world_scale_3d",
@@ -126,4 +163,5 @@ __all__ = [
     "apply_zoom_2d",
     "apply_pan_3d",
     "apply_pan_2d",
+    "animate_camera",
 ]

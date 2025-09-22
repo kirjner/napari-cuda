@@ -53,7 +53,7 @@ from napari_cuda.server.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.capture import CaptureFacade, capture_frame_for_encoder
-from napari_cuda.server.roi_applier import SliceUpdatePlanner
+from napari_cuda.server.roi_applier import SliceUpdatePlanner, refresh_slice
 from napari_cuda.server.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
@@ -1400,31 +1400,18 @@ class EGLRendererWorker:
 
     # ---- C5 helpers (pure refactor; no behavior change) ---------------------
     def _animate_camera_if_needed(self) -> None:
-        if not self._animate or not hasattr(self.view, "camera"):
+        if not self._animate or not hasattr(self, "view"):
             return
-        t = time.perf_counter() - self._anim_start
-        cam = self.view.camera
-        if isinstance(cam, scene.cameras.TurntableCamera):
-            try:
-                cam.azimuth = (self._animate_dps * t) % 360.0
-            except Exception as exc:
-                logger.debug("Animate(3D) failed: %s", exc)
+        cam = getattr(self.view, "camera", None)
+        if cam is None:
             return
-        try:
-            cx = self.width * 0.5
-            cy = self.height * 0.5
-            pan_ax = self.width * 0.05
-            pan_ay = self.height * 0.05
-            ox = pan_ax * math.sin(0.6 * t)
-            oy = pan_ay * math.cos(0.4 * t)
-            s = 1.0 + 0.08 * math.sin(0.8 * t)
-            half_w = (self.width * 0.5) / max(1e-6, s)
-            half_h = (self.height * 0.5) / max(1e-6, s)
-            x_rng = (cx + ox - half_w, cx + ox + half_w)
-            y_rng = (cy + oy - half_h, cy + oy + half_h)
-            cam.set_range(x=x_rng, y=y_rng)
-        except Exception as exc:
-            logger.debug("Animate(2D) failed: %s", exc)
+        camops.animate_camera(
+            camera=cam,
+            width=int(self.width),
+            height=int(self.height),
+            animate_dps=float(self._animate_dps),
+            anim_start=float(self._anim_start),
+        )
 
     def _refresh_slice_if_needed(self) -> None:
         if self.use_volume or self._scene_source is None or self._napari_layer is None:
@@ -1432,22 +1419,31 @@ class EGLRendererWorker:
         source = self._scene_source
         level = int(self._active_ms_level)
         roi = self._viewport_roi_for_level(source, level)
-        planner = SliceUpdatePlanner(int(self._roi_edge_threshold))
-        decision = planner.evaluate(level=level, roi=roi, last_roi=self._last_roi)
-        if not decision.refresh:
-            return
-        z_idx = int(self._z_index or 0)
-        slab = self._load_slice(source, level, z_idx)
-        cam = getattr(self.view, 'camera', None)
-        ctx = self._build_scene_state_context(cam)
-        SceneStateApplier.apply_slice_to_layer(
-            ctx,
-            source=source,
-            slab=slab,
+        def _load(level_idx: int) -> np.ndarray:
+            z_idx = int(self._z_index or 0)
+            return self._load_slice(source, level_idx, z_idx)
+
+        def _apply(slab: np.ndarray, roi_to_apply: SliceROI) -> None:
+            cam = getattr(self.view, 'camera', None)
+            ctx = self._build_scene_state_context(cam)
+            SceneStateApplier.apply_slice_to_layer(
+                ctx,
+                source=source,
+                slab=slab,
+                roi=roi_to_apply,
+                update_contrast=False,
+            )
+
+        refreshed, new_last = refresh_slice(
+            level=level,
             roi=roi,
-            update_contrast=False,
+            last_roi=self._last_roi,
+            edge_threshold=int(self._roi_edge_threshold),
+            load_slice=_load,
+            apply_slice=_apply,
         )
-        self._last_roi = decision.new_last_roi
+        if refreshed:
+            self._last_roi = new_last
 
     def render_tick(self) -> float:
         t_r0 = time.perf_counter()

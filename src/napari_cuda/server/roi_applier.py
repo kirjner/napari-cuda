@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, Callable
 
 from napari_cuda.server.scene_types import SliceROI
 
@@ -67,3 +67,24 @@ class SliceDataApplier:
         if not hasattr(self._layer, "data"):
             raise AttributeError("napari layer must expose a 'data' attribute")
         self._layer.data = slab  # type: ignore[assignment]
+
+
+def refresh_slice(
+    *,
+    level: int,
+    roi: SliceROI,
+    last_roi: Optional[tuple[int, SliceROI]],
+    edge_threshold: int,
+    load_slice: Callable[[int], Any],
+    apply_slice: Callable[[Any, SliceROI], None],
+) -> tuple[bool, Optional[tuple[int, SliceROI]]]:
+    """Determine if a slice needs refresh and apply it when required."""
+
+    planner = SliceUpdatePlanner(int(edge_threshold))
+    decision = planner.evaluate(level=level, roi=roi, last_roi=last_roi)
+    if not decision.refresh:
+        return False, last_roi
+
+    slab = load_slice(level)
+    apply_slice(slab, roi)
+    return True, decision.new_last_roi
