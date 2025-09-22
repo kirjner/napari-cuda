@@ -134,6 +134,8 @@ class EGLRendererWorker:
         self._level_downgraded: bool = False
         self._scene_refresh_cb = scene_refresh_cb
         self._zoom_accumulator: float = 0.0
+        self._last_zoom_hint_ts: float = 0.0
+        self._zoom_hint_hold_s: float = 0.35
 
         self._gl_capture = GLCapture(self.width, self.height)
         self._cuda = CudaInterop(self.width, self.height)
@@ -1434,6 +1436,8 @@ class EGLRendererWorker:
         ctx = self._build_policy_context(source, intent_level=target_level)
         prev = int(self._active_ms_level)
         self._set_level_with_budget(target_level, reason=reason)
+        if reason in {"zoom-in", "zoom-out"}:
+            self._last_zoom_hint_ts = time.perf_counter()
         idle_ms = max(0.0, (time.perf_counter() - self._last_interaction_ts) * 1000.0)
         self._record_policy_decision(
             policy=self._policy_name,
@@ -1588,11 +1592,14 @@ class EGLRendererWorker:
         )
 
         if outcome.zoom_intent is not None:
-            zoom_ratio = float(outcome.zoom_intent)
-            if zoom_ratio > 1.0:
-                # Napari emits factors >1 for zoom-in; selector expects <1.0 to mean zoom-in.
-                zoom_ratio = 1.0 / zoom_ratio
-            self._scene_state_machine.record_zoom_intent(zoom_ratio)
+            now_ts = time.perf_counter()
+            if (now_ts - float(self._last_zoom_hint_ts)) >= float(self._zoom_hint_hold_s):
+                zoom_ratio = float(outcome.zoom_intent)
+                if zoom_ratio > 1.0:
+                    # Napari emits factors >1 for zoom-in; selector expects <1.0 to mean zoom-in.
+                    zoom_ratio = 1.0 / zoom_ratio
+                self._scene_state_machine.record_zoom_intent(zoom_ratio)
+                self._last_zoom_hint_ts = now_ts
 
         self._last_interaction_ts = time.perf_counter()
 
@@ -2106,14 +2113,25 @@ class EGLRendererWorker:
                 desired = current + 1
                 napari_reason = 'zoom-out'
         try:
-            thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
+            base_thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
         except Exception:
-            thr_in = 1.05
+            base_thr_in = 1.05
         try:
-            thr_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
+            base_thr_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
         except Exception:
-            thr_out = 1.35
-        fine_threshold = max(thr_in, 1.05)
+            base_thr_out = 1.35
+        current = int(self._active_ms_level)
+        max_level = max(overs_map.keys())
+        if napari_reason == 'zoom-in':
+            thr_in = min(1.15, base_thr_in)
+            thr_out = base_thr_out
+        elif napari_reason == 'zoom-out':
+            thr_in = base_thr_in
+            thr_out = min(1.20, base_thr_out)
+        else:
+            thr_in = base_thr_in
+            thr_out = base_thr_out
+        fine_threshold = max(base_thr_in, 1.05)
 
         if desired is None:
             # Heuristic: step one level finer when its oversampling is within threshold,
@@ -2145,15 +2163,14 @@ class EGLRendererWorker:
         # Direction-sensitive band to avoid alternating near the boundary
         sel = int(selected)
         action_reason = napari_reason or 'heuristic'
-        if action_reason not in ('zoom-in', 'zoom-out'):
-            if sel < current:
-                # Zooming in: only allow stepping to a finer level if that level is clearly under target
-                if overs_map.get(sel, float('inf')) > thr_in:
-                    sel = current
-            elif sel > current:
-                # Zooming out: only allow stepping to a coarser level if current level is clearly over target
-                if overs_map.get(current, 0.0) <= thr_out:
-                    sel = current
+        if sel < current:
+            # Zooming in: only allow stepping to a finer level if that level is clearly under target
+            if overs_map.get(sel, float('inf')) > thr_in:
+                sel = current
+        elif sel > current:
+            # Zooming out: only allow stepping to a coarser level if current level is clearly over target
+            if overs_map.get(current, 0.0) <= thr_out:
+                sel = current
         selected = sel
         reason = action_reason
         if selected < current:
