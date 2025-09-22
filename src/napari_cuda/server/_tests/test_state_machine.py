@@ -59,6 +59,9 @@ def test_zoom_intent_recent_then_stale() -> None:
     # No intent left after consumption
     assert machine.consume_zoom_intent(max_age=0.5) is None
 
+    with pytest.raises(ValueError):
+        machine.record_zoom_intent(0.0)
+
     machine.record_zoom_intent(0.8)
     clock.advance(1.0)
     # Intent is now stale

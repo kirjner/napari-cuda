@@ -98,7 +98,7 @@ class SceneStateMachine:
 
     def record_zoom_intent(self, ratio: float, *, timestamp: Optional[float] = None) -> None:
         if ratio <= 0.0:
-            return
+            raise ValueError("zoom ratio must be positive")
         ts = self._time_fn() if timestamp is None else float(timestamp)
         with self._lock:
             self._zoom_intent = ZoomIntent(float(ratio), ts)

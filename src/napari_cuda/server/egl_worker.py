@@ -55,6 +55,11 @@ from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
+from napari_cuda.server.camera_controller import (
+    CameraCommandOutcome,
+    CameraDebugFlags,
+    apply_camera_commands,
+)
 from napari_cuda.server.state_machine import (
     CameraCommand,
     PendingSceneUpdates,
@@ -1556,9 +1561,8 @@ class EGLRendererWorker:
         logger.debug("worker processing %d camera command(s)", len(commands))
         cam = getattr(self.view, 'camera', None)
         if cam is None:
-            # Still capture zoom ratio so policy can react once camera is available
             for cmd in commands:
-                if cmd.kind == 'zoom' and cmd.factor and cmd.factor > 0.0:
+                if cmd.kind == 'zoom' and cmd.factor is not None and cmd.factor > 0.0:
                     self._scene_state_machine.record_zoom_intent(float(cmd.factor))
             return
 
@@ -1569,62 +1573,29 @@ class EGLRendererWorker:
             canvas_wh = (self.width, self.height)
 
         self._last_interaction_ts = time.perf_counter()
-        self._mark_render_tick_needed()
 
-        touched = False
-        policy_touch = False
+        debug_flags = CameraDebugFlags(
+            zoom=self._debug_zoom_drift,
+            pan=self._debug_pan,
+            orbit=self._debug_orbit,
+            reset=self._debug_reset,
+        )
+        outcome: CameraCommandOutcome = apply_camera_commands(
+            commands,
+            camera=cam,
+            view=self.view,
+            canvas_size=canvas_wh,
+            reset_camera=self._apply_camera_reset,
+            debug_flags=debug_flags,
+        )
 
-        for cmd in commands:
-            kind = cmd.kind
-            if kind == 'zoom':
-                factor = float(cmd.factor) if cmd.factor is not None else 0.0
-                if factor <= 0.0:
-                    continue
-                # Gate policy switching by env; still apply camera zoom
-                anchor = cmd.anchor_px or (canvas_wh[0] * 0.5, canvas_wh[1] * 0.5)
-                if isinstance(cam, scene.cameras.TurntableCamera):
-                    camops.apply_zoom_3d(cam, factor)
-                else:
-                    camops.apply_zoom_2d(cam, factor, (float(anchor[0]), float(anchor[1])), canvas_wh, self.view)
-                touched = True
-                policy_touch = True
-                if self._debug_zoom_drift and logger.isEnabledFor(logging.INFO):
-                    logger.info("command zoom factor=%.4f anchor=(%.1f,%.1f)", factor, float(anchor[0]), float(anchor[1]))
-            elif kind == 'pan':
-                dx = float(cmd.dx_px)
-                dy = float(cmd.dy_px)
-                if dx == 0.0 and dy == 0.0:
-                    continue
-                if isinstance(cam, scene.cameras.TurntableCamera):
-                    camops.apply_pan_3d(cam, dx, dy, canvas_wh)
-                else:
-                    camops.apply_pan_2d(cam, dx, dy, canvas_wh, self.view)
-                touched = True
-                policy_touch = True
-                if self._debug_pan and logger.isEnabledFor(logging.INFO):
-                    logger.info("command pan dx=%.2f dy=%.2f", dx, dy)
-            elif kind == 'orbit':
-                daz = float(cmd.d_az_deg)
-                delv = float(cmd.d_el_deg)
-                if not isinstance(cam, scene.cameras.TurntableCamera):
-                    continue
-                camops.apply_orbit(cam, daz, delv)
-                touched = True
-                policy_touch = True
-                if self._debug_orbit and logger.isEnabledFor(logging.INFO):
-                    logger.info("command orbit daz=%.2f del=%.2f", daz, delv)
-            elif kind == 'reset':
-                self._apply_camera_reset(cam)
-                touched = True
-                if self._debug_reset and logger.isEnabledFor(logging.INFO):
-                    logger.info("command reset view")
+        if outcome.zoom_intent is not None:
+            self._scene_state_machine.record_zoom_intent(float(outcome.zoom_intent))
 
-        if touched:
-            # Schedule a render tick and a single post-render selection if camera actually changed
+        if outcome.camera_changed:
             self._mark_render_tick_needed()
-            if policy_touch:
-                self._eval_after_render = True
-            # No additional camera clamping beyond core mapping
+        if outcome.policy_triggered:
+            self._eval_after_render = True
 
     def _apply_camera_reset(self, cam) -> None:
         if cam is None or not hasattr(cam, 'set_range'):
