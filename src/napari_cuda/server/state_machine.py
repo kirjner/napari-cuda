@@ -118,8 +118,6 @@ class SceneStateMachine:
 
     def update_state_signature(self, state: ServerSceneState) -> bool:
         signature = self._build_signature(state)
-        if signature is None:
-            return False
         with self._lock:
             if signature == self._last_signature:
                 return False
@@ -127,14 +125,15 @@ class SceneStateMachine:
             return True
 
     @staticmethod
-    def _build_signature(state: ServerSceneState) -> Optional[tuple]:
-        try:
-            center = tuple(float(c) for c in state.center) if state.center is not None else None
-            zoom = float(state.zoom) if state.zoom is not None else None
-            angles = tuple(float(a) for a in state.angles) if state.angles is not None else None
-            current_step = tuple(int(s) for s in state.current_step) if state.current_step is not None else None
-        except Exception:
-            return None
+    def _build_signature(state: ServerSceneState) -> tuple:
+        center = tuple(float(c) for c in state.center) if state.center is not None else None
+        zoom = float(state.zoom) if state.zoom is not None else None
+        angles = tuple(float(a) for a in state.angles) if state.angles is not None else None
+        current_step = (
+            tuple(int(s) for s in state.current_step)
+            if state.current_step is not None
+            else None
+        )
         return (center, zoom, angles, current_step)
 
 

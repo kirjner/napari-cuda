@@ -76,9 +76,9 @@ def test_update_state_signature_detects_changes() -> None:
     moved = replace(base, center=(1.0, 2.5, 3.0))
     assert machine.update_state_signature(moved)
 
-    # Invalid numeric inputs should still produce a signature change rather than crashing
-    garbage = replace(base, zoom="nan")  # type: ignore[arg-type]
-    assert machine.update_state_signature(garbage)
+    # Invalid numeric inputs should raise so invariant violations surface immediately
+    with pytest.raises((ValueError, TypeError)):
+        machine.update_state_signature(replace(base, zoom="invalid"))  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":  # pragma: no cover - direct execution helper
