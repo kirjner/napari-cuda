@@ -1,7 +1,7 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/client_stream_loop.py`: 2,306 LOC (down 89 with config + telemetry helpers; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/client_stream_loop.py`: 2,271 LOC (down 124 with config + telemetry + guard pruning; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
@@ -90,6 +90,6 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Start pruning hot-path `try`/`getattr` calls that the new config + telemetry helpers make redundant; replace them with assertions and explicit error paths.
-2. Continue env consolidation for smoke-mode helpers, then snapshot LOC + try counts to confirm progress toward the ≤1,000 LOC target.
-3. Draft the Phase C presenter facade proposal while current metrics hooks are fresh (document expected surfaces before editing `streaming_canvas.py`).
+1. Sweep remaining `try`/`getattr` hotspots (renderer fallback + smoke harness) now that config centralises inputs; replace with explicit assertions or helper methods.
+2. Snapshot remaining try-count metrics and earmark targets for the next extraction slice; align docs/tests with the 2,271 LOC baseline.
+3. Draft the Phase C presenter facade proposal while the telemetry hooks are fresh (document expected surfaces before editing `streaming_canvas.py`).

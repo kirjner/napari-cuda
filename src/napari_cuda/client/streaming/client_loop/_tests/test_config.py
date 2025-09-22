@@ -42,6 +42,16 @@ def clear_env(monkeypatch):
         "NAPARI_CUDA_INPUT_MAX_RATE",
         "NAPARI_CUDA_RESIZE_DEBOUNCE_MS",
         "NAPARI_CUDA_INPUT_LOG",
+        "NAPARI_CUDA_SMOKE_SOURCE",
+        "NAPARI_CUDA_SMOKE_PRESET",
+        "NAPARI_CUDA_SMOKE_MODE",
+        "NAPARI_CUDA_SMOKE_PREENCODE",
+        "NAPARI_CUDA_SMOKE_PRE_FRAMES",
+        "NAPARI_CUDA_SMOKE_PRE_MB",
+        "NAPARI_CUDA_SMOKE_PRE_PATH",
+        "NAPARI_CUDA_SMOKE_W",
+        "NAPARI_CUDA_SMOKE_H",
+        "NAPARI_CUDA_SMOKE_FPS",
     ]
     for key in keys:
         monkeypatch.delenv(key, raising=False)
@@ -61,6 +71,8 @@ def test_load_client_loop_config_defaults():
     assert cfg.watchdog_ms == 0
     assert cfg.evloop_sample_ms == 100
     assert cfg.wheel_step == 1
+    assert cfg.smoke_source == "vt"
+    assert cfg.smoke_mode == "checker"
     assert cfg.dims_rate_hz == pytest.approx(60.0)
     assert cfg.orbit_deg_per_px_x == pytest.approx(0.2)
     assert cfg.input_max_rate_hz == pytest.approx(120.0)
@@ -78,6 +90,14 @@ def test_load_client_loop_config_reads_env(monkeypatch):
     monkeypatch.setenv("NAPARI_CUDA_INPUT_LOG", "on")
     monkeypatch.setenv("NAPARI_CUDA_WHEEL_Z_STEP", "3")
     monkeypatch.setenv("NAPARI_CUDA_SERVER_TS_BIAS_MS", "4.2")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_SOURCE", "pyav")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_W", "1920")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_H", "1080")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_MODE", "ramp")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_PREENCODE", "yes")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_PRE_FRAMES", "240")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_PRE_MB", "256")
+    monkeypatch.setenv("NAPARI_CUDA_SMOKE_PRE_PATH", "/tmp/smoke")
 
     cfg = load_client_loop_config()
 
@@ -92,6 +112,14 @@ def test_load_client_loop_config_reads_env(monkeypatch):
     assert cfg.wheel_step == 3
     # 4.2 ms -> 0.0042 s bias
     assert cfg.server_bias_s == pytest.approx(0.0042)
+    assert cfg.smoke_source == "pyav"
+    assert cfg.smoke_width == 1920
+    assert cfg.smoke_height == 1080
+    assert cfg.smoke_mode == "ramp"
+    assert cfg.smoke_preencode is True
+    assert cfg.smoke_pre_frames == 240
+    assert cfg.smoke_pre_mb == 256
+    assert cfg.smoke_pre_path == "/tmp/smoke"
 
 
 def test_invalid_numeric_values_fall_back(monkeypatch):

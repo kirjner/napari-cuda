@@ -585,44 +585,26 @@ class ClientStreamLoop:
         # Receiver thread or smoke mode
         if self._vt_smoke:
             logger.info("ClientStreamLoop in smoke test mode (offline)")
-            # Ensure PyAV decoder is ready if targeting pyav
-            smoke_source = (os.getenv('NAPARI_CUDA_SMOKE_SOURCE') or 'vt').lower()
+            smoke_source = self._env_cfg.smoke_source
             if smoke_source == 'pyav':
                 self._init_decoder()
                 dec = self.decoder.decode if self.decoder else None
                 self._pyav_pipeline.set_decoder(dec)
             # Read config
-            try:
-                sw = int(os.getenv('NAPARI_CUDA_SMOKE_W', '1280'))
-            except Exception:
-                sw = 1280
-            try:
-                sh = int(os.getenv('NAPARI_CUDA_SMOKE_H', '720'))
-            except Exception:
-                sh = 720
-            # Preset handling
-            preset = (os.getenv('NAPARI_CUDA_SMOKE_PRESET') or '').lower().strip()
+            sw = self._env_cfg.smoke_width
+            sh = self._env_cfg.smoke_height
+            preset = self._env_cfg.smoke_preset
             if preset == '4k60':
                 sw = 3840
                 sh = 2160
                 fps = 60.0
             else:
-                try:
-                    fps = float(os.getenv('NAPARI_CUDA_SMOKE_FPS', '60'))
-                except Exception:
-                    fps = 60.0
-            smoke_mode = (os.getenv('NAPARI_CUDA_SMOKE_MODE', 'checker') or 'checker').lower()
-            preencode = (os.getenv('NAPARI_CUDA_SMOKE_PREENCODE', '0') or '0') in ('1', 'true', 'yes')
-            try:
-                pre_frames = int(os.getenv('NAPARI_CUDA_SMOKE_PRE_FRAMES', str(int(fps) * 3)))
-            except Exception:
-                pre_frames = int(fps) * 3
-            # Phase 5: memory cap and disk path for preencode cache
-            try:
-                mem_cap_mb = int(os.getenv('NAPARI_CUDA_SMOKE_PRE_MB', '0') or '0')
-            except Exception:
-                mem_cap_mb = 0
-            pre_path = os.getenv('NAPARI_CUDA_SMOKE_PRE_PATH', None)
+                fps = self._env_cfg.smoke_fps
+            smoke_mode = self._env_cfg.smoke_mode
+            preencode = self._env_cfg.smoke_preencode
+            pre_frames = self._env_cfg.smoke_pre_frames
+            mem_cap_mb = self._env_cfg.smoke_pre_mb
+            pre_path = self._env_cfg.smoke_pre_path
 
             cfg = SmokeConfig(
                 width=sw,
