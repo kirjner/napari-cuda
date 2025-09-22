@@ -156,6 +156,7 @@ class ClientStreamLoop:
         on_first_dims_ready: Optional[Callable[[], None]] = None,
     ) -> None:
         self._scene_canvas = scene_canvas
+        self._canvas_native = getattr(scene_canvas, 'native', None)
         _maybe_enable_debug_logger()
         # Set smoke mode early so start() can rely on it even if later init changes
         self._vt_smoke = bool(vt_smoke)
@@ -181,7 +182,7 @@ class ClientStreamLoop:
         # UI call proxy to marshal updates to the GUI thread
         self._ui_call: CallProxy | None
         try:
-            self._ui_call = CallProxy(getattr(self._scene_canvas, 'native', None))
+            self._ui_call = CallProxy(self._canvas_native)
         except Exception:
             self._ui_call = None
 
@@ -261,9 +262,9 @@ class ClientStreamLoop:
         self._in_present: bool = False
         self._use_display_loop = self._env_cfg.use_display_loop
         self._wake_proxy: WakeProxy | None = None
-        if not self._use_display_loop:
+        if not self._use_display_loop and self._canvas_native is not None:
             try:
-                self._wake_timer = QtCore.QTimer(self._scene_canvas.native)
+                self._wake_timer = QtCore.QTimer(self._canvas_native)
                 self._wake_timer.setTimerType(QtCore.Qt.PreciseTimer)
                 self._wake_timer.setSingleShot(True)
                 # On wake, request a canvas update and immediately schedule the next wake
@@ -272,9 +273,9 @@ class ClientStreamLoop:
                 logger.debug("Wake timer init failed", exc_info=True)
         # Record GUI thread affinity for safe scheduling from worker threads
         try:
-            self._gui_thread = self._scene_canvas.native.thread()  # type: ignore[attr-defined]
+            self._gui_thread = self._canvas_native.thread() if self._canvas_native is not None else None  # type: ignore[attr-defined]
         except Exception:
-            self._gui_thread = None  # type: ignore[attr-defined]
+            self._gui_thread = None  # type: ignore[var-annotated]
 
         def _schedule_next_wake() -> None:
             if self._use_display_loop:
@@ -309,14 +310,9 @@ class ClientStreamLoop:
                     if self._wake_timer is not None:
                         self._wake_timer.start(max(0, int(delta_ms)))
                     else:
-                        # Fallback: poke the canvas to ensure progress
-                        self._scene_canvas.native.update()
+                        self._scene_canvas_update()
                 except Exception:
-                    # As a last resort, poke the canvas to drive a draw
-                    try:
-                        self._scene_canvas.native.update()
-                    except Exception:
-                        getattr(self._scene_canvas, 'update', lambda: None)()
+                    self._scene_canvas_update()
             except Exception:
                 logger.debug("schedule_next_wake failed", exc_info=True)
 
@@ -325,16 +321,14 @@ class ClientStreamLoop:
 
         # Build pipelines after scheduler hooks are ready
         # Create a wake proxy so pipelines can nudge scheduling from any thread
-        if not self._use_display_loop:
+        if not self._use_display_loop and self._canvas_native is not None:
             try:
-                self._wake_proxy = WakeProxy(_schedule_next_wake, self._scene_canvas.native)
+                self._wake_proxy = WakeProxy(_schedule_next_wake, self._canvas_native)
                 wake_cb = self._wake_proxy.trigger.emit
             except Exception:
                 logger.debug("WakeProxy init failed; using thread-safe scheduler wrapper", exc_info=True)
-                # Fallback to a wrapper that routes scheduling to GUI thread
                 wake_cb = (lambda: self.schedule_next_wake_threadsafe())
         else:
-            # External loop owns draw cadence; pipelines don't need to schedule wakes
             wake_cb = (lambda: None)
         self._vt_pipeline = build_vt_pipeline(self, schedule_next_wake=wake_cb, logger=logger)
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
@@ -466,15 +460,22 @@ class ClientStreamLoop:
 
         logger.debug("threadsafe schedule: no proxy available; skipping")
 
+    def _scene_canvas_update(self) -> None:
+        try:
+            if self._canvas_native is not None:
+                self._canvas_native.update()
+                return
+        except Exception:
+            logger.debug("canvas native update failed", exc_info=True)
+        getattr(self._scene_canvas, 'update', lambda: None)()
+
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
         self._in_present = True
         # Clear pending marker to allow next wake to be scheduled freely
         self._next_due_pending_until = 0.0
         try:
-            self._scene_canvas.native.update()
-        except Exception:
-            getattr(self._scene_canvas, 'update', lambda: None)()
+            self._scene_canvas_update()
         finally:
             self._in_present = False
 
@@ -505,9 +506,9 @@ class ClientStreamLoop:
                 self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
                 # Unified wheel handler: dims intent step for plain wheel; zoom for modifiers
                 wheel_cb = self._on_wheel
-                if self._loop_state.state_channel is not None:
+                if self._loop_state.state_channel is not None and self._canvas_native is not None:
                     sender = InputSender(
-                        widget=self._scene_canvas.native,
+                        widget=self._canvas_native,
                         post=self._loop_state.state_channel.post,
                         max_rate_hz=max_rate_hz,
                         resize_debounce_ms=resize_debounce_ms,
@@ -525,7 +526,7 @@ class ClientStreamLoop:
                         # Bind shortcuts on the top-level window rather than the
                         # canvas widget to ensure they receive key events across
                         # platforms (notably macOS) with ApplicationShortcut.
-                        parent = getattr(self._scene_canvas, 'native', None)
+                        parent = self._canvas_native
                         try:
                             if parent is not None and hasattr(parent, 'window'):
                                 w = parent.window()  # type: ignore[attr-defined]
@@ -573,6 +574,8 @@ class ClientStreamLoop:
                         logger.info("Shortcuts bound: +/-/=→zoom, Home→reset (arrows via keycb)")
                     except Exception:
                         logger.debug("Failed to bind zoom/reset shortcuts", exc_info=True)
+                else:
+                    logger.debug("InputSender skipped: canvas has no native widget or state channel missing")
             except Exception:
                 logger.debug("Failed to attach InputSender", exc_info=True)
 
