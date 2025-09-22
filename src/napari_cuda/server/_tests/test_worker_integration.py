@@ -172,40 +172,37 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         def cleanup(self) -> None:
             return
 
-    class _DummyGLCapture:
-        def __init__(self, width: int, height: int) -> None:
+    class _DummyCaptureFacade:
+        def __init__(self, *, width: int, height: int) -> None:
+            self.width = width
+            self.height = height
+            self._debug = None
+            self._enc_fmt = "YUV444"
             self.texture_id = 1
+            self._orientation_ready = True
+            self._black_reset_done = False
+
+        def configure_auto_reset(self, enabled: bool) -> None:  # type: ignore[no-untyped-def]
+            return
+
+        def set_debug(self, debug):  # type: ignore[no-untyped-def]
+            self._debug = debug
+
+        @property
+        def enc_input_format(self) -> str:
+            return self._enc_fmt
+
+        def set_enc_input_format(self, fmt: str) -> None:
+            self._enc_fmt = str(fmt)
 
         def ensure(self) -> None:
             return
 
-        def cleanup(self) -> None:
+        def initialize_cuda_interop(self) -> None:
             return
-
-        def blit_with_timing(self) -> int:
-            return 0
-
-    class _DummyCudaInterop:
-        def __init__(self, width: int, height: int) -> None:
-            self.torch_frame = SimpleNamespace(device="cpu")
-
-        def map_and_copy(self, debug_cb=None):  # type: ignore[no-untyped-def]
-            return 0.0, 0.0
 
         def cleanup(self) -> None:
             return
-
-        def initialize(self, texture_id: int) -> None:
-            return
-
-    class _DummyFramePipeline:
-        def __init__(self, *, gl_capture, cuda, width, height, debug=None):  # type: ignore[no-untyped-def]
-            self._debug = debug
-            self.orientation_ready = True
-            self.black_reset_done = False
-
-        def set_debug(self, debug):  # type: ignore[no-untyped-def]
-            self._debug = debug
 
         def capture_blit_gpu_ns(self):  # type: ignore[no-untyped-def]
             return 0
@@ -216,18 +213,13 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         def convert_for_encoder(self, *, reset_camera=None):  # type: ignore[no-untyped-def]
             return SimpleNamespace(device="cpu"), 0.0
 
-        def set_dimensions(self, width: int, height: int) -> None:
-            return
-
-        def configure_auto_reset(self, enabled: bool) -> None:
-            return
-
-        def set_enc_input_format(self, fmt: str) -> None:
-            return
+        @property
+        def orientation_ready(self) -> bool:
+            return self._orientation_ready
 
         @property
-        def enc_input_format(self) -> str:
-            return "YUV444"
+        def black_reset_done(self) -> bool:
+            return self._black_reset_done
 
     class _DummyAdapterScene:
         def __init__(self, worker):  # type: ignore[no-untyped-def]
@@ -281,9 +273,7 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
 
     monkeypatch.setattr(ew.scene.cameras, "PanZoomCamera", _FakeCamera2D)
     monkeypatch.setattr(ew, "EglContext", _DummyEglContext)
-    monkeypatch.setattr(ew, "GLCapture", _DummyGLCapture)
-    monkeypatch.setattr(ew, "CudaInterop", _DummyCudaInterop)
-    monkeypatch.setattr(ew, "FramePipeline", _DummyFramePipeline)
+    monkeypatch.setattr(ew, "CaptureFacade", _DummyCaptureFacade)
     monkeypatch.setattr(ew, "AdapterScene", _DummyAdapterScene)
     monkeypatch.setattr(ew, "Encoder", _DummyEncoder)
     monkeypatch.setattr(ew, "plane_scale_for_level", _fake_plane_scale_for_level)

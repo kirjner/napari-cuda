@@ -11,14 +11,14 @@ Phase A: helpers only; wiring happens in the worker in a later step.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Mapping, Optional, Sequence, Tuple
 import logging
 
 import numpy as np
 
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.zarr_source import ZarrSceneSource
-from napari_cuda.server.roi import plane_scale_for_level, plane_wh_for_level
+from napari_cuda.server.roi import plane_scale_for_level
 
 
 logger = logging.getLogger(__name__)
@@ -76,11 +76,7 @@ class LevelPolicyDecision:
 
 
 def stabilize_level(napari_level: int, prev_level: int, *, hysteresis: float = 0.0) -> int:
-    """Return a stabilized level around the previous level.
-
-    For Phase A this is a pass-through unless hysteresis>0 (then clamp single-
-    step oscillations). More sophisticated policies can plug in here later.
-    """
+    """Return a stabilized level around ``prev_level`` honouring hysteresis."""
     cur = int(prev_level)
     nxt = int(napari_level)
     if hysteresis <= 0.0:
@@ -96,6 +92,13 @@ def stabilize_level(napari_level: int, prev_level: int, *, hysteresis: float = 0
 
 def _clamp_level(value: int, *, max_level: int) -> int:
     return max(0, min(int(value), int(max_level)))
+
+
+def _cooldown_remaining(config: LevelPolicyConfig, inputs: LevelPolicyInputs) -> float:
+    if inputs.last_switch_ts <= 0.0 or config.cooldown_ms <= 0.0:
+        return 0.0
+    elapsed_ms = (inputs.now_ts - inputs.last_switch_ts) * 1000.0
+    return max(0.0, float(config.cooldown_ms) - elapsed_ms)
 
 
 def select_level(
@@ -129,22 +132,14 @@ def select_level(
 
     if desired is None:
         desired = current
-        if current > 0:
-            finer = current - 1
-            ratio = overs_map.get(finer)
-            if ratio is not None and ratio <= config.fine_threshold:
-                desired = finer
-        if desired == current and current < max_level:
-            ratio_cur = overs_map.get(current)
-            if ratio_cur is not None and ratio_cur > config.threshold_out:
-                desired = current + 1
+        if current > 0 and overs_map.get(current - 1, float("inf")) <= config.fine_threshold:
+            desired = current - 1
+        elif current < max_level and overs_map.get(current, 0.0) > config.threshold_out:
+            desired = current + 1
         action = "heuristic"
     else:
         desired = _clamp_level(desired, max_level=max_level)
-        if desired < current:
-            desired = max(desired, current - 1)
-        elif desired > current:
-            desired = min(desired, current + 1)
+        desired = max(desired, current - 1) if desired < current else min(desired, current + 1)
 
     selected = stabilize_level(int(desired), current, hysteresis=config.hysteresis)
     sel = int(selected)
@@ -182,18 +177,16 @@ def select_level(
             blocked_reason=None,
         )
 
-    if inputs.last_switch_ts > 0.0:
-        elapsed_ms = (inputs.now_ts - inputs.last_switch_ts) * 1000.0
-        if elapsed_ms < config.cooldown_ms:
-            remaining = max(0.0, config.cooldown_ms - elapsed_ms)
-            return LevelPolicyDecision(
-                desired_level=int(desired),
-                selected_level=int(selected),
-                action=reason,
-                should_switch=False,
-                blocked_reason="cooldown",
-                cooldown_remaining_ms=remaining,
-            )
+    remaining = _cooldown_remaining(config, inputs)
+    if selected != current and remaining > 0.0:
+        return LevelPolicyDecision(
+            desired_level=int(desired),
+            selected_level=int(selected),
+            action=reason,
+            should_switch=False,
+            blocked_reason="cooldown",
+            cooldown_remaining_ms=remaining,
+        )
 
     return LevelPolicyDecision(
         desired_level=int(desired),
@@ -214,10 +207,7 @@ def assert_volume_within_budget(
     max_bytes: int | None,
     max_voxels: int | None,
 ) -> None:
-    """Raise if level volume exceeds memory/voxel budgets.
-
-    Budgets are inclusive; 0 or None means no budget.
-    """
+    """Raise when level volume exceeds inclusive memory/voxel budgets."""
     if not max_bytes and not max_voxels:
         return
     arr = source.get_level(level)
@@ -240,10 +230,7 @@ def assert_slice_within_budget(
     dtype_size: int | None,
     max_bytes: int | None,
 ) -> None:
-    """Raise if a full-frame slice at this level would exceed budget.
-
-    Use ROI-aware estimates from SceneSource where available when integrating.
-    """
+    """Raise when a full-frame slice at this level would exceed budget."""
     if not max_bytes:
         return
     desc = source.level_descriptors[level]
@@ -324,12 +311,7 @@ def apply_level(
     last_step: Optional[Sequence[int]],
     viewer: Optional[ViewerModel],
 ) -> AppliedLevel:
-    """Apply target level to the scene source and viewer; return applied snapshot.
-
-    - Preserves/adjusts Z proportionally across depth changes.
-    - Clamps step to descriptor shape; updates viewer dims and range.
-    - Computes contrast limits lazily and returns applied metadata.
-    """
+    """Apply target level, update dims, and return the applied snapshot."""
     axes = source.axes
     lower = [str(a).lower() for a in axes]
     desc = source.level_descriptors[target_level]

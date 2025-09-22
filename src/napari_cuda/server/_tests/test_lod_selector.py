@@ -132,3 +132,35 @@ def test_select_level_honours_lock_override() -> None:
     assert decision.selected_level == 2
     assert decision.action == "locked"
     assert decision.should_switch is True
+
+
+def test_select_level_handles_empty_oversampling() -> None:
+    inputs = LevelPolicyInputs(
+        current_level=0,
+        oversampling={},
+        zoom_ratio=None,
+        lock_level=None,
+        last_switch_ts=0.0,
+        now_ts=6.0,
+    )
+
+    decision = select_level(_BASE_CONFIG, inputs)
+
+    assert decision.should_switch is False
+    assert decision.blocked_reason == "no-oversampling"
+
+
+def test_select_level_filters_none_entries() -> None:
+    inputs = LevelPolicyInputs(
+        current_level=1,
+        oversampling={0: 0.95, 1: None, 2: 1.6},  # type: ignore[arg-type]
+        zoom_ratio=None,
+        lock_level=None,
+        last_switch_ts=0.0,
+        now_ts=7.0,
+    )
+
+    decision = select_level(_BASE_CONFIG, inputs)
+
+    assert decision.selected_level == 0
+    assert decision.should_switch is True

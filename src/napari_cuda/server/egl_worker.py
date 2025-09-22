@@ -16,7 +16,7 @@ import time
 import logging
 
 from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Mapping, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Mapping, Sequence, Tuple
 import threading
 import math
 
@@ -49,11 +49,9 @@ from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
 from napari_cuda.server.lod import apply_level
 from napari_cuda.server.config import LevelPolicySettings, ServerCtx
-from napari_cuda.server.rendering.gl_capture import GLCapture
-from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
-from napari_cuda.server.rendering.frame_pipeline import FramePipeline
+from napari_cuda.server.capture import CaptureFacade
 from napari_cuda.server.roi_applier import SliceUpdatePlanner
 from napari_cuda.server.roi import (
     compute_viewport_roi,
@@ -148,15 +146,7 @@ class EGLRendererWorker:
         self._last_zoom_hint_ts: float = 0.0
         self._zoom_hint_hold_s: float = 0.35
 
-        self._gl_capture = GLCapture(self.width, self.height)
-        self._cuda = CudaInterop(self.width, self.height)
-        self._frame_pipeline = FramePipeline(
-            gl_capture=self._gl_capture,
-            cuda=self._cuda,
-            width=self.width,
-            height=self.height,
-            debug=None,
-        )
+        self._capture = CaptureFacade(width=self.width, height=self.height)
 
         self._encoder: Optional[Encoder] = None
 
@@ -252,7 +242,7 @@ class EGLRendererWorker:
             self._auto_reset_on_black = env_bool('NAPARI_CUDA_AUTO_RESET_ON_BLACK', True)
         except Exception:
             self._auto_reset_on_black = True
-        self._frame_pipeline.configure_auto_reset(self._auto_reset_on_black)
+        self._capture.configure_auto_reset(self._auto_reset_on_black)
         self._black_reset_done: bool = False
         # Min time between level switches to avoid shimmering during pan
         self._level_switch_cooldown_ms = float(policy_cfg.cooldown_ms)
@@ -341,11 +331,11 @@ class EGLRendererWorker:
         if self._debug.cfg.enabled:
             self._debug.log_env_once()
             self._debug.ensure_out_dir()
-        self._frame_pipeline.set_debug(self._debug)
+        self._capture.set_debug(self._debug)
         # Log format/size once for clarity
         logger.info(
             "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
-            self.width, self.height, self._frame_pipeline.enc_input_format, self.fps, self._animate,
+            self.width, self.height, self._capture.enc_input_format, self.fps, self._animate,
             bool(self._zarr_path),
         )
 
@@ -1221,14 +1211,11 @@ class EGLRendererWorker:
         self._evaluate_level_policy()
 
     def _init_capture(self) -> None:
-        self._gl_capture.ensure()
+        self._capture.ensure()
 
     def _init_cuda_interop(self) -> None:
         """Init CUDA-GL interop and allocate destination via one-time DLPack bridge."""
-        tex = self._gl_capture.texture_id
-        if tex is None:
-            raise RuntimeError("Capture texture is not available for CUDA interop")
-        self._cuda.initialize(tex)
+        self._capture.initialize_cuda_interop()
 
     def _init_encoder(self) -> None:
         with self._enc_lock:
@@ -1237,7 +1224,7 @@ class EGLRendererWorker:
             encoder = self._encoder
             encoder.set_fps_hint(int(self.fps))
             encoder.setup(self._ctx)
-            self._frame_pipeline.set_enc_input_format(encoder.input_format)
+            self._capture.set_enc_input_format(encoder.input_format)
 
     def reset_encoder(self) -> None:
         with self._enc_lock:
@@ -1452,7 +1439,7 @@ class EGLRendererWorker:
         self._scene_state_queue.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
-        return self._gl_capture.blit_with_timing()
+        return self._capture.capture_blit_gpu_ns()
 
 
     def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int, int]:
@@ -1467,7 +1454,7 @@ class EGLRendererWorker:
         render_ms = self.render_tick()
         # Blit timing (GPU + CPU)
         t_b0 = time.perf_counter()
-        blit_gpu_ns = self._frame_pipeline.capture_blit_gpu_ns()
+        blit_gpu_ns = self._capture.capture_blit_gpu_ns()
         t_b1 = time.perf_counter()
         blit_cpu_ms = (t_b1 - t_b0) * 1000.0
         debug_cb = None
@@ -1476,7 +1463,7 @@ class EGLRendererWorker:
                 self._debug.dump_triplet(tex_id, w, h, frame)  # type: ignore[attr-defined]
 
             debug_cb = _cb
-        map_ms, copy_ms = self._frame_pipeline.map_and_copy_to_torch(debug_cb)
+        map_ms, copy_ms = self._capture.map_and_copy_to_torch(debug_cb)
 
         reset_cb: Optional[Callable[[], None]] = None
         if self._auto_reset_on_black and self.view is not None and self.view.camera is not None:
@@ -1487,9 +1474,9 @@ class EGLRendererWorker:
 
             reset_cb = _reset_camera
 
-        dst, convert_ms = self._frame_pipeline.convert_for_encoder(reset_camera=reset_cb)
-        self._orientation_ready = self._frame_pipeline.orientation_ready
-        self._black_reset_done = self._frame_pipeline.black_reset_done
+        dst, convert_ms = self._capture.convert_for_encoder(reset_camera=reset_cb)
+        self._orientation_ready = self._capture.orientation_ready
+        self._black_reset_done = self._capture.black_reset_done
         with self._enc_lock:
             encoder = self._encoder
         if encoder is None or not encoder.is_ready:
@@ -1697,13 +1684,9 @@ class EGLRendererWorker:
 
     def cleanup(self) -> None:
         try:
-            self._cuda.cleanup()
+            self._capture.cleanup()
         except Exception:
-            logger.debug("Cleanup: CUDA interop cleanup failed", exc_info=True)
-        try:
-            self._gl_capture.cleanup()
-        except Exception:
-            logger.debug("Cleanup: GL capture cleanup failed", exc_info=True)
+            logger.debug("Cleanup: capture cleanup failed", exc_info=True)
 
         with self._enc_lock:
             encoder = self._encoder

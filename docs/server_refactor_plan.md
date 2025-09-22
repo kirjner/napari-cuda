@@ -1,9 +1,11 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
 ## Current Snapshot (2025-09-22)
-- `egl_worker.py`: 1,801 LOC (down ~470 from the pre-extraction snapshot and -119 since the last checkpoint). Longest blocks are `__init__` (254 lines), `_viewport_roi_for_level` (75), and `_evaluate_level_policy` (109); `_apply_level_internal` still sits <80 lines after the helper extraction.
+- `egl_worker.py`: 1,784 LOC (down ~487 from the pre-extraction snapshot and -17 since the last checkpoint). Longest blocks are `__init__` (254 lines), `_viewport_roi_for_level` (75), and `_evaluate_level_policy` (109); `_apply_level_internal` still sits <80 lines after the helper extraction.
 - `scene_state_applier.py`: 216 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
-- `lod.py`: 413 LOC after shedding the duplicate ROI helper and unused `LevelDecision` scaffolding. Policy helpers (`LevelPolicy*`, `select_level`) now live beside `apply_level` while we stage the final Phase C trims.
+- `lod.py`: 397 LOC after shedding the duplicate ROI helper, unused `LevelDecision` scaffolding, and dead cooldown bookkeeping. Selector coverage now includes oversampling gaps and cooldown blocking to guard the slimmed helpers.
+- `roi.py`: 214 LOC with the shared viewport helper, chunk alignment, and hysteresis logic consolidated from the worker and LOD modules.
+- `capture.py`: 94 LOC encapsulating GL capture, CUDA interop, and frame pipeline orchestration for the worker.
 - `try:` count trimmed to ≈60 with camera/state hot-path guards removed; remaining blocks sit at subsystem boundaries (EGL/CUDA/NVENC) and legacy ROI helpers queued for Phase C/D.
 - `getattr` usage in the worker now ≈33 after asserting invariants in the state queue + camera paths. Further reductions arrive with Phase C decomposition.
 - Env/env_bool still sprinkled across init (encoder, ROI, debug). Centralised logging/config policy remains scheduled for Phase D.
@@ -38,21 +40,21 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - `lod.py` now contains both the selector policy and the apply helpers. Near-term goal is to trim it back under 400 LOC by pushing ROI math that doesn't need selection context into `roi.py` and collapsing historic LevelDecision scaffolding once the compute-only napari path lands.
 - `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
 - **Remaining milestones to close Phase B**:
-  1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `FramePipeline` now owns capture/encode plumbing.
+  1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `CaptureFacade` now fronts GL capture, CUDA interop, and the frame pipeline.
   2. **Guard + naming audit** — ✅ renamed to `SceneStateQueue`/`PendingSceneUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
   3. **ServerCtx policy surface** — ✅ `ServerCtx.policy` is now authoritative and callers must provide an explicit ctx (`EGLRendererWorker` no longer falls back to `load_server_ctx()`; experiments/headless server wire it through).
   4. **Integration tests** — ✅ added zoom-intent coverage and preserve-view smoke harness in `src/napari_cuda/server/_tests/test_worker_integration.py` to exercise the worker pipeline end-to-end.
 
 ### Phase C — ROI & LOD Minimization
 - Phase transition: Phase B prerequisites (guard audit, integration coverage, explicit `ServerCtx`) are satisfied; Phase C work can now begin while capture/logging follow-ups proceed in parallel.
-- **ROI helper**: `compute_viewport_roi` now lives in `roi.py` and the worker routes through it with cached signatures. Remaining work is to delete the legacy duplicate path in `lod.py`, converge the tests on the shared helper, and collapse the worker-side log scaffolding once the new telemetry lands.
-- **LOD selection**: `_evaluate_level_policy` already delegates to `lod.select_level`; next trim is to remove the unused `LevelDecision` scaffolding and cap the module <400 LOC by pushing the lingering ROI math into `roi.py`.
-- **View preservation**: Render harness landed (`test_render_tick_preserve_view_smoke`) so we can safely delete the old fallback logging once the shared ROI helper is universal.
+- **ROI helper**: `compute_viewport_roi` now lives in `roi.py` and the worker routes through it with cached signatures. Legacy fallbacks in the worker were deleted, and integration tests now cover the zoom-intent/preserve-view path.
+- **LOD selection**: `_evaluate_level_policy` already delegates to `lod.select_level`; the module now sits at 397 LOC after pruning cooldown bookkeeping, with oversampling gap coverage in place.
+- **View preservation**: Render harness landed (`test_render_tick_preserve_view_smoke`) and the ROI helper is universal, so camera assertions now fail fast instead of logging fallbacks.
 - **Milestones (status + next action)**:
-  1. **ROI consolidation** — Worker uses `roi.compute_viewport_roi`; drop `lod.compute_viewport_roi`, update `lod` tests to import the shared helper, and remove the remaining ROI fallback logging from the worker.
-  2. **Slim `lod.py`** — Remove `LevelDecision` + dormant napari scaffolding, cap the file <400 LOC, and extend `test_lod_selector.py` with oversampling + cooldown coverage for the slimmed API.
-  3. **Capture façade** — Reuse the existing `rendering.gl_capture.GLCapture`, `rendering.cuda_interop.CudaInterop`, and `rendering.frame_pipeline.FramePipeline` by fronting them with a thin `server.capture` module so `_set_level_with_budget`/render tick shed the current init/reset boilerplate without duplicating capture logic; add smoke coverage that exercises the façade in the worker fixture.
-  4. **Regression sweep** — After each extraction, run ROI + worker integration tests (`uv run pytest src/napari_cuda/server/_tests/test_roi.py src/napari_cuda/server/_tests/test_worker_integration.py`) and log the new LOC metrics (`wc -l src/napari_cuda/server/egl_worker.py`).
+  1. **ROI consolidation** — ✅ Done. Worker calls the shared helper, `lod.compute_viewport_roi` is removed, and fallback logging/log counters were excised.
+  2. **Slim `lod.py`** — ✅ Done. Module sits at 397 LOC with cooldown math simplified and selector tests covering oversampling gaps + cooldown blocking.
+  3. **Capture façade** — ✅ Done. `server.capture.CaptureFacade` owns GL capture, CUDA interop, and frame pipeline wiring; worker init/reset paths now delegate through it. Follow-up: fold resize handling once dynamic canvas sizing lands.
+  4. **Regression sweep** — Ongoing. Worker + LOD suites green (`uv run pytest src/napari_cuda/server/_tests/test_lod_selector.py src/napari_cuda/server/_tests/test_worker_integration.py`); queue ROI unit suite next and keep recording LOC snapshots (`wc -l src/napari_cuda/server/{egl_worker,lod,roi,capture}.py`).
 
 ### Phase D — Logging & Debug Policy
 - Establish `logging_policy.py` or config entries controlling debug flags. Remove per-call env parsing (`NAPARI_CUDA_DEBUG_*`). Convert to bools resolved at init via `ServerCtx`.
