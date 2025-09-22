@@ -36,6 +36,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   - Unit coverage exists for the state machine, camera controller, and `SceneStateApplier` helpers.
 - `roi.py` now owns viewport ROI math and plane helpers; the worker simply wraps caching/log bookkeeping, eliminating the bespoke ROI code path and associated guard soup.
 - `lod.py` now contains both the selector policy and the apply helpers. Near-term goal is to trim it back under 400 LOC by pushing ROI math that doesn't need selection context into `roi.py` and collapsing historic LevelDecision scaffolding once the compute-only napari path lands.
+- `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
 - **In progress**:
   - Worker naming cleanup (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
 - **Next extraction targets**:
@@ -48,6 +49,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 ### Phase C — ROI & LOD Minimization
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
 - **LOD selection**: `_evaluate_level_policy` delegates to `lod.select_level`, so zoom hints and thresholds are handled in a pure helper with single env reads during init.
+- **View preservation**: Promote the new unit guard into an integration-level check once the ROI extraction lands, so render-thread camera state stays stable without manual smoke tests.
 
 ### Phase D — Logging & Debug Policy
 - Establish `logging_policy.py` or config entries controlling debug flags. Remove per-call env parsing (`NAPARI_CUDA_DEBUG_*`). Convert to bools resolved at init via `ServerCtx`.
@@ -75,7 +77,8 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Lint rules**: Introduce ruff rules to flag `except Exception` & `logger.*` inside try/except.
 
 ## Immediate Next Steps
-- Audit ROI and policy guards now that `compute_viewport_roi`/`lod_selector` own the math; replace fallback logging with assertions and keep only boundary logging.
+- Audit ROI and policy guards now that `compute_viewport_roi`/`lod.select_level` own the math; replace fallback logging with assertions and keep only boundary logging.
+- Backfill a scripted render smoke test (or integration test) that exercises Z updates with `preserve_view_on_switch=True`, using the new unit coverage as a baseline.
 - Carve the capture/CUDA glue into `capture.py`/`cuda_interop.py`, shrinking `egl_worker.py` toward the 1.5k LOC mark.
 - Land the zoom-hint integration test around the new selector before relaxing thresholds further.
 - Draft the `ServerCtx` logging/debug config surface so env probes migrate in Phase D without another worker churn.

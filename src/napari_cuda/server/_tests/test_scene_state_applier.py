@@ -123,6 +123,40 @@ def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
     assert result.last_step == (1, 1, 1)
 
 
+def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> None:
+    viewer = _StubViewer()
+    layer = _StubLayer()
+    visual = _StubVisual()
+    camera = _StubCamera()
+    source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
+
+    ctx = SceneStateApplyContext(
+        use_volume=False,
+        viewer=viewer,
+        camera=camera,
+        visual=visual,
+        layer=layer,
+        scene_source=source,
+        active_ms_level=0,
+        z_index=None,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=True,
+        idr_on_z=False,
+        data_wh=(256, 256),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: source,
+        plane_scale_for_level=_plane_scale_for_level,
+        load_slice=_load_slice,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: None,
+    )
+
+    SceneStateApplier.apply_dims_and_slice(ctx, current_step=(2, 3, 4))
+
+    assert camera.ranges == []
+
+
 def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()

@@ -127,10 +127,10 @@ class SceneStateApplier:
         cam = ctx.camera
         if not ctx.preserve_view_on_switch:
             assert cam is not None, "camera must be available to update range"
-        h, w = int(slab.shape[0]), int(slab.shape[1])
-        world_w = max(1.0, float(w) * float(max(1e-12, sx)))
-        world_h = max(1.0, float(h) * float(max(1e-12, sy)))
-        cam.set_range(x=(0.0, world_w), y=(0.0, world_h))
+            h, w = int(slab.shape[0]), int(slab.shape[1])
+            world_w = max(1.0, float(w) * float(max(1e-12, sx)))
+            world_h = max(1.0, float(h) * float(max(1e-12, sy)))
+            cam.set_range(x=(0.0, world_w), y=(0.0, world_h))
 
         if ctx.idr_on_z and ctx.request_encoder_idr is not None:
             ctx.request_encoder_idr()
