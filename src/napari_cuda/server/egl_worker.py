@@ -260,7 +260,7 @@ class EGLRendererWorker:
         # multiscale level switches regardless of viewer timing.
         self._last_step: Optional[tuple[int, ...]] = None
         # Coalesce selection to run once after a render when camera changed
-        self.policy_eval_requested: bool = False
+        self._policy_eval_pending: bool = False
         # Policy init happens naturally; no deferral needed
         # One-shot safety: reset camera if initial frames are black
         try:
@@ -883,31 +883,19 @@ class EGLRendererWorker:
                 if logged is not None:
                     prev_logged = logged[0]
 
-        try:
-            result = compute_viewport_roi(
-                view=view,
-                canvas_size=(int(self.width), int(self.height)),
-                source=source,
-                level=int(level),
-                align_chunks=align_chunks,
-                chunk_pad=chunk_pad,
-                ensure_contains_viewport=ensure_contains,
-                edge_threshold=edge_threshold,
-                prev_roi=prev_logged,
-                for_policy=for_policy,
-                transform_signature=signature,
-            )
-        except Exception:
-            if not quiet and self._log_layer_debug:
-                logger.exception(
-                    "viewport ROI computation failed; returning full frame (level=%d dims=%dx%d)",
-                    level,
-                    plane_h,
-                    plane_w,
-                )
-            if not quiet:
-                self._log_roi_fallback(level=level, reason="compute-failed", plane_h=plane_h, plane_w=plane_w, scale=scale)
-            return SliceROI(0, plane_h, 0, plane_w)
+        result = compute_viewport_roi(
+            view=view,
+            canvas_size=(int(self.width), int(self.height)),
+            source=source,
+            level=int(level),
+            align_chunks=align_chunks,
+            chunk_pad=chunk_pad,
+            ensure_contains_viewport=ensure_contains,
+            edge_threshold=edge_threshold,
+            prev_roi=prev_logged,
+            for_policy=for_policy,
+            transform_signature=signature,
+        )
 
         roi = result.roi
         if roi.is_empty():
@@ -1400,7 +1388,7 @@ class EGLRendererWorker:
         if outcome.camera_changed:
             self._mark_render_tick_needed()
         if outcome.policy_triggered:
-            self.policy_eval_requested = True
+            self._policy_eval_pending = True
 
     def _apply_camera_reset(self, cam) -> None:
         if cam is None or not hasattr(cam, 'set_range'):
@@ -1629,8 +1617,8 @@ class EGLRendererWorker:
                 )
                 self._last_roi = decision.new_last_roi
         self.canvas.render()
-        if self.policy_eval_requested:
-            self.policy_eval_requested = False
+        if self._policy_eval_pending:
+            self._policy_eval_pending = False
             self._evaluate_level_policy()
         self._render_tick_required = False
         self._render_loop_started = True
