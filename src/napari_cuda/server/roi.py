@@ -8,17 +8,13 @@ worker sheds its bespoke implementations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
-import logging
+from typing import Any, Optional, Sequence, Tuple
 import math
 
 from vispy import scene
 
 from napari_cuda.server.scene_types import SliceROI
 from napari_cuda.server.zarr_source import ZarrSceneSource
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,6 +24,9 @@ class ViewportROIResult:
     roi: SliceROI
     transform_signature: Optional[tuple[float, ...]]
 
+def _axis_index(axes_lower: Sequence[str], axis: str, fallback: int) -> int:
+    return axes_lower.index(axis) if axis in axes_lower else fallback
+
 
 def plane_wh_for_level(source: ZarrSceneSource, level: int) -> Tuple[int, int]:
     """Return the plane height/width for the requested multiscale level."""
@@ -35,14 +34,8 @@ def plane_wh_for_level(source: ZarrSceneSource, level: int) -> Tuple[int, int]:
     descriptor = source.level_descriptors[level]
     axes = source.axes
     axes_lower = [str(ax).lower() for ax in axes]
-    try:
-        y_pos = axes_lower.index("y")
-    except ValueError:
-        y_pos = max(0, len(descriptor.shape) - 2)
-    try:
-        x_pos = axes_lower.index("x")
-    except ValueError:
-        x_pos = max(0, len(descriptor.shape) - 1)
+    y_pos = _axis_index(axes_lower, "y", max(0, len(descriptor.shape) - 2))
+    x_pos = _axis_index(axes_lower, "x", max(0, len(descriptor.shape) - 1))
     h = int(descriptor.shape[y_pos]) if 0 <= y_pos < len(descriptor.shape) else int(descriptor.shape[-2])
     w = int(descriptor.shape[x_pos]) if 0 <= x_pos < len(descriptor.shape) else int(descriptor.shape[-1])
     return h, w
@@ -54,14 +47,8 @@ def plane_scale_for_level(source: ZarrSceneSource, level: int) -> Tuple[float, f
     axes = source.axes
     axes_lower = [str(ax).lower() for ax in axes]
     scale = source.level_scale(level)
-    try:
-        y_pos = axes_lower.index("y")
-    except ValueError:
-        y_pos = max(0, len(scale) - 2)
-    try:
-        x_pos = axes_lower.index("x")
-    except ValueError:
-        x_pos = max(0, len(scale) - 1)
+    y_pos = _axis_index(axes_lower, "y", max(0, len(scale) - 2))
+    x_pos = _axis_index(axes_lower, "x", max(0, len(scale) - 1))
     sy = float(scale[y_pos]) if 0 <= y_pos < len(scale) else float(scale[-2])
     sx = float(scale[x_pos]) if 0 <= x_pos < len(scale) else float(scale[-1])
     return sy, sx
@@ -76,14 +63,9 @@ def _transform_signature(view: Any) -> Optional[tuple[float, ...]]:
     transform = getattr(scene_graph, "transform", None)
     if transform is None or not hasattr(transform, "matrix"):
         return None
-    try:
-        mat = transform.matrix
-    except Exception:
-        return None
-    try:
-        return tuple(float(v) for v in mat.ravel())
-    except Exception:
-        return None
+    mat = transform.matrix
+    values = mat.ravel() if hasattr(mat, "ravel") else mat
+    return tuple(float(v) for v in values)
 
 
 def compute_viewport_roi(
@@ -128,18 +110,18 @@ def compute_viewport_roi(
     width = int(canvas_size[0])
     height = int(canvas_size[1])
 
+    corners = (
+        (0.0, 0.0),
+        (float(width), 0.0),
+        (0.0, float(height)),
+        (float(width), float(height)),
+    )
     try:
-        corners = (
-            (0.0, 0.0),
-            (float(width), 0.0),
-            (0.0, float(height)),
-            (float(width), float(height)),
-        )
         world_pts = [transform.imap((float(x), float(y), 0.0)) for x, y in corners]
-        xs = [float(pt[0]) for pt in world_pts]
-        ys = [float(pt[1]) for pt in world_pts]
     except Exception as exc:
         raise RuntimeError("transform.imap failed for ROI compute") from exc
+    xs = [float(pt[0]) for pt in world_pts]
+    ys = [float(pt[1]) for pt in world_pts]
 
     x0, x1 = min(xs), max(xs)
     y0, y1 = min(ys), max(ys)
@@ -157,30 +139,27 @@ def compute_viewport_roi(
     roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
 
     if not for_policy and align_chunks:
-        try:
-            arr = source.get_level(level)
-            chunks = getattr(arr, "chunks", None)
-            if chunks is not None:
-                axes_lower = [str(ax).lower() for ax in source.axes]
-                y_pos = axes_lower.index("y") if "y" in axes_lower else max(0, len(chunks) - 2)
-                x_pos = axes_lower.index("x") if "x" in axes_lower else max(0, len(chunks) - 1)
-                cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-                cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-                cy = max(1, cy)
-                cx = max(1, cx)
-                ys = (roi.y_start // cy) * cy
-                ye = ((roi.y_stop + cy - 1) // cy) * cy
-                xs = (roi.x_start // cx) * cx
-                xe = ((roi.x_stop + cx - 1) // cx) * cx
-                pad = max(0, int(chunk_pad))
-                if pad:
-                    ys = max(0, ys - pad * cy)
-                    ye = min(h, ye + pad * cy)
-                    xs = max(0, xs - pad * cx)
-                    xe = min(w, xe + pad * cx)
-                roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
-        except Exception:
-            logger.debug("ROI chunk alignment failed", exc_info=True)
+        arr = source.get_level(level)
+        chunks = getattr(arr, "chunks", None)
+        if chunks is not None:
+            axes_lower = [str(ax).lower() for ax in source.axes]
+            y_pos = _axis_index(axes_lower, "y", max(0, len(chunks) - 2))
+            x_pos = _axis_index(axes_lower, "x", max(0, len(chunks) - 1))
+            cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
+            cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
+            cy = max(1, cy)
+            cx = max(1, cx)
+            ys = (roi.y_start // cy) * cy
+            ye = ((roi.y_stop + cy - 1) // cy) * cy
+            xs = (roi.x_start // cx) * cx
+            xe = ((roi.x_stop + cx - 1) // cx) * cx
+            pad = max(0, int(chunk_pad))
+            if pad:
+                ys = max(0, ys - pad * cy)
+                ye = min(h, ye + pad * cy)
+                xs = max(0, xs - pad * cx)
+                xe = min(w, xe + pad * cx)
+            roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
 
     if not for_policy and prev_roi is not None and edge_threshold > 0:
         thr = int(edge_threshold)
@@ -205,23 +184,20 @@ def compute_viewport_roi(
         xs = min(int(roi.x_start), int(viewport_bounds[2]))
         xe = max(int(roi.x_stop), int(viewport_bounds[3]))
         if align_chunks:
-            try:
-                arr = source.get_level(level)
-                chunks = getattr(arr, "chunks", None)
-                if chunks is not None:
-                    axes_lower = [str(ax).lower() for ax in source.axes]
-                    y_pos = axes_lower.index("y") if "y" in axes_lower else max(0, len(chunks) - 2)
-                    x_pos = axes_lower.index("x") if "x" in axes_lower else max(0, len(chunks) - 1)
-                    cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-                    cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-                    cy = max(1, cy)
-                    cx = max(1, cx)
-                    ys = (ys // cy) * cy
-                    ye = ((ye + cy - 1) // cy) * cy
-                    xs = (xs // cx) * cx
-                    xe = ((xe + cx - 1) // cx) * cx
-            except Exception:
-                logger.debug("ROI ensure-contains chunk align failed", exc_info=True)
+            arr = source.get_level(level)
+            chunks = getattr(arr, "chunks", None)
+            if chunks is not None:
+                axes_lower = [str(ax).lower() for ax in source.axes]
+                y_pos = _axis_index(axes_lower, "y", max(0, len(chunks) - 2))
+                x_pos = _axis_index(axes_lower, "x", max(0, len(chunks) - 1))
+                cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
+                cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
+                cy = max(1, cy)
+                cx = max(1, cx)
+                ys = (ys // cy) * cy
+                ye = ((ye + cy - 1) // cy) * cy
+                xs = (xs // cx) * cx
+                xe = ((xe + cx - 1) // cx) * cx
         roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
 
     if roi.is_empty():

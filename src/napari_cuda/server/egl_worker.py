@@ -48,7 +48,7 @@ from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
 from napari_cuda.server.lod import apply_level
-from napari_cuda.server.config import LevelPolicySettings, ServerCtx, load_server_ctx
+from napari_cuda.server.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
@@ -70,11 +70,11 @@ from napari_cuda.server.camera_controller import (
     CameraDebugFlags,
     apply_camera_commands,
 )
+from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.state_machine import (
     CameraCommand,
-    SceneUpdateBundle,
-    SceneStateCoordinator,
-    ServerSceneState,
+    PendingSceneUpdate,
+    SceneStateQueue,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,9 +112,8 @@ class EGLRendererWorker:
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
                  scene_refresh_cb: Optional[Callable[[], None]] = None,
                  policy_name: Optional[str] = None,
-                 ctx: Optional[ServerCtx] = None) -> None:
-        if ctx is None:
-            ctx = load_server_ctx()
+                 *,
+                 ctx: ServerCtx) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -163,6 +162,7 @@ class EGLRendererWorker:
 
         # Track current data extents in world units (W,H)
         self._data_wh: tuple[int, int] = (int(width), int(height))
+        self._data_d: Optional[int] = None
         # Gate pixel streaming until orientation/camera are settled and a non-black frame is observed
         self._orientation_ready: bool = False
 
@@ -171,7 +171,7 @@ class EGLRendererWorker:
 
         # Atomic state application
         self._state_lock = threading.Lock()
-        self._scene_state_coordinator = SceneStateCoordinator()
+        self._scene_state_queue = SceneStateQueue()
         # Debug gating for ensure_scene_source logging
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts: float = 0.0
@@ -245,7 +245,7 @@ class EGLRendererWorker:
         # multiscale level switches regardless of viewer timing.
         self._last_step: Optional[tuple[int, ...]] = None
         # Coalesce selection to run once after a render when camera changed
-        self._policy_eval_pending: bool = False
+        self._level_policy_refresh_needed: bool = False
         # Policy init happens naturally; no deferral needed
         # One-shot safety: reset camera if initial frames are black
         try:
@@ -373,11 +373,10 @@ class EGLRendererWorker:
         self.view = view
         self._viewer = viewer
         # Ensure the camera frames current data extents on first init
-        try:
-            if hasattr(self, 'view') and hasattr(self.view, 'camera'):
-                self._apply_camera_reset(self.view.camera)
-        except Exception:
-            logger.debug("initial camera reset after adapter init failed", exc_info=True)
+        assert self.view is not None, "adapter must supply a VisPy view"
+        cam = self.view.camera
+        if cam is not None:
+            self._apply_camera_reset(cam)
 
     def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
         """Set napari dims.range to match the chosen level shape.
@@ -573,7 +572,7 @@ class EGLRendererWorker:
                 int(level),
                 str(path) if path else "<default>",
             )
-        self._scene_state_coordinator.queue_multiscale_level(int(level), str(path) if path else None)
+        self._scene_state_queue.queue_multiscale_level(int(level), str(path) if path else None)
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
@@ -717,9 +716,9 @@ class EGLRendererWorker:
         info: Dict[str, Any] = {
             "canvas_size": (int(self.width), int(self.height)),
             "data_wh": tuple(int(v) for v in self._data_wh) if self._data_wh else None,
-            "data_depth": int(self._data_d) if getattr(self, "_data_d", None) is not None else None,
+            "data_depth": int(self._data_d) if self._data_d is not None else None,
         }
-        view = getattr(self, "view", None)
+        view = self.view
         if view is not None:
             info["view_class"] = view.__class__.__name__
             try:
@@ -1149,14 +1148,12 @@ class EGLRendererWorker:
             z_idx = int(self._z_index or 0)
             slab = self._load_slice(source, applied.level, z_idx)
             roi_for_layer = None
-            try:
-                if self._last_roi is not None and int(self._last_roi[0]) == int(applied.level):
-                    roi_for_layer = self._last_roi[1]
-            except Exception:
-                roi_for_layer = None
+            if self._last_roi is not None and int(self._last_roi[0]) == int(applied.level):
+                roi_for_layer = self._last_roi[1]
             if layer is not None:
-                cam = getattr(self.view, 'camera', None)
-                ctx = self._build_scene_state_context(cam)
+                view = self.view
+                assert view is not None
+                ctx = self._build_scene_state_context(view.camera)
                 SceneStateApplier.apply_slice_to_layer(
                     ctx,
                     source=source,
@@ -1167,13 +1164,12 @@ class EGLRendererWorker:
             h, w = int(slab.shape[0]), int(slab.shape[1])
             self._data_wh = (w, h)
             self._data_d = None
-            if not self._preserve_view_on_switch and self.view is not None and hasattr(self.view, 'camera'):
-                try:
-                    world_w = float(w) * float(max(1e-12, sx))
-                    world_h = float(h) * float(max(1e-12, sy))
-                    self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-                except Exception:
-                    logger.debug("apply_level: camera set_range failed", exc_info=True)
+            if not self._preserve_view_on_switch:
+                view = self.view
+                assert view is not None and view.camera is not None
+                world_w = float(w) * float(max(1e-12, sx))
+                world_h = float(h) * float(max(1e-12, sy))
+                view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             self._log_layer_assignment('slice', applied.level, self._z_index, (h, w), applied.contrast)
 
         self._notify_scene_refresh()
@@ -1231,27 +1227,21 @@ class EGLRendererWorker:
         )
 
     def _clear_visual(self) -> None:
-        if self._visual is not None and hasattr(self._visual, 'parent'):
+        if self._visual is not None:
             self._visual.parent = None  # type: ignore[attr-defined]
         self._visual = None
 
     def _apply_ndisplay_switch(self, ndisplay: int) -> None:
         """Apply 2D/3D toggle on the render thread."""
-        assert self.view is not None and hasattr(self.view, 'scene'), "VisPy view must be initialized"
+        assert self.view is not None and self.view.scene is not None, "VisPy view must be initialized"
         # Adapter-only: do not rebuild visuals; just update viewer dims
         target = 3 if int(ndisplay) >= 3 else 2
         self.use_volume = bool(target == 3)
         if self._viewer is not None:
-            try:
-                self._viewer.dims.ndisplay = target
-            except Exception:
-                logger.debug("ndisplay update via viewer failed", exc_info=True)
+            self._viewer.dims.ndisplay = target
         logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
         # Evaluate policy once after display mode changes
-        try:
-            self._evaluate_level_policy()
-        except Exception:
-            logger.debug("ndisplay selection failed", exc_info=True)
+        self._evaluate_level_policy()
 
     def _init_capture(self) -> None:
         self._gl_capture.ensure()
@@ -1297,7 +1287,8 @@ class EGLRendererWorker:
             encoder.request_idr()
 
     def render_frame(self, azimuth_deg: Optional[float] = None) -> None:
-        if azimuth_deg is not None and hasattr(self.view, "camera"):
+        if azimuth_deg is not None:
+            assert self.view is not None and self.view.camera is not None
             self.view.camera.azimuth = float(azimuth_deg)
         self.drain_scene_updates()
         t0 = time.perf_counter()
@@ -1309,17 +1300,17 @@ class EGLRendererWorker:
         """Queue a complete scene state snapshot for the next frame."""
         self._last_interaction_ts = time.perf_counter()
         normalized = ServerSceneState(
-            center=tuple(state.center) if state.center is not None else None,
+            center=tuple(float(c) for c in state.center) if state.center is not None else None,
             zoom=float(state.zoom) if state.zoom is not None else None,
-            angles=tuple(state.angles) if state.angles is not None else None,
-            current_step=tuple(state.current_step) if state.current_step is not None else None,
-            volume_mode=str(getattr(state, 'volume_mode', None)) if getattr(state, 'volume_mode', None) is not None else None,
-            volume_colormap=str(getattr(state, 'volume_colormap', None)) if getattr(state, 'volume_colormap', None) is not None else None,
-            volume_clim=tuple(getattr(state, 'volume_clim')) if getattr(state, 'volume_clim', None) is not None else None,
-            volume_opacity=float(getattr(state, 'volume_opacity')) if getattr(state, 'volume_opacity', None) is not None else None,
-            volume_sample_step=float(getattr(state, 'volume_sample_step')) if getattr(state, 'volume_sample_step', None) is not None else None,
+            angles=tuple(float(a) for a in state.angles) if state.angles is not None else None,
+            current_step=tuple(int(s) for s in state.current_step) if state.current_step is not None else None,
+            volume_mode=str(state.volume_mode) if state.volume_mode is not None else None,
+            volume_colormap=str(state.volume_colormap) if state.volume_colormap is not None else None,
+            volume_clim=tuple(float(v) for v in state.volume_clim) if state.volume_clim is not None else None,
+            volume_opacity=float(state.volume_opacity) if state.volume_opacity is not None else None,
+            volume_sample_step=float(state.volume_sample_step) if state.volume_sample_step is not None else None,
         )
-        self._scene_state_coordinator.queue_scene_state(normalized)
+        self._scene_state_queue.queue_scene_state(normalized)
 
     def process_camera_commands(self, commands: Sequence[CameraCommand]) -> None:
         if not commands:
@@ -1327,15 +1318,17 @@ class EGLRendererWorker:
         # Interaction observed (kept for future metrics)
         self._user_interaction_seen = True
         logger.debug("worker processing %d camera command(s)", len(commands))
-        cam = self.view.camera
+        view = self.view
+        assert view is not None, "process_camera_commands requires an active VisPy view"
+        cam = view.camera
         if cam is None:
             for cmd in commands:
                 if cmd.kind == 'zoom' and cmd.factor is not None and cmd.factor > 0.0:
-                    self._scene_state_coordinator.record_zoom_intent(float(cmd.factor))
+                    self._scene_state_queue.record_zoom_intent(float(cmd.factor))
             return
 
         canvas_wh: tuple[int, int]
-        if self.canvas is not None and hasattr(self.canvas, 'size'):
+        if self.canvas is not None:
             canvas_wh = (int(self.canvas.size[0]), int(self.canvas.size[1]))
         else:
             canvas_wh = (self.width, self.height)
@@ -1349,7 +1342,7 @@ class EGLRendererWorker:
         outcome: CameraCommandOutcome = apply_camera_commands(
             commands,
             camera=cam,
-            view=self.view,
+            view=view,
             canvas_size=canvas_wh,
             reset_camera=self._apply_camera_reset,
             debug_flags=debug_flags,
@@ -1362,7 +1355,7 @@ class EGLRendererWorker:
                 if zoom_ratio > 1.0:
                     # Napari emits factors >1 for zoom-in; selector expects <1.0 to mean zoom-in.
                     zoom_ratio = 1.0 / zoom_ratio
-                self._scene_state_coordinator.record_zoom_intent(zoom_ratio)
+                self._scene_state_queue.record_zoom_intent(zoom_ratio)
                 self._last_zoom_hint_ts = now_ts
 
         self._last_interaction_ts = time.perf_counter()
@@ -1370,20 +1363,17 @@ class EGLRendererWorker:
         if outcome.camera_changed:
             self._mark_render_tick_needed()
         if outcome.policy_triggered:
-            self._policy_eval_pending = True
+            self._level_policy_refresh_needed = True
 
     def _apply_camera_reset(self, cam) -> None:
-        if cam is None or not hasattr(cam, 'set_range'):
-            return
-        w, h = getattr(self, '_data_wh', (self.width, self.height))
-        d = getattr(self, '_data_d', None)
+        assert cam is not None, "VisPy camera expected"
+        assert hasattr(cam, "set_range"), "Camera missing set_range handler"
+        w, h = self._data_wh
+        d = self._data_d
         # Convert pixel dims to world extents using current level scale
         sx = sy = 1.0
-        try:
-            if self._scene_source is not None and not self.use_volume:
-                sy, sx = plane_scale_for_level(self._scene_source, int(self._active_ms_level))
-        except Exception:
-            logger.debug('camera reset: level scale lookup failed', exc_info=True)
+        if self._scene_source is not None and not self.use_volume:
+            sy, sx = plane_scale_for_level(self._scene_source, int(self._active_ms_level))
         if d is not None:
             # 3D: set full volume range
             cam.set_range(x=(0, int(w)), y=(0, int(h)), z=(0, int(d)))
@@ -1419,7 +1409,7 @@ class EGLRendererWorker:
         )
 
     def drain_scene_updates(self) -> None:
-        updates: SceneUpdateBundle = self._scene_state_coordinator.drain_pending_updates()
+        updates: PendingSceneUpdate = self._scene_state_queue.drain_pending_updates()
 
         if updates.display_mode is not None:
             self._apply_ndisplay_switch(updates.display_mode)
@@ -1433,7 +1423,9 @@ class EGLRendererWorker:
         if state is None:
             return
 
-        cam = getattr(self.view, 'camera', None)
+        view = self.view
+        assert view is not None, "drain_scene_updates requires an active VisPy view"
+        cam = view.camera
 
         # Delegate dims/Z handling to the applier in 2D mode
         if not bool(self.use_volume) and state.current_step is not None:
@@ -1451,11 +1443,11 @@ class EGLRendererWorker:
             ctx = self._build_scene_state_context(cam)
             SceneStateApplier.apply_volume_params(
                 ctx,
-                mode=getattr(state, 'volume_mode', None),
-                colormap=getattr(state, 'volume_colormap', None),
-                clim=getattr(state, 'volume_clim', None),
-                opacity=getattr(state, 'volume_opacity', None),
-                sample_step=getattr(state, 'volume_sample_step', None),
+                mode=state.volume_mode,
+                colormap=state.volume_colormap,
+                clim=state.volume_clim,
+                opacity=state.volume_opacity,
+                sample_step=state.volume_sample_step,
             )
 
         if cam is None:
@@ -1463,21 +1455,24 @@ class EGLRendererWorker:
             return
 
         # Legacy absolute camera fields
-        if state.center is not None and hasattr(cam, 'center'):
+        if state.center is not None:
+            assert hasattr(cam, "center"), "Camera missing center property"
             cam.center = state.center  # type: ignore[attr-defined]
-        if state.zoom is not None and hasattr(cam, 'zoom'):
+        if state.zoom is not None:
+            assert hasattr(cam, "zoom"), "Camera missing zoom property"
             cam.zoom = state.zoom  # type: ignore[attr-defined]
-        if state.angles is not None and hasattr(cam, 'angles'):
+        if state.angles is not None:
+            assert hasattr(cam, "angles"), "Camera missing angles property"
             cam.angles = state.angles  # type: ignore[attr-defined]
 
         # Evaluate policy only if the absolute state actually changed
-        if self._scene_state_coordinator.update_state_signature(state):
+        if self._scene_state_queue.update_state_signature(state):
             self._evaluate_level_policy()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
         """Queue a 2D/3D view switch to apply on the render thread."""
-        self._scene_state_coordinator.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
+        self._scene_state_queue.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return self._gl_capture.blit_with_timing()
@@ -1499,7 +1494,7 @@ class EGLRendererWorker:
         t_b1 = time.perf_counter()
         blit_cpu_ms = (t_b1 - t_b0) * 1000.0
         debug_cb = None
-        if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
+        if self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
             def _cb(tex_id: int, w: int, h: int, frame) -> None:
                 self._debug.dump_triplet(tex_id, w, h, frame)  # type: ignore[attr-defined]
 
@@ -1507,11 +1502,11 @@ class EGLRendererWorker:
         map_ms, copy_ms = self._frame_pipeline.map_and_copy_to_torch(debug_cb)
 
         reset_cb: Optional[Callable[[], None]] = None
-        if self._auto_reset_on_black and hasattr(self, 'view') and getattr(self.view, 'camera', None) is not None:
+        if self._auto_reset_on_black and self.view is not None and self.view.camera is not None:
             def _reset_camera() -> None:
-                cam = getattr(self.view, 'camera', None)
-                if cam is not None:
-                    self._apply_camera_reset(cam)
+                cam = self.view.camera
+                assert cam is not None
+                self._apply_camera_reset(cam)
 
             reset_cb = _reset_camera
 
@@ -1599,8 +1594,8 @@ class EGLRendererWorker:
                 )
                 self._last_roi = decision.new_last_roi
         self.canvas.render()
-        if self._policy_eval_pending:
-            self._policy_eval_pending = False
+        if self._level_policy_refresh_needed:
+            self._level_policy_refresh_needed = False
             self._evaluate_level_policy()
         self._render_tick_required = False
         self._render_loop_started = True
@@ -1632,7 +1627,7 @@ class EGLRendererWorker:
             return
 
         current = int(self._active_ms_level)
-        zoom_hint = self._scene_state_coordinator.consume_zoom_intent(max_age=0.5)
+        zoom_hint = self._scene_state_queue.consume_zoom_intent(max_age=0.5)
         zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
 
         now_ts = time.perf_counter()

@@ -21,6 +21,7 @@ from napari._vispy.layers.image import VispyImageLayer
 from napari.components import ViewerModel
 from napari.layers import Image
 
+from ..config import load_server_ctx
 from ..egl_worker import EGLRendererWorker, FrameTimings
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,7 @@ def run_spike(cfg: SpikeConfig, stop_event: Optional[threading.Event] = None) ->
         fps=cfg.fps,
         use_volume=(cfg.layer == "volume"),
         disable_nvenc=not cfg.use_nvenc,
+        ctx=load_server_ctx(),
     )
     try:
         _attach_to_worker(worker, adapter, cfg.layer)

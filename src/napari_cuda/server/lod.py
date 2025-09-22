@@ -93,11 +93,8 @@ def stabilize_level(napari_level: int, prev_level: int, *, hysteresis: float = 0
     For Phase A this is a pass-through unless hysteresis>0 (then clamp single-
     step oscillations). More sophisticated policies can plug in here later.
     """
-    try:
-        cur = int(prev_level)
-        nxt = int(napari_level)
-    except Exception:
-        return int(napari_level)
+    cur = int(prev_level)
+    nxt = int(napari_level)
     if hysteresis <= 0.0:
         return nxt
     # Simple clamp: require two-step intent to move away from prev_level
@@ -243,11 +240,7 @@ def compute_viewport_roi(
         return SliceROI(0, h, 0, w)
 
     view = getattr(viewer, "_view", None) or getattr(viewer, "_qt_window", None)
-    # Prefer public viewer.canvas.
-    try:
-        canvas = getattr(viewer, "canvas", None)
-    except Exception:
-        canvas = None
+    canvas = getattr(viewer, "canvas", None)
     # Fallback to private attribute used in our adapter path
     if canvas is None and hasattr(viewer, "_canvas"):
         canvas = getattr(viewer, "_canvas")
@@ -257,35 +250,30 @@ def compute_viewport_roi(
     sy = max(1e-12, float(sy))
     sx = max(1e-12, float(sx))
 
-    try:
-        # napari exposes a current camera on the viewer; our adapter sets it on worker.view
-        vis_view = getattr(getattr(viewer, "_view", None), "view", None)
-        if vis_view is None and hasattr(viewer, "window"):
-            vis_view = getattr(getattr(viewer, "window", None), "_qt_viewer", None)
-        if vis_view is None:
-            raise RuntimeError("No vispy view available for ROI compute")
-        # We expect the adapter to set .scene.transform with a MatrixTransform
-        scene = getattr(vis_view, "scene", None)
-        transform = getattr(scene, "transform", None) if scene is not None else None
-        if transform is None or not hasattr(transform, "imap"):
-            raise RuntimeError("No transform.imap available for ROI compute")
-        # Sample viewport corners in pixel coords (canvas space) and map to world
-        width = int(getattr(vis_view, "size", (w, h))[0])
-        height = int(getattr(vis_view, "size", (w, h))[1])
-        corners = (
-            (0.0, 0.0),
-            (float(width), 0.0),
-            (0.0, float(height)),
-            (float(width), float(height)),
-        )
-        world_pts = [transform.imap((float(x), float(y), 0.0)) for x, y in corners]
-        xs = [float(pt[0]) for pt in world_pts]
-        ys = [float(pt[1]) for pt in world_pts]
-        x0, x1 = min(xs), max(xs)
-        y0, y1 = min(ys), max(ys)
-    except Exception:
-        # Fallback to full frame
-        return SliceROI(0, h, 0, w)
+    vis_view = getattr(getattr(viewer, "_view", None), "view", None)
+    if vis_view is None and hasattr(viewer, "window"):
+        vis_view = getattr(getattr(viewer, "window", None), "_qt_viewer", None)
+    if vis_view is None:
+        raise RuntimeError("No vispy view available for ROI compute")
+
+    scene = getattr(vis_view, "scene", None)
+    transform = getattr(scene, "transform", None) if scene is not None else None
+    if transform is None or not hasattr(transform, "imap"):
+        raise RuntimeError("No transform.imap available for ROI compute")
+
+    width = int(getattr(vis_view, "size", (w, h))[0])
+    height = int(getattr(vis_view, "size", (w, h))[1])
+    corners = (
+        (0.0, 0.0),
+        (float(width), 0.0),
+        (0.0, float(height)),
+        (float(width), float(height)),
+    )
+    world_pts = [transform.imap((float(x), float(y), 0.0)) for x, y in corners]
+    xs = [float(pt[0]) for pt in world_pts]
+    ys = [float(pt[1]) for pt in world_pts]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
 
     x_start = int(math.floor(min(x0, x1) / sx))
     x_stop = int(math.ceil(max(x0, x1) / sx))
@@ -295,45 +283,32 @@ def compute_viewport_roi(
 
     # Align to chunk boundaries to stabilize IO and avoid sub-chunk phasing
     if align_chunks:
-        try:
-            arr = source.get_level(level)
-            chunks = getattr(arr, "chunks", None)
-            axes = source.axes
-            lower = [str(a).lower() for a in axes]
-            if chunks is not None:
-                if "y" in lower:
-                    y_pos = lower.index("y")
-                else:
-                    y_pos = max(0, len(chunks) - 2)
-                if "x" in lower:
-                    x_pos = lower.index("x")
-                else:
-                    x_pos = max(0, len(chunks) - 1)
-                cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-                cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-                cy = max(1, cy)
-                cx = max(1, cx)
-                ys = (roi.y_start // cy) * cy
-                ye = ((roi.y_stop + cy - 1) // cy) * cy
-                xs = (roi.x_start // cx) * cx
-                xe = ((roi.x_stop + cx - 1) // cx) * cx
-                roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
-        except Exception:
-            logger.debug("ROI chunk alignment failed", exc_info=True)
+        arr = source.get_level(level)
+        chunks = getattr(arr, "chunks", None)
+        if chunks is not None:
+            lower = [str(a).lower() for a in source.axes]
+            y_pos = lower.index("y") if "y" in lower else max(0, len(chunks) - 2)
+            x_pos = lower.index("x") if "x" in lower else max(0, len(chunks) - 1)
+            cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
+            cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
+            cy = max(1, cy)
+            cx = max(1, cx)
+            ys = (roi.y_start // cy) * cy
+            ye = ((roi.y_stop + cy - 1) // cy) * cy
+            xs = (roi.x_start // cx) * cx
+            xe = ((roi.x_stop + cx - 1) // cx) * cx
+            roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
 
     # Small-move hysteresis relative to previous ROI
     if prev_roi is not None and edge_threshold > 0:
-        try:
-            thr = int(edge_threshold)
-            if (
-                abs(roi.y_start - prev_roi.y_start) < thr
-                and abs(roi.y_stop - prev_roi.y_stop) < thr
-                and abs(roi.x_start - prev_roi.x_start) < thr
-                and abs(roi.x_stop - prev_roi.x_stop) < thr
-            ):
-                roi = prev_roi
-        except Exception:
-            pass
+        thr = int(edge_threshold)
+        if (
+            abs(roi.y_start - prev_roi.y_start) < thr
+            and abs(roi.y_stop - prev_roi.y_stop) < thr
+            and abs(roi.x_start - prev_roi.x_start) < thr
+            and abs(roi.x_stop - prev_roi.x_stop) < thr
+        ):
+            roi = prev_roi
 
     if roi.is_empty():
         return SliceROI(0, h, 0, w)

@@ -13,6 +13,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+from ..config import load_server_ctx
 from ..egl_worker import EGLRendererWorker, FrameTimings
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ def run_capture(cfg: CaptureConfig) -> list[CaptureResult]:
         height=cfg.height,
         fps=cfg.fps,
         use_volume=cfg.use_volume,
+        ctx=load_server_ctx(),
     )
     try:
         results: list[CaptureResult] = []

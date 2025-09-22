@@ -52,7 +52,8 @@ def _apply_encoder_profile(profile: str) -> None:
         logger.debug("Failed to log encoder profile %s", profile, exc_info=True)
 
 from .egl_worker import EGLRendererWorker
-from .state_machine import CameraCommand, ServerSceneState
+from .scene_state import ServerSceneState
+from .state_machine import CameraCommand
 from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from .metrics import Metrics

@@ -4,8 +4,8 @@
 - `egl_worker.py`: 1,920 LOC (down ~350 from the pre-extraction snapshot). Longest blocks are `__init__` (254 lines), `_viewport_roi_for_level` (87), and `_evaluate_level_policy` (109); `_apply_level_internal` now delegates to helpers and is <80 lines.
 - `scene_state_applier.py`: 216 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
 - `lod.py`: 553 LOC after folding the selector helpers back into the core LOD module. The policy helpers (`LevelPolicy*`, `select_level`) now live beside `apply_level`/ROI math, removing the redundant `lod_selector.py` layer.
-- `try:` count trending down (≈110) with hot-path guards removed from camera/state application. Remaining broad `try:` live at subsystem boundaries (EGL/CUDA/NVENC) and ROI math; targets to trim continue in Phase C/D.
-- `getattr` usage in the worker dropped (≈60 → ≈35) by asserting invariants in the new helper. Further reductions arrive with Phase C decomposition.
+- `try:` count trimmed to ≈60 with camera/state hot-path guards removed; remaining blocks sit at subsystem boundaries (EGL/CUDA/NVENC) and legacy ROI helpers queued for Phase C/D.
+- `getattr` usage in the worker now ≈33 after asserting invariants in the state queue + camera paths. Further reductions arrive with Phase C decomposition.
 - Env/env_bool still sprinkled across init (encoder, ROI, debug). Centralised logging/config policy remains scheduled for Phase D.
 - Server (`egl_headless_server.py`) untouched in this pass; still 2,249 LOC.
 
@@ -39,11 +39,12 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
 - **Remaining milestones to close Phase B**:
   1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `FramePipeline` now owns capture/encode plumbing.
-  2. **Guard + naming audit** — finish renaming (`SceneStateCoordinator`, `SceneUpdateBundle`, `_policy_eval_pending`) and remove the remaining ROI/policy try/except fallbacks now that `compute_viewport_roi` owns the math; re-check `try`/`getattr` counts.
-  3. **ServerCtx policy surface** — lift level-policy thresholds, logging toggles, and related env reads into a shared config object resolved at init to simplify `__init__` and prepare for Phase D logging work. ✅ `ServerCtx.policy` is now authoritative; next follow-up is to require callers to pass `ServerCtx` explicitly once guard audit is complete.
-  4. **Integration tests** — add the zoom-intent regression test and a scripted render smoke harness that exercises `preserve_view_on_switch=True` so state/camera changes stay covered end-to-end.
+  2. **Guard + naming audit** — ✅ renamed to `SceneStateQueue`/`PendingSceneUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
+  3. **ServerCtx policy surface** — ✅ `ServerCtx.policy` is now authoritative and callers must provide an explicit ctx (`EGLRendererWorker` no longer falls back to `load_server_ctx()`; experiments/headless server wire it through).
+  4. **Integration tests** — ✅ added zoom-intent coverage and preserve-view smoke harness in `src/napari_cuda/server/_tests/test_worker_integration.py` to exercise the worker pipeline end-to-end.
 
 ### Phase C — ROI & LOD Minimization
+- Phase transition: Phase B prerequisites (guard audit, integration coverage, explicit `ServerCtx`) are satisfied; Phase C work can now begin while capture/logging follow-ups proceed in parallel.
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
 - **LOD selection**: `_evaluate_level_policy` delegates to `lod.select_level`, so zoom hints and thresholds are handled in a pure helper with single env reads during init.
 - **View preservation**: Promote the new unit guard into an integration-level check once the ROI extraction lands, so render-thread camera state stays stable without manual smoke tests.
@@ -74,10 +75,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Lint rules**: Introduce ruff rules to flag `except Exception` & `logger.*` inside try/except.
 
 ## Immediate Next Steps
-- Audit ROI and policy guards now that `compute_viewport_roi`/`lod.select_level` own the math; replace fallback logging with assertions and keep only boundary logging.
-- Backfill a scripted render smoke test (or integration test) that exercises Z updates with `preserve_view_on_switch=True`, using the new unit coverage as a baseline.
-- Carve the capture/CUDA glue into `capture.py`/`cuda_interop.py`, shrinking `egl_worker.py` toward the 1.5k LOC mark.
-- Land the zoom-hint integration test around the new selector before relaxing thresholds further.
+- Kick off Phase C ROI extraction (`compute_viewport_roi` to own ROI math fully) while carving the capture/CUDA glue into dedicated modules to keep the worker trending downward.
 - Draft the `ServerCtx` logging/debug config surface so env probes migrate in Phase D without another worker churn.
 
 ---

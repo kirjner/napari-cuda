@@ -1,31 +1,22 @@
-"""Scene state coordination helpers for the EGL renderer worker.
+"""Scene state queue helpers for the EGL renderer worker.
 
-This module centralises the bookkeeping previously sprinkled through
-``egl_worker`` so that the worker can delegate state queuing, signature
-tracking, and zoom intent handling to small, testable components.
+This module centralises the bookkeeping previously embedded in ``egl_worker``
+so the worker can delegate state queuing, signature tracking, and zoom intent
+handling to small, testable components.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
 import threading
 import time
+from typing import Callable, Literal, Optional
+
+from napari_cuda.server.scene_state import ServerSceneState
 
 
-@dataclass(frozen=True)
-class ServerSceneState:
-    """Minimal scene state snapshot applied atomically per frame."""
-
-    center: Optional[tuple[float, float, float]] = None
-    zoom: Optional[float] = None
-    angles: Optional[tuple[float, float, float]] = None
-    current_step: Optional[tuple[int, ...]] = None
-    volume_mode: Optional[str] = None
-    volume_colormap: Optional[str] = None
-    volume_clim: Optional[tuple[float, float]] = None
-    volume_opacity: Optional[float] = None
-    volume_sample_step: Optional[float] = None
+# `ServerSceneState` moves to `napari_cuda.server.scene_state` to break the
+# circular dependency between the worker and state queue. Import lazily below.
 
 
 @dataclass(frozen=True)
@@ -48,7 +39,7 @@ class MultiscaleLevelRequest:
 
 
 @dataclass(frozen=True)
-class SceneUpdateBundle:
+class PendingSceneUpdate:
     display_mode: Optional[int] = None
     multiscale: Optional[MultiscaleLevelRequest] = None
     scene_state: Optional[ServerSceneState] = None
@@ -60,8 +51,8 @@ class ZoomIntent:
     timestamp: float
 
 
-class SceneStateCoordinator:
-    """Thread-safe coordinator for pending scene updates and zoom intents."""
+class SceneStateQueue:
+    """Thread-safe queue for pending scene updates and zoom intents."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._lock = threading.Lock()
@@ -84,9 +75,9 @@ class SceneStateCoordinator:
         with self._lock:
             self._pending_scene_state = state
 
-    def drain_pending_updates(self) -> SceneUpdateBundle:
+    def drain_pending_updates(self) -> PendingSceneUpdate:
         with self._lock:
-            updates = SceneUpdateBundle(
+            updates = PendingSceneUpdate(
                 display_mode=self._pending_display_mode,
                 multiscale=self._pending_multiscale,
                 scene_state=self._pending_scene_state,
@@ -140,8 +131,7 @@ class SceneStateCoordinator:
 __all__ = [
     "CameraCommand",
     "MultiscaleLevelRequest",
-    "SceneUpdateBundle",
-    "SceneStateCoordinator",
-    "ServerSceneState",
+    "PendingSceneUpdate",
+    "SceneStateQueue",
     "ZoomIntent",
 ]
