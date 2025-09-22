@@ -55,6 +55,35 @@ class AppliedLevel:
     dtype: str
 
 
+@dataclass(frozen=True)
+class LevelPolicyConfig:
+    threshold_in: float
+    threshold_out: float
+    fine_threshold: float
+    hysteresis: float
+    cooldown_ms: float
+
+
+@dataclass(frozen=True)
+class LevelPolicyInputs:
+    current_level: int
+    oversampling: Mapping[int, float]
+    zoom_ratio: Optional[float]
+    lock_level: Optional[int]
+    last_switch_ts: float
+    now_ts: float
+
+
+@dataclass(frozen=True)
+class LevelPolicyDecision:
+    desired_level: int
+    selected_level: int
+    action: str
+    should_switch: bool
+    blocked_reason: Optional[str]
+    cooldown_remaining_ms: float = 0.0
+
+
 # ---- Stabilizer --------------------------------------------------------------
 
 
@@ -78,6 +107,116 @@ def stabilize_level(napari_level: int, prev_level: int, *, hysteresis: float = 0
 
 
 # ---- ROI computation ---------------------------------------------------------
+
+
+def _clamp_level(value: int, *, max_level: int) -> int:
+    return max(0, min(int(value), int(max_level)))
+
+
+def select_level(
+    config: LevelPolicyConfig,
+    inputs: LevelPolicyInputs,
+) -> LevelPolicyDecision:
+    overs_map = {int(k): float(v) for k, v in inputs.oversampling.items() if v is not None}
+    if not overs_map:
+        return LevelPolicyDecision(
+            desired_level=int(inputs.current_level),
+            selected_level=int(inputs.current_level),
+            action="no-oversampling",
+            should_switch=False,
+            blocked_reason="no-oversampling",
+        )
+
+    current = int(inputs.current_level)
+    max_level = max(overs_map.keys())
+
+    desired: Optional[int] = None
+    action = "heuristic"
+    zoom_ratio = inputs.zoom_ratio
+    if zoom_ratio is not None:
+        eps = 1e-3
+        if zoom_ratio < 1.0 - eps and current > 0:
+            desired = current - 1
+            action = "zoom-in"
+        elif zoom_ratio > 1.0 + eps and current < max_level:
+            desired = current + 1
+            action = "zoom-out"
+
+    if desired is None:
+        desired = current
+        if current > 0:
+            finer = current - 1
+            ratio = overs_map.get(finer)
+            if ratio is not None and ratio <= config.fine_threshold:
+                desired = finer
+        if desired == current and current < max_level:
+            ratio_cur = overs_map.get(current)
+            if ratio_cur is not None and ratio_cur > config.threshold_out:
+                desired = current + 1
+        action = "heuristic"
+    else:
+        desired = _clamp_level(desired, max_level=max_level)
+        if desired < current:
+            desired = max(desired, current - 1)
+        elif desired > current:
+            desired = min(desired, current + 1)
+
+    selected = stabilize_level(int(desired), current, hysteresis=config.hysteresis)
+    sel = int(selected)
+
+    # Respect zoom hints by tightening the outgoing threshold when the user is
+    # explicitly zooming in or out. This mirrors the previous inline policy in
+    # ``EGLRendererWorker`` and preserves the softer 1.20 band for hint-driven
+    # zoom-outs so they may trigger sooner than heuristic switching.
+    thr_in = float(config.threshold_in)
+    thr_out = float(config.threshold_out)
+    if action == "zoom-in":
+        thr_in = min(1.20, thr_in)
+    elif action == "zoom-out":
+        thr_out = min(1.20, thr_out)
+
+    if sel < current:
+        if overs_map.get(sel, float("inf")) > thr_in:
+            sel = current
+    elif sel > current:
+        if overs_map.get(current, 0.0) <= thr_out:
+            sel = current
+    selected = sel
+
+    reason = action
+    if inputs.lock_level is not None:
+        selected = int(inputs.lock_level)
+        reason = "locked"
+
+    if selected == current:
+        return LevelPolicyDecision(
+            desired_level=int(desired),
+            selected_level=int(selected),
+            action=reason,
+            should_switch=False,
+            blocked_reason=None,
+        )
+
+    if inputs.last_switch_ts > 0.0:
+        elapsed_ms = (inputs.now_ts - inputs.last_switch_ts) * 1000.0
+        if elapsed_ms < config.cooldown_ms:
+            remaining = max(0.0, config.cooldown_ms - elapsed_ms)
+            return LevelPolicyDecision(
+                desired_level=int(desired),
+                selected_level=int(selected),
+                action=reason,
+                should_switch=False,
+                blocked_reason="cooldown",
+                cooldown_remaining_ms=remaining,
+            )
+
+    return LevelPolicyDecision(
+        desired_level=int(desired),
+        selected_level=int(selected),
+        action=reason,
+        should_switch=True,
+        blocked_reason=None,
+    )
 
 
 def compute_viewport_roi(
@@ -374,7 +513,7 @@ def apply_level(
 
     # Contrast and scale
     contrast = source.ensure_contrast(level=int(target_level))
-    sy, sx = _plane_scale_for_level(source, int(target_level))
+    sy, sx = plane_scale_for_level(source, int(target_level))
     axes_str = "".join(str(a) for a in axes)
     dtype_str = str(source.dtype)
 
@@ -401,10 +540,14 @@ __all__ = [
     "LevelBudgetError",
     "LevelDecision",
     "AppliedLevel",
+    "LevelPolicyConfig",
+    "LevelPolicyDecision",
+    "LevelPolicyInputs",
     "stabilize_level",
     "compute_viewport_roi",
     "assert_volume_within_budget",
     "assert_slice_within_budget",
     "apply_level",
+    "select_level",
     "set_dims_range_for_level",
 ]

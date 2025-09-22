@@ -1,8 +1,9 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
-## Current Snapshot
-- `egl_worker.py`: 2,203 LOC (down ~200 from the pre-extraction snapshot) after moving scene application into `SceneStateApplier`. Longest blocks now `__init__` (~250 lines), `_viewport_roi_for_level` (186), `_apply_level_internal` (182), `_maybe_select_level` (154); `_apply_pending_state` is ~80 lines and purely orchestrates helpers.
-- `scene_state_applier.py`: 203 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
+## Current Snapshot (2025-09-22)
+- `egl_worker.py`: 1,920 LOC (down ~350 from the pre-extraction snapshot). Longest blocks are `__init__` (254 lines), `_viewport_roi_for_level` (87), and `_evaluate_level_policy` (109); `_apply_level_internal` now delegates to helpers and is <80 lines.
+- `scene_state_applier.py`: 216 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
+- `lod.py`: 553 LOC after folding the selector helpers back into the core LOD module. The policy helpers (`LevelPolicy*`, `select_level`) now live beside `apply_level`/ROI math, removing the redundant `lod_selector.py` layer.
 - `try:` count trending down (≈110) with hot-path guards removed from camera/state application. Remaining broad `try:` live at subsystem boundaries (EGL/CUDA/NVENC) and ROI math; targets to trim continue in Phase C/D.
 - `getattr` usage in the worker dropped (≈60 → ≈35) by asserting invariants in the new helper. Further reductions arrive with Phase C decomposition.
 - Env/env_bool still sprinkled across init (encoder, ROI, debug). Centralised logging/config policy remains scheduled for Phase D.
@@ -33,18 +34,20 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   - Method renames landed: `_apply_pending_state` → `drain_scene_updates`, `_render_frame_and_maybe_eval` → `render_tick`, clarifying responsibilities for future refactors.
   - Zoom intent handling normalized (factor >1 ⇒ invert) and rate-limited; LOD thresholds soften to 1.20 during active zoom hints.
   - Unit coverage exists for the state machine, camera controller, and `SceneStateApplier` helpers.
-  - `roi.py` now owns viewport ROI math and plane helpers; the worker simply wraps caching/log bookkeeping, eliminating the bespoke ROI code path and associated guard soup.
+- `roi.py` now owns viewport ROI math and plane helpers; the worker simply wraps caching/log bookkeeping, eliminating the bespoke ROI code path and associated guard soup.
+- `lod.py` now contains both the selector policy and the apply helpers. Near-term goal is to trim it back under 400 LOC by pushing ROI math that doesn't need selection context into `roi.py` and collapsing historic LevelDecision scaffolding once the compute-only napari path lands.
 - **In progress**:
   - Worker naming cleanup (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
 - **Next extraction targets**:
-- **ROI refresh integration**: follow through on translating remaining ROI fetches (policy, capture) to use the new helper consistently so no worker path pokes at napari internals directly.
-  - **Guard audit**: continue removing remaining defensive branches in ROI math once helper coverage lands.
+  - **Capture/interop split**: hoist capture + CUDA glue into `capture.py`/`cuda_interop.py` so the worker only orchestrates timing and logging.
+  - **Guard audit**: prune the remaining ROI fallback logs and broad `except Exception` blocks now that `compute_viewport_roi` is authoritative.
+  - **ServerCtx wiring**: lift level-policy thresholds and logging toggles into a shared config object to keep `__init__` moving toward the 200 LOC goal.
 - **Tests still to add**:
   - Integration-style test exercising level selection under a sequence of zoom hints to lock the relaxed thresholds in place.
 
 ### Phase C — ROI & LOD Minimization
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
-- **LOD selection**: Replace `_maybe_select_level` with composition of (1) input intent (zoom queue), (2) pure `lod.select_level(current, overs_map, thresholds)`. No env reads inside worker; thresholds come from config.
+- **LOD selection**: `_evaluate_level_policy` delegates to `lod.select_level`, so zoom hints and thresholds are handled in a pure helper with single env reads during init.
 
 ### Phase D — Logging & Debug Policy
 - Establish `logging_policy.py` or config entries controlling debug flags. Remove per-call env parsing (`NAPARI_CUDA_DEBUG_*`). Convert to bools resolved at init via `ServerCtx`.
@@ -57,7 +60,8 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - Module size goals (track in weekly snapshots):
   - `egl_worker.py` → target 700–900 LOC (never above 900); reductions come from camera/state, ROI/LOD, and capture helpers.
   - `state_machine.py` (new) → 200–300 LOC covering pending state application and camera command processing.
-  - `roi.py` / `lod.py` (new) → 250–300 LOC handling viewport ROI math and oversampling thresholds.
+  - `roi.py` → ≤250 LOC focused purely on ROI math once the remaining helpers move across.
+  - `lod.py` → <400 LOC after we delete the legacy `LevelDecision` scaffolding, shift ROI math to `roi.py`, and collapse unused code paths when the napari-gated selector matures.
   - `capture.py` (new) → ≤200 LOC for render→blit glue; `cuda_interop.py` (existing) → ≤150 LOC once trimmed to map/unmap and cleanup.
   - `rendering/encoder.py` → ~300 LOC after config/env plumbing moves into ServerCtx.
   - `egl_headless_server.py` → 800–1,000 LOC after websocket, watchdog, and metrics helpers extract.
@@ -71,9 +75,10 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Lint rules**: Introduce ruff rules to flag `except Exception` & `logger.*` inside try/except.
 
 ## Immediate Next Steps
-- Begin Phase C by extracting `_viewport_roi_for_level` and related oversampling math into `lod.py`/`roi.py`, further shrinking worker LOC and eliminating remaining defensive branches.
-- Land the integration-style test for zoom-hint-driven level selection to guard policy behaviour.
-- Prepare for Phase D by sketching a `ServerCtx` logging/debug policy so environment probes can be centralised when logging refactor begins.
+- Audit ROI and policy guards now that `compute_viewport_roi`/`lod_selector` own the math; replace fallback logging with assertions and keep only boundary logging.
+- Carve the capture/CUDA glue into `capture.py`/`cuda_interop.py`, shrinking `egl_worker.py` toward the 1.5k LOC mark.
+- Land the zoom-hint integration test around the new selector before relaxing thresholds further.
+- Draft the `ServerCtx` logging/debug config surface so env probes migrate in Phase D without another worker churn.
 
 ---
 

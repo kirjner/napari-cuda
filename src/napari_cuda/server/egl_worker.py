@@ -49,7 +49,7 @@ from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
-from napari_cuda.server.lod import stabilize_level
+from napari_cuda.server.lod import apply_level
 from napari_cuda.server.config import ServerCtx
 from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
@@ -61,6 +61,7 @@ from napari_cuda.server.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
 )
+from napari_cuda.server.lod import LevelPolicyConfig, LevelPolicyInputs, select_level
 from napari_cuda.server.scene_state_applier import (
     SceneStateApplier,
     SceneStateApplyContext,
@@ -227,6 +228,19 @@ class EGLRendererWorker:
             self._lock_level: Optional[int] = int(_lock) if (_lock is not None and _lock != '') else None
         except Exception:
             self._lock_level = None
+        try:
+            self._level_threshold_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
+        except Exception:
+            self._level_threshold_in = 1.05
+        try:
+            self._level_threshold_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
+        except Exception:
+            self._level_threshold_out = 1.35
+        try:
+            self._level_hysteresis = float(os.getenv('NAPARI_CUDA_LEVEL_HYST', '0.0') or '0.0')
+        except Exception:
+            self._level_hysteresis = 0.0
+        self._level_fine_threshold = max(self._level_threshold_in, 1.05)
         # Preserve current camera view on level switches (avoid resetting zoom)
         try:
             self._preserve_view_on_switch = env_bool('NAPARI_CUDA_PRESERVE_VIEW', True)
@@ -1120,178 +1134,70 @@ class EGLRendererWorker:
         *,
         prev_level: Optional[int] = None,
     ) -> None:
-        descriptor = source.level_descriptors[level]
-        axes = source.axes
-        axes_lower = [str(ax).lower() for ax in axes]
+        applied = apply_level(
+            source=source,
+            target_level=int(level),
+            prev_level=prev_level,
+            last_step=self._last_step,
+            viewer=self._viewer,
+        )
 
-        # Preserve current Z (and other indices) across level switches.
-        step_hint: Optional[Sequence[int]] = None
-        # 1) Use last dims step received from intents, if any
-        if self._last_step is not None:
-            step_hint = tuple(int(x) for x in self._last_step)
-        # 2) Else fall back to viewer's dims if available
-        if step_hint is None and self._viewer is not None:
-            try:
-                step_hint = tuple(int(x) for x in self._viewer.dims.current_step)
-            except Exception:
-                step_hint = None
-        # 3) Else use source current step
-        if step_hint is None:
-            step_hint = source.current_step
-
-        # Proportional Z remap only when switching between different levels (depth may change)
-        try:
-            if prev_level is not None and int(prev_level) != int(level) and 'z' in axes_lower:
-                zi = axes_lower.index('z')
-                try:
-                    prev_desc = source.level_descriptors[int(prev_level)]
-                    z_src = int(prev_desc.shape[zi]) if 0 <= zi < len(prev_desc.shape) else int(prev_desc.shape[0])
-                except Exception:
-                    z_src = None
-                try:
-                    z_tgt = int(descriptor.shape[zi]) if 0 <= zi < len(descriptor.shape) else int(descriptor.shape[0])
-                except Exception:
-                    z_tgt = None
-                if (z_src is not None and z_tgt is not None and z_src > 0 and z_tgt > 0):
-                    cur_z = None
-                    # Prefer explicit step_hint (e.g., from a dims intent) over stale cached z_index
-                    if step_hint is not None and len(step_hint) > zi:
-                        cur_z = int(step_hint[zi])
-                    elif self._z_index is not None:
-                        cur_z = int(self._z_index)
-                    else:
-                        cur_z = 0
-                    if z_src <= 1:
-                        new_z = 0
-                    else:
-                        new_z = int(round(float(cur_z) * float(max(0, z_tgt - 1)) / float(max(1, z_src - 1))))
-                    new_z = max(0, min(int(new_z), int(z_tgt - 1)))
-                    # (diagnostic logging removed)
-                    sh = list(step_hint) if step_hint is not None else [0] * len(descriptor.shape)
-                    if len(sh) < len(descriptor.shape):
-                        sh.extend([0] * (len(descriptor.shape) - len(sh)))
-                    sh[zi] = int(new_z)
-                    step_hint = tuple(int(x) for x in sh)
-        except Exception:
-            logger.debug("proportional Z remap failed", exc_info=True)
-
-        with self._state_lock:
-            step = source.set_current_level(level, step=step_hint)
-
-        self._active_ms_level = level
-        # Keep viewer slider aligned with the applied level's clamped step
-        # IMPORTANT: set dims.range first to avoid clamping against previous level
-        if self._viewer is not None:
-            try:
-                self._set_dims_range_for_level(source, level)
-                self._viewer.dims.current_step = tuple(int(x) for x in step)
-                self._last_step = tuple(int(x) for x in step)
-            except Exception:
-                logger.debug("apply_level: syncing viewer dims failed", exc_info=True)
+        descriptor = source.level_descriptors[int(level)]
+        self._active_ms_level = applied.level
+        self._last_step = applied.step
+        self._z_index = applied.z_index
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
-        self._zarr_axes = ''.join(axes)
-        self._zarr_dtype = str(source.dtype)
-
-        if axes_lower and 'z' in axes_lower and len(step) > axes_lower.index('z'):
-            self._z_index = int(step[axes_lower.index('z')])
-        elif step:
-            self._z_index = int(step[0])
-        else:
-            self._z_index = None
-
-        # (diagnostic logging removed)
-
-        if self._viewer is not None:
-            # Ensure range is applied before setting step to avoid transient clamp
-            self._set_dims_range_for_level(source, level)
-            self._viewer.dims.current_step = tuple(int(x) for x in step)
-
-        # Ensure contrast cache/limits are updated regardless of napari layer presence
-        contrast = source.ensure_contrast(level=level)
-        self._zarr_clim = contrast
-
-        overs = None
-        try:
-            overs = self._oversampling_for_level(source, level)
-        except Exception:
-            logger.debug("oversampling compute failed", exc_info=True)
+        self._zarr_axes = applied.axes
+        self._zarr_dtype = applied.dtype
+        self._zarr_clim = applied.contrast
 
         layer = self._napari_layer
-        update_layer = layer is not None
-
         if self.use_volume:
-            volume = self._get_level_volume(source, level)
+            volume = self._get_level_volume(source, applied.level)
             d, h, w = int(volume.shape[0]), int(volume.shape[1]), int(volume.shape[2])
             self._data_wh = (w, h)
             self._data_d = d
-            if update_layer:
+            if layer is not None:
                 layer.data = volume
-                layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
-            self._log_layer_assignment('volume', level, None, (d, h, w), contrast)
+                layer.contrast_limits = [float(applied.contrast[0]), float(applied.contrast[1])]
+            self._log_layer_assignment('volume', applied.level, None, (d, h, w), applied.contrast)
         else:
-            z_idx = self._z_index or 0
-            # Apply per-level scale to the layer BEFORE computing ROI/slab so
-            # world->index mapping is consistent across level changes.
-            try:
-                sy, sx = plane_scale_for_level(source, level)
-                if update_layer:
+            sy, sx = applied.scale_yx
+            if layer is not None:
+                try:
                     layer.scale = (sy, sx)
-            except Exception:
-                logger.debug("apply_level: setting 2D layer scale pre-slab failed", exc_info=True)
-                sy = sx = 1.0
-            slab = self._load_slice(
-                source,
-                level,
-                z_idx,
-            )
-            # Place the ROI slab at its world offset so the view doesn't nudge
-            if update_layer:
-                try:
-                    roi_for_layer = None
-                    try:
-                        if getattr(self, '_last_roi', None) is not None and int(self._last_roi[0]) == int(level):
-                            roi_for_layer = self._last_roi[1]
-                    except Exception:
-                        roi_for_layer = None
-                    if roi_for_layer is not None:
-                        yoff = float(roi_for_layer.y_start) * float(max(1e-12, sy))
-                        xoff = float(roi_for_layer.x_start) * float(max(1e-12, sx))
-                        layer.translate = (yoff, xoff)
-                    else:
-                        layer.translate = (0.0, 0.0)
                 except Exception:
-                    logger.debug("apply_level: setting 2D layer translate failed", exc_info=True)
-            # (slab statistics logging removed)
-            if update_layer:
-                layer.data = slab
-                # Optionally keep existing contrast limits stable across pans/level switches
-                try:
-                    if not getattr(self, '_sticky_contrast', True):
-                        smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
-                        smax = float(np.nanmax(slab)) if hasattr(np, 'nanmax') else float(np.max(slab))
-                        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
-                            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
-                        else:
-                            if 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
-                                layer.contrast_limits = [0.0, 1.0]
-                            else:
-                                layer.contrast_limits = [smin, smax]
-                except Exception:
-                    # If sticky, leave as-is; else fallback to provided contrast
-                    if not getattr(self, '_sticky_contrast', True):
-                        layer.contrast_limits = [float(contrast[0]), float(contrast[1])]
-            h, w = plane_wh_for_level(source, level)
-            self._data_wh = (w, h)
+                    logger.debug("apply_level: setting 2D layer scale pre-slab failed", exc_info=True)
+            z_idx = int(self._z_index or 0)
+            slab = self._load_slice(source, applied.level, z_idx)
+            roi_for_layer = None
             try:
-                if not getattr(self, '_preserve_view_on_switch', True):
-                    if self.view is not None and hasattr(self.view, 'camera'):
-                        world_w = float(w) * float(max(1e-12, sx))
-                        world_h = float(h) * float(max(1e-12, sy))
-                        self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+                if self._last_roi is not None and int(self._last_roi[0]) == int(applied.level):
+                    roi_for_layer = self._last_roi[1]
             except Exception:
-                logger.debug("apply_level: camera set_range failed", exc_info=True)
-            self._log_layer_assignment('slice', level, self._z_index, (h, w), contrast)
+                roi_for_layer = None
+            if layer is not None:
+                cam = getattr(self.view, 'camera', None)
+                ctx = self._build_scene_state_context(cam)
+                SceneStateApplier.apply_slice_to_layer(
+                    ctx,
+                    source=source,
+                    slab=slab,
+                    roi=roi_for_layer,
+                    update_contrast=not self._sticky_contrast,
+                )
+            h, w = int(slab.shape[0]), int(slab.shape[1])
+            self._data_wh = (w, h)
+            self._data_d = None
+            if not self._preserve_view_on_switch and self.view is not None and hasattr(self.view, 'camera'):
+                try:
+                    world_w = float(w) * float(max(1e-12, sx))
+                    world_h = float(h) * float(max(1e-12, sy))
+                    self.view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+                except Exception:
+                    logger.debug("apply_level: camera set_range failed", exc_info=True)
+            self._log_layer_assignment('slice', applied.level, self._z_index, (h, w), applied.contrast)
 
         self._notify_scene_refresh()
 
@@ -1366,7 +1272,7 @@ class EGLRendererWorker:
         logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
         # Evaluate policy once after display mode changes
         try:
-            self._maybe_select_level()
+            self._evaluate_level_policy()
         except Exception:
             logger.debug("ndisplay selection failed", exc_info=True)
 
@@ -1576,7 +1482,7 @@ class EGLRendererWorker:
             )
 
         if cam is None:
-            self._maybe_select_level()
+            self._evaluate_level_policy()
             return
 
         # Legacy absolute camera fields
@@ -1589,7 +1495,7 @@ class EGLRendererWorker:
 
         # Evaluate policy only if the absolute state actually changed
         if self._scene_state_coordinator.update_state_signature(state):
-            self._maybe_select_level()
+            self._evaluate_level_policy()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
@@ -1700,7 +1606,7 @@ class EGLRendererWorker:
         self.canvas.render()
         if self.policy_eval_requested:
             self.policy_eval_requested = False
-            self._maybe_select_level()
+            self._evaluate_level_policy()
         self._render_tick_required = False
         self._render_loop_started = True
         t_r1 = time.perf_counter()
@@ -1793,13 +1699,8 @@ class EGLRendererWorker:
         return dst, (t_c1 - t_c0) * 1000.0
 
     # ---- C6 selection (napari-anchored) -------------------------------------
-    def _maybe_select_level(self) -> None:
-        """Select and apply a multiscale level based on current view.
-
-        Uses an oversampling estimate per level and a small stabilizer to avoid
-        oscillation. Enforces budgets via existing helpers and preserves Z
-        proportionally in apply.
-        """
+    def _evaluate_level_policy(self) -> None:
+        """Evaluate multiscale policy inputs and perform a level switch if needed."""
         if not self._zarr_path:
             return
         try:
@@ -1807,150 +1708,107 @@ class EGLRendererWorker:
         except Exception:
             logger.debug("ensure_scene_source failed in selection", exc_info=True)
             return
-        levels = list(range(len(source.level_descriptors)))
-        if not levels:
+
+        level_indices = list(range(len(source.level_descriptors)))
+        if not level_indices:
             return
-        # Build oversampling map: viewport-to-slice size ratio per level
+
         overs_map: Dict[int, float] = {}
-        for lvl in levels:
+        for lvl in level_indices:
             try:
                 overs_map[int(lvl)] = float(self._oversampling_for_level(source, int(lvl)))
             except Exception:
                 continue
         if not overs_map:
             return
+
         current = int(self._active_ms_level)
-        max_level = max(overs_map.keys())
-
-        # Prefer napari's own selected level when available; fall back to heuristic
-        desired = None
-        napari_reason = 'heuristic'
-
-        # Recent zoom command (explicit user intent) takes precedence
-        zoom_ratio = None
         zoom_hint = self._scene_state_coordinator.consume_zoom_intent(max_age=0.5)
-        if zoom_hint is not None:
-            zoom_ratio = float(zoom_hint.ratio)
-        if zoom_ratio is not None:
-            eps = 1e-3
-            if zoom_ratio < 1.0 - eps and current > 0:
-                desired = current - 1
-                napari_reason = 'zoom-in'
-            elif zoom_ratio > 1.0 + eps and current < max_level:
-                desired = current + 1
-                napari_reason = 'zoom-out'
-        try:
-            base_thr_in = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_IN', '1.05') or '1.05')
-        except Exception:
-            base_thr_in = 1.05
-        try:
-            base_thr_out = float(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLD_OUT', '1.35') or '1.35')
-        except Exception:
-            base_thr_out = 1.35
-        current = int(self._active_ms_level)
-        max_level = max(overs_map.keys())
-        if napari_reason == 'zoom-in':
-            thr_in = min(1.20, base_thr_in)
-            thr_out = base_thr_out
-        elif napari_reason == 'zoom-out':
-            thr_in = base_thr_in
-            thr_out = min(1.20, base_thr_out)
-        else:
-            thr_in = base_thr_in
-            thr_out = base_thr_out
-        fine_threshold = max(base_thr_in, 1.05)
+        zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
 
-        if desired is None:
-            # Heuristic: step one level finer when its oversampling is within threshold,
-            # otherwise consider stepping coarser if current slice is oversampled.
-            desired = current
-            if current > 0:
-                finer = current - 1
-                ratio = overs_map.get(finer)
-                if ratio is not None and ratio <= fine_threshold:
-                    desired = finer
-            if desired == current and current < max_level:
-                ratio_cur = overs_map.get(current)
-                if ratio_cur is not None and ratio_cur > thr_out:
-                    desired = current + 1
-            napari_reason = 'heuristic'
-        else:
-            # Napari hint: only allow single-step moves to avoid leaps.
-            desired = max(0, min(int(desired), max_level))
-            if desired < current:
-                desired = max(desired, current - 1)
-            elif desired > current:
-                desired = min(desired, current + 1)
-        # Stabilize against previous level to avoid jitter
-        try:
-            hyst = float(os.getenv('NAPARI_CUDA_LEVEL_HYST', '0.0') or '0.0')
-        except Exception:
-            hyst = 0.0
-        selected = stabilize_level(int(desired), int(current), hysteresis=hyst)
-        # Direction-sensitive band to avoid alternating near the boundary
-        sel = int(selected)
-        action_reason = napari_reason or 'heuristic'
-        if sel < current:
-            # Zooming in: only allow stepping to a finer level if that level is clearly under target
-            if overs_map.get(sel, float('inf')) > thr_in:
-                sel = current
-        elif sel > current:
-            # Zooming out: only allow stepping to a coarser level if current level is clearly over target
-            if overs_map.get(current, 0.0) <= thr_out:
-                sel = current
-        selected = sel
-        reason = action_reason
-        if selected < current:
+        now_ts = time.perf_counter()
+        config = LevelPolicyConfig(
+            threshold_in=float(self._level_threshold_in),
+            threshold_out=float(self._level_threshold_out),
+            fine_threshold=float(self._level_fine_threshold),
+            hysteresis=float(self._level_hysteresis),
+            cooldown_ms=float(self._level_switch_cooldown_ms),
+        )
+        inputs = LevelPolicyInputs(
+            current_level=current,
+            oversampling=overs_map,
+            zoom_ratio=zoom_ratio,
+            lock_level=self._lock_level,
+            last_switch_ts=float(self._last_level_switch_ts),
+            now_ts=now_ts,
+        )
+        decision = select_level(config, inputs)
+
+        if not decision.should_switch:
+            if decision.blocked_reason == 'cooldown':
+                if self._log_policy_eval and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "lod.cooldown: level=%d target=%d remaining=%.1fms",
+                        int(current),
+                        int(decision.selected_level),
+                        decision.cooldown_remaining_ms,
+                    )
+                return
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "lod.hold: level=%d desired=%d selected=%d overs=%s",
+                    int(current),
+                    int(decision.desired_level),
+                    int(decision.selected_level),
+                    '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+                )
+            return
+
+        if int(decision.selected_level) < current:
             logger.info(
                 "lod.zoom_in: current=%d -> selected=%d overs=%.3f reason=%s",
                 current,
-                selected,
-                overs_map.get(selected, float('nan')),
-                reason,
+                int(decision.selected_level),
+                overs_map.get(int(decision.selected_level), float('nan')),
+                decision.action,
             )
-        elif selected > current:
+        elif int(decision.selected_level) > current:
             logger.info(
                 "lod.zoom_out: current=%d -> selected=%d overs=%.3f reason=%s",
                 current,
-                selected,
-                overs_map.get(selected, float('nan')),
-                reason,
+                int(decision.selected_level),
+                overs_map.get(int(decision.selected_level), float('nan')),
+                decision.action,
             )
-        # Lock override
-        lock = getattr(self, '_lock_level', None)
-        if lock is not None:
-            selected = int(lock)
-            reason = 'locked'
-        # Apply if changed; budgets enforced inside _set_level_with_budget
-        if int(selected) != int(current):
-            # Enforce a cooldown between level switches to avoid oscillation
-            now_ts = time.perf_counter()
-            try:
-                cool_ms = float(getattr(self, '_level_switch_cooldown_ms', 150.0))
-            except Exception:
-                cool_ms = 150.0
-            if self._last_level_switch_ts > 0.0:
-                elapsed_ms = (now_ts - float(self._last_level_switch_ts)) * 1000.0
-                if elapsed_ms < float(cool_ms):
-                    return
-            prev = current
-            try:
-                self._set_level_with_budget(int(selected), reason=reason)
-                self._last_level_switch_ts = now_ts
-                logger.info(
-                    "ms.switch: %d -> %d (reason=%s) overs=%s",
-                    int(prev), int(self._active_ms_level), reason,
-                    '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
-                )
-            except Exception as e:
-                logger.info("ms.switch: hold=%d (budget reject %s)", int(current), str(e))
-        else:
-            # No change; emit a compact decision trace to aid testing
-            logger.debug(
-                "lod.hold: level=%d desired=%d selected=%d overs=%s",
-                int(current), int(desired), int(selected),
-                '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+
+        prev = current
+        try:
+            self._set_level_with_budget(int(decision.selected_level), reason=decision.action)
+        except _LevelBudgetError as exc:
+            logger.info(
+                "ms.switch: hold=%d (budget reject %s)",
+                int(current),
+                str(exc),
             )
+            return
+        except Exception:
+            logger.exception(
+                "ms.switch: level apply failed (reason=%s)",
+                decision.action,
+            )
+            raise
+
+        self._last_level_switch_ts = now_ts
+        if decision.action in {"zoom-in", "zoom-out"}:
+            self._last_zoom_hint_ts = now_ts
+
+        logger.info(
+            "ms.switch: %d -> %d (reason=%s) overs=%s",
+            int(prev),
+            int(self._active_ms_level),
+            decision.action,
+            '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+        )
 
     # (packer is now provided by bitstream.py)
 
