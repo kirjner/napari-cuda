@@ -48,6 +48,11 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
 - **LOD selection**: `_evaluate_level_policy` delegates to `lod.select_level`, so zoom hints and thresholds are handled in a pure helper with single env reads during init.
 - **View preservation**: Promote the new unit guard into an integration-level check once the ROI extraction lands, so render-thread camera state stays stable without manual smoke tests.
+- **Milestones**:
+  1. Extract the worker ROI helpers (viewport ROI, chunk alignment, hysteresis) into `roi.py`, delete the duplicate ROI path in `lod.py`, and update call sites/tests.
+  2. Trim `lod.py` to pure level/policy logic (<400 LOC) by removing ROI math and unused `LevelDecision` scaffolding; extend unit tests to cover the slimmed selector.
+  3. Introduce a capture façade (`capture.py`) that wraps `GLCapture`, `CudaInterop`, and `FramePipeline` orchestration so `egl_worker.py` sheds ~300 LOC.
+  4. Re-run integration + ROI unit suites to verify zoom-intent/preserve-view behaviour after the extractions and log the new LOC metrics.
 
 ### Phase D — Logging & Debug Policy
 - Establish `logging_policy.py` or config entries controlling debug flags. Remove per-call env parsing (`NAPARI_CUDA_DEBUG_*`). Convert to bools resolved at init via `ServerCtx`.
