@@ -1634,18 +1634,12 @@ class EGLRendererWorker:
         updates: PendingSceneUpdates = self._scene_state_machine.drain_pending_updates()
 
         if updates.display_mode is not None:
-            try:
-                self._apply_ndisplay_switch(updates.display_mode)
-            except Exception:
-                logger.exception("ndisplay switch failed")
+            self._apply_ndisplay_switch(updates.display_mode)
 
         if updates.multiscale is not None:
             lvl = int(updates.multiscale.level)
             pth = updates.multiscale.path
-            try:
-                self._apply_multiscale_switch(lvl, pth)
-            except Exception:
-                logger.exception("multiscale switch failed")
+            self._apply_multiscale_switch(lvl, pth)
 
         state = updates.scene_state
         if state is None:
@@ -1969,11 +1963,8 @@ class EGLRendererWorker:
             logger.debug("render-frame: slab update on pan failed", exc_info=True)
         self.canvas.render()
         if self._eval_after_render:
-            try:
-                self._eval_after_render = False
-                self._maybe_select_level()
-            except Exception:
-                logger.debug("post-render policy eval failed", exc_info=True)
+            self._eval_after_render = False
+            self._maybe_select_level()
         self._render_tick_required = False
         self._render_loop_started = True
         t_r1 = time.perf_counter()

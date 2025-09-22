@@ -22,18 +22,20 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   - Add targeted unit tests for `Encoder` (mock `PyNvVideoCodec`) covering preset kwargs, fallback path, IDR toggles, and logging guards.
   - Move residual encode-path env reads (e.g. `NAPARI_CUDA_DUMP_RAW`, debug swizzle toggles) into config/logging policy during Phase D so they share the same initialization flow.
 
-### Phase B — State/Camera Core
-- **State machine extraction**: Pull `apply_state`, `_apply_pending_state`, `process_camera_commands`, and `_render_frame_and_maybe_eval`’s state transition pieces into a new `state_machine.py` that exposes:
-  - `PendingStateQueue`: dataclass capturing queued scene/camera state with validation helpers + `apply_to_view(viewer)` for render-thread commits.
-  - `CameraCommandProcessor`: pure helper that consumes `CameraCommand` sequences, folds zoom intent for the policy, and raises on unexpected command kinds.
-  - `StateSignature`: utility for change detection (mirrors current `_last_state_sig`).
-- **Integration plan**:
-  - Worker becomes a thin coordinator: enqueue state via `PendingStateQueue.enqueue(state)` and call `pending.apply(view, layer_set)` on the render thread.
-  - Replace ad-hoc `getattr` guards with asserts once `ViewerModel`/camera invariants are satisfied post-initialization.
-  - Hoist zoom intent + `_pending_zoom_ratio` mutations into the helper so `_maybe_select_level` only consumes stable intents.
-- **Testing scope**:
-  - Unit tests for `PendingStateQueue` (2D/3D camera states, volume params) and `CameraCommandProcessor` (zoom/pan/orbit/reset ordering, zoom intent cooldown) under `src/napari_cuda/server/_tests/test_state_machine.py`.
-  - Regression test ensuring state signature changes trigger policy eval while identical sequences short-circuit.
+### Phase B — State/Camera Core (in flight)
+- **Implemented**:
+  - `state_machine.py` now owns scene snapshots, zoom intent tracking, and signature change detection; `_pending_*` fields and state signatures were removed from the worker.
+  - `camera_controller.py` applies zoom/pan/orbit/reset commands and returns intent metadata so the worker only schedules renders/policy once.
+  - Zoom intent handling normalized (factor >1 ⇒ invert) and rate-limited; LOD thresholds soften to 1.20 during active zoom hints.
+  - Unit coverage added for the state machine and camera controller helpers.
+- **Next extraction targets**:
+  - **ROI/slab helper**: extract `_render_frame_and_maybe_eval`’s inner ROI/slab block into `roi_applier.py` with exports `SliceUpdatePlanner` (computes transforms) and `SliceDataApplier.apply_slab(layer, roi_result)`. Worker calls the helper and only checks for return values.
+  - **State commit helper**: replace the ad-hoc `apply_state` logic with `SceneStateCommit.apply(viewer, volume_visual)` that encapsulates dims/contrast/translate updates and raises on misconfigured viewers. Worker simply builds the commit object via `SceneStateMachine`.
+  - **Naming cleanup**: `PendingSceneUpdates` ⇒ `SceneUpdateBundle`, `_scene_state_machine` ⇒ `SceneStateCoordinator`, `_eval_after_render` ⇒ `policy_eval_requested` to better describe intent once helpers land.
+  - Swap remaining broad worker `try/except Exception` guards (ROI placement, post-render policy eval, cleanup) with targeted assertions/logging now that helpers own subsystem boundaries.
+- **Tests still to add**:
+  - Integration-style test exercising level selection under a sequence of zoom hints to lock the relaxed thresholds in place.
+  - Coverage for ROI/slab helper once extracted (verifying translate/contrast updates without VisPy).
 
 ### Phase C — ROI & LOD Minimization
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
