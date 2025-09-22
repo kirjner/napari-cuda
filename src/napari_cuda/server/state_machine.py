@@ -48,7 +48,7 @@ class MultiscaleLevelRequest:
 
 
 @dataclass(frozen=True)
-class PendingSceneUpdates:
+class SceneUpdateBundle:
     display_mode: Optional[int] = None
     multiscale: Optional[MultiscaleLevelRequest] = None
     scene_state: Optional[ServerSceneState] = None
@@ -60,7 +60,7 @@ class ZoomIntent:
     timestamp: float
 
 
-class SceneStateMachine:
+class SceneStateCoordinator:
     """Thread-safe coordinator for pending scene updates and zoom intents."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
@@ -84,9 +84,9 @@ class SceneStateMachine:
         with self._lock:
             self._pending_scene_state = state
 
-    def drain_pending_updates(self) -> PendingSceneUpdates:
+    def drain_pending_updates(self) -> SceneUpdateBundle:
         with self._lock:
-            updates = PendingSceneUpdates(
+            updates = SceneUpdateBundle(
                 display_mode=self._pending_display_mode,
                 multiscale=self._pending_multiscale,
                 scene_state=self._pending_scene_state,
@@ -140,8 +140,8 @@ class SceneStateMachine:
 __all__ = [
     "CameraCommand",
     "MultiscaleLevelRequest",
-    "PendingSceneUpdates",
-    "SceneStateMachine",
+    "SceneUpdateBundle",
+    "SceneStateCoordinator",
     "ServerSceneState",
     "ZoomIntent",
 ]

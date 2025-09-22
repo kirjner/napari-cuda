@@ -28,11 +28,13 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   - `camera_controller.py` applies zoom/pan/orbit/reset commands and returns intent metadata so the worker only schedules renders/policy once.
   - Zoom intent handling normalized (factor >1 ⇒ invert) and rate-limited; LOD thresholds soften to 1.20 during active zoom hints.
   - Unit coverage added for the state machine and camera controller helpers.
+- **In progress**:
+  - `roi_applier.py` handles ROI drift detection + slab placement, with `_render_frame_and_maybe_eval` delegating to the helper; remaining contrast/translate branches slated for extraction into `SceneStateCommit`.
+  - Worker naming cleanup underway (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
 - **Next extraction targets**:
-  - **ROI/slab helper**: extract `_render_frame_and_maybe_eval`’s inner ROI/slab block into `roi_applier.py` with exports `SliceUpdatePlanner` (computes transforms) and `SliceDataApplier.apply_slab(layer, roi_result)`. Worker calls the helper and only checks for return values.
-  - **State commit helper**: replace the ad-hoc `apply_state` logic with `SceneStateCommit.apply(viewer, volume_visual)` that encapsulates dims/contrast/translate updates and raises on misconfigured viewers. Worker simply builds the commit object via `SceneStateMachine`.
-  - **Naming cleanup**: `PendingSceneUpdates` ⇒ `SceneUpdateBundle`, `_scene_state_machine` ⇒ `SceneStateCoordinator`, `_eval_after_render` ⇒ `policy_eval_requested` to better describe intent once helpers land.
-  - Swap remaining broad worker `try/except Exception` guards (ROI placement, post-render policy eval, cleanup) with targeted assertions/logging now that helpers own subsystem boundaries.
+  - **Scene commit helper**: replace the ad-hoc `apply_state` branches with `SceneStateCommit.apply(viewer, volume_visual)` that encapsulates dims/contrast/translate handling, returning a new `SceneUpdateBundle` that the worker simply enqueues.
+  - **Contrast/ROI post-processing**: move the contrast-limit and translate refresh (currently still inline in `_render_frame_and_maybe_eval`) into helper methods owned by `SceneStateCommit` so the worker no longer touches napari layer internals.
+  - **Cleanup guard posture**: audit remaining `try/except Exception` sites (cleanup detach, ROI scale lookup) and replace them with assertions or scoped helpers now that subsystem boundaries are explicit.
 - **Tests still to add**:
   - Integration-style test exercising level selection under a sequence of zoom hints to lock the relaxed thresholds in place.
   - Coverage for ROI/slab helper once extracted (verifying translate/contrast updates without VisPy).

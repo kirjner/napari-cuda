@@ -55,6 +55,7 @@ from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
+from napari_cuda.server.roi_applier import SliceDataApplier, SliceUpdatePlanner
 from napari_cuda.server.camera_controller import (
     CameraCommandOutcome,
     CameraDebugFlags,
@@ -62,8 +63,8 @@ from napari_cuda.server.camera_controller import (
 )
 from napari_cuda.server.state_machine import (
     CameraCommand,
-    PendingSceneUpdates,
-    SceneStateMachine,
+    SceneUpdateBundle,
+    SceneStateCoordinator,
     ServerSceneState,
 )
 
@@ -153,7 +154,7 @@ class EGLRendererWorker:
 
         # Atomic state application
         self._state_lock = threading.Lock()
-        self._scene_state_machine = SceneStateMachine()
+        self._scene_state_coordinator = SceneStateCoordinator()
         # Debug gating for ensure_scene_source logging
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts: float = 0.0
@@ -231,7 +232,7 @@ class EGLRendererWorker:
         # multiscale level switches regardless of viewer timing.
         self._last_step: Optional[tuple[int, ...]] = None
         # Coalesce selection to run once after a render when camera changed
-        self._eval_after_render: bool = False
+        self.policy_eval_requested: bool = False
         # Policy init happens naturally; no deferral needed
         # One-shot safety: reset camera if initial frames are black
         try:
@@ -558,7 +559,7 @@ class EGLRendererWorker:
                 int(level),
                 str(path) if path else "<default>",
             )
-        self._scene_state_machine.queue_multiscale_level(int(level), str(path) if path else None)
+        self._scene_state_coordinator.queue_multiscale_level(int(level), str(path) if path else None)
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
@@ -1555,7 +1556,7 @@ class EGLRendererWorker:
             volume_opacity=float(getattr(state, 'volume_opacity')) if getattr(state, 'volume_opacity', None) is not None else None,
             volume_sample_step=float(getattr(state, 'volume_sample_step')) if getattr(state, 'volume_sample_step', None) is not None else None,
         )
-        self._scene_state_machine.queue_scene_state(normalized)
+        self._scene_state_coordinator.queue_scene_state(normalized)
 
     def process_camera_commands(self, commands: Sequence[CameraCommand]) -> None:
         if not commands:
@@ -1567,7 +1568,7 @@ class EGLRendererWorker:
         if cam is None:
             for cmd in commands:
                 if cmd.kind == 'zoom' and cmd.factor is not None and cmd.factor > 0.0:
-                    self._scene_state_machine.record_zoom_intent(float(cmd.factor))
+                    self._scene_state_coordinator.record_zoom_intent(float(cmd.factor))
             return
 
         canvas_wh: tuple[int, int]
@@ -1598,7 +1599,7 @@ class EGLRendererWorker:
                 if zoom_ratio > 1.0:
                     # Napari emits factors >1 for zoom-in; selector expects <1.0 to mean zoom-in.
                     zoom_ratio = 1.0 / zoom_ratio
-                self._scene_state_machine.record_zoom_intent(zoom_ratio)
+                self._scene_state_coordinator.record_zoom_intent(zoom_ratio)
                 self._last_zoom_hint_ts = now_ts
 
         self._last_interaction_ts = time.perf_counter()
@@ -1606,7 +1607,7 @@ class EGLRendererWorker:
         if outcome.camera_changed:
             self._mark_render_tick_needed()
         if outcome.policy_triggered:
-            self._eval_after_render = True
+            self.policy_eval_requested = True
 
     def _apply_camera_reset(self, cam) -> None:
         if cam is None or not hasattr(cam, 'set_range'):
@@ -1631,7 +1632,7 @@ class EGLRendererWorker:
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
     def _apply_pending_state(self) -> None:
-        updates: PendingSceneUpdates = self._scene_state_machine.drain_pending_updates()
+        updates: SceneUpdateBundle = self._scene_state_coordinator.drain_pending_updates()
 
         if updates.display_mode is not None:
             self._apply_ndisplay_switch(updates.display_mode)
@@ -1831,13 +1832,13 @@ class EGLRendererWorker:
             cam.angles = state.angles  # type: ignore[attr-defined]
 
         # Evaluate policy only if the absolute state actually changed
-        if self._scene_state_machine.update_state_signature(state):
+        if self._scene_state_coordinator.update_state_signature(state):
             self._maybe_select_level()
 
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
         """Queue a 2D/3D view switch to apply on the render thread."""
-        self._scene_state_machine.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
+        self._scene_state_coordinator.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return self._gl_capture.blit_with_timing()
@@ -1921,49 +1922,25 @@ class EGLRendererWorker:
         self._apply_pending_state()
         # If in 2D slice mode, update the slab when panning moves the viewport
         # outside the last ROI or beyond the hysteresis threshold.
-        try:
-            if not self.use_volume and self._scene_source is not None and self._napari_layer is not None:
-                source = self._scene_source
-                level = int(self._active_ms_level)
-                # Compute current render ROI (render-only path guarantees viewport containment)
-                roi = self._viewport_roi_for_level(source, level)
-                # Decide whether to fetch a new slab
-                need_update = False
-                last = getattr(self, '_last_roi', None)
-                thr = int(getattr(self, '_roi_edge_threshold', 4))
-                if last is None or int(last[0]) != level:
-                    need_update = True
-                else:
-                    prev = last[1]
-                    if (
-                        abs(int(roi.y_start) - int(prev.y_start)) >= thr or
-                        abs(int(roi.y_stop)  - int(prev.y_stop))  >= thr or
-                        abs(int(roi.x_start) - int(prev.x_start)) >= thr or
-                        abs(int(roi.x_stop)  - int(prev.x_stop))  >= thr
-                    ):
-                        need_update = True
-                if need_update:
-                    z_idx = int(self._z_index or 0)
-                    slab = self._load_slice(source, level, z_idx)
-                    # Place slab using current ROI
-                    try:
-                        sy, sx = self._plane_scale_for_level(source, level)
-                    except Exception:
-                        sy = sx = 1.0
-                    try:
-                        self._napari_layer.translate = (
-                            float(roi.y_start) * float(max(1e-12, sy)),
-                            float(roi.x_start) * float(max(1e-12, sx)),
-                        )
-                    except Exception:
-                        logger.debug("render-frame: set translate failed", exc_info=True)
-                    self._napari_layer.data = slab
-                    self._last_roi = (level, roi)
-        except Exception:
-            logger.debug("render-frame: slab update on pan failed", exc_info=True)
+        if not self.use_volume and self._scene_source is not None and self._napari_layer is not None:
+            source = self._scene_source
+            level = int(self._active_ms_level)
+            roi = self._viewport_roi_for_level(source, level)
+            planner = SliceUpdatePlanner(int(self._roi_edge_threshold))
+            decision = planner.evaluate(level=level, roi=roi, last_roi=self._last_roi)
+            if decision.refresh:
+                z_idx = int(self._z_index or 0)
+                slab = self._load_slice(source, level, z_idx)
+                try:
+                    sy, sx = self._plane_scale_for_level(source, level)
+                except Exception:
+                    sy = sx = 1.0
+                applier = SliceDataApplier(layer=self._napari_layer)
+                applier.apply(slab=slab, roi=roi, scale=(sy, sx))
+                self._last_roi = decision.new_last_roi
         self.canvas.render()
-        if self._eval_after_render:
-            self._eval_after_render = False
+        if self.policy_eval_requested:
+            self.policy_eval_requested = False
             self._maybe_select_level()
         self._render_tick_required = False
         self._render_loop_started = True
@@ -2092,7 +2069,7 @@ class EGLRendererWorker:
 
         # Recent zoom command (explicit user intent) takes precedence
         zoom_ratio = None
-        zoom_hint = self._scene_state_machine.consume_zoom_intent(max_age=0.5)
+        zoom_hint = self._scene_state_coordinator.consume_zoom_intent(max_age=0.5)
         if zoom_hint is not None:
             zoom_ratio = float(zoom_hint.ratio)
         if zoom_ratio is not None:
