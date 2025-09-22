@@ -52,12 +52,13 @@ from napari_cuda.server.level_budget import apply_level_with_budget, LevelBudget
 from napari_cuda.server.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
-from napari_cuda.server.capture import CaptureFacade
+from napari_cuda.server.capture import CaptureFacade, capture_frame_for_encoder
 from napari_cuda.server.roi_applier import SliceUpdatePlanner
 from napari_cuda.server.roi import (
-    cached_viewport_roi,
     plane_scale_for_level,
     plane_wh_for_level,
+    viewport_debug_snapshot,
+    resolve_viewport_roi,
 )
 from napari_cuda.server.lod import LevelPolicyConfig, LevelPolicyInputs, select_level
 from napari_cuda.server.scene_state_applier import (
@@ -739,7 +740,12 @@ class EGLRendererWorker:
                 info["transform"] = "error"
         else:
             info["view"] = None
-        return info
+        return viewport_debug_snapshot(
+            view=self.view,
+            canvas_size=(int(self.width), int(self.height)),
+            data_wh=self._data_wh,
+            data_depth=self._data_d,
+        )
 
     def _viewport_world_bounds(self) -> Optional[tuple[float, float, float, float]]:
         view = getattr(self, "view", None)
@@ -767,35 +773,6 @@ class EGLRendererWorker:
 
     def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int, *, quiet: bool = False, for_policy: bool = False) -> SliceROI:
         view = getattr(self, "view", None)
-        plane_h, plane_w = plane_wh_for_level(source, level)
-
-        if view is None or not hasattr(view, "camera"):
-            if not quiet and logger.isEnabledFor(logging.INFO):
-                snapshot = self._viewport_debug_snapshot()
-                logger.info(
-                    "viewport ROI boundary: inactive view; returning full frame (level=%d dims=%dx%d snapshot=%s)",
-                    level,
-                    plane_h,
-                    plane_w,
-                    snapshot,
-                )
-            return SliceROI(0, plane_h, 0, plane_w)
-
-        cam = view.camera
-        if not isinstance(cam, scene.cameras.PanZoomCamera):
-            ensured = self._ensure_panzoom_camera(reason="roi-request")
-            cam = ensured or cam
-        assert isinstance(cam, scene.cameras.PanZoomCamera), "PanZoomCamera required for ROI compute"
-
-        signature: Optional[tuple[float, ...]] = None
-        scene_graph = getattr(view, "scene", None)
-        transform = getattr(scene_graph, "transform", None)
-        if transform is not None and hasattr(transform, "matrix"):
-            try:
-                signature = tuple(float(v) for v in transform.matrix.ravel())
-            except Exception:
-                signature = None
-
         align_chunks = (not for_policy) and bool(getattr(self, "_roi_align_chunks", True))
         ensure_contains = (not for_policy) and bool(getattr(self, "_roi_ensure_contains_viewport", True))
         edge_threshold = int(getattr(self, "_roi_edge_threshold", 4))
@@ -804,7 +781,13 @@ class EGLRendererWorker:
         roi_log = getattr(self, "_roi_log_state", None)
         log_state = roi_log if isinstance(roi_log, dict) else None
 
-        return cached_viewport_roi(
+        cam = view.camera
+        if not isinstance(cam, scene.cameras.PanZoomCamera):
+            ensured = self._ensure_panzoom_camera(reason="roi-request")
+            cam = ensured or cam
+        assert isinstance(cam, scene.cameras.PanZoomCamera), "PanZoomCamera required for ROI compute"
+
+        return resolve_viewport_roi(
             view=view,
             canvas_size=(int(self.width), int(self.height)),
             source=source,
@@ -816,8 +799,10 @@ class EGLRendererWorker:
             for_policy=for_policy,
             cache=self._roi_cache,
             log_state=log_state,
-            clock=time.perf_counter,
-            transform_signature=signature,
+            snapshot_cb=self._viewport_debug_snapshot,
+            log_layer_debug=self._log_layer_debug,
+            quiet=quiet,
+            logger_ref=logger,
         )
 
     def _estimate_volume_io(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
@@ -1057,13 +1042,15 @@ class EGLRendererWorker:
         layer = self._napari_layer
         if self.use_volume:
             volume = self._get_level_volume(source, applied.level)
-            d, h, w = int(volume.shape[0]), int(volume.shape[1]), int(volume.shape[2])
-            self._data_wh = (w, h)
-            self._data_d = d
-            if layer is not None:
-                layer.data = volume
-                layer.contrast_limits = [float(applied.contrast[0]), float(applied.contrast[1])]
-            self._log_layer_assignment('volume', applied.level, None, (d, h, w), applied.contrast)
+            ctx = self._build_scene_state_context(self.view.camera if self.view is not None else None)
+            data_wh, data_d = SceneStateApplier.apply_volume_layer(
+                ctx,
+                volume=volume,
+                contrast=applied.contrast,
+            )
+            self._data_wh = data_wh
+            self._data_d = data_d
+            self._log_layer_assignment('volume', applied.level, None, (data_d, data_wh[1], data_wh[0]), applied.contrast)
         else:
             sy, sx = applied.scale_yx
             if layer is not None:
@@ -1411,19 +1398,12 @@ class EGLRendererWorker:
         wall_ts = time.time()
         t0 = time.perf_counter()
         render_ms = self.render_tick()
-        # Blit timing (GPU + CPU)
-        t_b0 = time.perf_counter()
-        blit_gpu_ns = self._capture.capture_blit_gpu_ns()
-        t_b1 = time.perf_counter()
-        blit_cpu_ms = (t_b1 - t_b0) * 1000.0
         debug_cb = None
         if self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
             def _cb(tex_id: int, w: int, h: int, frame) -> None:
                 self._debug.dump_triplet(tex_id, w, h, frame)  # type: ignore[attr-defined]
 
             debug_cb = _cb
-        map_ms, copy_ms = self._capture.map_and_copy_to_torch(debug_cb)
-
         reset_cb: Optional[Callable[[], None]] = None
         if self._auto_reset_on_black and self.view is not None and self.view.camera is not None:
             def _reset_camera() -> None:
@@ -1432,10 +1412,19 @@ class EGLRendererWorker:
                 self._apply_camera_reset(cam)
 
             reset_cb = _reset_camera
-
-        dst, convert_ms = self._capture.convert_for_encoder(reset_camera=reset_cb)
-        self._orientation_ready = self._capture.orientation_ready
-        self._black_reset_done = self._capture.black_reset_done
+        capture = capture_frame_for_encoder(
+            self._capture,
+            debug_cb=debug_cb,
+            reset_camera=reset_cb,
+        )
+        dst = capture.frame
+        blit_gpu_ns = capture.blit_gpu_ns
+        blit_cpu_ms = capture.blit_cpu_ms
+        map_ms = capture.map_ms
+        copy_ms = capture.copy_ms
+        convert_ms = capture.convert_ms
+        self._orientation_ready = capture.orientation_ready
+        self._black_reset_done = capture.black_reset_done
         with self._enc_lock:
             encoder = self._encoder
         if encoder is None or not encoder.is_ready:

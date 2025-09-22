@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping, Optional, Sequence, Tuple
+import logging
 import math
 import time
 
@@ -16,6 +17,9 @@ from vispy import scene
 
 from napari_cuda.server.scene_types import SliceROI
 from napari_cuda.server.zarr_source import ZarrSceneSource
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -207,6 +211,76 @@ def compute_viewport_roi(
     return ViewportROIResult(roi, transform_signature)
 
 
+def viewport_debug_snapshot(
+    *,
+    view: Any,
+    canvas_size: Tuple[int, int],
+    data_wh: Optional[Tuple[int, int]],
+    data_depth: Optional[int],
+) -> dict[str, Any]:
+    width, height = canvas_size
+    info: dict[str, Any] = {
+        "canvas_size": (int(width), int(height)),
+        "data_wh": tuple(int(v) for v in data_wh) if data_wh else None,
+        "data_depth": int(data_depth) if data_depth is not None else None,
+    }
+
+    if view is None:
+        info["view"] = None
+        return info
+
+    info["view_class"] = view.__class__.__name__
+    try:
+        cam = getattr(view, "camera", None)
+        if cam is not None:
+            cam_info: dict[str, Any] = {"type": cam.__class__.__name__}
+            rect = getattr(cam, "rect", None)
+            if rect is not None:
+                try:
+                    cam_info["rect"] = tuple(float(v) for v in rect)
+                except Exception:
+                    cam_info["rect"] = str(rect)
+            center = getattr(cam, "center", None)
+            if center is not None:
+                try:
+                    cam_info["center"] = tuple(float(v) for v in center)
+                except Exception:
+                    cam_info["center"] = str(center)
+            if hasattr(cam, "zoom"):
+                try:
+                    cam_info["zoom"] = float(cam.zoom)  # type: ignore[arg-type]
+                except Exception:
+                    cam_info["zoom"] = str(cam.zoom)
+            if hasattr(cam, "scale"):
+                try:
+                    cam_info["scale"] = tuple(float(v) for v in cam.scale)
+                except Exception:
+                    cam_info["scale"] = str(cam.scale)
+            if hasattr(cam, "_viewbox"):
+                try:
+                    vb = cam._viewbox
+                    cam_info["viewbox_size"] = tuple(float(v) for v in getattr(vb, "size", ()) or ())
+                except Exception:
+                    cam_info["viewbox_size"] = "unavailable"
+            info["camera"] = cam_info
+    except Exception:
+        info["camera"] = "error"
+
+    try:
+        scene_graph = getattr(view, "scene", None)
+        transform = getattr(scene_graph, "transform", None)
+        if transform is not None and hasattr(transform, "matrix"):
+            mat = getattr(transform, "matrix")
+            try:
+                info["transform_matrix"] = tuple(float(v) for v in mat.ravel())
+            except Exception:
+                info["transform_matrix"] = str(mat)
+    except Exception:
+        info["transform"] = "error"
+
+    return info
+
+
 def cached_viewport_roi(
     *,
     view: Any,
@@ -263,10 +337,67 @@ def cached_viewport_roi(
     return roi
 
 
+def resolve_viewport_roi(
+    *,
+    view: Any,
+    canvas_size: Tuple[int, int],
+    source: ZarrSceneSource,
+    level: int,
+    align_chunks: bool,
+    chunk_pad: int,
+    ensure_contains_viewport: bool,
+    edge_threshold: int,
+    for_policy: bool,
+    cache: MutableMapping[int, tuple[Optional[tuple[float, ...]], SliceROI]] | None,
+    log_state: MutableMapping[int, tuple[SliceROI, float]] | None,
+    snapshot_cb: Callable[[], dict[str, Any]],
+    log_layer_debug: bool,
+    quiet: bool,
+    logger_ref: logging.Logger = logger,
+) -> SliceROI:
+    h, w = plane_wh_for_level(source, level)
+
+    if view is None or not hasattr(view, "camera"):
+        if not quiet and log_layer_debug and logger_ref.isEnabledFor(logging.INFO):
+            logger_ref.info(
+                "viewport ROI boundary: inactive view; returning full frame (level=%d dims=%dx%d snapshot=%s)",
+                level,
+                h,
+                w,
+                snapshot_cb(),
+            )
+        return SliceROI(0, h, 0, w)
+
+    cam = getattr(view, "camera", None)
+    if not isinstance(cam, scene.cameras.PanZoomCamera):
+        raise RuntimeError("PanZoomCamera required for ROI compute")
+
+    signature = _transform_signature(view)
+
+    return cached_viewport_roi(
+        view=view,
+        canvas_size=canvas_size,
+        source=source,
+        level=level,
+        align_chunks=align_chunks,
+        chunk_pad=chunk_pad,
+        ensure_contains_viewport=ensure_contains_viewport,
+        edge_threshold=edge_threshold,
+        for_policy=for_policy,
+        cache=cache,
+        log_state=log_state,
+        clock=time.perf_counter,
+        transform_signature=signature,
+    )
+
+
 __all__ = [
     "ViewportROIResult",
     "compute_viewport_roi",
     "plane_scale_for_level",
     "plane_wh_for_level",
+    "viewport_debug_snapshot",
+    "resolve_viewport_roi",
     "cached_viewport_roi",
 ]
+logger = logging.getLogger(__name__)

@@ -175,6 +175,23 @@ class SceneStateApplier:
         return sy, sx
 
     @staticmethod
+    def apply_volume_layer(
+        ctx: SceneStateApplyContext,
+        *,
+        volume: Any,
+        contrast: Tuple[float, float],
+    ) -> Tuple[Tuple[int, int], int]:
+        layer = ctx.layer
+        if layer is not None:
+            layer.data = volume
+            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]  # type: ignore[assignment]
+
+        depth = int(volume.shape[0])
+        height = int(volume.shape[1])
+        width = int(volume.shape[2]) if volume.ndim >= 3 else int(volume.shape[-1])
+        return (width, height), depth
+
+    @staticmethod
     def apply_volume_params(
         ctx: SceneStateApplyContext,
         *,

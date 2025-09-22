@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional, Any
 import logging
+import time
 
 from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
@@ -91,4 +93,39 @@ class CaptureFacade:
         return self._pipeline.black_reset_done
 
 
-__all__ = ["CaptureFacade"]
+@dataclass
+class FrameCapture:
+    frame: Any
+    blit_gpu_ns: Optional[int]
+    blit_cpu_ms: float
+    map_ms: float
+    copy_ms: float
+    convert_ms: float
+    orientation_ready: bool
+    black_reset_done: bool
+
+
+def capture_frame_for_encoder(
+    facade: CaptureFacade,
+    *,
+    debug_cb: Optional[Callable[[int, int, int, object], None]] = None,
+    reset_camera: Optional[Callable[[], None]] = None,
+) -> FrameCapture:
+    t_b0 = time.perf_counter()
+    blit_gpu_ns = facade.capture_blit_gpu_ns()
+    blit_cpu_ms = (time.perf_counter() - t_b0) * 1000.0
+    map_ms, copy_ms = facade.map_and_copy_to_torch(debug_cb)
+    frame, convert_ms = facade.convert_for_encoder(reset_camera=reset_camera)
+    return FrameCapture(
+        frame=frame,
+        blit_gpu_ns=blit_gpu_ns,
+        blit_cpu_ms=blit_cpu_ms,
+        map_ms=map_ms,
+        copy_ms=copy_ms,
+        convert_ms=convert_ms,
+        orientation_ready=facade.orientation_ready,
+        black_reset_done=facade.black_reset_done,
+    )
+
+
+__all__ = ["CaptureFacade", "FrameCapture", "capture_frame_for_encoder"]
