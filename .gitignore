@@ -1,4 +1,3 @@
-docs
 tmp
 vendor/gl/
 # Byte-compiled / optimized / DLL files
@@ -167,6 +166,7 @@ docs/guides/_layer_events.md
 docs/guides/_viewer_events.md
 docs/guides/_layerlist_events.md
 # come from npe2 docs
+docs/archive_local/
 docs/plugins/_npe2_*.md
 
 src/napari/settings/napari.schema.json

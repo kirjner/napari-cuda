@@ -40,7 +40,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Remaining milestones to close Phase B**:
   1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `FramePipeline` now owns capture/encode plumbing.
   2. **Guard + naming audit** — finish renaming (`SceneStateCoordinator`, `SceneUpdateBundle`, `_policy_eval_pending`) and remove the remaining ROI/policy try/except fallbacks now that `compute_viewport_roi` owns the math; re-check `try`/`getattr` counts.
-  3. **ServerCtx policy surface** — lift level-policy thresholds, logging toggles, and related env reads into a shared config object resolved at init to simplify `__init__` and prepare for Phase D logging work. Partial ✅: policy thresholds and toggles now come from `ServerCtx.policy`; remaining env reads stay in the guard audit backlog.
+  3. **ServerCtx policy surface** — lift level-policy thresholds, logging toggles, and related env reads into a shared config object resolved at init to simplify `__init__` and prepare for Phase D logging work. ✅ `ServerCtx.policy` is now authoritative; next follow-up is to require callers to pass `ServerCtx` explicitly once guard audit is complete.
   4. **Integration tests** — add the zoom-intent regression test and a scripted render smoke harness that exercises `preserve_view_on_switch=True` so state/camera changes stay covered end-to-end.
 
 ### Phase C — ROI & LOD Minimization
