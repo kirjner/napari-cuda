@@ -683,63 +683,6 @@ class EGLRendererWorker:
             return None
 
     def _viewport_debug_snapshot(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {
-            "canvas_size": (int(self.width), int(self.height)),
-            "data_wh": tuple(int(v) for v in self._data_wh) if self._data_wh else None,
-            "data_depth": int(self._data_d) if self._data_d is not None else None,
-        }
-        view = self.view
-        if view is not None:
-            info["view_class"] = view.__class__.__name__
-            try:
-                cam = getattr(view, "camera", None)
-                if cam is not None:
-                    cam_info: Dict[str, Any] = {"type": cam.__class__.__name__}
-                    rect = getattr(cam, "rect", None)
-                    if rect is not None:
-                        try:
-                            cam_info["rect"] = tuple(float(v) for v in rect)
-                        except Exception:
-                            cam_info["rect"] = str(rect)
-                    center = getattr(cam, "center", None)
-                    if center is not None:
-                        try:
-                            cam_info["center"] = tuple(float(v) for v in center)
-                        except Exception:
-                            cam_info["center"] = str(center)
-                    if hasattr(cam, "zoom"):
-                        try:
-                            cam_info["zoom"] = float(cam.zoom)  # type: ignore[arg-type]
-                        except Exception:
-                            cam_info["zoom"] = str(cam.zoom)
-                    if hasattr(cam, "scale"):
-                        try:
-                            cam_info["scale"] = tuple(float(v) for v in cam.scale)
-                        except Exception:
-                            cam_info["scale"] = str(cam.scale)
-                    if hasattr(cam, "_viewbox"):
-                        try:
-                            vb = cam._viewbox
-                            cam_info["viewbox_size"] = tuple(float(v) for v in getattr(vb, "size", ()) or ())
-                        except Exception:
-                            cam_info["viewbox_size"] = "unavailable"
-                    info["camera"] = cam_info
-            except Exception:
-                info["camera"] = "error"
-            try:
-                transform = getattr(view, "scene", None)
-                if transform is not None and hasattr(transform, "transform"):
-                    xform = transform.transform
-                    if hasattr(xform, "matrix"):
-                        mat = getattr(xform, "matrix")
-                        try:
-                            info["transform_matrix"] = tuple(float(v) for v in mat.ravel())
-                        except Exception:
-                            info["transform_matrix"] = str(mat)
-            except Exception:
-                info["transform"] = "error"
-        else:
-            info["view"] = None
         return viewport_debug_snapshot(
             view=self.view,
             canvas_size=(int(self.width), int(self.height)),
@@ -1456,55 +1399,61 @@ class EGLRendererWorker:
         return timings, pkt_obj, flags, seq
 
     # ---- C5 helpers (pure refactor; no behavior change) ---------------------
+    def _animate_camera_if_needed(self) -> None:
+        if not self._animate or not hasattr(self.view, "camera"):
+            return
+        t = time.perf_counter() - self._anim_start
+        cam = self.view.camera
+        if isinstance(cam, scene.cameras.TurntableCamera):
+            try:
+                cam.azimuth = (self._animate_dps * t) % 360.0
+            except Exception as exc:
+                logger.debug("Animate(3D) failed: %s", exc)
+            return
+        try:
+            cx = self.width * 0.5
+            cy = self.height * 0.5
+            pan_ax = self.width * 0.05
+            pan_ay = self.height * 0.05
+            ox = pan_ax * math.sin(0.6 * t)
+            oy = pan_ay * math.cos(0.4 * t)
+            s = 1.0 + 0.08 * math.sin(0.8 * t)
+            half_w = (self.width * 0.5) / max(1e-6, s)
+            half_h = (self.height * 0.5) / max(1e-6, s)
+            x_rng = (cx + ox - half_w, cx + ox + half_w)
+            y_rng = (cy + oy - half_h, cy + oy + half_h)
+            cam.set_range(x=x_rng, y=y_rng)
+        except Exception as exc:
+            logger.debug("Animate(2D) failed: %s", exc)
+
+    def _refresh_slice_if_needed(self) -> None:
+        if self.use_volume or self._scene_source is None or self._napari_layer is None:
+            return
+        source = self._scene_source
+        level = int(self._active_ms_level)
+        roi = self._viewport_roi_for_level(source, level)
+        planner = SliceUpdatePlanner(int(self._roi_edge_threshold))
+        decision = planner.evaluate(level=level, roi=roi, last_roi=self._last_roi)
+        if not decision.refresh:
+            return
+        z_idx = int(self._z_index or 0)
+        slab = self._load_slice(source, level, z_idx)
+        cam = getattr(self.view, 'camera', None)
+        ctx = self._build_scene_state_context(cam)
+        SceneStateApplier.apply_slice_to_layer(
+            ctx,
+            source=source,
+            slab=slab,
+            roi=roi,
+            update_contrast=False,
+        )
+        self._last_roi = decision.new_last_roi
+
     def render_tick(self) -> float:
         t_r0 = time.perf_counter()
-        # Optional animation
-        if self._animate and hasattr(self.view, "camera"):
-            t = time.perf_counter() - self._anim_start
-            cam = self.view.camera
-            if isinstance(cam, scene.cameras.TurntableCamera):
-                try:
-                    cam.azimuth = (self._animate_dps * t) % 360.0
-                except Exception as e:
-                    logger.debug("Animate(3D) failed: %s", e)
-            else:
-                try:
-                    cx = self.width * 0.5
-                    cy = self.height * 0.5
-                    pan_ax = self.width * 0.05
-                    pan_ay = self.height * 0.05
-                    ox = pan_ax * math.sin(0.6 * t)
-                    oy = pan_ay * math.cos(0.4 * t)
-                    s = 1.0 + 0.08 * math.sin(0.8 * t)
-                    half_w = (self.width * 0.5) / max(1e-6, s)
-                    half_h = (self.height * 0.5) / max(1e-6, s)
-                    x_rng = (cx + ox - half_w, cx + ox + half_w)
-                    y_rng = (cy + oy - half_h, cy + oy + half_h)
-                    cam.set_range(x=x_rng, y=y_rng)
-                except Exception as e:
-                    logger.debug("Animate(2D) failed: %s", e)
+        self._animate_camera_if_needed()
         self.drain_scene_updates()
-        # If in 2D slice mode, update the slab when panning moves the viewport
-        # outside the last ROI or beyond the hysteresis threshold.
-        if not self.use_volume and self._scene_source is not None and self._napari_layer is not None:
-            source = self._scene_source
-            level = int(self._active_ms_level)
-            roi = self._viewport_roi_for_level(source, level)
-            planner = SliceUpdatePlanner(int(self._roi_edge_threshold))
-            decision = planner.evaluate(level=level, roi=roi, last_roi=self._last_roi)
-            if decision.refresh:
-                z_idx = int(self._z_index or 0)
-                slab = self._load_slice(source, level, z_idx)
-                cam = getattr(self.view, 'camera', None)
-                ctx = self._build_scene_state_context(cam)
-                SceneStateApplier.apply_slice_to_layer(
-                    ctx,
-                    source=source,
-                    slab=slab,
-                    roi=roi,
-                    update_contrast=False,
-                )
-                self._last_roi = decision.new_last_roi
+        self._refresh_slice_if_needed()
         self.canvas.render()
         if self._level_policy_refresh_needed:
             self._level_policy_refresh_needed = False
