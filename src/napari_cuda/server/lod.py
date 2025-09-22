@@ -11,7 +11,7 @@ Phase A: helpers only; wiring happens in the worker in a later step.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Mapping, Optional, Sequence, Tuple, Callable
 import logging
 
 import numpy as np
@@ -379,6 +379,87 @@ def apply_level(
     )
 
 
+def format_oversampling(overs_map: Mapping[int, float]) -> str:
+    return '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}'
+
+
+def evaluate_policy_decision(
+    *,
+    source: ZarrSceneSource,
+    current_level: int,
+    oversampling_for_level: Callable[[ZarrSceneSource, int], float],
+    zoom_ratio: Optional[float],
+    lock_level: Optional[int],
+    last_switch_ts: float,
+    now_ts: float,
+    config: LevelPolicyConfig,
+    log_policy_eval: bool,
+    select_level_fn: Callable[[LevelPolicyConfig, LevelPolicyInputs], LevelPolicyDecision] = select_level,
+    logger_ref: logging.Logger = logger,
+) -> Optional[tuple[LevelPolicyDecision, Mapping[int, float]]]:
+    level_indices = list(range(len(source.level_descriptors)))
+    if not level_indices:
+        return None
+
+    overs_map: dict[int, float] = {}
+    for lvl in level_indices:
+        try:
+            overs_map[int(lvl)] = float(oversampling_for_level(source, int(lvl)))
+        except Exception:
+            continue
+    if not overs_map:
+        return None
+
+    inputs = LevelPolicyInputs(
+        current_level=current_level,
+        oversampling=overs_map,
+        zoom_ratio=zoom_ratio,
+        lock_level=lock_level,
+        last_switch_ts=last_switch_ts,
+        now_ts=now_ts,
+    )
+    decision = select_level_fn(config, inputs)
+
+    if not decision.should_switch:
+        if decision.blocked_reason == "cooldown":
+            if log_policy_eval and logger_ref.isEnabledFor(logging.DEBUG):
+                logger_ref.debug(
+                    "lod.cooldown: level=%d target=%d remaining=%.1fms",
+                    int(current_level),
+                    int(decision.selected_level),
+                    decision.cooldown_remaining_ms,
+                )
+        elif logger_ref.isEnabledFor(logging.DEBUG):
+            logger_ref.debug(
+                "lod.hold: level=%d desired=%d selected=%d overs=%s",
+                int(current_level),
+                int(decision.desired_level),
+                int(decision.selected_level),
+                format_oversampling(overs_map),
+            )
+        return None
+
+    if logger_ref.isEnabledFor(logging.INFO):
+        if int(decision.selected_level) < int(current_level):
+            logger_ref.info(
+                "lod.zoom_in: current=%d -> selected=%d overs=%.3f reason=%s",
+                int(current_level),
+                int(decision.selected_level),
+                overs_map.get(int(decision.selected_level), float('nan')),
+                decision.action,
+            )
+        elif int(decision.selected_level) > int(current_level):
+            logger_ref.info(
+                "lod.zoom_out: current=%d -> selected=%d overs=%.3f reason=%s",
+                int(current_level),
+                int(decision.selected_level),
+                overs_map.get(int(decision.selected_level), float('nan')),
+                decision.action,
+            )
+
+    return decision, overs_map
+
+
 def apply_level_with_budget(
     *,
     desired_level: int,
@@ -440,4 +521,6 @@ __all__ = [
     "apply_level",
     "select_level",
     "set_dims_range_for_level",
+    "format_oversampling",
+    "evaluate_policy_decision",
 ]

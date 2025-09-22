@@ -1,9 +1,9 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
 ## Current Snapshot (2025-09-22)
-- `egl_worker.py`: 1,681 LOC (down ~586 from the pre-extraction snapshot and -64 since the last checkpoint). Longest blocks are `__init__` (235 lines), `_evaluate_level_policy` (110), and `_apply_level_internal` (59) after the helper splits.
+- `egl_worker.py`: 1,640 LOC (down ~627 from the pre-extraction snapshot and -41 since the last checkpoint). Longest blocks are `__init__` (235 lines), `_apply_level_internal` (72), and `_evaluate_level_policy` (70) after the helper splits.
 - `scene_state_applier.py`: 216 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
-- `lod.py`: 443 LOC while it still hosts the selector and level-application helpers. Budget orchestration now lives beside the worker through `level_budget.py`; remaining trims target pure policy code.
+- `lod.py`: 526 LOC after adding policy-evaluation helpers. Further trims will move selector plumbing and cooldown logging into dedicated modules.
 - `roi.py`: 403 LOC after absorbing the viewport debug + ROI caching helpers. Further consolidation will follow once the worker delegates slice refresh entirely to `roi_applier`.
 - `capture.py`: 94 LOC encapsulating GL capture, CUDA interop, and frame pipeline orchestration for the worker.
 - `try:` count trimmed to ≈60 with camera/state hot-path guards removed; remaining blocks sit at subsystem boundaries (EGL/CUDA/NVENC) and legacy ROI helpers queued for Phase C/D.

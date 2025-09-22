@@ -47,6 +47,7 @@ from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
 from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
+import napari_cuda.server.lod as lod
 from napari_cuda.server.lod import apply_level
 from napari_cuda.server.level_budget import apply_level_with_budget, LevelBudgetError
 from napari_cuda.server.config import LevelPolicySettings, ServerCtx
@@ -60,7 +61,6 @@ from napari_cuda.server.roi import (
     viewport_debug_snapshot,
     resolve_viewport_roi,
 )
-from napari_cuda.server.lod import LevelPolicyConfig, LevelPolicyInputs, select_level
 from napari_cuda.server.scene_state_applier import (
     SceneStateApplier,
     SceneStateApplyContext,
@@ -78,6 +78,9 @@ from napari_cuda.server.state_machine import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Back-compat for tests patching the selector directly
+select_level = lod.select_level
 
 ## Camera ops now live in napari_cuda.server.camera_ops as free functions.
 
@@ -1470,77 +1473,37 @@ class EGLRendererWorker:
             logger.debug("ensure_scene_source failed in selection", exc_info=True)
             return
 
-        level_indices = list(range(len(source.level_descriptors)))
-        if not level_indices:
-            return
-
-        overs_map: Dict[int, float] = {}
-        for lvl in level_indices:
-            try:
-                overs_map[int(lvl)] = float(self._oversampling_for_level(source, int(lvl)))
-            except Exception:
-                continue
-        if not overs_map:
-            return
-
         current = int(self._active_ms_level)
         zoom_hint = self._scene_state_queue.consume_zoom_intent(max_age=0.5)
         zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
 
         now_ts = time.perf_counter()
-        config = LevelPolicyConfig(
+        config = lod.LevelPolicyConfig(
             threshold_in=float(self._level_threshold_in),
             threshold_out=float(self._level_threshold_out),
             fine_threshold=float(self._level_fine_threshold),
             hysteresis=float(self._level_hysteresis),
             cooldown_ms=float(self._level_switch_cooldown_ms),
         )
-        inputs = LevelPolicyInputs(
+
+        result = lod.evaluate_policy_decision(
+            source=source,
             current_level=current,
-            oversampling=overs_map,
+            oversampling_for_level=self._oversampling_for_level,
             zoom_ratio=zoom_ratio,
             lock_level=self._lock_level,
             last_switch_ts=float(self._last_level_switch_ts),
             now_ts=now_ts,
+            config=config,
+            log_policy_eval=self._log_policy_eval,
+            select_level_fn=select_level,
+            logger_ref=logger,
         )
-        decision = select_level(config, inputs)
 
-        if not decision.should_switch:
-            if decision.blocked_reason == 'cooldown':
-                if self._log_policy_eval and logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "lod.cooldown: level=%d target=%d remaining=%.1fms",
-                        int(current),
-                        int(decision.selected_level),
-                        decision.cooldown_remaining_ms,
-                    )
-                return
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "lod.hold: level=%d desired=%d selected=%d overs=%s",
-                    int(current),
-                    int(decision.desired_level),
-                    int(decision.selected_level),
-                    '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
-                )
+        if result is None:
             return
 
-        if int(decision.selected_level) < current:
-            logger.info(
-                "lod.zoom_in: current=%d -> selected=%d overs=%.3f reason=%s",
-                current,
-                int(decision.selected_level),
-                overs_map.get(int(decision.selected_level), float('nan')),
-                decision.action,
-            )
-        elif int(decision.selected_level) > current:
-            logger.info(
-                "lod.zoom_out: current=%d -> selected=%d overs=%.3f reason=%s",
-                current,
-                int(decision.selected_level),
-                overs_map.get(int(decision.selected_level), float('nan')),
-                decision.action,
-            )
+        decision, overs_map = result
 
         prev = current
         try:
@@ -1568,7 +1531,7 @@ class EGLRendererWorker:
             int(prev),
             int(self._active_ms_level),
             decision.action,
-            '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+            lod.format_oversampling(overs_map),
         )
 
     # (packer is now provided by bitstream.py)
