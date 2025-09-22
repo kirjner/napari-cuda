@@ -37,8 +37,6 @@ from napari.components.viewer_model import ViewerModel
 from napari._vispy.layers.image import VispyImageLayer
 
 import pycuda.driver as cuda  # type: ignore
-import torch  # type: ignore
-import torch.nn.functional as F  # type: ignore
 # Bitstream packing happens in the server layer
 from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
@@ -55,6 +53,7 @@ from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
+from napari_cuda.server.rendering.frame_pipeline import FramePipeline
 from napari_cuda.server.roi_applier import SliceUpdatePlanner
 from napari_cuda.server.roi import (
     compute_viewport_roi,
@@ -150,9 +149,15 @@ class EGLRendererWorker:
 
         self._gl_capture = GLCapture(self.width, self.height)
         self._cuda = CudaInterop(self.width, self.height)
+        self._frame_pipeline = FramePipeline(
+            gl_capture=self._gl_capture,
+            cuda=self._cuda,
+            width=self.width,
+            height=self.height,
+            debug=None,
+        )
 
         self._encoder: Optional[Encoder] = None
-        self._enc_input_fmt: str = "YUV444"
 
         # Track current data extents in world units (W,H)
         self._data_wh: tuple[int, int] = (int(width), int(height))
@@ -262,6 +267,7 @@ class EGLRendererWorker:
             self._auto_reset_on_black = env_bool('NAPARI_CUDA_AUTO_RESET_ON_BLACK', True)
         except Exception:
             self._auto_reset_on_black = True
+        self._frame_pipeline.configure_auto_reset(self._auto_reset_on_black)
         self._black_reset_done: bool = False
         # Min time between level switches to avoid shimmering during pan
         try:
@@ -353,10 +359,11 @@ class EGLRendererWorker:
         if self._debug.cfg.enabled:
             self._debug.log_env_once()
             self._debug.ensure_out_dir()
+        self._frame_pipeline.set_debug(self._debug)
         # Log format/size once for clarity
         logger.info(
             "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
-            self.width, self.height, getattr(self, '_enc_input_fmt', 'unknown'), self.fps, self._animate,
+            self.width, self.height, self._frame_pipeline.enc_input_format, self.fps, self._animate,
             bool(self._zarr_path),
         )
 
@@ -1293,7 +1300,7 @@ class EGLRendererWorker:
             encoder = self._encoder
             encoder.set_fps_hint(int(self.fps))
             encoder.setup(self._ctx)
-            self._enc_input_fmt = encoder.input_format
+            self._frame_pipeline.set_enc_input_format(encoder.input_format)
 
     def reset_encoder(self) -> None:
         with self._enc_lock:
@@ -1518,11 +1525,29 @@ class EGLRendererWorker:
         render_ms = self.render_tick()
         # Blit timing (GPU + CPU)
         t_b0 = time.perf_counter()
-        blit_gpu_ns = self._capture_blit_gpu_ns()
+        blit_gpu_ns = self._frame_pipeline.capture_blit_gpu_ns()
         t_b1 = time.perf_counter()
         blit_cpu_ms = (t_b1 - t_b0) * 1000.0
-        map_ms, copy_ms = self._map_and_copy_to_torch()
-        dst, convert_ms = self._convert_for_encoder()
+        debug_cb = None
+        if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
+            def _cb(tex_id: int, w: int, h: int, frame) -> None:
+                self._debug.dump_triplet(tex_id, w, h, frame)  # type: ignore[attr-defined]
+
+            debug_cb = _cb
+        map_ms, copy_ms = self._frame_pipeline.map_and_copy_to_torch(debug_cb)
+
+        reset_cb: Optional[Callable[[], None]] = None
+        if self._auto_reset_on_black and hasattr(self, 'view') and getattr(self.view, 'camera', None) is not None:
+            def _reset_camera() -> None:
+                cam = getattr(self.view, 'camera', None)
+                if cam is not None:
+                    self._apply_camera_reset(cam)
+
+            reset_cb = _reset_camera
+
+        dst, convert_ms = self._frame_pipeline.convert_for_encoder(reset_camera=reset_cb)
+        self._orientation_ready = self._frame_pipeline.orientation_ready
+        self._black_reset_done = self._frame_pipeline.black_reset_done
         with self._enc_lock:
             encoder = self._encoder
         if encoder is None or not encoder.is_ready:
@@ -1611,92 +1636,6 @@ class EGLRendererWorker:
         self._render_loop_started = True
         t_r1 = time.perf_counter()
         return (t_r1 - t_r0) * 1000.0
-
-    def _map_and_copy_to_torch(self) -> tuple[float, float]:
-        debug_cb = None
-        if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
-            def _cb(tex_id: int, w: int, h: int, frame: torch.Tensor) -> None:
-                self._debug.dump_triplet(tex_id, w, h, frame)
-
-            debug_cb = _cb
-        return self._cuda.map_and_copy(debug_cb=debug_cb)
-
-    def _convert_for_encoder(self):
-        t_c0 = time.perf_counter()
-        try:
-            dump_raw = int(os.getenv('NAPARI_CUDA_DUMP_RAW', '0'))
-        except Exception:
-            dump_raw = 0
-        frame = self._cuda.torch_frame
-        if dump_raw > 0:
-            try:
-                self._debug.dump_cuda_rgba(frame, self.width, self.height, prefix="raw")
-                os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
-            except Exception as e:
-                logger.debug("Pre-encode raw dump failed: %s", e)
-        src = frame
-        try:
-            r = src[..., 0].float() / 255.0
-            g = src[..., 1].float() / 255.0
-            b = src[..., 2].float() / 255.0
-            y_n = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            y = torch.clamp(16.0 + 219.0 * y_n, 0.0, 255.0)
-            cb = torch.clamp(128.0 + 224.0 * (b - y_n) / 1.8556, 0.0, 255.0)
-            cr = torch.clamp(128.0 + 224.0 * (r - y_n) / 1.5748, 0.0, 255.0)
-            try:
-                if not hasattr(self, '_logged_swizzle_stats'):
-                    rm = float(r.mean().item()); gm = float(g.mean().item()); bm = float(b.mean().item())
-                    ym = float(y.mean().item()); cbm = float(cb.mean().item()); crm = float(cr.mean().item())
-                    logger.info("Pre-encode channel means: R=%.3f G=%.3f B=%.3f | Y=%.3f Cb=%.3f Cr=%.3f", rm, gm, bm, ym, cbm, crm)
-                    try:
-                        if (getattr(self, '_auto_reset_on_black', False) and not getattr(self, '_black_reset_done', False) and (rm + gm + bm) < 1e-4):
-                            logger.info("Detected black initial frame; applying one-shot camera reset")
-                            if hasattr(self, 'view') and hasattr(self.view, 'camera'):
-                                self._apply_camera_reset(self.view.camera)
-                            self._black_reset_done = True
-                        if (rm + gm + bm) >= 1e-4:
-                            self._orientation_ready = True
-                    except Exception:
-                        logger.debug("auto-reset-on-black failed", exc_info=True)
-                    setattr(self, '_logged_swizzle_stats', True)
-            except Exception as e:
-                logger.debug("Swizzle stats log failed: %s", e)
-            H, W = self.height, self.width
-            if self._enc_input_fmt == 'YUV444':
-                if not hasattr(self, '_logged_swizzle'):
-                    logger.info("Pre-encode swizzle: RGBA -> YUV444 (BT709 LIMITED, planar)")
-                    setattr(self, '_logged_swizzle', True)
-                dst = torch.empty((H * 3, W), dtype=torch.uint8, device=src.device)
-                dst[0:H, :] = y.to(torch.uint8)
-                dst[H:2*H, :] = cb.to(torch.uint8)
-                dst[2*H:3*H, :] = cr.to(torch.uint8)
-            elif self._enc_input_fmt in ('ARGB', 'ABGR'):
-                if not hasattr(self, '_logged_swizzle'):
-                    logger.info("Pre-encode swizzle: RGBA -> %s (packed)", self._enc_input_fmt)
-                    setattr(self, '_logged_swizzle', True)
-                dst = src[..., [3, 0, 1, 2]].contiguous() if self._enc_input_fmt == 'ARGB' else src[..., [3, 2, 1, 0]].contiguous()
-            else:
-                if not hasattr(self, '_logged_swizzle'):
-                    logger.info("Pre-encode swizzle: RGBA -> NV12 (BT709 LIMITED, 4:2:0 UV interleaved)")
-                    setattr(self, '_logged_swizzle', True)
-                cb2 = F.avg_pool2d(cb.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2).squeeze()
-                cr2 = F.avg_pool2d(cr.unsqueeze(0).unsqueeze(0), kernel_size=2, stride=2).squeeze()
-                H2, W2 = cb2.shape
-                dst = torch.empty((H + H2, W), dtype=torch.uint8, device=src.device)
-                dst[0:H, :] = y.to(torch.uint8)
-                uv = dst[H:, :]
-                uv[:, 0::2] = cb2.to(torch.uint8)
-                uv[:, 1::2] = cr2.to(torch.uint8)
-        except Exception as e:
-            logger.exception("Pre-encode color conversion failed: %s", e)
-            dst = src[..., [3, 0, 1, 2]]
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-        except Exception:
-            logger.debug("torch.cuda.synchronize failed", exc_info=True)
-        t_c1 = time.perf_counter()
-        return dst, (t_c1 - t_c0) * 1000.0
 
     # ---- C6 selection (napari-anchored) -------------------------------------
     def _evaluate_level_policy(self) -> None:

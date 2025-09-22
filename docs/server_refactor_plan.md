@@ -37,14 +37,11 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - `roi.py` now owns viewport ROI math and plane helpers; the worker simply wraps caching/log bookkeeping, eliminating the bespoke ROI code path and associated guard soup.
 - `lod.py` now contains both the selector policy and the apply helpers. Near-term goal is to trim it back under 400 LOC by pushing ROI math that doesn't need selection context into `roi.py` and collapsing historic LevelDecision scaffolding once the compute-only napari path lands.
 - `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
-- **In progress**:
-  - Worker naming cleanup (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
-- **Next extraction targets**:
-  - **Capture/interop split**: hoist capture + CUDA glue into `capture.py`/`cuda_interop.py` so the worker only orchestrates timing and logging.
-  - **Guard audit**: prune the remaining ROI fallback logs and broad `except Exception` blocks now that `compute_viewport_roi` is authoritative.
-  - **ServerCtx wiring**: lift level-policy thresholds and logging toggles into a shared config object to keep `__init__` moving toward the 200 LOC goal.
-- **Tests still to add**:
-  - Integration-style test exercising level selection under a sequence of zoom hints to lock the relaxed thresholds in place.
+- **Remaining milestones to close Phase B**:
+  1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC).
+  2. **Guard + naming audit** — finish renaming (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) and remove the remaining ROI/policy try/except fallbacks now that `compute_viewport_roi` owns the math; re-check `try`/`getattr` counts.
+  3. **ServerCtx policy surface** — lift level-policy thresholds, logging toggles, and related env reads into a shared config object resolved at init to simplify `__init__` and prepare for Phase D logging work.
+  4. **Integration tests** — add the zoom-intent regression test and a scripted render smoke harness that exercises `preserve_view_on_switch=True` so state/camera changes stay covered end-to-end.
 
 ### Phase C — ROI & LOD Minimization
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
