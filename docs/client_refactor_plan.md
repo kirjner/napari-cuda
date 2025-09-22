@@ -1,7 +1,7 @@
 # Client Streamlining & Degodification Plan
 
 ## Current Snapshot (2025-09-22)
-- `streaming/client_stream_loop.py`: 2,395 LOC (down another 31 after pipeline helpers; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
+- `streaming/client_stream_loop.py`: 2,330 LOC (down 65 with env config + pipelines; still a god object). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; >40 `try` blocks and pervasive env reads in hot paths.
 - `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
 - `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
@@ -48,7 +48,7 @@
   2. Funnel metrics/logging toggles through a lightweight facade so Phase E can reuse the surface.
   3. Write regression tests that simulate keyframe gating + dims replay to ensure `_last_dims_payload` survives each extraction.
 - **Config & env plumbing**
-  1. Move loop-specific env parsing into `client_loop_config.py` (pure helper + tests).
+  1. ✓ `client_loop_config.py` now loads warmup, metrics, dims, and input env knobs once; loop ctor consumes the struct and `_tests/test_config.py` locks parsing behaviour.
   2. After env centralisation, sweep remaining `try`/`getattr` usage in the loop to boundary-only assertions.
 - **Exit criteria**
   - `ClientStreamLoop` ≤1,000 LOC with `<25` `try` blocks and `<20` `getattr` calls.
@@ -90,6 +90,6 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
-1. Introduce `client_loop_config.py`, migrate env parsing there, then start replacing in-loop `try`/`getattr` with assertions once helpers are in place.
-2. Funnel metrics/logging toggles through a lightweight facade (Phase B bullet 2) so we can measure wake latency before deeper refactors.
-3. After helpers land, sweep the loop for dead code (e.g., orphaned proxy variants) and capture LOC + try counts to track progress toward the ≤1,000 LOC target.
+1. Funnel metrics/logging toggles through a lightweight facade so presenter timers and wake instrumentation share one surface before Phase E.
+2. Start pruning hot-path `try`/`getattr` calls that the new config makes redundant; replace them with assertions and explicit error paths.
+3. Continue env consolidation for smoke-mode helpers, then snapshot LOC + try counts to confirm progress toward the ≤1,000 LOC target.

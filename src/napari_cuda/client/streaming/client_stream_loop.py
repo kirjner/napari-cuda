@@ -37,12 +37,12 @@ from napari_cuda.codec.avcc import (
 )
 from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
-from napari_cuda.utils.env import env_float, env_str
 from napari_cuda.client.streaming.client_loop.scheduler import CallProxy, WakeProxy
 from napari_cuda.client.streaming.client_loop.pipelines import (
     build_pyav_pipeline,
     build_vt_pipeline,
 )
+from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
 from napari_cuda.client.streaming.smoke.generators import make_generator
 from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
@@ -156,6 +156,7 @@ class ClientStreamLoop:
         self._vt_smoke = bool(vt_smoke)
         # Phase 0: stash client config for future phases (no behavior change)
         self._client_cfg = client_cfg
+        self._env_cfg = load_client_loop_config()
         self._first_dims_ready_cb = on_first_dims_ready
         self._first_dims_notified = False
         self._loop_state = LoopState()
@@ -207,10 +208,10 @@ class ClientStreamLoop:
         self._next_due_pending_until: float = 0.0
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
-        self._warmup_ms_override = env_str('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MS', None)
-        self._warmup_window_s = env_float('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_WINDOW_S', 0.75)
-        self._warmup_margin_ms = env_float('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MARGIN_MS', 2.0)
-        self._warmup_max_ms = env_float('NAPARI_CUDA_CLIENT_STARTUP_WARMUP_MAX_MS', 24.0)
+        self._warmup_ms_override = self._env_cfg.warmup_ms_override
+        self._warmup_window_s = self._env_cfg.warmup_window_s
+        self._warmup_margin_ms = self._env_cfg.warmup_margin_ms
+        self._warmup_max_ms = self._env_cfg.warmup_max_ms
         self._warmup_until: float = 0.0
         self._warmup_extra_active_s: float = 0.0
         self._fps: Optional[float] = None
@@ -230,9 +231,9 @@ class ClientStreamLoop:
         self._vt_ts_offset: Optional[float] = None  # legacy wall->wall offset (unused once monotonic is active)
         self._vt_errors = 0
         # Bias for server timestamp alignment; default 0 for exact due times
-        self._server_bias_s = env_float('NAPARI_CUDA_SERVER_TS_BIAS_MS', 0.0) / 1000.0
+        self._server_bias_s = self._env_cfg.server_bias_s
         # Wake scheduling fudge (ms) to compensate for timer quantization; added to due delay
-        self._wake_fudge_ms = env_float('NAPARI_CUDA_WAKE_FUDGE_MS', 1.0)
+        self._wake_fudge_ms = self._env_cfg.wake_fudge_ms
         # avcC nal length size (default 4 if unknown)
         self._nal_length_size: int = 4
 
@@ -240,22 +241,14 @@ class ClientStreamLoop:
         self._vt_backlog_trigger = int(vt_backlog_trigger)
         self._vt_enqueued = 0
         # Client metrics (optional, env-controlled)
-        try:
-            metrics_enabled = (os.getenv('NAPARI_CUDA_CLIENT_METRICS', '0') or '0').lower() in ('1', 'true', 'yes')
-        except Exception:
-            metrics_enabled = False
-        self._metrics = ClientMetrics(enabled=metrics_enabled)
+        self._metrics = ClientMetrics(enabled=self._env_cfg.metrics_enabled)
 
         # Presenter-owned wake scheduling: single-shot QTimer owned by the GUI thread,
         # optionally disabled when an external fixed-cadence display loop is active.
         # Opt-in via NAPARI_CUDA_USE_DISPLAY_LOOP=1.
         self._wake_timer = None
         self._in_present: bool = False
-        try:
-            use_disp_loop_env = (os.getenv('NAPARI_CUDA_USE_DISPLAY_LOOP', '0') or '0').lower()
-            self._use_display_loop = use_disp_loop_env in ('1', 'true', 'yes', 'on')
-        except Exception:
-            self._use_display_loop = False
+        self._use_display_loop = self._env_cfg.use_display_loop
         if not self._use_display_loop:
             try:
                 self._wake_timer = QtCore.QTimer(self._scene_canvas.native)
@@ -350,7 +343,7 @@ class ClientStreamLoop:
         self._stream_seen_keyframe = False
 
         # Stats/logging and diagnostics
-        lvl_env = (env_str('NAPARI_CUDA_VT_STATS', '') or '').lower()
+        lvl_env = self._env_cfg.vt_stats_mode
         if lvl_env in ('1', 'true', 'yes', 'info'):
             self._stats_level = logging.INFO
         elif lvl_env in ('debug', 'dbg'):
@@ -373,17 +366,10 @@ class ClientStreamLoop:
         self._last_draw_pc: float = 0.0
         # Draw watchdog
         self._watchdog_timer = None
-        try:
-            self._watchdog_ms = max(0, int(env_float('NAPARI_CUDA_CLIENT_DRAW_WATCHDOG_MS', 0.0)))
-        except Exception:
-            self._watchdog_ms = 0
+        self._watchdog_ms = self._env_cfg.watchdog_ms
         # Event loop stall monitor (disabled by default)
-        try:
-            self._evloop_stall_ms = max(0, int(env_float('NAPARI_CUDA_CLIENT_EVENTLOOP_STALL_MS', 0.0)))
-            self._evloop_sample_ms = max(50, int(env_float('NAPARI_CUDA_CLIENT_EVENTLOOP_SAMPLE_MS', 100.0)))
-        except Exception:
-            self._evloop_stall_ms = 0
-            self._evloop_sample_ms = 100
+        self._evloop_stall_ms = self._env_cfg.evloop_stall_ms
+        self._evloop_sample_ms = self._env_cfg.evloop_sample_ms
         self._evloop_mon: Optional[EventLoopMonitor] = None
         # Video dimensions (from video_config)
         self._vid_w: Optional[int] = None
@@ -396,21 +382,9 @@ class ClientStreamLoop:
         self._last_pan_dx_sent: float = 0.0
         self._last_pan_dy_sent: float = 0.0
         # Dims/Z control (client-initiated)
-        try:
-            import os as _os
-            z0 = _os.getenv('NAPARI_CUDA_ZARR_Z')
-            self._dims_z: Optional[int] = int(z0) if z0 is not None and z0.strip() != '' else None
-        except Exception:
-            self._dims_z = None
-        try:
-            import os as _os
-            zmin = _os.getenv('NAPARI_CUDA_ZARR_Z_MIN')
-            zmax = _os.getenv('NAPARI_CUDA_ZARR_Z_MAX')
-            self._dims_z_min: Optional[int] = int(zmin) if zmin else None
-            self._dims_z_max: Optional[int] = int(zmax) if zmax else None
-        except Exception:
-            self._dims_z_min = None
-            self._dims_z_max = None
+        self._dims_z = self._env_cfg.dims_z
+        self._dims_z_min = self._env_cfg.dims_z_min
+        self._dims_z_max = self._env_cfg.dims_z_max
         # Clamp initial Z if provided
         if self._dims_z is not None:
             if self._dims_z_min is not None and self._dims_z < self._dims_z_min:
@@ -418,26 +392,14 @@ class ClientStreamLoop:
             if self._dims_z_max is not None and self._dims_z > self._dims_z_max:
                 self._dims_z = self._dims_z_max
         self._wheel_px_accum: float = 0.0
-        try:
-            import os as _os
-            self._wheel_step: int = max(1, int(_os.getenv('NAPARI_CUDA_WHEEL_Z_STEP', '1') or '1'))
-        except Exception:
-            self._wheel_step = 1
+        self._wheel_step = self._env_cfg.wheel_step
         # dims intents rate limiting (coalesce)
-        try:
-            import os as _os
-            rate = float(_os.getenv('NAPARI_CUDA_DIMS_SET_RATE', '60') or '60')
-        except Exception:
-            rate = 60.0
-        self._dims_min_dt: float = 1.0 / max(1.0, rate)
+        rate = self._env_cfg.dims_rate_hz
+        self._dims_min_dt = 1.0 / max(1.0, rate)
         self._last_dims_send: float = 0.0
         # Camera ops coalescing
-        try:
-            import os as _os
-            cam_rate = float(_os.getenv('NAPARI_CUDA_CAMERA_SET_RATE', '60') or '60')
-        except Exception:
-            cam_rate = 60.0
-        self._cam_min_dt: float = 1.0 / max(1.0, cam_rate)
+        cam_rate = self._env_cfg.camera_rate_hz
+        self._cam_min_dt = 1.0 / max(1.0, cam_rate)
         self._last_cam_send: float = 0.0
         self._dragging: bool = False
         self._last_wx: float = 0.0
@@ -448,14 +410,8 @@ class ClientStreamLoop:
         self._orbit_daz_accum: float = 0.0
         self._orbit_del_accum: float = 0.0
         self._orbit_dragging: bool = False
-        try:
-            self._orbit_deg_per_px_x: float = float(env_float('NAPARI_CUDA_ORBIT_DEG_PER_PX_X', 0.2))
-        except Exception:
-            self._orbit_deg_per_px_x = 0.2
-        try:
-            self._orbit_deg_per_px_y: float = float(env_float('NAPARI_CUDA_ORBIT_DEG_PER_PX_Y', 0.2))
-        except Exception:
-            self._orbit_deg_per_px_y = 0.2
+        self._orbit_deg_per_px_x = self._env_cfg.orbit_deg_per_px_x
+        self._orbit_deg_per_px_y = self._env_cfg.orbit_deg_per_px_y
         # --- Dims/intent state (intent-only client) ----------------------------
         self._dims_ready: bool = False
         self._dims_meta: dict = {
@@ -474,12 +430,8 @@ class ClientStreamLoop:
         self._client_id: str = uuid.uuid4().hex
         self._client_seq: int = 0
         # Settings/mode intents rate limiting (coalesce like dims intents)
-        try:
-            import os as _os
-            settings_rate = float(_os.getenv('NAPARI_CUDA_SETTINGS_SET_RATE', '60') or '60')
-        except Exception:
-            settings_rate = 60.0
-        self._settings_min_dt: float = 1.0 / max(1.0, settings_rate)
+        settings_rate = self._env_cfg.settings_rate_hz
+        self._settings_min_dt = 1.0 / max(1.0, settings_rate)
         self._last_settings_send: float = 0.0
 
     # --- Thread-safe scheduling helpers --------------------------------------
@@ -559,24 +511,9 @@ class ClientStreamLoop:
             self._loop_state.threads.append(t_state)
             # Attach input forwarding (wheel + resize) now that state channel exists
             try:
-                # Env knobs
-                import os as _os
-                try:
-                    max_rate_hz = float(_os.getenv('NAPARI_CUDA_INPUT_MAX_RATE', '120'))
-                except Exception:
-                    max_rate_hz = 120.0
-                try:
-                    resize_debounce_ms = int(_os.getenv('NAPARI_CUDA_RESIZE_DEBOUNCE_MS', '80'))
-                except Exception:
-                    resize_debounce_ms = 80
-                try:
-                    enable_wheel_set_dims = (_os.getenv('NAPARI_CUDA_CLIENT_WHEEL_SET_DIMS', '1') or '1').lower() in ('1','true','yes','on')
-                except Exception:
-                    enable_wheel_set_dims = True
-                try:
-                    log_input_info = (_os.getenv('NAPARI_CUDA_INPUT_LOG', '0') or '0').lower() in ('1','true','yes','on')
-                except Exception:
-                    log_input_info = False
+                max_rate_hz = self._env_cfg.input_max_rate_hz
+                resize_debounce_ms = self._env_cfg.resize_debounce_ms
+                log_input_info = self._env_cfg.input_log
                 # Use same flag for dims logging (INFO when enabled, DEBUG otherwise)
                 self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
                 # Unified wheel handler: dims intent step for plain wheel; zoom for modifiers
@@ -755,8 +692,7 @@ class ClientStreamLoop:
         # Client metrics CSV dump timer (independent of stats log level)
         if getattr(self._metrics, 'enabled', False):
             try:
-                interval_s = env_float('NAPARI_CUDA_CLIENT_METRICS_INTERVAL', 1.0)
-                interval_ms = max(100, int(round(1000.0 * max(0.1, float(interval_s)))))
+                interval_ms = self._env_cfg.metrics_interval_ms
                 self._metrics_timer = QtCore.QTimer(self._scene_canvas.native)
                 self._metrics_timer.setTimerType(QtCore.Qt.PreciseTimer)
                 self._metrics_timer.setInterval(interval_ms)
@@ -2265,7 +2201,7 @@ class ClientStreamLoop:
                 self._disco_gated = False
                 try:
                     if self._warmup_window_s > 0:
-                        if self._warmup_ms_override:
+                        if self._warmup_ms_override is not None:
                             extra_ms = max(0.0, float(self._warmup_ms_override))
                         else:
                             frame_ms = 1000.0 / (self._fps if (self._fps and self._fps > 0) else 60.0)
@@ -2341,8 +2277,7 @@ class ClientStreamLoop:
 
     def _start_metrics_timer(self) -> None:
         try:
-            interval_s = env_float('NAPARI_CUDA_CLIENT_METRICS_INTERVAL', 1.0)
-            interval_ms = max(100, int(round(1000.0 * max(0.1, float(interval_s)))))
+            interval_ms = self._env_cfg.metrics_interval_ms
             self._metrics_timer = QtCore.QTimer(self._scene_canvas.native)
             self._metrics_timer.setTimerType(QtCore.Qt.PreciseTimer)
             self._metrics_timer.setInterval(interval_ms)
