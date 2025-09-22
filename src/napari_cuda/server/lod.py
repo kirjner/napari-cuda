@@ -1,9 +1,9 @@
 """Level-of-detail (multiscale) helpers.
 
-Pure, testable functions that decide and apply multiscale level changes and
-compute slice ROIs from the active view. This module centralizes logic that was
-previously embedded in the worker so we can make napari the authority for level
-choice while keeping our stabilizers and budgets.
+Pure, testable functions that decide and apply multiscale level changes. This
+module centralizes logic that was previously embedded in the worker so napari
+remains the authority for level choice while keeping our stabilizers and
+budgets.
 
 Phase A: helpers only; wiring happens in the worker in a later step.
 """
@@ -13,13 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence, Tuple
 import logging
-import math
 
 import numpy as np
 
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.zarr_source import ZarrSceneSource
-from napari_cuda.server.scene_types import SliceROI
 from napari_cuda.server.roi import plane_scale_for_level, plane_wh_for_level
 
 
@@ -31,16 +29,6 @@ logger = logging.getLogger(__name__)
 
 class LevelBudgetError(RuntimeError):
     """Raised when a multiscale level exceeds configured budgets."""
-
-
-@dataclass(frozen=True)
-class LevelDecision:
-    desired_level: Optional[int]
-    selected_level: Optional[int]
-    applied_level: int
-    roi: Optional[SliceROI]
-    reason: str
-    needs_apply: bool
 
 
 @dataclass(frozen=True)
@@ -214,105 +202,6 @@ def select_level(
         should_switch=True,
         blocked_reason=None,
     )
-
-
-def compute_viewport_roi(
-    *,
-    viewer: ViewerModel,
-    source: ZarrSceneSource,
-    level: int,
-    align_chunks: bool = True,
-    edge_threshold: int = 4,
-    prev_roi: Optional[SliceROI] = None,
-    init_fullframe: bool = False,
-) -> SliceROI:
-    """Compute ROI in target level index space from the current viewport.
-
-    - Uses view.scene.transform to derive world bounds, converts to index space
-      using level scale, clamps to plane shape.
-    - Optionally aligns to chunk boundaries and applies a small-move hysteresis
-      relative to ``prev_roi``.
-    - If ``init_fullframe`` is True, returns a full-frame ROI for the very
-      first call to guarantee visible content.
-    """
-    h, w = plane_wh_for_level(source, level)
-    if init_fullframe:
-        return SliceROI(0, h, 0, w)
-
-    view = getattr(viewer, "_view", None) or getattr(viewer, "_qt_window", None)
-    canvas = getattr(viewer, "canvas", None)
-    # Fallback to private attribute used in our adapter path
-    if canvas is None and hasattr(viewer, "_canvas"):
-        canvas = getattr(viewer, "_canvas")
-
-    # We expect a vispy ViewBox with a scene graph; compute world-space bounds
-    sy, sx = plane_scale_for_level(source, level)
-    sy = max(1e-12, float(sy))
-    sx = max(1e-12, float(sx))
-
-    vis_view = getattr(getattr(viewer, "_view", None), "view", None)
-    if vis_view is None and hasattr(viewer, "window"):
-        vis_view = getattr(getattr(viewer, "window", None), "_qt_viewer", None)
-    if vis_view is None:
-        raise RuntimeError("No vispy view available for ROI compute")
-
-    scene = getattr(vis_view, "scene", None)
-    transform = getattr(scene, "transform", None) if scene is not None else None
-    if transform is None or not hasattr(transform, "imap"):
-        raise RuntimeError("No transform.imap available for ROI compute")
-
-    width = int(getattr(vis_view, "size", (w, h))[0])
-    height = int(getattr(vis_view, "size", (w, h))[1])
-    corners = (
-        (0.0, 0.0),
-        (float(width), 0.0),
-        (0.0, float(height)),
-        (float(width), float(height)),
-    )
-    world_pts = [transform.imap((float(x), float(y), 0.0)) for x, y in corners]
-    xs = [float(pt[0]) for pt in world_pts]
-    ys = [float(pt[1]) for pt in world_pts]
-    x0, x1 = min(xs), max(xs)
-    y0, y1 = min(ys), max(ys)
-
-    x_start = int(math.floor(min(x0, x1) / sx))
-    x_stop = int(math.ceil(max(x0, x1) / sx))
-    y_start = int(math.floor(min(y0, y1) / sy))
-    y_stop = int(math.ceil(max(y0, y1) / sy))
-    roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
-
-    # Align to chunk boundaries to stabilize IO and avoid sub-chunk phasing
-    if align_chunks:
-        arr = source.get_level(level)
-        chunks = getattr(arr, "chunks", None)
-        if chunks is not None:
-            lower = [str(a).lower() for a in source.axes]
-            y_pos = lower.index("y") if "y" in lower else max(0, len(chunks) - 2)
-            x_pos = lower.index("x") if "x" in lower else max(0, len(chunks) - 1)
-            cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-            cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-            cy = max(1, cy)
-            cx = max(1, cx)
-            ys = (roi.y_start // cy) * cy
-            ye = ((roi.y_stop + cy - 1) // cy) * cy
-            xs = (roi.x_start // cx) * cx
-            xe = ((roi.x_stop + cx - 1) // cx) * cx
-            roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
-
-    # Small-move hysteresis relative to previous ROI
-    if prev_roi is not None and edge_threshold > 0:
-        thr = int(edge_threshold)
-        if (
-            abs(roi.y_start - prev_roi.y_start) < thr
-            and abs(roi.y_stop - prev_roi.y_stop) < thr
-            and abs(roi.x_start - prev_roi.x_start) < thr
-            and abs(roi.x_stop - prev_roi.x_stop) < thr
-        ):
-            roi = prev_roi
-
-    if roi.is_empty():
-        return SliceROI(0, h, 0, w)
-    return roi
 
 
 # ---- Budget checks -----------------------------------------------------------
@@ -513,13 +402,11 @@ def apply_level(
 
 __all__ = [
     "LevelBudgetError",
-    "LevelDecision",
     "AppliedLevel",
     "LevelPolicyConfig",
     "LevelPolicyDecision",
     "LevelPolicyInputs",
     "stabilize_level",
-    "compute_viewport_roi",
     "assert_volume_within_budget",
     "assert_slice_within_budget",
     "apply_level",

@@ -15,10 +15,22 @@ class _IdentityTransform:
     """Minimal transform stub mirroring VisPy API used in tests."""
 
     matrix = (
-        (1.0, 0.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0, 0.0),
-        (0.0, 0.0, 1.0, 0.0),
-        (0.0, 0.0, 0.0, 1.0),
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
     )
 
     def __mul__(self, other: object) -> "_IdentityTransform":
@@ -37,7 +49,7 @@ class _FakeCanvas:
 
 
 class _FakeCamera2D:
-    def __init__(self) -> None:
+    def __init__(self, aspect: float | None = None) -> None:
         self.center = (0.0, 0.0)
         self.angles = (0.0, 0.0, 0.0)
         self.zoom_factor = 1.0
@@ -45,6 +57,7 @@ class _FakeCamera2D:
         self.set_range_calls: list[dict[str, tuple[float, float] | None]] = []
         self.azimuth = 0.0
         self.elevation = 0.0
+        self.aspect = aspect
 
     def zoom(self, factor: float, center: tuple[float, float] | None = None) -> None:
         self.zoom_factor *= float(factor)
@@ -115,19 +128,32 @@ class _FakeSceneSource:
         self.current_level = 1
         self.dtype = "float32"
         self.level_descriptors = [
-            SimpleNamespace(shape=(1, 4, 4), path=None) for _ in range(3)
+            SimpleNamespace(shape=(1, 4, 4), path=None, index=i) for i in range(3)
         ]
 
     def level_shape(self, level: int) -> tuple[int, int, int]:
         return (1, 4, 4)
 
-    def set_current_level(self, level: int, step: tuple[int, ...]):
+    def set_current_level(self, level: int, step: tuple[int, ...]) -> tuple[int, ...]:
         self.current_level = int(level)
         self.current_step = tuple(int(s) for s in step)
-        return SimpleNamespace(level=int(level), step=self.current_step)
+        return self.current_step
 
     def level_index_for_path(self, path: str | None) -> int:
         return 0
+
+    def level_scale(self, level: int) -> tuple[float, float, float]:
+        return (1.0, 1.0, 1.0)
+
+    def get_level(self, level: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            chunks=(1, 4, 4),
+            dtype=self.dtype,
+            shape=(1, 4, 4),
+        )
+
+    def ensure_contrast(self, *, level: int) -> tuple[float, float]:
+        return (0.0, 1.0)
 
 
 @pytest.fixture()
@@ -253,6 +279,7 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         layer.applied.append((slab, roi, bool(update_contrast)))
         return 1.0, 1.0
 
+    monkeypatch.setattr(ew.scene.cameras, "PanZoomCamera", _FakeCamera2D)
     monkeypatch.setattr(ew, "EglContext", _DummyEglContext)
     monkeypatch.setattr(ew, "GLCapture", _DummyGLCapture)
     monkeypatch.setattr(ew, "CudaInterop", _DummyCudaInterop)
@@ -369,3 +396,36 @@ def test_preserve_view_disabled_resets_camera(egl_worker_fixture):
     worker.drain_scene_updates()
 
     assert camera.set_range_calls, "camera.set_range should be invoked when preserve-view is disabled"
+
+
+def test_zoom_intent_triggers_level_switch_end_to_end(egl_worker_fixture):
+    worker = egl_worker_fixture
+
+    def _oversampling(self, source, level):  # type: ignore[no-untyped-def]
+        return {0: 0.8, 1: 1.0, 2: 1.6}.get(int(level), 1.0)
+
+    worker._oversampling_for_level = MethodType(_oversampling, worker)
+    worker._napari_layer.applied.clear()
+
+    worker.process_camera_commands([CameraCommand(kind="zoom", factor=2.0)])
+    worker._evaluate_level_policy()
+
+    assert worker._active_ms_level == 0
+    assert worker._napari_layer.applied, "slice should be applied when level changes"
+    assert worker._scene_state_queue.consume_zoom_intent(max_age=0.5) is None
+    assert worker._last_level_switch_ts > 0.0
+
+
+def test_render_tick_preserve_view_smoke(egl_worker_fixture):
+    worker = egl_worker_fixture
+    camera: _FakeCamera2D = worker.view.camera  # type: ignore[assignment]
+    camera.set_range_calls.clear()
+    worker._napari_layer.applied.clear()
+    worker._last_roi = None
+
+    elapsed_ms = worker.render_tick()
+
+    assert elapsed_ms >= 0.0
+    assert worker._napari_layer.applied, "render_tick should apply the latest slab"
+    assert worker._last_roi is not None
+    assert camera.set_range_calls == []

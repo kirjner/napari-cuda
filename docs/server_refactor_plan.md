@@ -1,9 +1,9 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
 ## Current Snapshot (2025-09-22)
-- `egl_worker.py`: 1,920 LOC (down ~350 from the pre-extraction snapshot). Longest blocks are `__init__` (254 lines), `_viewport_roi_for_level` (87), and `_evaluate_level_policy` (109); `_apply_level_internal` now delegates to helpers and is <80 lines.
+- `egl_worker.py`: 1,801 LOC (down ~470 from the pre-extraction snapshot and -119 since the last checkpoint). Longest blocks are `__init__` (254 lines), `_viewport_roi_for_level` (75), and `_evaluate_level_policy` (109); `_apply_level_internal` still sits <80 lines after the helper extraction.
 - `scene_state_applier.py`: 216 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
-- `lod.py`: 553 LOC after folding the selector helpers back into the core LOD module. The policy helpers (`LevelPolicy*`, `select_level`) now live beside `apply_level`/ROI math, removing the redundant `lod_selector.py` layer.
+- `lod.py`: 413 LOC after shedding the duplicate ROI helper and unused `LevelDecision` scaffolding. Policy helpers (`LevelPolicy*`, `select_level`) now live beside `apply_level` while we stage the final Phase C trims.
 - `try:` count trimmed to ≈60 with camera/state hot-path guards removed; remaining blocks sit at subsystem boundaries (EGL/CUDA/NVENC) and legacy ROI helpers queued for Phase C/D.
 - `getattr` usage in the worker now ≈33 after asserting invariants in the state queue + camera paths. Further reductions arrive with Phase C decomposition.
 - Env/env_bool still sprinkled across init (encoder, ROI, debug). Centralised logging/config policy remains scheduled for Phase D.
@@ -45,14 +45,14 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 
 ### Phase C — ROI & LOD Minimization
 - Phase transition: Phase B prerequisites (guard audit, integration coverage, explicit `ServerCtx`) are satisfied; Phase C work can now begin while capture/logging follow-ups proceed in parallel.
-- **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
-- **LOD selection**: `_evaluate_level_policy` delegates to `lod.select_level`, so zoom hints and thresholds are handled in a pure helper with single env reads during init.
-- **View preservation**: Promote the new unit guard into an integration-level check once the ROI extraction lands, so render-thread camera state stays stable without manual smoke tests.
-- **Milestones**:
-  1. Extract the worker ROI helpers (viewport ROI, chunk alignment, hysteresis) into `roi.py`, delete the duplicate ROI path in `lod.py`, and update call sites/tests.
-  2. Trim `lod.py` to pure level/policy logic (<400 LOC) by removing ROI math and unused `LevelDecision` scaffolding; extend unit tests to cover the slimmed selector.
-  3. Introduce a capture façade (`capture.py`) that wraps `GLCapture`, `CudaInterop`, and `FramePipeline` orchestration so `egl_worker.py` sheds ~300 LOC.
-  4. Re-run integration + ROI unit suites to verify zoom-intent/preserve-view behaviour after the extractions and log the new LOC metrics.
+- **ROI helper**: `compute_viewport_roi` now lives in `roi.py` and the worker routes through it with cached signatures. Remaining work is to delete the legacy duplicate path in `lod.py`, converge the tests on the shared helper, and collapse the worker-side log scaffolding once the new telemetry lands.
+- **LOD selection**: `_evaluate_level_policy` already delegates to `lod.select_level`; next trim is to remove the unused `LevelDecision` scaffolding and cap the module <400 LOC by pushing the lingering ROI math into `roi.py`.
+- **View preservation**: Render harness landed (`test_render_tick_preserve_view_smoke`) so we can safely delete the old fallback logging once the shared ROI helper is universal.
+- **Milestones (status + next action)**:
+  1. **ROI consolidation** — Worker uses `roi.compute_viewport_roi`; drop `lod.compute_viewport_roi`, update `lod` tests to import the shared helper, and remove the remaining ROI fallback logging from the worker.
+  2. **Slim `lod.py`** — Remove `LevelDecision` + dormant napari scaffolding, cap the file <400 LOC, and extend `test_lod_selector.py` with oversampling + cooldown coverage for the slimmed API.
+  3. **Capture façade** — Reuse the existing `rendering.gl_capture.GLCapture`, `rendering.cuda_interop.CudaInterop`, and `rendering.frame_pipeline.FramePipeline` by fronting them with a thin `server.capture` module so `_set_level_with_budget`/render tick shed the current init/reset boilerplate without duplicating capture logic; add smoke coverage that exercises the façade in the worker fixture.
+  4. **Regression sweep** — After each extraction, run ROI + worker integration tests (`uv run pytest src/napari_cuda/server/_tests/test_roi.py src/napari_cuda/server/_tests/test_worker_integration.py`) and log the new LOC metrics (`wc -l src/napari_cuda/server/egl_worker.py`).
 
 ### Phase D — Logging & Debug Policy
 - Establish `logging_policy.py` or config entries controlling debug flags. Remove per-call env parsing (`NAPARI_CUDA_DEBUG_*`). Convert to bools resolved at init via `ServerCtx`.
@@ -80,8 +80,10 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Lint rules**: Introduce ruff rules to flag `except Exception` & `logger.*` inside try/except.
 
 ## Immediate Next Steps
-- Kick off Phase C ROI extraction (`compute_viewport_roi` to own ROI math fully) while carving the capture/CUDA glue into dedicated modules to keep the worker trending downward.
-- Draft the `ServerCtx` logging/debug config surface so env probes migrate in Phase D without another worker churn.
+1. Finish ROI consolidation: delete `lod.compute_viewport_roi`, repoint its callers/tests to `roi.compute_viewport_roi`, and strip the worker’s fallback logging now that integration coverage exists.
+2. Trim `lod.py`: remove the dead `LevelDecision` scaffolding, keep only selector/policy helpers, and extend unit coverage before recording the updated LOC snapshot.
+3. Draft the capture façade module skeleton (`capture.py` composing `rendering.gl_capture.GLCapture`, `rendering.cuda_interop.CudaInterop`, and `rendering.frame_pipeline.FramePipeline`) and outline the migration strategy so we can schedule the LOC drop once the ROI/LOD cleanup lands.
+4. Draft the `ServerCtx` logging/debug config surface so env probes migrate in Phase D without another worker churn.
 
 ---
 

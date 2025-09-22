@@ -772,29 +772,6 @@ class EGLRendererWorker:
             info["view"] = None
         return info
 
-    def _log_roi_fallback(
-        self,
-        *,
-        level: int,
-        reason: str,
-        plane_h: int,
-        plane_w: int,
-        scale: tuple[float, float],
-    ) -> None:
-        if not self._log_layer_debug or not logger.isEnabledFor(logging.INFO):
-            return
-        snapshot = self._viewport_debug_snapshot()
-        logger.info(
-            "viewport ROI fallback: level=%d reason=%s dims=%dx%d scale=(%.6f,%.6f) snapshot=%s",
-            level,
-            reason,
-            plane_h,
-            plane_w,
-            scale[0],
-            scale[1],
-            snapshot,
-        )
-
     def _viewport_world_bounds(self) -> Optional[tuple[float, float, float, float]]:
         view = getattr(self, "view", None)
         if view is None or not hasattr(view, "camera"):
@@ -822,21 +799,24 @@ class EGLRendererWorker:
     def _viewport_roi_for_level(self, source: ZarrSceneSource, level: int, *, quiet: bool = False, for_policy: bool = False) -> SliceROI:
         view = getattr(self, "view", None)
         plane_h, plane_w = plane_wh_for_level(source, level)
-        scale = plane_scale_for_level(source, level)
 
         if view is None or not hasattr(view, "camera"):
-            if not quiet:
-                self._log_roi_fallback(level=level, reason="no-view", plane_h=plane_h, plane_w=plane_w, scale=scale)
+            if not quiet and logger.isEnabledFor(logging.INFO):
+                snapshot = self._viewport_debug_snapshot()
+                logger.info(
+                    "viewport ROI boundary: inactive view; returning full frame (level=%d dims=%dx%d snapshot=%s)",
+                    level,
+                    plane_h,
+                    plane_w,
+                    snapshot,
+                )
             return SliceROI(0, plane_h, 0, plane_w)
 
         cam = view.camera
         if not isinstance(cam, scene.cameras.PanZoomCamera):
             ensured = self._ensure_panzoom_camera(reason="roi-request")
             cam = ensured or cam
-        if not isinstance(cam, scene.cameras.PanZoomCamera):
-            if not quiet:
-                self._log_roi_fallback(level=level, reason="no-panzoom", plane_h=plane_h, plane_w=plane_w, scale=scale)
-            return SliceROI(0, plane_h, 0, plane_w)
+        assert isinstance(cam, scene.cameras.PanZoomCamera), "PanZoomCamera required for ROI compute"
 
         signature: Optional[tuple[float, ...]] = None
         scene_graph = getattr(view, "scene", None)
@@ -879,10 +859,7 @@ class EGLRendererWorker:
         )
 
         roi = result.roi
-        if roi.is_empty():
-            if not quiet:
-                self._log_roi_fallback(level=level, reason="empty", plane_h=plane_h, plane_w=plane_w, scale=scale)
-            return SliceROI(0, plane_h, 0, plane_w)
+        assert not roi.is_empty(), "compute_viewport_roi returned an empty ROI"
 
         if result.transform_signature is not None:
             self._roi_cache[int(level)] = (result.transform_signature, roi)
