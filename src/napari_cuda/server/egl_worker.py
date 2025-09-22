@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import time
 import logging
-import ctypes
  
 from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Mapping, Sequence, Tuple, Literal
@@ -32,16 +31,12 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
-from OpenGL import GL, EGL  # type: ignore
 from vispy import scene  # type: ignore
 
 from napari.components.viewer_model import ViewerModel
 from napari._vispy.layers.image import VispyImageLayer
 
-import cupy as cp  # type: ignore
 import pycuda.driver as cuda  # type: ignore
-import pycuda.gl  # type: ignore
-from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
 import torch.nn.functional as F  # type: ignore
 import PyNvVideoCodec as pnvc  # type: ignore
@@ -57,6 +52,9 @@ from napari_cuda.server import camera_ops as camops
 from . import policy as level_policy
 from napari_cuda.server.lod import stabilize_level
 from napari_cuda.server.config import ServerCtx
+from napari_cuda.server.rendering.gl_capture import GLCapture
+from napari_cuda.server.rendering.cuda_interop import CudaInterop
+from napari_cuda.server.rendering.egl_context import EglContext
 
 logger = logging.getLogger(__name__)
 
@@ -142,17 +140,12 @@ class EGLRendererWorker:
             self._animate_dps = 30.0
         self._anim_start = time.perf_counter()
 
-        self.egl_display = None
-        self.egl_context = None
-        self.egl_surface = None
-
         self.cuda_ctx: Optional[cuda.Context] = None
 
         self.canvas: Optional[scene.SceneCanvas] = None
         self.view = None
         self._visual = None
-        # Track EGL ownership when adopting a backend-provided context
-        self._owns_egl: bool = False
+        self._egl = EglContext(self.width, self.height)
 
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
@@ -164,13 +157,8 @@ class EGLRendererWorker:
         self._pending_zoom_ratio: Optional[float] = None
         self._pending_zoom_ts: float = 0.0
 
-        self._texture: Optional[int] = None
-        self._fbo: Optional[int] = None
-
-        self._registered_tex: Optional[RegisteredImage] = None
-        # Destination frame (Torch CUDA tensor) via one-time DLPack handoff
-        self._torch_frame: Optional[torch.Tensor] = None
-        self._dst_pitch_bytes: Optional[int] = None
+        self._gl_capture = GLCapture(self.width, self.height)
+        self._cuda = CudaInterop(self.width, self.height)
 
         self._encoder = None
 
@@ -178,11 +166,6 @@ class EGLRendererWorker:
         self._data_wh: tuple[int, int] = (int(width), int(height))
         # Gate pixel streaming until orientation/camera are settled and a non-black frame is observed
         self._orientation_ready: bool = False
-
-        # Timer query double-buffering for capture blit
-        self._query_ids = None  # type: Optional[tuple]
-        self._query_idx = 0
-        self._query_started = False
 
         # Encoder access synchronization (reset vs encode across threads)
         self._enc_lock = threading.Lock()
@@ -501,87 +484,7 @@ class EGLRendererWorker:
     # Legacy _apply_zoom_based_level_switch removed
 
     def _init_egl(self) -> None:
-        # If a GL context is already current (e.g., created by VisPy's EGL
-        # backend), adopt it instead of creating our own. This ensures a single
-        # context is used for both drawing and capture.
-        try:
-            cur_ctx = EGL.eglGetCurrentContext()
-        except Exception:
-            cur_ctx = None
-        if cur_ctx and cur_ctx != EGL.EGL_NO_CONTEXT:
-            try:
-                self.egl_display = EGL.eglGetCurrentDisplay()
-                # Track draw surface; read is typically the same for pbuffers
-                self.egl_surface = EGL.eglGetCurrentSurface(EGL.EGL_DRAW)
-                self.egl_context = cur_ctx
-                # Mark that we do not own the EGL lifecycle created elsewhere
-                self._owns_egl = False
-                # Ensure we read from the right default buffer for pbuffers
-                try:
-                    dbl = bool(GL.glGetBooleanv(GL.GL_DOUBLEBUFFER))
-                except Exception:
-                    dbl = False
-                try:
-                    GL.glReadBuffer(GL.GL_BACK if dbl else GL.GL_FRONT)
-                    logger.debug("Adopted EGL ctx: GL_DOUBLEBUFFER=%s -> GL_READ_BUFFER=%s", dbl, 'BACK' if dbl else 'FRONT')
-                except Exception:
-                    logger.debug("Setting GL_READ_BUFFER failed on adopted ctx", exc_info=True)
-                return
-            except Exception:
-                logger.debug("Adopting current EGL context failed; creating our own", exc_info=True)
-        # No context current; create our own headless EGL pbuffer context
-        egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
-        if egl_display == EGL.EGL_NO_DISPLAY:
-            raise RuntimeError("Failed to get EGL display")
-        major = EGL.EGLint()
-        minor = EGL.EGLint()
-        if not EGL.eglInitialize(egl_display, major, minor):
-            raise RuntimeError("Failed to initialize EGL")
-        config_attribs = [
-            EGL.EGL_SURFACE_TYPE, EGL.EGL_PBUFFER_BIT,
-            EGL.EGL_RED_SIZE, 8,
-            EGL.EGL_GREEN_SIZE, 8,
-            EGL.EGL_BLUE_SIZE, 8,
-            EGL.EGL_ALPHA_SIZE, 8,
-            EGL.EGL_RENDERABLE_TYPE, EGL.EGL_OPENGL_BIT,
-            EGL.EGL_NONE,
-        ]
-        config_attribs_p = (EGL.EGLint * len(config_attribs))(*config_attribs)
-        egl_config = EGL.EGLConfig()
-        num_configs = EGL.EGLint()
-        if not EGL.eglChooseConfig(egl_display, config_attribs_p, ctypes.byref(egl_config), 1, ctypes.byref(num_configs)):
-            raise RuntimeError("Failed to choose EGL config")
-        if num_configs.value < 1:
-            raise RuntimeError("No EGL configs matched requested attributes")
-        EGL.eglBindAPI(EGL.EGL_OPENGL_API)
-        egl_context = EGL.eglCreateContext(egl_display, egl_config, EGL.EGL_NO_CONTEXT, None)
-        if egl_context == EGL.EGL_NO_CONTEXT:
-            raise RuntimeError("Failed to create EGL context")
-        pbuffer_attribs = [
-            EGL.EGL_WIDTH, self.width,
-            EGL.EGL_HEIGHT, self.height,
-            EGL.EGL_NONE,
-        ]
-        pbuffer_attribs_p = (EGL.EGLint * len(pbuffer_attribs))(*pbuffer_attribs)
-        egl_surface = EGL.eglCreatePbufferSurface(egl_display, egl_config, pbuffer_attribs_p)
-        if egl_surface == EGL.EGL_NO_SURFACE:
-            raise RuntimeError("Failed to create EGL pbuffer surface")
-        if not EGL.eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context):
-            raise RuntimeError("Failed to make EGL context current")
-        self.egl_display = egl_display
-        self.egl_context = egl_context
-        self.egl_surface = egl_surface
-        self._owns_egl = True
-        # Ensure correct read buffer for single/double buffered surfaces
-        try:
-            dbl = bool(GL.glGetBooleanv(GL.GL_DOUBLEBUFFER))
-        except Exception:
-            dbl = False
-        try:
-            GL.glReadBuffer(GL.GL_BACK if dbl else GL.GL_FRONT)
-            logger.debug("Created EGL ctx: GL_DOUBLEBUFFER=%s -> GL_READ_BUFFER=%s", dbl, 'BACK' if dbl else 'FRONT')
-        except Exception:
-            logger.debug("Setting GL_READ_BUFFER failed on created ctx", exc_info=True)
+        self._egl.ensure()
 
     def _init_cuda(self) -> None:
         cuda.init()
@@ -1358,19 +1261,16 @@ class EGLRendererWorker:
         if key == self._last_layer_debug:
             return
         self._last_layer_debug = key
-        try:
-            logger.info(
-                "layer assign: mode=%s level=%d z=%s shape=%s contrast=(%.4f, %.4f) downgraded=%s",
-                mode,
-                level,
-                z_index if z_index is not None else 'na',
-                'x'.join(str(int(x)) for x in shape),
-                float(contrast[0]),
-                float(contrast[1]),
-                self._level_downgraded,
-            )
-        except Exception:
-            logger.debug("layer debug log failed", exc_info=True)
+        logger.info(
+            "layer assign: mode=%s level=%d z=%s shape=%s contrast=(%.4f, %.4f) downgraded=%s",
+            mode,
+            level,
+            z_index if z_index is not None else 'na',
+            'x'.join(str(int(x)) for x in shape),
+            float(contrast[0]),
+            float(contrast[1]),
+            self._level_downgraded,
+        )
 
     def _apply_level_internal(
         self,
@@ -1627,67 +1527,15 @@ class EGLRendererWorker:
         except Exception:
             logger.debug("ndisplay selection failed", exc_info=True)
 
-    def _ensure_capture_buffers(self) -> None:
-        if self._texture is None:
-            self._texture = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self._texture)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, self.width, self.height, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, None)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-        if self._fbo is None:
-            self._fbo = GL.glGenFramebuffers(1)
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._fbo)
-        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self._texture, 0)
-        status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
-        if status != GL.GL_FRAMEBUFFER_COMPLETE:
-            raise RuntimeError(f"Capture FBO incomplete: 0x{status:x}")
-
     def _init_capture(self) -> None:
-        self._ensure_capture_buffers()
+        self._gl_capture.ensure()
 
     def _init_cuda_interop(self) -> None:
         """Init CUDA-GL interop and allocate destination via one-time DLPack bridge."""
-        pycuda.gl.init()
-        self._registered_tex = RegisteredImage(int(self._texture), GL.GL_TEXTURE_2D, graphics_map_flags.READ_ONLY)
-        # Allocate a CuPy device array once, convert to Torch via DLPack (consumes capsule), then drop CuPy
-        dev_cp = cp.empty((self.height, self.width, 4), dtype=cp.uint8)
-        # Avoid deprecated toDlpack(): pass the array object to Torch's DLPack importer
-        if hasattr(torch, 'from_dlpack'):
-            self._torch_frame = torch.from_dlpack(dev_cp)
-        else:
-            self._torch_frame = torch.utils.dlpack.from_dlpack(dev_cp)
-        del dev_cp  # do not use the CuPy array after handoff
-        # Force contiguous layout (tight packing) and compute pitch
-        try:
-            self._torch_frame = self._torch_frame.contiguous()
-        except Exception as e:
-            logger.debug("Making torch frame contiguous failed (continuing): %s", e)
-        # Pre-allocate auxiliary buffers for conversions to avoid per-frame alloc jitter
-        try:
-            self._torch_frame_argb = torch.empty_like(self._torch_frame)
-        except Exception:
-            self._torch_frame_argb = None  # type: ignore[attr-defined]
-        try:
-            self._yuv444 = torch.empty((self.height * 3, self.width), dtype=torch.uint8, device=self._torch_frame.device)
-        except Exception:
-            self._yuv444 = None  # type: ignore[attr-defined]
-        # Compute pitch (bytes per row) from Torch tensor stride
-        self._dst_pitch_bytes = int(self._torch_frame.stride(0) * self._torch_frame.element_size())
-        row_bytes = int(self.width * 4)
-        # Optional override to force tight pitch (debug/testing)
-        if int(os.getenv('NAPARI_CUDA_FORCE_TIGHT_PITCH', '0') or '0'):
-            self._dst_pitch_bytes = row_bytes
-        logger.info("CUDA dst pitch: %d bytes (expected %d)", self._dst_pitch_bytes, row_bytes)
-        if self._dst_pitch_bytes != row_bytes:
-            logger.warning(
-                "Non-tight pitch: dst_pitch=%d, expected=%d (width*4). This may cause right-edge artifacts.",
-                self._dst_pitch_bytes, row_bytes,
-            )
-        # Warn on odd dimensions which can cause crop issues in H.264 4:2:0
-        if (self.width % 2) or (self.height % 2):
-            logger.warning("Odd dimensions %dx%d may reveal right/bottom padding without SPS cropping.", self.width, self.height)
+        tex = self._gl_capture.texture_id
+        if tex is None:
+            raise RuntimeError("Capture texture is not available for CUDA interop")
+        self._cuda.initialize(tex)
 
     def _init_encoder(self) -> None:
         # Encoder input format: allow YUV444 (default), NV12 (4:2:0), or ARGB/ABGR (packed RGB)
@@ -2292,60 +2140,7 @@ class EGLRendererWorker:
         self._pending_ndisplay = (3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
-        try:
-            if self._query_ids is None:
-                ids = GL.glGenQueries(2)
-                if isinstance(ids, (list, tuple)) and len(ids) == 2:
-                    self._query_ids = (int(ids[0]), int(ids[1]))
-                else:
-                    q0 = int(GL.glGenQueries(1))
-                    q1 = int(GL.glGenQueries(1))
-                    self._query_ids = (q0, q1)
-
-            qids = self._query_ids
-            cur = self._query_idx
-            prev = 1 - cur
-
-            GL.glBeginQuery(GL.GL_TIME_ELAPSED, qids[cur])
-
-            bound_fbo = GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING)
-            read_fbo = int(bound_fbo)
-            draw_fbo = int(self._fbo)
-            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, read_fbo)
-            GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, draw_fbo)
-            GL.glBlitFramebuffer(0, 0, self.width, self.height, 0, 0, self.width, self.height, GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST)
-
-            GL.glEndQuery(GL.GL_TIME_ELAPSED)
-
-            gpu_ns = None
-            if self._query_started:
-                result = GL.GLuint64(0)
-                GL.glGetQueryObjectui64v(qids[prev], GL.GL_QUERY_RESULT, result)
-                gpu_ns = int(result.value)
-            else:
-                self._query_started = True
-
-            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, read_fbo)
-            GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, read_fbo)
-            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, read_fbo)
-
-            self._query_idx = prev
-            return gpu_ns
-        except Exception as e:
-            logger.debug("Blit with timer query failed; falling back without timing: %s", e)
-            try:
-                bound_fbo = GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING)
-                read_fbo = int(bound_fbo)
-                draw_fbo = int(self._fbo)
-                GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, read_fbo)
-                GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, draw_fbo)
-                GL.glBlitFramebuffer(0, 0, self.width, self.height, 0, 0, self.width, self.height, GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST)
-                GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, read_fbo)
-                GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, read_fbo)
-                GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, read_fbo)
-            except Exception as e2:
-                logger.debug("Blit fallback failed: %s", e2)
-            return None
+        return self._gl_capture.blit_with_timing()
 
 
     def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int, int]:
@@ -2478,30 +2273,13 @@ class EGLRendererWorker:
         return (t_r1 - t_r0) * 1000.0
 
     def _map_and_copy_to_torch(self) -> tuple[float, float]:
-        t_m0 = time.perf_counter()
-        mapping = self._registered_tex.map()
-        cuda_array = mapping.array(0, 0)
-        t_m1 = time.perf_counter()
-        map_ms = (t_m1 - t_m0) * 1000.0
-        start_evt = cuda.Event(); end_evt = cuda.Event()
-        start_evt.record()
-        m = cuda.Memcpy2D()
-        m.set_src_array(cuda_array)
-        m.set_dst_device(int(self._torch_frame.data_ptr()))
-        m.width_in_bytes = self.width * 4
-        m.height = self.height
-        m.dst_pitch = self._dst_pitch_bytes if self._dst_pitch_bytes is not None else (self.width * 4)
-        m(aligned=True)
-        end_evt.record(); end_evt.synchronize()
-        copy_ms = start_evt.time_till(end_evt)
-        try:
-            if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
-                self._debug.dump_triplet(int(self._texture), self.width, self.height, self._torch_frame)
-        except Exception as e:
-            logger.warning("Debug triplet failed: %s", e, exc_info=True)
-        finally:
-            mapping.unmap()
-        return map_ms, copy_ms
+        debug_cb = None
+        if hasattr(self, "_debug") and self._debug.cfg.enabled and self._debug.cfg.frames_remaining > 0:
+            def _cb(tex_id: int, w: int, h: int, frame: torch.Tensor) -> None:
+                self._debug.dump_triplet(tex_id, w, h, frame)
+
+            debug_cb = _cb
+        return self._cuda.map_and_copy(debug_cb=debug_cb)
 
     def _convert_for_encoder(self):
         t_c0 = time.perf_counter()
@@ -2509,13 +2287,14 @@ class EGLRendererWorker:
             dump_raw = int(os.getenv('NAPARI_CUDA_DUMP_RAW', '0'))
         except Exception:
             dump_raw = 0
+        frame = self._cuda.torch_frame
         if dump_raw > 0:
             try:
-                self._debug.dump_cuda_rgba(self._torch_frame, self.width, self.height, prefix="raw")
+                self._debug.dump_cuda_rgba(frame, self.width, self.height, prefix="raw")
                 os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as e:
                 logger.debug("Pre-encode raw dump failed: %s", e)
-        src = self._torch_frame
+        src = frame
         try:
             r = src[..., 0].float() / 255.0
             g = src[..., 1].float() / 255.0
@@ -2670,17 +2449,23 @@ class EGLRendererWorker:
             return
         # Prefer napari's own selected level when available; fall back to heuristic
         desired = None
-        napari_reason = None
-        try:
-            layer = getattr(self, '_napari_layer', None)
-            if layer is not None and hasattr(layer, 'data_level'):
-                nap = int(getattr(layer, 'data_level'))
-                if nap in overs_map:
-                    desired = nap
-                    napari_reason = 'napari-layer'
-        except Exception:
-            desired = None
-            napari_reason = None
+        napari_reason = 'heuristic'
+
+        # Recent zoom command (explicit user intent) takes precedence
+        zoom_ratio = None
+        if self._pending_zoom_ratio is not None:
+            dt = time.perf_counter() - float(self._pending_zoom_ts)
+            if dt <= 0.5:
+                zoom_ratio = float(self._pending_zoom_ratio)
+            self._pending_zoom_ratio = None
+        if zoom_ratio is not None:
+            eps = 1e-3
+            if zoom_ratio < 1.0 - eps and current > 0:
+                desired = current - 1
+                napari_reason = 'zoom-in'
+            elif zoom_ratio > 1.0 + eps and current < max_level:
+                desired = current + 1
+                napari_reason = 'zoom-out'
         current = int(self._active_ms_level)
         max_level = max(overs_map.keys())
         try:
@@ -2704,7 +2489,7 @@ class EGLRendererWorker:
                     desired = finer
             if desired == current and current < max_level:
                 ratio_cur = overs_map.get(current)
-                if ratio_cur is not None and ratio_cur < thr_out:
+                if ratio_cur is not None and ratio_cur > thr_out:
                     desired = current + 1
             napari_reason = 'heuristic'
         else:
@@ -2714,14 +2499,6 @@ class EGLRendererWorker:
                 desired = max(desired, current - 1)
             elif desired > current:
                 desired = min(desired, current + 1)
-        # Zoom direction logs
-        try:
-            if desired < current:
-                logger.info("lod.zoom_in: current=%d -> desired=%d overs=%.3f", current, desired, overs_map.get(desired, float('nan')))
-            elif desired > current:
-                logger.info("lod.zoom_out: current=%d -> desired=%d overs=%.3f", current, desired, overs_map.get(desired, float('nan')))
-        except Exception:
-            logger.debug("lod zoom log failed", exc_info=True)
         # Stabilize against previous level to avoid jitter
         try:
             hyst = float(os.getenv('NAPARI_CUDA_LEVEL_HYST', '0.0') or '0.0')
@@ -2730,16 +2507,34 @@ class EGLRendererWorker:
         selected = stabilize_level(int(desired), int(current), hysteresis=hyst)
         # Direction-sensitive band to avoid alternating near the boundary
         sel = int(selected)
-        if sel < current:
-            # Zooming in: only allow stepping to a finer level if that level is clearly under target
-            if overs_map.get(sel, float('inf')) > thr_in:
-                sel = current
-        elif sel > current:
-            # Zooming out: only allow stepping to a coarser level if current level is clearly over target
-            if overs_map.get(current, 0.0) < thr_out:
-                sel = current
+        action_reason = napari_reason or 'heuristic'
+        if action_reason not in ('zoom-in', 'zoom-out'):
+            if sel < current:
+                # Zooming in: only allow stepping to a finer level if that level is clearly under target
+                if overs_map.get(sel, float('inf')) > thr_in:
+                    sel = current
+            elif sel > current:
+                # Zooming out: only allow stepping to a coarser level if current level is clearly over target
+                if overs_map.get(current, 0.0) <= thr_out:
+                    sel = current
         selected = sel
-        reason = napari_reason or 'napari'
+        reason = action_reason
+        if selected < current:
+            logger.info(
+                "lod.zoom_in: current=%d -> selected=%d overs=%.3f reason=%s",
+                current,
+                selected,
+                overs_map.get(selected, float('nan')),
+                reason,
+            )
+        elif selected > current:
+            logger.info(
+                "lod.zoom_out: current=%d -> selected=%d overs=%.3f reason=%s",
+                current,
+                selected,
+                overs_map.get(selected, float('nan')),
+                reason,
+            )
         # Lock override
         lock = getattr(self, '_lock_level', None)
         if lock is not None:
@@ -2770,14 +2565,11 @@ class EGLRendererWorker:
                 logger.info("ms.switch: hold=%d (budget reject %s)", int(current), str(e))
         else:
             # No change; emit a compact decision trace to aid testing
-            try:
-                logger.debug(
-                    "lod.hold: level=%d desired=%d selected=%d overs=%s",
-                    int(current), int(desired), int(selected),
-                    '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
-                )
-            except Exception:
-                logger.debug("lod.hold log failed", exc_info=True)
+            logger.debug(
+                "lod.hold: level=%d desired=%d selected=%d overs=%s",
+                int(current), int(desired), int(selected),
+                '{' + ', '.join(f"{k}:{overs_map[k]:.2f}" for k in sorted(overs_map)) + '}',
+            )
 
     # (packer is now provided by bitstream.py)
 
@@ -2785,54 +2577,43 @@ class EGLRendererWorker:
 
     def cleanup(self) -> None:
         try:
-            if self._registered_tex is not None:
-                self._registered_tex.unregister()
-        except Exception as e:
-            logger.debug("Cleanup: unregister RegisteredImage failed: %s", e)
-        self._registered_tex = None
+            self._cuda.cleanup()
+        except Exception:
+            logger.debug("Cleanup: CUDA interop cleanup failed", exc_info=True)
         try:
-            if self._fbo is not None:
-                GL.glDeleteFramebuffers(int(self._fbo))
-        except Exception as e:
-            logger.debug("Cleanup: delete FBO failed: %s", e)
-        self._fbo = None
-        try:
-            if self._texture is not None:
-                GL.glDeleteTextures(int(self._texture))
-        except Exception as e:
-            logger.debug("Cleanup: delete texture failed: %s", e)
-        self._texture = None
+            self._gl_capture.cleanup()
+        except Exception:
+            logger.debug("Cleanup: GL capture cleanup failed", exc_info=True)
+
         try:
             with self._enc_lock:
                 if self._encoder is not None:
-                    self._encoder.EndEncode()
+                    try:
+                        self._encoder.EndEncode()
+                    except Exception:
+                        logger.debug("Cleanup: encoder EndEncode failed", exc_info=True)
                 self._encoder = None
-        except Exception as e:
-            logger.debug("Cleanup: encoder EndEncode failed: %s", e)
+        except Exception:
+            logger.debug("Cleanup: encoder cleanup lock failed", exc_info=True)
+
         try:
             if self.cuda_ctx is not None:
                 self.cuda_ctx.pop()
                 self.cuda_ctx.detach()
-        except Exception as e:
-            logger.debug("Cleanup: CUDA context pop/detach failed: %s", e)
+        except Exception:
+            logger.debug("Cleanup: CUDA context pop/detach failed", exc_info=True)
         self.cuda_ctx = None
+
         try:
             if self.canvas is not None:
                 self.canvas.close()
-        except Exception as e:
-            logger.debug("Cleanup: canvas close failed: %s", e)
+        except Exception:
+            logger.debug("Cleanup: canvas close failed", exc_info=True)
         self.canvas = None
         self._viewer = None
         self._napari_layer = None
-        try:
-            # Only terminate EGL display if we created/own it. When adopting a
-            # context from a backend (e.g., VisPy EGL), the backend manages its
-            # own EGL lifecycle.
-            if getattr(self, '_owns_egl', False) and self.egl_display is not None:
-                EGL.eglTerminate(self.egl_display)
-        except Exception as e:
-            logger.debug("Cleanup: eglTerminate failed: %s", e)
-        self.egl_display = None
+
+        self._egl.cleanup()
 
     def viewer_model(self) -> Optional[ViewerModel]:
         """Expose the napari ``ViewerModel`` when adapter mode is active."""
