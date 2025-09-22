@@ -179,6 +179,7 @@ class ClientStreamLoop:
         # Optional weakref to a ViewerModel mirror (e.g., ProxyViewer)
         self._viewer_mirror = None  # type: ignore[var-annotated]
         # UI call proxy to marshal updates to the GUI thread
+        self._ui_call: CallProxy | None
         try:
             self._ui_call = CallProxy(getattr(self._scene_canvas, 'native', None))
         except Exception:
@@ -259,6 +260,7 @@ class ClientStreamLoop:
         self._wake_timer = None
         self._in_present: bool = False
         self._use_display_loop = self._env_cfg.use_display_loop
+        self._wake_proxy: WakeProxy | None = None
         if not self._use_display_loop:
             try:
                 self._wake_timer = QtCore.QTimer(self._scene_canvas.native)
@@ -440,60 +442,41 @@ class ClientStreamLoop:
 
     # --- Thread-safe scheduling helpers --------------------------------------
     def _on_gui_thread(self) -> bool:
-        try:
-            cur = QtCore.QThread.currentThread()
-            gui_thr = getattr(self, '_gui_thread', None)
-            return (gui_thr is None) or (cur == gui_thr)
-        except Exception:
+        gui_thr = getattr(self, '_gui_thread', None)
+        if gui_thr is None:
             return True
+        return QtCore.QThread.currentThread() == gui_thr
 
     def schedule_next_wake_threadsafe(self) -> None:
         """Ensure wake scheduling runs on the GUI thread.
 
         Prefer the wake proxy; fallback to UI call proxy; otherwise no-op.
         """
-        try:
-            if self._on_gui_thread():
-                self._schedule_next_wake()
-                return
-        except Exception:
-            pass
-        # Otherwise forward via proxies
-        try:
-            wp = getattr(self, '_wake_proxy', None)
-            if wp is not None and hasattr(wp, 'trigger'):
-                wp.trigger.emit()  # type: ignore[attr-defined]
-                return
-        except Exception:
-            logger.debug("threadsafe schedule: wake proxy failed", exc_info=True)
-        try:
-            ui_call = getattr(self, '_ui_call', None)
-            if ui_call is not None and hasattr(ui_call, 'call'):
-                ui_call.call.emit(self._schedule_next_wake)  # type: ignore[attr-defined]
-                return
-        except Exception:
-            logger.debug("threadsafe schedule: ui_call failed", exc_info=True)
+        if self._on_gui_thread():
+            self._schedule_next_wake()
+            return
+
+        if self._wake_proxy is not None:
+            self._wake_proxy.trigger.emit()
+            return
+
+        if self._ui_call is not None:
+            self._ui_call.call.emit(self._schedule_next_wake)
+            return
+
         logger.debug("threadsafe schedule: no proxy available; skipping")
 
     def _on_present_timer(self) -> None:
         # On wake, request a paint; the actual GL draw happens inside the canvas draw event
+        self._in_present = True
+        # Clear pending marker to allow next wake to be scheduled freely
+        self._next_due_pending_until = 0.0
         try:
-            self._in_present = True
-            # Clear pending marker to allow next wake to be scheduled freely
-            self._next_due_pending_until = 0.0
-            # Prefer non-blocking update() over repaint()
-            try:
-                self._scene_canvas.native.update()
-            except Exception:
-                getattr(self._scene_canvas, 'update', lambda: None)()
+            self._scene_canvas.native.update()
         except Exception:
-            logger.debug("present timer: repaint/update failed", exc_info=True)
-        # Do not schedule next wake here; draw() re-arms after consumption to reduce early wakes
+            getattr(self._scene_canvas, 'update', lambda: None)()
         finally:
-            try:
-                self._in_present = False
-            except Exception:
-                pass
+            self._in_present = False
 
     def start(self) -> None:
         # State channel thread (disabled in offline VT smoke mode)
