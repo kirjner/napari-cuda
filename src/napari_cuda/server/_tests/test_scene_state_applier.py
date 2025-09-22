@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import threading
+from types import SimpleNamespace
+
+import numpy as np
+
+from napari_cuda.server.scene_state_applier import (
+    SceneStateApplier,
+    SceneStateApplyContext,
+)
+from napari_cuda.server.scene_types import SliceROI
+
+
+class _StubViewer:
+    def __init__(self) -> None:
+        self.dims = SimpleNamespace(current_step=(0, 0, 0))
+
+
+class _StubLayer:
+    def __init__(self) -> None:
+        self.data = None
+        self.translate = (0.0, 0.0)
+        self.visible = False
+        self.opacity = 0.0
+        self.blending = ""
+        self.contrast_limits = [0.0, 1.0]
+
+
+class _StubVisual:
+    def __init__(self) -> None:
+        self.data = None
+
+    def set_data(self, slab) -> None:  # pragma: no cover - simple setter
+        self.data = slab
+
+
+class _StubCamera:
+    def __init__(self) -> None:
+        self.ranges = []
+
+    def set_range(self, *, x, y) -> None:
+        self.ranges.append((tuple(x), tuple(y)))
+
+
+class _StubSceneSource:
+    def __init__(self, axes: tuple[str, ...], shape: tuple[int, ...]) -> None:
+        self.axes = axes
+        self._shape = shape
+        self._current_step = tuple(0 for _ in shape)
+
+    @property
+    def current_step(self) -> tuple[int, ...]:
+        return self._current_step
+
+    def level_shape(self, _: int) -> tuple[int, ...]:
+        return self._shape
+
+    def set_current_level(self, level: int, step: tuple[int, ...]) -> tuple[int, ...]:
+        self._current_step = tuple(int(x) for x in step)
+        return self._current_step
+
+
+def _plane_scale_for_level(_source: _StubSceneSource, _level: int) -> tuple[float, float]:
+    return 0.5, 0.25
+
+
+def _load_slice(_source: _StubSceneSource, _level: int, z_index: int):
+    base = z_index * 10
+    return np.array([[base + 0, base + 1], [base + 2, base + 3]], dtype=float)
+
+
+def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
+    viewer = _StubViewer()
+    layer = _StubLayer()
+    visual = _StubVisual()
+    camera = _StubCamera()
+    source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
+
+    notify_calls: list[None] = []
+    mark_calls: list[None] = []
+    idr_requests: list[None] = []
+
+    ctx = SceneStateApplyContext(
+        use_volume=False,
+        viewer=viewer,
+        camera=camera,
+        visual=visual,
+        layer=layer,
+        scene_source=source,
+        active_ms_level=0,
+        z_index=0,
+        last_roi=(0, SliceROI(2, 4, 6, 8)),
+        preserve_view_on_switch=False,
+        sticky_contrast=False,
+        idr_on_z=True,
+        data_wh=(256, 256),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: source,
+        plane_scale_for_level=_plane_scale_for_level,
+        load_slice=_load_slice,
+        notify_scene_refresh=lambda: notify_calls.append(None),
+        mark_render_tick_needed=lambda: mark_calls.append(None),
+        request_encoder_idr=lambda: idr_requests.append(None),
+    )
+
+    result = SceneStateApplier.apply_dims_and_slice(ctx, current_step=(1, 1, 1))
+
+    assert viewer.dims.current_step == (1, 1, 1)
+    assert layer.data is not None and np.all(layer.data == np.array([[10, 11], [12, 13]], dtype=float))
+    assert layer.translate == (1.0, 1.5)
+    assert layer.visible is True
+    assert layer.opacity == 1.0
+    assert layer.blending == "opaque"
+    assert layer.contrast_limits == [10.0, 13.0]
+    assert visual.data is not None and np.all(visual.data == layer.data)
+    assert camera.ranges == [((0.0, 1.0), (0.0, 1.0))]
+    assert len(notify_calls) == 1
+    assert len(mark_calls) == 1
+    assert len(idr_requests) == 1
+    assert result.z_index == 1
+    assert result.data_wh == (2, 2)
+    assert result.last_step == (1, 1, 1)
+
+
+def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
+    viewer = _StubViewer()
+    layer = _StubLayer()
+    visual = _StubVisual()
+    camera = _StubCamera()
+    source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
+
+    mark_calls: list[None] = []
+
+    ctx = SceneStateApplyContext(
+        use_volume=False,
+        viewer=viewer,
+        camera=camera,
+        visual=visual,
+        layer=layer,
+        scene_source=source,
+        active_ms_level=0,
+        z_index=1,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=True,
+        idr_on_z=False,
+        data_wh=(256, 256),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: source,
+        plane_scale_for_level=_plane_scale_for_level,
+        load_slice=_load_slice,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: mark_calls.append(None),
+        request_encoder_idr=lambda: (_ for _ in ()).throw(RuntimeError("should not be called")),
+    )
+
+    result = SceneStateApplier.apply_dims_and_slice(ctx, current_step=(1, 2, 3))
+
+    assert mark_calls == [None]
+    assert result.z_index is None
+    assert result.last_step == (1, 2, 3)
+
+
+def test_apply_volume_params_sets_visual_fields() -> None:
+    viewer = _StubViewer()
+    visual = SimpleNamespace(method="", cmap="", clim=None, opacity=0.0, relative_step_size=1.0)
+
+    ctx = SceneStateApplyContext(
+        use_volume=True,
+        viewer=viewer,
+        camera=None,
+        visual=visual,
+        layer=None,
+        scene_source=None,
+        active_ms_level=0,
+        z_index=None,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=True,
+        idr_on_z=False,
+        data_wh=(0, 0),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: None,
+        plane_scale_for_level=lambda *_: (1.0, 1.0),
+        load_slice=lambda *_: None,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: None,
+        request_encoder_idr=None,
+    )
+
+    SceneStateApplier.apply_volume_params(
+        ctx,
+        mode="MIP",
+        colormap="gray",
+        clim=(2.0, 1.0),
+        opacity=0.7,
+        sample_step=0.2,
+    )
+
+    assert visual.method == "mip"
+    assert visual.cmap == "grays"
+    assert visual.clim == (1.0, 2.0)
+    assert visual.opacity == 0.7
+    assert visual.relative_step_size == 0.2

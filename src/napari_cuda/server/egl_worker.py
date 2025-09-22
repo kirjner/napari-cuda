@@ -55,7 +55,11 @@ from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
-from napari_cuda.server.roi_applier import SliceDataApplier, SliceUpdatePlanner
+from napari_cuda.server.roi_applier import SliceUpdatePlanner
+from napari_cuda.server.scene_state_applier import (
+    SceneStateApplier,
+    SceneStateApplyContext,
+)
 from napari_cuda.server.camera_controller import (
     CameraCommandOutcome,
     CameraDebugFlags,
@@ -268,6 +272,8 @@ class EGLRendererWorker:
             self._roi_ensure_contains_viewport = env_bool('NAPARI_CUDA_ROI_ENSURE_CONTAINS_VIEWPORT', True)
         except Exception:
             self._roi_ensure_contains_viewport = True
+        # Explicit default: do not force encoder IDR on Z-change unless enabled later
+        self._idr_on_z: bool = False
         # No full-frame horizon on level switches; keep ROI consistent
         # Last applied ROI for the active level (for placement/translate)
         self._last_roi: Optional[tuple[int, SliceROI]] = None
@@ -1536,7 +1542,7 @@ class EGLRendererWorker:
     def render_frame(self, azimuth_deg: Optional[float] = None) -> None:
         if azimuth_deg is not None and hasattr(self.view, "camera"):
             self.view.camera.azimuth = float(azimuth_deg)
-        self._apply_pending_state()
+        self.drain_scene_updates()
         t0 = time.perf_counter()
         self.canvas.render()
         self._render_tick_required = False
@@ -1564,7 +1570,7 @@ class EGLRendererWorker:
         # Interaction observed (kept for future metrics)
         self._user_interaction_seen = True
         logger.debug("worker processing %d camera command(s)", len(commands))
-        cam = getattr(self.view, 'camera', None)
+        cam = self.view.camera
         if cam is None:
             for cmd in commands:
                 if cmd.kind == 'zoom' and cmd.factor is not None and cmd.factor > 0.0:
@@ -1631,7 +1637,31 @@ class EGLRendererWorker:
             world_h = float(h) * float(max(1e-12, sy))
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
-    def _apply_pending_state(self) -> None:
+    def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
+        return SceneStateApplyContext(
+            use_volume=bool(self.use_volume),
+            viewer=self._viewer,
+            camera=cam,
+            visual=self._visual,
+            layer=self._napari_layer,
+            scene_source=self._scene_source,
+            active_ms_level=int(self._active_ms_level),
+            z_index=self._z_index,
+            last_roi=self._last_roi,
+            preserve_view_on_switch=self._preserve_view_on_switch,
+            sticky_contrast=self._sticky_contrast,
+            idr_on_z=self._idr_on_z,
+            data_wh=self._data_wh,
+            state_lock=self._state_lock,
+            ensure_scene_source=self._ensure_scene_source,
+            plane_scale_for_level=self._plane_scale_for_level,
+            load_slice=self._load_slice,
+            notify_scene_refresh=self._notify_scene_refresh,
+            mark_render_tick_needed=self._mark_render_tick_needed,
+            request_encoder_idr=self._request_encoder_idr,
+        )
+
+    def drain_scene_updates(self) -> None:
         updates: SceneUpdateBundle = self._scene_state_coordinator.drain_pending_updates()
 
         if updates.display_mode is not None:
@@ -1647,177 +1677,29 @@ class EGLRendererWorker:
             return
 
         cam = getattr(self.view, 'camera', None)
-        # Update 2D slice when in slice mode and a new index is provided
-        if not bool(self.use_volume) and state.current_step is not None:
-            if self._viewer is not None:
-                try:
-                    steps = tuple(int(x) for x in state.current_step)
-                    # Remember last dims for preserving indices across switches
-                    self._last_step = steps
-                    # Compute intended z index based on axes
-                    z_new = None
-                    if self._scene_source is not None:
-                        axes = self._scene_source.axes
-                        if 'z' in axes:
-                            zi = axes.index('z')
-                            if zi < len(steps):
-                                z_new = int(steps[zi])
-                    # Apply dims to viewer
-                    self._viewer.dims.current_step = steps
-                    # If z changed, update source/viewer and slab immediately and mark a render
-                    if z_new is not None and (self._z_index is None or int(z_new) != int(self._z_index)):
-                        try:
-                            source = self._ensure_scene_source()
-                            # Apply the z change directly without re-running level selection
-                            try:
-                                axes = source.axes
-                                zi = axes.index('z') if 'z' in axes else 0
-                                # Build a step with the new z, preserving other indices when available
-                                base = list(source.current_step or steps)
-                                if len(base) < len(source.level_shape(self._active_ms_level)):
-                                    base = base + [0] * (len(source.level_shape(self._active_ms_level)) - len(base))
-                                base[zi] = int(z_new)
-                                with self._state_lock:
-                                    _ = source.set_current_level(self._active_ms_level, step=tuple(int(x) for x in base))
-                            except Exception:
-                                logger.debug("apply_state: set_current_level(z) failed; will proceed to load slab", exc_info=True)
-                            # On Z change, keep ROI-based slab to preserve world alignment
-                            slab = self._load_slice(source, self._active_ms_level, int(z_new))
-                            layer = getattr(self, '_napari_layer', None)
-                            if layer is not None:
-                                layer.data = slab
-                                # Ensure translate matches the ROI placement
-                                try:
-                                    sy, sx = self._plane_scale_for_level(source, int(self._active_ms_level))
-                                except Exception:
-                                    sy = sx = 1.0
-                                try:
-                                    roi_for_layer = None
-                                    if getattr(self, '_last_roi', None) is not None and int(self._last_roi[0]) == int(self._active_ms_level):
-                                        roi_for_layer = self._last_roi[1]
-                                    if roi_for_layer is not None:
-                                        yoff = float(roi_for_layer.y_start) * float(max(1e-12, sy))
-                                        xoff = float(roi_for_layer.x_start) * float(max(1e-12, sx))
-                                        layer.translate = (yoff, xoff)
-                                    else:
-                                        layer.translate = (0.0, 0.0)
-                                except Exception:
-                                    logger.debug("apply_state: setting layer.translate on z-change failed", exc_info=True)
-                                try:
-                                    layer.visible = True
-                                    layer.opacity = 1.0
-                                    layer.blending = 'opaque'
-                                except Exception:
-                                    logger.debug("apply_state: ensuring layer visibility failed", exc_info=True)
-                                # Update contrast limits for the new Z slice unless sticky
-                                try:
-                                    if not getattr(self, '_sticky_contrast', True):
-                                        smin = float(np.nanmin(slab)) if hasattr(np, 'nanmin') else float(np.min(slab))
-                                        smax = float(np.nanmax(slab)) if hasattr(np, 'nanmax') else float(np.max(slab))
-                                        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
-                                            layer.contrast_limits = [0.0, 1.0]
-                                        else:
-                                            if 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
-                                                layer.contrast_limits = [0.0, 1.0]
-                                            else:
-                                                layer.contrast_limits = [smin, smax]
-                                except Exception:
-                                    logger.debug("apply_state: contrast update failed", exc_info=True)
-                            vis = getattr(self, '_visual', None)
-                            if vis is not None and hasattr(vis, 'set_data'):
-                                vis.set_data(slab)  # type: ignore[attr-defined]
-                            h, w = int(slab.shape[0]), int(slab.shape[1])
-                            cam = getattr(self.view, 'camera', None)
-                            # Ensure camera sees the new slice only if not preserving view
-                            if cam is not None and hasattr(cam, 'set_range') and not getattr(self, '_preserve_view_on_switch', True):
-                                try:
-                                    sy, sx = (1.0, 1.0)
-                                    if self._scene_source is not None:
-                                        sy, sx = self._plane_scale_for_level(self._scene_source, int(self._active_ms_level))
-                                    world_w = max(1.0, float(w) * float(max(1e-12, sx)))
-                                    world_h = max(1.0, float(h) * float(max(1e-12, sy)))
-                                    cam.set_range(x=(0.0, world_w), y=(0.0, world_h))
-                                except Exception:
-                                    logger.debug("apply_state: camera set_range on z-change failed", exc_info=True)
-                            self._data_wh = (w, h)
-                            self._z_index = int(z_new)
-                            # Do not force fullframe horizon on Z; keep ROI for stability
-                            # Optionally force IDR on Z for immediate visibility on clients
-                            if getattr(self, '_idr_on_z', False):
-                                self._request_encoder_idr()
-                            self._notify_scene_refresh()
-                            self._mark_render_tick_needed()
-                            if self._log_layer_debug:
-                                logger.info("apply_state: z updated -> %d (level=%d)", int(self._z_index), int(self._active_ms_level))
-                        except Exception:
-                            logger.debug("apply_state: immediate slab update failed", exc_info=True)
-                    else:
-                        # Even if z didn’t change, ensure a render to reflect dims
-                        self._mark_render_tick_needed()
-                except Exception:
-                    logger.debug("apply_state: viewer dims update failed", exc_info=True)
-            elif self._scene_source is not None:
-                axes = self._scene_source.axes
-                if 'z' in axes and len(state.current_step) > axes.index('z'):
-                    try:
-                        z_idx = int(state.current_step[axes.index('z')])
-                    except (TypeError, ValueError):
-                        logger.debug("apply_state: invalid z index in current_step=%r", state.current_step)
-                        z_idx = self._z_index or 0
-                else:
-                    z_idx = self._z_index or 0
-                if self._z_index is None or int(z_idx) != int(self._z_index):
-                    source = self._ensure_scene_source()
-                    # Directly set source/viewer to requested z without level re-apply
-                    try:
-                        axes = source.axes
-                        zi = axes.index('z') if 'z' in axes else 0
-                        base = list(source.current_step or [0] * len(source.level_shape(self._active_ms_level)))
-                        if len(base) < len(source.level_shape(self._active_ms_level)):
-                            base = base + [0] * (len(source.level_shape(self._active_ms_level)) - len(base))
-                        base[zi] = int(z_idx)
-                        with self._state_lock:
-                            _ = source.set_current_level(self._active_ms_level, step=tuple(int(x) for x in base))
-                    except Exception:
-                        logger.debug("apply_state: set_current_level(z) failed (no viewer)", exc_info=True)
-                    slab = self._load_slice(source, self._active_ms_level, int(z_idx))
-                    vis = getattr(self, '_visual', None)
-                    if vis is not None and hasattr(vis, 'set_data'):
-                        vis.set_data(slab)  # type: ignore[attr-defined]
-                    h, w = int(slab.shape[0]), int(slab.shape[1])
-                    if getattr(self, '_data_wh', None) != (w, h) and cam is not None and hasattr(cam, 'set_range'):
-                        cam.set_range(x=(0, w), y=(0, h))
-                    self._data_wh = (w, h)
-                    self._z_index = int(z_idx)
-                    self._notify_scene_refresh()
 
-        # Volume render parameters in 3D mode
+        # Delegate dims/Z handling to the applier in 2D mode
+        if not bool(self.use_volume) and state.current_step is not None:
+            ctx = self._build_scene_state_context(cam)
+            res = SceneStateApplier.apply_dims_and_slice(ctx, current_step=state.current_step)
+            if res.z_index is not None:
+                self._z_index = int(res.z_index)
+            if res.data_wh is not None:
+                self._data_wh = (int(res.data_wh[0]), int(res.data_wh[1]))
+            if res.last_step is not None:
+                self._last_step = tuple(int(x) for x in res.last_step)
+
+        # Volume visual parameters in 3D mode
         if bool(self.use_volume):
-            vis = getattr(self, '_visual', None)
-            if vis is not None:
-                m = getattr(state, 'volume_mode', None)
-                if m and hasattr(vis, 'method'):
-                    mm = str(m).lower()
-                    if mm in ('mip', 'translucent', 'iso'):
-                        vis.method = mm  # type: ignore[attr-defined]
-                cm = getattr(state, 'volume_colormap', None)
-                if cm and hasattr(vis, 'cmap'):
-                    name = str(cm).lower()
-                    if name == 'gray':
-                        name = 'grays'
-                    vis.cmap = name  # type: ignore[attr-defined]
-                cl = getattr(state, 'volume_clim', None)
-                if isinstance(cl, tuple) and len(cl) >= 2 and hasattr(vis, 'clim'):
-                    lo = float(cl[0]); hi = float(cl[1])
-                    if hi < lo:
-                        lo, hi = hi, lo
-                    vis.clim = (lo, hi)  # type: ignore[attr-defined]
-                op = getattr(state, 'volume_opacity', None)
-                if op is not None and hasattr(vis, 'opacity'):
-                    vis.opacity = float(max(0.0, min(1.0, float(op))))  # type: ignore[attr-defined]
-                ss = getattr(state, 'volume_sample_step', None)
-                if ss is not None and hasattr(vis, 'relative_step_size'):
-                    vis.relative_step_size = float(max(0.1, min(4.0, float(ss))))  # type: ignore[attr-defined]
+            ctx = self._build_scene_state_context(cam)
+            SceneStateApplier.apply_volume_params(
+                ctx,
+                mode=getattr(state, 'volume_mode', None),
+                colormap=getattr(state, 'volume_colormap', None),
+                clim=getattr(state, 'volume_clim', None),
+                opacity=getattr(state, 'volume_opacity', None),
+                sample_step=getattr(state, 'volume_sample_step', None),
+            )
 
         if cam is None:
             self._maybe_select_level()
@@ -1853,7 +1735,7 @@ class EGLRendererWorker:
         # Capture wall and monotonic timestamps at frame start
         wall_ts = time.time()
         t0 = time.perf_counter()
-        render_ms = self._render_frame_and_maybe_eval()
+        render_ms = self.render_tick()
         # Blit timing (GPU + CPU)
         t_b0 = time.perf_counter()
         blit_gpu_ns = self._capture_blit_gpu_ns()
@@ -1892,7 +1774,7 @@ class EGLRendererWorker:
         return timings, pkt_obj, flags, seq
 
     # ---- C5 helpers (pure refactor; no behavior change) ---------------------
-    def _render_frame_and_maybe_eval(self) -> float:
+    def render_tick(self) -> float:
         t_r0 = time.perf_counter()
         # Optional animation
         if self._animate and hasattr(self.view, "camera"):
@@ -1919,7 +1801,7 @@ class EGLRendererWorker:
                     cam.set_range(x=x_rng, y=y_rng)
                 except Exception as e:
                     logger.debug("Animate(2D) failed: %s", e)
-        self._apply_pending_state()
+        self.drain_scene_updates()
         # If in 2D slice mode, update the slab when panning moves the viewport
         # outside the last ROI or beyond the hysteresis threshold.
         if not self.use_volume and self._scene_source is not None and self._napari_layer is not None:
@@ -1931,12 +1813,15 @@ class EGLRendererWorker:
             if decision.refresh:
                 z_idx = int(self._z_index or 0)
                 slab = self._load_slice(source, level, z_idx)
-                try:
-                    sy, sx = self._plane_scale_for_level(source, level)
-                except Exception:
-                    sy = sx = 1.0
-                applier = SliceDataApplier(layer=self._napari_layer)
-                applier.apply(slab=slab, roi=roi, scale=(sy, sx))
+                cam = getattr(self.view, 'camera', None)
+                ctx = self._build_scene_state_context(cam)
+                SceneStateApplier.apply_slice_to_layer(
+                    ctx,
+                    source=source,
+                    slab=slab,
+                    roi=roi,
+                    update_contrast=False,
+                )
                 self._last_roi = decision.new_last_roi
         self.canvas.render()
         if self.policy_eval_requested:

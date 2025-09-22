@@ -1,10 +1,12 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
 ## Current Snapshot
-- `egl_worker.py`: 2.4k LOC, still hosts camera/state/ROI/policy/encode logic. Longest blocks remain `__init__` (252 lines), `_apply_pending_state` (239), `_viewport_roi_for_level` (186), `_apply_level_internal` (182), `_maybe_select_level` (154).
-- `try:` count: 129 in worker. Many wrap logging/sample instrumentation. `getattr` (85) and `isinstance` (17) still pepper hot paths.
-- Env/env_bool sprinkled across init (encoder, ROI, debug). No centralized logging/flag policy yet.
-- Server (`egl_headless_server.py`) untouched in this pass; still >2k LOC.
+- `egl_worker.py`: 2,203 LOC (down ~200 from the pre-extraction snapshot) after moving scene application into `SceneStateApplier`. Longest blocks now `__init__` (~250 lines), `_viewport_roi_for_level` (186), `_apply_level_internal` (182), `_maybe_select_level` (154); `_apply_pending_state` is ~80 lines and purely orchestrates helpers.
+- `scene_state_applier.py`: 203 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
+- `try:` count trending down (≈110) with hot-path guards removed from camera/state application. Remaining broad `try:` live at subsystem boundaries (EGL/CUDA/NVENC) and ROI math; targets to trim continue in Phase C/D.
+- `getattr` usage in the worker dropped (≈60 → ≈35) by asserting invariants in the new helper. Further reductions arrive with Phase C decomposition.
+- Env/env_bool still sprinkled across init (encoder, ROI, debug). Centralised logging/config policy remains scheduled for Phase D.
+- Server (`egl_headless_server.py`) untouched in this pass; still 2,249 LOC.
 
 ## Guiding Principles
 Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodify, Hostility to "Just In Case").
@@ -26,18 +28,18 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Implemented**:
   - `state_machine.py` now owns scene snapshots, zoom intent tracking, and signature change detection; `_pending_*` fields and state signatures were removed from the worker.
   - `camera_controller.py` applies zoom/pan/orbit/reset commands and returns intent metadata so the worker only schedules renders/policy once.
+  - `roi_applier.py` handles ROI drift detection + slab placement, with `render_tick` delegating ROI refreshes to `SceneStateApplier` rather than reimplementing translate logic.
+  - `SceneStateApplier` extracted from `drain_scene_updates`; dims/Z updates and 3D volume params are now applied through a procedural context. Hot-path `try/except` and `hasattr` guards were removed in favour of assertions, aligning with the “hostility to just-in-case” tenet.
+  - Method renames landed: `_apply_pending_state` → `drain_scene_updates`, `_render_frame_and_maybe_eval` → `render_tick`, clarifying responsibilities for future refactors.
   - Zoom intent handling normalized (factor >1 ⇒ invert) and rate-limited; LOD thresholds soften to 1.20 during active zoom hints.
-  - Unit coverage added for the state machine and camera controller helpers.
+  - Unit coverage exists for the state machine, camera controller, and `SceneStateApplier` helpers.
 - **In progress**:
-  - `roi_applier.py` handles ROI drift detection + slab placement, with `_render_frame_and_maybe_eval` delegating to the helper; remaining contrast/translate branches slated for extraction into `SceneStateCommit`.
-  - Worker naming cleanup underway (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
+  - Worker naming cleanup (`SceneStateCoordinator`, `SceneUpdateBundle`, `policy_eval_requested`) to better reflect ownership.
 - **Next extraction targets**:
-  - **Scene commit helper**: replace the ad-hoc `apply_state` branches with `SceneStateCommit.apply(viewer, volume_visual)` that encapsulates dims/contrast/translate handling, returning a new `SceneUpdateBundle` that the worker simply enqueues.
-  - **Contrast/ROI post-processing**: move the contrast-limit and translate refresh (currently still inline in `_render_frame_and_maybe_eval`) into helper methods owned by `SceneStateCommit` so the worker no longer touches napari layer internals.
-  - **Cleanup guard posture**: audit remaining `try/except Exception` sites (cleanup detach, ROI scale lookup) and replace them with assertions or scoped helpers now that subsystem boundaries are explicit.
+  - **ROI refresh integration**: with `render_tick` calling into `SceneStateApplier`, follow up by deleting residual ROI translate/contrast code once Phase C extractions land.
+  - **Guard audit**: continue removing remaining defensive branches in ROI math once helper coverage lands.
 - **Tests still to add**:
   - Integration-style test exercising level selection under a sequence of zoom hints to lock the relaxed thresholds in place.
-  - Coverage for ROI/slab helper once extracted (verifying translate/contrast updates without VisPy).
 
 ### Phase C — ROI & LOD Minimization
 - **ROI helper**: Move `_viewport_roi_for_level`, related chunk alignment, oversampling to `lod.py` or new `roi.py`. Worker should request `roi = compute_roi(view_context)` and let helper raise on failure.
@@ -66,6 +68,11 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Docs**: Capture module responsibilities & invariants in `docs/server_refactor_plan.md` and inline docstrings.
 - **Tests**: Add unit tests around new helpers (encoder, ROI/LOD, state machine) for regression control. Prefer pure functions for easy testing.
 - **Lint rules**: Introduce ruff rules to flag `except Exception` & `logger.*` inside try/except.
+
+## Immediate Next Steps
+- Begin Phase C by extracting `_viewport_roi_for_level` and related oversampling math into `lod.py`/`roi.py`, further shrinking worker LOC and eliminating remaining defensive branches.
+- Land the integration-style test for zoom-hint-driven level selection to guard policy behaviour.
+- Prepare for Phase D by sketching a `ServerCtx` logging/debug policy so environment probes can be centralised when logging refactor begins.
 
 ---
 
