@@ -67,6 +67,7 @@ class ClientLoopConfig:
     smoke_pre_frames: int
     smoke_pre_mb: int
     smoke_pre_path: Optional[str]
+    zoom_base: float
 
 
 def load_client_loop_config() -> ClientLoopConfig:
@@ -120,6 +121,7 @@ def load_client_loop_config() -> ClientLoopConfig:
     smoke_width = int(env_float("NAPARI_CUDA_SMOKE_W", 1280.0))
     smoke_height = int(env_float("NAPARI_CUDA_SMOKE_H", 720.0))
     smoke_fps = float(env_float("NAPARI_CUDA_SMOKE_FPS", 60.0))
+    zoom_base = float(env_float("NAPARI_CUDA_ZOOM_BASE", 1.1))
 
     return ClientLoopConfig(
         warmup_ms_override=warmup_ms_override,
@@ -157,4 +159,5 @@ def load_client_loop_config() -> ClientLoopConfig:
         smoke_pre_frames=smoke_pre_frames,
         smoke_pre_mb=smoke_pre_mb,
         smoke_pre_path=smoke_pre_path,
+        zoom_base=zoom_base,
     )
