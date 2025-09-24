@@ -200,10 +200,15 @@ class EGLRendererWorker:
         fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
         dist = (0.5 * float(h)) / max(1e-6, math.tan(0.5 * fov_rad))
         cam.distance = float(dist * 1.1)  # type: ignore[attr-defined]
-        print(
-            f"frame_volume_camera extent=({w:.3f}, {h:.3f}, {d:.3f}) center={center} dist={cam.distance:.3f}",
-            flush=True,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "frame_volume_camera extent=(%.3f, %.3f, %.3f) center=%s dist=%.3f",
+                w,
+                h,
+                d,
+                center,
+                float(cam.distance),
+            )
 
     def _init_adapter_scene(self, source: Optional[ZarrSceneSource]) -> None:
         adapter = AdapterScene(self)
@@ -883,10 +888,13 @@ class EGLRendererWorker:
                     y=(0.0, max(1.0, world_h)),
                     z=(0.0, max(1.0, world_d)),
                 )
-                print(
-                    f"configure_camera_for_mode extent=({world_w:.3f}, {world_h:.3f}, {world_d:.3f})",
-                    flush=True,
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "configure_camera_for_mode extent=(%.3f, %.3f, %.3f)",
+                        world_w,
+                        world_h,
+                        world_d,
+                    )
                 self._frame_volume_camera(world_w, world_h, world_d)
                 logger.debug(
                     "configure_camera_for_mode: use_volume extent=(%.3f, %.3f, %.3f) camera_center=%s distance=%.3f",
@@ -972,6 +980,7 @@ class EGLRendererWorker:
         self.use_volume = bool(target == 3)
 
         if self.use_volume:
+            self._last_roi = None
             source = None
             try:
                 source = self._ensure_scene_source()
@@ -1210,6 +1219,7 @@ class EGLRendererWorker:
             sticky_contrast=self._sticky_contrast,
             idr_on_z=self._idr_on_z,
             data_wh=self._data_wh,
+            volume_scale=getattr(self, '_volume_scale', None),
             state_lock=self._state_lock,
             ensure_scene_source=self._ensure_scene_source,
             plane_scale_for_level=plane_scale_for_level,

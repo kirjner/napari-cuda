@@ -62,6 +62,11 @@ class _StubSceneSource:
     def level_shape(self, _: int) -> tuple[int, ...]:
         return self._shape
 
+    def level_scale(self, _: int) -> tuple[float, ...]:
+        if len(self._shape) >= 3:
+            return (1.0, 0.5, 0.25)
+        return (0.5, 0.25)
+
     def set_current_level(self, level: int, step: tuple[int, ...]) -> tuple[int, ...]:
         self._current_step = tuple(int(x) for x in step)
         return self._current_step
@@ -243,6 +248,40 @@ def test_apply_volume_params_sets_visual_fields() -> None:
     assert visual.clim == (1.0, 2.0)
     assert visual.opacity == 0.7
     assert visual.relative_step_size == 0.2
+
+
+def test_apply_volume_layer_resets_translate() -> None:
+    viewer = _StubViewer()
+    camera = _StubCamera()
+    source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
+    layer = SimpleNamespace(translate=(5.0, 6.0, 7.0), contrast_limits=[0.0, 1.0], data=None, scale=(1.0, 1.0, 1.0))
+
+    ctx = SceneStateApplyContext(
+        use_volume=True,
+        viewer=viewer,
+        camera=camera,
+        visual=None,
+        layer=layer,
+        scene_source=source,
+        active_ms_level=0,
+        z_index=None,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=False,
+        idr_on_z=False,
+        data_wh=(256, 256),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: source,
+        plane_scale_for_level=_plane_scale_for_level,
+        load_slice=_load_slice,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: None,
+    )
+
+    data = np.ones((3, 4, 5), dtype=float)
+    SceneStateApplier.apply_volume_layer(ctx, volume=data, contrast=(0.0, 1.0))
+
+    assert layer.translate == (0.0, 0.0, 0.0)
 
 
 def test_drain_updates_records_render_and_policy_without_camera() -> None:

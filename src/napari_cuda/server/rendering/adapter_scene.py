@@ -144,16 +144,26 @@ class AdapterScene:
                     y=(0.0, max(1.0, world_h)),
                     z=(0.0, max(1.0, world_d)),
                 )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "adapter volume init extent=(%.3f, %.3f, %.3f) translate=%s scale=%s",
+                        world_w,
+                        world_h,
+                        world_d,
+                        getattr(layer, 'translate', None),
+                        getattr(layer, 'scale', None),
+                    )
                 print(
-                    f"adapter volume init extent=({world_w:.3f}, {world_h:.3f}, {world_d:.3f}) translate={getattr(layer, 'translate', None)} scale={getattr(layer, 'scale', None)}",
+                    "adapter_scene volume",
+                    {
+                        'extent': (float(world_w), float(world_h), float(world_d)),
+                        'layer_translate': getattr(layer, 'translate', None),
+                        'layer_scale': getattr(layer, 'scale', None),
+                    },
                     flush=True,
                 )
                 self._bridge._frame_volume_camera(world_w, world_h, world_d)
                 self._bridge._z_index = 0
-                try:
-                    viewer.reset_view()
-                except Exception:
-                    logger.debug("adapter volume: reset_view failed", exc_info=True)
                 layer.rendering = "mip"
                 scene_src = "napari-zarr-volume"
                 scene_meta = f"level={self._bridge._zarr_level or current_level} shape={d}x{h}x{w}"
@@ -275,6 +285,8 @@ class AdapterScene:
                     setattr(adapter, 'order', 10_000)
                 except Exception:
                     setattr(n, 'order', 10_000)
+                # Update bridge visual pointer so downstream volume params hit the active node
+                self._bridge._visual = n
             except Exception:
                 logger.debug("adapter: ensure_node_registered failed", exc_info=True)
 

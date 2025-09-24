@@ -13,7 +13,7 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Awaitable, Deque, Dict, List, Optional, Set
 
@@ -346,6 +346,18 @@ class EGLHeadlessServer:
             if worker_volume and chosen:
                 while len(chosen) < 3:
                     chosen.append(0)
+            print(
+                "_rebroadcast_meta",
+                {
+                    'source': source_of_truth,
+                    'chosen': chosen,
+                    'state_step': state_step,
+                    'worker_step': w_step,
+                    'source_step': s_step,
+                    'worker_volume': worker_volume,
+                },
+                flush=True,
+            )
 
             # Synchronize server state with chosen step to keep intents consistent
             try:
@@ -439,6 +451,22 @@ class EGLHeadlessServer:
         else:
             logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
         self.use_volume = bool(ndisp == 3)
+        if self.use_volume:
+            # Seed server state with a neutral step so we don't rebroadcast stale 2D slices
+            try:
+                with self._state_lock:
+                    self._latest_state = replace(self._latest_state, current_step=(0, 0, 0))
+            except Exception:
+                logger.debug("view.set_ndisplay: failed to seed volume step", exc_info=True)
+        print(
+            "_handle_set_ndisplay",
+            {
+                'requested': int(ndisp),
+                'use_volume': self.use_volume,
+                'latest_step': getattr(self._latest_state, 'current_step', None),
+            },
+            flush=True,
+        )
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:
@@ -458,7 +486,7 @@ class EGLHeadlessServer:
         except Exception:
             logger.debug("view.set_ndisplay: rebroadcast failed", exc_info=True)
 
-    async def _wait_for_worker_ndisplay(self, *, expected_volume: bool, timeout: float = 0.25) -> None:
+    async def _wait_for_worker_ndisplay(self, *, expected_volume: bool, timeout: float = 1.0) -> None:
         start = time.monotonic()
         worker = self._worker
         if worker is None:
@@ -477,21 +505,23 @@ class EGLHeadlessServer:
                     ndisp = int(getattr(dims, 'ndisplay', 2))
                     step_tuple: tuple[int, ...] = tuple(int(x) for x in getattr(dims, 'current_step', ()) or ())
                     if expected_volume:
-                        if ndisp != 3:
-                            pass
-                        elif step_tuple and step_tuple[0] == 0:
-                            data_d = getattr(worker, '_data_d', None)
-                            napari_layer = getattr(worker, '_napari_layer', None)
-                            layer_ndim = int(getattr(napari_layer, 'ndim', 0)) if napari_layer is not None else 0
-                            if data_d is not None and int(data_d) > 0 and layer_ndim >= 3:
+                        data_d = getattr(worker, '_data_d', None)
+                        napari_layer = getattr(worker, '_napari_layer', None)
+                        layer_ndim = int(getattr(napari_layer, 'ndim', 0)) if napari_layer is not None else 0
+                        if ndisp == 3 and data_d is not None and int(data_d) > 0 and layer_ndim >= 3:
+                            if step_tuple and step_tuple[0] != 0:
+                                # Wait for the worker to emit the neutral volume step
+                                pass
+                            else:
                                 return
-                        # otherwise continue waiting for volume state
                     else:
                         if ndisp == 2:
                             return
                 except Exception:
                     return
             if (time.monotonic() - start) >= timeout:
+                if expected_volume:
+                    logger.debug("wait_for_worker_ndisplay: timeout waiting for volume ready")
                 return
             await asyncio.sleep(0.01)
 

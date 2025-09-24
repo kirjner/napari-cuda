@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 import logging
 
@@ -50,9 +51,23 @@ def apply_worker_volume_level(
 ) -> None:
     """Apply a volume level and emit layer logging via the worker hooks."""
 
+    try:
+        scale_vals = [float(s) for s in source.level_scale(applied.level)]
+    except Exception:
+        scale_vals = []
+    while len(scale_vals) < 3:
+        scale_vals.insert(0, 1.0)
+    scale_tuple = (
+        float(scale_vals[-3]),
+        float(scale_vals[-2]),
+        float(scale_vals[-1]),
+    )
+    worker._volume_scale = scale_tuple  # type: ignore[attr-defined]
     volume = worker._get_level_volume(source, applied.level)  # type: ignore[attr-defined]
     cam = worker.view.camera if getattr(worker, "view", None) is not None else None
     ctx = worker._build_scene_state_context(cam)  # type: ignore[attr-defined]
+    if ctx.volume_scale is None:
+        ctx = replace(ctx, volume_scale=scale_tuple)
     data_wh, data_d = SceneStateApplier.apply_volume_layer(
         ctx,
         volume=volume,
@@ -60,17 +75,6 @@ def apply_worker_volume_level(
     )
     worker._data_wh = data_wh  # type: ignore[attr-defined]
     worker._data_d = data_d  # type: ignore[attr-defined]
-    try:
-        scale_vals = [float(s) for s in source.level_scale(applied.level)]
-    except Exception:
-        scale_vals = []
-    while len(scale_vals) < 3:
-        scale_vals.insert(0, 1.0)
-    worker._volume_scale = (  # type: ignore[attr-defined]
-        float(scale_vals[-3]),
-        float(scale_vals[-2]),
-        float(scale_vals[-1]),
-    )
     volume_shape = (
         (int(data_d), int(data_wh[1]), int(data_wh[0]))
         if data_d is not None

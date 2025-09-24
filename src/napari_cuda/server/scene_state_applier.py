@@ -57,6 +57,7 @@ class SceneStateApplyContext:
     notify_scene_refresh: Callable[[], None]
     mark_render_tick_needed: Callable[[], None]
     request_encoder_idr: Optional[Callable[[], None]] = None
+    volume_scale: Optional[Tuple[float, float, float]] = None
 
 
 @dataclass(frozen=True)
@@ -195,7 +196,42 @@ class SceneStateApplier:
         layer = ctx.layer
         if layer is not None:
             layer.data = volume
-            layer.contrast_limits = [float(contrast[0]), float(contrast[1])]  # type: ignore[assignment]
+            lo = float(contrast[0])
+            hi = float(contrast[1])
+            if hi <= lo:
+                hi = lo + 1.0
+            if not hasattr(layer, 'translate'):
+                raise AttributeError("volume layer must expose a 'translate' attribute")
+            layer.translate = tuple(0.0 for _ in range(int(volume.ndim)))  # type: ignore[assignment]
+            data_min = float(np.nanmin(volume)) if hasattr(np, 'nanmin') else float(np.min(volume))
+            data_max = float(np.nanmax(volume)) if hasattr(np, 'nanmax') else float(np.max(volume))
+            normalized = (-0.05 <= data_min <= 1.05) and (-0.05 <= data_max <= 1.05)
+            logger.debug(
+                "apply_volume_layer stats: min=%.6f max=%.6f contrast=(%.6f, %.6f) normalized=%s",
+                data_min,
+                data_max,
+                lo,
+                hi,
+                normalized,
+            )
+            if normalized:
+                layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
+            else:
+                layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
+            if ctx.volume_scale is not None:
+                scale_vals: Tuple[float, ...] = tuple(float(s) for s in ctx.volume_scale)
+            elif ctx.scene_source is not None:
+                lvl_scale = ctx.scene_source.level_scale(int(ctx.active_ms_level))
+                scale_vals = tuple(float(s) for s in lvl_scale)
+            else:
+                scale_vals = tuple(1.0 for _ in range(int(volume.ndim)))
+            if len(scale_vals) < int(volume.ndim):
+                pad = int(volume.ndim) - len(scale_vals)
+                scale_vals = tuple(1.0 for _ in range(pad)) + scale_vals
+            scale_vals = tuple(scale_vals[-int(volume.ndim):])
+            if not hasattr(layer, 'scale'):
+                raise AttributeError("volume layer must expose a 'scale' attribute")
+            layer.scale = scale_vals  # type: ignore[assignment]
 
         depth = int(volume.shape[0])
         height = int(volume.shape[1])
