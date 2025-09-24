@@ -8,7 +8,7 @@ return value.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional, Sequence, Tuple
 import math
 import logging
@@ -17,6 +17,8 @@ import numpy as np
 
 from napari_cuda.server.scene_types import SliceROI
 from napari_cuda.server.roi_applier import SliceDataApplier
+from napari_cuda.server.scene_state import ServerSceneState
+from napari_cuda.server.state_machine import SceneStateQueue
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,15 @@ class SceneStateApplyResult:
     z_index: Optional[int] = None
     data_wh: Optional[Tuple[int, int]] = None
     last_step: Optional[Tuple[int, ...]] = None
+
+
+@dataclass(frozen=True)
+class SceneDrainResult:
+    z_index: Optional[int] = None
+    data_wh: Optional[Tuple[int, int]] = None
+    last_step: Optional[Tuple[int, ...]] = None
+    render_marked: bool = False
+    policy_refresh_needed: bool = False
 
 
 class SceneStateApplier:
@@ -149,7 +160,7 @@ class SceneStateApplier:
         slab: Any,
         roi: Optional[SliceROI],
         update_contrast: bool,
-    ) -> Tuple[float, float]:
+        ) -> Tuple[float, float]:
         layer = ctx.layer
         assert layer is not None, "napari layer must be initialised in 2D mode"
 
@@ -225,9 +236,86 @@ class SceneStateApplier:
         if sample_step is not None:
             vis.relative_step_size = float(max(0.1, min(4.0, float(sample_step))))  # type: ignore[attr-defined]
 
+    @staticmethod
+    def drain_updates(
+        ctx: SceneStateApplyContext,
+        *,
+        state: ServerSceneState,
+        queue: SceneStateQueue,
+    ) -> SceneDrainResult:
+        """Apply pending scene state updates and report side effects."""
+
+        render_marked = False
+        original_mark = ctx.mark_render_tick_needed
+
+        def _mark_render() -> None:
+            nonlocal render_marked
+            render_marked = True
+            original_mark()
+
+        ctx_for_apply = replace(ctx, mark_render_tick_needed=_mark_render)
+
+        z_index = ctx.z_index
+        data_wh = ctx.data_wh
+        last_step: Optional[Tuple[int, ...]] = None
+
+        if not ctx.use_volume and state.current_step is not None:
+            res = SceneStateApplier.apply_dims_and_slice(
+                ctx_for_apply,
+                current_step=state.current_step,
+            )
+            if res.z_index is not None:
+                z_index = int(res.z_index)
+            if res.data_wh is not None:
+                data_wh = (int(res.data_wh[0]), int(res.data_wh[1]))
+            if res.last_step is not None:
+                last_step = tuple(int(x) for x in res.last_step)
+
+        if ctx.use_volume:
+            SceneStateApplier.apply_volume_params(
+                ctx_for_apply,
+                mode=state.volume_mode,
+                colormap=state.volume_colormap,
+                clim=state.volume_clim,
+                opacity=state.volume_opacity,
+                sample_step=state.volume_sample_step,
+            )
+
+        cam = ctx.camera
+        if cam is None:
+            queue.update_state_signature(state)
+            return SceneDrainResult(
+                z_index=int(z_index) if z_index is not None else None,
+                data_wh=(int(data_wh[0]), int(data_wh[1])) if data_wh is not None else None,
+                last_step=last_step,
+                render_marked=render_marked,
+                policy_refresh_needed=True,
+            )
+
+        if state.center is not None:
+            assert hasattr(cam, "center"), "Camera missing center property"
+            cam.center = state.center  # type: ignore[attr-defined]
+        if state.zoom is not None:
+            assert hasattr(cam, "zoom"), "Camera missing zoom property"
+            cam.zoom = state.zoom  # type: ignore[attr-defined]
+        if state.angles is not None:
+            assert hasattr(cam, "angles"), "Camera missing angles property"
+            cam.angles = state.angles  # type: ignore[attr-defined]
+
+        policy_refresh = queue.update_state_signature(state)
+
+        return SceneDrainResult(
+            z_index=int(z_index) if z_index is not None else None,
+            data_wh=(int(data_wh[0]), int(data_wh[1])) if data_wh is not None else None,
+            last_step=last_step,
+            render_marked=render_marked,
+            policy_refresh_needed=policy_refresh,
+        )
+
 
 __all__ = [
     "SceneStateApplier",
     "SceneStateApplyContext",
     "SceneStateApplyResult",
+    "SceneDrainResult",
 ]

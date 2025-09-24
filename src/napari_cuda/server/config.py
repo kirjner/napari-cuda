@@ -122,6 +122,9 @@ class ServerConfig:
     height: int = 1080
     use_volume: bool = False
     ndisplay: int = 2  # 2|3 intent; worker may clamp
+    max_slice_bytes: int = 0
+    max_volume_bytes: int = 0
+    max_volume_voxels: int = 0
 
     # Animation (dev only)
     animate: bool = False
@@ -188,6 +191,10 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     codec = _env_str(env, "NAPARI_CUDA_CODEC", enc.codec) or enc.codec
     enc = EncodeCfg(fps=fps, codec=codec, bitrate=bitrate, keyint=keyint)
 
+    max_slice_bytes = max(0, _env_int(env, "NAPARI_CUDA_MAX_SLICE_BYTES", 0))
+    max_volume_bytes = max(0, _env_int(env, "NAPARI_CUDA_MAX_VOLUME_BYTES", 0))
+    max_volume_voxels = max(0, _env_int(env, "NAPARI_CUDA_MAX_VOLUME_VOXELS", 0))
+
     idr_on_reset = _env_bool(env, "NAPARI_CUDA_IDR_ON_RESET", True)
     packer = (_env_str(env, "NAPARI_CUDA_PACKER", "cython") or "cython").lower()
 
@@ -203,6 +210,9 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
         height=height,
         use_volume=use_volume,
         ndisplay=ndisplay,
+        max_slice_bytes=max_slice_bytes,
+        max_volume_bytes=max_volume_bytes,
+        max_volume_voxels=max_volume_voxels,
         animate=animate,
         animate_dps=animate_dps,
         frame_queue=frame_queue,

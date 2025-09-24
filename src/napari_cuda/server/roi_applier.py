@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any, Callable
 
+from napari_cuda.server.zarr_source import ZarrSceneSource
+
 from napari_cuda.server.scene_types import SliceROI
 
 
@@ -88,3 +90,34 @@ def refresh_slice(
     slab = load_slice(level)
     apply_slice(slab, roi)
     return True, decision.new_last_roi
+
+
+def refresh_slice_for_worker(
+    *,
+    source: ZarrSceneSource,
+    level: int,
+    last_roi: Optional[tuple[int, SliceROI]],
+    z_index: Optional[int],
+    edge_threshold: int,
+    viewport_roi_for_level: Callable[[ZarrSceneSource, int], SliceROI],
+    load_slice: Callable[[ZarrSceneSource, int, int], Any],
+    apply_slice: Callable[[Any, SliceROI], None],
+) -> tuple[bool, Optional[tuple[int, SliceROI]]]:
+    """Refresh a slice in the worker context with supplied callbacks."""
+
+    roi = viewport_roi_for_level(source, int(level))
+
+    def _load(level_idx: int) -> Any:
+        return load_slice(source, int(level_idx), int(z_index or 0))
+
+    def _apply(slab: Any, roi_to_apply: SliceROI) -> None:
+        apply_slice(slab, roi_to_apply)
+
+    return refresh_slice(
+        level=int(level),
+        roi=roi,
+        last_roi=last_roi,
+        edge_threshold=int(edge_threshold),
+        load_slice=_load,
+        apply_slice=_apply,
+    )

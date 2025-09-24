@@ -11,8 +11,9 @@ Phase A: helpers only; wiring happens in the worker in a later step.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple, Callable
+from typing import Callable, Mapping, MutableMapping, Optional, Sequence, Tuple
 import logging
+import time
 
 import numpy as np
 
@@ -67,6 +68,13 @@ class LevelPolicyDecision:
     should_switch: bool
     blocked_reason: Optional[str]
     cooldown_remaining_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class PolicySwitchOutcome:
+    timestamp: float
+    decision: LevelPolicyDecision
+    oversampling: Mapping[int, float]
 
 
 # ---- Stabilizer --------------------------------------------------------------
@@ -510,6 +518,120 @@ def apply_level_with_budget(
     raise RuntimeError("Unable to select multiscale level within budget")
 
 
+def apply_level_with_context(
+    *,
+    desired_level: int,
+    use_volume: bool,
+    source: ZarrSceneSource,
+    current_level: int,
+    log_layer_debug: bool,
+    budget_check: Callable[[ZarrSceneSource, int], None],
+    apply_level_fn: Callable[[ZarrSceneSource, int, Optional[int]], AppliedLevel],
+    on_switch: Callable[[int, int, float], None],
+    roi_cache: Optional[MutableMapping[int, object]] = None,
+    roi_log_state: Optional[MutableMapping[int, object]] = None,
+    logger_ref: logging.Logger = logger,
+) -> tuple[AppliedLevel, bool]:
+    """Apply a level within budgets and refresh ROI caches."""
+
+    applied_snapshot: Optional[AppliedLevel] = None
+
+    def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> None:
+        nonlocal applied_snapshot
+        level_idx = int(level)
+        if roi_cache is not None:
+            roi_cache.pop(level_idx, None)
+        if roi_log_state is not None:
+            roi_log_state.pop(level_idx, None)
+        applied_snapshot = apply_level_fn(scene, level, prev_level)
+
+    def _on_switch(prev_level: int, applied_level: int, elapsed_ms: float) -> None:
+        on_switch(prev_level, applied_level, elapsed_ms)
+
+    applied_level_idx, downgraded = apply_level_with_budget(
+        desired_level=desired_level,
+        use_volume=use_volume,
+        source=source,
+        current_level=current_level,
+        log_layer_debug=log_layer_debug,
+        budget_check=budget_check,
+        apply_level_cb=_apply,
+        on_switch=_on_switch,
+        logger_ref=logger_ref,
+    )
+
+    if applied_snapshot is None:
+        raise RuntimeError("apply_level_with_context: apply_level_fn did not run")
+
+    if int(applied_snapshot.level) != int(applied_level_idx) and logger_ref.isEnabledFor(logging.DEBUG):
+        logger_ref.debug(
+            "apply_level_with_context: snapshot level=%d idx=%d",  # pragma: no cover - debug aid
+            int(applied_snapshot.level),
+            int(applied_level_idx),
+        )
+
+    return applied_snapshot, downgraded
+
+
+def run_policy_switch(
+    *,
+    source: ZarrSceneSource,
+    current_level: int,
+    oversampling_for_level: Callable[[ZarrSceneSource, int], float],
+    zoom_ratio: Optional[float],
+    lock_level: Optional[int],
+    last_switch_ts: float,
+    config: LevelPolicyConfig,
+    log_policy_eval: bool,
+    apply_level: Callable[[int, str], None],
+    budget_error: type[Exception],
+    select_level_fn: Callable[[LevelPolicyConfig, LevelPolicyInputs], LevelPolicyDecision] = select_level,
+    logger_ref: logging.Logger = logger,
+    perf_counter: Callable[[], float] = time.perf_counter,
+) -> Optional[PolicySwitchOutcome]:
+    """Evaluate and apply a level policy decision, returning metadata on success."""
+
+    now_ts = perf_counter()
+    maybe = evaluate_policy_decision(
+        source=source,
+        current_level=current_level,
+        oversampling_for_level=oversampling_for_level,
+        zoom_ratio=zoom_ratio,
+        lock_level=lock_level,
+        last_switch_ts=last_switch_ts,
+        now_ts=now_ts,
+        config=config,
+        log_policy_eval=log_policy_eval,
+        select_level_fn=select_level_fn,
+        logger_ref=logger_ref,
+    )
+
+    if maybe is None:
+        return None
+
+    decision, overs_map = maybe
+
+    try:
+        apply_level(int(decision.selected_level), decision.action)
+    except budget_error as exc:  # type: ignore[arg-type]
+        if logger_ref.isEnabledFor(logging.INFO):
+            logger_ref.info(
+                "ms.switch: hold=%d (budget reject %s)",
+                int(current_level),
+                str(exc),
+            )
+        return None
+    except Exception as exc:
+        setattr(exc, "policy_decision", decision)
+        raise
+
+    return PolicySwitchOutcome(
+        timestamp=now_ts,
+        decision=decision,
+        oversampling=overs_map,
+    )
+
+
 __all__ = [
     "AppliedLevel",
     "LevelPolicyConfig",
@@ -519,8 +641,11 @@ __all__ = [
     "assert_volume_within_budget",
     "assert_slice_within_budget",
     "apply_level",
+    "apply_level_with_context",
     "select_level",
     "set_dims_range_for_level",
     "format_oversampling",
     "evaluate_policy_decision",
+    "PolicySwitchOutcome",
+    "run_policy_switch",
 ]

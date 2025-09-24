@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from napari_cuda.server.lod import (
+    AppliedLevel,
+    LevelBudgetError,
     LevelPolicyConfig,
     LevelPolicyInputs,
+    apply_level_with_context,
     select_level,
 )
 
@@ -164,3 +169,99 @@ def test_select_level_filters_none_entries() -> None:
 
     assert decision.selected_level == 0
     assert decision.should_switch is True
+
+
+class _StubLevelDescriptor:
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.shape = shape
+
+
+class _StubSource:
+    def __init__(self, level_shapes: tuple[tuple[int, ...], ...], *, current_level: int) -> None:
+        self.level_descriptors = [_StubLevelDescriptor(shape) for shape in level_shapes]
+        self.current_level = current_level
+        self.level_history: list[int] = []
+
+
+def _make_applied(level: int) -> AppliedLevel:
+    return AppliedLevel(
+        level=level,
+        step=(0, 0, 0),
+        z_index=0,
+        shape=(8, 8, 8),
+        scale_yx=(1.0, 1.0),
+        contrast=(0.0, 1.0),
+        axes="zyx",
+        dtype="float32",
+    )
+
+
+def test_apply_level_with_context_clears_roi_caches() -> None:
+    source = _StubSource(((8, 8, 8), (4, 4, 4)), current_level=1)
+    roi_cache = {0: object(), 1: object()}
+    roi_log_state = {0: object(), 1: object()}
+    applied_levels: list[int] = []
+    switches: list[tuple[int, int, float]] = []
+
+    def _budget_check(_scene: _StubSource, _level: int) -> None:
+        return None
+
+    def _apply(scene: _StubSource, level: int, prev: Optional[int]) -> AppliedLevel:
+        scene.level_history.append(level)
+        applied_levels.append(level)
+        return _make_applied(level)
+
+    def _on_switch(prev: int, new: int, elapsed_ms: float) -> None:
+        switches.append((prev, new, elapsed_ms))
+
+    snapshot, downgraded = apply_level_with_context(
+        desired_level=0,
+        use_volume=False,
+        source=source,  # type: ignore[arg-type]
+        current_level=1,
+        log_layer_debug=False,
+        budget_check=_budget_check,  # type: ignore[arg-type]
+        apply_level_fn=_apply,  # type: ignore[arg-type]
+        on_switch=_on_switch,
+        roi_cache=roi_cache,
+        roi_log_state=roi_log_state,
+    )
+
+    assert snapshot.level == 0
+    assert downgraded is False
+    assert applied_levels == [0]
+    assert switches and switches[0][0] == 1 and switches[0][1] == 0
+    assert 0 not in roi_cache
+    assert 0 not in roi_log_state
+
+
+def test_apply_level_with_context_falls_back_on_budget_error() -> None:
+    source = _StubSource(((8, 8, 8), (4, 4, 4), (2, 2, 2)), current_level=2)
+    switches: list[tuple[int, int, float]] = []
+
+    def _budget_check(_scene: _StubSource, level: int) -> None:
+        if level == 0:
+            raise LevelBudgetError("reject coarse")
+
+    def _apply(scene: _StubSource, level: int, prev: Optional[int]) -> AppliedLevel:
+        scene.level_history.append(level)
+        return _make_applied(level)
+
+    def _on_switch(prev: int, new: int, elapsed_ms: float) -> None:
+        switches.append((prev, new, elapsed_ms))
+
+    snapshot, downgraded = apply_level_with_context(
+        desired_level=0,
+        use_volume=False,
+        source=source,  # type: ignore[arg-type]
+        current_level=2,
+        log_layer_debug=False,
+        budget_check=_budget_check,  # type: ignore[arg-type]
+        apply_level_fn=_apply,  # type: ignore[arg-type]
+        on_switch=_on_switch,
+    )
+
+    assert snapshot.level == 1
+    assert downgraded is True
+    assert source.level_history == [1]
+    assert switches and switches[0][0] == 2 and switches[0][1] == 1

@@ -391,6 +391,103 @@ def resolve_viewport_roi(
     )
 
 
+def ensure_panzoom_camera(
+    *,
+    view: Any,
+    width: int,
+    height: int,
+    data_wh: Optional[tuple[int, int]],
+    log_layer_debug: bool,
+    reason: str,
+    logger_ref: logging.Logger = logger,
+) -> Optional[scene.cameras.PanZoomCamera]:
+    """Ensure a :class:`~vispy.scene.cameras.PanZoomCamera` is active for ROI work."""
+
+    if view is None:
+        return None
+
+    cam = getattr(view, "camera", None)
+    if isinstance(cam, scene.cameras.PanZoomCamera):
+        return cam
+
+    if cam is not None and log_layer_debug and logger_ref.isEnabledFor(logging.INFO):
+        logger_ref.info(
+            "ensure panzoom camera: reason=%s current=%s",
+            reason,
+            cam.__class__.__name__,
+        )
+
+    try:
+        panzoom = scene.cameras.PanZoomCamera(aspect=1.0)
+        view.camera = panzoom
+        if data_wh:
+            w, h = data_wh
+            panzoom.set_range(x=(0, float(w)), y=(0, float(h)))
+        else:
+            panzoom.set_range(x=(0, float(width)), y=(0, float(height)))
+        return panzoom
+    except Exception:
+        logger_ref.debug("ensure_panzoom_camera failed", exc_info=True)
+        return None
+
+
+def resolve_worker_viewport_roi(
+    *,
+    view: Any,
+    canvas_size: Tuple[int, int],
+    source: ZarrSceneSource,
+    level: int,
+    align_chunks: bool,
+    chunk_pad: int,
+    ensure_contains_viewport: bool,
+    edge_threshold: int,
+    for_policy: bool,
+    roi_cache: MutableMapping[int, tuple[Optional[tuple[float, ...]], SliceROI]] | None,
+    roi_log_state: MutableMapping[int, tuple[SliceROI, float]] | None,
+    snapshot_cb: Callable[[], dict[str, Any]],
+    log_layer_debug: bool,
+    quiet: bool,
+    data_wh: Optional[tuple[int, int]],
+    reason: str,
+    logger_ref: logging.Logger = logger,
+) -> SliceROI:
+    """Resolve the viewport ROI using worker settings, ensuring camera readiness."""
+
+    if view is not None:
+        cam = getattr(view, "camera", None)
+        if not isinstance(cam, scene.cameras.PanZoomCamera):
+            ensured = ensure_panzoom_camera(
+                view=view,
+                width=int(canvas_size[0]),
+                height=int(canvas_size[1]),
+                data_wh=data_wh,
+                log_layer_debug=log_layer_debug,
+                reason=reason,
+                logger_ref=logger_ref,
+            )
+            cam = ensured or getattr(view, "camera", None)
+        if not isinstance(cam, scene.cameras.PanZoomCamera):
+            raise RuntimeError("PanZoomCamera required for ROI compute")
+
+    return resolve_viewport_roi(
+        view=view,
+        canvas_size=canvas_size,
+        source=source,
+        level=level,
+        align_chunks=align_chunks,
+        chunk_pad=chunk_pad,
+        ensure_contains_viewport=ensure_contains_viewport,
+        edge_threshold=edge_threshold,
+        for_policy=for_policy,
+        cache=roi_cache,
+        log_state=roi_log_state,
+        snapshot_cb=snapshot_cb,
+        log_layer_debug=log_layer_debug,
+        quiet=quiet,
+        logger_ref=logger_ref,
+    )
+
+
 __all__ = [
     "ViewportROIResult",
     "compute_viewport_roi",
@@ -399,5 +496,7 @@ __all__ = [
     "viewport_debug_snapshot",
     "resolve_viewport_roi",
     "cached_viewport_roi",
+    "ensure_panzoom_camera",
+    "resolve_worker_viewport_roi",
 ]
 logger = logging.getLogger(__name__)

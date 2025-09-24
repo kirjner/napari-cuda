@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Any
 import logging
 import time
+from threading import Lock
 
 from napari_cuda.server.rendering.gl_capture import GLCapture
 from napari_cuda.server.rendering.cuda_interop import CudaInterop
@@ -13,6 +14,21 @@ from napari_cuda.server.rendering.frame_pipeline import FramePipeline
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FrameTimings:
+    render_ms: float
+    blit_gpu_ns: Optional[int]
+    blit_cpu_ms: float
+    map_ms: float
+    copy_ms: float
+    convert_ms: float
+    encode_ms: float
+    pack_ms: float
+    total_ms: float
+    packet_bytes: Optional[int]
+    capture_wall_ts: float = 0.0
 
 
 class CaptureFacade:
@@ -105,6 +121,16 @@ class FrameCapture:
     black_reset_done: bool
 
 
+@dataclass
+class EncodedFrame:
+    timings: FrameTimings
+    packet: Optional[bytes]
+    flags: int
+    sequence: int
+    orientation_ready: bool
+    black_reset_done: bool
+
+
 def capture_frame_for_encoder(
     facade: CaptureFacade,
     *,
@@ -128,4 +154,107 @@ def capture_frame_for_encoder(
     )
 
 
-__all__ = ["CaptureFacade", "FrameCapture", "capture_frame_for_encoder"]
+def encode_frame(
+    *,
+    capture: CaptureFacade,
+    render_frame: Callable[[], float],
+    obtain_encoder: Callable[[], Optional[Any]],
+    encoder_lock: Optional[Lock],
+    debug_dumper: Optional[Any],
+    reset_camera: Optional[Callable[[], None]] = None,
+    wall_time_fn: Callable[[], float] = time.time,
+) -> EncodedFrame:
+    """Render, capture, and encode a frame via the shared helpers."""
+
+    wall_ts = wall_time_fn()
+    render_ms = float(render_frame())
+
+    debug_cb: Optional[Callable[[int, int, int, object], None]] = None
+    if debug_dumper is not None:
+        cfg = getattr(debug_dumper, "cfg", None)
+        if cfg is not None and getattr(cfg, "enabled", False):
+            remaining = getattr(cfg, "frames_remaining", 0)
+            if remaining > 0:
+
+                def _dump(tex_id: int, w: int, h: int, frame: object) -> None:
+                    debug_dumper.dump_triplet(tex_id, w, h, frame)
+
+                debug_cb = _dump
+
+    capture_result = capture_frame_for_encoder(
+        capture,
+        debug_cb=debug_cb,
+        reset_camera=reset_camera,
+    )
+
+    dst = capture_result.frame
+    blit_gpu_ns = capture_result.blit_gpu_ns
+    blit_cpu_ms = capture_result.blit_cpu_ms
+    map_ms = capture_result.map_ms
+    copy_ms = capture_result.copy_ms
+    convert_ms = capture_result.convert_ms
+
+    pkt: Optional[bytes]
+    encode_ms: float
+    pack_ms: float
+
+    encoder = None
+    if encoder_lock is not None:
+        with encoder_lock:
+            encoder = obtain_encoder()
+            if encoder is None or not getattr(encoder, "is_ready", False):
+                pkt = None
+                encode_ms = 0.0
+                pack_ms = 0.0
+            else:
+                pkt, timings = encoder.encode(dst)
+                encode_ms = float(getattr(timings, "encode_ms", 0.0))
+                pack_ms = float(getattr(timings, "pack_ms", 0.0))
+    else:
+        encoder = obtain_encoder()
+        if encoder is None or not getattr(encoder, "is_ready", False):
+            pkt = None
+            encode_ms = 0.0
+            pack_ms = 0.0
+        else:
+            pkt, timings = encoder.encode(dst)
+            encode_ms = float(getattr(timings, "encode_ms", 0.0))
+            pack_ms = float(getattr(timings, "pack_ms", 0.0))
+
+    total_ms = render_ms + blit_cpu_ms + map_ms + copy_ms + convert_ms + encode_ms + pack_ms
+    packet_bytes = len(pkt) if pkt is not None else None
+
+    timings = FrameTimings(
+        render_ms=render_ms,
+        blit_gpu_ns=blit_gpu_ns,
+        blit_cpu_ms=blit_cpu_ms,
+        map_ms=map_ms,
+        copy_ms=copy_ms,
+        convert_ms=convert_ms,
+        encode_ms=encode_ms,
+        pack_ms=pack_ms,
+        total_ms=total_ms,
+        packet_bytes=packet_bytes,
+        capture_wall_ts=wall_ts,
+    )
+
+    seq = int(getattr(encoder, "frame_index", 0)) if encoder is not None else 0
+
+    return EncodedFrame(
+        timings=timings,
+        packet=pkt,
+        flags=0,
+        sequence=seq,
+        orientation_ready=bool(capture_result.orientation_ready),
+        black_reset_done=bool(capture_result.black_reset_done),
+    )
+
+
+__all__ = [
+    "CaptureFacade",
+    "FrameCapture",
+    "FrameTimings",
+    "EncodedFrame",
+    "capture_frame_for_encoder",
+    "encode_frame",
+]

@@ -6,9 +6,12 @@ from types import SimpleNamespace
 import numpy as np
 
 from napari_cuda.server.scene_state_applier import (
+    SceneDrainResult,
     SceneStateApplier,
     SceneStateApplyContext,
 )
+from napari_cuda.server.scene_state import ServerSceneState
+from napari_cuda.server.state_machine import SceneStateQueue
 from napari_cuda.server.scene_types import SliceROI
 
 
@@ -38,6 +41,9 @@ class _StubVisual:
 class _StubCamera:
     def __init__(self) -> None:
         self.ranges = []
+        self.center = (0.0, 0.0, 0.0)
+        self.zoom = 1.0
+        self.angles = (0.0, 0.0, 0.0)
 
     def set_range(self, *, x, y) -> None:
         self.ranges.append((tuple(x), tuple(y)))
@@ -237,3 +243,96 @@ def test_apply_volume_params_sets_visual_fields() -> None:
     assert visual.clim == (1.0, 2.0)
     assert visual.opacity == 0.7
     assert visual.relative_step_size == 0.2
+
+
+def test_drain_updates_records_render_and_policy_without_camera() -> None:
+    viewer = _StubViewer()
+    layer = _StubLayer()
+    visual = _StubVisual()
+    source = _StubSceneSource(("z", "y", "x"), (4, 4, 4))
+
+    marks: list[None] = []
+
+    ctx = SceneStateApplyContext(
+        use_volume=False,
+        viewer=viewer,
+        camera=None,
+        visual=visual,
+        layer=layer,
+        scene_source=source,
+        active_ms_level=0,
+        z_index=0,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=False,
+        idr_on_z=False,
+        data_wh=(128, 128),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: source,
+        plane_scale_for_level=_plane_scale_for_level,
+        load_slice=_load_slice,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: marks.append(None),
+        request_encoder_idr=None,
+    )
+
+    queue = SceneStateQueue()
+    state = ServerSceneState(current_step=(1, 0, 0))
+
+    result = SceneStateApplier.drain_updates(ctx, state=state, queue=queue)
+
+    assert isinstance(result, SceneDrainResult)
+    assert result.render_marked is True
+    assert result.policy_refresh_needed is True
+    assert queue.update_state_signature(state) is False
+    assert marks == [None]
+
+
+def test_drain_updates_applies_camera_fields_and_signature() -> None:
+    viewer = _StubViewer()
+    layer = _StubLayer()
+    visual = _StubVisual()
+    camera = _StubCamera()
+    source = _StubSceneSource(("z", "y", "x"), (4, 4, 4))
+
+    ctx = SceneStateApplyContext(
+        use_volume=False,
+        viewer=viewer,
+        camera=camera,
+        visual=visual,
+        layer=layer,
+        scene_source=source,
+        active_ms_level=0,
+        z_index=None,
+        last_roi=None,
+        preserve_view_on_switch=False,
+        sticky_contrast=False,
+        idr_on_z=False,
+        data_wh=(64, 64),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: source,
+        plane_scale_for_level=_plane_scale_for_level,
+        load_slice=_load_slice,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: None,
+        request_encoder_idr=None,
+    )
+
+    queue = SceneStateQueue()
+    state = ServerSceneState(
+        current_step=(1, 0, 0),
+        center=(5.0, 6.0, 7.0),
+        zoom=0.5,
+        angles=(10.0, 20.0, 30.0),
+    )
+
+    result = SceneStateApplier.drain_updates(ctx, state=state, queue=queue)
+
+    assert result.z_index == 1
+    assert result.data_wh == (2, 2)
+    assert result.render_marked is True
+    assert result.policy_refresh_needed is True
+    assert camera.center == (5.0, 6.0, 7.0)
+    assert camera.zoom == 0.5
+    assert camera.angles == (10.0, 20.0, 30.0)
+    assert queue.update_state_signature(state) is False
