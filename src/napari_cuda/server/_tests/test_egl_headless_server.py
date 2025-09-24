@@ -29,7 +29,7 @@ class _StubWorker:
         return self._viewer
 
 
-def test_set_ndisplay_seeds_volume_step(monkeypatch) -> None:
+def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     server = EGLHeadlessServer()
     server._latest_state = ServerSceneState(current_step=(136, 0, 0))
     worker = _StubWorker()
@@ -52,9 +52,7 @@ def test_set_ndisplay_seeds_volume_step(monkeypatch) -> None:
     asyncio.run(server._handle_set_ndisplay(3, client_id='c1', client_seq=1))
 
     assert server.use_volume is True
-    assert server._latest_state.current_step == (0, 0, 0)
+    assert server._latest_state.current_step == (136, 0, 0)
     assert worker.requested == 3
     assert worker.force_idr_called is True
-    assert recorded_step['step'] == (0, 0, 0)
-    assert recorded_step['client'] == 'c1'
-    assert recorded_step['ack'] is True
+    assert recorded_step == {}

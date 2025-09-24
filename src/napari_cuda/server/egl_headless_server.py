@@ -13,7 +13,7 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Deque, Dict, List, Optional, Set
 
@@ -451,13 +451,6 @@ class EGLHeadlessServer:
         else:
             logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
         self.use_volume = bool(ndisp == 3)
-        if self.use_volume:
-            # Seed server state with a neutral step so we don't rebroadcast stale 2D slices
-            try:
-                with self._state_lock:
-                    self._latest_state = replace(self._latest_state, current_step=(0, 0, 0))
-            except Exception:
-                logger.debug("view.set_ndisplay: failed to seed volume step", exc_info=True)
         print(
             "_handle_set_ndisplay",
             {
@@ -477,53 +470,9 @@ class EGLHeadlessServer:
                     self._bypass_until_key = True
                 except Exception:
                     logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
-                await self._wait_for_worker_ndisplay(expected_volume=bool(ndisp == 3))
             except Exception:
                 logger.exception("view.set_ndisplay: worker request failed")
-        # Re-broadcast dims meta so clients reflect the authoritative state
-        try:
-            await self._rebroadcast_meta(client_id)
-        except Exception:
-            logger.debug("view.set_ndisplay: rebroadcast failed", exc_info=True)
-
-    async def _wait_for_worker_ndisplay(self, *, expected_volume: bool, timeout: float = 1.0) -> None:
-        start = time.monotonic()
-        worker = self._worker
-        if worker is None:
-            return
-        while True:
-            try:
-                current_volume = bool(getattr(worker, 'use_volume', False))
-            except Exception:
-                return
-            if current_volume == expected_volume:
-                try:
-                    vm = worker.viewer_model()
-                    if vm is None:
-                        return
-                    dims = vm.dims
-                    ndisp = int(getattr(dims, 'ndisplay', 2))
-                    step_tuple: tuple[int, ...] = tuple(int(x) for x in getattr(dims, 'current_step', ()) or ())
-                    if expected_volume:
-                        data_d = getattr(worker, '_data_d', None)
-                        napari_layer = getattr(worker, '_napari_layer', None)
-                        layer_ndim = int(getattr(napari_layer, 'ndim', 0)) if napari_layer is not None else 0
-                        if ndisp == 3 and data_d is not None and int(data_d) > 0 and layer_ndim >= 3:
-                            if step_tuple and step_tuple[0] != 0:
-                                # Wait for the worker to emit the neutral volume step
-                                pass
-                            else:
-                                return
-                    else:
-                        if ndisp == 2:
-                            return
-                except Exception:
-                    return
-            if (time.monotonic() - start) >= timeout:
-                if expected_volume:
-                    logger.debug("wait_for_worker_ndisplay: timeout waiting for volume ready")
-                return
-            await asyncio.sleep(0.01)
+        # Let the worker-driven scene refresh broadcast updated dims once the toggle completes
 
     def _start_kf_watchdog(self) -> None:
         async def _kf_watchdog(last_key_seq: Optional[int]):

@@ -46,6 +46,13 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   4. **Integration tests** — ✅ added zoom-intent coverage and preserve-view smoke harness in `src/napari_cuda/server/_tests/test_worker_integration.py` to exercise the worker pipeline end-to-end.
 
 ### Phase C — ROI & LOD Minimization
+- **Worker LOC reduction roadmap (pre-Phase E)**: target ≈−490 LOC to bring `egl_worker.py` under 1,200 before we decompose the server layer. Execute the extractions below while Phase C remains in flight:
+  - Extract a `display_mode.py` helper that owns `_apply_ndisplay_switch` and `_reset_volume_step` (≈−120 LOC).
+  - Fold `process_camera_commands` and `_log_zoom_drift` into `camera_controller` so the worker just forwards callbacks (≈−80 LOC).
+  - Move `_set_level_with_budget`, `_perform_level_switch`, `_configure_camera_for_mode`, and `_viewport_roi_for_level` into a `level_manager` module layered on `level_runtime` (≈−150 LOC).
+  - Hoist `_ensure_scene_source` and `_notify_scene_refresh` into `scene_source_manager.py` to centralise source caching/refresh (≈−80 LOC).
+  - Push `cleanup` into capture lifecycle helpers and merge `_refresh_slice_if_needed` with `roi_applier` (≈−60 LOC).
+
 - Phase transition: Phase B prerequisites (guard audit, integration coverage, explicit `ServerCtx`) are satisfied; Phase C work can now begin while capture/logging follow-ups proceed in parallel.
 - **ROI helper**: `roi.resolve_viewport_roi` now handles debug snapshots, caching, and fallbacks; the worker simply forwards canvas metadata. Integration tests cover the shared helper and the ROI unit suite.
 - **LOD selection**: `_evaluate_level_policy` already delegates to `lod.select_level`; budget application now flows through `level_budget.apply_level_with_budget` so the worker only wires callbacks.
