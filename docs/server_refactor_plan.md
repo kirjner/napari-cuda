@@ -47,11 +47,11 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 
 ### Phase C — ROI & LOD Minimization
 - **Worker LOC reduction roadmap (pre-Phase E)**: target ≈−490 LOC to bring `egl_worker.py` under 1,200 before we decompose the server layer. Execute the extractions below while Phase C remains in flight:
-  - Extract a `display_mode.py` helper that owns `_apply_ndisplay_switch` and `_reset_volume_step` (≈−120 LOC).
-  - Fold `process_camera_commands` and `_log_zoom_drift` into `camera_controller` so the worker just forwards callbacks (≈−80 LOC).
-  - Move `_set_level_with_budget`, `_perform_level_switch`, `_configure_camera_for_mode`, and `_viewport_roi_for_level` into a `level_manager` module layered on `level_runtime` (≈−150 LOC).
-  - Hoist `_ensure_scene_source` and `_notify_scene_refresh` into `scene_source_manager.py` to centralise source caching/refresh (≈−80 LOC).
-  - Push `cleanup` into capture lifecycle helpers and merge `_refresh_slice_if_needed` with `roi_applier` (≈−60 LOC).
+  - Add procedural helpers in a `display_mode.py` module for `_apply_ndisplay_switch` and `_reset_volume_step`; worker just logs and forwards (≈−120 LOC).
+  - Extend `camera_controller` with a `process_commands` wrapper that subsumes `process_camera_commands` and `_log_zoom_drift` (≈−80 LOC).
+  - Collapse `_set_level_with_budget`, `_perform_level_switch`, `_configure_camera_for_mode`, and `_viewport_roi_for_level` into procedural functions inside `level_runtime.py` (≈−150 LOC).
+  - Hoist `_ensure_scene_source` and `_notify_scene_refresh` into plain helpers in `scene_source.py` alongside the existing Zarr source logic (≈−80 LOC).
+  - Push `cleanup` into capture/encoder lifecycle helpers and fold `_refresh_slice_if_needed` into `roi_applier`’s procedural API (≈−60 LOC).
 
 - Phase transition: Phase B prerequisites (guard audit, integration coverage, explicit `ServerCtx`) are satisfied; Phase C work can now begin while capture/logging follow-ups proceed in parallel.
 - **ROI helper**: `roi.resolve_viewport_roi` now handles debug snapshots, caching, and fallbacks; the worker simply forwards canvas metadata. Integration tests cover the shared helper and the ROI unit suite.
