@@ -107,18 +107,53 @@ class AdapterScene:
 
             if self._bridge.use_volume:
                 data = self._bridge._get_level_volume(source, current_level)
-                layer = viewer.add_image(data, name="zarr-volume", scale=source.level_scale(current_level))
+                level_scale = source.level_scale(current_level)
+                try:
+                    scale_vals = [float(s) for s in level_scale]
+                except Exception:
+                    scale_vals = []
+                while len(scale_vals) < 3:
+                    scale_vals.insert(0, 1.0)
+                sz, sy, sx = scale_vals[-3], scale_vals[-2], scale_vals[-1]
+                self._bridge._volume_scale = (float(sz), float(sy), float(sx))
+                layer = viewer.add_image(data, name="zarr-volume", scale=level_scale)
                 viewer.dims.axis_labels = tuple(source.axes)
                 viewer.dims.ndisplay = 3
-                viewer.dims.current_step = tuple(step)
+                step_seq = list(step)
+                axes_lower = [str(ax).lower() for ax in source.axes]
+                if 'z' in axes_lower:
+                    z_pos = axes_lower.index('z')
+                    if z_pos < len(step_seq) and step_seq[z_pos] != 0:
+                        step_seq[z_pos] = 0
+                        try:
+                            step = source.set_current_level(current_level, step=tuple(step_seq))
+                        except Exception:
+                            logger.debug("adapter volume: resetting source step to 0 failed", exc_info=True)
+                viewer.dims.current_step = tuple(int(s) for s in step)
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
                 d, h, w = int(data.shape[0]), int(data.shape[1]), int(data.shape[2])
                 self._bridge._data_wh = (w, h)
                 self._bridge._data_d = d
-                view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
-                self._bridge._frame_volume_camera(w, h, d)
+                world_w = float(w) * float(sx)
+                world_h = float(h) * float(sy)
+                world_d = float(d) * float(sz)
+                view.camera.set_range(
+                    x=(0.0, max(1.0, world_w)),
+                    y=(0.0, max(1.0, world_h)),
+                    z=(0.0, max(1.0, world_d)),
+                )
+                print(
+                    f"adapter volume init extent=({world_w:.3f}, {world_h:.3f}, {world_d:.3f}) translate={getattr(layer, 'translate', None)} scale={getattr(layer, 'scale', None)}",
+                    flush=True,
+                )
+                self._bridge._frame_volume_camera(world_w, world_h, world_d)
+                self._bridge._z_index = 0
+                try:
+                    viewer.reset_view()
+                except Exception:
+                    logger.debug("adapter volume: reset_view failed", exc_info=True)
                 layer.rendering = "mip"
                 scene_src = "napari-zarr-volume"
                 scene_meta = f"level={self._bridge._zarr_level or current_level} shape={d}x{h}x{w}"

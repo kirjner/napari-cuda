@@ -727,13 +727,37 @@ class ViewerSceneManager:
         """Keep the internal ``ViewerModel`` roughly in sync."""
 
         dims = self._viewer.dims
-        dims.ndim = dims_spec.ndim
-        if dims_spec.axis_labels:
-            dims.axis_labels = tuple(dims_spec.axis_labels)
-        if dims_spec.current_step:
-            dims.current_step = tuple(dims_spec.current_step)
-        if dims_spec.ndisplay is not None:
-            dims.ndisplay = int(dims_spec.ndisplay)
+        try:
+            from contextlib import ExitStack
+
+            with ExitStack() as stack:
+                for attr in ("ndisplay", "current_step", "displayed"):
+                    emitter = getattr(dims.events, attr, None)
+                    if emitter is not None and hasattr(emitter, "blocker"):
+                        try:
+                            stack.enter_context(emitter.blocker())
+                        except Exception:
+                            logger.debug("layer_manager: failed to block dims events for %s", attr, exc_info=True)
+                dims.ndim = dims_spec.ndim
+                if dims_spec.axis_labels:
+                    dims.axis_labels = tuple(dims_spec.axis_labels)
+                if dims_spec.displayed:
+                    try:
+                        dims.displayed = tuple(dims_spec.displayed)  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.debug("layer_manager: dims.displayed update failed", exc_info=True)
+                if dims_spec.current_step:
+                    try:
+                        dims.current_step = tuple(dims_spec.current_step)
+                    except Exception:
+                        logger.debug("layer_manager: dims.current_step update failed", exc_info=True)
+                if dims_spec.ndisplay is not None:
+                    try:
+                        dims.ndisplay = int(dims_spec.ndisplay)
+                    except Exception:
+                        logger.debug("layer_manager: dims.ndisplay update failed", exc_info=True)
+        except Exception:
+            logger.debug("layer_manager: dims sync failed", exc_info=True)
         if camera_spec is not None:
             cam = self._viewer.camera
             if camera_spec.center is not None:

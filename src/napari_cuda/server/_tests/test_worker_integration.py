@@ -81,6 +81,20 @@ class _FakeCamera2D:
         return SimpleNamespace(size=(320.0, 180.0))
 
 
+class _FakeCamera3D(_FakeCamera2D):
+    def __init__(self, elevation: float = 30.0, azimuth: float = 30.0, fov: float = 60.0) -> None:
+        super().__init__()
+        self.elevation = float(elevation)
+        self.azimuth = float(azimuth)
+        self.fov = float(fov)
+        self.center = (0.0, 0.0, 0.0)
+        self.distance = 1.0
+        self.set_range_calls_3d: list[dict[str, tuple[float, float]]] = []
+
+    def set_range(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        self.set_range_calls_3d.append({str(k): v for k, v in kwargs.items()})
+
+
 class _FakeScene:
     transform = _IdentityTransform()
 
@@ -272,6 +286,7 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         return 1.0, 1.0
 
     monkeypatch.setattr(ew.scene.cameras, "PanZoomCamera", _FakeCamera2D)
+    monkeypatch.setattr(ew.scene.cameras, "TurntableCamera", _FakeCamera3D)
     monkeypatch.setattr(ew, "EglContext", _DummyEglContext)
     monkeypatch.setattr(ew, "CaptureFacade", _DummyCaptureFacade)
     monkeypatch.setattr(ew, "AdapterScene", _DummyAdapterScene)
@@ -419,3 +434,53 @@ def test_render_tick_preserve_view_smoke(egl_worker_fixture):
     assert worker._napari_layer.applied, "render_tick should apply the latest slab"
     assert worker._last_roi is not None
     assert camera.set_range_calls == []
+
+
+def test_ndisplay_switch_to_volume_pins_coarsest_level(egl_worker_fixture, monkeypatch):
+    worker = egl_worker_fixture
+
+    recorded: dict[str, object] = {}
+
+    def _capture_switch(self, *, target_level, reason, intent_level, selected_level, source=None):  # type: ignore[no-untyped-def]
+        recorded.update(
+            target_level=int(target_level),
+            reason=reason,
+            intent_level=int(intent_level) if intent_level is not None else None,
+            selected_level=int(selected_level) if selected_level is not None else None,
+        )
+        self._active_ms_level = int(target_level)
+
+    monkeypatch.setattr(worker, "_perform_level_switch", MethodType(_capture_switch, worker))
+
+    worker._render_tick_required = False
+    worker._level_policy_refresh_needed = True
+    worker._apply_ndisplay_switch(3)
+
+    assert worker.use_volume is True
+    assert recorded.get("target_level") == 2
+    assert recorded.get("reason") == "ndisplay-3d"
+    assert worker._level_policy_refresh_needed is False
+    assert worker._render_tick_required is True
+    assert worker._viewer is not None and worker._viewer.dims.ndisplay == 3
+    assert tuple(worker._viewer.dims.current_step)[:3] == (0, 0, 0)
+    assert worker._z_index == 0
+
+
+def test_ndisplay_switch_back_to_plane_resumes_policy(egl_worker_fixture, monkeypatch):
+    worker = egl_worker_fixture
+    worker.use_volume = True
+    worker._viewer.dims.ndisplay = 3
+
+    calls: list[None] = []
+
+    monkeypatch.setattr(worker, "_evaluate_level_policy", lambda: calls.append(None))
+
+    worker._render_tick_required = False
+    worker._apply_ndisplay_switch(2)
+
+    assert worker.use_volume is False
+    assert worker._viewer.dims.ndisplay == 2
+    assert calls, "Expected policy evaluation after returning to 2D"
+    assert worker._level_policy_refresh_needed is False
+    assert worker._render_tick_required is True
+    assert tuple(worker._viewer.dims.current_step)[:2] == (0, 0)

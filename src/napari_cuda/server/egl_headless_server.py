@@ -317,10 +317,20 @@ class EGLHeadlessServer:
             except Exception:
                 s_step = None
 
-            # Choose authoritative step: prefer source, then worker viewer, then server state
+            worker_volume = False
+            try:
+                if self._worker is not None:
+                    worker_volume = bool(getattr(self._worker, 'use_volume', False))
+            except Exception:
+                worker_volume = False
+
+            # Choose authoritative step: favour worker viewer when volume mode is active
             chosen: list[int] = []
             source_of_truth = 'server'
-            if s_step is not None and len(s_step) > 0:
+            if worker_volume and w_step is not None and len(w_step) > 0:
+                chosen = [int(x) for x in w_step]
+                source_of_truth = 'viewer-volume'
+            elif s_step is not None and len(s_step) > 0:
                 chosen = [int(x) for x in s_step]
                 source_of_truth = 'source'
             elif w_step is not None and len(w_step) > 0:
@@ -332,6 +342,10 @@ class EGLHeadlessServer:
             else:
                 chosen = [0]
                 source_of_truth = 'default'
+
+            if worker_volume and chosen:
+                while len(chosen) < 3:
+                    chosen.append(0)
 
             # Synchronize server state with chosen step to keep intents consistent
             try:
@@ -424,6 +438,7 @@ class EGLHeadlessServer:
             logger.info("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
         else:
             logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
+        self.use_volume = bool(ndisp == 3)
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:
@@ -434,6 +449,7 @@ class EGLHeadlessServer:
                     self._bypass_until_key = True
                 except Exception:
                     logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
+                await self._wait_for_worker_ndisplay(expected_volume=bool(ndisp == 3))
             except Exception:
                 logger.exception("view.set_ndisplay: worker request failed")
         # Re-broadcast dims meta so clients reflect the authoritative state
@@ -441,6 +457,43 @@ class EGLHeadlessServer:
             await self._rebroadcast_meta(client_id)
         except Exception:
             logger.debug("view.set_ndisplay: rebroadcast failed", exc_info=True)
+
+    async def _wait_for_worker_ndisplay(self, *, expected_volume: bool, timeout: float = 0.25) -> None:
+        start = time.monotonic()
+        worker = self._worker
+        if worker is None:
+            return
+        while True:
+            try:
+                current_volume = bool(getattr(worker, 'use_volume', False))
+            except Exception:
+                return
+            if current_volume == expected_volume:
+                try:
+                    vm = worker.viewer_model()
+                    if vm is None:
+                        return
+                    dims = vm.dims
+                    ndisp = int(getattr(dims, 'ndisplay', 2))
+                    step_tuple: tuple[int, ...] = tuple(int(x) for x in getattr(dims, 'current_step', ()) or ())
+                    if expected_volume:
+                        if ndisp != 3:
+                            pass
+                        elif step_tuple and step_tuple[0] == 0:
+                            data_d = getattr(worker, '_data_d', None)
+                            napari_layer = getattr(worker, '_napari_layer', None)
+                            layer_ndim = int(getattr(napari_layer, 'ndim', 0)) if napari_layer is not None else 0
+                            if data_d is not None and int(data_d) > 0 and layer_ndim >= 3:
+                                return
+                        # otherwise continue waiting for volume state
+                    else:
+                        if ndisp == 2:
+                            return
+                except Exception:
+                    return
+            if (time.monotonic() - start) >= timeout:
+                return
+            await asyncio.sleep(0.01)
 
     def _start_kf_watchdog(self) -> None:
         async def _kf_watchdog(last_key_seq: Optional[int]):

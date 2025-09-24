@@ -185,21 +185,25 @@ class EGLRendererWorker:
             bool(self._zarr_path),
         )
 
-    def _frame_volume_camera(self, w: int, h: int, d: int) -> None:
+    def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
         """Choose stable initial center and distance for TurntableCamera.
 
-        Center at the volume centroid and set distance so the full height fits
-        in view (adds a small margin). This avoids dead pan response before the
-        first zoom and prevents the initial zoom from overshooting.
+        ``w``, ``h``, ``d`` are world-space extents (after scale). We center the
+        camera on the volume midpoint and set distance so the full height fits.
         """
         cam = self.view.camera
         if not isinstance(cam, scene.cameras.TurntableCamera):
             return
-        cam.center = (float(w) * 0.5, float(h) * 0.5, float(d) * 0.5)  # type: ignore[attr-defined]
+        center = (float(w) * 0.5, float(h) * 0.5, float(d) * 0.5)
+        cam.center = center  # type: ignore[attr-defined]
         fov_deg = float(getattr(cam, 'fov', 60.0) or 60.0)
         fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
         dist = (0.5 * float(h)) / max(1e-6, math.tan(0.5 * fov_rad))
         cam.distance = float(dist * 1.1)  # type: ignore[attr-defined]
+        print(
+            f"frame_volume_camera extent=({w:.3f}, {h:.3f}, {d:.3f}) center={center} dist={cam.distance:.3f}",
+            flush=True,
+        )
 
     def _init_adapter_scene(self, source: Optional[ZarrSceneSource]) -> None:
         adapter = AdapterScene(self)
@@ -428,7 +432,7 @@ class EGLRendererWorker:
         self._render_loop_started = True
 
     def _evaluate_policy_if_needed(self) -> None:
-        if not self._level_policy_refresh_needed:
+        if not self._level_policy_refresh_needed or self.use_volume:
             return
         self._level_policy_refresh_needed = False
         self._evaluate_level_policy()
@@ -465,6 +469,7 @@ class EGLRendererWorker:
         self._zoom_hint_hold_s = 0.35
         self._data_wh = (int(self.width), int(self.height))
         self._data_d = None
+        self._volume_scale = (1.0, 1.0, 1.0)
         self._orientation_ready = False
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
@@ -843,17 +848,211 @@ class EGLRendererWorker:
             self._visual.parent = None  # type: ignore[attr-defined]
         self._visual = None
 
+    @staticmethod
+    def _coarsest_level_index(source) -> Optional[int]:
+        """Return the largest level index available on the source."""
+
+        descriptors = getattr(source, "level_descriptors", None)
+        if not descriptors:
+            return None
+        try:
+            last = descriptors[-1]
+        except Exception:
+            return None
+        try:
+            return int(getattr(last, "index"))
+        except Exception:
+            return int(len(descriptors) - 1)
+
+    def _configure_camera_for_mode(self) -> None:
+        view = self.view
+        if view is None:
+            return
+        try:
+            if self.use_volume:
+                if not isinstance(view.camera, scene.cameras.TurntableCamera):
+                    view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
+                extent = self._volume_world_extents()
+                if extent is None:
+                    w_px, h_px = self._data_wh
+                    d_px = self._data_d or 1
+                    extent = (float(w_px), float(h_px), float(d_px))
+                world_w, world_h, world_d = extent
+                view.camera.set_range(
+                    x=(0.0, max(1.0, world_w)),
+                    y=(0.0, max(1.0, world_h)),
+                    z=(0.0, max(1.0, world_d)),
+                )
+                print(
+                    f"configure_camera_for_mode extent=({world_w:.3f}, {world_h:.3f}, {world_d:.3f})",
+                    flush=True,
+                )
+                self._frame_volume_camera(world_w, world_h, world_d)
+                logger.debug(
+                    "configure_camera_for_mode: use_volume extent=(%.3f, %.3f, %.3f) camera_center=%s distance=%.3f",
+                    world_w,
+                    world_h,
+                    world_d,
+                    getattr(view.camera, 'center', None),
+                    float(getattr(view.camera, 'distance', 0.0)),
+                )
+            else:
+                if not isinstance(view.camera, scene.cameras.PanZoomCamera):
+                    view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+                cam = view.camera
+                if cam is not None:
+                    self._apply_camera_reset(cam)
+        except Exception:
+            logger.debug("configure_camera_for_mode failed", exc_info=True)
+
+    def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
+        if self._data_d is not None and self._data_wh is not None:
+            w, h = self._data_wh
+            return int(self._data_d), int(h), int(w)
+        if self._zarr_shape is not None and len(self._zarr_shape) >= 3:
+            z, y, x = self._zarr_shape[:3]
+            return int(z), int(y), int(x)
+        return None
+
+    def _volume_world_extents(self) -> Optional[tuple[float, float, float]]:
+        shape = self._volume_shape_for_view()
+        if shape is None:
+            return None
+        z, y, x = shape
+        try:
+            sz, sy, sx = self._volume_scale
+        except Exception:
+            sz = sy = sx = 1.0
+        width = float(x) * float(sx)
+        height = float(y) * float(sy)
+        depth = float(z) * float(sz)
+        return (width, height, depth)
+
+    def _reset_volume_step(self, source, level: int) -> None:
+        descriptor = None
+        try:
+            descriptor = source.level_descriptors[int(level)]
+        except Exception:
+            return
+        axes = [str(a).lower() for a in getattr(source, "axes", []) or []]
+        z_axis = 0
+        if "z" in axes:
+            z_axis = axes.index("z")
+        step = list(getattr(source, "current_step", ()) or [])
+        shape = list(getattr(descriptor, "shape", ()) or [])
+        dims = max(len(step), len(shape), 3)
+        if len(step) < dims:
+            step.extend([0] * (dims - len(step)))
+        if len(shape) < dims:
+            shape.extend([1] * (dims - len(shape)))
+        if z_axis >= len(step):
+            step.extend([0] * (z_axis - len(step) + 1))
+        if z_axis >= len(shape):
+            shape.extend([1] * (z_axis - len(shape) + 1))
+        max_z = max(1, int(shape[z_axis]))
+        new_z = 0
+        step[z_axis] = new_z
+        clamped_step = []
+        for idx, val in enumerate(step):
+            sh = max(1, int(shape[idx] if idx < len(shape) else 1))
+            clamped_step.append(int(max(0, min(int(val), sh - 1))))
+        try:
+            with self._state_lock:
+                source.set_current_level(int(level), step=tuple(clamped_step))
+        except Exception:
+            logger.debug("ndisplay switch: resetting volume step failed", exc_info=True)
+        self._z_index = int(new_z)
+        self._last_step = tuple(clamped_step)
+
     def _apply_ndisplay_switch(self, ndisplay: int) -> None:
         """Apply 2D/3D toggle on the render thread."""
         assert self.view is not None and self.view.scene is not None, "VisPy view must be initialized"
-        # Adapter-only: do not rebuild visuals; just update viewer dims
         target = 3 if int(ndisplay) >= 3 else 2
+        previous_volume = bool(self.use_volume)
         self.use_volume = bool(target == 3)
+
+        if self.use_volume:
+            source = None
+            try:
+                source = self._ensure_scene_source()
+            except Exception:
+                logger.debug("ndisplay switch: ensure_scene_source failed", exc_info=True)
+            if source is not None:
+                level = self._coarsest_level_index(source)
+                if level is not None:
+                    try:
+                        self._perform_level_switch(
+                            target_level=int(level),
+                            reason="ndisplay-3d",
+                            intent_level=int(level),
+                            selected_level=int(level),
+                            source=source,
+                        )
+                        self._reset_volume_step(source, int(level))
+                    except Exception:
+                        logger.exception("ndisplay switch: failed to apply coarsest level")
+            self._level_policy_refresh_needed = False
+        else:
+            if previous_volume:
+                self._level_policy_refresh_needed = True
+                self._mark_render_tick_needed()
+
+        self._configure_camera_for_mode()
+
         if self._viewer is not None:
-            self._viewer.dims.ndisplay = target
+            try:
+                viewer_dims = self._viewer.dims
+                viewer_dims.ndisplay = target
+                if target == 3:
+                    layer = self._napari_layer
+                    layer_ndim = int(getattr(layer, "ndim", 0)) if layer is not None else 0
+                    data = getattr(layer, "data", None) if layer is not None else None
+                    data_ndim = int(getattr(data, "ndim", 0)) if data is not None else 0
+                    ndim = max(layer_ndim, data_ndim, int(getattr(viewer_dims, "ndim", 0)), 3)
+                    viewer_dims.ndim = ndim
+                    try:
+                        displayed = tuple(range(max(0, ndim - 3), ndim))
+                        viewer_dims.displayed = displayed  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.debug("ndisplay switch: displayed update failed", exc_info=True)
+                    steps = list(getattr(viewer_dims, "current_step", () ) or ())
+                    if len(steps) < ndim:
+                        steps.extend([0] * (ndim - len(steps)))
+                    elif len(steps) > ndim:
+                        steps = steps[:ndim]
+                    if steps:
+                        try:
+                            steps[0] = int(self._z_index) if self._z_index is not None else int(steps[0])
+                        except Exception:
+                            logger.debug("ndisplay switch: z index step adjust failed", exc_info=True)
+                    shape = self._volume_shape_for_view()
+                    if shape is not None:
+                        axes = tuple(getattr(viewer_dims, "axis_labels", []) or [])
+                        for axis_idx in range(min(len(steps), len(shape))):
+                            size = int(max(1, shape[axis_idx]))
+                            try:
+                                steps[axis_idx] = int(max(0, min(int(steps[axis_idx]), size - 1)))
+                            except Exception:
+                                logger.debug("ndisplay switch: step clamp failed axis=%d", axis_idx, exc_info=True)
+                        # Clamp any displayed axes based on computed shape and axis labels
+                        if axes and shape:
+                            axis_map = {label.lower(): idx for idx, label in enumerate(axes)}
+                            for label_key, dim_size in zip(("z", "y", "x"), shape):
+                                idx = axis_map.get(label_key)
+                                if idx is not None and idx < len(steps):
+                                    steps[idx] = int(max(0, min(int(steps[idx]), int(dim_size) - 1)))
+                    try:
+                        viewer_dims.current_step = tuple(int(s) for s in steps)
+                    except Exception:
+                        logger.debug("ndisplay switch: current_step update failed", exc_info=True)
+            except Exception:
+                logger.debug("ndisplay switch: viewer dims update failed", exc_info=True)
+
         logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
-        # Evaluate policy once after display mode changes
-        self._evaluate_level_policy()
+        if not self.use_volume:
+            self._evaluate_level_policy()
+            self._level_policy_refresh_needed = False
+        self._mark_render_tick_needed()
 
     def _init_capture(self) -> None:
         self._capture.ensure()
@@ -976,14 +1175,21 @@ class EGLRendererWorker:
         w, h = self._data_wh
         d = self._data_d
         # Convert pixel dims to world extents using current level scale
-        sx = sy = 1.0
-        if self._scene_source is not None and not self.use_volume:
-            sy, sx = plane_scale_for_level(self._scene_source, int(self._active_ms_level))
-        if d is not None:
-            # 3D: set full volume range
-            cam.set_range(x=(0, int(w)), y=(0, int(h)), z=(0, int(d)))
-            self._frame_volume_camera(int(w), int(h), int(d))
+        if self.use_volume:
+            extent = self._volume_world_extents()
+            if extent is None:
+                extent = (float(w), float(h), float(d or 1))
+            world_w, world_h, world_d = extent
+            cam.set_range(
+                x=(0.0, max(1.0, world_w)),
+                y=(0.0, max(1.0, world_h)),
+                z=(0.0, max(1.0, world_d)),
+            )
+            self._frame_volume_camera(world_w, world_h, world_d)
         else:
+            sx = sy = 1.0
+            if self._scene_source is not None:
+                sy, sx = plane_scale_for_level(self._scene_source, int(self._active_ms_level))
             # 2D: set full world extents (shape * scale)
             world_w = float(w) * float(max(1e-12, sx))
             world_h = float(h) * float(max(1e-12, sy))
@@ -1046,7 +1252,7 @@ class EGLRendererWorker:
         if drain_res.last_step is not None:
             self._last_step = tuple(int(x) for x in drain_res.last_step)
 
-        if drain_res.policy_refresh_needed:
+        if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
 
     # --- Public coalesced toggles ------------------------------------------------
