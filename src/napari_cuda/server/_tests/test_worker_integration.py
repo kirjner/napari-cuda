@@ -8,6 +8,7 @@ import pytest
 
 from napari_cuda.server.config import LevelPolicySettings, ServerConfig, ServerCtx
 from napari_cuda.server.scene_state import ServerSceneState
+from napari_cuda.server.display_mode import apply_ndisplay_switch
 from napari_cuda.server.state_machine import CameraCommand
 
 
@@ -441,20 +442,20 @@ def test_ndisplay_switch_to_volume_pins_coarsest_level(egl_worker_fixture, monke
 
     recorded: dict[str, object] = {}
 
-    def _capture_switch(self, *, target_level, reason, intent_level, selected_level, source=None):  # type: ignore[no-untyped-def]
+    def _capture_switch(worker_param, *, target_level, reason, intent_level, selected_level, source=None, budget_error=None):  # type: ignore[no-untyped-def]
         recorded.update(
             target_level=int(target_level),
             reason=reason,
             intent_level=int(intent_level) if intent_level is not None else None,
             selected_level=int(selected_level) if selected_level is not None else None,
         )
-        self._active_ms_level = int(target_level)
+        worker_param._active_ms_level = int(target_level)  # type: ignore[attr-defined]
 
-    monkeypatch.setattr(worker, "_perform_level_switch", MethodType(_capture_switch, worker))
+    monkeypatch.setattr("napari_cuda.server.display_mode.perform_level_switch", _capture_switch)
 
     worker._render_tick_required = False
     worker._level_policy_refresh_needed = True
-    worker._apply_ndisplay_switch(3)
+    apply_ndisplay_switch(worker, 3)
 
     assert worker.use_volume is True
     assert recorded.get("target_level") == 2
@@ -476,7 +477,7 @@ def test_ndisplay_switch_back_to_plane_resumes_policy(egl_worker_fixture, monkey
     monkeypatch.setattr(worker, "_evaluate_level_policy", lambda: calls.append(None))
 
     worker._render_tick_required = False
-    worker._apply_ndisplay_switch(2)
+    apply_ndisplay_switch(worker, 2)
 
     assert worker.use_volume is False
     assert worker._viewer.dims.ndisplay == 2

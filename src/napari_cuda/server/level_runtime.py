@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Optional
+from typing import Any, Dict, Optional
 import logging
+import time
 
 import numpy as np
 
 import napari_cuda.server.lod as lod
 from napari_cuda.server.scene_state_applier import SceneStateApplier
 from napari_cuda.server.zarr_source import ZarrSceneSource
+from napari_cuda.server.level_budget import LevelBudgetError
+from napari_cuda.server.roi import (
+    plane_wh_for_level,
+    viewport_debug_snapshot,
+    resolve_worker_viewport_roi,
+)
+from napari_cuda.server.scene_types import SliceROI
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +167,150 @@ def format_worker_level_roi(
 
     if getattr(worker, "use_volume", False):
         return "volume"
-    roi = worker._viewport_roi_for_level(source, level)  # type: ignore[attr-defined]
+    roi = viewport_roi_for_level(worker, source, level)
     if roi.is_empty():
         return "full"
     return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
+
+
+def viewport_roi_for_level(
+    worker: object,
+    source: ZarrSceneSource,
+    level: int,
+    *,
+    quiet: bool = False,
+    for_policy: bool = False,
+) -> SliceROI:
+    view = getattr(worker, "view", None)
+    align_chunks = (not for_policy) and bool(getattr(worker, "_roi_align_chunks", True))
+    ensure_contains = (not for_policy) and bool(getattr(worker, "_roi_ensure_contains_viewport", True))
+    edge_threshold = int(getattr(worker, "_roi_edge_threshold", 4))
+    chunk_pad = int(getattr(worker, "_roi_pad_chunks", 1))
+
+    roi_log = getattr(worker, "_roi_log_state", None)
+    log_state = roi_log if isinstance(roi_log, dict) else None
+
+    def _snapshot() -> Dict[str, Any]:
+        return viewport_debug_snapshot(
+            view=getattr(worker, "view", None),
+            canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
+            data_wh=getattr(worker, "_data_wh", None),
+            data_depth=getattr(worker, "_data_d", None),
+        )
+
+    reason = "policy-roi" if for_policy else "roi-request"
+
+    return resolve_worker_viewport_roi(
+        view=view,
+        canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
+        source=source,
+        level=int(level),
+        align_chunks=align_chunks,
+        chunk_pad=chunk_pad,
+        ensure_contains_viewport=ensure_contains,
+        edge_threshold=edge_threshold,
+        for_policy=for_policy,
+        roi_cache=getattr(worker, "_roi_cache", None),
+        roi_log_state=log_state,
+        snapshot_cb=_snapshot,
+        log_layer_debug=getattr(worker, "_log_layer_debug", False),
+        quiet=quiet,
+        data_wh=getattr(worker, "_data_wh", None),
+        reason=reason,
+        logger_ref=logger,
+    )
+
+
+def set_level_with_budget(
+    worker: object,
+    desired_level: int,
+    *,
+    reason: str,
+    budget_error: type[Exception],
+) -> None:
+    source = worker._ensure_scene_source()  # type: ignore[attr-defined]
+
+    def _budget_check(scene: ZarrSceneSource, level: int) -> None:
+        try:
+            if getattr(worker, "use_volume", False):
+                worker._volume_budget_allows(scene, level)  # type: ignore[attr-defined]
+            else:
+                worker._slice_budget_allows(scene, level)  # type: ignore[attr-defined]
+        except budget_error as exc:
+            raise LevelBudgetError(str(exc)) from exc
+
+    def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> lod.AppliedLevel:
+        return apply_worker_level(worker, scene, level, prev_level=prev_level)
+
+    def _on_switch(prev_level: int, applied: int, elapsed_ms: float) -> None:
+        roi_desc = format_worker_level_roi(worker, source, applied)
+        worker._switch_logger.log(  # type: ignore[attr-defined]
+            enabled=getattr(worker, "_log_layer_debug", False),
+            previous=prev_level,
+            applied=applied,
+            roi_desc=roi_desc,
+            reason=reason,
+            elapsed_ms=elapsed_ms,
+        )
+        worker._mark_render_tick_needed()  # type: ignore[attr-defined]
+
+    try:
+        applied_snapshot, downgraded = lod.apply_level_with_context(
+            desired_level=desired_level,
+            use_volume=getattr(worker, "use_volume", False),
+            source=source,
+            current_level=int(getattr(worker, "_active_ms_level", 0)),
+            log_layer_debug=getattr(worker, "_log_layer_debug", False),
+            budget_check=_budget_check,
+            apply_level_fn=_apply,
+            on_switch=_on_switch,
+            roi_cache=getattr(worker, "_roi_cache", None),
+            roi_log_state=getattr(worker, "_roi_log_state", None),
+        )
+    except LevelBudgetError as exc:
+        raise budget_error(str(exc)) from exc
+
+    worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
+    worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
+
+
+def perform_level_switch(
+    worker: object,
+    *,
+    target_level: int,
+    reason: str,
+    intent_level: Optional[int],
+    selected_level: Optional[int],
+    source: Optional[ZarrSceneSource] = None,
+    budget_error: type[Exception],
+) -> None:
+    if not getattr(worker, "_zarr_path", None):
+        return
+    if getattr(worker, "_lock_level", None) is not None:
+        if getattr(worker, "_log_layer_debug", False) and logger.isEnabledFor(logging.INFO):
+            logger.info("perform_level_switch ignored due to lock_level=%s", str(worker._lock_level))  # type: ignore[attr-defined]
+        return
+    if source is None:
+        source = worker._ensure_scene_source()  # type: ignore[attr-defined]
+    target_level = int(target_level)
+    ctx = worker._build_policy_context(source, intent_level=target_level)  # type: ignore[attr-defined]
+    prev = int(getattr(worker, "_active_ms_level", 0))
+    set_level_with_budget(worker, target_level, reason=reason, budget_error=budget_error)
+    if reason in {"zoom-in", "zoom-out"}:
+        worker._last_zoom_hint_ts = time.perf_counter()  # type: ignore[attr-defined]
+    idle_ms = max(0.0, (time.perf_counter() - getattr(worker, "_last_interaction_ts", time.perf_counter())) * 1000.0)
+    worker._policy_metrics.record(  # type: ignore[attr-defined]
+        policy=getattr(worker, "_policy_name", "oversampling"),
+        intent_level=intent_level if intent_level is not None else ctx.intent_level,
+        selected_level=selected_level if selected_level is not None else target_level,
+        desired_level=target_level,
+        applied_level=int(getattr(worker, "_active_ms_level", target_level)),
+        reason=reason,
+        idle_ms=idle_ms,
+        oversampling=ctx.level_oversampling,
+        downgraded=bool(getattr(worker, "_level_downgraded", False)),
+        from_level=prev,
+    )
 
 
 __all__ = [
@@ -170,4 +318,7 @@ __all__ = [
     "apply_worker_volume_level",
     "apply_worker_slice_level",
     "format_worker_level_roi",
+    "viewport_roi_for_level",
+    "set_level_with_budget",
+    "perform_level_switch",
 ]

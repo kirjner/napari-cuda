@@ -165,8 +165,123 @@ def apply_camera_commands(
     )
 
 
+def process_commands(worker, commands: Sequence[CameraCommand]) -> None:
+    """Process camera commands on the worker, updating its state as needed."""
+
+    if not commands:
+        return
+
+    worker._user_interaction_seen = True
+    logger.debug("worker processing %d camera command(s)", len(commands))
+
+    view = worker.view
+    assert view is not None, "process_camera_commands requires an active VisPy view"
+    camera = view.camera
+
+    if worker.canvas is not None:
+        canvas_wh = (int(worker.canvas.size[0]), int(worker.canvas.size[1]))
+    else:
+        canvas_wh = (worker.width, worker.height)
+
+    debug_flags = CameraDebugFlags(
+        zoom=worker._debug_zoom_drift,
+        pan=worker._debug_pan,
+        orbit=worker._debug_orbit,
+        reset=worker._debug_reset,
+    )
+
+    def _mark_render() -> None:
+        worker._mark_render_tick_needed()
+
+    def _trigger_policy() -> None:
+        worker._level_policy_refresh_needed = True
+
+    def _record_zoom_intent(ratio: float) -> None:
+        worker._scene_state_queue.record_zoom_intent(float(ratio))
+
+    outcome = apply_camera_commands(
+        commands,
+        camera=camera,
+        view=view,
+        canvas_size=canvas_wh,
+        reset_camera=worker._apply_camera_reset,
+        debug_flags=debug_flags,
+        mark_render_tick_needed=_mark_render,
+        trigger_policy_refresh=_trigger_policy,
+        record_zoom_intent=_record_zoom_intent,
+        last_zoom_hint_ts=worker._last_zoom_hint_ts,
+        zoom_hint_hold_s=worker._zoom_hint_hold_s,
+    )
+
+    if outcome.last_zoom_hint_ts is not None:
+        worker._last_zoom_hint_ts = float(outcome.last_zoom_hint_ts)
+    if outcome.interaction_ts is not None:
+        worker._last_interaction_ts = float(outcome.interaction_ts)
+
+
+def log_zoom_drift(view, zoom_factor: float, anchor_px: tuple[float, float], center_world: tuple[float, float], canvas_size: tuple[int, int]) -> None:
+    """Instrument anchored zoom to quantify pixel-space drift."""
+
+    try:
+        cam = view.camera
+        tr = view.transform * view.scene.transform
+        cw, ch = canvas_size
+        ax_px = float(anchor_px[0])
+        ay_tl = float(ch) - float(anchor_px[1])
+        pre_map = tr.map([float(center_world[0]), float(center_world[1]), 0, 1])
+        pre_x = float(pre_map[0]); pre_y = float(pre_map[1])
+        pre_dx = pre_x - ax_px; pre_dy = pre_y - ay_tl
+        cam.zoom(float(zoom_factor), center=center_world)  # type: ignore[call-arg]
+        tr2 = view.transform * view.scene.transform
+        post_map = tr2.map([float(center_world[0]), float(center_world[1]), 0, 1])
+        post_x = float(post_map[0]); post_y = float(post_map[1])
+        post_dx = post_x - ax_px; post_dy = post_y - ay_tl
+        rect = getattr(cam, 'rect', None)
+        rect_tuple = None
+        if rect is not None:
+            rect_tuple = (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
+        logger.info(
+            "zoom_drift: f=%.4f ancTL=(%.1f,%.1f) world=(%.3f,%.3f) preTL=(%.1f,%.1f) err_pre=(%.2f,%.2f) postTL=(%.1f,%.1f) err_post=(%.2f,%.2f) cam.rect=%s canvas=%dx%d",
+            float(zoom_factor), float(ax_px), float(ay_tl), float(center_world[0]), float(center_world[1]),
+            pre_x, pre_y, pre_dx, pre_dy, post_x, post_y, post_dx, post_dy, str(rect_tuple), int(cw), int(ch)
+        )
+    except Exception:
+        logger.debug("zoom_drift instrumentation failed", exc_info=True)
+
+
+def log_pan_mapping(view, dx_px: float, dy_px: float, canvas_size: tuple[int, int]) -> None:
+    """Instrument pixel-space pan mapping to world delta."""
+
+    try:
+        cam = view.camera
+        tr = view.transform * view.scene.transform
+        cw, ch = canvas_size
+        cx_px = float(cw) * 0.5
+        cy_px = float(ch) * 0.5
+        p0 = tr.imap((cx_px, cy_px))
+        p1 = tr.imap((cx_px + dx_px, cy_px + dy_px))
+        dwx = float(p1[0] - p0[0])
+        dwy = float(p1[1] - p0[1])
+        cam.center = (float(cam.center[0] - dwx), float(cam.center[1] - dwy))  # type: ignore[attr-defined]
+        logger.info(
+            "pan_map: dx=%.2f dy=%.2f world_dx=%.3f world_dy=%.3f center=%s canvas=%dx%d",
+            dx_px,
+            dy_px,
+            dwx,
+            dwy,
+            getattr(cam, 'center', None),
+            cw,
+            ch,
+        )
+    except Exception:
+        logger.debug("pan mapping instrumentation failed", exc_info=True)
+
+
 __all__ = [
     "CameraCommandOutcome",
     "CameraDebugFlags",
     "apply_camera_commands",
+    "process_commands",
+    "log_zoom_drift",
+    "log_pan_mapping",
 ]
