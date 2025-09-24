@@ -57,7 +57,6 @@ from napari_cuda.server.render_loop import run_render_tick
 from napari_cuda.server.roi_applier import (
     SliceUpdatePlanner,
     refresh_slice,
-    refresh_slice_for_worker,
 )
 from napari_cuda.server.roi import (
     plane_scale_for_level,
@@ -77,7 +76,7 @@ from napari_cuda.server.state_machine import (
 )
 from napari_cuda.server.policy_metrics import PolicyMetrics
 from napari_cuda.server.level_logging import LayerAssignmentLogger, LevelSwitchLogger
-from napari_cuda.server.level_runtime import (
+from napari_cuda.server.worker_runtime import (
     apply_worker_level,
     apply_worker_volume_level,
     apply_worker_slice_level,
@@ -85,9 +84,12 @@ from napari_cuda.server.level_runtime import (
     viewport_roi_for_level,
     set_level_with_budget,
     perform_level_switch,
+    ensure_scene_source,
+    notify_scene_refresh,
+    refresh_worker_slice_if_needed,
+    reset_worker_camera,
 )
 from napari_cuda.server.display_mode import apply_ndisplay_switch
-from napari_cuda.server.scene_source_utils import ensure_scene_source, notify_scene_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -748,30 +750,7 @@ class EGLRendererWorker:
         process_commands(self, commands)
 
     def _apply_camera_reset(self, cam) -> None:
-        assert cam is not None, "VisPy camera expected"
-        assert hasattr(cam, "set_range"), "Camera missing set_range handler"
-        w, h = self._data_wh
-        d = self._data_d
-        # Convert pixel dims to world extents using current level scale
-        if self.use_volume:
-            extent = self._volume_world_extents()
-            if extent is None:
-                extent = (float(w), float(h), float(d or 1))
-            world_w, world_h, world_d = extent
-            cam.set_range(
-                x=(0.0, max(1.0, world_w)),
-                y=(0.0, max(1.0, world_h)),
-                z=(0.0, max(1.0, world_d)),
-            )
-            self._frame_volume_camera(world_w, world_h, world_d)
-        else:
-            sx = sy = 1.0
-            if self._scene_source is not None:
-                sy, sx = plane_scale_for_level(self._scene_source, int(self._active_ms_level))
-            # 2D: set full world extents (shape * scale)
-            world_w = float(w) * float(max(1e-12, sx))
-            world_h = float(h) * float(max(1e-12, sy))
-            cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+        reset_worker_camera(self, cam)
 
     def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
         return SceneStateApplyContext(
@@ -873,37 +852,7 @@ class EGLRendererWorker:
 
     # ---- C5 helpers (pure refactor; no behavior change) ---------------------
     def _refresh_slice_if_needed(self) -> None:
-        if self.use_volume or self._scene_source is None or self._napari_layer is None:
-            return
-
-        source = self._scene_source
-
-        def _apply_slice(slab: np.ndarray, roi_to_apply: SliceROI) -> None:
-            cam = getattr(self.view, "camera", None)
-            ctx = self._build_scene_state_context(cam)
-            SceneStateApplier.apply_slice_to_layer(
-                ctx,
-                source=source,
-                slab=slab,
-                roi=roi_to_apply,
-                update_contrast=False,
-            )
-
-        def _viewport(src: ZarrSceneSource, lvl: int) -> SliceROI:
-            return viewport_roi_for_level(self, src, lvl)
-
-        refreshed, new_last = refresh_slice_for_worker(
-            source=source,
-            level=int(self._active_ms_level),
-            last_roi=self._last_roi,
-            z_index=self._z_index,
-            edge_threshold=int(self._roi_edge_threshold),
-            viewport_roi_for_level=_viewport,
-            load_slice=self._load_slice,
-            apply_slice=_apply_slice,
-        )
-        if refreshed:
-            self._last_roi = new_last
+        refresh_worker_slice_if_needed(self)
 
     def render_tick(self) -> float:
         canvas = self.canvas

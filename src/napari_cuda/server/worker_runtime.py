@@ -1,9 +1,9 @@
-"""Worker-oriented helpers for applying multiscale levels."""
+"""Worker runtime helpers for scene sources, ROI selection, and level switches."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import logging
 import time
 
@@ -14,13 +14,177 @@ from napari_cuda.server.scene_state_applier import SceneStateApplier
 from napari_cuda.server.zarr_source import ZarrSceneSource
 from napari_cuda.server.level_budget import LevelBudgetError
 from napari_cuda.server.roi import (
+    plane_scale_for_level,
     plane_wh_for_level,
     viewport_debug_snapshot,
     resolve_worker_viewport_roi,
 )
 from napari_cuda.server.scene_types import SliceROI
+from napari_cuda.server.roi_applier import refresh_slice_for_worker
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_scene_source(worker) -> ZarrSceneSource:
+    """Return a configured ``ZarrSceneSource`` and synchronise worker metadata."""
+
+    zarr_path = getattr(worker, "_zarr_path", None)
+    assert zarr_path, "No OME-Zarr path configured for scene source"
+
+    source = getattr(worker, "_scene_source", None)
+    if source is None:
+        create_scene_source = getattr(worker, "_create_scene_source", None)
+        assert callable(create_scene_source), "Worker must provide _create_scene_source()"
+        created = create_scene_source()
+        assert created is not None, "Failed to create ZarrSceneSource"
+        source = created
+        worker._scene_source = source  # type: ignore[attr-defined]
+
+    target = source.current_level
+    zarr_level = getattr(worker, "_zarr_level", None)
+    if zarr_level:
+        target = source.level_index_for_path(zarr_level)
+
+    if getattr(worker, "_log_layer_debug", False):
+        current = int(source.current_level)
+        key = (current, str(zarr_level) if zarr_level else None)
+        last_key = getattr(worker, "_last_ensure_log", None)
+        if last_key != key:
+            logger.debug(
+                "ensure_source: current=%d target=%d path=%s",
+                current,
+                int(target),
+                zarr_level,
+            )
+            worker._last_ensure_log = key  # type: ignore[attr-defined]
+            worker._last_ensure_log_ts = time.perf_counter()  # type: ignore[attr-defined]
+
+    state_lock = getattr(worker, "_state_lock", None)
+    assert state_lock is not None, "Worker must provide _state_lock"
+    with state_lock:
+        step = source.set_current_level(target, step=source.current_step)
+
+    descriptor = source.level_descriptors[source.current_level]
+    worker._active_ms_level = int(source.current_level)  # type: ignore[attr-defined]
+    worker._zarr_level = descriptor.path or None  # type: ignore[attr-defined]
+    worker._zarr_axes = ''.join(source.axes)  # type: ignore[attr-defined]
+    worker._zarr_shape = descriptor.shape  # type: ignore[attr-defined]
+    worker._zarr_dtype = str(source.dtype)  # type: ignore[attr-defined]
+
+    axes_lower = [str(ax).lower() for ax in source.axes]
+    if step:
+        z_index_pos = axes_lower.index('z') if 'z' in axes_lower else 0
+        worker._z_index = int(step[z_index_pos])  # type: ignore[attr-defined]
+
+    return source
+
+
+def notify_scene_refresh(worker, step_hint: Optional[Tuple[int, ...]] = None) -> None:
+    """Invoke the worker's scene refresh callback with the best step hint."""
+
+    callback = getattr(worker, "_scene_refresh_cb", None)
+    if callback is None:
+        return
+    assert callable(callback), "Scene refresh callback must be callable"
+
+    hint = step_hint
+    if hint is None:
+        source = getattr(worker, "_scene_source", None)
+        current_step = getattr(source, "current_step", None) if source is not None else None
+        if current_step is not None:
+            hint = tuple(int(x) for x in current_step)
+
+    if hint is None:
+        viewer = getattr(worker, "_viewer", None)
+        dims = getattr(viewer, "dims", None) if viewer is not None else None
+        current_step = getattr(dims, "current_step", None) if dims is not None else None
+        if current_step is not None:
+            hint = tuple(int(x) for x in current_step)
+
+    if hint is None:
+        z_index = getattr(worker, "_z_index", None)
+        if z_index is not None:
+            hint = (int(z_index),)
+
+    if hint is None:
+        callback()
+    else:
+        callback(hint)
+
+
+def refresh_worker_slice_if_needed(worker) -> None:
+    """Refresh the napari slice layer when ROI drift warrants it."""
+
+    if getattr(worker, "use_volume", False):
+        return
+
+    source = getattr(worker, "_scene_source", None)
+    layer = getattr(worker, "_napari_layer", None)
+    if source is None or layer is None:
+        return
+
+    def _apply_slice(slab: np.ndarray, roi_to_apply: SliceROI) -> None:
+        view = getattr(worker, "view", None)
+        cam = getattr(view, "camera", None)
+        ctx = worker._build_scene_state_context(cam)  # type: ignore[attr-defined]
+        SceneStateApplier.apply_slice_to_layer(
+            ctx,
+            source=source,
+            slab=slab,
+            roi=roi_to_apply,
+            update_contrast=False,
+        )
+
+    def _viewport(src: ZarrSceneSource, lvl: int) -> SliceROI:
+        return viewport_roi_for_level(worker, src, lvl)
+
+    refreshed, new_last = refresh_slice_for_worker(
+        source=source,
+        level=int(getattr(worker, "_active_ms_level", 0)),
+        last_roi=getattr(worker, "_last_roi", None),
+        z_index=getattr(worker, "_z_index", None),
+        edge_threshold=int(getattr(worker, "_roi_edge_threshold", 0)),
+        viewport_roi_for_level=_viewport,
+        load_slice=worker._load_slice,  # type: ignore[attr-defined]
+        apply_slice=_apply_slice,
+    )
+
+    if refreshed:
+        worker._last_roi = new_last  # type: ignore[attr-defined]
+
+
+def reset_worker_camera(worker, cam) -> None:
+    """Reset the VisPy camera to match the current worker dataset extent."""
+
+    assert cam is not None, "VisPy camera expected"
+    assert hasattr(cam, "set_range"), "Camera missing set_range handler"
+
+    data_wh = getattr(worker, "_data_wh", None)
+    assert data_wh is not None, "Worker missing _data_wh for camera reset"
+    w, h = data_wh
+    data_d = getattr(worker, "_data_d", None)
+
+    if getattr(worker, "use_volume", False):
+        extent = worker._volume_world_extents()  # type: ignore[attr-defined]
+        if extent is None:
+            depth = data_d or 1
+            extent = (float(w), float(h), float(depth))
+        world_w, world_h, world_d = extent
+        cam.set_range(
+            x=(0.0, max(1.0, world_w)),
+            y=(0.0, max(1.0, world_h)),
+            z=(0.0, max(1.0, world_d)),
+        )
+        worker._frame_volume_camera(world_w, world_h, world_d)  # type: ignore[attr-defined]
+        return
+
+    sy = sx = 1.0
+    source = getattr(worker, "_scene_source", None)
+    if source is not None:
+        sy, sx = plane_scale_for_level(source, int(getattr(worker, "_active_ms_level", 0)))
+    world_w = float(w) * float(max(1e-12, sx))
+    world_h = float(h) * float(max(1e-12, sy))
+    cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
 
 def apply_worker_level(
@@ -314,6 +478,10 @@ def perform_level_switch(
 
 
 __all__ = [
+    "ensure_scene_source",
+    "notify_scene_refresh",
+    "refresh_worker_slice_if_needed",
+    "reset_worker_camera",
     "apply_worker_level",
     "apply_worker_volume_level",
     "apply_worker_slice_level",

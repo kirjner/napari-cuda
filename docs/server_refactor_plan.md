@@ -1,15 +1,15 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
-## Current Snapshot (2025-09-22)
-- `egl_worker.py`: 1,459 LOC (down ~808 from the pre-extraction snapshot and -65 since the last checkpoint). Longest blocks are `__init__` (91 lines after the helper breakout), `_apply_level` (63), and `_perform_level_switch` (58).
-- `scene_state_applier.py`: 321 LOC capturing the dims/Z and volume update logic previously embedded in the worker.
-- `lod.py`: 651 LOC after adding the policy runner façade. Further trims will move selector plumbing and cooldown logging into dedicated modules.
-- `roi.py`: 502 LOC after absorbing viewport ROI + PanZoom helpers. Once the worker delegates view bootstrap completely, aim to push this back toward 350.
-- `capture.py`: 260 LOC encapsulating GL capture, CUDA interop, and frame pipeline orchestration for the worker.
-- `try:` count trimmed to ≈60 with camera/state hot-path guards removed; remaining blocks sit at subsystem boundaries (EGL/CUDA/NVENC) and legacy ROI helpers queued for Phase C/D.
-- `getattr` usage in the worker now ≈33 after asserting invariants in the state queue + camera paths. Further reductions arrive with Phase C decomposition.
-- Env/env_bool still sprinkled across init (encoder, ROI, debug). Centralised logging/config policy remains scheduled for Phase D.
-- Server (`egl_headless_server.py`) untouched in this pass; still 2,249 LOC.
+## Current Snapshot (2025-09-24)
+- `egl_worker.py`: 980 LOC (finally under four digits after hoisting scene, ROI, and camera reset helpers). Longest blocks are `__init__` (91 lines), `_evaluate_level_policy` (77), and `_build_scene_state_context` (24).
+- `worker_runtime.py`: 492 LOC covering scene-source bootstrap, ROI refresh, camera reset, and multiscale orchestration shared by the worker.
+- `scene_state_applier.py`: 357 LOC handling dims/Z and volume state application.
+- `lod.py`: 651 LOC; policy runner + budget helpers remain, with further slimming deferred.
+- `roi.py`: 502 LOC after absorbing viewport ROI and plane helpers; still slated for a later trim once phase-d policy work moves logging.
+- `capture.py`: 260 LOC encapsulating GL capture, CUDA interop, and the frame pipeline façade.
+- `try:` count in the worker sits at ≈36 with hot-path guards removed; remaining blocks are subsystem boundaries (EGL/CUDA/NVENC).
+- `getattr` usage in the worker now ≈28 after asserting invariants in state/camera helpers.
+- Server (`egl_headless_server.py`) still untouched in this pass at 2,249 LOC.
 
 ## Guiding Principles
 Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodify, Hostility to "Just In Case").
@@ -49,7 +49,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - **Worker LOC reduction roadmap (pre-Phase E)**: target ≈−490 LOC to bring `egl_worker.py` under 1,200 before we decompose the server layer. Execute the extractions below while Phase C remains in flight:
   - Add procedural helpers in a `display_mode.py` module for `_apply_ndisplay_switch` and `_reset_volume_step`; worker just logs and forwards (≈−120 LOC).
   - Extend `camera_controller` with a `process_commands` wrapper that subsumes `process_camera_commands` and `_log_zoom_drift` (≈−80 LOC).
-  - Collapse `_set_level_with_budget`, `_perform_level_switch`, `_configure_camera_for_mode`, and `_viewport_roi_for_level` into procedural functions inside `level_runtime.py` (≈−150 LOC).
+  - Collapse `_set_level_with_budget`, `_perform_level_switch`, `_configure_camera_for_mode`, and `_viewport_roi_for_level` into procedural functions inside `worker_runtime.py` (≈−150 LOC).
   - Hoist `_ensure_scene_source` and `_notify_scene_refresh` into plain helpers in `scene_source.py` alongside the existing Zarr source logic (≈−80 LOC).
   - Push `cleanup` into capture/encoder lifecycle helpers and fold `_refresh_slice_if_needed` into `roi_applier`’s procedural API (≈−60 LOC).
 
@@ -70,6 +70,11 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 
 ### Phase E — Server Decomposition
 - Mirror worker work: extract `PixelBroadcaster`, `StateServer`, `SceneSpecBuilder`. Apply same hostility to try/except & getattr.
+
+### Phase F — Worker State Extraction (later)
+- Introduce an explicit `WorkerState` data bag capturing mutable fields consumed by helpers.
+- Gradually migrate helpers (`ensure_scene_source`, `refresh_worker_slice_if_needed`, `reset_worker_camera`, etc.) to accept/return state snapshots instead of mutating `self`.
+- Refactor the worker into a thin event loop that wires inputs/outputs between state, helpers, and rendering primitives, aligning with the data-oriented plan.
 
 ### Targets & Metrics
 - Module size goals (track in weekly snapshots):

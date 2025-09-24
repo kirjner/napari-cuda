@@ -66,7 +66,7 @@ Websocket Clients (state + pixel)
   - `SceneStateApplier` applies dims/camera/volume changes to viewer + layer objects.
   - `CameraController` executes queued camera commands and reports policy triggers.
 
-- **ROI & Level Helpers** (`roi.py`, `lod.py`, `level_budget.py`, `level_runtime.py`)
+- **ROI & Level Helpers** (`roi.py`, `lod.py`, `level_budget.py`, `worker_runtime.py`)
   - Compute viewport ROI, manage multiscale level selection, and enforce per-level budgets.
   - Provide pure helpers that the worker invokes during render ticks.
 
@@ -88,4 +88,3 @@ Websocket Clients (state + pixel)
 - Phase D will consolidate logging and env toggles into a dedicated policy module.
 - Phase E targets further decomposition of `EGLHeadlessServer` into discrete broadcaster/state-manager components to mirror the worker split.
 - Capture resizing and dynamic canvas negotiation remain TODO items once client capabilities land.
-
