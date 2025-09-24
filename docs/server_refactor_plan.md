@@ -64,9 +64,12 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   4. **Regression sweep** — Ongoing. Worker + LOD suites green (`uv run pytest src/napari_cuda/server/_tests/test_lod_selector.py src/napari_cuda/server/_tests/test_worker_integration.py`); queue ROI unit suite next and keep recording LOC snapshots (`wc -l src/napari_cuda/server/{egl_worker,lod,roi,capture}.py`).
   5. **Residual god-object trimming** — In flight. The worker still orchestrates capture/encode timing, camera command side-effects, scene draining, and budget logging. Each will be delegated to the new helpers below to push the worker under 1,600 LOC.
 
-### Phase D — Logging & Debug Policy
-- Establish `logging_policy.py` or config entries controlling debug flags. Remove per-call env parsing (`NAPARI_CUDA_DEBUG_*`). Convert to bools resolved at init via `ServerCtx`.
-- Strip logging try/except; ensure format strings are safe or pre-format values.
+### Phase D — Logging & Debug Policy (next)
+- **D1: Central policy module** — add a `logging_policy.py` (or `config.debug`) that materialises a `DebugPolicy` dataclass from `ServerConfig`. Collapse all `env_bool`/`os.getenv` reads for logging/debug flags into this layer. Acceptance: worker construction requires a policy object; no server module reaches into `os.environ` for `NAPARI_CUDA_DEBUG_*` or related toggles.
+- **D2: Worker adoption** — replace direct `env_bool` calls in `egl_worker.py` with policy-driven attributes (`DebugPolicy.camera`, `DebugPolicy.roi`, etc.). Ensure the worker’s debug flags live on the policy and are immutable during runtime. Remove `_log_layer_debug`/`_debug_zoom_drift` initialisation from ctor in favour of injected policy. Acceptance: worker init only touches policy fields; test via integration harness.
+- **D3: Server + rendering alignment** — migrate `debug_tools.py`, `rendering/encoder.py`, `frame_pipeline.py`, and `adapter_scene.py` to consume the shared policy/config. Remove latent `os.getenv` usage for dump paths, overlay toggles, and NVENC logging. Acceptance: `rg "NAPARI_CUDA_" src/napari_cuda/server` only surfaces in config/policy modules after the pass.
+- **D4: Logging guard audit** — review remaining `try/except` blocks that only exist to protect logging (e.g., `_orbit_el_min`, ROI logging). Where the guarded call is internal, convert to assertions; where boundary-facing, wrap once in the helper and log via `logger.exception`. Capture before/after counts in this doc (target <25 try blocks in worker, <50 across server package).
+- **D5: Documentation & tests** — document the new policy wiring in `docs/server_architecture.md` and add unit coverage around `DebugPolicy` (defaults, env overrides). Update integration tests to ensure flags propagate through `ServerCtx`.
 
 ### Phase E — Server Decomposition
 - Mirror worker work: extract `PixelBroadcaster`, `StateServer`, `SceneSpecBuilder`. Apply same hostility to try/except & getattr.
