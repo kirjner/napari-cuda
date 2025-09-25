@@ -10,8 +10,10 @@ import logging
 import argparse
 
 import napari
-from napari._qt.qt_viewer import QtViewer
 from napari._qt.qt_main_window import Window
+from napari.components.viewer_model import ViewerModel
+from napari.utils.action_manager import action_manager
+from napari.utils.translations import trans
 
 from .proxy_viewer import ProxyViewer
 from .streaming_canvas import StreamingCanvas
@@ -149,15 +151,68 @@ def launch_streaming_client(server_host='localhost',
         logger.debug("launcher: deferred window show failed; showing immediately", exc_info=True)
         window.show()
 
-    # Wire the Home button to remote camera.reset via coordinator
-    try:
-        mgr = getattr(streaming_canvas, '_manager', None)
-        if mgr is not None:
+    # Wire the Home button to remote camera.reset via coordinator and
+    # override the 2D/3D toggle to send intents rather than mutate locally.
+    mgr = getattr(streaming_canvas, '_manager', None)
+    if mgr is not None:
+        try:
             rvb = window._qt_viewer.viewerButtons.resetViewButton
             # Avoid duplicate connections by lambdas with default arg
             rvb.clicked.connect(lambda _=False, m=mgr: m.reset_camera(origin='ui'))
-    except Exception:
-        logger.debug("launcher: failed to bind Home button to loop.reset_camera", exc_info=True)
+        except Exception:
+            logger.debug(
+                "launcher: failed to bind Home button to loop.reset_camera",
+                exc_info=True,
+            )
+
+        try:
+            ndb = window._qt_viewer.viewerButtons.ndisplayButton
+
+            def _remote_toggle_ndisplay(viewer: ViewerModel) -> None:
+                """Toggle 2D/3D mode by forwarding an intent to the server."""
+
+                current = mgr.current_ndisplay()
+                if current is None:
+                    try:
+                        current = viewer.dims.ndisplay
+                    except Exception:
+                        current = 2
+                target = 2 if current == 3 else 3
+                if not mgr.view_set_ndisplay(target, origin='ui'):
+                    logger.info(
+                        "toggle_ndisplay: remote intent rejected (dims not ready or rate limited)"
+                    )
+                    return
+
+                suppress_token = None
+                if hasattr(viewer, '_suppress_forward'):
+                    suppress_token = getattr(viewer, '_suppress_forward')
+                    setattr(viewer, '_suppress_forward', True)
+                try:
+                    viewer.dims.ndisplay = target
+                except Exception:
+                    logger.debug(
+                        "toggle_ndisplay: local mirror update failed", exc_info=True
+                    )
+                finally:
+                    if suppress_token is not None:
+                        setattr(viewer, '_suppress_forward', suppress_token)
+
+                try:
+                    ndb.setChecked(target == 3)
+                except Exception:
+                    pass
+
+            action_manager.register_action(
+                name='napari:toggle_ndisplay',
+                command=_remote_toggle_ndisplay,
+                description=trans._('Toggle 2D/3D view'),
+                keymapprovider=ViewerModel,
+            )
+        except Exception:
+            logger.debug(
+                "launcher: failed to override toggle_ndisplay action", exc_info=True
+            )
 
     logger.info("Client launched successfully")
     

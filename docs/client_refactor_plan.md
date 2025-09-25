@@ -1,11 +1,12 @@
 # Client Streamlining & Degodification Plan
 
-## Current Snapshot (2025-09-22)
-- `streaming/client_stream_loop.py`: 1,885 LOC (draw/wake refactor + guard purge). Handles dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class; 1 `try` block remains (VT shim fallback) and 0 `getattr` calls in the hot path.
-- `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and smoke harness. Retains dummy keymap proxies and repeated env lookups.
-- `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers live as nested try/except with minimal test coverage.
-- `proxy_viewer.py`: 517 LOC; mirrors napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
-- Tests exist only for the websocket shim. No coverage for intent ack bookkeeping, presenter scheduling, or dims replay.
+## Current Snapshot (2025-09-25)
+- `streaming/client_stream_loop.py`: 1,903 LOC after the Phase B bootstrap. Still owns dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class. Only the VT shim fallback keeps a `try` block in the hot path; `getattr` calls remain purged.
+- `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and the smoke harness. Dummy keymap proxies and repeated env lookups remain.
+- `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers still live as nested try/except with minimal test coverage.
+- `client/proxy_viewer.py`: 517 LOC; mirrors the napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
+- Tests remain limited to the websocket shim and the new helper modules; no direct coverage yet for intent ack bookkeeping, presenter scheduling, or dims replay.
+- Known runtime issue: VT zero-copy draw segfaults shortly after `"VT gate lifted on keyframe"` once the presenter flips to VT. See `docs/debugging/vt_zero_copy_crash.md` for spike notes and reproduction details.
 
 ## Guiding Principles
 1. **Plain data + direct functions**: prefer module-level helpers over class stacks. If a helper is only called once, inline it. Keep call stacks shallow so debug traces read naturally.
@@ -94,3 +95,14 @@
 1. Extract the smoke harness and renderer fallback paths into `client_loop/smoke_helpers.py` + `renderer_fallbacks.py`, replace the remaining blanket `try/except` blocks with explicit assertions/logging at those helper boundaries, and re-run the focused client loop tests.
 2. After the helper extraction, recount `ClientStreamLoop` safeguards (current: 1 `try`, 0 `getattr`) and keep the doc snapshot in sync as we chip away at the remaining VT fallback guard.
 3. Author the Phase C presenter/canvas split outline (draft `docs/client_presenter_facade.md`) specifying which warmup, VT gate, and render responsibilities move out of `streaming_canvas.py`, along with the regression tests required before refactoring.
+4. Run the VT zero-copy spike checklist (see below) before touching renderer code paths so we do not widen the segfault window mid-refactor.
+
+## VT Zero-Copy Spike (2025-09-25)
+- Failure signature: client logs `"VT gate lifted on keyframe (seq=15713); presenter=VT"` and crashes inside `GLRenderer._draw_vt_texture` on the immediate paint tick; the crash propagates through Vispy's `paintGL` into Qt's event loop.
+- Scope: reproducible on the current `client-refactor` tip with the VT pipeline enabled; the PyAV pipeline alone does not crash.
+- Impact: streaming client hard exits (Fatal Python error: Segmentation fault) with multiple worker threads still alive; this blocks further QA of the refactor until mitigated.
+- Spike tasks:
+  - Capture native backtraces via `lldb -- uv run napari-cuda-client` with the VT safe flag flipped both on/off.
+  - Instrument `renderer.py` around `_draw_vt_texture` with guard logs for cache rebuilds, GL state, and texture IDs (gated behind `NAPARI_CUDA_VT_GL_DEBUG`).
+  - Audit VT retain/release counts during the gate transition (`RemoteLayerRegistry` swap) to confirm we do not double-release keyframe payloads.
+  - Update `docs/debugging/vt_zero_copy_crash.md` with findings and ensure mitigations are tracked as blockers before Phase C kicks off.

@@ -142,9 +142,9 @@ class StateChannel:
                         while True:
                             try:
                                 msg = await outbox.get()  # type: ignore[arg-type]
-                                logger.info("StateChannel sender -> %s", msg)
+                                logger.debug("StateChannel sender -> %s", msg)
                                 await ws.send(msg)
-                                logger.info("StateChannel sender delivered")
+                                logger.debug("StateChannel sender delivered")
                             except Exception:
                                 logger.debug("State sender failed; stopping", exc_info=True)
                                 break
@@ -257,7 +257,7 @@ class StateChannel:
             if self.handle_dims_update:
                 try:
                     meta_raw = data.get('meta') or {}
-                    logger.info(
+                    logger.debug(
                         "dims.update raw meta: level=%s level_shape=%s range=%s",
                         meta_raw.get('level'),
                         meta_raw.get('level_shape') or meta_raw.get('sizes'),

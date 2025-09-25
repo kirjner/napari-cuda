@@ -20,6 +20,46 @@ def _make_loop() -> ClientStreamLoop:
     return loop
 
 
+def test_toggle_ndisplay_requires_ready() -> None:
+    loop = _make_loop()
+    calls: list[tuple[int, str]] = []
+
+    def _fake_view_set(nd: int, *, origin: str = 'ui') -> bool:
+        calls.append((nd, origin))
+        return True
+
+    loop.view_set_ndisplay = _fake_view_set  # type: ignore[assignment]
+
+    assert loop.toggle_ndisplay(origin='ui') is False
+    assert calls == []
+
+
+def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
+    loop = _make_loop()
+    loop._dims_ready = True
+    calls: list[tuple[int, str]] = []
+
+    def _fake_view_set(nd: int, *, origin: str = 'ui') -> bool:
+        calls.append((nd, origin))
+        return True
+
+    loop.view_set_ndisplay = _fake_view_set  # type: ignore[assignment]
+
+    # Missing meta defaults to 3D target
+    assert loop.toggle_ndisplay(origin='ui') is True
+    assert calls == [(3, 'ui')]
+
+    # 2D -> 3D
+    loop._dims_meta['ndisplay'] = 2
+    assert loop.toggle_ndisplay(origin='ui') is True
+    assert calls[-1] == (3, 'ui')
+
+    # 3D -> 2D
+    loop._dims_meta['ndisplay'] = 3
+    assert loop.toggle_ndisplay(origin='ui') is True
+    assert calls[-1] == (2, 'ui')
+
+
 def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
     loop = _make_loop()
     loop._loop_state.pending_intents = {41: {'kind': 'dims'}}

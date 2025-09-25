@@ -1614,6 +1614,24 @@ class ClientStreamLoop:
             return True
         return self._send_intent('view.intent.set_ndisplay', {'ndisplay': nd_target}, origin)
 
+    def current_ndisplay(self) -> Optional[int]:
+        """Return the last known ndisplay value from dims metadata."""
+
+        try:
+            return _int_or_none(self._dims_meta.get('ndisplay'))
+        except Exception:
+            logger.debug('current_ndisplay lookup failed', exc_info=True)
+            return None
+
+    def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
+        """Toggle between 2D and 3D display modes if dims metadata is ready."""
+
+        if not self._dims_ready:
+            return False
+        current = self.current_ndisplay()
+        target = 2 if current == 3 else 3
+        return self.view_set_ndisplay(target, origin=origin)
+
     def _on_wheel_for_zoom(self, data: dict) -> None:
         ch = self._loop_state.state_channel
         if ch is None:

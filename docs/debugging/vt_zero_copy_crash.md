@@ -12,6 +12,19 @@ sporadic segmentation faults observed while presenting VT zero-copy frames in
 - `VT GL dbg` never reports cache releases (texture cache retains GL objects).
 - Crashes reproduce even with `NAPARI_CUDA_VT_GL_SAFE=1` (current safe mode
   performs a blocking `glFinish()` before calling `gl_release_tex`).
+- 2025-09-25 spike: segfault now reproduces immediately after the stream loop
+  logs `VT gate lifted on keyframe (...); presenter=VT`. The top of the Python
+  traceback is `GLRenderer._draw_vt_texture`, invoked via Vispy's `paintGL`
+  handler, matching the zero-copy path.
+
+### Stack (abridged)
+
+```
+GLRenderer._draw_vt_texture -> GLRenderer.draw -> ClientStreamLoop.draw
+StreamingCanvas._draw_video_frame -> vispy.app.backends._qt.QGLWidget.paintGL
+napari._qt.qt_main_window.Window.event -> napari._qt.qt_event_loop.run
+napari_cuda.client.launcher.launch_streaming_client -> main
+```
 
 ## Accounting Fixes (Done)
 
@@ -47,6 +60,21 @@ sporadic segmentation faults observed while presenting VT zero-copy frames in
   context current (e.g., wake scheduled from a worker), any GL call can crash.
   Confirm all wake scheduling routes through the main thread and guard the draw
   entry point with `QOpenGLContext.currentContext()` checks.
+
+## 2025-09-25 Spike Tasks
+
+- Capture an `lldb` native backtrace with symbols for the Apple VT stack while
+  the segfault reproduces. This will confirm whether the crash happens inside
+  `IOSurface` release or within our GL shim.
+- Instrument `_draw_vt_texture` with per-frame debug logs (texture IDs, cache
+  handles, GL target) gated behind `NAPARI_CUDA_VT_GL_DEBUG` so we can correlate
+  the fatal frame with VT retain/release counters.
+- Verify VT retain/release balance during the gate lift: ensure the initial
+  keyframe retains the buffer exactly twice (cache + presenter). Audit the base
+  `vt.release_frame` in the presenter to rule out double-release at the end of
+  the warmup window.
+- Re-run with `NAPARI_CUDA_VT_GL_SAFE=1` and the new logging to confirm whether
+  the safe fence queue drains before the crash.
 
 ## Suggested Hardening Tasks
 
