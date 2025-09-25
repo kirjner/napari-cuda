@@ -15,7 +15,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Deque, Dict, List, Optional, Set
+from typing import Awaitable, Deque, Dict, List, Optional, Set, Mapping
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -23,7 +23,7 @@ import importlib.resources as ilr
 import socket
 
 # Encoder profile presets for convenient NVENC tuning
-def _apply_encoder_profile(profile: str) -> None:
+def _apply_encoder_profile(profile: str) -> dict[str, str]:
     profiles: dict[str, dict[str, str]] = {
         'latency': {
             'NAPARI_CUDA_RC': 'cbr',
@@ -42,20 +42,16 @@ def _apply_encoder_profile(profile: str) -> None:
     }
     settings = profiles.get((profile or '').lower())
     if not settings:
-        return
-    for key, value in settings.items():
-        if key and value and key not in os.environ:
-            os.environ[key] = value
-    try:
-        logger.info("Applied encoder profile '%s' (override via env vars as needed)", profile)
-    except Exception:
-        logger.debug("Failed to log encoder profile %s", profile, exc_info=True)
+        return {}
+    if logger.isEnabledFor(logging.INFO):
+        logger.info("Encoder profile '%s' resolved overrides: %s", profile, settings)
+    return dict(settings)
 
 from .egl_worker import EGLRendererWorker
 from .scene_state import ServerSceneState
 from .state_machine import CameraCommand
 from .layer_manager import ViewerSceneManager
-from .bitstream import ParamCache, pack_to_avcc, build_avcc_config
+from .bitstream import ParamCache, pack_to_avcc, build_avcc_config, configure_bitstream
 from .metrics import Metrics
 from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
@@ -85,13 +81,23 @@ class EGLHeadlessServer:
                  animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False,
                  zarr_path: str | None = None, zarr_level: str | None = None,
                  zarr_axes: str | None = None, zarr_z: int | None = None,
-                 debug: bool = False) -> None:
+                 debug: bool = False,
+                 env_overrides: Optional[Mapping[str, str]] = None) -> None:
         # Build once: resolved runtime context (observe-only for now)
+        base_env: dict[str, str] = dict(os.environ)
+        if env_overrides:
+            for key, value in env_overrides.items():
+                base_env[str(key)] = str(value)
+        self._ctx_env: dict[str, str] = base_env
         try:
-            self._ctx: ServerCtx = load_server_ctx()
+            self._ctx: ServerCtx = load_server_ctx(self._ctx_env)
         except Exception:
             # Fallback to minimal defaults if ctx load fails for any reason
             self._ctx = load_server_ctx({})  # type: ignore[arg-type]
+        try:
+            configure_bitstream(self._ctx.bitstream)
+        except Exception:
+            logger.debug("Bitstream configuration failed", exc_info=True)
 
         self.width = width
         self.height = height
@@ -142,18 +148,21 @@ class EGLHeadlessServer:
         self._kf_watchdog_cooldown_s = float(self._ctx.kf_watchdog_cooldown_s)
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.Lock()
+        policy_logging = self._ctx.debug_policy.logging
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops
-        self._log_cam_info = bool(self._ctx.log_camera_info)
-        self._log_cam_debug = bool(self._ctx.log_camera_debug)
+        self._log_cam_info = bool(policy_logging.log_camera_info)
+        self._log_cam_debug = bool(policy_logging.log_camera_debug)
         logger.info(
             "camera logging flags info=%s debug=%s",
             self._log_cam_info,
             self._log_cam_debug,
         )
         # State trace toggles (per-message start/end logs)
-        self._log_state_traces = bool(self._ctx.log_state_traces)
+        self._log_state_traces = bool(policy_logging.log_state_traces)
         # Logging controls for volume/multiscale intents
-        self._log_volume_info = bool(self._ctx.log_volume_info)
+        self._log_volume_info = bool(policy_logging.log_volume_info)
         # Force IDR on reset (default True)
         self._idr_on_reset = bool(self._ctx.cfg.idr_on_reset)
 
@@ -162,7 +171,7 @@ class EGLHeadlessServer:
         self._last_send_ts: Optional[float] = None
         self._send_count: int = 0
         # Optional detailed per-send logging (seq, send_ts, stamp_ts, delta)
-        self._log_sends = bool(log_sends or self._ctx.log_sends_env)
+        self._log_sends = bool(log_sends or policy_logging.log_sends_env)
 
         # Data configuration (optional OME-Zarr dataset for real data)
         self._zarr_path = zarr_path or self._ctx.cfg.zarr_path or None
@@ -179,9 +188,9 @@ class EGLHeadlessServer:
             self._last_written_decision_seq = 0
         self._policy_event_path = Path(self._ctx.policy_event_path)
         # Verbose dims logging control: default debug, upgrade to info with flag
-        self._log_dims_info = bool(self._ctx.log_dims_info)
+        self._log_dims_info = bool(policy_logging.log_dims_info)
         # Dedicated debug control for this module only (no dependency loggers)
-        self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug)
+        self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug_policy.enabled)
         # Dims intent/update tracking (server-authoritative dims seq and last client)
         self._dims_seq: int = 0
         self._last_dims_client_id: Optional[str] = None
@@ -1056,7 +1065,7 @@ class EGLHeadlessServer:
             # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
             # Optional: raw NAL summary before packing for diagnostics
             try:
-                if int(os.getenv('NAPARI_CUDA_LOG_NALS', '0')):
+                if self._ctx.debug_policy.encoder.log_nals:
                     from .bitstream import parse_nals
                     raw_bytes: bytes
                     if isinstance(payload_obj, (bytes, bytearray, memoryview)):
@@ -1073,14 +1082,18 @@ class EGLHeadlessServer:
             except Exception as e:
                 logger.debug("Raw NAL summary failed: %s", e)
             t_p0 = time.perf_counter()
-            avcc_pkt, is_key = pack_to_avcc(payload_obj, self._param_cache)
+            avcc_pkt, is_key = pack_to_avcc(
+                payload_obj,
+                self._param_cache,
+                encoder_logging=self._ctx.debug_policy.encoder,
+            )
             t_p1 = time.perf_counter()
             try:
                 self.metrics.observe_ms('napari_cuda_pack_ms', (t_p1 - t_p0) * 1000.0)
             except Exception:
                 logger.debug('metrics observe napari_cuda_pack_ms failed', exc_info=True)
             try:
-                if int(os.getenv('NAPARI_CUDA_LOG_NALS', '0')) and avcc_pkt is not None:
+                if self._ctx.debug_policy.encoder.log_nals and avcc_pkt is not None:
                     from .bitstream import parse_nals
                     nals2 = parse_nals(avcc_pkt)
                     has_idr2 = any(((n[0] & 0x1F) == 5) or (((n[0] >> 1) & 0x3F) in (19, 20, 21)) for n in nals2 if n)
@@ -1198,6 +1211,7 @@ class EGLHeadlessServer:
                     policy_name=self._ms_state.get('policy'),
                     scene_refresh_cb=_on_scene_refresh,
                     ctx=self._ctx,
+                    env=self._ctx_env,
                 )
                 # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
                 z0 = self._worker._z_index
@@ -1881,7 +1895,7 @@ class EGLHeadlessServer:
     async def _broadcast_loop(self) -> None:
         # Always use paced broadcasting with latest-wins coalescing for smooth delivery
         try:
-            target_fps = float(os.getenv('NAPARI_CUDA_BROADCAST_FPS', str(self.cfg.fps)))
+            target_fps = float(self._ctx_env.get('NAPARI_CUDA_BROADCAST_FPS', str(self.cfg.fps)))
         except Exception:
             target_fps = float(self.cfg.fps)
         loop = asyncio.get_running_loop()
@@ -2265,14 +2279,14 @@ def main() -> None:
     args = parser.parse_args()
 
     async def run():
-        # Apply encoder profile before worker initialization so env vars are honored
-        _apply_encoder_profile(args.encoder_profile)
+        # Determine encoder profile overrides before building the server context
+        profile_overrides = _apply_encoder_profile(args.encoder_profile)
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
                                 animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),
                                 zarr_path=args.zarr_path, zarr_level=args.zarr_level,
                                 zarr_axes=args.zarr_axes, zarr_z=(None if int(args.zarr_z) < 0 else int(args.zarr_z)),
-                                debug=bool(args.debug))
+                                debug=bool(args.debug), env_overrides=profile_overrides)
         await srv.start()
 
     asyncio.run(run())

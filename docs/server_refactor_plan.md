@@ -65,11 +65,32 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   5. **Residual god-object trimming** — In flight. The worker still orchestrates capture/encode timing, camera command side-effects, scene draining, and budget logging. Each will be delegated to the new helpers below to push the worker under 1,600 LOC.
 
 ### Phase D — Logging & Debug Policy (next)
-- **D1: Central policy module** — add a `logging_policy.py` (or `config.debug`) that materialises a `DebugPolicy` dataclass from `ServerConfig`. Collapse all `env_bool`/`os.getenv` reads for logging/debug flags into this layer. Acceptance: worker construction requires a policy object; no server module reaches into `os.environ` for `NAPARI_CUDA_DEBUG_*` or related toggles.
-- **D2: Worker adoption** — replace direct `env_bool` calls in `egl_worker.py` with policy-driven attributes (`DebugPolicy.camera`, `DebugPolicy.roi`, etc.). Ensure the worker’s debug flags live on the policy and are immutable during runtime. Remove `_log_layer_debug`/`_debug_zoom_drift` initialisation from ctor in favour of injected policy. Acceptance: worker init only touches policy fields; test via integration harness.
-- **D3: Server + rendering alignment** — migrate `debug_tools.py`, `rendering/encoder.py`, `frame_pipeline.py`, and `adapter_scene.py` to consume the shared policy/config. Remove latent `os.getenv` usage for dump paths, overlay toggles, and NVENC logging. Acceptance: `rg "NAPARI_CUDA_" src/napari_cuda/server` only surfaces in config/policy modules after the pass.
-- **D4: Logging guard audit** — review remaining `try/except` blocks that only exist to protect logging (e.g., `_orbit_el_min`, ROI logging). Where the guarded call is internal, convert to assertions; where boundary-facing, wrap once in the helper and log via `logger.exception`. Capture before/after counts in this doc (target <25 try blocks in worker, <50 across server package).
-- **D5: Documentation & tests** — document the new policy wiring in `docs/server_architecture.md` and add unit coverage around `DebugPolicy` (defaults, env overrides). Update integration tests to ensure flags propagate through `ServerCtx`.
+- **D0: Inventory freeze** — capture the current env + debug landscape (`rg "NAPARI_CUDA_"` counts, `try:` totals) and stash the figures in this doc. Acceptance: one table covering env keys by domain (config, logging, dumps, metrics) plus the worker/package try counts so we can prove the cleanup landed.
+- Baseline snapshot (2025-09-24):
+  | Domain | Unique env keys | Modules touching env directly |
+  | --- | --- | --- |
+  | Core server/encoder config | 38 | `config.py`, `egl_headless_server.py`, `rendering/encoder.py`, `bitstream.py`
+  | Logging + debug toggles | 23 (`NAPARI_CUDA_LOG_*`, `NAPARI_CUDA_DEBUG*`) | `config.py`, `egl_worker.py`, `debug_tools.py`, `rendering/adapter_scene.py`, `frame_pipeline.py`, `egl_headless_server.py`
+  | Dump / capture controls | 4 (`NAPARI_CUDA_DUMP_*`) | `config.py`, `debug_tools.py`, `rendering/frame_pipeline.py`
+  | Policy + metrics | 14 (`NAPARI_CUDA_LEVEL_*`, `NAPARI_CUDA_METRICS_*`, `NAPARI_CUDA_POLICY_EVENT_PATH`, `NAPARI_CUDA_PRESERVE_VIEW`, `NAPARI_CUDA_STICKY_CONTRAST`, `NAPARI_CUDA_OVERSAMPLING_HYSTERESIS`) | `config.py`, `policy.py`, `metrics.py`, `egl_worker.py`
+
+  | Metric | Current value | Collection command |
+  | --- | --- | --- |
+  | `try:` blocks in `egl_worker.py` | 23 | `rg -c "try:" src/napari_cuda/server/egl_worker.py` |
+  | `try:` blocks in `src/napari_cuda/server` | 345 | `rg -c "try:" src/napari_cuda/server | awk -F: '{sum+=$2} END {print sum}'` |
+- **D1: Debug policy surface** — introduce `logging_policy.py` (or `config.debug`) that materialises a `DebugPolicy` dataclass from `ServerCtx`. Enumerate every logging/dump toggle we found (`NAPARI_CUDA_LOG_*`, `NAPARI_CUDA_DEBUG_*`, dump + policy flags) with type hints and defaults. Acceptance: the dataclass is the only place that knows about these env keys and ships descriptive docstrings.
+- **D1: Debug policy surface** ✅ — `logging_policy.py` now materialises `DebugPolicy` (with nested dataclasses) from `ServerCtx`. Every logging/dump flag lives there with docstrings + type hints, and unit coverage exists in `_tests/test_logging_policy.py`.
+- **D2: Context + CLI wiring** ✅ — `load_server_ctx` builds and carries the policy; `EGLHeadlessServer` logs the snapshot and passes it through to worker/capture. CLI still controls env overrides pre-load; future work can add explicit flags if needed.
+- **D3: Worker + pipeline adoption** ✅ — worker/rendering/capture stack consume the policy directly. `DebugDumper` and `FramePipeline` respect policy budgets, and raw dumps no longer mutate `os.environ`. `git grep os.getenv src/napari_cuda/server/egl_worker.py` is clean.
+- **D4: Rendering + bitstream alignment** ✅ — `ServerCtx` now exposes `encoder_runtime`/`bitstream` dataclasses feeding `rendering/encoder.py` and `bitstream.py`; `AdapterScene` pulls interpolation from the debug policy; bitstream packer wiring is configured via `configure_bitstream(self._ctx.bitstream)`. Direct env reads in these modules are gone—`rg "NAPARI_CUDA_" src/napari_cuda/server/rendering` and `rg "NAPARI_CUDA_" src/napari_cuda/server/bitstream.py` are clean.
+- **D5: Logging guard cleanup** — audit `try/except` blocks that only defend logging/formatting (`debug_tools.DebugDumper.log_env_once`, `_apply_encoder_profile`, ROI logging). Replace internal guards with assertions or helper methods that catch once at the boundary (`logger.exception`). Acceptance: worker `try:` count <25, server package <50, with before/after numbers recorded in this doc.
+- **D6: Docs, tests, lint policy** — document the policy flow in `docs/server_architecture.md`, add unit coverage for env resolution + policy wiring, and codify a Ruff-backed lint policy (documented in this phase) that enforces the new logging/debug rules. Extend `ruff.toml` (or equivalent) with rules that block fresh `os.getenv`/`env_bool` calls in the server package and flag logging-only `try/except` guards. Acceptance: new tests live under `src/napari_cuda/server/_tests/test_logging_policy.py`, the lint policy is documented in this doc + `docs/server_architecture.md`, and CI Ruff runs fail on regressions.
+
+Implementation slices:
+1. **Policy scaffolding** ✅ — `logging_policy.py` landed; `ServerCtx` now owns `debug_policy` and startup logs the resolved snapshot.
+2. **Worker + capture refactor** ✅ — worker + capture stack consume the policy, debug budgets are tracked in-process, and CUDA interop flags derive from the policy instead of env reads.
+3. **Render + encoder sweep** ✅ — rendering, adapter, and bitstream modules now consume `ServerCtx.encoder_runtime`, `ServerCtx.bitstream`, and the policy. NVENC env reads are gone, bitstream toggles flow through `configure_bitstream`, and napari dims transitions rely purely on model state (no env fallbacks).
+4. **Cleanup + guard audit** — remove remaining direct env reads (policy/patterns/CLI), tighten logging guards, wire Ruff lint/test enforcement, and refresh the metrics table above.
 
 ### Phase E — Server Decomposition
 - Mirror worker work: extract `PixelBroadcaster`, `StateServer`, `SceneSpecBuilder`. Apply same hostility to try/except & getattr.

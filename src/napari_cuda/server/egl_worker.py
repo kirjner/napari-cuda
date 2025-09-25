@@ -40,7 +40,6 @@ import pycuda.driver as cuda  # type: ignore
 from .patterns import make_rgba_image
 from .debug_tools import DebugConfig, DebugDumper
 from .hw_limits import get_hw_limits
-from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource
 from .scene_types import SliceROI
 from napari_cuda.server.rendering.adapter_scene import AdapterScene
@@ -114,7 +113,8 @@ class EGLRendererWorker:
                  scene_refresh_cb: Optional[Callable[[], None]] = None,
                  policy_name: Optional[str] = None,
                  *,
-                 ctx: ServerCtx) -> None:
+                 ctx: ServerCtx,
+                 env: Optional[Mapping[str, str]] = None) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -124,6 +124,10 @@ class EGLRendererWorker:
         self.volume_dtype = str(volume_dtype)
         self.volume_relative_step = volume_relative_step
         self._ctx: ServerCtx = ctx
+        self._debug_policy = ctx.debug_policy
+        self._raw_dump_budget = max(0, int(self._debug_policy.dumps.raw_budget))
+        self._debug_policy_logged = False
+        self._env: Optional[Mapping[str, str]] = dict(env) if env is not None else None
 
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
@@ -174,15 +178,19 @@ class EGLRendererWorker:
             raise
         # Bitstream parameter cache is maintained by the server (for avcC/hvcC)
         # Debug configuration (single place)
-        self._debug = DebugDumper(DebugConfig.from_env())
+        dump_cfg = DebugConfig.from_policy(self._debug_policy.dumps)
+        self._debug = DebugDumper(dump_cfg)
         if self._debug.cfg.enabled:
             self._debug.log_env_once()
             self._debug.ensure_out_dir()
-        self._capture.set_debug(self._debug)
+        self._capture.pipeline.set_debug(self._debug)
+        self._capture.pipeline.set_raw_dump_budget(self._raw_dump_budget)
+        self._capture.cuda.set_force_tight_pitch(self._debug_policy.worker.force_tight_pitch)
+        self._log_debug_policy_once()
         # Log format/size once for clarity
         logger.info(
             "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
-            self.width, self.height, self._capture.enc_input_format, self.fps, self._animate,
+            self.width, self.height, self._capture.pipeline.enc_input_format, self.fps, self._animate,
             bool(self._zarr_path),
         )
 
@@ -373,32 +381,25 @@ class EGLRendererWorker:
         self._level_policy_refresh_needed = False
 
     def _configure_debug_flags(self) -> None:
-        self._debug_zoom_drift = env_bool('NAPARI_CUDA_DEBUG_ZOOM_DRIFT', False)
-        self._debug_pan = env_bool('NAPARI_CUDA_DEBUG_PAN', False)
-        self._debug_reset = env_bool('NAPARI_CUDA_DEBUG_RESET', False)
-        self._debug_orbit = env_bool('NAPARI_CUDA_DEBUG_ORBIT', False)
-        try:
-            self._orbit_el_min = float(os.getenv('NAPARI_CUDA_ORBIT_ELEV_MIN', '-85.0') or '-85.0')
-        except Exception:
-            self._orbit_el_min = -85.0
-        try:
-            self._orbit_el_max = float(os.getenv('NAPARI_CUDA_ORBIT_ELEV_MAX', '85.0') or '85.0')
-        except Exception:
-            self._orbit_el_max = 85.0
+        worker_dbg = self._debug_policy.worker
+        self._debug_zoom_drift = bool(worker_dbg.debug_zoom_drift)
+        self._debug_pan = bool(worker_dbg.debug_pan)
+        self._debug_reset = bool(worker_dbg.debug_reset)
+        self._debug_orbit = bool(worker_dbg.debug_orbit)
+        self._orbit_el_min = float(worker_dbg.orbit_el_min)
+        self._orbit_el_max = float(worker_dbg.orbit_el_max)
 
     def _configure_policy(self, policy_cfg: LevelPolicySettings) -> None:
         self._policy_func = level_policy.resolve_policy('oversampling')
         self._policy_name = 'oversampling'
         self._last_interaction_ts = time.perf_counter()
         self._policy_metrics.reset()
-        self._log_layer_debug = env_bool('NAPARI_CUDA_LAYER_DEBUG', False)
-        self._log_roi_anchor = env_bool('NAPARI_CUDA_LOG_ROI_ANCHOR', False)
+        policy_logging = self._debug_policy.logging
+        worker_dbg = self._debug_policy.worker
+        self._log_layer_debug = bool(policy_logging.log_layer_debug)
+        self._log_roi_anchor = bool(policy_logging.log_roi_anchor)
         self._log_policy_eval = bool(policy_cfg.log_policy_eval)
-        try:
-            _lock = os.getenv('NAPARI_CUDA_LOCK_LEVEL')
-            self._lock_level = int(_lock) if (_lock and _lock != '') else None
-        except Exception:
-            self._lock_level = None
+        self._lock_level = worker_dbg.lock_level
         self._level_threshold_in = float(policy_cfg.threshold_in)
         self._level_threshold_out = float(policy_cfg.threshold_out)
         self._level_hysteresis = float(policy_cfg.hysteresis)
@@ -413,22 +414,17 @@ class EGLRendererWorker:
         self._roi_cache: Dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
         self._roi_log_state: Dict[int, tuple[SliceROI, float]] = {}
         self._roi_log_interval = 0.25
-        try:
-            self._roi_edge_threshold = int(os.getenv('NAPARI_CUDA_ROI_EDGE_THRESHOLD', '4') or '4')
-        except Exception:
-            self._roi_edge_threshold = 4
-        self._roi_align_chunks = env_bool('NAPARI_CUDA_ROI_ALIGN_CHUNKS', False)
-        self._roi_ensure_contains_viewport = env_bool('NAPARI_CUDA_ROI_ENSURE_CONTAINS_VIEWPORT', True)
+        worker_dbg = self._debug_policy.worker
+        self._roi_edge_threshold = int(worker_dbg.roi_edge_threshold)
+        self._roi_align_chunks = bool(worker_dbg.roi_align_chunks)
+        self._roi_ensure_contains_viewport = bool(worker_dbg.roi_ensure_contains_viewport)
         self._roi_pad_chunks = 1
         self._idr_on_z = False
         self._last_roi: Optional[tuple[int, SliceROI]] = None
 
     def _configure_auto_reset(self) -> None:
-        try:
-            self._auto_reset_on_black = env_bool('NAPARI_CUDA_AUTO_RESET_ON_BLACK', True)
-        except Exception:
-            self._auto_reset_on_black = True
-        self._capture.configure_auto_reset(self._auto_reset_on_black)
+        self._auto_reset_on_black = bool(self._debug_policy.worker.auto_reset_on_black)
+        self._capture.pipeline.configure_auto_reset(self._auto_reset_on_black)
         self._black_reset_done = False
 
     def _configure_budget_limits(self) -> None:
@@ -436,6 +432,13 @@ class EGLRendererWorker:
         self._slice_max_bytes = int(max(0, getattr(cfg, 'max_slice_bytes', 0)))
         self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
+
+    def _log_debug_policy_once(self) -> None:
+        if self._debug_policy_logged:
+            return
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("Debug policy resolved: %s", self._debug_policy)
+        self._debug_policy_logged = True
 
     # ---- Level helpers ------------------------------------------------------
 
@@ -690,11 +693,15 @@ class EGLRendererWorker:
     def _init_encoder(self) -> None:
         with self._enc_lock:
             if self._encoder is None:
-                self._encoder = Encoder(self.width, self.height, fps_hint=int(self.fps))
+                self._encoder = Encoder(
+                    self.width,
+                    self.height,
+                    fps_hint=int(self.fps),
+                )
             encoder = self._encoder
             encoder.set_fps_hint(int(self.fps))
             encoder.setup(self._ctx)
-            self._capture.set_enc_input_format(encoder.input_format)
+            self._capture.pipeline.set_enc_input_format(encoder.input_format)
 
     def reset_encoder(self) -> None:
         with self._enc_lock:
@@ -819,7 +826,7 @@ class EGLRendererWorker:
         self._scene_state_queue.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
-        return self._capture.capture_blit_gpu_ns()
+        return self._capture.pipeline.capture_blit_gpu_ns()
 
 
     def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int, int]:

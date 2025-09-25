@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Callable, Optional
 
@@ -31,6 +30,7 @@ class CudaInterop:
         self._yuv444: Optional[torch.Tensor] = None
         self._dst_pitch_bytes: Optional[int] = None
         self._texture_id: Optional[int] = None
+        self._force_tight_pitch: bool = False
 
     @property
     def torch_frame(self) -> torch.Tensor:
@@ -79,7 +79,7 @@ class CudaInterop:
 
         self._dst_pitch_bytes = int(self._torch_frame.stride(0) * self._torch_frame.element_size())
         row_bytes = int(self._width * 4)
-        if int(os.getenv("NAPARI_CUDA_FORCE_TIGHT_PITCH", "0") or "0"):
+        if self._force_tight_pitch:
             self._dst_pitch_bytes = row_bytes
         logger.info("CUDA dst pitch: %d bytes (expected %d)", self._dst_pitch_bytes, row_bytes)
         if self._dst_pitch_bytes != row_bytes:
@@ -150,6 +150,9 @@ class CudaInterop:
         self._yuv444 = None
         self._dst_pitch_bytes = None
         self._texture_id = None
+
+    def set_force_tight_pitch(self, enabled: bool) -> None:
+        self._force_tight_pitch = bool(enabled)
 
 
 __all__ = ["CudaInterop"]

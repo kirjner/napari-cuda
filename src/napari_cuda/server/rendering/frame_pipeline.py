@@ -7,7 +7,6 @@ worker can delegate heavy lifting and shed defensive state.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Callable, Optional
 
@@ -43,6 +42,7 @@ class FramePipeline:
         self._enc_input_format: str = "YUV444"
         self._logged_swizzle = False
         self._logged_swizzle_stats = False
+        self._raw_dump_budget: int = 0
 
     # --- Configuration ------------------------------------------------------
 
@@ -51,6 +51,9 @@ class FramePipeline:
 
     def configure_auto_reset(self, enabled: bool) -> None:
         self._auto_reset_on_black = bool(enabled)
+
+    def set_raw_dump_budget(self, budget: int) -> None:
+        self._raw_dump_budget = max(0, int(budget))
 
     def set_dimensions(self, width: int, height: int) -> None:
         self._width = int(width)
@@ -87,17 +90,14 @@ class FramePipeline:
     def convert_for_encoder(self, *, reset_camera: Optional[Callable[[], None]] = None) -> tuple[torch.Tensor, float]:
         """Convert the CUDA frame to the encoder's expected input format."""
         t_c0 = time.perf_counter()
-        try:
-            dump_raw = int(os.getenv('NAPARI_CUDA_DUMP_RAW', '0') or '0')
-        except Exception:
-            dump_raw = 0
         frame = self._cuda.torch_frame
-        if dump_raw > 0 and self._debug is not None:
+        if self._raw_dump_budget > 0 and self._debug is not None:
             try:
                 self._debug.dump_cuda_rgba(frame, self._width, self._height, prefix="raw")  # type: ignore[attr-defined]
-                os.environ['NAPARI_CUDA_DUMP_RAW'] = str(max(0, dump_raw - 1))
             except Exception as exc:  # pragma: no cover - diagnostics only
                 logger.debug("Pre-encode raw dump failed: %s", exc)
+            finally:
+                self._raw_dump_budget = max(0, self._raw_dump_budget - 1)
         src = frame
         try:
             r = src[..., 0].float() / 255.0

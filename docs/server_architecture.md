@@ -74,17 +74,31 @@ Websocket Clients (state + pixel)
   - `CaptureFacade` encapsulates VisPy FBO capture, CUDA interop, and the NVENC frame pipeline.
   - `encode_frame` returns packets + timing metadata consumed by the server for pacing.
 
+- **Configuration & Policy** (`config.py`, `logging_policy.py`)
+  - `ServerCtx` is resolved once at startup and bundles the structured `ServerConfig` with
+    `DebugPolicy`, `EncoderRuntime`, and `BitstreamRuntime` dataclasses. Downstream modules use these
+    immutable snapshots instead of reading environment variables directly.
+  - `logging_policy.py` materialises every debug/logging toggle; worker, rendering, and bitstream
+    code paths now consume the policy object exclusively.
+
 ## Data Flow Summary
 
 1. Clients connect via websocket; `EGLHeadlessServer` registers them and pushes an initial `SceneSpec`.
 2. User interactions or policy decisions enqueue updates in `SceneStateQueue`.
 3. The worker thread drains updates, applies them through `SceneStateApplier`, and kicks ROI/LOD recalculation as needed.
 4. `CaptureFacade` captures rendered frames, hands them to NVENC, and returns packet bytes to the server.
-5. The server broadcasts encoded frames over the pixel channel and sends authoritative dims/camera updates via the state channel when changes land.
+   - The NVENC helper (`rendering/encoder.py`) reads preset/bitrate/RC overrides from
+     `ServerCtx.encoder_runtime` and honours `DebugPolicy.encoder` logging toggles.
+5. The server broadcasts encoded frames over the pixel channel and sends authoritative dims/camera
+   updates via the state channel when changes land.
+   - Bitstream packing consults `ServerCtx.bitstream` to decide between the Cython fast path and
+     Python fallback; SPS/NAL logging comes from `DebugPolicy.encoder`.
 6. Metrics and watchdogs live in the server layer to detect stalled keyframes, drop counts, or policy anomalies.
 
 ## Future Refinements
 
-- Phase D will consolidate logging and env toggles into a dedicated policy module.
+- Phase D is underway: logging/debug toggles live in `logging_policy.py`, and rendering/bitstream
+  modules rely on the `ServerCtx` snapshots. Remaining work focuses on the logging-guard audit and
+  lint/test enforcement.
 - Phase E targets further decomposition of `EGLHeadlessServer` into discrete broadcaster/state-manager components to mirror the worker split.
 - Capture resizing and dynamic canvas negotiation remain TODO items once client capabilities land.

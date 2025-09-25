@@ -138,7 +138,16 @@ def _update_viewer_dims(worker, viewer, target: int) -> None:
     ndim = max(layer_ndim, data_ndim, dims_attr, 3)
     viewer_dims.ndim = ndim
     displayed = tuple(range(max(0, ndim - 3), ndim))
-    viewer_dims.displayed = displayed  # type: ignore[attr-defined]
+
+    # Keep the displayed axes as the tail of the order tuple so napari marks
+    # them as active. This mirrors the old `displayed` setter without relying on it.
+    order = list(getattr(viewer_dims, "order", ()) or ())
+    if len(order) != ndim or any(ax >= ndim for ax in order):
+        order = list(range(ndim))
+    else:
+        order = [ax for ax in order if ax not in displayed]
+        order.extend(displayed)
+    viewer_dims.order = tuple(order)
     steps = list(getattr(viewer_dims, "current_step", ()) or ())
     if len(steps) < ndim:
         steps.extend([0] * (ndim - len(steps)))

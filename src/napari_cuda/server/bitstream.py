@@ -12,29 +12,45 @@ Provided helpers:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 import logging
 from typing import List, Optional, Tuple, Sequence, Union
 
-# Optional Cython fast packer; default is to require it on server
-_FAST_PACK = None
-try:
-    from ._avcc_packer import pack_to_avcc_fast as _FAST_PACK  # type: ignore
-except Exception:
-    # Try runtime build via pyximport if Cython is available (enabled by default)
-    try:
-        if os.getenv('NAPARI_CUDA_BUILD_CYTHON', '1') != '0':
-            import pyximport  # type: ignore
-            pyximport.install(language_level=3, inplace=True)  # type: ignore
-            from ._avcc_packer import pack_to_avcc_fast as _FAST_PACK  # type: ignore
-        else:
-            _FAST_PACK = None
-    except Exception:
-        _FAST_PACK = None
+from napari_cuda.server.logging_policy import EncoderLogging
+from napari_cuda.server.config import BitstreamRuntime
 
-# Allow disabling the Cython fast packer via env for diagnostics/workarounds
-if os.getenv('NAPARI_CUDA_DISABLE_FAST_PACK', '0') not in ('0', '', 'false', 'False', 'NO', 'no'):
-    _FAST_PACK = None
+# Optional Cython fast packer; default is to require it on server
+_BITSTREAM_RUNTIME = BitstreamRuntime()
+_FAST_PACK = None
+
+
+def _load_fast_packer(runtime: BitstreamRuntime):
+    if runtime.disable_fast_pack:
+        return None
+    try:
+        from ._avcc_packer import pack_to_avcc_fast as fast  # type: ignore
+        return fast
+    except Exception:
+        if not runtime.build_cython:
+            return None
+        try:
+            import pyximport  # type: ignore
+
+            pyximport.install(language_level=3, inplace=True)  # type: ignore
+            from ._avcc_packer import pack_to_avcc_fast as fast  # type: ignore
+            return fast
+        except Exception:
+            return None
+
+
+def configure_bitstream(runtime: BitstreamRuntime) -> None:
+    """Configure bitstream packer runtime options from server context."""
+
+    global _BITSTREAM_RUNTIME, _FAST_PACK
+    _BITSTREAM_RUNTIME = runtime
+    _FAST_PACK = _load_fast_packer(runtime)
+
+
+_FAST_PACK = _load_fast_packer(_BITSTREAM_RUNTIME)
 
 
 BytesLike = Union[bytes, bytearray, memoryview]
@@ -98,7 +114,12 @@ def parse_nals(buf: bytes) -> List[bytes]:
         return nals if nals else [buf]
 
 
-def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: ParamCache) -> Tuple[Optional[bytes], bool]:
+def pack_to_annexb(
+    packets: Union[BytesLike, Sequence[BytesLike], None],
+    cache: ParamCache,
+    *,
+    encoder_logging: Optional[EncoderLogging] = None,
+) -> Tuple[Optional[bytes], bool]:
     """Normalize encoder output (bytes or list of bytes) to Annex B and detect keyframe.
 
     - Accepts bytes or list/tuple of byte-like objects
@@ -158,7 +179,10 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
 
     is_key = False
     saw_sps = saw_pps = saw_vps = False
-    log_sps = bool(int(os.getenv('NAPARI_CUDA_LOG_SPS', '0') or '0'))
+    if encoder_logging is not None:
+        log_sps = bool(encoder_logging.log_sps)
+    else:
+        log_sps = False
     logger = logging.getLogger(__name__)
     for nal in nal_units:
         if not nal:
@@ -210,7 +234,12 @@ def pack_to_annexb(packets: Union[BytesLike, Sequence[BytesLike], None], cache: 
     return bytes(ba), is_key
 
 
-def pack_to_avcc(packets: Union[BytesLike, Sequence[BytesLike], None], cache: ParamCache) -> Tuple[Optional[bytes], bool]:
+def pack_to_avcc(
+    packets: Union[BytesLike, Sequence[BytesLike], None],
+    cache: ParamCache,
+    *,
+    encoder_logging: Optional[EncoderLogging] = None,
+) -> Tuple[Optional[bytes], bool]:
     """Normalize encoder output to AVCC (4-byte length-prefixed) and detect keyframe.
 
     - Accepts bytes or list/tuple of byte-like objects (Annex B or AVCC)
@@ -219,11 +248,11 @@ def pack_to_avcc(packets: Union[BytesLike, Sequence[BytesLike], None], cache: Pa
     - Returns (payload bytes or None, is_keyframe)
     """
     # If Cython fast path is available, use it; by default, Python fallback is disabled
-    allow_fallback = os.getenv('NAPARI_CUDA_ALLOW_PY_FALLBACK', '0') != '0'
+    allow_fallback = bool(_BITSTREAM_RUNTIME.allow_py_fallback)
     if _FAST_PACK is None and not allow_fallback:
         raise RuntimeError(
             "Cython packer not available. Install with 'napari-cuda[server]' (includes Cython) "
-            "or set NAPARI_CUDA_ALLOW_PY_FALLBACK=1 to enable the Python implementation."
+            "or enable the Python fallback via server context." 
         )
     if _FAST_PACK is not None:
         try:
@@ -232,8 +261,8 @@ def pack_to_avcc(packets: Union[BytesLike, Sequence[BytesLike], None], cache: Pa
             # If Cython fails and fallback is not allowed, fail fast
             if not allow_fallback:
                 raise RuntimeError(
-                    "Cython packer failed. Ensure 'napari-cuda[server]' is installed or set "
-                    "NAPARI_CUDA_ALLOW_PY_FALLBACK=1 to use the Python implementation."
+                    "Cython packer failed. Ensure 'napari-cuda[server]' is installed or enable "
+                    "the Python fallback via server context."
                 ) from e
             # else fall through to Python path
     if packets is None:
@@ -258,7 +287,10 @@ def pack_to_avcc(packets: Union[BytesLike, Sequence[BytesLike], None], cache: Pa
     def t265(b0: int) -> int: return (b0 >> 1) & 0x3F
 
     is_key = False
-    log_sps = bool(int(os.getenv('NAPARI_CUDA_LOG_SPS', '0') or '0'))
+    if encoder_logging is not None:
+        log_sps = bool(encoder_logging.log_sps)
+    else:
+        log_sps = False
     logger = logging.getLogger(__name__)
     for nal in nal_units:
         if not nal:

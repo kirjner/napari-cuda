@@ -14,9 +14,11 @@ Usage plan (PR1/PR2):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional
 import os
+
+from napari_cuda.server.logging_policy import DebugPolicy, load_debug_policy
 
 
 # ---- Helpers -----------------------------------------------------------------
@@ -142,6 +144,36 @@ class ServerConfig:
     packer: str = "cython"  # "cython" | "python"
 
 
+@dataclass(frozen=True)
+class EncoderRuntime:
+    """Advanced NVENC runtime tuning overrides.
+
+    These values capture the various environment-based knobs that historically
+    lived inside `rendering.encoder`. They are now parsed once during context
+    construction so the encoder no longer touches `os.environ`.
+    """
+
+    input_format: str = "YUV444"
+    rc_mode: str = "cbr"
+    preset: str = "P3"
+    max_bitrate: Optional[int] = None
+    lookahead: int = 0
+    aq: int = 0
+    temporalaq: int = 0
+    enable_non_ref_p: bool = False
+    bframes: int = 0
+    idr_period: int = 600
+
+
+@dataclass(frozen=True)
+class BitstreamRuntime:
+    """Bitstream packer toggles resolved from environment."""
+
+    build_cython: bool = True
+    disable_fast_pack: bool = False
+    allow_py_fallback: bool = False
+
+
 def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     """Load server configuration from environment (no side effects).
 
@@ -254,14 +286,14 @@ class ServerCtx:
     dump_dir: str = "benchmarks/bitstreams"
     kf_watchdog_cooldown_s: float = 2.0
 
-    # Logging toggles
-    log_camera_info: bool = False
-    log_camera_debug: bool = False
-    log_state_traces: bool = False
-    log_volume_info: bool = False
-    log_dims_info: bool = False
-    debug: bool = False
-    log_sends_env: bool = False
+    # Debug/logging policy
+    debug_policy: DebugPolicy = field(default_factory=lambda: load_debug_policy({}))
+
+    # Encoder runtime overrides (NVENC tuning)
+    encoder_runtime: EncoderRuntime = field(default_factory=EncoderRuntime)
+
+    # Bitstream/packer toggles
+    bitstream: BitstreamRuntime = field(default_factory=BitstreamRuntime)
 
     # Metrics UI
     metrics_port: int = 8083
@@ -292,13 +324,42 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     except Exception:
         kf_watchdog_cooldown_s = 2.0
 
-    log_camera_info = _env_bool(env, "NAPARI_CUDA_LOG_CAMERA_INFO", False)
-    log_camera_debug = _env_bool(env, "NAPARI_CUDA_LOG_CAMERA_DEBUG", False)
-    log_state_traces = _env_bool(env, "NAPARI_CUDA_LOG_STATE_TRACES", False)
-    log_volume_info = _env_bool(env, "NAPARI_CUDA_LOG_VOLUME_INFO", False)
-    log_dims_info = _env_bool(env, "NAPARI_CUDA_LOG_DIMS_INFO", False)
-    debug = _env_bool(env, "NAPARI_CUDA_DEBUG", False)
-    log_sends_env = _env_bool(env, "NAPARI_CUDA_LOG_SENDS", False)
+    debug_policy = load_debug_policy(env)
+
+    # Encoder runtime overrides
+    input_fmt = (_env_str(env, "NAPARI_CUDA_ENCODER_INPUT_FMT", "YUV444") or "YUV444").strip().upper()
+    rc_mode = (_env_str(env, "NAPARI_CUDA_RC", "cbr") or "cbr").strip().lower()
+    preset = (_env_str(env, "NAPARI_CUDA_PRESET", "P3") or "P3").strip()
+    max_bitrate_val = _env_int(env, "NAPARI_CUDA_MAXBITRATE", 0)
+    max_bitrate = max_bitrate_val if max_bitrate_val > 0 else None
+    lookahead = max(0, _env_int(env, "NAPARI_CUDA_LOOKAHEAD", 0))
+    aq = max(0, _env_int(env, "NAPARI_CUDA_AQ", 0))
+    temporalaq = max(0, _env_int(env, "NAPARI_CUDA_TEMPORALAQ", 0))
+    nonrefp = _env_int(env, "NAPARI_CUDA_NONREFP", 0) > 0
+    bframes = max(0, _env_int(env, "NAPARI_CUDA_BFRAMES", 0))
+    try:
+        idr_period_raw = _env_int(env, "NAPARI_CUDA_IDR_PERIOD", 600)
+        idr_period = idr_period_raw if idr_period_raw > 0 else 600
+    except Exception:
+        idr_period = 600
+    encoder_runtime = EncoderRuntime(
+        input_format=input_fmt or "YUV444",
+        rc_mode=rc_mode or "cbr",
+        preset=preset or "P3",
+        max_bitrate=max_bitrate,
+        lookahead=lookahead,
+        aq=aq,
+        temporalaq=temporalaq,
+        enable_non_ref_p=bool(nonrefp),
+        bframes=bframes,
+        idr_period=int(idr_period),
+    )
+
+    bitstream_runtime = BitstreamRuntime(
+        build_cython=_env_bool(env, "NAPARI_CUDA_BUILD_CYTHON", True),
+        disable_fast_pack=_env_bool(env, "NAPARI_CUDA_DISABLE_FAST_PACK", False),
+        allow_py_fallback=_env_bool(env, "NAPARI_CUDA_ALLOW_PY_FALLBACK", False),
+    )
 
     metrics_port = _env_int(env, "NAPARI_CUDA_METRICS_PORT", 8083)
     metrics_refresh_ms = _env_int(env, "NAPARI_CUDA_METRICS_REFRESH_MS", 1000)
@@ -333,17 +394,13 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         dump_bitstream=dump_bitstream,
         dump_dir=dump_dir,
         kf_watchdog_cooldown_s=kf_watchdog_cooldown_s,
-        log_camera_info=log_camera_info,
-        log_camera_debug=log_camera_debug,
-        log_state_traces=log_state_traces,
-        log_volume_info=log_volume_info,
-        log_dims_info=log_dims_info,
-        debug=debug,
-        log_sends_env=log_sends_env,
+        debug_policy=debug_policy,
         metrics_port=metrics_port,
         metrics_refresh_ms=metrics_refresh_ms,
         policy_event_path=policy_event_path,
         policy=policy_settings,
+        encoder_runtime=encoder_runtime,
+        bitstream=bitstream_runtime,
     )
 
 
@@ -352,6 +409,8 @@ __all__ = [
     "LevelPolicySettings",
     "ServerConfig",
     "ServerCtx",
+    "EncoderRuntime",
+    "BitstreamRuntime",
     "load_server_config",
     "load_server_ctx",
 ]

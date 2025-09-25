@@ -20,6 +20,8 @@ from typing import Optional
 
 import numpy as np
 
+from napari_cuda.server.logging_policy import DumpControls
+
 try:
     from OpenGL import GL  # type: ignore
 except Exception as e:  # pragma: no cover - only used in GPU runtime
@@ -36,33 +38,20 @@ class DebugConfig:
     flip_cuda_for_view: bool = False
     have_imageio: bool = False
 
-    @staticmethod
-    def from_env() -> "DebugConfig":
-        # Single switch: NAPARI_CUDA_DEBUG=1 enables dumps.
-        # Optional: NAPARI_CUDA_DEBUG_FRAMES (default 3), NAPARI_CUDA_DUMP_DIR.
-        enabled = os.getenv("NAPARI_CUDA_DEBUG", "0") in ("1", "true", "TRUE")
-        frames_s = os.getenv("NAPARI_CUDA_DEBUG_FRAMES", "3") if enabled else "0"
-        out_dir = os.getenv("NAPARI_CUDA_DUMP_DIR", "logs/napari_cuda_frames")
-        flip_s = os.getenv("NAPARI_CUDA_DEBUG_FLIP_CUDA", "0")
-        try:
-            frames = int(frames_s)
-        except Exception:
-            frames = 0
-        try:
-            flip = bool(int(flip_s))
-        except Exception:
-            flip = False
+    @classmethod
+    def from_policy(cls, policy: DumpControls) -> "DebugConfig":
         have_iio = False
         try:
             import imageio.v3 as _iio  # type: ignore
             have_iio = True
         except Exception:
             have_iio = False
-        return DebugConfig(
-            enabled=enabled and frames > 0,
-            frames_remaining=max(0, frames),
-            out_dir=out_dir,
-            flip_cuda_for_view=flip,
+        frames_budget = max(0, int(policy.frames_budget))
+        return cls(
+            enabled=bool(policy.enabled and frames_budget > 0),
+            frames_remaining=frames_budget,
+            out_dir=str(policy.output_dir),
+            flip_cuda_for_view=bool(policy.flip_cuda_for_view),
             have_imageio=have_iio,
         )
 

@@ -1,53 +1,19 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, MutableMapping, Optional
+from typing import Any, MutableMapping, Optional
 
 import PyNvVideoCodec as pnvc  # type: ignore
 
-from napari_cuda.server.config import ServerCtx
+from napari_cuda.server.config import EncoderRuntime, ServerCtx
 
 
 logger = logging.getLogger(__name__)
 
 
 _ALLOWED_INPUT_FORMATS = {"YUV444", "NV12", "ARGB", "ABGR"}
-
-
-def _env_int(env: Mapping[str, str], name: str, default: Optional[int] = None) -> Optional[int]:
-    raw = env.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except Exception:
-        return default
-
-
-def _env_str(env: Mapping[str, str], name: str, default: Optional[str] = None) -> Optional[str]:
-    raw = env.get(name)
-    if raw is None:
-        return default
-    raw = raw.strip()
-    return raw if raw else default
-
-
-def _env_bool(env: Mapping[str, str], name: str, default: bool = False) -> bool:
-    raw = env.get(name)
-    if raw is None or raw == "":
-        return default
-    low = raw.strip().lower()
-    if low in {"1", "true", "yes", "on"}:
-        return True
-    if low in {"0", "false", "no", "off"}:
-        return False
-    try:
-        return bool(int(raw))
-    except Exception:
-        return default
 
 
 @dataclass(frozen=True)
@@ -65,11 +31,9 @@ class Encoder:
         height: int,
         *,
         fps_hint: int = 60,
-        env: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._width = int(width)
         self._height = int(height)
-        self._env: Mapping[str, str] = dict(env) if env is not None else os.environ
         self._encoder: Optional[Any] = None
         self._input_format: str = "YUV444"
         self._log_keyframes = False
@@ -97,37 +61,42 @@ class Encoder:
 
     def setup(self, ctx: Optional[ServerCtx]) -> None:
         self._ctx = ctx
-        env = self._env
+        runtime = ctx.encoder_runtime if ctx is not None else EncoderRuntime()
 
-        fmt = (_env_str(env, "NAPARI_CUDA_ENCODER_INPUT_FMT", "YUV444") or "YUV444").upper()
+        fmt = (runtime.input_format or "YUV444").strip().upper()
         if fmt not in _ALLOWED_INPUT_FORMATS:
             fmt = "YUV444"
         self._input_format = fmt
-        self._log_settings = bool(_env_int(env, "NAPARI_CUDA_LOG_ENCODER_SETTINGS", 1))
-        self._log_keyframes = _env_bool(env, "NAPARI_CUDA_LOG_KEYFRAMES", False)
 
-        rc_mode = (_env_str(env, "NAPARI_CUDA_RC", "cbr") or "cbr").lower()
-        preset_env = _env_str(env, "NAPARI_CUDA_PRESET", "") or ""
+        if ctx is not None and getattr(ctx, "debug_policy", None) is not None:
+            encoder_policy = ctx.debug_policy.encoder
+            self._log_settings = bool(encoder_policy.log_encoder_settings)
+            self._log_keyframes = bool(encoder_policy.log_keyframes)
+        else:
+            self._log_settings = True
+            self._log_keyframes = False
 
-        bitrate_default = 10_000_000
+        rc_mode = (runtime.rc_mode or "cbr").strip().lower() or "cbr"
+        preset_raw = (runtime.preset or "P3").strip()
+        preset = preset_raw if preset_raw else "P3"
+
+        bitrate = None
         if ctx is not None:
             try:
-                bitrate_default = int(getattr(ctx.cfg.encode, "bitrate", bitrate_default))
+                bitrate = int(getattr(ctx.cfg.encode, "bitrate", 10_000_000))
             except Exception:
-                bitrate_default = 10_000_000
-        bitrate = _env_int(env, "NAPARI_CUDA_BITRATE", bitrate_default)
-        max_bitrate = _env_int(env, "NAPARI_CUDA_MAXBITRATE")
-        lookahead = _env_int(env, "NAPARI_CUDA_LOOKAHEAD", 0) or 0
-        aq = _env_int(env, "NAPARI_CUDA_AQ", 0) or 0
-        temporalaq = _env_int(env, "NAPARI_CUDA_TEMPORALAQ", 0) or 0
-        nonrefp = _env_int(env, "NAPARI_CUDA_NONREFP", 0) or 0
-        bf_override = _env_int(env, "NAPARI_CUDA_BFRAMES")
-        try:
-            idr_period = int(_env_str(env, "NAPARI_CUDA_IDR_PERIOD", "600") or "600")
-        except Exception:
-            idr_period = 600
+                bitrate = None
+        if bitrate is None or bitrate <= 0:
+            bitrate = 10_000_000
 
-        preset = preset_env.strip() if preset_env.strip() else "P3"
+        max_bitrate = runtime.max_bitrate if runtime.max_bitrate and runtime.max_bitrate > 0 else None
+        lookahead = max(0, int(runtime.lookahead))
+        aq = max(0, int(runtime.aq))
+        temporalaq = max(0, int(runtime.temporalaq))
+        nonrefp = bool(runtime.enable_non_ref_p)
+        bframes = max(0, int(runtime.bframes))
+        idr_period = int(runtime.idr_period) if runtime.idr_period > 0 else 600
+
         kwargs: dict[str, Any] = {
             "codec": "h264",
             "tuning_info": "low_latency",
@@ -139,12 +108,11 @@ class Encoder:
         }
         if bitrate and bitrate > 0:
             kwargs["bitrate"] = int(bitrate)
-        if max_bitrate and max_bitrate > 0:
+        if max_bitrate is not None and max_bitrate > 0:
             kwargs["maxbitrate"] = int(max_bitrate)
         elif rc_mode == "cbr" and bitrate and bitrate > 0:
             kwargs["maxbitrate"] = int(bitrate)
-        bf = max(0, bf_override) if bf_override is not None else 0
-        kwargs["bf"] = int(bf)
+        kwargs["bf"] = int(bframes)
 
         fps_num = self._fps_hint if self._fps_hint > 0 else None
         if (fps_num is None or fps_num <= 0) and ctx is not None:
@@ -152,10 +120,6 @@ class Encoder:
                 fps_num = int(getattr(ctx.cfg.encode, "fps", 60))
             except Exception:
                 fps_num = None
-        if fps_num is None or fps_num <= 0:
-            fps_env = _env_int(env, "NAPARI_CUDA_FPS")
-            if fps_env is not None and fps_env > 0:
-                fps_num = fps_env
         if fps_num is None or fps_num <= 0:
             fps_num = 60
         kwargs["frameRateNum"] = int(max(1, fps_num))
@@ -167,7 +131,7 @@ class Encoder:
             kwargs["aq"] = int(max(0, aq))
         if temporalaq > 0:
             kwargs["temporalaq"] = int(max(0, temporalaq))
-        if nonrefp > 0:
+        if nonrefp:
             kwargs["nonrefp"] = 1
 
         logger.info(
@@ -200,7 +164,7 @@ class Encoder:
                 self._height,
                 self._input_format,
                 preset,
-                int(bf),
+                int(bframes),
                 rc_mode.upper(),
                 kwargs.get("bitrate"),
                 kwargs.get("maxbitrate"),

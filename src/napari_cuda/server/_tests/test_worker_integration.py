@@ -191,24 +191,47 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         def __init__(self, *, width: int, height: int) -> None:
             self.width = width
             self.height = height
-            self._debug = None
-            self._enc_fmt = "YUV444"
             self.texture_id = 1
-            self._orientation_ready = True
-            self._black_reset_done = False
 
-        def configure_auto_reset(self, enabled: bool) -> None:  # type: ignore[no-untyped-def]
-            return
+            class _DummyPipeline:
+                def __init__(self) -> None:
+                    self._debug = None
+                    self._enc_fmt = "YUV444"
+                    self.orientation_ready = True
+                    self.black_reset_done = False
+                    self._raw_budget = 0
 
-        def set_debug(self, debug):  # type: ignore[no-untyped-def]
-            self._debug = debug
+                def configure_auto_reset(self, enabled: bool) -> None:  # type: ignore[no-untyped-def]
+                    return
 
-        @property
-        def enc_input_format(self) -> str:
-            return self._enc_fmt
+                def set_debug(self, debug):  # type: ignore[no-untyped-def]
+                    self._debug = debug
 
-        def set_enc_input_format(self, fmt: str) -> None:
-            self._enc_fmt = str(fmt)
+                def set_raw_dump_budget(self, budget: int) -> None:  # type: ignore[no-untyped-def]
+                    self._raw_budget = int(budget)
+
+                @property
+                def enc_input_format(self) -> str:
+                    return self._enc_fmt
+
+                def set_enc_input_format(self, fmt: str) -> None:
+                    self._enc_fmt = str(fmt)
+
+                def capture_blit_gpu_ns(self):  # type: ignore[no-untyped-def]
+                    return 0
+
+                def map_and_copy_to_torch(self, debug_cb=None):  # type: ignore[no-untyped-def]
+                    return 0.0, 0.0
+
+                def convert_for_encoder(self, *, reset_camera=None):  # type: ignore[no-untyped-def]
+                    return SimpleNamespace(device="cpu"), 0.0
+
+            class _DummyCuda:
+                def set_force_tight_pitch(self, enabled: bool) -> None:  # type: ignore[no-untyped-def]
+                    return
+
+            self.pipeline = _DummyPipeline()
+            self.cuda = _DummyCuda()
 
         def ensure(self) -> None:
             return
@@ -219,22 +242,13 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         def cleanup(self) -> None:
             return
 
-        def capture_blit_gpu_ns(self):  # type: ignore[no-untyped-def]
-            return 0
-
-        def map_and_copy_to_torch(self, debug_cb=None):  # type: ignore[no-untyped-def]
-            return 0.0, 0.0
-
-        def convert_for_encoder(self, *, reset_camera=None):  # type: ignore[no-untyped-def]
-            return SimpleNamespace(device="cpu"), 0.0
-
         @property
         def orientation_ready(self) -> bool:
-            return self._orientation_ready
+            return self.pipeline.orientation_ready
 
         @property
         def black_reset_done(self) -> bool:
-            return self._black_reset_done
+            return self.pipeline.black_reset_done
 
     class _DummyAdapterScene:
         def __init__(self, worker):  # type: ignore[no-untyped-def]

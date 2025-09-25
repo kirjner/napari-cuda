@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional, Tuple
 
 import numpy as np
@@ -26,11 +25,11 @@ class AdapterScene:
         self._bridge = bridge
 
     def init(self, source: Optional[ZarrSceneSource]) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
-        try:
-            _bg_dbg = int(os.getenv('NAPARI_CUDA_DEBUG_BG', '0') or '0')
-        except Exception:
-            _bg_dbg = 0
-        bgcolor = (0.08, 0.08, 0.08, 1.0) if _bg_dbg else "black"
+        worker_policy = getattr(self._bridge, "_debug_policy", None)
+        worker_debug = getattr(worker_policy, "worker", None)
+        debug_bg = bool(getattr(worker_debug, "debug_bg_overlay", False))
+        layer_interpolation = (getattr(worker_debug, "layer_interpolation", "bilinear") or "bilinear").strip().lower()
+        bgcolor = (0.08, 0.08, 0.08, 1.0) if debug_bg else "black"
         # Create a native EGL-backed SceneCanvas. The worker will adopt this
         # context for capture to ensure a single GL context is used.
         canvas = scene.SceneCanvas(
@@ -211,8 +210,8 @@ class AdapterScene:
                     layer.colormap = 'gray'
                 except Exception:
                     logger.debug("adapter: layer visual props set failed", exc_info=True)
-                # Configurable interpolation; default to bilinear to reduce speckling of point features
-                interp = os.getenv('NAPARI_CUDA_INTERP', 'bilinear').strip().lower() or 'bilinear'
+                # Configurable interpolation; default to policy-specified value (bilinear by default)
+                interp = layer_interpolation or 'bilinear'
                 if hasattr(layer, 'interpolation'):
                     try:
                         layer.interpolation = interp
@@ -326,7 +325,7 @@ class AdapterScene:
                 type(n).__name__, getattr(n, 'visible', None), bool(getattr(n, 'parent', None) is view.scene), getattr(layer, 'visible', None), slice_empty, kid_types,
             )
 
-        if int(os.getenv('NAPARI_CUDA_DEBUG_OVERLAY', '0') or '0'):
+        if bool(getattr(worker_debug, "debug_overlay", False)):
             # Use scene.visuals API for compatibility with recent VisPy
             try:
                 from vispy.scene.visuals import Rectangle  # type: ignore
