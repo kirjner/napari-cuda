@@ -92,10 +92,12 @@
 - Maintain >85% coverage on every new helper module (dims payload, presenter policy, intent throttle) and snapshot LOC/try metrics per phase.
 
 ## Immediate Next Steps
+0. Keep `docs/client_architecture.md` updated as the canonical snapshot of the current client topology while work proceeds.
 1. Extract the smoke harness and renderer fallback paths into `client_loop/smoke_helpers.py` + `renderer_fallbacks.py`, replace the remaining blanket `try/except` blocks with explicit assertions/logging at those helper boundaries, and re-run the focused client loop tests.
 2. After the helper extraction, recount `ClientStreamLoop` safeguards (current: 1 `try`, 0 `getattr`) and keep the doc snapshot in sync as we chip away at the remaining VT fallback guard.
 3. Author the Phase C presenter/canvas split outline (draft `docs/client_presenter_facade.md`) specifying which warmup, VT gate, and render responsibilities move out of `streaming_canvas.py`, along with the regression tests required before refactoring.
 4. Run the VT zero-copy spike checklist (see below) before touching renderer code paths so we do not widen the segfault window mid-refactor.
+5. Draft a `ClientLoopState` dataclass that aggregates the mutable fields we currently hang off `self`, so a later pass can convert the loop methods into Casey-Muratori-style routines operating on an explicit data bag instead of an ever-growing object.
 
 ## VT Zero-Copy Spike (2025-09-25)
 - Failure signature: client logs `"VT gate lifted on keyframe (seq=15713); presenter=VT"` and crashes inside `GLRenderer._draw_vt_texture` on the immediate paint tick; the crash propagates through Vispy's `paintGL` into Qt's event loop.

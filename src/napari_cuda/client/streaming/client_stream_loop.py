@@ -24,7 +24,6 @@ from napari_cuda.client.streaming.types import Source, SubmittedFrame
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
-from napari_cuda.client.streaming.pipelines.smoke_pipeline import SmokePipeline, SmokeConfig
 from napari_cuda.client.streaming.eventloop_monitor import EventLoopMonitor
 from napari_cuda.client.streaming.input import InputSender
 from napari_cuda.codec.avcc import (
@@ -42,6 +41,15 @@ from napari_cuda.client.streaming.client_loop.pipelines import (
     build_pyav_pipeline,
     build_vt_pipeline,
 )
+from napari_cuda.client.streaming.client_loop.renderer_fallbacks import RendererFallbacks
+from napari_cuda.client.streaming.client_loop.smoke_helpers import start_smoke_mode
+from napari_cuda.client.streaming.client_loop.input_helpers import (
+    attach_input_sender,
+    bind_shortcuts,
+)
+from napari_cuda.client.streaming.client_loop.scheduler_helpers import (
+    init_wake_scheduler,
+)
 from napari_cuda.client.streaming.client_loop.telemetry import (
     build_telemetry_config,
     create_metrics,
@@ -49,8 +57,6 @@ from napari_cuda.client.streaming.client_loop.telemetry import (
     start_stats_timer,
 )
 from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
-from napari_cuda.client.streaming.smoke.generators import make_generator
-from napari_cuda.client.streaming.smoke.submit import submit_vt, submit_pyav
 from napari_cuda.client.streaming.config import extract_video_config
 from napari_cuda.client.layers import RemoteLayerRegistry, RegistrySnapshot
 from napari_cuda.protocol.messages import (
@@ -261,56 +267,17 @@ class ClientStreamLoop:
         # Client metrics (optional, env-controlled)
         self._metrics = create_metrics(self._telemetry_cfg)
 
-        # Presenter-owned wake scheduling: single-shot QTimer owned by the GUI thread,
-        # optionally disabled when an external fixed-cadence display loop is active.
-        # Opt-in via NAPARI_CUDA_USE_DISPLAY_LOOP=1.
+        # Presenter-owned wake scheduling helper
         self._wake_timer = None
-        self._in_present: bool = False
+        self._in_present = False
         self._use_display_loop = self._env_cfg.use_display_loop
         self._wake_proxy: WakeProxy | None = None
-        if not self._use_display_loop:
-            assert self._canvas_native is not None, "Precise scheduling requires a native canvas"
-            self._wake_timer = QtCore.QTimer(self._canvas_native)
-            self._wake_timer.setTimerType(QtCore.Qt.PreciseTimer)
-            self._wake_timer.setSingleShot(True)
-            # On wake, request a canvas update and immediately schedule the next wake
-            self._wake_timer.timeout.connect(self._on_present_timer)
-        # Record GUI thread affinity for safe scheduling from worker threads
-        self._gui_thread = self._canvas_native.thread() if self._canvas_native is not None else None  # type: ignore[attr-defined]
-
-        def _schedule_next_wake() -> None:
-            if self._use_display_loop:
-                # External display loop drives cadence; no per-frame wake scheduling
-                return
-            earliest = self._presenter.peek_next_due(self._source_mux.active)
-            if earliest is None:
-                return
-            now_mono = time.perf_counter()
-            delta_ms = (float(earliest) - now_mono) * 1000.0 + float(self._wake_fudge_ms or 0.0)
-            # If a wake is already scheduled earlier (within a small margin), keep it to avoid thrash
-            if self._next_due_pending_until > now_mono:
-                pending_ms = (self._next_due_pending_until - now_mono) * 1000.0
-                if delta_ms >= (pending_ms - 0.5):
-                    return
-            else:
-                # Clear stale marker
-                self._next_due_pending_until = 0.0
-            # (Re)schedule
-            if self._wake_timer is not None and self._wake_timer.isActive():
-                self._wake_timer.stop()
-            self._next_due_pending_until = now_mono + max(0.0, delta_ms) / 1000.0
-            if self._wake_timer is not None:
-                self._wake_timer.start(max(0, int(delta_ms)))
-            else:
-                self._scene_canvas_update()
-
-        # Expose to pipelines via closure
-        self._schedule_next_wake = _schedule_next_wake
+        self._gui_thread = None
+        self._schedule_next_wake = init_wake_scheduler(self)
 
         # Build pipelines after scheduler hooks are ready
         # Create a wake proxy so pipelines can nudge scheduling from any thread
-        if not self._use_display_loop and self._canvas_native is not None:
-            self._wake_proxy = WakeProxy(_schedule_next_wake, self._canvas_native)
+        if not self._use_display_loop and self._wake_proxy is not None:
             wake_cb = self._wake_proxy.trigger.emit
         else:
             wake_cb = (lambda: None)
@@ -320,9 +287,11 @@ class ClientStreamLoop:
         self._pyav_pipeline = build_pyav_pipeline(self, schedule_next_wake=wake_cb)
         self._pyav_wait_keyframe: bool = False
 
-        # Last-frame caches for redraw fallback
-        self._last_vt_lease = None  # FrameLease for VT cached frame
-        self._last_pyav_frame = None
+        # Renderer fallback manager (VT cache + PyAV reuse)
+        self._renderer_fallbacks = RendererFallbacks()
+
+        # Smoke harness (optional)
+        self._smoke = None
 
         # Frame queue for renderer (latest-wins)
         # Holds either numpy arrays or (capsule, release_cb) tuples for VT
@@ -491,57 +460,10 @@ class ClientStreamLoop:
             self._loop_state.state_thread = t_state
             self._loop_state.threads.append(t_state)
             # Attach input forwarding (wheel + resize) now that state channel exists
-            max_rate_hz = self._env_cfg.input_max_rate_hz
-            resize_debounce_ms = self._env_cfg.resize_debounce_ms
-            log_input_info = self._env_cfg.input_log
             # Use same flag for dims logging (INFO when enabled, DEBUG otherwise)
-            self._log_dims_info = bool(log_input_info)  # type: ignore[attr-defined]
-            # Unified wheel handler: dims intent step for plain wheel; zoom for modifiers
-            wheel_cb = self._on_wheel
-            assert self._loop_state.state_channel is not None, "State channel must be ready before InputSender attaches"
-            assert self._canvas_native is not None, "InputSender requires a native canvas"
-
-            sender = InputSender(
-                widget=self._canvas_native,
-                post=self._loop_state.state_channel.post,
-                max_rate_hz=max_rate_hz,
-                resize_debounce_ms=resize_debounce_ms,
-                on_wheel=wheel_cb,
-                on_pointer=self._on_pointer,
-                on_key=self._on_key_event,
-                log_info=log_input_info,
-            )
-            sender.start()
-            self._input_sender = sender  # type: ignore[attr-defined]
-            logger.info("InputSender attached (wheel+resize+pointer)")
-
-            from qtpy import QtWidgets, QtGui, QtCore  # type: ignore
-
-            parent = self._canvas_native
-            if parent is not None and hasattr(parent, 'window') and callable(parent.window):
-                candidate = parent.window()
-                parent = candidate if candidate is not None else parent
-            if parent is None:
-                parent = QtWidgets.QApplication.activeWindow()
-
-            if parent is None:
-                logger.warning("InputSender shortcuts skipped: no Qt window available")
-            else:
-                plus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Plus), parent)  # type: ignore
-                eq_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Equal), parent)  # type: ignore
-                minus_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Minus), parent)  # type: ignore
-                home_sc = QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), parent)  # type: ignore
-
-                for sc in (plus_sc, eq_sc, minus_sc, home_sc):
-                    sc.setContext(QtCore.Qt.ApplicationShortcut)  # type: ignore[attr-defined]
-                    sc.setAutoRepeat(True)
-
-                plus_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
-                eq_sc.activated.connect(lambda: self._zoom_steps_at_center(+1))  # type: ignore
-                minus_sc.activated.connect(lambda: self._zoom_steps_at_center(-1))  # type: ignore
-                home_sc.activated.connect(lambda: (logger.info("shortcut: Home -> camera.reset"), self._reset_camera()))  # type: ignore
-                self._shortcuts = [plus_sc, eq_sc, minus_sc, home_sc]  # type: ignore[attr-defined]
-                logger.info("Shortcuts bound: +/-/=→zoom, Home→reset (arrows via keycb)")
+            self._log_dims_info = bool(self._env_cfg.input_log)  # type: ignore[attr-defined]
+            attach_input_sender(self)
+            bind_shortcuts(self)
 
         # Start VT pipeline workers
         self._vt_pipeline.start()
@@ -551,56 +473,7 @@ class ClientStreamLoop:
 
         # Receiver thread or smoke mode
         if self._vt_smoke:
-            logger.info("ClientStreamLoop in smoke test mode (offline)")
-            smoke_source = self._env_cfg.smoke_source
-            if smoke_source == 'pyav':
-                self._init_decoder()
-                dec = self.decoder.decode if self.decoder else None
-                self._pyav_pipeline.set_decoder(dec)
-            # Read config
-            sw = self._env_cfg.smoke_width
-            sh = self._env_cfg.smoke_height
-            preset = self._env_cfg.smoke_preset
-            if preset == '4k60':
-                sw = 3840
-                sh = 2160
-                fps = 60.0
-            else:
-                fps = self._env_cfg.smoke_fps
-            smoke_mode = self._env_cfg.smoke_mode
-            preencode = self._env_cfg.smoke_preencode
-            pre_frames = self._env_cfg.smoke_pre_frames
-            mem_cap_mb = self._env_cfg.smoke_pre_mb
-            pre_path = self._env_cfg.smoke_pre_path
-
-            cfg = SmokeConfig(
-                width=sw,
-                height=sh,
-                fps=fps,
-                smoke_mode=smoke_mode,
-                preencode=preencode,
-                pre_frames=pre_frames,
-                backlog_trigger=self._vt_backlog_trigger if smoke_source == 'vt' else self._pyav_backlog_trigger,
-                target='pyav' if smoke_source == 'pyav' else 'vt',
-                vt_latency_s=self._vt_latency_s,
-                pyav_latency_s=self._pyav_latency_s,
-                mem_cap_mb=mem_cap_mb,
-                pre_path=pre_path,
-            )
-            def _init_and_clear(avcc_b64: str, w: int, h: int) -> None:
-                self._init_vt_from_avcc(avcc_b64, w, h)
-                # In smoke mode, lift VT gate immediately after init
-                self._vt_wait_keyframe = False
-
-            self._smoke = SmokePipeline(
-                config=cfg,
-                presenter=self._presenter,
-                source_mux=self._source_mux,
-                pipeline=self._pyav_pipeline if smoke_source == 'pyav' else self._vt_pipeline,
-                init_vt_from_avcc=_init_and_clear,
-                metrics=self._metrics,
-            )
-            self._smoke.start()
+            self._smoke = start_smoke_mode(self)
         else:
             rc = ReceiveController(
                 self.server_host,
@@ -678,25 +551,6 @@ class ClientStreamLoop:
             self._frame_q.get_nowait()
         self._frame_q.put(frame)
 
-    def _try_enqueue_cached_vt_frame(self) -> bool:
-        lease = self._last_vt_lease
-        if lease is None:
-            return False
-        try:
-            lease.acquire_renderer()
-        except Exception:
-            logger.debug("VT cache acquire for fallback failed", exc_info=True)
-            return False
-
-        def _release_after_draw(_: object, _lease=lease) -> None:
-            try:
-                _lease.release_renderer()
-            except Exception:
-                logger.debug("VT cache release after fallback draw failed", exc_info=True)
-
-        self._enqueue_frame((lease, _release_after_draw))
-        return True
-
     def draw(self) -> None:
         # Guard to avoid scheduling immediate repaints from within draw
         in_draw_prev = self._in_draw
@@ -750,15 +604,15 @@ class ClientStreamLoop:
                 self._enqueue_frame((ready.payload, ready.release_cb))
             else:
                 # Cache for last-frame fallback and enqueue
-                self._last_pyav_frame = ready.payload
+                self._renderer_fallbacks.store_pyav_frame(ready.payload)
                 self._enqueue_frame(ready.payload)
 
         frame = None
         if ready is None:
             if self._source_mux.active == Source.VT:
-                self._try_enqueue_cached_vt_frame()
-            elif self._source_mux.active == Source.PYAV and self._last_pyav_frame is not None:
-                self._enqueue_frame(self._last_pyav_frame)
+                self._renderer_fallbacks.try_enqueue_cached_vt(self._enqueue_frame)
+            elif self._source_mux.active == Source.PYAV:
+                self._renderer_fallbacks.try_enqueue_pyav(self._enqueue_frame)
         # Schedule next wake based on earliest due; avoids relying on a 60 Hz loop
         # Safe: draw() runs on GUI thread
         self._schedule_next_wake()
@@ -1918,9 +1772,16 @@ class ClientStreamLoop:
             self._watchdog_timer = None
         if self._evloop_mon is not None:
             self._evloop_mon.stop()
-            self._evloop_mon = None
+        self._evloop_mon = None
 
         self._presenter.clear()
+
+        if self._smoke is not None:
+            try:
+                self._smoke.stop()
+            except Exception:
+                logger.debug("ClientStreamLoop.stop: smoke stop failed", exc_info=True)
+            self._smoke = None
 
         while True:
             try:
@@ -1932,11 +1793,10 @@ class ClientStreamLoop:
                 if release_cb is not None:
                     release_cb(payload)  # type: ignore[misc]
 
-        lease = self._last_vt_lease
-        self._last_vt_lease = None
+        lease = self._renderer_fallbacks.pop_vt_cache()
         if lease is not None:
             lease.close()
-        self._last_pyav_frame = None
+        self._renderer_fallbacks.clear_pyav()
 
         self._vt_pipeline.stop()
         self._pyav_pipeline.stop()
