@@ -1,7 +1,7 @@
 napari-cuda Streaming (EGL + NVENC)
 
 - Default encoder input: YUV444 (planar), BT.709 limited, for correct colors and smooth playback.
-  - Override via `NAPARI_CUDA_ENCODER_INPUT_FMT=ARGB|ABGR|YUV444`.
+  - Override via `NAPARI_CUDA_ENCODER_CONFIG='{"runtime": {"input_format": "ARGB"}}'` (valid values: ARGB, ABGR, YUV444, NV12).
   - YUV444 path converts RGBA->YUV444 on-GPU and feeds planar (3H x W) to NVENC.
 
 - Client decoding:
@@ -9,8 +9,8 @@ napari-cuda Streaming (EGL + NVENC)
   - Header reserved field remains for compatibility but carries no color hints.
 
 - Debugging:
-  - Frame dumps: `NAPARI_CUDA_DEBUG_FRAMES=3 NAPARI_CUDA_DUMP_DIR=logs/napari_cuda_frames`.
-  - Bitstream dump (Annex B): `NAPARI_CUDA_DUMP_BITSTREAM=120` to `logs/bitstreams/` (ensure dir exists).
+  - Frame dumps: `NAPARI_CUDA_DEBUG='{"enabled": true, "dumps": {"frames": 3, "dir": "logs/napari_cuda_frames"}}'`.
+  - Bitstream dump (Annex B): `NAPARI_CUDA_ENCODER_CONFIG='{"dump_bitstream": 120, "dump_dir": "logs/bitstreams"}'`.
 
 - Performance:
   - Server drains the pixel queue on overflow to avoid latency buildup.

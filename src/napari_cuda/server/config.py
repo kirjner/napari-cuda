@@ -16,9 +16,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
+import json
+import logging
 import os
 
 from napari_cuda.server.logging_policy import DebugPolicy, load_debug_policy
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---- Helpers -----------------------------------------------------------------
@@ -57,6 +62,100 @@ def _env_str(env: Mapping[str, str], name: str, default: Optional[str] = None) -
         return default
     v = v.strip()
     return v if v != "" else default
+
+
+def _cfg_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in {"1", "true", "yes", "on"}:
+            return True
+        if val in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(default)
+
+
+def _cfg_int(value: object, default: int) -> int:
+    if value is None:
+        return int(default)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except Exception:
+            return int(default)
+    return int(default)
+
+
+def _cfg_float(value: object, default: float) -> float:
+    if value is None:
+        return float(default)
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except Exception:
+            return float(default)
+    return float(default)
+
+
+def _cfg_str(value: object, default: str) -> str:
+    if value is None:
+        return default
+    return str(value).strip() or default
+
+
+def _cfg_optional_int(value: object, default: Optional[int]) -> Optional[int]:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except Exception:
+            return default
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return default
+        try:
+            return int(stripped)
+        except Exception:
+            return default
+    return default
+
+
+def _load_json_config(env: Mapping[str, str], name: str) -> dict[str, object]:
+    raw = env.get(name)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        logger.warning("Failed to parse %s; ignoring", name, exc_info=True)
+        return {}
+    if isinstance(data, dict):
+        return data
+    logger.warning("%s must be a JSON object; ignoring", name)
+    return {}
 
 
 # ---- Types -------------------------------------------------------------------
@@ -184,9 +283,8 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     - NAPARI_CUDA_ANIMATE, NAPARI_CUDA_TURNTABLE_DPS
     - NAPARI_CUDA_FRAME_QUEUE
     - NAPARI_CUDA_PROFILE (latency|quality)
-    - NAPARI_CUDA_FPS, NAPARI_CUDA_BITRATE, NAPARI_CUDA_KEYINT, NAPARI_CUDA_CODEC
-    - NAPARI_CUDA_IDR_ON_RESET
-    - NAPARI_CUDA_PACKER (cython|python)
+    - NAPARI_CUDA_ENCODER_CONFIG (JSON encode/runtime/bitstream overrides)
+    - NAPARI_CUDA_POLICY_CONFIG (JSON policy thresholds and hysteresis)
     """
 
     env = env or os.environ
@@ -216,19 +314,22 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
 
     profile = (_env_str(env, "NAPARI_CUDA_PROFILE", "latency") or "latency").lower()
     enc = _profile_defaults(profile)
-    # Allow basic overrides
-    fps = _env_int(env, "NAPARI_CUDA_FPS", enc.fps)
-    bitrate = _env_int(env, "NAPARI_CUDA_BITRATE", enc.bitrate)
-    keyint = _env_int(env, "NAPARI_CUDA_KEYINT", enc.keyint)
-    codec = _env_str(env, "NAPARI_CUDA_CODEC", enc.codec) or enc.codec
-    enc = EncodeCfg(fps=fps, codec=codec, bitrate=bitrate, keyint=keyint)
+    encoder_cfg = _load_json_config(env, "NAPARI_CUDA_ENCODER_CONFIG")
+    encode_section = encoder_cfg.get("encode") if isinstance(encoder_cfg, dict) else None
+    if not isinstance(encode_section, dict):
+        encode_section = encoder_cfg
+    fps = _cfg_int(encode_section.get("fps") if encode_section else None, enc.fps)
+    bitrate = _cfg_int(encode_section.get("bitrate") if encode_section else None, enc.bitrate)
+    keyint = _cfg_int(encode_section.get("keyint") if encode_section else None, enc.keyint)
+    codec = _cfg_str(encode_section.get("codec") if encode_section else enc.codec, enc.codec)
+    enc = EncodeCfg(fps=fps, codec=codec.lower(), bitrate=bitrate, keyint=keyint)
 
     max_slice_bytes = max(0, _env_int(env, "NAPARI_CUDA_MAX_SLICE_BYTES", 0))
     max_volume_bytes = max(0, _env_int(env, "NAPARI_CUDA_MAX_VOLUME_BYTES", 0))
     max_volume_voxels = max(0, _env_int(env, "NAPARI_CUDA_MAX_VOLUME_VOXELS", 0))
 
-    idr_on_reset = _env_bool(env, "NAPARI_CUDA_IDR_ON_RESET", True)
-    packer = (_env_str(env, "NAPARI_CUDA_PACKER", "cython") or "cython").lower()
+    idr_on_reset = _cfg_bool(encoder_cfg.get("idr_on_reset") if encoder_cfg else None, True)
+    packer = _cfg_str(encoder_cfg.get("packer") if encoder_cfg else "cython", "cython").lower()
 
     return ServerConfig(
         host=host,
@@ -267,6 +368,8 @@ class LevelPolicySettings:
     log_policy_eval: bool = False
     preserve_view_on_switch: bool = True
     sticky_contrast: bool = True
+    oversampling_thresholds: Optional[Mapping[int, float]] = None
+    oversampling_hysteresis: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -313,10 +416,11 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     """
     env = env or os.environ
     cfg = load_server_config(env)
+    encoder_cfg = _load_json_config(env, "NAPARI_CUDA_ENCODER_CONFIG")
 
-    frame_queue = max(1, _env_int(env, "NAPARI_CUDA_FRAME_QUEUE", 1))
-    dump_bitstream = max(0, _env_int(env, "NAPARI_CUDA_DUMP_BITSTREAM", 0))
-    dump_dir = _env_str(env, "NAPARI_CUDA_DUMP_DIR", "benchmarks/bitstreams") or "benchmarks/bitstreams"
+    frame_queue = max(1, int(getattr(cfg, "frame_queue", 1)))
+    dump_bitstream = max(0, _cfg_int(encoder_cfg.get("dump_bitstream") if encoder_cfg else None, 0))
+    dump_dir = _cfg_str(encoder_cfg.get("dump_dir") if encoder_cfg else "benchmarks/bitstreams", "benchmarks/bitstreams")
 
     _cool = _env_str(env, "NAPARI_CUDA_KF_WATCHDOG_COOLDOWN")
     try:
@@ -327,26 +431,24 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     debug_policy = load_debug_policy(env)
 
     # Encoder runtime overrides
-    input_fmt = (_env_str(env, "NAPARI_CUDA_ENCODER_INPUT_FMT", "YUV444") or "YUV444").strip().upper()
-    rc_mode = (_env_str(env, "NAPARI_CUDA_RC", "cbr") or "cbr").strip().lower()
-    preset = (_env_str(env, "NAPARI_CUDA_PRESET", "P3") or "P3").strip()
-    max_bitrate_val = _env_int(env, "NAPARI_CUDA_MAXBITRATE", 0)
-    max_bitrate = max_bitrate_val if max_bitrate_val > 0 else None
-    lookahead = max(0, _env_int(env, "NAPARI_CUDA_LOOKAHEAD", 0))
-    aq = max(0, _env_int(env, "NAPARI_CUDA_AQ", 0))
-    temporalaq = max(0, _env_int(env, "NAPARI_CUDA_TEMPORALAQ", 0))
-    nonrefp = _env_int(env, "NAPARI_CUDA_NONREFP", 0) > 0
-    bframes = max(0, _env_int(env, "NAPARI_CUDA_BFRAMES", 0))
-    try:
-        idr_period_raw = _env_int(env, "NAPARI_CUDA_IDR_PERIOD", 600)
-        idr_period = idr_period_raw if idr_period_raw > 0 else 600
-    except Exception:
-        idr_period = 600
+    runtime_cfg = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
+    if not isinstance(runtime_cfg, dict):
+        runtime_cfg = {}
+    input_fmt = _cfg_str(runtime_cfg.get("input_format"), "YUV444").upper()
+    rc_mode = _cfg_str(runtime_cfg.get("rc_mode"), "cbr").lower()
+    preset = _cfg_str(runtime_cfg.get("preset"), "P3")
+    max_bitrate_val = _cfg_optional_int(runtime_cfg.get("max_bitrate"), None)
+    lookahead = max(0, _cfg_int(runtime_cfg.get("lookahead"), 0))
+    aq = max(0, _cfg_int(runtime_cfg.get("aq"), 0))
+    temporalaq = max(0, _cfg_int(runtime_cfg.get("temporalaq"), 0))
+    nonrefp = _cfg_bool(runtime_cfg.get("non_ref_p"), False)
+    bframes = max(0, _cfg_int(runtime_cfg.get("bframes"), 0))
+    idr_period = max(1, _cfg_int(runtime_cfg.get("idr_period"), 600))
     encoder_runtime = EncoderRuntime(
         input_format=input_fmt or "YUV444",
         rc_mode=rc_mode or "cbr",
         preset=preset or "P3",
-        max_bitrate=max_bitrate,
+        max_bitrate=max_bitrate_val if (max_bitrate_val or 0) > 0 else None,
         lookahead=lookahead,
         aq=aq,
         temporalaq=temporalaq,
@@ -355,10 +457,13 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         idr_period=int(idr_period),
     )
 
+    bitstream_cfg = encoder_cfg.get("bitstream") if isinstance(encoder_cfg, dict) else {}
+    if not isinstance(bitstream_cfg, dict):
+        bitstream_cfg = {}
     bitstream_runtime = BitstreamRuntime(
-        build_cython=_env_bool(env, "NAPARI_CUDA_BUILD_CYTHON", True),
-        disable_fast_pack=_env_bool(env, "NAPARI_CUDA_DISABLE_FAST_PACK", False),
-        allow_py_fallback=_env_bool(env, "NAPARI_CUDA_ALLOW_PY_FALLBACK", False),
+        build_cython=_cfg_bool(bitstream_cfg.get("build_cython"), True),
+        disable_fast_pack=_cfg_bool(bitstream_cfg.get("disable_fast_pack"), False),
+        allow_py_fallback=_cfg_bool(bitstream_cfg.get("allow_py_fallback"), False),
     )
 
     metrics_port = _env_int(env, "NAPARI_CUDA_METRICS_PORT", 8083)
@@ -366,16 +471,30 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
 
     policy_event_path = _env_str(env, "NAPARI_CUDA_POLICY_EVENT_PATH", "tmp/policy_events.jsonl") or "tmp/policy_events.jsonl"
 
-    policy_threshold_in = _env_float(env, "NAPARI_CUDA_LEVEL_THRESHOLD_IN", 1.05)
-    policy_threshold_out = _env_float(env, "NAPARI_CUDA_LEVEL_THRESHOLD_OUT", 1.35)
-    policy_hysteresis = _env_float(env, "NAPARI_CUDA_LEVEL_HYST", 0.0)
+    policy_cfg = _load_json_config(env, "NAPARI_CUDA_POLICY_CONFIG")
+    policy_threshold_in = _cfg_float(policy_cfg.get("threshold_in") if policy_cfg else None, 1.05)
+    policy_threshold_out = _cfg_float(policy_cfg.get("threshold_out") if policy_cfg else None, 1.35)
+    policy_hysteresis = _cfg_float(policy_cfg.get("hysteresis") if policy_cfg else None, 0.0)
     fine_default = max(policy_threshold_in, 1.05)
-    policy_fine_threshold = _env_float(env, "NAPARI_CUDA_LEVEL_FINE_THRESHOLD", fine_default)
+    policy_fine_threshold = _cfg_float(policy_cfg.get("fine_threshold") if policy_cfg else None, fine_default)
     policy_fine_threshold = max(policy_threshold_in, policy_fine_threshold)
-    policy_cooldown_ms = _env_float(env, "NAPARI_CUDA_LEVEL_SWITCH_COOLDOWN_MS", 150.0)
-    policy_log_eval = _env_bool(env, "NAPARI_CUDA_LOG_POLICY_EVAL", False)
-    policy_preserve_view = _env_bool(env, "NAPARI_CUDA_PRESERVE_VIEW", True)
-    policy_sticky_contrast = _env_bool(env, "NAPARI_CUDA_STICKY_CONTRAST", True)
+    policy_cooldown_ms = _cfg_float(policy_cfg.get("cooldown_ms") if policy_cfg else None, 150.0)
+    policy_log_eval = debug_policy.logging.log_policy_eval
+    policy_preserve_view = _cfg_bool(policy_cfg.get("preserve_view_on_switch") if policy_cfg else None, True)
+    policy_sticky_contrast = _cfg_bool(policy_cfg.get("sticky_contrast") if policy_cfg else None, True)
+
+    overs_cfg = policy_cfg.get("oversampling") if isinstance(policy_cfg, dict) else {}
+    if not isinstance(overs_cfg, dict):
+        overs_cfg = {}
+    oversampling_thresholds_raw = overs_cfg.get("thresholds") if isinstance(overs_cfg, dict) else None
+    oversampling_thresholds = None
+    if isinstance(oversampling_thresholds_raw, Mapping):
+        oversampling_thresholds = {
+            int(k): float(v)
+            for k, v in oversampling_thresholds_raw.items()
+            if v is not None
+        }
+    oversampling_hysteresis = _cfg_float(overs_cfg.get("hysteresis") if overs_cfg else None, 0.1)
 
     policy_settings = LevelPolicySettings(
         threshold_in=float(policy_threshold_in),
@@ -386,6 +505,8 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         log_policy_eval=bool(policy_log_eval),
         preserve_view_on_switch=bool(policy_preserve_view),
         sticky_contrast=bool(policy_sticky_contrast),
+        oversampling_thresholds=oversampling_thresholds,
+        oversampling_hysteresis=float(oversampling_hysteresis),
     )
 
     return ServerCtx(

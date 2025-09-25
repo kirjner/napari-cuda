@@ -1,3 +1,5 @@
+import json
+
 from napari_cuda.server.logging_policy import load_debug_policy
 
 
@@ -14,20 +16,25 @@ def test_debug_policy_defaults():
 
 def test_debug_policy_env_overrides():
     env = {
-        "NAPARI_CUDA_DEBUG": "1",
-        "NAPARI_CUDA_DEBUG_FRAMES": "5",
-        "NAPARI_CUDA_LOG_KEYFRAMES": "1",
-        "NAPARI_CUDA_LOG_SPS": "1",
-        "NAPARI_CUDA_FORCE_TIGHT_PITCH": "1",
-        "NAPARI_CUDA_ROI_EDGE_THRESHOLD": "7",
-        "NAPARI_CUDA_LOG_NALS": "1",
-        "NAPARI_CUDA_INTERP": "nearest",
+        "NAPARI_CUDA_DEBUG": json.dumps(
+            {
+                "enabled": True,
+                "flags": ["camera", "encoder-keyframes", "encoder-sps", "encoder-nals"],
+                "dumps": {"frames": 5},
+                "worker": {
+                    "force_tight_pitch": True,
+                    "roi_edge_threshold": 7,
+                    "layer_interpolation": "nearest",
+                },
+            }
+        )
     }
     policy = load_debug_policy(env)
     assert policy.enabled is True
     assert policy.dumps.enabled is True
     assert policy.dumps.frames_budget == 5
     assert policy.encoder.log_keyframes is True
+    assert policy.encoder.log_nals is True
     assert policy.encoder.log_sps is True
     assert policy.worker.force_tight_pitch is True
     assert policy.worker.roi_edge_threshold == 7

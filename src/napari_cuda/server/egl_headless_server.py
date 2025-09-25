@@ -22,22 +22,60 @@ from websockets.exceptions import ConnectionClosed
 import importlib.resources as ilr
 import socket
 
+def _merge_encoder_config(base: Mapping[str, object], override: Mapping[str, object]) -> dict[str, object]:
+    merged: dict[str, object] = {k: v for k, v in base.items()}
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_encoder_config(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _build_encoder_override_env(base_env: Mapping[str, str], patch: Mapping[str, object]) -> dict[str, str]:
+    if not patch:
+        return {}
+    merged_base: dict[str, object] = {}
+    raw = base_env.get('NAPARI_CUDA_ENCODER_CONFIG')
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                merged_base = loaded
+        except Exception:
+            logger.debug("Failed to parse existing encoder config; starting fresh", exc_info=True)
+    merged = _merge_encoder_config(merged_base, patch)
+    return {'NAPARI_CUDA_ENCODER_CONFIG': json.dumps(merged)}
+
+
 # Encoder profile presets for convenient NVENC tuning
-def _apply_encoder_profile(profile: str) -> dict[str, str]:
-    profiles: dict[str, dict[str, str]] = {
+def _apply_encoder_profile(profile: str) -> dict[str, object]:
+    profiles: dict[str, dict[str, object]] = {
         'latency': {
-            'NAPARI_CUDA_RC': 'cbr',
+            'runtime': {
+                'rc_mode': 'cbr',
+                'lookahead': 0,
+                'aq': 0,
+                'temporalaq': 0,
+                'bframes': 0,
+                'preset': 'P3',
+            },
         },
         'quality': {
-            'NAPARI_CUDA_RC': 'vbr',
-            'NAPARI_CUDA_BITRATE': '35000000',
-            'NAPARI_CUDA_MAXBITRATE': '45000000',
-            'NAPARI_CUDA_LOOKAHEAD': '10',
-            'NAPARI_CUDA_AQ': '1',
-            'NAPARI_CUDA_TEMPORALAQ': '1',
-            'NAPARI_CUDA_BFRAMES': '2',
-            'NAPARI_CUDA_PRESET': 'P5',
-            'NAPARI_CUDA_IDR_PERIOD': '120',
+            'encode': {
+                'bitrate': 35_000_000,
+            },
+            'runtime': {
+                'rc_mode': 'vbr',
+                'max_bitrate': 45_000_000,
+                'lookahead': 10,
+                'aq': 1,
+                'temporalaq': 1,
+                'bframes': 2,
+                'preset': 'P5',
+                'idr_period': 120,
+            },
         },
     }
     settings = profiles.get((profile or '').lower())
@@ -45,7 +83,7 @@ def _apply_encoder_profile(profile: str) -> dict[str, str]:
         return {}
     if logger.isEnabledFor(logging.INFO):
         logger.info("Encoder profile '%s' resolved overrides: %s", profile, settings)
-    return dict(settings)
+    return settings
 
 from .egl_worker import EGLRendererWorker
 from .scene_state import ServerSceneState
@@ -105,7 +143,18 @@ class EGLHeadlessServer:
         self.host = host
         self.state_port = state_port
         self.pixel_port = pixel_port
-        self.cfg = EncodeConfig(fps=fps)
+        encode_cfg = getattr(self._ctx.cfg, 'encode', None)
+        codec_map = {'h264': 1, 'hevc': 2, 'av1': 3}
+        if encode_cfg is None:
+            self.cfg = EncodeConfig(fps=fps)
+        else:
+            codec_name = str(getattr(encode_cfg, 'codec', 'h264')).lower()
+            self.cfg = EncodeConfig(
+                fps=int(getattr(encode_cfg, 'fps', fps)),
+                codec=codec_map.get(codec_name, 1),
+                bitrate=int(getattr(encode_cfg, 'bitrate', 10_000_000)),
+                keyint=int(getattr(encode_cfg, 'keyint', 120)),
+            )
         self._animate = bool(animate)
         try:
             self._animate_dps = float(animate_dps)
@@ -1894,10 +1943,7 @@ class EGLHeadlessServer:
 
     async def _broadcast_loop(self) -> None:
         # Always use paced broadcasting with latest-wins coalescing for smooth delivery
-        try:
-            target_fps = float(self._ctx_env.get('NAPARI_CUDA_BROADCAST_FPS', str(self.cfg.fps)))
-        except Exception:
-            target_fps = float(self.cfg.fps)
+        target_fps = float(getattr(self._ctx.cfg.encode, 'fps', getattr(self.cfg, 'fps', 60)))
         loop = asyncio.get_running_loop()
         tick = 1.0 / max(1.0, target_fps)
         next_t = loop.time()
@@ -2279,8 +2325,13 @@ def main() -> None:
     args = parser.parse_args()
 
     async def run():
-        # Determine encoder profile overrides before building the server context
-        profile_overrides = _apply_encoder_profile(args.encoder_profile)
+        encoder_patch = _apply_encoder_profile(args.encoder_profile)
+        encode_section = encoder_patch.setdefault('encode', {})
+        if not isinstance(encode_section, dict):
+            encode_section = {}
+            encoder_patch['encode'] = encode_section
+        encode_section['fps'] = int(args.fps)
+        profile_overrides = _build_encoder_override_env(os.environ, encoder_patch)
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
                                 animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),

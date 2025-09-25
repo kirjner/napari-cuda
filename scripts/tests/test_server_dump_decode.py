@@ -20,7 +20,10 @@ def test_decode_dump_if_present():
     else:
         files = sorted(glob.glob('benchmarks/bitstreams/*.h264'))
         if not files:
-            pytest.skip("no dumped bitstreams found; set NAPARI_CUDA_DUMP_BITSTREAM to generate")
+            pytest.skip(
+                "no dumped bitstreams found; set NAPARI_CUDA_ENCODER_CONFIG with "
+                "{\"dump_bitstream\": <count>} to generate"
+            )
         candidate = pathlib.Path(files[-1])
     # Try to decode a few packets
     with av.open(str(candidate), 'r') as container:
@@ -35,4 +38,3 @@ def test_decode_dump_if_present():
             if frames >= 1:
                 break
         assert frames >= 1, f"failed to decode any frames from {candidate}"
-

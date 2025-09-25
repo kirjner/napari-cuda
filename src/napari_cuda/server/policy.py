@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Callable, Mapping, Sequence
 
 from .zarr_source import LevelDescriptor
@@ -17,41 +15,7 @@ ThresholdMap = Mapping[int, float]
 PolicyFunc = Callable[["LevelSelectionContext"], int | None]
 
 
-def _parse_thresholds(env_value: str | None, fallback: ThresholdMap) -> dict[int, float]:
-    """Parse level:threshold pairs from an env string."""
-    if not env_value:
-        return dict(fallback)
-    result: dict[int, float] = {}
-    for item in env_value.split(','):
-        item = item.strip()
-        if not item:
-            continue
-        if ':' not in item:
-            logger.warning("Invalid threshold token '%s'; expected level:value", item)
-            continue
-        level_part, value_part = item.split(':', 1)
-        try:
-            level = int(level_part)
-            value = float(value_part)
-        except ValueError:
-            logger.warning("Invalid threshold entry '%s'; skipping", item)
-            continue
-        if value <= 0:
-            logger.warning("Threshold for level %d must be > 0; skipping", level)
-            continue
-        result[level] = float(value)
-    if not result:
-        return dict(fallback)
-    return result
-
-
-@lru_cache(maxsize=8)
-def _cached_thresholds(env_value: str | None) -> dict[int, float]:
-    """Cache parsed thresholds for a given env string."""
-    default_thresholds = {0: 1.25, 1: 2.5}
-    thresholds = dict(default_thresholds)
-    thresholds.update(_parse_thresholds(env_value, thresholds))
-    return thresholds
+_DEFAULT_OVERSAMPLING_THRESHOLDS: dict[int, float] = {0: 1.25, 1: 2.5}
 
 
 @dataclass(frozen=True)
@@ -61,6 +25,7 @@ class LevelSelectionContext:
     intent_level: int | None
     level_oversampling: Mapping[int, float]
     thresholds: ThresholdMap | None = None
+    hysteresis: float = 0.1
 
 
 def select_by_oversampling(ctx: LevelSelectionContext) -> int | None:
@@ -68,8 +33,7 @@ def select_by_oversampling(ctx: LevelSelectionContext) -> int | None:
     if not ctx.levels:
         return ctx.intent_level
 
-    # Cache thresholds derived from env; allow per-call overrides to tweak live
-    thresholds = dict(_cached_thresholds(os.getenv('NAPARI_CUDA_LEVEL_THRESHOLDS')))
+    thresholds = dict(_DEFAULT_OVERSAMPLING_THRESHOLDS)
     if ctx.thresholds:
         thresholds.update({int(k): float(v) for k, v in ctx.thresholds.items()})
 
@@ -82,10 +46,7 @@ def select_by_oversampling(ctx: LevelSelectionContext) -> int | None:
         thresholds.setdefault(max_level, float('inf'))
 
     ordered = sorted({int(desc.index) for desc in ctx.levels})
-    try:
-        hysteresis = float(os.getenv('NAPARI_CUDA_OVERSAMPLING_HYSTERESIS', '0.1') or '0.1')
-    except Exception:
-        hysteresis = 0.1
+    hysteresis = float(ctx.hysteresis)
     for level in ordered:
         overs = overs_map.get(level)
         if overs is None:

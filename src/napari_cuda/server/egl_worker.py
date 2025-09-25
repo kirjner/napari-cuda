@@ -409,6 +409,12 @@ class EGLRendererWorker:
         self._last_step: Optional[tuple[int, ...]] = None
         self._level_switch_cooldown_ms = float(policy_cfg.cooldown_ms)
         self._last_level_switch_ts = 0.0
+        self._oversampling_thresholds = (
+            {int(k): float(v) for k, v in policy_cfg.oversampling_thresholds.items()}
+            if getattr(policy_cfg, "oversampling_thresholds", None)
+            else None
+        )
+        self._oversampling_hysteresis = float(getattr(policy_cfg, "oversampling_hysteresis", 0.1))
 
     def _configure_roi_settings(self) -> None:
         self._roi_cache: Dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
@@ -550,7 +556,8 @@ class EGLRendererWorker:
             current_level=int(self._active_ms_level),
             intent_level=int(intent_level) if intent_level is not None else None,
             level_oversampling=overs_map,
-            thresholds=None,
+            thresholds=self._oversampling_thresholds,
+            hysteresis=self._oversampling_hysteresis,
         )
 
     def _estimate_level_bytes(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:

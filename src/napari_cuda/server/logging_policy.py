@@ -1,65 +1,19 @@
 from __future__ import annotations
 
-"""Centralised debug/logging policy for the napari-cuda server stack.
+"""Central debug/logging policy plumbing for the napari-cuda server."""
 
-This module materialises immutable dataclasses that capture every logging and
-debug toggle currently consumed by the server, worker, and rendering layers.
-All env var parsing happens here so the rest of the codebase can depend on a
-structured policy rather than scattered `os.getenv`/`env_bool` calls.
-"""
-
+import json
+import logging
 import os
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Iterable, Mapping, Optional
 
 
-def _env_bool(env: Mapping[str, str], name: str, default: bool = False) -> bool:
-    raw = env.get(name)
-    if raw is None:
-        return default
-    val = raw.strip().lower()
-    if val in {"1", "true", "yes", "on"}:
-        return True
-    if val in {"0", "false", "no", "off"}:
-        return False
-    try:
-        return bool(int(raw))
-    except Exception:
-        return default
-
-
-def _env_int(env: Mapping[str, str], name: str, default: int = 0) -> int:
-    raw = env.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw, 10)
-    except Exception:
-        return default
-
-
-def _env_float(env: Mapping[str, str], name: str, default: float = 0.0) -> float:
-    raw = env.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except Exception:
-        return default
-
-
-def _env_str(env: Mapping[str, str], name: str, default: Optional[str] = None) -> Optional[str]:
-    raw = env.get(name)
-    if raw is None:
-        return default
-    raw = raw.strip()
-    return raw if raw else default
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class LoggingToggles:
-    """Worker/server logging flags."""
-
     log_camera_info: bool = False
     log_camera_debug: bool = False
     log_state_traces: bool = False
@@ -73,8 +27,6 @@ class LoggingToggles:
 
 @dataclass(frozen=True)
 class EncoderLogging:
-    """Encoder/bitstream specific logging flags."""
-
     log_keyframes: bool = False
     log_encoder_settings: bool = True
     log_nals: bool = False
@@ -83,8 +35,6 @@ class EncoderLogging:
 
 @dataclass(frozen=True)
 class DumpControls:
-    """Frame dump / diagnostics configuration."""
-
     enabled: bool = False
     frames_budget: int = 0
     output_dir: str = "logs/napari_cuda_frames"
@@ -94,8 +44,6 @@ class DumpControls:
 
 @dataclass(frozen=True)
 class WorkerDebug:
-    """Worker-only debug knobs."""
-
     debug_pan: bool = False
     debug_orbit: bool = False
     debug_reset: bool = False
@@ -115,8 +63,6 @@ class WorkerDebug:
 
 @dataclass(frozen=True)
 class DebugPolicy:
-    """Composite debug/logging policy for the server runtime."""
-
     enabled: bool
     logging: LoggingToggles
     encoder: EncoderLogging
@@ -124,78 +70,183 @@ class DebugPolicy:
     worker: WorkerDebug
 
 
-def load_debug_policy(env: Optional[Mapping[str, str]] = None) -> DebugPolicy:
-    """Read debug/logging flags from the provided environment mapping."""
+_LOG_FLAG_MAP: dict[str, Iterable[str]] = {
+    "camera": ("log_camera_info", "log_camera_debug"),
+    "state": ("log_state_traces",),
+    "volume": ("log_volume_info",),
+    "dims": ("log_dims_info",),
+    "policy": ("log_policy_eval",),
+    "sends": ("log_sends_env",),
+    "layer": ("log_layer_debug",),
+    "roi": ("log_roi_anchor",),
+}
 
-    if env is None:
-        env = os.environ
+_ENCODER_FLAG_MAP: dict[str, Iterable[str]] = {
+    "encoder-keyframes": ("log_keyframes",),
+    "encoder-nals": ("log_nals",),
+    "encoder-sps": ("log_sps",),
+    "encoder-settings": ("log_encoder_settings",),
+}
 
-    # General logging
-    logging = LoggingToggles(
-        log_camera_info=_env_bool(env, "NAPARI_CUDA_LOG_CAMERA_INFO", False),
-        log_camera_debug=_env_bool(env, "NAPARI_CUDA_LOG_CAMERA_DEBUG", False),
-        log_state_traces=_env_bool(env, "NAPARI_CUDA_LOG_STATE_TRACES", False),
-        log_volume_info=_env_bool(env, "NAPARI_CUDA_LOG_VOLUME_INFO", False),
-        log_dims_info=_env_bool(env, "NAPARI_CUDA_LOG_DIMS_INFO", False),
-        log_policy_eval=_env_bool(env, "NAPARI_CUDA_LOG_POLICY_EVAL", False),
-        log_sends_env=_env_bool(env, "NAPARI_CUDA_LOG_SENDS", False),
-        log_layer_debug=_env_bool(env, "NAPARI_CUDA_LAYER_DEBUG", False),
-        log_roi_anchor=_env_bool(env, "NAPARI_CUDA_LOG_ROI_ANCHOR", False),
-    )
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off", ""}
 
-    encoder = EncoderLogging(
-        log_keyframes=_env_bool(env, "NAPARI_CUDA_LOG_KEYFRAMES", False),
-        log_encoder_settings=_env_bool(env, "NAPARI_CUDA_LOG_ENCODER_SETTINGS", True),
-        log_nals=_env_bool(env, "NAPARI_CUDA_LOG_NALS", False),
-        log_sps=_env_bool(env, "NAPARI_CUDA_LOG_SPS", False),
-    )
 
-    # Dump controls piggy-back on the master debug switch by default
-    debug_enabled = _env_bool(env, "NAPARI_CUDA_DEBUG", False)
-    dump_frames = _env_int(env, "NAPARI_CUDA_DEBUG_FRAMES", 3)
-    dump_dir = _env_str(env, "NAPARI_CUDA_DUMP_DIR", "logs/napari_cuda_frames") or "logs/napari_cuda_frames"
-    dumps = DumpControls(
-        enabled=debug_enabled and dump_frames > 0,
-        frames_budget=max(0, dump_frames),
-        output_dir=dump_dir,
-        flip_cuda_for_view=_env_bool(env, "NAPARI_CUDA_DEBUG_FLIP_CUDA", False),
-        raw_budget=max(0, _env_int(env, "NAPARI_CUDA_DUMP_RAW", 0)),
-    )
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in _TRUTHY:
+            return True
+        if val in _FALSY:
+            return False
+    return default
 
-    orbit_el_min = _env_float(env, "NAPARI_CUDA_ORBIT_ELEV_MIN", -85.0)
-    orbit_el_max = _env_float(env, "NAPARI_CUDA_ORBIT_ELEV_MAX", 85.0)
-    lock_level_raw = _env_str(env, "NAPARI_CUDA_LOCK_LEVEL")
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except Exception:
+            return int(default)
+    return int(default)
+
+
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except Exception:
+            return float(default)
+    return float(default)
+
+
+def _split_flags(raw: object) -> set[str]:
+    result: set[str] = set()
+    items: Iterable[object]
+    if raw is None:
+        return result
+    if isinstance(raw, str):
+        items = raw.split(",")
+    elif isinstance(raw, Iterable):
+        items = raw
+    else:
+        return result
+    for item in items:
+        token = str(item).strip().lower()
+        if token:
+            result.add(token)
+    return result
+
+
+def _load_debug_config(env: Mapping[str, str]) -> tuple[bool, dict[str, object]]:
+    raw = env.get("NAPARI_CUDA_DEBUG")
+    if raw is None:
+        return False, {}
+    raw_str = raw.strip()
+    if raw_str.lower() in _FALSY:
+        return False, {}
+    if raw_str.lower() in _TRUTHY:
+        return True, {}
     try:
-        lock_level = int(lock_level_raw) if lock_level_raw not in (None, "") else None
+        parsed = json.loads(raw_str)
+        if isinstance(parsed, dict):
+            enabled = _coerce_bool(parsed.get("enabled", True), True)
+            return enabled, parsed
+        if isinstance(parsed, (list, tuple)):
+            return True, {"flags": parsed}
     except Exception:
-        lock_level = None
+        logger.debug("Failed to parse NAPARI_CUDA_DEBUG JSON; treating as flag list", exc_info=True)
+    return True, {"flags": raw_str}
 
-    worker = WorkerDebug(
-        debug_pan=_env_bool(env, "NAPARI_CUDA_DEBUG_PAN", False),
-        debug_orbit=_env_bool(env, "NAPARI_CUDA_DEBUG_ORBIT", False),
-        debug_reset=_env_bool(env, "NAPARI_CUDA_DEBUG_RESET", False),
-        debug_zoom_drift=_env_bool(env, "NAPARI_CUDA_DEBUG_ZOOM_DRIFT", False),
-        debug_bg_overlay=_env_bool(env, "NAPARI_CUDA_DEBUG_BG", False),
-        debug_overlay=_env_bool(env, "NAPARI_CUDA_DEBUG_OVERLAY", False),
-        orbit_el_min=float(orbit_el_min),
-        orbit_el_max=float(orbit_el_max),
-        lock_level=lock_level,
-        roi_edge_threshold=_env_int(env, "NAPARI_CUDA_ROI_EDGE_THRESHOLD", 4),
-        roi_align_chunks=_env_bool(env, "NAPARI_CUDA_ROI_ALIGN_CHUNKS", False),
-        roi_ensure_contains_viewport=_env_bool(env, "NAPARI_CUDA_ROI_ENSURE_CONTAINS_VIEWPORT", True),
-        auto_reset_on_black=_env_bool(env, "NAPARI_CUDA_AUTO_RESET_ON_BLACK", True),
-        force_tight_pitch=_env_bool(env, "NAPARI_CUDA_FORCE_TIGHT_PITCH", False),
-        layer_interpolation=(
-            (_env_str(env, "NAPARI_CUDA_INTERP", "bilinear") or "bilinear").strip().lower()
-        ),
+
+def load_debug_policy(env: Optional[Mapping[str, str]] = None) -> DebugPolicy:
+    env = env or os.environ
+    enabled, cfg = _load_debug_config(env)
+
+    flag_source = cfg.get("flags") if isinstance(cfg, dict) else []
+    flags = _split_flags(flag_source)
+
+    log_kwargs = {field: False for field in LoggingToggles.__annotations__.keys()}
+    for flag, attrs in _LOG_FLAG_MAP.items():
+        if flag in flags:
+            for attr in attrs:
+                log_kwargs[attr] = True
+
+    enc_kwargs = {field: getattr(EncoderLogging, field, None) for field in EncoderLogging.__annotations__.keys()}
+    enc_defaults = EncoderLogging()
+    enc_kwargs = {name: getattr(enc_defaults, name) for name in EncoderLogging.__annotations__.keys()}
+    for flag, attrs in _ENCODER_FLAG_MAP.items():
+        if flag in flags:
+            for attr in attrs:
+                enc_kwargs[attr] = True
+
+    dumps_cfg = cfg.get("dumps") if isinstance(cfg, dict) else {}
+    default_frames = 3
+    if isinstance(dumps_cfg, dict):
+        frames = _coerce_int(dumps_cfg.get("frames", default_frames), default_frames)
+        raw_budget = _coerce_int(dumps_cfg.get("raw_frames", 0), 0)
+        output_dir = str(dumps_cfg.get("dir", "logs/napari_cuda_frames") or "logs/napari_cuda_frames")
+        flip = _coerce_bool(dumps_cfg.get("flip"), False)
+    else:
+        frames = default_frames
+        raw_budget = 0
+        output_dir = "logs/napari_cuda_frames"
+        flip = False
+    dumps = DumpControls(
+        enabled=enabled and frames > 0,
+        frames_budget=max(0, frames),
+        output_dir=output_dir,
+        flip_cuda_for_view=flip,
+        raw_budget=max(0, raw_budget),
     )
+
+    worker_cfg = cfg.get("worker") if isinstance(cfg, dict) else {}
+    worker_defaults = WorkerDebug()
+    worker_kwargs = worker_defaults.__dict__.copy()
+    if isinstance(worker_cfg, dict):
+        if "lock_level" in worker_cfg:
+            worker_kwargs["lock_level"] = int(worker_cfg["lock_level"]) if worker_cfg["lock_level"] is not None else None
+        if "roi_edge_threshold" in worker_cfg:
+            worker_kwargs["roi_edge_threshold"] = max(0, _coerce_int(worker_cfg["roi_edge_threshold"], worker_defaults.roi_edge_threshold))
+        if "auto_reset_on_black" in worker_cfg:
+            worker_kwargs["auto_reset_on_black"] = _coerce_bool(worker_cfg["auto_reset_on_black"], worker_defaults.auto_reset_on_black)
+        if "force_tight_pitch" in worker_cfg:
+            worker_kwargs["force_tight_pitch"] = _coerce_bool(worker_cfg["force_tight_pitch"], worker_defaults.force_tight_pitch)
+        if "layer_interpolation" in worker_cfg:
+            worker_kwargs["layer_interpolation"] = str(worker_cfg["layer_interpolation"]).strip().lower() or worker_defaults.layer_interpolation
+        if "orbit_el_min" in worker_cfg:
+            worker_kwargs["orbit_el_min"] = _coerce_float(worker_cfg["orbit_el_min"], worker_defaults.orbit_el_min)
+        if "orbit_el_max" in worker_cfg:
+            worker_kwargs["orbit_el_max"] = _coerce_float(worker_cfg["orbit_el_max"], worker_defaults.orbit_el_max)
+
+    logging_toggles = LoggingToggles(**log_kwargs)
+    encoder_logging = EncoderLogging(**enc_kwargs)
+    worker_debug = WorkerDebug(**worker_kwargs)
 
     return DebugPolicy(
-        enabled=debug_enabled,
-        logging=logging,
-        encoder=encoder,
+        enabled=enabled,
+        logging=logging_toggles,
+        encoder=encoder_logging,
         dumps=dumps,
-        worker=worker,
+        worker=worker_debug,
     )
 
 

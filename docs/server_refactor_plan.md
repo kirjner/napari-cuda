@@ -65,26 +65,33 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   5. **Residual god-object trimming** — In flight. The worker still orchestrates capture/encode timing, camera command side-effects, scene draining, and budget logging. Each will be delegated to the new helpers below to push the worker under 1,600 LOC.
 
 ### Phase D — Logging & Debug Policy (next)
-- **D0: Inventory freeze** — capture the current env + debug landscape (`rg "NAPARI_CUDA_"` counts, `try:` totals) and stash the figures in this doc. Acceptance: one table covering env keys by domain (config, logging, dumps, metrics) plus the worker/package try counts so we can prove the cleanup landed.
-- Baseline snapshot (2025-09-24):
-  | Domain | Unique env keys | Modules touching env directly |
+- **D0: Inventory freeze** — capture the current env + debug landscape (`rg "NAPARI_CUDA_"` counts, `try:` totals) and stash the figures in this doc. Acceptance: up-to-date tables covering env domains and guard counts so we can prove the cleanup landed.
+- Snapshot (2025-09-25):
+  | Domain | Unique env keys | Notes |
   | --- | --- | --- |
-  | Core server/encoder config | 38 | `config.py`, `egl_headless_server.py`, `rendering/encoder.py`, `bitstream.py`
-  | Logging + debug toggles | 23 (`NAPARI_CUDA_LOG_*`, `NAPARI_CUDA_DEBUG*`) | `config.py`, `egl_worker.py`, `debug_tools.py`, `rendering/adapter_scene.py`, `frame_pipeline.py`, `egl_headless_server.py`
-  | Dump / capture controls | 4 (`NAPARI_CUDA_DUMP_*`) | `config.py`, `debug_tools.py`, `rendering/frame_pipeline.py`
-  | Policy + metrics | 14 (`NAPARI_CUDA_LEVEL_*`, `NAPARI_CUDA_METRICS_*`, `NAPARI_CUDA_POLICY_EVENT_PATH`, `NAPARI_CUDA_PRESERVE_VIEW`, `NAPARI_CUDA_STICKY_CONTRAST`, `NAPARI_CUDA_OVERSAMPLING_HYSTERESIS`) | `config.py`, `policy.py`, `metrics.py`, `egl_worker.py`
+  | Encoder/runtime | 21 | NVENC presets + byte budgets live in `config.py`; `egl_headless_server.py` still reads `NAPARI_CUDA_BROADCAST_FPS` directly. |
+  | Logging/debug | 21 | All parsed via `logging_policy.py`; worker helpers flip behaviour off `DebugPolicy`. |
+  | Runtime ops | 17 | Host/port sizing, queue depth, animation toggles, HW limits. |
+  | Metrics | 4 | Metrics server port/refresh and the policy event log path. |
+  | Zarr selectors | 4 | Dataset axes/levels/z hints for NGFF sources. |
+  | Patterns | 3 | Synthetic image helpers retained for demos/tests. |
+  | Debug | 1 | `NAPARI_CUDA_DEBUG` JSON (flags, dumps, worker tweaks). |
+  | Encoder/runtime | 1 | `NAPARI_CUDA_ENCODER_CONFIG` JSON (encode/runtime/bitstream overrides). |
+  | Policy | 1 | `NAPARI_CUDA_POLICY_CONFIG` JSON (LOD + oversampling settings). |
 
   | Metric | Current value | Collection command |
   | --- | --- | --- |
-  | `try:` blocks in `egl_worker.py` | 23 | `rg -c "try:" src/napari_cuda/server/egl_worker.py` |
-  | `try:` blocks in `src/napari_cuda/server` | 345 | `rg -c "try:" src/napari_cuda/server | awk -F: '{sum+=$2} END {print sum}'` |
+  | `try:` blocks in `egl_worker.py` | 18 | `rg -c "try:" src/napari_cuda/server/egl_worker.py` |
+  | `try:` blocks in `src/napari_cuda/server` | 342 | `uv run python - <<'PY' ...` *(inline reducer summing `rg -c` output)* |
 - **D1: Debug policy surface** — introduce `logging_policy.py` (or `config.debug`) that materialises a `DebugPolicy` dataclass from `ServerCtx`. Enumerate every logging/dump toggle we found (`NAPARI_CUDA_LOG_*`, `NAPARI_CUDA_DEBUG_*`, dump + policy flags) with type hints and defaults. Acceptance: the dataclass is the only place that knows about these env keys and ships descriptive docstrings.
 - **D1: Debug policy surface** ✅ — `logging_policy.py` now materialises `DebugPolicy` (with nested dataclasses) from `ServerCtx`. Every logging/dump flag lives there with docstrings + type hints, and unit coverage exists in `_tests/test_logging_policy.py`.
 - **D2: Context + CLI wiring** ✅ — `load_server_ctx` builds and carries the policy; `EGLHeadlessServer` logs the snapshot and passes it through to worker/capture. CLI still controls env overrides pre-load; future work can add explicit flags if needed.
 - **D3: Worker + pipeline adoption** ✅ — worker/rendering/capture stack consume the policy directly. `DebugDumper` and `FramePipeline` respect policy budgets, and raw dumps no longer mutate `os.environ`. `git grep os.getenv src/napari_cuda/server/egl_worker.py` is clean.
 - **D4: Rendering + bitstream alignment** ✅ — `ServerCtx` now exposes `encoder_runtime`/`bitstream` dataclasses feeding `rendering/encoder.py` and `bitstream.py`; `AdapterScene` pulls interpolation from the debug policy; bitstream packer wiring is configured via `configure_bitstream(self._ctx.bitstream)`. Direct env reads in these modules are gone—`rg "NAPARI_CUDA_" src/napari_cuda/server/rendering` and `rg "NAPARI_CUDA_" src/napari_cuda/server/bitstream.py` are clean.
-- **D5: Logging guard cleanup** — audit `try/except` blocks that only defend logging/formatting (`debug_tools.DebugDumper.log_env_once`, `_apply_encoder_profile`, ROI logging). Replace internal guards with assertions or helper methods that catch once at the boundary (`logger.exception`). Acceptance: worker `try:` count <25, server package <50, with before/after numbers recorded in this doc.
-- **D6: Docs, tests, lint policy** — document the policy flow in `docs/server_architecture.md`, add unit coverage for env resolution + policy wiring, and codify a Ruff-backed lint policy (documented in this phase) that enforces the new logging/debug rules. Extend `ruff.toml` (or equivalent) with rules that block fresh `os.getenv`/`env_bool` calls in the server package and flag logging-only `try/except` guards. Acceptance: new tests live under `src/napari_cuda/server/_tests/test_logging_policy.py`, the lint policy is documented in this doc + `docs/server_architecture.md`, and CI Ruff runs fail on regressions.
+- **D5: Debug flag consolidation** ✅ — `NAPARI_CUDA_DEBUG` now carries JSON (`{"enabled": true, "flags": [...], "dumps": {...}, "worker": {...}}`) parsed by `logging_policy`. All legacy `NAPARI_CUDA_DEBUG_*` / `NAPARI_CUDA_LOG_*` vars are gone, tests updated, and docs refreshed.
+- **D6: Encoder override bundle** ✅ — `NAPARI_CUDA_ENCODER_CONFIG` replaces the NVENC/bitstream env sprawl. `load_server_ctx` hydrates encode/runtime/bitstream structures from JSON, CLI profiles merge through `_build_encoder_override_env`, and `egl_headless_server` no longer peeks at `NAPARI_CUDA_BROADCAST_FPS`.
+- **D7: Logging guard cleanup** — audit `try/except` blocks that only defend logging/formatting (`debug_tools.DebugDumper.log_env_once`, budget loggers, adapter scene stats). Replace internal guards with assertions or boundary helpers so only I/O surfaces retain broad catches. Acceptance: worker `try:` count stays ≤18 while the whole server package drops below 250 on the path to the <50 target post-refactor, with before/after numbers recorded here.
+- **D8: Docs, tests, lint policy** — document the consolidated policy flow in `docs/server_architecture.md`, add regression coverage for the new parsers, and codify a Ruff-backed lint policy that blocks fresh `os.getenv`/`env_bool` usage and logging-only try/except blocks inside `src/napari_cuda/server`. Acceptance: lint rule enabled, docs updated, and CI fails on regressions.
 
 Implementation slices:
 1. **Policy scaffolding** ✅ — `logging_policy.py` landed; `ServerCtx` now owns `debug_policy` and startup logs the resolved snapshot.
