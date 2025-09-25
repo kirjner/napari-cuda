@@ -17,6 +17,7 @@ from typing import Callable, Optional, Tuple
 from qtpy import QtCore
 
 from napari_cuda.client.streaming.types import Source, SubmittedFrame
+from napari_cuda.client.streaming.vt_frame import FrameLease
 from napari_cuda.codec.avcc import is_annexb, annexb_to_avcc, split_avcc_by_len
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,11 @@ class VTPipeline:
             self._hold_cache = ((_os.getenv('NAPARI_CUDA_VT_HOLD_CACHE', '1') or '1').lower() in ('1','true','yes','on'))
         except Exception:
             self._hold_cache = True
-        self._last_payload = None  # type: ignore[var-annotated]
-        self._last_persistent = False
+        self._cache_lock = threading.Lock()
+        self._cache_lease: FrameLease | None = None
+        self._cache_persistent: bool = False
+        self._stop_event = threading.Event()
+        self._threads: list[Thread] = []
         # Scheduling hook to coordinator (optional)
         self._schedule_next_wake = schedule_next_wake or (lambda: None)
         # Drain coordination to reduce busy polling
@@ -90,23 +94,33 @@ class VTPipeline:
     def start(self) -> None:
         if self._started:
             return
+        self._stop_event.clear()
+        self._threads = []
 
         def _submit_worker() -> None:
-            while True:
+            while not self._stop_event.is_set():
                 try:
                     data, ts = self._in_q.get(timeout=0.1)
-                except Exception:
+                except queue.Empty:
                     # Timeout or queue error; nothing to submit
                     continue
+                except Exception:
+                    if self._stop_event.is_set():
+                        break
+                    logger.debug("VTPipeline: submit queue error", exc_info=True)
+                    continue
+                if self._stop_event.is_set():
+                    break
                 try:
                     self._decode_vt_live(data, ts)
                     # Decoded data may be ready for drain
                     self._drain_event.set()
                 except Exception:
                     logger.exception("VTPipeline: decode submit failed")
+            logger.debug("VTPipeline: submit worker exiting")
 
         def _drain_worker() -> None:
-            while True:
+            while not self._stop_event.is_set():
                 try:
                     dec = self._decoder
                     if dec is None:
@@ -115,54 +129,43 @@ class VTPipeline:
                         self._drain_event.clear()
                         continue
                     drained = False
-                    while True:
+                    while not self._stop_event.is_set():
                         item = dec.get_frame_nowait()
                         if not item:
                             break
                         drained = True
                         img_buf, pts = item
                         if self._is_gated():
-                            # Drain but don't present while waiting for keyframe
                             from napari_cuda import _vt as vt  # type: ignore
-                            vt.release_frame(img_buf)
+                            lease = FrameLease(vt, img_buf)
+                            lease.release_decoder()
                             continue
-                        # Present and cache last
                         from napari_cuda import _vt as vt  # type: ignore
-                        # Optionally keep a last-frame cache; otherwise avoid extra retains
+                        lease = FrameLease(vt, img_buf)
                         if self._hold_cache:
-                            # Retain once for cache
-                            vt.retain_frame(img_buf)
-                            # Release previously cached payload
-                            if self._last_payload is not None:
-                                try:
-                                    vt.release_frame(self._last_payload)
-                                except Exception:
-                                    logger.debug("VTPipeline: release previous cached payload failed", exc_info=True)
-                            self._last_payload = img_buf
-                            self._last_persistent = True
-                            self._on_cache_last(self._last_payload, True)
+                            self._publish_cache(lease, True)
                         else:
-                            # No cache retained
-                            self._last_payload = None
-                            self._last_persistent = False
-                            self._on_cache_last(None, False)
-                        # Retain once for presenter-owned buffer entry
-                        vt.retain_frame(img_buf)
-                        self._presenter.submit(
-                            SubmittedFrame(
-                                source=Source.VT,
-                                server_ts=float(pts) if pts is not None else None,
-                                arrival_ts=time.perf_counter(),
-                                payload=img_buf,
-                                release_cb=vt.release_frame,
-                            )
-                        )
-                        # Release the base reference obtained from vt_get_frame();
-                        # retains above keep the buffer alive for cache/presenter as needed.
+                            self._publish_cache(None, False)
+                        lease.acquire_presenter()
                         try:
-                            vt.release_frame(img_buf)
+                            self._presenter.submit(
+                                SubmittedFrame(
+                                    source=Source.VT,
+                                    server_ts=float(pts) if pts is not None else None,
+                                    arrival_ts=time.perf_counter(),
+                                    payload=lease,
+                                    release_cb=None,
+                                )
+                            )
                         except Exception:
-                            logger.debug("VTPipeline: base release failed", exc_info=True)
+                            logger.exception("VTPipeline: presenter submit failed")
+                            try:
+                                lease.release_presenter()
+                            except Exception:
+                                logger.debug("VTPipeline: presenter release after failure failed", exc_info=True)
+                            lease.release_decoder()
+                            continue
+                        lease.release_decoder()
                         # Nudge coordinator to schedule next-due wake (thread-safe via proxy)
                         try:
                             self._schedule_next_wake()
@@ -185,41 +188,59 @@ class VTPipeline:
                         self._drain_event.clear()
                 except Exception:
                     logger.debug("VTPipeline: drain worker error", exc_info=True)
+            logger.debug("VTPipeline: drain worker exiting")
 
-        Thread(target=_submit_worker, daemon=True).start()
-        Thread(target=_drain_worker, daemon=True).start()
-        # Optional periodic VT debug logging
-        import os as _os
-        _vt_debug = (_os.getenv('NAPARI_CUDA_VT_DEBUG', '0') or '0') in ('1','true','yes','on')
-        if _vt_debug:
-            def _vt_debugger() -> None:
-                last = None
-                while True:
-                    try:
-                        dec = self._decoder
-                        if dec is not None and hasattr(dec, 'stats'):
-                            s = dec.stats()  # type: ignore[attr-defined]
-                            # s: (submits, outputs, qlen, drops, retains, releases)
-                            if last is not None:
-                                dt_sub = s[0] - last[0]
-                                dt_out = s[1] - last[1]
-                                dt_ret = s[4] - last[4]
-                                dt_rel = s[5] - last[5]
-                                outstanding = s[4] - s[5]
-                                logger.info(
-                                    "VT dbg: sub=%d out=%d q=%d drop=%d ret=%d rel=%d outstd=%d (+ret=%d +rel=%d)",
-                                    s[0], s[1], s[2], s[3], s[4], s[5], outstanding, dt_ret, dt_rel,
-                                )
-                            else:
-                                logger.info(
-                                    "VT dbg: sub=%d out=%d q=%d drop=%d ret=%d rel=%d", s[0], s[1], s[2], s[3], s[4], s[5]
-                                )
-                            last = s
-                        time.sleep(1.0)
-                    except Exception:
-                        time.sleep(1.0)
-            Thread(target=_vt_debugger, daemon=True).start()
+        t_submit = Thread(target=_submit_worker, daemon=True)
+        t_drain = Thread(target=_drain_worker, daemon=True)
+        t_submit.start()
+        t_drain.start()
+        self._threads.extend([t_submit, t_drain])
         self._started = True
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._stop_event.set()
+        self._drain_event.set()
+        # Wake submit worker by ensuring queue.get timeout will elapse soon
+        for t in list(self._threads):
+            try:
+                t.join(timeout=0.5)
+            except Exception:
+                logger.debug("VTPipeline: join failed", exc_info=True)
+        self._threads.clear()
+        # Drain any queued inputs
+        try:
+            while True:
+                self._in_q.get_nowait()
+        except queue.Empty:
+            pass
+        except Exception:
+            logger.debug("VTPipeline: queue drain during stop failed", exc_info=True)
+
+        cached: FrameLease | None = None
+        with self._cache_lock:
+            cached = self._cache_lease
+            self._cache_lease = None
+            self._cache_persistent = False
+        if cached is not None:
+            try:
+                cached.close()
+            except Exception:
+                logger.debug("VTPipeline: cached lease close failed", exc_info=True)
+        try:
+            self._on_cache_last(None, False)
+        except Exception:
+            logger.debug("VTPipeline: cache clear callback during stop failed", exc_info=True)
+        # Flush decoder once more to encourage VT to retire surfaces
+        dec = self._decoder
+        if dec is not None:
+            try:
+                dec.flush()  # type: ignore[attr-defined]
+            except Exception:
+                logger.debug("VTPipeline: decoder flush during stop failed", exc_info=True)
+        self._decoder = None
+        self._started = False
 
     def set_decoder(self, dec: Optional[object]) -> None:
         self._decoder = dec
@@ -238,7 +259,7 @@ class VTPipeline:
                 self._on_backlog_gate()
                 if self._metrics is not None:
                     self._metrics.inc('napari_cuda_client_vt_backlog_gates', 1.0)
-                self.clear()
+                self.clear(preserve_cache=True)
                 self._presenter.clear(Source.VT)
                 self._request_keyframe()
             else:
@@ -259,8 +280,20 @@ class VTPipeline:
             logger.debug("VTPipeline: qsize failed", exc_info=True)
             return 0
 
-    def clear(self) -> None:
+    def clear(self, *, preserve_cache: bool = False) -> None:
         try:
+            cached = None
+            if not preserve_cache:
+                with self._cache_lock:
+                    cached = self._cache_lease
+                    self._cache_lease = None
+                    self._cache_persistent = False
+                if cached is not None:
+                    try:
+                        cached.release_cache()
+                    except Exception:
+                        logger.debug("VTPipeline: cache release failed", exc_info=True)
+                self._on_cache_last(None, False)
             while self._in_q.qsize() > 0:
                 try:
                     _ = self._in_q.get_nowait()
@@ -277,8 +310,35 @@ class VTPipeline:
         except Exception:
             return None
 
-    def last_payload_info(self) -> Tuple[object | None, bool]:
-        return self._last_payload, bool(self._last_persistent)
+    # Internal helpers -------------------------------------------------
+
+    def _publish_cache(self, lease: FrameLease | None, persistent: bool) -> None:
+        if lease is not None and persistent:
+            try:
+                lease.acquire_cache()
+            except Exception:
+                logger.debug("VTPipeline: acquire cache failed", exc_info=True)
+                lease = None
+                persistent = False
+        with self._cache_lock:
+            old = self._cache_lease
+            self._cache_lease = lease if persistent else None
+            self._cache_persistent = bool(persistent and lease is not None)
+        if persistent and lease is not None:
+            try:
+                self._on_cache_last(lease, True)
+            except Exception:
+                logger.debug("VTPipeline: cache callback failed", exc_info=True)
+        else:
+            try:
+                self._on_cache_last(None, False)
+            except Exception:
+                logger.debug("VTPipeline: cache clear callback failed", exc_info=True)
+        if old is not None and old is not lease:
+            try:
+                old.release_cache()
+            except Exception:
+                logger.debug("VTPipeline: release previous cache failed", exc_info=True)
 
     # Internal decode submit with normalization
     def _decode_vt_live(self, data: bytes | memoryview, ts: float | None) -> None:

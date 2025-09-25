@@ -321,8 +321,7 @@ class ClientStreamLoop:
         self._pyav_wait_keyframe: bool = False
 
         # Last-frame caches for redraw fallback
-        self._last_vt_payload = None  # VT payload capsule
-        self._last_vt_persistent = False
+        self._last_vt_lease = None  # FrameLease for VT cached frame
         self._last_pyav_frame = None
 
         # Frame queue for renderer (latest-wins)
@@ -357,6 +356,8 @@ class ClientStreamLoop:
         self._evloop_stall_ms = self._env_cfg.evloop_stall_ms
         self._evloop_sample_ms = self._env_cfg.evloop_sample_ms
         self._evloop_mon: Optional[EventLoopMonitor] = None
+        self._quit_hook_connected = False
+        self._stopped = False
         # Video dimensions (from video_config)
         self._vid_w: Optional[int] = None
         self._vid_h: Optional[int] = None
@@ -471,6 +472,7 @@ class ClientStreamLoop:
         self._in_present = False
 
     def start(self) -> None:
+        self._stopped = False
         # State channel thread (disabled in offline VT smoke mode)
         if not self._vt_smoke:
             st = StateController(
@@ -665,10 +667,35 @@ class ClientStreamLoop:
                 on_stall_kick=_kick,
             )
 
-    def _enqueue_frame(self, frame: np.ndarray) -> None:
+        if not self._quit_hook_connected:
+            app = QtCore.QCoreApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(self.stop)
+                self._quit_hook_connected = True
+
+    def _enqueue_frame(self, frame: object) -> None:
         if self._frame_q.full():
             self._frame_q.get_nowait()
         self._frame_q.put(frame)
+
+    def _try_enqueue_cached_vt_frame(self) -> bool:
+        lease = self._last_vt_lease
+        if lease is None:
+            return False
+        try:
+            lease.acquire_renderer()
+        except Exception:
+            logger.debug("VT cache acquire for fallback failed", exc_info=True)
+            return False
+
+        def _release_after_draw(_: object, _lease=lease) -> None:
+            try:
+                _lease.release_renderer()
+            except Exception:
+                logger.debug("VT cache release after fallback draw failed", exc_info=True)
+
+        self._enqueue_frame((lease, _release_after_draw))
+        return True
 
     def draw(self) -> None:
         # Guard to avoid scheduling immediate repaints from within draw
@@ -719,22 +746,17 @@ class ClientStreamLoop:
                 elif not ready.preview:
                     self._relearn_logged = False
             if src_val == 'vt':
-                # Zero-copy path: pass CVPixelBuffer + release_cb through to GLRenderer
-                release_cb = None if ready.preview else ready.release_cb
-                self._enqueue_frame((ready.payload, release_cb))
+                # Always pass renderer release callback; leases manage refcounts internally.
+                self._enqueue_frame((ready.payload, ready.release_cb))
             else:
                 # Cache for last-frame fallback and enqueue
                 self._last_pyav_frame = ready.payload
                 self._enqueue_frame(ready.payload)
 
         frame = None
-        # Optional legacy last-frame fallback (temporary, gated). When disabled,
-        # rely on renderer persistence and presenter preview to avoid flicker.
-        if ready is None and self._keep_last_frame_fallback:
+        if ready is None:
             if self._source_mux.active == Source.VT:
-                pb, persistent = self._vt_pipeline.last_payload_info()
-                if pb is not None and persistent:
-                    self._enqueue_frame((pb, None))
+                self._try_enqueue_cached_vt_frame()
             elif self._source_mux.active == Source.PYAV and self._last_pyav_frame is not None:
                 self._enqueue_frame(self._last_pyav_frame)
         # Schedule next wake based on earliest due; avoids relying on a 60 Hz loop
@@ -1792,7 +1814,7 @@ class ClientStreamLoop:
             if self._sync.update_and_check(cur):
                 if self._vt_decoder is not None:
                     self._vt_wait_keyframe = True
-                    self._vt_pipeline.clear()
+                    self._vt_pipeline.clear(preserve_cache=True)
                     self._presenter.clear(Source.VT)
                     self._request_keyframe_once()
                 self._pyav_wait_keyframe = True
@@ -1878,16 +1900,53 @@ class ClientStreamLoop:
                 self._presenter.set_latency(cur)
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+
         if self._stats_timer is not None:
             self._stats_timer.stop()
+            self._stats_timer = None
         if self._metrics_timer is not None:
             self._metrics_timer.stop()
+            self._metrics_timer = None
         if self._warmup_reset_timer is not None:
             self._warmup_reset_timer.stop()
+            self._warmup_reset_timer = None
         if self._watchdog_timer is not None:
             self._watchdog_timer.stop()
+            self._watchdog_timer = None
         if self._evloop_mon is not None:
             self._evloop_mon.stop()
+            self._evloop_mon = None
+
+        self._presenter.clear()
+
+        while True:
+            try:
+                frame = self._frame_q.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(frame, tuple) and len(frame) == 2:
+                payload, release_cb = frame  # type: ignore[assignment]
+                if release_cb is not None:
+                    release_cb(payload)  # type: ignore[misc]
+
+        lease = self._last_vt_lease
+        self._last_vt_lease = None
+        if lease is not None:
+            lease.close()
+        self._last_pyav_frame = None
+
+        self._vt_pipeline.stop()
+        self._pyav_pipeline.stop()
+
+        if self._vt_decoder is not None:
+            self._vt_decoder.flush()
+            close_decoder = getattr(self._vt_decoder, 'close', None)
+            if callable(close_decoder):
+                close_decoder()
+            self._vt_decoder = None
 
     # VT decode/submit is handled by VTPipeline
 

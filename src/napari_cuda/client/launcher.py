@@ -218,8 +218,10 @@ def launch_streaming_client(server_host='localhost',
     
     # Run Qt event loop
     napari.run()
-    
+
     # Cleanup
+    if mgr is not None:
+        mgr.stop()
     proxy_viewer.close()
     logger.info("Client closed")
 

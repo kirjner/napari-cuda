@@ -103,6 +103,48 @@
 - Impact: streaming client hard exits (Fatal Python error: Segmentation fault) with multiple worker threads still alive; this blocks further QA of the refactor until mitigated.
 - Spike tasks:
   - Capture native backtraces via `lldb -- uv run napari-cuda-client` with the VT safe flag flipped both on/off.
-  - Instrument `renderer.py` around `_draw_vt_texture` with guard logs for cache rebuilds, GL state, and texture IDs (gated behind `NAPARI_CUDA_VT_GL_DEBUG`).
+  - Ensure `renderer.py` around `_draw_vt_texture` continues to emit guard logs for cache rebuilds, GL state, and texture IDs without requiring debug env toggles.
   - Audit VT retain/release counts during the gate transition (`RemoteLayerRegistry` swap) to confirm we do not double-release keyframe payloads.
   - Update `docs/debugging/vt_zero_copy_crash.md` with findings and ensure mitigations are tracked as blockers before Phase C kicks off.
+
+### Phase C — VT Pipeline Re-architecture (2025-09-26 spike)
+
+**Motivation**
+
+- Repeated VT segfaults point to unsafe capsule ownership: decoder, cache, presenter, and renderer all `retain`/`release` the same buffer independently.
+- Cache state is shared via raw capsules (`_last_payload`) with no synchronisation, so presenter clears or gate transitions can release a buffer while Qt still draws it.
+- The existing refcount “anomaly” logging adds noise but cannot prevent double-release; we need structural lifetime ownership instead of heuristics.
+
+**Guiding Shape**
+
+1. (done) Introduce a `FrameLease` abstraction that wraps a VT capsule plus a role-based refcount (`decoder`, `cache`, `presenter`, `renderer`). Only the lease calls into VideoToolbox.
+2. (done) Pipelines create leases as soon as `dec.get_frame_nowait()` returns and drop the decoder role immediately after wiring cache + presenter consumers.
+3. (done) Presenter buffers store leases (not raw capsules) and release the presenter role whenever frames are trimmed or cleared.
+4. (done) Renderer acquires the renderer role before drawing, hands the capsule to the GL shim, then releases on completion via the presenter-supplied callback. Fallback uploads do the same.
+5. (done) Cache/gate logic manipulates lease roles only—no direct capsule swapping—so gate entry/exit merely toggles submissions without invalidating the cache lease. The stream loop now reuses the cached lease automatically when no fresh VT frame is dequeued.
+
+**Implementation Steps**
+
+1. (done) `client/streaming/vt_frame.py`: define `FrameLease`, role enum, and context helpers (`lease.acquire_renderer()`, etc.), plus assertions for mismatched release.
+2. (done) `pipelines/vt_pipeline.py`:
+   - Replace `_last_payload` with `_cache_lease` guarded by a lock.
+   - Emit `SubmittedFrame` objects carrying leases; make `release_cb` call `lease.release_presenter`.
+   - Simplify `clear()` to release cache/presenter roles without touching capsules; gating clears now preserve the cached lease.
+3. (done) `presenter.py`: store leases inside `_BufItem`, releasing presenter role when items fall out of the deque.
+4. (done) `client_stream_loop.py`: update draw queue to push leases; when no frame arrives, reuse `_cache_lease` by acquiring the renderer role via `_try_enqueue_cached_vt_frame()`.
+5. (done) `renderer.py`: accept leases with explicit release callbacks and hand capsules to the GL shim; renderer never invents its own release logic.
+6. (done) Delete the VT retain/release audit scaffolding added during the spike—lease invariants make it redundant.
+
+**Outstanding Lease Cleanup (as of 2025-09-25)**
+
+- (done) Add a deterministic shutdown path that quiesces the VT pipeline before the decoder is torn down; Qt `aboutToQuit` now drives `ClientStreamLoop.stop()` and the launcher calls it explicitly during cleanup.
+- (done) Remove the legacy VT retain/release tracing now that shutdown is hardened.
+- Once shutdown is stable, re-exercise the spike harness (ndisplay flips, camera resets, back-to-back gates) with the default logging pipeline to confirm no regressions.
+
+**Validation Plan**
+
+- Run manual scenarios (`ndisplay` flips, camera resets, backlog gating) with `NAPARI_CUDA_VT_GL_SAFE=1` and the new lease instrumentation logs.
+- Track outstanding renderer roles via debug counters to confirm zero at idle.
+- Capture docs updates in `docs/debugging/vt_zero_copy_crash.md` once behaviour stabilises.
+
+> Branch note: work continues on `client-refactor` (see branch strategy above). We stashed the spike tweaks and will reimplement VT on a feature branch stemming from the clean refactor base.

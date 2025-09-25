@@ -7,6 +7,7 @@ from typing import Callable, TYPE_CHECKING
 
 from napari_cuda.client.streaming.pipelines.pyav_pipeline import PyAVPipeline
 from napari_cuda.client.streaming.pipelines.vt_pipeline import VTPipeline
+from napari_cuda.client.streaming.vt_frame import FrameLease
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
@@ -31,8 +32,8 @@ def build_vt_pipeline(
 
     def _on_cache_last(payload: object, persistent: bool) -> None:
         try:
-            loop._last_vt_payload = payload
-            loop._last_vt_persistent = bool(persistent)
+            lease: FrameLease | None = payload if isinstance(payload, FrameLease) else None
+            loop._last_vt_lease = lease
         except Exception:
             logger.debug("cache last VT payload callback failed", exc_info=True)
 

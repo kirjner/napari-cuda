@@ -10,6 +10,8 @@ from vispy.gloo import Texture2D, Program
 
 from OpenGL import GL as GL  # type: ignore
 
+from napari_cuda.client.streaming.vt_frame import FrameLease
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +112,6 @@ class GLRenderer:
         # VT zero-copy state (initialized lazily inside draw when needed)
         self._vt = None  # type: ignore
         self._vt_cache = None  # GLCache capsule
-        self._gl_dbg_last_log: float = 0.0
         self._gl_frame_counter: int = 0
         # Debug safety: force CPU mapping instead of zero-copy
         try:
@@ -222,12 +223,7 @@ class GLRenderer:
         self._vt_cache = None
         self._vt_first_draw_logged = False
         self._gl_frame_counter = 0
-        try:
-            import os as _os
-            if (_os.getenv('NAPARI_CUDA_VT_GL_DEBUG', '0') or '0') in ('1', 'true', 'yes', 'on'):
-                logger.info("GLRenderer: GL context change detected; resources rebuilt")
-        except Exception:
-            logger.debug("GLRenderer: context-change debug log failed", exc_info=True)
+        logger.debug("GLRenderer: GL context change detected; resources rebuilt")
 
     def _maybe_handle_context_change(self) -> None:
         ctx_id = self._current_context_id()
@@ -306,22 +302,25 @@ class GLRenderer:
         if isinstance(frame, tuple) and len(frame) == 2:
             payload, release_cb = frame  # type: ignore[assignment]
 
+        lease = payload if isinstance(payload, FrameLease) else None
+        vt_resource = lease.capsule if lease is not None else payload
+
         # Try VT zero-copy path if payload looks like a CVPixelBuffer and OpenGL is available
         drew_vt = False
         vt_attempted = False
-        if payload is not None:
+        if vt_resource is not None:
             try:
                 # Lazy import to detect VT capsule
                 if self._vt is None:
                     from napari_cuda import _vt as vt  # type: ignore
                     self._vt = vt
-                pf = self._vt.pixel_format(payload)  # type: ignore[misc]
+                pf = self._vt.pixel_format(vt_resource)  # type: ignore[misc]
                 if pf is not None and not self._vt_force_cpu:
                     if self._vt_cache is None:
                         self._vt_cache = self._vt.gl_cache_init_for_current_context()
                     if self._vt_cache:
                         vt_attempted = True
-                        drew_vt = self._draw_vt_texture(self._vt_cache, payload)
+                        drew_vt = self._draw_vt_texture(self._vt_cache, vt_resource)
                         if drew_vt and release_cb is not None:
                             release_after_draw_cb = release_cb
                             release_after_draw_payload = payload
@@ -350,21 +349,21 @@ class GLRenderer:
             # Fallback: upload numpy RGB
             if self._video_program is None or self._video_texture is None:
                 self._init_resources()
-            if payload is not None:
+            if vt_resource is not None:
                 try:
                     # If payload is a CVPixelBuffer and force_cpu is on, map to RGB bytes
                     if self._vt is not None:
                         try:
-                            pf = self._vt.pixel_format(payload)  # type: ignore[misc]
+                            pf = self._vt.pixel_format(vt_resource)  # type: ignore[misc]
                         except Exception:
                             pf = None
                         if pf is not None and self._vt_force_cpu:
-                            data = self._vt.map_to_rgb(payload)
+                            data = self._vt.map_to_rgb(vt_resource)
                             arr = np.frombuffer(data[0], dtype=np.uint8).reshape((int(data[2]), int(data[1]), 3))
                         else:
-                            arr = np.asarray(payload)
+                            arr = np.asarray(vt_resource)
                     else:
-                        arr = np.asarray(payload)
+                        arr = np.asarray(vt_resource)
                     if arr.dtype != np.uint8 or not arr.flags.c_contiguous:
                         arr = np.ascontiguousarray(arr, dtype=np.uint8)
                 except Exception:
@@ -608,21 +607,6 @@ class GLRenderer:
                     self._vt.gl_cache_flush(cache_cap)
             except Exception:
                 logger.debug("gl_cache_flush failed", exc_info=True)
-            # Optional GL cache debug
-            try:
-                import os as _os, time as _time
-                if (_os.getenv('NAPARI_CUDA_VT_GL_DEBUG', '0') or '0') in ('1','true','yes','on'):
-                    now = _time.time()
-                    if now - float(self._gl_dbg_last_log or 0.0) >= 1.0:
-                        try:
-                            creates, releases = self._vt.gl_cache_counts(cache_cap)  # type: ignore[misc]
-                            queue_depth = len(self._vt_release_queue) if self._vt_gl_safe else 0
-                            logger.info("VT GL dbg: cache creates=%d releases=%d queue=%d", int(creates), int(releases), int(queue_depth))
-                        except Exception:
-                            logger.debug("VT draw: cache counts failed", exc_info=True)
-                        self._gl_dbg_last_log = now
-            except Exception:
-                logger.debug("VT draw: debug logging failed", exc_info=True)
             return True
         except Exception:
             logger.debug("VT draw failed", exc_info=True)

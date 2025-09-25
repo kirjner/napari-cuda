@@ -9,7 +9,6 @@ sporadic segmentation faults observed while presenting VT zero-copy frames in
 - Segfault happens shortly after `GLRenderer: VT zero-copy draw engaged` logs.
 - `VT dbg` counter shows `ret` and `rel` deltas of roughly `+120/+180` per
   second; `outstd` trends negative even when the pipeline keeps up.
-- `VT GL dbg` never reports cache releases (texture cache retains GL objects).
 - Crashes reproduce even with `NAPARI_CUDA_VT_GL_SAFE=1` (current safe mode
   performs a blocking `glFinish()` before calling `gl_release_tex`).
 - 2025-09-25 spike: segfault now reproduces immediately after the stream loop
@@ -66,9 +65,6 @@ napari_cuda.client.launcher.launch_streaming_client -> main
 - Capture an `lldb` native backtrace with symbols for the Apple VT stack while
   the segfault reproduces. This will confirm whether the crash happens inside
   `IOSurface` release or within our GL shim.
-- Instrument `_draw_vt_texture` with per-frame debug logs (texture IDs, cache
-  handles, GL target) gated behind `NAPARI_CUDA_VT_GL_DEBUG` so we can correlate
-  the fatal frame with VT retain/release counters.
 - Verify VT retain/release balance during the gate lift: ensure the initial
   keyframe retains the buffer exactly twice (cache + presenter). Audit the base
   `vt.release_frame` in the presenter to rule out double-release at the end of
@@ -82,9 +78,7 @@ napari_cuda.client.launcher.launch_streaming_client -> main
    helpers that restore state in `finally` blocks.
 2. Recreate the VT texture cache when the Vispy canvas reports a context
    change (`on_initialize`, `on_resize`, or via a context UUID check).
-3. Instrument cache rebuilds and GL state transitions with debug logs gated by
-   `NAPARI_CUDA_VT_GL_DEBUG`.
-4. Add presenter-side assertions to ensure every retained VT frame has exactly
+3. Add presenter-side assertions to ensure every retained VT frame has exactly
    two outstanding references (cache + renderer) while the frame is live.
 
 ## Next Steps
