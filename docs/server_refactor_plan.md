@@ -113,7 +113,7 @@ Implementation slices:
      - Replace direct attribute mutations with helper calls that operate on `ServerSceneData` (e.g. `server_scene.update_volume_state(...)`).
      - Emit immutable `ServerSceneState` snapshots by copying from the bag before handing off to the worker.
      - Ensure the dims/spec broadcast helpers only read from the bag; no hidden state on the server object.
-     - Remaining LOC now sits in `_handle_pixel`, metrics/event plumbing, and worker lifecycle glue; future slices target those clusters.
+     - Remaining LOC now sits in `_handle_pixel`, metrics/event plumbing, worker lifecycle glue, and the embedded Dash server; future slices target those clusters with focused helpers.
      - State-channel orchestration lives in `server_scene_control.py` (`handle_state`, `process_state_message`, `broadcast_dims_update`, `rebroadcast_meta`, metrics writers); `EGLHeadlessServer` now only wires the websocket handlers to these helpers.
      - Helpers operate as free functions over the scene bag and server interface, matching the data-oriented style we committed to for Phase E.
   6. **Worker→control queue** — route worker refresh notifications through a dedicated channel so metadata stays ahead of each broadcast:
@@ -121,16 +121,26 @@ Implementation slices:
      - Teach the control loop to drain that queue before emitting `dims.update` / `scene.spec`, updating `ServerSceneData` and `ViewerSceneManager` inside the same critical section so `build_dims_payload` always sees aligned axes.
      - Delete the `pending_worker_step` scaffolding once the queue is wired, keeping the scene bag free of cross-thread scratch state and eliminating the ad-hoc flush helper.
 
-  6. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
+  7. **Pixel channel extraction** — peel `_handle_pixel`, `_broadcast_loop`, and keyframe watchdog logic into a procedural `pixel_channel.py` module:
+     - Expose a `PixelChannelState` bag (clients, queue, bypass settings, drops) plus free functions to accept packets, manage bypass/keyframe timers, and write metrics.
+     - This leaves `egl_headless_server` with only lifecycle wiring; state mutation happens through the bag so tests can cover queue draining without websockets.
+     - Add unit tests for watchdog restart, drop counters, and safe-send pruning; reuse the existing broadcaster state for consistency.
+  8. **Metrics/Dash helper** — hoist the metrics server startup/shutdown (`_start_metrics_server`, `_stop_metrics_server`, Dash wiring) into `server_metrics.py`:
+     - The helper should own the Dash app factory and HTTP routes, accepting the `Metrics` object and config. `EGLHeadlessServer` just calls `start_metrics(server_ctx)` / `stop_metrics(handle)`.
+     - Update docs to describe the new module and move the current logging/exception handling out of `egl_headless_server`.
+  9. **Worker lifecycle module** — extract worker start/stop + scene refresh wiring into `server_worker.py`:
+     - Provide functions for `start_worker(server, loop)` and `stop_worker(server)` that build the renderer, register callbacks, and handle cleanup.
+     - This trims the 300+ lines of worker boot logic from `egl_headless_server` and gives us a single place to reason about worker creation.
+  10. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
      - Add a focused pytest (`test_server_scene_data.py`) to cover the new helper functions and dim-sequence wraparound once they land.
-  7. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
+  11. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
      - Document the `server_scene` helpers inline (docstrings) and add a `ServerScene` section to the architecture doc once the spec builder is in place.
-  8. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
+  12. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
      - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap, projection, interpolation, depiction) alongside validation helpers.
      - Extend `ServerSceneData` with render-property fields so handlers mutate data snapshots instead of `self`.
      - Add procedural helpers to apply each mutation, enqueue worker commands, and trigger authoritative rebroadcasts.
      - Cover with focused tests asserting state updates and outgoing `layer.update` mirrors.
-  9. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
+  13. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
 - Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.
 
 ### Phase F — Worker State Extraction (later)
