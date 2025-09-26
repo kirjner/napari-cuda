@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import base64
 import logging
 import os
 import struct
@@ -18,9 +17,9 @@ from pathlib import Path
 from typing import Awaitable, Dict, List, Optional, Set, Mapping
 
 import websockets
-from websockets.exceptions import ConnectionClosed
 import importlib.resources as ilr
 import socket
+from websockets.exceptions import ConnectionClosed
 
 def _merge_encoder_config(base: Mapping[str, object], override: Mapping[str, object]) -> dict[str, object]:
     merged: dict[str, object] = {k: v for k, v in base.items()}
@@ -108,7 +107,7 @@ from napari_cuda.server.config import (
     ServerCtx,
     load_server_ctx,
 )
-from . import pixel_broadcaster
+from . import pixel_broadcaster, pixel_channel
 from .server_scene_control import (
     broadcast_dims_update,
     build_dims_update_message,
@@ -164,9 +163,11 @@ class EGLHeadlessServer:
         encode_cfg = getattr(self._ctx.cfg, 'encode', None)
         codec_map = {'h264': 1, 'hevc': 2, 'av1': 3}
         if encode_cfg is None:
+            self._codec_name = 'h264'
             self.cfg = EncodeConfig(fps=fps)
         else:
             codec_name = str(getattr(encode_cfg, 'codec', 'h264')).lower()
+            self._codec_name = codec_name if codec_name in codec_map else 'h264'
             self.cfg = EncodeConfig(
                 fps=int(getattr(encode_cfg, 'fps', fps)),
                 codec=codec_map.get(codec_name, 1),
@@ -186,10 +187,24 @@ class EGLHeadlessServer:
         qsize = int(self._ctx.frame_queue)
         frame_queue: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
         log_sends_flag = bool(log_sends or policy_logging.log_sends_env)
-        self._pixel = pixel_broadcaster.PixelBroadcastState(
+        broadcast_state = pixel_broadcaster.PixelBroadcastState(
             frame_queue=frame_queue,
             clients=set(),
             log_sends=log_sends_flag,
+        )
+        self._pixel_config = pixel_channel.PixelChannelConfig(
+            width=self.width,
+            height=self.height,
+            fps=float(self.cfg.fps),
+            codec_id=self.cfg.codec,
+            codec_name=self._codec_name,
+            kf_watchdog_cooldown_s=float(self._ctx.kf_watchdog_cooldown_s),
+        )
+        self._pixel_channel = pixel_channel.PixelChannelState(
+            broadcast=broadcast_state,
+            needs_config=True,
+            last_avcc=None,
+            kf_watchdog_cooldown_s=self._pixel_config.kf_watchdog_cooldown_s,
         )
         self._seq = 0
         self._stop = threading.Event()
@@ -202,14 +217,10 @@ class EGLHeadlessServer:
         )
         # Bitstream parameter cache and config tracking (server-side)
         self._param_cache = ParamCache()
-        self._needs_config = True
-        self._last_avcc: Optional[bytes] = None
         # Optional bitstream dump for validation
         self._dump_remaining = int(self._ctx.dump_bitstream)
         self._dump_dir = self._ctx.dump_dir
         self._dump_path: Optional[str] = None
-        # Keyframe watchdog cooldown to avoid rapid encoder resets
-        self._kf_watchdog_cooldown_s = float(self._ctx.kf_watchdog_cooldown_s)
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.Lock()
         if logger.isEnabledFor(logging.INFO):
@@ -278,6 +289,20 @@ class EGLHeadlessServer:
         except Exception:
             logger.debug("volume intent log failed", exc_info=True)
 
+    def _try_reset_encoder(self) -> bool:
+        worker = self._worker
+        if worker is None:
+            return False
+        worker.reset_encoder()
+        return True
+
+    def _try_force_idr(self) -> bool:
+        worker = self._worker
+        if worker is None:
+            return False
+        worker.force_idr()
+        return True
+
     def _schedule_coro(self, coro: Awaitable[None], label: str) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -337,50 +362,16 @@ class EGLHeadlessServer:
         return
 
     async def _ensure_keyframe(self) -> None:
-        """Request a clean keyframe and set up watchdog + pacing bypass.
+        """Request a clean keyframe and arrange for watchdog + config resend."""
 
-        Tries a lightweight IDR request first; falls back to encoder reset.
-        Also rebroadcasts current video_config if available.
-        """
-        if self._worker is None:
-            return
-        # Try force IDR; fall back to reset without nesting
-        forced = False
-        try:
-            self._worker.force_idr()
-            forced = True
-        except Exception:
-            logger.debug("force_idr request failed; will reset encoder", exc_info=True)
-        if not forced:
-            try:
-                self._worker.reset_encoder()
-            except Exception:
-                logger.exception("Encoder reset failed in ensure_keyframe")
-                return
-            self._pixel.kf_last_reset_ts = time.time()
-        # Bypass pacing once to deliver next keyframe immediately
-        self._pixel.bypass_until_key = True
-        # Count encoder force/reset; log failure instead of passing
-        try:
-            self.metrics.inc('napari_cuda_encoder_resets')
-        except Exception:
-            logger.debug("metrics inc failed: napari_cuda_encoder_resets", exc_info=True)
-        # Start/restart watchdog to hard reset if no keyframe within 300 ms
-        self._start_kf_watchdog()
-        # Re-broadcast current video config to tighten resync window
-        if self._last_avcc is not None:
-            msg = {
-                'type': 'video_config',
-                'codec': 'h264',
-                'format': 'avcc',
-                'data': base64.b64encode(self._last_avcc).decode('ascii'),
-                'width': self.width,
-                'height': self.height,
-                'fps': self.cfg.fps,
-            }
-            await self._broadcast_state_json(msg)
-        else:
-            self._needs_config = True
+        await pixel_channel.ensure_keyframe(
+            self._pixel_channel,
+            config=self._pixel_config,
+            metrics=self.metrics,
+            try_force_idr=self._try_force_idr,
+            reset_encoder=self._try_reset_encoder,
+            send_state_json=self._broadcast_state_json,
+        )
 
     async def _handle_set_ndisplay(self, ndisplay: int, client_id: Optional[str], client_seq: Optional[int]) -> None:
         """Apply a 2D/3D view toggle request.
@@ -414,8 +405,9 @@ class EGLHeadlessServer:
                 self._worker.request_ndisplay(int(ndisp))  # type: ignore[attr-defined]
                 # Force a keyframe and bypass pacing so the switch is immediate
                 try:
-                    self._worker.force_idr()
-                    self._pixel.bypass_until_key = True
+                    if self._try_force_idr():
+                        self._pixel_channel.broadcast.bypass_until_key = True
+                        pixel_channel.mark_config_dirty(self._pixel_channel)
                 except Exception:
                     logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
             except Exception:
@@ -423,31 +415,10 @@ class EGLHeadlessServer:
         # Let the worker-driven scene refresh broadcast updated dims once the toggle completes
 
     def _start_kf_watchdog(self) -> None:
-        state = self._pixel
-
-        async def _kf_watchdog(last_key_seq: Optional[int]):
-            await asyncio.sleep(0.30)
-            if state.last_key_seq == last_key_seq and self._worker is not None:
-                now = time.time()
-                if state.kf_last_reset_ts is not None and (now - state.kf_last_reset_ts) < self._kf_watchdog_cooldown_s:
-                    rem = self._kf_watchdog_cooldown_s - (now - state.kf_last_reset_ts)
-                    logger.debug("Keyframe watchdog cooldown active (%.2fs remaining); skip reset", rem)
-                    return
-                logger.warning("Keyframe watchdog fired; resetting encoder")
-                try:
-                    self._worker.reset_encoder()
-                except Exception:
-                    logger.exception("Encoder reset failed during keyframe watchdog")
-                    return
-                state.bypass_until_key = True
-                state.kf_last_reset_ts = now
-        try:
-            task = state.kf_watchdog_task
-            if task is not None and not task.done():
-                task.cancel()
-            state.kf_watchdog_task = asyncio.create_task(_kf_watchdog(state.last_key_seq))
-        except Exception:
-            logger.debug("start watchdog failed", exc_info=True)
+        pixel_channel.start_watchdog(
+            self._pixel_channel,
+            reset_encoder=self._try_reset_encoder,
+        )
 
     # --- Meta builders ------------------------------------------------------------
     def _populate_multiscale_state(self) -> None:
@@ -843,26 +814,20 @@ class EGLHeadlessServer:
                 return
             # Build and send video_config if needed or changed
             avcc_cfg = build_avcc_config(self._param_cache)
-            if avcc_cfg is not None and (self._needs_config or self._last_avcc != avcc_cfg):
-                try:
-                    msg = {
-                        'type': 'video_config',
-                        'codec': 'h264',
-                        'format': 'avcc',
-                        'data': base64.b64encode(avcc_cfg).decode('ascii'),
-                        'width': self.width,
-                        'height': self.height,
-                        'fps': self.cfg.fps,
-                    }
-                    loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_state_json(msg)))
-                    self._last_avcc = avcc_cfg
-                    self._needs_config = False
-                    try:
-                        self.metrics.inc('napari_cuda_video_config_sends')
-                    except Exception:
-                        logger.debug('metrics inc napari_cuda_video_config_sends failed', exc_info=True)
-                except Exception as e:
-                    logger.debug("Failed to schedule video_config broadcast: %s", e)
+            if avcc_cfg is not None:
+                def _send_config(avcc_bytes: bytes) -> None:
+                    self._schedule_coro(
+                        pixel_channel.maybe_send_video_config(
+                            self._pixel_channel,
+                            config=self._pixel_config,
+                            metrics=self.metrics,
+                            avcc=avcc_bytes,
+                            send_state_json=self._broadcast_state_json,
+                        ),
+                        "video_config",
+                    )
+
+                loop.call_soon_threadsafe(_send_config, avcc_cfg)
             # Optional payload dump (AVCC payload)
             if self._dump_remaining > 0:
                 try:
@@ -884,30 +849,14 @@ class EGLHeadlessServer:
             seq_val = self._seq & 0xFFFFFFFF
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             # Enqueue via callback that handles QueueFull inside the event loop thread
-            queue = self._pixel.frame_queue
+            packet = (avcc_pkt, flags, seq_val, stamp_ts)
 
             def _enqueue() -> None:
-                try:
-                    queue.put_nowait((avcc_pkt, flags, seq_val, stamp_ts))
-                    try:
-                        self.metrics.set('napari_cuda_frame_queue_depth', float(queue.qsize()))
-                    except Exception:
-                        logger.debug('metrics set frame_queue_depth failed', exc_info=True)
-                except asyncio.QueueFull:
-                    try:
-                        self._drain_and_put((avcc_pkt, flags, seq_val, stamp_ts))
-                        try:
-                            self.metrics.inc('napari_cuda_frames_dropped')
-                            self._pixel.drops_total += 1
-                            if (self._pixel.drops_total % 100) == 1:
-                                logger.info(
-                                    "Pixel queue full: dropped oldest (total drops=%d)",
-                                    self._pixel.drops_total,
-                                )
-                        except Exception:
-                            logger.debug('metrics inc frames_dropped failed', exc_info=True)
-                    except Exception as e:
-                        logger.debug("Failed to drain and enqueue frame: %s", e)
+                pixel_channel.enqueue_frame(
+                    self._pixel_channel,
+                    packet,
+                    metrics=self.metrics,
+                )
             loop.call_soon_threadsafe(_enqueue)
 
         def worker_loop() -> None:
@@ -1133,69 +1082,23 @@ class EGLHeadlessServer:
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
 
-    def _drain_and_put(self, data: tuple[bytes, int, int, float]) -> None:
-        queue = self._pixel.frame_queue
-        try:
-            while not queue.empty():
-                queue.get_nowait()
-        except Exception as e:
-            logger.debug("Queue drain error: %s", e)
-        try:
-            queue.put_nowait(data)
-        except Exception as e:
-            logger.debug("Frame enqueue error: %s", e)
-
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
-        self._pixel.clients.add(ws)
-        self._update_client_gauges()
-        # Reduce latency: disable Nagle for binary pixel stream
-        pixel_broadcaster.configure_socket(ws, label='pixel ws')
-        # Reset encoder on new client to guarantee an immediate keyframe
-        try:
-            if self._worker is not None:
-                logger.info("Resetting encoder for new pixel client to force keyframe")
-                self._worker.reset_encoder()
-                # Allow immediate send of the first keyframe when pacing is enabled
-                self._pixel.bypass_until_key = True
-                # Record reset time for watchdog cooldown
-                self._pixel.kf_last_reset_ts = time.time()
-                # Request re-send of video configuration for new clients
-                self._needs_config = True
-                # If we already have a cached avcC, proactively re-broadcast on state channel
-                if self._last_avcc is not None:
-                    try:
-                        msg = {
-                            'type': 'video_config',
-                            'codec': 'h264',
-                            'format': 'avcc',
-                            'data': base64.b64encode(self._last_avcc).decode('ascii'),
-                            'width': self.width,
-                            'height': self.height,
-                            'fps': self.cfg.fps,
-                        }
-                        await self._broadcast_state_json(msg)
-                    except Exception as e:
-                        logger.debug("Proactive video_config broadcast failed: %s", e)
-                try:
-                    self.metrics.inc('napari_cuda_encoder_resets')
-                except Exception:
-                    logger.debug('metrics inc encoder_resets failed', exc_info=True)
-        except Exception as e:
-                logger.debug("Encoder reset on client connect failed: %s", e)
-        try:
-            await ws.wait_closed()
-        finally:
-            self._pixel.clients.discard(ws)
-            self._update_client_gauges()
+        await pixel_channel.handle_client(
+            self._pixel_channel,
+            ws,
+            config=self._pixel_config,
+            metrics=self.metrics,
+            reset_encoder=self._try_reset_encoder,
+            send_state_json=self._broadcast_state_json,
+            on_clients_change=self._update_client_gauges,
+        )
 
     async def _broadcast_loop(self) -> None:
-        cfg = pixel_broadcaster.PixelBroadcastConfig(
-            width=self.width,
-            height=self.height,
-            codec=self.cfg.codec,
-            fps=float(getattr(self._ctx.cfg.encode, 'fps', getattr(self.cfg, 'fps', 60))),
+        await pixel_channel.run_channel_loop(
+            self._pixel_channel,
+            config=self._pixel_config,
+            metrics=self.metrics,
         )
-        await pixel_broadcaster.broadcast_loop(self._pixel, cfg, self.metrics)
 
     def _scene_spec_json(self) -> Optional[str]:
         try:
@@ -1257,7 +1160,8 @@ class EGLHeadlessServer:
 
     def _update_client_gauges(self) -> None:
         try:
-            self.metrics.set('napari_cuda_pixel_clients', float(len(self._pixel.clients)))
+            count = len(self._pixel_channel.broadcast.clients)
+            self.metrics.set('napari_cuda_pixel_clients', float(count))
             # We could track state clients separately if desired; here we reuse pixel_clients for demo
         except Exception:
             logger.debug('metrics set pixel_clients failed', exc_info=True)

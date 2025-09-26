@@ -66,6 +66,47 @@ Websocket Clients (state + pixel)
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
   - Worker refresh notifications travel through a dedicated worker→control queue, so the control loop updates the scene manager before emitting dims/spec payloads; no deferred flushes or ad-hoc regeneration needed.
 
+- **Pixel Channel Helpers** (`pixel_channel.py` + `pixel_broadcaster.py`)
+  - `PixelChannelState` + `PixelChannelConfig` own websocket lifecycle data (clients, bypass, keyframe watchdogs, avcC cache) while the broadcaster continues to handle raw frame draining.
+  - `EGLHeadlessServer` relies on these helpers to attach/detach clients, enqueue frames from the encoder thread, force keyframes, and rebroadcast video configuration snapshots.
+  - Isolating pixel logic keeps the server shell thin and enables unit tests that exercise queue overflow, watchdog cooldowns, and config caching without real websockets.
+
+### Pixel Channel & Control Flow
+
+```mermaid
+graph LR
+    subgraph AsyncLoop["EGLHeadlessServer (async loop)"]
+        SSC["server_scene_control\\n(handle_state, dims/spec)"]
+        PCH["pixel_channel\\n(client lifecycle, keyframe)"]
+        SceneBag["ServerSceneData\\n(mutable state bag)"]
+        PixelBag["PixelBroadcastState\\n(frame queue + metrics)"]
+        WQueue["WorkerSceneNotificationQueue"]
+    end
+
+    subgraph WorkerThread["EGLRendererWorker (render thread)"]
+        Worker["Render loop"]
+        SceneQueue["ServerSceneQueue\\n(camera + intents)"]
+    end
+
+    StateClient["State WS client"]
+    PixelClient["Pixel WS client"]
+
+    StateClient -->|intents| SSC
+    SSC -->|mutate| SceneBag
+    SSC -->|broadcast dims/spec| StateClient
+    SceneBag -->|enqueue updates| SceneQueue
+    SceneQueue --> Worker
+    Worker -->|scene_refresh| WQueue
+    WQueue --> SSC
+
+    PixelClient -->|connect| PCH
+    PCH -->|metrics/gauges| SSC
+    Worker -->|encoded AVCC packets| PCH
+    PCH -->|enqueue| PixelBag
+    PixelBag -->|broadcast_loop| PixelClient
+    PCH -->|ensure keyframe| Worker
+```
+
 
 - **ViewerSceneManager** (`src/napari_cuda/server/layer_manager.py`)
   - Maintains a headless `ViewerModel` mirror for scene metadata.

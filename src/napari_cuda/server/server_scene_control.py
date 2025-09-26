@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import socket
@@ -20,6 +19,7 @@ from napari_cuda.server.server_scene_spec import (
     build_dims_payload,
     build_scene_spec_json,
 )
+from napari_cuda.server import pixel_channel
 
 logger = logging.getLogger(__name__)
 
@@ -663,17 +663,15 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         logger.exception("Initial scene.spec send failed")
 
     try:
-        if server._last_avcc is not None:
-            msg = {
-                'type': 'video_config',
-                'codec': 'h264',
-                'format': 'avcc',
-                'data': base64.b64encode(server._last_avcc).decode('ascii'),
-                'width': server.width,
-                'height': server.height,
-                'fps': server.cfg.fps,
-            }
+        channel = getattr(server, "_pixel_channel", None)
+        cfg = getattr(server, "_pixel_config", None)
+        assert channel is not None and cfg is not None, "Pixel channel not initialized"
+        avcc = channel.last_avcc
+        if avcc is not None:
+            msg = pixel_channel.build_video_config_payload(cfg, avcc)
             await ws.send(json.dumps(msg))
+        else:
+            pixel_channel.mark_config_dirty(channel)
     except Exception:
         logger.exception("Initial state config send failed")
 

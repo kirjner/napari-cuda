@@ -1,0 +1,35 @@
+graph LR
+    %% Async control loop components
+    subgraph AsyncLoop["EGLHeadlessServer (async loop)"]
+        SSC["server_scene_control\n(handle_state, dims/spec)"]
+        PCH["pixel_channel\n(client lifecycle, keyframe)"]
+        SceneBag["ServerSceneData\n(mutable state bag)"]
+        PixelBag["PixelBroadcastState\n(frame queue + metrics)"]
+        WQueue["WorkerSceneNotificationQueue"]
+    end
+
+    %% Worker thread + helpers
+    subgraph WorkerThread["EGLRendererWorker (render thread)"]
+        Worker["Render loop"]
+        SceneQueue["ServerSceneQueue\n(camera + intents)"]
+    end
+
+    %% Clients
+    StateClient["State WS client"]
+    PixelClient["Pixel WS client"]
+
+    %% Data/control flow
+    StateClient -->|intents| SSC
+    SSC -->|mutate| SceneBag
+    SSC -->|broadcast dims/spec| StateClient
+    SceneBag -->|enqueue updates| SceneQueue
+    SceneQueue --> Worker
+    Worker -->|scene_refresh| WQueue
+    WQueue --> SSC
+
+    PixelClient -->|connect| PCH
+    PCH -->|metrics/gauges| SSC
+    Worker -->|encoded AVCC packets| PCH
+    PCH -->|enqueue| PixelBag
+    PixelBag -->|broadcast_loop| PixelClient
+    PCH -->|ensure keyframe| Worker

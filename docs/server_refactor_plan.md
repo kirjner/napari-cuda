@@ -121,10 +121,10 @@ Implementation slices:
      - Teach the control loop to drain that queue before emitting `dims.update` / `scene.spec`, updating `ServerSceneData` and `ViewerSceneManager` inside the same critical section so `build_dims_payload` always sees aligned axes.
      - Delete the `pending_worker_step` scaffolding once the queue is wired, keeping the scene bag free of cross-thread scratch state and eliminating the ad-hoc flush helper.
 
-  7. **Pixel channel extraction** — peel `_handle_pixel`, `_broadcast_loop`, and keyframe watchdog logic into a procedural `pixel_channel.py` module:
-     - Expose a `PixelChannelState` bag (clients, queue, bypass settings, drops) plus free functions to accept packets, manage bypass/keyframe timers, and write metrics.
-     - This leaves `egl_headless_server` with only lifecycle wiring; state mutation happens through the bag so tests can cover queue draining without websockets.
-     - Add unit tests for watchdog restart, drop counters, and safe-send pruning; reuse the existing broadcaster state for consistency.
+  7. **Pixel channel extraction ✅** — `_handle_pixel`, `_broadcast_loop`, encoder resets, and watchdog orchestration now live in `pixel_channel.py`:
+     - `PixelChannelState` wraps the existing broadcaster bag and tracks avcC cache, pacing bypass, drops, and watchdog handles while `PixelChannelConfig` captures the static codec geometry.
+     - `EGLHeadlessServer` delegates client attach/detach, keyframe forcing, queue draining, and video-config broadcasts to the new helpers; only lifecycle wiring remains inline.
+     - Added focused tests (`test_pixel_channel.py`) covering queue overflow drop counting, video-config caching, and watchdog cooldown behaviour without spinning up websockets.
   8. **Metrics/Dash helper** — hoist the metrics server startup/shutdown (`_start_metrics_server`, `_stop_metrics_server`, Dash wiring) into `server_metrics.py`:
      - The helper should own the Dash app factory and HTTP routes, accepting the `Metrics` object and config. `EGLHeadlessServer` just calls `start_metrics(server_ctx)` / `stop_metrics(handle)`.
      - Update docs to describe the new module and move the current logging/exception handling out of `egl_headless_server`.
