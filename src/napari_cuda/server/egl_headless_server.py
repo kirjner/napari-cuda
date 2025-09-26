@@ -69,6 +69,17 @@ class EncodeConfig:
     keyint: int = 120
 
 
+@dataclass
+class PolicyLoggingConfig:
+    """Logging toggles sourced from environment for policy/stream instrumentation."""
+
+    log_sends_env: bool = False
+
+    @classmethod
+    def from_env(cls) -> 'PolicyLoggingConfig':
+        return cls(log_sends_env=env_bool('NAPARI_CUDA_LOG_SENDS', False))
+
+
  
 
 
@@ -158,10 +169,8 @@ class EGLHeadlessServer:
         self._last_send_ts: Optional[float] = None
         self._send_count: int = 0
         # Optional detailed per-send logging (seq, send_ts, stamp_ts, delta)
-        try:
-            self._log_sends = bool(log_sends or int(os.getenv('NAPARI_CUDA_LOG_SENDS', '0') or '0'))
-        except Exception:
-            self._log_sends = bool(log_sends)
+        self._policy_logging = PolicyLoggingConfig.from_env()
+        self._log_sends = bool(log_sends or self._policy_logging.log_sends_env)
 
         # Data configuration (optional OME-Zarr dataset for real data)
         self._zarr_path = zarr_path or os.getenv('NAPARI_CUDA_ZARR_PATH') or None

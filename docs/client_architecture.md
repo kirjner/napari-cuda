@@ -4,6 +4,12 @@ This snapshot captures the current layout of the client streaming stack after
 the VT lease migration. It focuses on how data, control, and threading glue the
 streaming client together today.
 
+## Refactor Status (2025-09-27)
+
+- FrameLease lifetime fixes removed the VT zero-copy crash; keep `NAPARI_CUDA_VT_GL_SAFE=1` during the current soak.
+- InputSender now asserts on Qt invariants (position(), modifiers(), etc.) and only guards subsystem boundaries; no generic "safe call" fallback remains in the event handlers.
+- GLRenderer keeps `_safe_call` for OpenGL / VT boundary calls but asserts for internal state (texture caches, lease handling). Guard snapshot lives in `docs/client_refactor_plan.md` and should be kept in sync when the topology changes.
+
 ## High-Level Flow
 
 ```

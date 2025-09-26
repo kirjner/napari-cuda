@@ -1493,11 +1493,8 @@ class ClientStreamLoop:
     def current_ndisplay(self) -> Optional[int]:
         """Return the last known ndisplay value from dims metadata."""
 
-        try:
-            return _int_or_none(self._dims_meta.get('ndisplay'))
-        except Exception:
-            logger.debug('current_ndisplay lookup failed', exc_info=True)
-            return None
+        value = self._dims_meta.get('ndisplay')
+        return _int_or_none(value)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
         """Toggle between 2D and 3D display modes if dims metadata is ready."""
@@ -1777,10 +1774,7 @@ class ClientStreamLoop:
         self._presenter.clear()
 
         if self._smoke is not None:
-            try:
-                self._smoke.stop()
-            except Exception:
-                logger.debug("ClientStreamLoop.stop: smoke stop failed", exc_info=True)
+            self._smoke.stop()
             self._smoke = None
 
         while True:

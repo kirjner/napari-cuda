@@ -1,10 +1,19 @@
 # VT Zero-Copy Crash Notes
 
+**Status (2025-09-27):** Segfault no longer reproduces after the FrameLease lifetime refactor; keep the checklist below for regression monitoring while soak tests continue.
+
+## Resolution Summary
+
+- FrameLease now manages decoder/cache/presenter/renderer roles so VT capsules are released exactly once.
+- Presenter shutdown drains pipelines before Qt teardown, eliminating dangling worker draws.
+- Keep `NAPARI_CUDA_VT_GL_SAFE=1` during soak; remove after two weeks of clean runs.
+
+
 This note captures the current hypotheses and hardening ideas around the
 sporadic segmentation faults observed while presenting VT zero-copy frames in
 `GLRenderer._draw_vt_texture`.
 
-## Observed Symptoms
+## Observed Symptoms (historical)
 
 - Segfault happens shortly after `GLRenderer: VT zero-copy draw engaged` logs.
 - `VT dbg` counter shows `ret` and `rel` deltas of roughly `+120/+180` per
@@ -31,7 +40,7 @@ napari_cuda.client.launcher.launch_streaming_client -> main
   `vt_release_frame()` whenever the ring buffer or session drops a frame. This
   keeps `releases - retains` close to the number of frames actually presented.
 
-## Remaining Crash Hypotheses
+## Remaining Crash Hypotheses (historical)
 
 - **Texture released while GPU still uses it.** We now gate releases through a
   fence-backed queue when `NAPARI_CUDA_VT_GL_SAFE=1` (see Renderer section
@@ -83,9 +92,6 @@ napari_cuda.client.launcher.launch_streaming_client -> main
 
 ## Next Steps
 
-- Rebuild the extension so the new retain/release counters ship.
-- Exercise the fence + deferred release logic under the safe flag and confirm
-  whether segfaults stop. Compare crash frequency with the flag disabled to
-  validate the queue is providing cover.
-- If crashes persist, capture a native backtrace with `lldb` while logging the
-  release queue to identify which texture ID explodes.
+- Continue soak tests with FrameLease instrumentation enabled; log retains/releases at WARN if counts drift.
+- Leave `NAPARI_CUDA_VT_GL_SAFE=1` enabled for the next two QA cycles, then re-evaluate removing it once metrics stay flat.
+- Capture any regression in this doc and re-open the historical checklist if segfaults return.

@@ -1,16 +1,18 @@
 # Client Streamlining & Degodification Plan
 
-## Current Snapshot (2025-09-25)
+## Current Snapshot (2025-09-27)
 - `streaming/client_stream_loop.py`: 1,903 LOC after the Phase B bootstrap. Still owns dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class. Only the VT shim fallback keeps a `try` block in the hot path; `getattr` calls remain purged.
-- `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and the smoke harness. Dummy keymap proxies and repeated env lookups remain.
+- `streaming/input.py`: event handlers now assert on Qt invariants; the blanket `_safe_call` plumbing is gone so failures surface immediately unless they cross a Qt boundary.
+- `streaming/renderer.py`: `_safe_call` is restricted to OpenGL / VideoToolbox boundaries with explicit logging; texture/cache lifetime expectations are enforced with asserts.
+- `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and the smoke harness; internal handlers now assert by default with `try` blocks limited to import fallbacks and queue drains.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers still live as nested try/except with minimal test coverage.
 - `client/proxy_viewer.py`: 517 LOC; mirrors the napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
 - Tests remain limited to the websocket shim and the new helper modules; no direct coverage yet for intent ack bookkeeping, presenter scheduling, or dims replay.
-- Known runtime issue: VT zero-copy draw segfaults shortly after `"VT gate lifted on keyframe"` once the presenter flips to VT. See `docs/debugging/vt_zero_copy_crash.md` for spike notes and reproduction details.
+- VT zero-copy draw segfault from the 2025-09-25 spike no longer reproduces after the FrameLease restructuring (verified 2025-09-27 soak run); keep `NAPARI_CUDA_VT_GL_SAFE=1` during soak testing. See `docs/debugging/vt_zero_copy_crash.md` for historical notes.
 
 ## Guiding Principles
 1. **Plain data + direct functions**: prefer module-level helpers over class stacks. If a helper is only called once, inline it. Keep call stacks shallow so debug traces read naturally.
-2. **Boundary-only guards**: assertions inside client logic; reserve `try/except` for websocket I/O, PyAV/VT calls, and Qt signal emission. Log failures at the boundary.
+2. **Boundary-only guards**: assertions inside client logic; reserve `try/except` (or `_safe_call`) for websocket I/O, PyAV/VT calls, Qt signal emission, and raw OpenGL invocations. Log failures at the boundary.
 3. **One env read, one place**: resolve flags/config at startup into a simple struct; pass values explicitly rather than lazily reading env vars mid-frame.
 4. **Explicit state struct**: represent coordinator state with dataclasses or plain dicts. No indirection layers for “maybe someday” abstraction.
 5. **Meaningful names**: rename surfaces to describe behaviour (`ClientStreamLoop`, `DimsIntentTracker`, `send_step_request`). Avoid placeholder terms like “coordinator” or “pending”.
@@ -93,13 +95,24 @@
 
 ## Immediate Next Steps
 0. Keep `docs/client_architecture.md` updated as the canonical snapshot of the current client topology while work proceeds.
-1. Extract the smoke harness and renderer fallback paths into `client_loop/smoke_helpers.py` + `renderer_fallbacks.py`, replace the remaining blanket `try/except` blocks with explicit assertions/logging at those helper boundaries, and re-run the focused client loop tests.
-2. After the helper extraction, recount `ClientStreamLoop` safeguards (current: 1 `try`, 0 `getattr`) and keep the doc snapshot in sync as we chip away at the remaining VT fallback guard.
-3. Author the Phase C presenter/canvas split outline (draft `docs/client_presenter_facade.md`) specifying which warmup, VT gate, and render responsibilities move out of `streaming_canvas.py`, along with the regression tests required before refactoring.
-4. Run the VT zero-copy spike checklist (see below) before touching renderer code paths so we do not widen the segfault window mid-refactor.
-5. Draft a `ClientLoopState` dataclass that aggregates the mutable fields we currently hang off `self`, so a later pass can convert the loop methods into Casey-Muratori-style routines operating on an explicit data bag instead of an ever-growing object.
+1. Capture the presenter/canvas facade plan (draft `docs/client_presenter_facade.md`) so Phase C can start immediately after the current branch lands.
+   - Outline the public surface (`start_presenting`, `apply_dims_update`, `shutdown`) plus the regression tests required before moving code out of `streaming_canvas.py`.
+2. Keep exercising the VT soak checklist from the resolved spike to confirm the FrameLease fix holds while we touch renderer code paths; update the debugging note if anything regresses.
+3. Draft a `ClientLoopState` dataclass that aggregates the mutable fields we currently hang off `self`, so a later pass can convert the loop methods into Casey-Muratori-style routines operating on an explicit data bag instead of an ever-growing object.
+   - Include a sketch of how draw/present/shutdown helpers would accept the state bag and explicit collaborators.
+4. Sweep `proxy_viewer.py` for blanket guards next, then revisit `state.py`/`vt_pipeline.py` to continue shrinking the package-wide try/except count.
 
-## VT Zero-Copy Spike (2025-09-25)
+### Guard Snapshot (2025-09-27)
+
+- `ClientStreamLoop`: 2 `try` blocks remain (VT decoder init, shutdown queue drain); both sit at subsystem boundaries after the latest sweep.
+- `renderer.py`: trimmed from 36 → 3 `try` blocks by consolidating GL boundary guards into `_safe_call`; all remaining `try` blocks are boundary-oriented (helper, draw-state context manager, VT draw wrapper).
+- `input.py`: now 0 `try` blocks; event handlers assert directly on Qt invariants and only rely on Qt/VisPy to raise when the API contract is violated.
+- `streaming_canvas.py`: reduced to 7 `try` blocks (import fallbacks + queue drains) after inlining assertions for internal invariants and removing blanket helper guards.
+- Package-wide try/except count now sits at 299 (down 99 from baseline); next hotspots are `proxy_viewer.py`, `state.py`, and `vt_pipeline.py`.
+
+## VT Zero-Copy Spike (2025-09-25) — status: resolved 2025-09-27 via FrameLease refactor
+
+FrameLease role-based ownership removed the unsafe capsule sharing that triggered the segfaults. Decoder, presenter, and renderer now coordinate through `FrameLease` roles, and the deterministic shutdown path keeps the VT pipeline quiesced before teardown. The checklist below remains for regression monitoring.
 - Failure signature: client logs `"VT gate lifted on keyframe (seq=15713); presenter=VT"` and crashes inside `GLRenderer._draw_vt_texture` on the immediate paint tick; the crash propagates through Vispy's `paintGL` into Qt's event loop.
 - Scope: reproducible on the current `client-refactor` tip with the VT pipeline enabled; the PyAV pipeline alone does not crash.
 - Impact: streaming client hard exits (Fatal Python error: Segmentation fault) with multiple worker threads still alive; this blocks further QA of the refactor until mitigated.
