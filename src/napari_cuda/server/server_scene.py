@@ -64,6 +64,7 @@ class ServerSceneData:
     last_scene_spec: Optional[Dict[str, Any]] = None
     pending_scene_spec: Optional[Dict[str, Any]] = None
     last_dims_payload: Optional[Dict[str, Any]] = None
+    last_scene_spec_json: Optional[str] = None
 
 
 def create_server_scene_data(*, policy_event_path: Optional[str | Path] = None) -> ServerSceneData:

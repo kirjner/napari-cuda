@@ -65,8 +65,9 @@ Websocket Clients (state + pixel)
   - Coordinates render ticks, applies pending scene updates, and liaises with ROI/LOD helpers.
   - Delegates capture/encode to `CaptureFacade` and camera/scene logic to extracted helpers.
 
-- **SceneState Helpers** (`scene_state_applier.py`, `server_scene_queue.py`, `camera_controller.py`)
+- **SceneState Helpers** (`scene_state_applier.py`, `server_scene_queue.py`, `server_scene_spec.py`, `camera_controller.py`)
   - `ServerSceneQueue` coalesces pending updates across threads before the worker drains them.
+  - `server_scene_spec.py` builds `scene.spec` and `dims.update` payloads from `ServerSceneData` for WebSocket and MCP callers.
   - `SceneStateApplier` applies dims/camera/volume changes to viewer + layer objects.
   - `CameraController` executes queued camera commands and reports policy triggers.
 

@@ -87,12 +87,16 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
 
 from .egl_worker import EGLRendererWorker
 from .scene_state import ServerSceneState
-from .server_scene import (
-    ServerSceneData,
-    create_server_scene_data,
-    increment_dims_sequence,
+from .server_scene import ServerSceneData, create_server_scene_data
+from .server_scene_queue import (
+    PendingServerSceneUpdate,
+    ServerSceneCommand,
+    ServerSceneQueue,
 )
-from .server_scene_queue import ServerSceneCommand
+from .server_scene_spec import (
+    build_dims_payload,
+    build_scene_spec_json,
+)
 from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config, configure_bitstream
 from .metrics import Metrics
@@ -762,192 +766,30 @@ class EGLHeadlessServer:
         ack: bool = False,
         intent_seq: Optional[int] = None,
     ) -> dict:
-        """Build dims.update payload with nested metadata.
-
-        {'type':'dims.update', 'seq':..., 'last_client_id':..., 'current_step':[...], 'meta':{...}}
-        """
         meta = self._dims_metadata() or {}
-        # Always include ndisplay in meta for new, and as top-level for legacy
-        try:
-            # If 3D and volume mode, prefer ndisplay=3; else 2
-            ndisp = 3 if int(meta.get('ndim') or 2) >= 3 and bool(meta.get('volume')) else 2
-        except Exception:
-            ndisp = 2
-        # Inflate/align current_step to full length and order
-        try:
-            ndim = int(meta.get('ndim') or 0)
-        except Exception:
-            ndim = 0
-        if ndim <= 0:
-            ndim = len(step_list) if step_list else 1
-        order = meta.get('order') if isinstance(meta.get('order'), (list, tuple)) else []
-        rng = meta.get('range') if isinstance(meta.get('range'), (list, tuple)) else None
-        # Start with zeros, then place provided indices
-        full = [0 for _ in range(int(ndim))]
-        if len(step_list) >= int(ndim):
-            full = [int(x) for x in step_list[:int(ndim)]]
-        elif len(step_list) == 1:
-            val = int(step_list[0])
-            try:
-                if order and 'z' in [str(c).lower() for c in order]:
-                    # Place value into the 'z' axis index if present
-                    lower = [str(c).lower() for c in order]
-                    zi = lower.index('z')
-                    if 0 <= zi < len(full):
-                        full[zi] = val
-                    else:
-                        full[0] = val
-                else:
-                    full[0] = val
-            except Exception:
-                full[0] = val
-        else:
-            # Partial list: place sequentially starting from 0
-            for i, v in enumerate(step_list):
-                if i < len(full):
-                    full[i] = int(v)
-        # Clamp to meta range if available
-        if rng:
-            try:
-                for i in range(min(len(full), len(rng))):
-                    lohi = rng[i]
-                    if isinstance(lohi, (list, tuple)) and len(lohi) >= 2:
-                        lo, hi = int(lohi[0]), int(lohi[1])
-                        if hi < lo:
-                            lo, hi = hi, lo
-                        full[i] = max(lo, min(hi, int(full[i])))
-            except Exception:
-                logger.debug("dims.update clamp in builder failed", exc_info=True)
-        # New shape with nested meta
-        seq_val = increment_dims_sequence(self._scene, last_client_id)
-        # Build base message
-        new_msg: dict = {
-            'type': 'dims.update',
-            'seq': seq_val,
-            'last_client_id': last_client_id,
-            'current_step': list(int(x) for x in full),
-            'meta': {**meta, 'ndisplay': int(ndisp)},
-        }
-        # Enrich meta with flattened, per-level details when available
-        try:
-            src = getattr(self._worker, '_scene_source', None) if self._worker is not None else None
-            if src is not None:
-                try:
-                    lvl = int(getattr(src, 'current_level', 0))
-                    new_msg['meta']['level'] = lvl
-                except Exception:
-                    logger.debug('dims.update meta: level lookup failed', exc_info=True)
-                try:
-                    descs = getattr(src, 'level_descriptors', [])
-                    if isinstance(descs, list) and descs:
-                        cur = lvl if (0 <= lvl < len(descs)) else 0
-                        shape = getattr(descs[cur], 'shape', None)
-                        if shape is not None:
-                            new_msg['meta']['level_shape'] = [int(s) for s in shape]
-                except Exception:
-                    logger.debug('dims.update meta: shape enrichment failed', exc_info=True)
-                try:
-                    dt = getattr(src, 'dtype', None)
-                    if dt is not None:
-                        new_msg['meta']['dtype'] = str(dt)
-                except Exception:
-                    logger.debug('dims.update meta: dtype enrichment failed', exc_info=True)
-                # For 2D slice path we normalize slabs to [0,1]
-                if self._worker is not None:
-                    normalized = not bool(self._worker.use_volume)
-                    new_msg['meta']['normalized'] = normalized
-        except Exception:
-            logger.debug('dims.update meta enrichment failed', exc_info=True)
-        # Ensure sizes/range reflect the active adapter-selected level, overriding any stale cache.
-        # We derive a fresh multiscale descriptor from the live scene source when available.
-        try:
-            meta_obj = new_msg.get('meta') if isinstance(new_msg.get('meta'), dict) else None
-            if isinstance(meta_obj, dict):
-                eff_shape = None
-                # Hard source of truth: live adapter source
-                src = getattr(self._worker, '_scene_source', None) if self._worker is not None else None
-                if src is not None:
-                    try:
-                        cur = int(getattr(src, 'current_level', 0))
-                    except Exception:
-                        cur = 0
-                    try:
-                        descs = getattr(src, 'level_descriptors', [])
-                    except Exception:
-                        descs = []
-                    # Overwrite/construct multiscale meta from descriptors
-                    if isinstance(descs, list) and descs:
-                        levels_meta: list[dict] = []
-                        for d in descs:
-                            try:
-                                levels_meta.append({
-                                    'shape': [int(s) for s in (getattr(d, 'shape', []) or [])],
-                                    'downsample': list(getattr(d, 'downsample', []) or []),
-                                    'path': getattr(d, 'path', None),
-                                })
-                            except Exception:
-                                levels_meta.append({'shape': list(getattr(d, 'shape', []) or [])})
-                        meta_obj['multiscale'] = {
-                            'levels': levels_meta,
-                            'current_level': cur,
-                            'policy': (self._scene.multiscale_state.get('policy') if isinstance(self._scene.multiscale_state, dict) else None) or 'auto',
-                            'index_space': 'base',
-                        }
-                        if 0 <= cur < len(levels_meta):
-                            sh = levels_meta[cur].get('shape')
-                            if isinstance(sh, (list, tuple)):
-                                eff_shape = [int(max(1, int(s))) for s in sh]
-                # Secondary: explicit level_shape from earlier enrichment
-                if eff_shape is None:
-                    lvl_shape = meta_obj.get('level_shape')
-                    if isinstance(lvl_shape, (list, tuple)) and len(lvl_shape) > 0:
-                        eff_shape = [int(max(1, int(s))) for s in lvl_shape]
-                # Tertiary: cached multiscale block, if consistent
-                if eff_shape is None:
-                    ms = meta_obj.get('multiscale')
-                    if isinstance(ms, dict):
-                        cur = int(ms.get('current_level', 0))
-                        levels = ms.get('levels')
-                        if isinstance(levels, (list, tuple)) and 0 <= cur < len(levels):
-                            entry = levels[cur]
-                            if isinstance(entry, dict):
-                                sh = entry.get('shape')
-                                if isinstance(sh, (list, tuple)):
-                                    eff_shape = [int(max(1, int(s))) for s in sh]
-                if eff_shape:
-                    meta_obj['sizes'] = list(eff_shape)
-                    meta_obj['range'] = [[0, max(0, int(s) - 1)] for s in eff_shape]
-        except Exception:
-            logger.debug('dims.update: live level reconciliation failed', exc_info=True)
-        # Optional verbose meta log to diagnose slider bounds/ranges
-        try:
-            if getattr(self, '_log_dims_info', False):
-                meta_dbg = new_msg.get('meta', {}) if isinstance(new_msg.get('meta'), dict) else {}
+        payload = build_dims_payload(
+            self._scene,
+            step_list=step_list,
+            last_client_id=last_client_id,
+            meta=meta,
+            worker_scene_source=(getattr(self._worker, '_scene_source', None) if self._worker is not None else None),
+            use_volume=bool(self._worker.use_volume if self._worker is not None else self.use_volume),
+            ack=ack,
+            intent_seq=intent_seq,
+        )
+
+        if self._log_dims_info:
+            meta_out = payload.get('meta')
+            if isinstance(meta_out, dict):
                 logger.info(
                     "dims.update meta: level=%s level_shape=%s sizes=%s range=%s",
-                    meta_dbg.get('level'),
-                    meta_dbg.get('level_shape'),
-                    meta_dbg.get('sizes'),
-                    meta_dbg.get('range'),
+                    meta_out.get('level'),
+                    meta_out.get('level_shape'),
+                    meta_out.get('sizes'),
+                    meta_out.get('range'),
                 )
-        except Exception:
-            logger.debug('dims.update: meta logging failed', exc_info=True)
-        # Provide both 'range' and 'ranges' aliases for client normalization
-        try:
-            rng = new_msg.get('meta', {}).get('range')
-            if rng is not None and isinstance(new_msg.get('meta'), dict):
-                new_msg['meta']['ranges'] = rng
-        except Exception:
-            logger.debug('dims.update ranges alias failed', exc_info=True)
-        # ACK fields for deterministic client reconciliation
-        try:
-            if ack:
-                new_msg['ack'] = True
-                if intent_seq is not None:
-                    new_msg['intent_seq'] = int(intent_seq)
-        except Exception:
-            logger.debug('dims.update ack/intent_seq set failed', exc_info=True)
-        return new_msg
+
+        return payload
 
     async def _broadcast_dims_update(self, step_list: list[int], last_client_id: Optional[str], *, ack: bool = False, intent_seq: Optional[int] = None) -> None:
         """Broadcast dims update in both new and legacy formats.
@@ -955,7 +797,6 @@ class EGLHeadlessServer:
         Never raises; logs and continues on failure.
         """
         try:
-            self._scene.last_dims_client_id = last_client_id
             obj = self._build_dims_update_message(step_list, last_client_id, ack=ack, intent_seq=intent_seq)
             await self._broadcast_state_json(obj)
             # Intentionally skip scene.spec here to avoid client layer churn on
@@ -1926,31 +1767,36 @@ class EGLHeadlessServer:
 
     def _scene_spec_json(self) -> Optional[str]:
         try:
-            # Refresh scene manager from live sources to avoid stale dims in scene.spec
-            try:
-                self._update_scene_manager()
-            except Exception:
-                logger.debug("scene manager update failed before scene.spec", exc_info=True)
-            msg = self._scene_manager.scene_message(time.time())
-            if self._log_dims_info:
-                try:
-                    dims = msg.scene.dims.to_dict() if msg.scene and msg.scene.dims else {}
-                    ms = None
-                    if msg.scene and msg.scene.layers:
-                        layer0 = msg.scene.layers[0]
-                        ms = layer0.multiscale.to_dict() if layer0.multiscale else None
-                    logger.info(
-                        "scene.spec dims: sizes=%s range=%s ms_level=%s",
-                        dims.get('sizes'),
-                        dims.get('range'),
-                        (ms or {}).get('current_level') if isinstance(ms, dict) else None,
-                    )
-                except Exception:
-                    logger.debug("scene.spec dims log failed", exc_info=True)
-            return msg.to_json()
+            self._update_scene_manager()
+        except Exception:
+            logger.debug("scene manager update failed before scene.spec", exc_info=True)
+
+        try:
+            json_payload = build_scene_spec_json(
+                self._scene,
+                self._scene_manager,
+                timestamp=time.time(),
+            )
         except Exception:
             logger.debug("scene.spec build failed", exc_info=True)
             return None
+
+        if self._log_dims_info:
+            spec = self._scene_manager.scene_spec()
+            dims = spec.dims.to_dict() if spec is not None and spec.dims is not None else {}
+            ms = None
+            if spec is not None and spec.layers:
+                layer0 = spec.layers[0]
+                if layer0.multiscale is not None:
+                    ms = layer0.multiscale.to_dict()
+            logger.info(
+                "scene.spec dims: sizes=%s range=%s ms_level=%s",
+                dims.get('sizes'),
+                dims.get('range'),
+                (ms or {}).get('current_level') if isinstance(ms, dict) else None,
+            )
+
+        return json_payload
 
     async def _send_scene_spec(self, ws: websockets.WebSocketServerProtocol, *, reason: str) -> None:
         payload = self._scene_spec_json()
