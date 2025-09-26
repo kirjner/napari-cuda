@@ -86,21 +86,24 @@ leases once the draw call finishes.
   dereference proxies and timers through `ClientLoopState`, keeping draw/update
   routines pure.
 
-#### Planned extractions (2025-10)
+#### Hoisted modules (2025-10)
 
-- `client_loop/warmup.py`: encapsulate the VT gate lift ramp, offset relearn,
-  and watchdog-friendly latency adjustments so `ClientStreamLoop.draw` becomes
-  plumbing plus assertions.
-- `client_loop/intents.py`: own dims/settings payload normalisation, viewer
-  mirroring, and intent ack bookkeeping. This module will expose pure
-  functions that operate on `ClientLoopState` and collaborators, paving the way
-  for the layer-intent bridge.
-- `client_loop/camera.py`: isolate pan/orbit/zoom accumulation and rate limits.
-- `client_loop/lifecycle.py`: handle start/stop bookkeeping (Qt timers,
-  fallbacks, reconnect) with explicit enter/exit routines.
+- `client_loop/warmup.py`: the `WarmupPolicy` helper computes the VT latency
+  boost on gate lift, drives the timer-free ramp-down in `draw`, and resets
+  presenter latency during shutdown.
+- `client_loop/intents.py`: `IntentState` captures dims/settings metadata while
+  pure helpers normalise payloads, reconcile ACKs, mirror viewer state, and
+  expose the public intent senders used by input bindings.
+- `client_loop/camera.py`: `CameraState` tracks pan/orbit accumulators, zoom
+  anchors, and cadence limits; helper functions emit `camera.*` payloads while
+  keeping HUD snapshots in sync.
+- `client_loop/loop_lifecycle.py`: centralises startup/shutdown wiring for the
+  loop (state/pixel controllers, metrics timers, watchdog, event-loop monitor).
+  `ClientStreamLoop.start/stop` now delegate to these helpers so lifecycle
+  changes stay localised.
 
-Once those seams land, `ClientStreamLoop` should shrink to ~800–900 LOC and act
-mostly as a coordinator that wires collaborators together.
+`ClientStreamLoop` now focuses on collaborator wiring and high-level control
+flow; hot-path logic lives in compact helper modules with targeted tests.
 
 ### Presenter / SourceMux
 

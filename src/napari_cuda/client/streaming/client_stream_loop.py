@@ -13,18 +13,15 @@ from contextlib import ExitStack
 
 import numpy as np
 from qtpy import QtCore
-import uuid
 
 from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, SourceMux
 from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
 from napari_cuda.client.streaming.state import StateChannel
-from napari_cuda.client.streaming.controllers import StateController, ReceiveController
 from napari_cuda.client.streaming.types import Source, SubmittedFrame
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
 from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
-from napari_cuda.client.streaming.eventloop_monitor import EventLoopMonitor
 from napari_cuda.client.streaming.input import InputSender
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
@@ -43,19 +40,13 @@ from napari_cuda.client.streaming.client_loop.pipelines import (
 )
 from napari_cuda.client.streaming.client_loop.renderer_fallbacks import RendererFallbacks
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-
-from napari_cuda.client.streaming.client_loop.input_helpers import (
-    attach_input_sender,
-    bind_shortcuts,
-)
+from napari_cuda.client.streaming.client_loop import warmup, intents, camera, loop_lifecycle
 from napari_cuda.client.streaming.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
 from napari_cuda.client.streaming.client_loop.telemetry import (
     build_telemetry_config,
     create_metrics,
-    start_metrics_timer,
-    start_stats_timer,
 )
 from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
 from napari_cuda.client.streaming.config import extract_video_config
@@ -192,12 +183,14 @@ class ClientStreamLoop:
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         # Monotonic scheduling marker for next due
-        # Startup warmup (arrival mode): temporarily increase latency then ramp down
-        # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
-        self._warmup_ms_override = self._env_cfg.warmup_ms_override
-        self._warmup_window_s = self._env_cfg.warmup_window_s
-        self._warmup_margin_ms = self._env_cfg.warmup_margin_ms
-        self._warmup_max_ms = self._env_cfg.warmup_max_ms
+        # Startup warmup policy: temporarily boost VT latency and ramp down
+        self._warmup_policy = warmup.WarmupPolicy(
+            ms_override=(self._env_cfg.warmup_ms_override if self._env_cfg.warmup_ms_override is not None else None),
+            window_s=float(self._env_cfg.warmup_window_s or 0.0),
+            margin_ms=float(self._env_cfg.warmup_margin_ms or 0.0),
+            max_ms=float(self._env_cfg.warmup_max_ms or 0.0),
+        )
+        self._loop_state.warmup_policy = self._warmup_policy
         self._fps: Optional[float] = None
 
         # Renderer
@@ -282,65 +275,17 @@ class ClientStreamLoop:
         self._vid_w: Optional[int] = None
         self._vid_h: Optional[int] = None
         # View HUD diagnostics (for tuning 3D volume controls)
-        self._last_zoom_factor: Optional[float] = None
-        self._last_zoom_widget_px: Optional[tuple[float, float]] = None
-        self._last_zoom_video_px: Optional[tuple[float, float]] = None
-        self._last_zoom_anchor_px: Optional[tuple[float, float]] = None
-        self._last_pan_dx_sent: float = 0.0
-        self._last_pan_dy_sent: float = 0.0
-        self._zoom_base: float = self._env_cfg.zoom_base
-        # Dims/Z control (client-initiated)
-        self._dims_z = self._env_cfg.dims_z
-        self._dims_z_min = self._env_cfg.dims_z_min
-        self._dims_z_max = self._env_cfg.dims_z_max
-        # Clamp initial Z if provided
-        if self._dims_z is not None:
-            if self._dims_z_min is not None and self._dims_z < self._dims_z_min:
-                self._dims_z = self._dims_z_min
-            if self._dims_z_max is not None and self._dims_z > self._dims_z_max:
-                self._dims_z = self._dims_z_max
-        self._wheel_px_accum: float = 0.0
-        self._wheel_step = self._env_cfg.wheel_step
-        # dims intents rate limiting (coalesce)
-        rate = self._env_cfg.dims_rate_hz
-        self._dims_min_dt = 1.0 / max(1.0, rate)
-        self._last_dims_send: float = 0.0
+        self._camera_state = camera.CameraState.from_env(self._env_cfg)
+        self._loop_state.camera = self._camera_state
         # Camera ops coalescing
         cam_rate = self._env_cfg.camera_rate_hz
-        self._cam_min_dt = 1.0 / max(1.0, cam_rate)
-        self._last_cam_send: float = 0.0
-        self._dragging: bool = False
-        self._last_wx: float = 0.0
-        self._last_wy: float = 0.0
-        self._pan_dx_accum: float = 0.0
-        self._pan_dy_accum: float = 0.0
-        # Orbit (Alt-drag) accumulation (3D volume mode)
-        self._orbit_daz_accum: float = 0.0
-        self._orbit_del_accum: float = 0.0
-        self._orbit_dragging: bool = False
-        self._orbit_deg_per_px_x = self._env_cfg.orbit_deg_per_px_x
-        self._orbit_deg_per_px_y = self._env_cfg.orbit_deg_per_px_y
+        self._camera_state.cam_min_dt = 1.0 / max(1.0, cam_rate)
+        self._camera_state.orbit_deg_per_px_x = float(self._env_cfg.orbit_deg_per_px_x)
+        self._camera_state.orbit_deg_per_px_y = float(self._env_cfg.orbit_deg_per_px_y)
+        self._camera_state.zoom_base = float(self._env_cfg.zoom_base)
         # --- Dims/intent state (intent-only client) ----------------------------
-        self._dims_ready: bool = False
-        self._dims_meta: dict = {
-            'ndim': None,
-            'order': None,
-            'axis_labels': None,
-            'range': None,
-            'sizes': None,
-            'ndisplay': None,
-            'volume': None,
-            'render': None,
-            'multiscale': None,
-        }
-        self._primary_axis_index: int | None = None
-        # Client identity for intents
-        self._client_id: str = uuid.uuid4().hex
-        self._client_seq: int = 0
-        # Settings/mode intents rate limiting (coalesce like dims intents)
-        settings_rate = self._env_cfg.settings_rate_hz
-        self._settings_min_dt = 1.0 / max(1.0, settings_rate)
-        self._last_settings_send: float = 0.0
+        self._intent_state = intents.IntentState.from_env(self._env_cfg)
+        self._loop_state.intents = self._intent_state
 
     # --- Thread-safe scheduling helpers --------------------------------------
     def _on_gui_thread(self) -> bool:
@@ -392,105 +337,7 @@ class ClientStreamLoop:
         self._loop_state.in_present = False
 
     def start(self) -> None:
-        self._stopped = False
-        # State channel thread
-        st = StateController(
-            self.server_host,
-            self.state_port,
-            handle_video_config=self._handle_video_config,
-            handle_dims_update=self._handle_dims_update,
-            handle_scene_spec=self._handle_scene_spec,
-            handle_layer_update=self._handle_layer_update,
-            handle_layer_remove=self._handle_layer_remove,
-            handle_connected=self._on_state_connected,
-            handle_disconnect=self._on_state_disconnect,
-        )
-        state_channel, t_state = st.start()
-        self._loop_state.state_channel = state_channel
-        self._loop_state.state_thread = t_state
-        self._loop_state.threads.append(t_state)
-        # Attach input forwarding (wheel + resize) now that state channel exists
-        self._log_dims_info = bool(self._env_cfg.input_log)  # type: ignore[attr-defined]
-        attach_input_sender(self)
-        bind_shortcuts(self)
-
-        # Start VT pipeline workers
-        self._loop_state.vt_pipeline.start()
-
-        # Start PyAV pipeline worker
-        self._loop_state.pyav_pipeline.start()
-
-        # Receiver thread
-        rc = ReceiveController(
-            self.server_host,
-            self.server_port,
-            on_connected=self._handle_connected,
-            on_frame=self._on_frame,
-            on_disconnect=self._handle_disconnect,
-        )
-        receiver, t_rx = rc.start()
-        self._loop_state.pixel_receiver = receiver
-        self._loop_state.pixel_thread = t_rx
-        self._loop_state.threads.append(t_rx)
-
-        # Dedicated 1 Hz presenter stats timer (decoupled from draw loop)
-        self._loop_state.stats_timer = start_stats_timer(
-            self._scene_canvas.native,
-            stats_level=self._stats_level,
-            callback=self._log_stats,
-            logger=logger,
-        )
-
-        # Client metrics CSV dump timer (independent of stats log level)
-        self._loop_state.metrics_timer = start_metrics_timer(
-            self._scene_canvas.native,
-            config=self._telemetry_cfg,
-            metrics=self._loop_state.metrics,
-            logger=logger,
-        )
-        # Optional draw watchdog: if no draw observed for threshold, kick an update
-        if self._watchdog_ms > 0:
-            native_canvas = self._scene_canvas.native
-            assert native_canvas is not None, "Draw watchdog requires a native canvas"
-            timer = QtCore.QTimer(native_canvas)
-            timer.setTimerType(QtCore.Qt.PreciseTimer)
-            timer.setInterval(max(100, int(self._watchdog_ms // 2) or 100))
-
-            def _wd_tick() -> None:
-                last = float(self._loop_state.last_draw_pc or 0.0)
-                if last <= 0.0:
-                    return
-                now = time.perf_counter()
-                if (now - last) * 1000.0 < float(self._watchdog_ms):
-                    return
-                if self._presenter.peek_next_due(self._source_mux.active) is None:
-                    return
-                self._scene_canvas_update()
-                if self._loop_state.metrics is not None:
-                    self._loop_state.metrics.inc('napari_cuda_client_draw_watchdog_kicks', 1.0)
-
-            timer.timeout.connect(_wd_tick)
-            timer.start()
-            self._loop_state.watchdog_timer = timer
-            logger.info("Draw watchdog enabled: threshold=%d ms", self._watchdog_ms)
-        # Optional event loop monitor (diagnostic): logs and metrics on stalls
-        if self._evloop_stall_ms > 0:
-            def _kick() -> None:
-                self._scene_canvas_update()
-
-            self._loop_state.evloop_monitor = EventLoopMonitor(
-                parent=self._scene_canvas.native,
-                metrics=self._loop_state.metrics,
-                stall_threshold_ms=int(self._evloop_stall_ms),
-                sample_interval_ms=int(self._evloop_sample_ms),
-                on_stall_kick=_kick,
-            )
-
-        if not self._quit_hook_connected:
-            app = QtCore.QCoreApplication.instance()
-            if app is not None:
-                app.aboutToQuit.connect(self.stop)
-                self._quit_hook_connected = True
+        loop_lifecycle.start_loop(self)
 
     def _enqueue_frame(self, frame: object) -> None:
         if self._loop_state.frame_queue.full():
@@ -508,7 +355,14 @@ class ClientStreamLoop:
             self._loop_state.metrics.observe_ms('napari_cuda_client_draw_interval_ms', (now_pc - last_pc) * 1000.0)
         self._loop_state.last_draw_pc = now_pc
         # Apply warmup ramp/restore on GUI thread (timer-less)
-        self._apply_warmup(now_pc)
+        if self._warmup_policy is not None:
+            warmup.apply_ramp(
+                self._warmup_policy,
+                self._loop_state,
+                self._presenter,
+                self._vt_latency_s,
+                now_pc,
+            )
         # VT output is drained continuously by worker; draw focuses on presenting
         # If no offset learned yet (e.g., during early startup), derive from buffer samples.
         clock_offset = self._presenter.clock.offset
@@ -674,106 +528,16 @@ class ClientStreamLoop:
             self._init_vt_from_avcc(avcc_b64, w, h)
 
     def _handle_dims_update(self, data: dict) -> None:
-        seq_val = _int_or_none(data.get('seq'))
-        if seq_val is not None:
-            self._loop_state.last_dims_seq = seq_val
-
-        cur = data.get('current_step')
-        ndisp = data.get('ndisplay')
-        ndim = data.get('ndim')
-        dims_range = data.get('range')
-        order = data.get('order')
-        axis_labels = data.get('axis_labels')
-        sizes = data.get('sizes')
-        volume = data.get('volume')
-        render = data.get('render')
-        multiscale = data.get('multiscale')
-        displayed = data.get('displayed')
-        level = data.get('level')
-        level_shape = data.get('level_shape')
-        dtype = data.get('dtype')
-        normalized = data.get('normalized')
-        ack_val = data.get('ack') if isinstance(data.get('ack'), bool) else None
-        intent_seq = _int_or_none(data.get('intent_seq'))
-
-        if ndim is not None:
-            self._dims_meta['ndim'] = int(ndim)
-        if order is not None:
-            self._dims_meta['order'] = order
-        if axis_labels is not None:
-            self._dims_meta['axis_labels'] = axis_labels
-        if dims_range is not None:
-            self._dims_meta['range'] = dims_range
-        if sizes is not None:
-            self._dims_meta['sizes'] = sizes
-        if displayed is not None:
-            self._dims_meta['displayed'] = displayed
-        if level is not None:
-            self._dims_meta['level'] = level
-        if level_shape is not None:
-            self._dims_meta['level_shape'] = level_shape
-        if dtype is not None:
-            self._dims_meta['dtype'] = dtype
-        if normalized is not None:
-            self._dims_meta['normalized'] = normalized
-        if volume is not None:
-            self._dims_meta['volume'] = bool(volume)
-        if render is not None:
-            self._dims_meta['render'] = render
-        if multiscale is not None:
-            self._dims_meta['multiscale'] = multiscale
-        if ndisp is not None:
-            self._dims_meta['ndisplay'] = int(ndisp)
-
-        if not self._dims_ready and (ndim is not None or order is not None):
-            self._dims_ready = True
-            logger.info("dims.update: metadata received; client intents enabled")
-            self._notify_first_dims_ready()
-
-        self._primary_axis_index = self._compute_primary_axis_index()
-
-        if isinstance(cur, (list, tuple)) and cur and self._log_dims_info:
-            logger.info(
-                "dims_update: step=%s ndisp=%s order=%s labels=%s",
-                list(cur),
-                self._dims_meta.get('ndisplay'),
-                self._dims_meta.get('order'),
-                self._dims_meta.get('axis_labels'),
-            )
-
-        vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is not None:
-            self._mirror_dims_to_viewer(
-                vm_ref,
-                cur,
-                ndisp,
-                ndim,
-                dims_range,
-                order,
-                axis_labels,
-                sizes,
-                displayed,
-            )
-
-        if intent_seq is not None:
-            info = self._loop_state.pending_intents.pop(intent_seq, None)
-            if info is not None:
-                if ack_val is False:
-                    logger.warning("dims_update ack=false for intent_seq=%s info=%s", intent_seq, info)
-                elif self._log_dims_info:
-                    logger.debug("dims_update ack: intent_seq=%s info=%s", intent_seq, info)
-
-        self._loop_state.last_dims_payload = {
-            'current_step': cur,
-            'ndisplay': ndisp,
-            'ndim': ndim,
-            'dims_range': dims_range,
-            'order': order,
-            'axis_labels': axis_labels,
-            'sizes': sizes,
-            'displayed': displayed,
-        }
-        self._presenter_facade.apply_dims_update(dict(data))
+        intents.handle_dims_update(
+            self._intent_state,
+            self._loop_state,
+            data,
+            presenter=self._presenter_facade,
+            viewer_ref=self._viewer_mirror,
+            ui_call=self._ui_call,
+            notify_first_dims_ready=self._notify_first_dims_ready,
+            log_dims_info=self._log_dims_info,
+        )
 
     def _notify_first_dims_ready(self) -> None:
         if self._first_dims_notified:
@@ -792,27 +556,12 @@ class ClientStreamLoop:
             return
         _invoke()
 
-    def _record_pending_intent(self, seq: int, info: dict[str, object]) -> None:
-        """Track in-flight intents so we can reconcile on server ACKs."""
-        self._loop_state.pending_intents[seq] = info
-
     def _replay_last_dims_payload(self) -> None:
-        payload = self._loop_state.last_dims_payload
-        if not payload:
-            return
-        vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is None:
-            return
-        self._mirror_dims_to_viewer(
-            vm_ref,
-            payload.get('current_step'),
-            payload.get('ndisplay'),
-            payload.get('ndim'),
-            payload.get('dims_range'),
-            payload.get('order'),
-            payload.get('axis_labels'),
-            payload.get('sizes'),
-            payload.get('displayed'),
+        intents.replay_last_dims_payload(
+            self._intent_state,
+            self._loop_state,
+            self._viewer_mirror,
+            self._ui_call,
         )
 
     def _handle_scene_spec(self, msg: SceneSpecMessage) -> None:
@@ -861,16 +610,11 @@ class ClientStreamLoop:
 
     # State channel lifecycle: gate dims intents safely across reconnects
     def _on_state_connected(self) -> None:
-        self._dims_ready = False
-        self._primary_axis_index = None
+        intents.on_state_connected(self._intent_state)
         logger.info("StateChannel connected; gating dims intents until dims.update meta arrives")
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
-        self._dims_ready = False
-        self._primary_axis_index = None
-        self._loop_state.pending_intents.clear()
-        self._loop_state.last_dims_seq = None
-        self._loop_state.last_dims_payload = None
+        intents.on_state_disconnected(self._loop_state, self._intent_state)
         logger.info("StateChannel disconnected: %s; dims intents gated", exc)
 
     # --- Input mapping: unified wheel handler -------------------------------------
@@ -888,41 +632,16 @@ class ClientStreamLoop:
 
     # --- Input mapping: wheel -> dims.intent.step (primary axis) ---------------------
     def _on_wheel_for_dims(self, data: dict) -> None:
-        ay = int(data.get('angle_y') or 0)
-        py = int(data.get('pixel_y') or 0)
-        mods = int(data.get('mods') or 0)
-        # For now, ignore modifiers (server may treat ctrl as zoom based on input.wheel)
-        step = 0
-        if ay != 0:
-            step = (1 if ay > 0 else -1) * int(self._wheel_step or 1)
-        elif py != 0:
-            # Accumulate pixel delta to synthesize steps (assume ~30 px per notch)
-            self._wheel_px_accum += float(py)
-            thr = 30.0
-            while self._wheel_px_accum >= thr:
-                step += int(self._wheel_step or 1)
-                self._wheel_px_accum -= thr
-            while self._wheel_px_accum <= -thr:
-                step -= int(self._wheel_step or 1)
-                self._wheel_px_accum += thr
-        if step == 0:
-            return
-        # Send intent to server on primary axis
-        sent = self.dims_step('primary', int(step), origin='wheel')
-        if self._log_dims_info:
-            logger.info(
-                "wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent)
-            )
-        else:
-            logger.debug("wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent))
+        intents.handle_wheel_for_dims(
+            self._intent_state,
+            self._loop_state,
+            data,
+            viewer_ref=self._viewer_mirror,
+            ui_call=self._ui_call,
+            log_dims_info=self._log_dims_info,
+        )
 
     # Shortcut-driven stepping via intents (arrows/page)
-    def _step_primary(self, delta: int, origin: str = 'keys') -> None:
-        dz = int(delta)
-        if dz == 0:
-            return
-        _ = self.dims_step('primary', dz, origin=origin)
-
     # --- Camera ops: zoom/pan/reset -----------------------------------------------
     def _widget_to_video(self, xw: float, yw: float) -> tuple[float, float]:
         # Map widget pixel coordinates to video pixel coordinates assuming
@@ -952,81 +671,25 @@ class ClientStreamLoop:
         return (float(xv), clamped)
 
     def _zoom_steps_at_center(self, steps: int) -> None:
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return
-        base = float(self._zoom_base)
-        s = int(steps)
-        if s == 0:
-            return
-        # '+' zooms in, '-' zooms out
-        f = base ** (-s)
-        # Use cursor position if available; otherwise fall back to view center.
-        cursor_xw = self._cursor_wx if hasattr(self, '_cursor_wx') else None
-        cursor_yw = self._cursor_wy if hasattr(self, '_cursor_wy') else None
-        if isinstance(cursor_xw, (int, float)) and isinstance(cursor_yw, (int, float)):
-            xv, yv = self._widget_to_video(float(cursor_xw), float(cursor_yw))
-        else:
-            xv = float(self._vid_w or 0) / 2.0
-            yv = float(self._vid_h or 0) / 2.0
-        ax_s, ay_s = self._server_anchor_from_video(xv, yv)
-        ok = ch.post({'type': 'camera.zoom_at', 'factor': float(f), 'anchor_px': [float(ax_s), float(ay_s)]})
-        if self._log_dims_info:
-            logger.info(
-                "key->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s",
-                float(f), float(ax_s), float(ay_s), bool(ok)
-            )
+        camera.zoom_steps_at_center(
+            self._camera_state,
+            self._loop_state,
+            steps,
+            widget_to_video=self._widget_to_video,
+            server_anchor_from_video=self._server_anchor_from_video,
+            log_dims_info=self._log_dims_info,
+            vid_size=(self._vid_w, self._vid_h),
+        )
 
     def _reset_camera(self) -> None:
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return
-        logger.info("key->camera.reset (sending)")
-        ok = ch.post({'type': 'camera.reset'})
-        logger.info("key->camera.reset sent=%s", bool(ok))
+        camera.reset_camera(self._loop_state, origin='keys')
 
     def _on_key_event(self, data: dict) -> bool:
-        """Optional app-level key handling for bindings that struggle as QShortcut.
-
-        Triggers camera reset on plain '0' with no modifiers. Also accepts
-        keypad 0 when the only modifier is the keypad flag.
-        """
-        key_raw = data.get('key')
-        key = int(key_raw) if key_raw is not None else -1
-        mods = int(data.get('mods') or 0)
-        txt = str(data.get('text') or '')
-        # Accept if explicitly '0' text with no modifiers
-        if txt == '0' and mods == 0:
-            logger.info("keycb: '0' -> camera.reset")
-            self._reset_camera()
-            return True
-        # Or if the key is Key_0 and modifiers are none (or just keypad)
-        keypad_mask = int(QtCore.Qt.KeypadModifier)
-        keypad_only = (mods & ~keypad_mask) == 0 and (mods & keypad_mask) != 0
-        if key == int(QtCore.Qt.Key_0) and (mods == 0 or keypad_only):
-            logger.info("keycb: Key_0 -> camera.reset")
-            self._reset_camera()
-            return True
-        # Map arrows and page keys to primary-axis stepping
-        k_left = int(QtCore.Qt.Key_Left)
-        k_right = int(QtCore.Qt.Key_Right)
-        k_up = int(QtCore.Qt.Key_Up)
-        k_down = int(QtCore.Qt.Key_Down)
-        k_pgup = int(QtCore.Qt.Key_PageUp)
-        k_pgdn = int(QtCore.Qt.Key_PageDown)
-        if key in (k_left, k_right, k_up, k_down, k_pgup, k_pgdn):
-            # Coarse step for PageUp/Down
-            coarse = 10
-            if key == k_left or key == k_down:
-                self._step_primary(-1, origin='keys')
-            elif key == k_right or key == k_up:
-                self._step_primary(+1, origin='keys')
-            elif key == k_pgup:
-                self._step_primary(+coarse, origin='keys')
-            elif key == k_pgdn:
-                self._step_primary(-coarse, origin='keys')
-            return True
-        return False
+        return intents.handle_key_event(
+            data,
+            reset_camera=self._reset_camera,
+            step_primary=lambda delta: self.dims_step('primary', delta, origin='keys'),
+        )
 
     # --- Public UI/state bridge methods -------------------------------------------
     def attach_viewer_mirror(self, viewer: object) -> None:
@@ -1050,13 +713,7 @@ class ClientStreamLoop:
 
     def reset_camera(self, origin: str = 'ui') -> bool:
         """Send a camera.reset to the server (used by UI bindings)."""
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return False
-        logger.info("%s->camera.reset (sending)", origin)
-        ok = ch.post({'type': 'camera.reset'})
-        logger.info("%s->camera.reset sent=%s", origin, bool(ok))
-        return bool(ok)
+        return camera.reset_camera(self._loop_state, origin=origin)
 
     def set_camera(self, *, center=None, zoom=None, angles=None, origin: str = 'ui') -> bool:
         """Send absolute camera fields when provided.
@@ -1064,552 +721,118 @@ class ClientStreamLoop:
         Prefer using zoom_at/pan_px/reset ops for interactions; this is
         intended for explicit UI actions that set a known state.
         """
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return False
-        payload: dict = {'type': 'set_camera'}
-        if center is not None:
-            payload['center'] = list(center)
-        if zoom is not None:
-            payload['zoom'] = float(zoom)
-        if angles is not None:
-            payload['angles'] = list(angles)
-        logger.info("%s->set_camera %s", origin, {k: v for k, v in payload.items() if k != 'type'})
-        ok = ch.post(payload)
-        return bool(ok)
+        return camera.set_camera(
+            self._loop_state,
+            center=center,
+            zoom=zoom,
+            angles=angles,
+            origin=origin,
+        )
 
     # --- Intents API --------------------------------------------------------------
-    def _axis_to_index(self, axis: int | str) -> Optional[int]:
-        if axis == 'primary':
-            return int(self._primary_axis_index) if self._primary_axis_index is not None else 0
-        if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
-            return int(axis)
-        labels = self._dims_meta.get('axis_labels')
-        if isinstance(labels, (list, tuple)):
-            label_map = {str(lbl): i for i, lbl in enumerate(labels)}
-            match = label_map.get(str(axis))
-            return int(match) if match is not None else None
-        return None
-
-    def _compute_primary_axis_index(self) -> Optional[int]:
-        order = self._dims_meta.get('order')
-        ndisplay = self._dims_meta.get('ndisplay')
-        labels = self._dims_meta.get('axis_labels')
-        nd = int(ndisplay) if ndisplay is not None else 2
-        # Normalize order to indices
-        idx_order: list[int] | None = None
-        if isinstance(order, (list, tuple)) and len(order) > 0:
-            if all(isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order):
-                idx_order = [int(x) for x in order]
-            elif isinstance(labels, (list, tuple)) and all(isinstance(x, str) for x in order):
-                l2i = {str(lbl): i for i, lbl in enumerate(labels)}
-                idx_order = [int(l2i.get(str(lbl), i)) for i, lbl in enumerate(order)]
-        # Primary axis = first non-displayed axis (front of order excluding last ndisplay)
-        if idx_order and len(idx_order) > nd:
-            return int(idx_order[0])
-        # Fallback: 0
-        return 0
-
-    def _next_client_seq(self) -> int:
-        self._client_seq = (int(self._client_seq) + 1) & 0x7FFFFFFF
-        return int(self._client_seq)
-
     # --- Mode helpers -----------------------------------------------------------
     def _is_volume_mode(self) -> bool:
-        vol = bool(self._dims_meta.get('volume'))
-        nd = int(self._dims_meta.get('ndisplay') or 2)
-        return bool(vol) and int(nd) == 3
+        return intents._is_volume_mode(self._intent_state)  # type: ignore[attr-defined]
 
     # --- Small utilities (no behavior change) ----------------------------------
-    def _clamp01(self, a: float) -> float:
-        a = float(a)
-        if a < 0.0:
-            return 0.0
-        if a > 1.0:
-            return 1.0
-        return a
-
-    def _clamp_sample_step(self, r: float) -> float:
-        r = float(r)
-        if r < 0.1:
-            return 0.1
-        if r > 4.0:
-            return 4.0
-        return r
-
-    def _ensure_lo_hi(self, lo: float, hi: float) -> tuple[float, float]:
-        lo_f = float(lo)
-        hi_f = float(hi)
-        if hi_f <= lo_f:
-            lo_f, hi_f = hi_f, lo_f
-        return lo_f, hi_f
-
-    def _clamp_level(self, level: int) -> int:
-        ms = self._dims_meta.get('multiscale') if isinstance(self._dims_meta.get('multiscale'), dict) else None
-        if isinstance(ms, dict):
-            levels = ms.get('levels')
-            if isinstance(levels, (list, tuple)) and levels:
-                lo, hi = 0, len(levels) - 1
-                lv = int(level)
-                if lv < lo:
-                    return lo
-                if lv > hi:
-                    return hi
-                return lv
-        return int(level)
-
-    def _send_intent(self, type_str: str, fields: dict, origin: str) -> bool:
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return False
-        payload = {'type': type_str}
-        payload.update(fields)
-        payload['client_id'] = self._client_id
-        payload['client_seq'] = self._next_client_seq()
-        payload['origin'] = str(origin)
-        ok = ch.post(payload)
-        fields_to_log = {k: v for k, v in payload.items() if k not in ('type', 'client_id', 'client_seq', 'origin')}
-        logger.info("%s->%s %s sent=%s", origin, type_str, fields_to_log, bool(ok))
-        return bool(ok)
-
     # --- View HUD snapshot (for overlay) ----------------------------------------
     def view_hud_snapshot(self) -> dict:
         """Return a compact snapshot of 3D view/volume tuning state.
 
         Safe to call from GUI timer; avoids raising on missing fields.
         """
-        meta = self._dims_meta
-        snap: dict[str, object] = {}
-        snap['ndisplay'] = _int_or_none(meta.get('ndisplay'))
-        snap['volume'] = _bool_or_none(meta.get('volume'))
-        snap['vol_mode'] = bool(self._is_volume_mode())
-
-        render = meta.get('render') if isinstance(meta.get('render'), dict) else None
-        if isinstance(render, dict):
-            snap['render_mode'] = render.get('mode')
-            clim = render.get('clim')
-            if isinstance(clim, (list, tuple)):
-                snap['clim_lo'] = _float_or_none(clim[0] if len(clim) > 0 else None)
-                snap['clim_hi'] = _float_or_none(clim[1] if len(clim) > 1 else None)
-            else:
-                snap['clim_lo'] = None
-                snap['clim_hi'] = None
-            snap['colormap'] = render.get('colormap')
-            snap['opacity'] = _float_or_none(render.get('opacity'))
-            snap['sample_step'] = _float_or_none(render.get('sample_step'))
-
-        ms = meta.get('multiscale') if isinstance(meta.get('multiscale'), dict) else None
-        if isinstance(ms, dict):
-            snap['ms_policy'] = ms.get('policy')
-            current_level = ms.get('current_level')
-            level_value = _int_or_none(current_level)
-            snap['ms_level'] = level_value
-            levels_obj = ms.get('levels')
-            if isinstance(levels_obj, (list, tuple)):
-                snap['ms_levels'] = len(levels_obj)
-                if level_value is not None and 0 <= level_value < len(levels_obj):
-                    entry = levels_obj[level_value]
-                    snap['ms_path'] = entry.get('path') if isinstance(entry, dict) else None
-                else:
-                    snap['ms_path'] = None
-            else:
-                snap['ms_levels'] = None
-                snap['ms_path'] = None
-
-        snap['primary_axis'] = _int_or_none(self._primary_axis_index)
-        snap['last_zoom_factor'] = self._last_zoom_factor
-        snap['last_zoom_widget_px'] = self._last_zoom_widget_px
-        snap['last_zoom_video_px'] = self._last_zoom_video_px
-        snap['last_zoom_anchor_px'] = self._last_zoom_anchor_px
-        snap['last_pan_dx'] = self._last_pan_dx_sent
-        snap['last_pan_dy'] = self._last_pan_dy_sent
-        snap['video_w'] = _int_or_none(self._vid_w)
-        snap['video_h'] = _int_or_none(self._vid_h)
-        snap['zoom_base'] = float(self._zoom_base)
-        return snap
-
-    def _mirror_dims_to_viewer(
-        self,
-        vm_ref,
-        cur,
-        ndisplay,
-        ndim,
-        dims_range,
-        order,
-        axis_labels,
-        sizes,
-        displayed,
-    ) -> None:
-        """Mirror dims metadata/step into an attached viewer on the GUI thread.
-
-        Keeps exception handling contained and avoids deep nesting at callsite.
-        """
-        if vm_ref is None or not hasattr(vm_ref, '_apply_remote_dims_update'):
-            return
-        # Build a callable to execute on the GUI thread (or inline fallback)
-        apply_remote = vm_ref._apply_remote_dims_update  # type: ignore[attr-defined]
-
-        def _apply() -> None:
-            apply_remote(
-                current_step=cur,
-                ndisplay=ndisplay,
-                ndim=ndim,
-                dims_range=dims_range,
-                order=order,
-                axis_labels=axis_labels,
-                sizes=sizes,
-                displayed=displayed,
-            )
-        if self._ui_call is not None:
-            self._ui_call.call.emit(_apply)
-            return
-        _apply()
+        cam_state = self._camera_state
+        zoom_state = {
+            'last_zoom_factor': cam_state.last_zoom_factor,
+            'last_zoom_widget_px': cam_state.last_zoom_widget_px,
+            'last_zoom_video_px': cam_state.last_zoom_video_px,
+            'last_zoom_anchor_px': cam_state.last_zoom_anchor_px,
+            'last_pan_dx': cam_state.last_pan_dx_sent,
+            'last_pan_dy': cam_state.last_pan_dy_sent,
+            'zoom_base': float(cam_state.zoom_base),
+        }
+        return intents.hud_snapshot(
+            self._intent_state,
+            video_size=(self._vid_w, self._vid_h),
+            zoom_state=zoom_state,
+        )
 
     def dims_step(self, axis: int | str, delta: int, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        idx = self._axis_to_index(axis)
-        if idx is None:
-            return False
-        # Suppress local inputs on the playing axis while napari is animating it
-        vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is not None:
-            is_playing = bool(vm_ref._is_playing) if hasattr(vm_ref, '_is_playing') else False
-            play_axis = vm_ref._play_axis if hasattr(vm_ref, '_play_axis') else None
-            if is_playing and play_axis is not None and int(play_axis) == int(idx) and origin != 'play':
-                return False
-        now = time.perf_counter()
-        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
-            logger.debug("dims.intent.step gated by rate limiter (%s)", origin)
-            return False
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return False
-        payload = {
-            'type': 'dims.intent.step',
-            'axis': int(idx),
-            'delta': int(delta),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        seq_val = int(payload['client_seq'])
-        ok = ch.post(payload)
-        if ok:
-            self._record_pending_intent(
-                seq_val,
-                {
-                    'kind': 'step',
-                    'axis': int(idx),
-                    'origin': str(origin),
-                },
-            )
-        self._last_dims_send = now
-        return bool(ok)
+        return intents.dims_step(
+            self._intent_state,
+            self._loop_state,
+            axis,
+            delta,
+            origin=origin,
+            viewer_ref=self._viewer_mirror,
+            ui_call=self._ui_call,
+        )
 
     def dims_set_index(self, axis: int | str, value: int, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        idx = self._axis_to_index(axis)
-        if idx is None:
-            return False
-        # Suppress local inputs on the playing axis while napari is animating it
-        vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is not None:
-            is_playing = bool(vm_ref._is_playing) if hasattr(vm_ref, '_is_playing') else False
-            play_axis = vm_ref._play_axis if hasattr(vm_ref, '_play_axis') else None
-            if is_playing and play_axis is not None and int(play_axis) == int(idx) and origin != 'play':
-                return False
-        now = time.perf_counter()
-        if (now - float(self._last_dims_send or 0.0)) < self._dims_min_dt:
-            # Allow coalescing on caller side; treat as not sent
-            logger.debug("dims.intent.set_index gated by rate limiter (%s)", origin)
-            return False
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return False
-        payload = {
-            'type': 'dims.intent.set_index',
-            'axis': int(idx),
-            'value': int(value),
-            'client_id': self._client_id,
-            'client_seq': self._next_client_seq(),
-            'origin': str(origin),
-        }
-        seq_val = int(payload['client_seq'])
-        ok = ch.post(payload)
-        if ok:
-            self._record_pending_intent(
-                seq_val,
-                {
-                    'kind': 'set_index',
-                    'axis': int(idx),
-                    'value': int(value),
-                    'origin': str(origin),
-                },
-            )
-        self._last_dims_send = now
-        return bool(ok)
+        return intents.dims_set_index(
+            self._intent_state,
+            self._loop_state,
+            axis,
+            value,
+            origin=origin,
+            viewer_ref=self._viewer_mirror,
+            ui_call=self._ui_call,
+        )
 
     # --- Volume/multiscale intent senders --------------------------------------
-    def _rate_gate_settings(self, origin: str) -> bool:
-        now = time.perf_counter()
-        if (now - float(self._last_settings_send or 0.0)) < self._settings_min_dt:
-            logger.debug("settings intent gated by rate limiter (%s)", origin)
-            return True
-        self._last_settings_send = now
-        return False
-
     def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if not self._is_volume_mode():
-            logger.debug("volume_set_render_mode gated: not in volume mode")
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        return self._send_intent('volume.intent.set_render_mode', {'mode': str(mode)}, origin)
+        return intents.volume_set_render_mode(self._intent_state, self._loop_state, mode, origin=origin)
 
     def volume_set_clim(self, lo: float, hi: float, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if not self._is_volume_mode():
-            logger.debug("volume_set_clim gated: not in volume mode")
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        lo_f, hi_f = self._ensure_lo_hi(lo, hi)
-        return self._send_intent('volume.intent.set_clim', {'lo': float(lo_f), 'hi': float(hi_f)}, origin)
+        return intents.volume_set_clim(self._intent_state, self._loop_state, lo, hi, origin=origin)
 
     def volume_set_colormap(self, name: str, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if not self._is_volume_mode():
-            logger.debug("volume_set_colormap gated: not in volume mode")
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        return self._send_intent('volume.intent.set_colormap', {'name': str(name)}, origin)
+        return intents.volume_set_colormap(self._intent_state, self._loop_state, name, origin=origin)
 
     def volume_set_opacity(self, alpha: float, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if not self._is_volume_mode():
-            logger.debug("volume_set_opacity gated: not in volume mode")
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        a = self._clamp01(alpha)
-        return self._send_intent('volume.intent.set_opacity', {'alpha': float(a)}, origin)
+        return intents.volume_set_opacity(self._intent_state, self._loop_state, alpha, origin=origin)
 
     def volume_set_sample_step(self, relative: float, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if not self._is_volume_mode():
-            logger.debug("volume_set_sample_step gated: not in volume mode")
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        r = self._clamp_sample_step(relative)
-        return self._send_intent('volume.intent.set_sample_step', {'relative': float(r)}, origin)
+        return intents.volume_set_sample_step(self._intent_state, self._loop_state, relative, origin=origin)
 
     def multiscale_set_policy(self, policy: str, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        pol = str(policy).lower().strip()
-        if pol not in {'oversampling', 'thresholds', 'ratio'}:
-            logger.debug("multiscale_set_policy rejected: policy=%s", pol)
-            return False
-        return self._send_intent('multiscale.intent.set_policy', {'policy': pol}, origin)
+        return intents.multiscale_set_policy(self._intent_state, self._loop_state, policy, origin=origin)
 
     def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        lv = self._clamp_level(level)
-        return self._send_intent('multiscale.intent.set_level', {'level': int(lv)}, origin)
+        return intents.multiscale_set_level(self._intent_state, self._loop_state, level, origin=origin)
 
     def view_set_ndisplay(self, ndisplay: int, *, origin: str = 'ui') -> bool:
-        if not self._dims_ready:
-            return False
-        if self._rate_gate_settings(origin):
-            return False
-        nd_value = int(ndisplay)
-        nd_target = 3 if nd_value >= 3 else 2
-        cur = self._dims_meta.get('ndisplay')
-        if cur is not None and int(cur) == nd_target:
-            return True
-        return self._send_intent('view.intent.set_ndisplay', {'ndisplay': nd_target}, origin)
+        return intents.view_set_ndisplay(self._intent_state, self._loop_state, ndisplay, origin=origin)
 
     def current_ndisplay(self) -> Optional[int]:
-        """Return the last known ndisplay value from dims metadata."""
-
-        value = self._dims_meta.get('ndisplay')
-        return _int_or_none(value)
+        return intents.current_ndisplay(self._intent_state)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
-        """Toggle between 2D and 3D display modes if dims metadata is ready."""
-
-        if not self._dims_ready:
-            return False
-        current = self.current_ndisplay()
-        target = 2 if current == 3 else 3
-        return self.view_set_ndisplay(target, origin=origin)
+        return intents.toggle_ndisplay(self._intent_state, self._loop_state, origin=origin)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
-        ch = self._loop_state.state_channel
-        if ch is None:
-            return
-        ay = float(data.get('angle_y') or 0.0)
-        py = float(data.get('pixel_y') or 0.0)
-        xw = float(data.get('x_px') or 0.0)
-        yw = float(data.get('y_px') or 0.0)
-        base = float(self._zoom_base)
-        if ay != 0.0:
-            s = 1.0 if ay > 0 else -1.0
-            factor = base ** s
-        elif py != 0.0:
-            factor = base ** (py / 30.0)
-        else:
-            return
-        xv, yv = self._widget_to_video(xw, yw)
-        ax, ay = self._server_anchor_from_video(xv, yv)
-        # Stash for HUD
-        self._last_zoom_factor = float(factor)
-        self._last_zoom_widget_px = (float(xw), float(yw))
-        self._last_zoom_video_px = (float(xv), float(yv))
-        self._last_zoom_anchor_px = (float(ax), float(ay))
-        ok = ch.post({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay)]})
-        if self._log_dims_info:
-            logger.info("wheel+mod->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s", float(factor), float(ax), float(ay), bool(ok))
+        camera.handle_wheel_zoom(
+            self._camera_state,
+            self._loop_state,
+            data,
+            widget_to_video=self._widget_to_video,
+            server_anchor_from_video=self._server_anchor_from_video,
+            log_dims_info=self._log_dims_info,
+        )
 
     def _on_pointer(self, data: dict) -> None:
-        phase = (data.get('phase') or '').lower()
-        xw_raw = data.get('x_px')
-        yw_raw = data.get('y_px')
-        xw = float(xw_raw) if xw_raw is not None else 0.0
-        yw = float(yw_raw) if yw_raw is not None else 0.0
-        # Track latest cursor position regardless of drag
-        self._cursor_wx = xw
-        self._cursor_wy = yw
-        # Detect Alt modifier (for orbit)
-        mods = int(data.get('mods') or 0)
-        alt_mask = int(QtCore.Qt.AltModifier)
-        alt = (mods & alt_mask) != 0
-        in_vol3d = self._is_volume_mode() and int(self._dims_meta.get('ndisplay') or 2) == 3
-
-        if phase == 'down':
-            self._dragging = True
-            self._last_wx = xw
-            self._last_wy = yw
-            self._pan_dx_accum = 0.0
-            self._pan_dy_accum = 0.0
-            # Begin orbit drag when Alt held in 3D volume mode
-            if alt and in_vol3d:
-                self._orbit_dragging = True
-                self._orbit_daz_accum = 0.0
-                self._orbit_del_accum = 0.0
-            return
-        if phase == 'move' and self._dragging:
-            # Accumulate pan in video px, then convert to canvas delta
-            xv0, yv0 = self._widget_to_video(self._last_wx, self._last_wy)
-            xv1, yv1 = self._widget_to_video(xw, yw)
-            dx_v = (xv1 - xv0)
-            dy_v = (yv1 - yv0)
-            dx_c, dy_c = self._video_delta_to_canvas(dx_v, dy_v)
-            if self._log_dims_info:
-                logger.info(
-                    "pointer move: mods=%d alt=%s vol3d=%s dx_c=%.2f dy_c=%.2f",
-                    int(mods), bool(alt), bool(in_vol3d), float(dx_c), float(dy_c)
-                )
-            # If Alt held in 3D volume mode: orbit; suppress pan
-            if alt and in_vol3d:
-                # If orbit just started mid-drag (Alt pressed), reset accumulators
-                if not self._orbit_dragging:
-                    self._orbit_dragging = True
-                    self._orbit_daz_accum = 0.0
-                    self._orbit_del_accum = 0.0
-                self._orbit_daz_accum += float(dx_c) * float(self._orbit_deg_per_px_x)
-                self._orbit_del_accum += float(-dy_c) * float(self._orbit_deg_per_px_y)
-                # Do not accumulate pan while orbiting
-            else:
-                # If we were orbiting but Alt released, flush residual orbit and stop orbit mode
-                if self._orbit_dragging:
-                    self._flush_orbit(force=True)
-                    self._orbit_dragging = False
-                self._pan_dx_accum += dx_c
-                self._pan_dy_accum += dy_c
-            self._last_wx = xw
-            self._last_wy = yw
-            # Flush orbit or pan at camera cadence
-            if self._orbit_dragging:
-                self._flush_orbit_if_due()
-            else:
-                self._flush_pan_if_due()
-            return
-        if phase == 'up':
-            self._dragging = False
-            # Flush any residual orbit first if active; otherwise flush pan
-            if self._orbit_dragging:
-                self._flush_orbit(force=True)
-                self._orbit_dragging = False
-            else:
-                # Flush any residual pan
-                self._flush_pan(force=True)
-
-    def _flush_pan_if_due(self) -> None:
-        now = time.perf_counter()
-        if (now - float(self._last_cam_send or 0.0)) >= self._cam_min_dt:
-            self._flush_pan()
-
-    def _flush_pan(self, force: bool = False) -> None:
-        dx = float(self._pan_dx_accum or 0.0)
-        dy = float(self._pan_dy_accum or 0.0)
-        if not force and abs(dx) < 1e-3 and abs(dy) < 1e-3:
-            return
-        ch = self._loop_state.state_channel
-        if ch is None:
-            self._pan_dx_accum = 0.0
-            self._pan_dy_accum = 0.0
-            return
-        ok = ch.post({'type': 'camera.pan_px', 'dx_px': float(dx), 'dy_px': float(dy)})
-        # Stash for HUD
-        self._last_pan_dx_sent = float(dx)
-        self._last_pan_dy_sent = float(dy)
-        self._last_cam_send = time.perf_counter()
-        self._pan_dx_accum = 0.0
-        self._pan_dy_accum = 0.0
-        if self._log_dims_info:
-            logger.info("drag->camera.pan_px dx=%.1f dy=%.1f sent=%s", float(dx), float(dy), bool(ok))
-
-    def _flush_orbit_if_due(self) -> None:
-        now = time.perf_counter()
-        if (now - float(self._last_cam_send or 0.0)) >= self._cam_min_dt:
-            self._flush_orbit()
-
-    def _flush_orbit(self, force: bool = False) -> None:
-        # Coalesced orbit send using same cadence as pan
-        daz = float(self._orbit_daz_accum or 0.0)
-        delv = float(self._orbit_del_accum or 0.0)
-        if not force and abs(daz) < 1e-2 and abs(delv) < 1e-2:
-            return
-        ch = self._loop_state.state_channel
-        if ch is None:
-            self._orbit_daz_accum = 0.0
-            self._orbit_del_accum = 0.0
-            return
-        ok = ch.post({'type': 'camera.orbit', 'd_az_deg': float(daz), 'd_el_deg': float(delv)})
-        self._last_cam_send = time.perf_counter()
-        self._orbit_daz_accum = 0.0
-        self._orbit_del_accum = 0.0
-        if self._log_dims_info:
-            logger.info(
-                "alt-drag->camera.orbit daz=%.2f del=%.2f sent=%s",
-                float(daz), float(delv), bool(ok)
-            )
+        dims_meta = self._intent_state.dims_meta
+        in_vol3d = self._is_volume_mode() and int(dims_meta.get('ndisplay') or 2) == 3
+        camera.handle_pointer(
+            self._camera_state,
+            self._loop_state,
+            data,
+            widget_to_video=self._widget_to_video,
+            video_delta_to_canvas=self._video_delta_to_canvas,
+            log_dims_info=self._log_dims_info,
+            in_vol3d=in_vol3d,
+            alt_mask=int(QtCore.Qt.AltModifier),
+        )
 
     # (no key→dims mapping)
 
@@ -1649,20 +872,14 @@ class ClientStreamLoop:
                 self._presenter.clear(Source.PYAV)
                 logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", cur)
                 self._loop_state.disco_gated = False
-                if self._warmup_window_s > 0:
-                    if self._warmup_ms_override is not None:
-                        extra_ms = max(0.0, float(self._warmup_ms_override))
-                    else:
-                        frame_ms = 1000.0 / (self._fps if (self._fps and self._fps > 0) else 60.0)
-                        target_ms = frame_ms + float(self._warmup_margin_ms)
-                        base_ms = float(self._vt_latency_s) * 1000.0
-                        extra_ms = max(0.0, min(float(self._warmup_max_ms), target_ms - base_ms))
-                    extra_s = extra_ms / 1000.0
-                    if extra_s > 0.0:
-                        # Timer-less warmup: set extra latency and let draw() ramp it down
-                        self._presenter.set_latency(self._vt_latency_s + extra_s)
-                        self._loop_state.warmup_extra_active_s = extra_s
-                        self._loop_state.warmup_until = time.perf_counter() + float(self._warmup_window_s)
+                if self._warmup_policy is not None:
+                    warmup.on_gate_lift(
+                        self._warmup_policy,
+                        self._loop_state,
+                        self._presenter,
+                        self._vt_latency_s,
+                        self._fps,
+                    )
                 # Schedule first wake after VT becomes active (thread-safe)
                 self.schedule_next_wake_threadsafe()
             else:
@@ -1693,65 +910,11 @@ class ClientStreamLoop:
             self._loop_state.pyav_pipeline.enqueue(b, ts_float)
             self._pyav_enqueued += 1
 
-    def _apply_warmup(self, now: float) -> None:
-        if self._loop_state.warmup_until > 0:
-            if now >= self._loop_state.warmup_until:
-                self._presenter.set_latency(self._vt_latency_s)
-                self._loop_state.warmup_until = 0.0
-            else:
-                remain = max(0.0, self._loop_state.warmup_until - now)
-                frac = remain / max(1e-6, self._warmup_window_s)
-                cur = self._vt_latency_s + self._loop_state.warmup_extra_active_s * frac
-                self._presenter.set_latency(cur)
-
     def stop(self) -> None:
         if self._stopped:
             return
         self._stopped = True
-
-        if self._loop_state.stats_timer is not None:
-            self._loop_state.stats_timer.stop()
-            self._loop_state.stats_timer = None
-        if self._loop_state.metrics_timer is not None:
-            self._loop_state.metrics_timer.stop()
-            self._loop_state.metrics_timer = None
-        if self._loop_state.warmup_reset_timer is not None:
-            self._loop_state.warmup_reset_timer.stop()
-            self._loop_state.warmup_reset_timer = None
-        if self._loop_state.watchdog_timer is not None:
-            self._loop_state.watchdog_timer.stop()
-            self._loop_state.watchdog_timer = None
-        if self._loop_state.evloop_monitor is not None:
-            self._loop_state.evloop_monitor.stop()
-        self._loop_state.evloop_monitor = None
-
-        self._presenter.clear()
-        self._presenter_facade.shutdown()
-
-        while True:
-            try:
-                frame = self._loop_state.frame_queue.get_nowait()
-            except queue.Empty:
-                break
-            if isinstance(frame, tuple) and len(frame) == 2:
-                payload, release_cb = frame  # type: ignore[assignment]
-                if release_cb is not None:
-                    release_cb(payload)  # type: ignore[misc]
-
-        lease = self._loop_state.fallbacks.pop_vt_cache()
-        if lease is not None:
-            lease.close()
-        self._loop_state.fallbacks.clear_pyav()
-
-        self._loop_state.vt_pipeline.stop()
-        self._loop_state.pyav_pipeline.stop()
-
-        if self._vt_decoder is not None:
-            self._vt_decoder.flush()
-            close_decoder = getattr(self._vt_decoder, 'close', None)
-            if callable(close_decoder):
-                close_decoder()
-            self._vt_decoder = None
+        loop_lifecycle.stop_loop(self)
 
     # VT decode/submit is handled by VTPipeline
 

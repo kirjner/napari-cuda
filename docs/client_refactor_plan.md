@@ -104,17 +104,19 @@
 3. (done) `ClientLoopState` now aggregates loop state (`src/napari_cuda/client/streaming/client_loop/loop_state.py`).
    - Draw/present/shutdown helpers read timers, frame queue, metrics, and gating flags via the bag; presenter façade consults it for HUD stats.
    - Follow-up: migrate the remaining helper modules (scheduler, input, pipelines) to accept an explicit `ClientLoopState` parameter instead of reaching into `loop` directly.
-4. Hoist the remaining hot-path helpers out of `ClientStreamLoop` before adding
-   new features:
-   - `client_loop/warmup.py`: expose `apply_warmup(state, presenter, env_cfg)`
-     and friends so draw/shutdown only delegate.
-   - `client_loop/intents.py`: own dims/settings payload prep, ack clearing,
-     and viewer mirroring.
-   - `client_loop/camera.py`: hold pan/orbit accumulation and rate limits.
-   - `client_loop/lifecycle.py`: start/stop helpers for timers, fallbacks,
-     reconnect, and watchdog wiring.
-   Each module should land with focused unit coverage and drop the loop file to
-   ≤1 000 LOC.
+4. ✓ Hot-path helpers are now hoisted out of `ClientStreamLoop`:
+   - `client_loop/warmup.py` carries the `WarmupPolicy` ramp and shutdown
+     cleanup; draw/shutdown simply delegate to `warmup.apply_ramp` /
+     `warmup.cancel`.
+   - `client_loop/intents.py` owns the `IntentState`, dims/settings payload
+     normalisation, ACK bookkeeping, and viewer mirroring hooks.
+   - `client_loop/camera.py` isolates pan/orbit accumulation, zoom helpers, and
+     reset/set dispatch backed by `CameraState`.
+   - `client_loop/loop_lifecycle.py` now owns start/stop wiring (state/pixel
+     controllers, metrics timers, watchdog, event-loop monitor), trimming
+     `ClientStreamLoop.start/stop` to delegations.
+   Focused unit tests cover the new helpers and the loop file now weighs in at
+   ~930 LOC (down from 1 767).
 5. Sweep `proxy_viewer.py` for blanket guards next, then revisit
    `state.py`/`vt_pipeline.py` to continue shrinking the package-wide
    try/except count.

@@ -86,6 +86,12 @@ class ClientLoopState:
     input_sender: "InputSender | None" = None
     shortcuts: list[object] = field(default_factory=list)
 
+    # Intent handling
+    intents: "IntentState | None" = None
+
+    # Camera handling
+    camera: "CameraState | None" = None
+
     # Intent caches
     pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
     last_dims_seq: int | None = None
@@ -101,6 +107,7 @@ class ClientLoopState:
     last_present_mono: float = 0.0
 
     # Warmup behaviour
+    warmup_policy: "WarmupPolicy | None" = None
     warmup_until: float = 0.0
     warmup_extra_active_s: float = 0.0
 
@@ -119,3 +126,6 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.presenter import FixedLatencyPresenter
     from napari_cuda.client.streaming.receiver import PixelReceiver
     from napari_cuda.client.streaming.state import StateChannel
+    from .warmup import WarmupPolicy
+    from .intents import IntentState
+    from .camera import CameraState
