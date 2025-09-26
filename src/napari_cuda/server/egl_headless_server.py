@@ -88,14 +88,14 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
 from .egl_worker import EGLRendererWorker
 from .scene_state import ServerSceneState
 from .server_scene import ServerSceneData, create_server_scene_data
-from .server_scene_spec import build_scene_spec_json
 from .server_scene_queue import (
     PendingServerSceneUpdate,
     ServerSceneCommand,
     ServerSceneQueue,
+    WorkerSceneNotification,
+    WorkerSceneNotificationQueue,
 )
 from .server_scene_spec import (
-    build_dims_payload,
     build_scene_spec_json,
 )
 from .layer_manager import ViewerSceneManager
@@ -112,8 +112,8 @@ from . import pixel_broadcaster
 from .server_scene_control import (
     broadcast_dims_update,
     build_dims_update_message,
-    flush_pending_worker_step,
     handle_state,
+    process_worker_notifications,
     rebroadcast_meta,
 )
 
@@ -248,6 +248,7 @@ class EGLHeadlessServer:
             logger.debug("populate multiscale state failed", exc_info=True)
 
         self._scene_manager = ViewerSceneManager((self.width, self.height))
+        self._worker_notifications = WorkerSceneNotificationQueue()
 
     # --- Logging + Broadcast helpers --------------------------------------------
     def _enqueue_camera_command(self, cmd: ServerSceneCommand) -> None:
@@ -261,6 +262,12 @@ class EGLHeadlessServer:
                 queue_len,
                 cmd,
             )
+
+    def _process_worker_notifications(self) -> None:
+        notifications = self._worker_notifications.drain()
+        if not notifications:
+            return
+        process_worker_notifications(self, notifications)
 
     def _log_volume_intent(self, fmt: str, *args) -> None:
         try:
@@ -584,7 +591,6 @@ class EGLHeadlessServer:
             viewer_model=viewer_model,
             extras=extras,
         )
-        flush_pending_worker_step(self)
 
     def _current_ndisplay(self) -> int:
         if self._worker is not None and bool(getattr(self._worker, 'use_volume', False)):
@@ -908,11 +914,9 @@ class EGLHeadlessServer:
             try:
                 # Scene refresh callback: rebroadcast current dims/meta on worker-driven changes
                 def _on_scene_refresh(step: object = None) -> None:
-                    # If worker provided an explicit step, broadcast it directly; else rebroadcast meta
                     try:
                         if step is not None and isinstance(step, (list, tuple)):
                             chosen = [int(x) for x in step]
-                            # Synchronize server state so future intents use this baseline
                             try:
                                 with self._state_lock:
                                     s = self._scene.latest_state
@@ -920,25 +924,27 @@ class EGLHeadlessServer:
                                         center=s.center,
                                         zoom=s.zoom,
                                         angles=s.angles,
-                                        current_step=tuple(int(x) for x in chosen),
+                                        current_step=tuple(chosen),
                                     )
                             except Exception:
                                 logger.debug("scene.refresh: failed to sync server state step", exc_info=True)
-                            loop.call_soon_threadsafe(
-                                lambda c=chosen: asyncio.create_task(
-                                    broadcast_dims_update(
-                                        self,
-                                        c,
-                                        last_client_id=None,
-                                        ack=True,
-                                        intent_seq=None,
-                                    )
+                            self._worker_notifications.push(
+                                WorkerSceneNotification(
+                                    kind="dims_update",
+                                    step=tuple(chosen),
+                                    last_client_id=None,
+                                    ack=True,
+                                    intent_seq=None,
                                 )
                             )
                         else:
-                            loop.call_soon_threadsafe(
-                                lambda: asyncio.create_task(rebroadcast_meta(self, client_id=None))
+                            self._worker_notifications.push(
+                                WorkerSceneNotification(
+                                    kind="meta_refresh",
+                                    last_client_id=None,
+                                )
                             )
+                        loop.call_soon_threadsafe(self._process_worker_notifications)
                     except Exception:
                         logger.debug("scene.refresh scheduling failed", exc_info=True)
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import threading
 import time
-from typing import Callable, Literal, Optional
+from typing import Callable, Deque, Literal, Optional
 
 from napari_cuda.server.scene_state import ServerSceneState
 
@@ -123,10 +124,43 @@ class ServerSceneQueue:
         return (center, zoom, angles, current_step)
 
 
+@dataclass(frozen=True)
+class WorkerSceneNotification:
+    """Worker-thread message consumed by the control loop."""
+
+    kind: Literal["dims_update", "meta_refresh"]
+    step: Optional[tuple[int, ...]] = None
+    last_client_id: Optional[str] = None
+    ack: bool = False
+    intent_seq: Optional[int] = None
+
+
+class WorkerSceneNotificationQueue:
+    """Thread-safe FIFO for worker→control notifications."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: Deque[WorkerSceneNotification] = deque()
+
+    def push(self, notification: WorkerSceneNotification) -> None:
+        with self._lock:
+            self._items.append(notification)
+
+    def drain(self) -> list[WorkerSceneNotification]:
+        with self._lock:
+            if not self._items:
+                return []
+            items = list(self._items)
+            self._items.clear()
+            return items
+
+
 __all__ = [
     "ServerSceneCommand",
     "ServerSceneLevelRequest",
     "PendingServerSceneUpdate",
     "ServerSceneQueue",
     "ServerSceneZoomIntent",
+    "WorkerSceneNotification",
+    "WorkerSceneNotificationQueue",
 ]

@@ -12,7 +12,10 @@ from typing import Any, Mapping, Optional, Sequence
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene_queue import ServerSceneCommand
+from napari_cuda.server.server_scene_queue import (
+    ServerSceneCommand,
+    WorkerSceneNotification,
+)
 from napari_cuda.server.server_scene_spec import (
     build_dims_payload,
     build_scene_spec_json,
@@ -541,17 +544,9 @@ async def broadcast_dims_update(
     meta = server._dims_metadata() or {}
     ndim = _meta_axis_count(meta)
     step = [int(x) for x in step_list]
-    if len(step) > ndim:
-        server._scene.pending_worker_step = {
-            "step_list": step,
-            "last_client_id": last_client_id,
-            "ack": bool(ack),
-            "intent_seq": int(intent_seq) if intent_seq is not None else None,
-        }
-        logger.debug(
-            "Deferring dims.update broadcast: step_len=%s meta_ndim=%s", len(step), ndim
-        )
-        return
+    assert len(step) <= ndim, (
+        f"dims_update step length {len(step)} exceeds metadata ndim {ndim}"
+    )
 
     payload = build_dims_update_message(
         server,
@@ -568,49 +563,52 @@ async def broadcast_scene_spec(server: Any, *, reason: str) -> None:
     await broadcast_scene_spec_payload(server, payload, reason=reason)
 
 
-def flush_pending_worker_step(server: Any) -> None:
-    """Broadcast any deferred worker-originated dims update once metadata permits."""
-
-    pending = getattr(server._scene, "pending_worker_step", None)
-    if not pending:
+def process_worker_notifications(
+    server: Any, notifications: Sequence[WorkerSceneNotification]
+) -> None:
+    if not notifications:
         return
 
-    step = pending.get("step_list")
-    if not isinstance(step, Sequence) or not step:
-        server._scene.pending_worker_step = None
-        return
+    deferred: list[WorkerSceneNotification] = []
 
-    meta = server._dims_metadata() or {}
-    ndim = _meta_axis_count(meta)
-    if len(step) > ndim:
-        return
+    for note in notifications:
+        if note.kind == "dims_update" and note.step is not None:
+            meta = server._dims_metadata() or {}
+            ndim = _meta_axis_count(meta)
+            step_tuple = tuple(int(x) for x in note.step)
+            if len(step_tuple) > ndim:
+                deferred.append(
+                    WorkerSceneNotification(
+                        kind="dims_update",
+                        step=step_tuple,
+                        last_client_id=note.last_client_id,
+                        ack=note.ack,
+                        intent_seq=note.intent_seq,
+                    )
+                )
+                continue
 
-    server._scene.pending_worker_step = None
-    ack = bool(pending.get("ack", False))
-    intent_seq = pending.get("intent_seq")
-    if intent_seq is not None:
-        try:
-            intent_seq = int(intent_seq)
-        except Exception:
-            intent_seq = None
-    last_client_id = pending.get("last_client_id")
+            server._schedule_coro(
+                broadcast_dims_update(
+                    server,
+                    list(step_tuple),
+                    last_client_id=note.last_client_id,
+                    ack=note.ack,
+                    intent_seq=note.intent_seq,
+                ),
+                "dims_update-worker",
+            )
+        elif note.kind == "meta_refresh":
+            server._update_scene_manager()
+            server._schedule_coro(
+                rebroadcast_meta(server, note.last_client_id),
+                "rebroadcast-worker",
+            )
 
-    coro = broadcast_dims_update(
-        server,
-        step,
-        last_client_id=last_client_id,
-        ack=ack,
-        intent_seq=intent_seq,
-    )
-    scheduler = getattr(server, "_schedule_coro", None)
-    if callable(scheduler):
-        scheduler(coro, "dims_update-pending-flush")
-    else:
-        try:
-            asyncio.get_running_loop()
-            asyncio.create_task(coro)
-        except RuntimeError:
-            logger.debug("No running loop to flush pending dims update")
+    if deferred:
+        for note in deferred:
+            server._worker_notifications.push(note)
+        asyncio.get_running_loop().call_later(0.05, server._process_worker_notifications)
 
 
 # ---------------------------------------------------------------------------

@@ -116,10 +116,10 @@ Implementation slices:
      - Remaining LOC now sits in `_handle_pixel`, metrics/event plumbing, and worker lifecycle glue; future slices target those clusters.
      - State-channel orchestration lives in `server_scene_control.py` (`handle_state`, `process_state_message`, `broadcast_dims_update`, `rebroadcast_meta`, metrics writers); `EGLHeadlessServer` now only wires the websocket handlers to these helpers.
      - Helpers operate as free functions over the scene bag and server interface, matching the data-oriented style we committed to for Phase E.
-  6. **Worker→control ordering fix** — ensure the server never broadcasts dims updates that the metadata bag cannot describe:
-     - Populate the dims metadata bag (`ServerSceneData.last_dims_payload`) before the worker loop starts so axis counts are authoritative when `_on_scene_refresh` fires.
-     - On worker refresh, stash the step vector (`pending_worker_step`) and broadcast only when the metadata update observes a matching axis count.
-     - This keeps `build_dims_payload` invariants intact without post-hoc “ensure” helpers and eliminates the race exposed by the refactor.
+  6. **Worker→control queue** — route worker refresh notifications through a dedicated channel so metadata stays ahead of each broadcast:
+     - Introduce a lock-safe worker→control queue (parallel to `ServerSceneQueue`) owned by the asyncio loop; `_on_scene_refresh` enqueues the authoritative step + hints instead of scheduling a broadcast directly.
+     - Teach the control loop to drain that queue before emitting `dims.update` / `scene.spec`, updating `ServerSceneData` and `ViewerSceneManager` inside the same critical section so `build_dims_payload` always sees aligned axes.
+     - Delete the `pending_worker_step` scaffolding once the queue is wired, keeping the scene bag free of cross-thread scratch state and eliminating the ad-hoc flush helper.
 
   6. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
      - Add a focused pytest (`test_server_scene_data.py`) to cover the new helper functions and dim-sequence wraparound once they land.
