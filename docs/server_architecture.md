@@ -138,6 +138,10 @@ graph LR
     immutable snapshots instead of reading environment variables directly.
   - `logging_policy.py` materialises every debug/logging toggle; worker, rendering, and bitstream
     code paths now consume the policy object exclusively.
+- **Metrics Helpers** (`metrics_core.py`, `metrics_server.py`, `dash_dashboard.py`)
+  - `metrics_core.Metrics` is the dependency-free aggregator used by the server, dashboard, and tests.
+  - `metrics_server` wires Dash startup and policy gauge updates so `egl_headless_server` only calls concise helpers.
+  - The Dash app remains in `dash_dashboard.py`, consuming the shared aggregator without reaching into server internals.
 
 ## Data Flow Summary
 

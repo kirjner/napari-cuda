@@ -99,7 +99,7 @@ from .server_scene_spec import (
 )
 from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config, configure_bitstream
-from .metrics import Metrics
+from .metrics_core import Metrics
 from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
 from napari_cuda.server.config import (
@@ -107,7 +107,7 @@ from napari_cuda.server.config import (
     ServerCtx,
     load_server_ctx,
 )
-from . import pixel_broadcaster, pixel_channel
+from . import pixel_broadcaster, pixel_channel, metrics_server
 from .server_scene_control import (
     broadcast_dims_update,
     build_dims_update_message,
@@ -182,6 +182,7 @@ class EGLHeadlessServer:
 
         policy_logging = self._ctx.debug_policy.logging
         self.metrics = Metrics()
+        self._metrics_runner = None
         self._state_clients: Set[websockets.WebSocketServerProtocol] = set()
         # Keep queue size at 1 for latest-wins, never-block behavior
         qsize = int(self._ctx.frame_queue)
@@ -743,7 +744,12 @@ class EGLHeadlessServer:
         pixel_server = await websockets.serve(
             self._handle_pixel, self.host, self.pixel_port, compression=None
         )
-        metrics_server = await self._start_metrics_server()
+        self._metrics_runner = metrics_server.start_metrics_dashboard(
+            self.host,
+            int(self._ctx.metrics_port),
+            self.metrics,
+            int(self._ctx.metrics_refresh_ms),
+        )
         logger.info(
             "WS listening on %s:%d (state), %s:%d (pixel) | Dashboard: http://%s:%s/dash/ JSON: http://%s:%s/metrics.json",
             self.host,
@@ -762,7 +768,7 @@ class EGLHeadlessServer:
             broadcaster.cancel()
             state_server.close(); await state_server.wait_closed()
             pixel_server.close(); await pixel_server.wait_closed()
-            await self._stop_metrics_server(metrics_server)
+            metrics_server.stop_metrics_dashboard(self._metrics_runner)
             self._stop_worker()
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -1159,117 +1165,24 @@ class EGLHeadlessServer:
             self._state_clients.discard(ws)
 
     def _update_client_gauges(self) -> None:
-        try:
-            count = len(self._pixel_channel.broadcast.clients)
-            self.metrics.set('napari_cuda_pixel_clients', float(count))
-            # We could track state clients separately if desired; here we reuse pixel_clients for demo
-        except Exception:
-            logger.debug('metrics set pixel_clients failed', exc_info=True)
+        count = len(self._pixel_channel.broadcast.clients)
+        self.metrics.set('napari_cuda_pixel_clients', float(count))
+        # We could track state clients separately if desired; here we reuse pixel_clients for demo
         self._publish_policy_metrics()
 
     def _publish_policy_metrics(self) -> None:
         worker = self._worker
         if worker is None:
             return
-        try:
-            snapshot = worker.policy_metrics_snapshot()
-        except Exception:
-            logger.debug('policy metrics snapshot failed', exc_info=True)
-            return
+        snapshot = worker.policy_metrics_snapshot()
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("policy metrics snapshot must be a mapping")
 
-        if not isinstance(snapshot, dict):
-            return
-
-        self._scene.policy_metrics_snapshot = snapshot
-        try:
-            self._scene.multiscale_state['prime_complete'] = bool(snapshot.get('prime_complete'))
-            if 'active_level' in snapshot:
-                self._scene.multiscale_state['current_level'] = int(snapshot['active_level'])
-            self._scene.multiscale_state['downgraded'] = bool(snapshot.get('level_downgraded'))
-        except Exception:
-            logger.debug('ms_state prime update failed', exc_info=True)
-        try:
-            out = Path('tmp/policy_metrics_latest.json')
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(snapshot, indent=2))
-        except Exception:
-            logger.debug('policy metrics file write failed', exc_info=True)
-
-        levels = snapshot.get('levels') if isinstance(snapshot.get('levels'), dict) else {}
-        if isinstance(levels, dict):
-            for level, stats in levels.items():
-                try:
-                    lvl = int(level)
-                except Exception:
-                    continue
-                if not isinstance(stats, dict):
-                    continue
-                prefix = f'napari_cuda_policy_level_{lvl}'
-                mean_time = float(stats.get('mean_time_ms', 0.0))
-                last_time = float(stats.get('last_time_ms', 0.0))
-                overs = float(stats.get('latest_oversampling', 0.0))
-                mean_bytes = float(stats.get('mean_bytes', 0.0))
-                samples = float(stats.get('samples', 0.0))
-                try:
-                    self.metrics.set(f'{prefix}_mean_time_ms', mean_time)
-                    self.metrics.set(f'{prefix}_last_time_ms', last_time)
-                    self.metrics.set(f'{prefix}_oversampling', overs)
-                    self.metrics.set(f'{prefix}_mean_bytes', mean_bytes)
-                    self.metrics.set(f'{prefix}_samples', samples)
-                except Exception:
-                    logger.debug('policy metrics gauge update failed for level %s', lvl, exc_info=True)
-
-        try:
-            self.metrics.set('napari_cuda_ms_prime_complete', 1.0 if self._scene.multiscale_state.get('prime_complete') else 0.0)
-            self.metrics.set('napari_cuda_ms_active_level', float(self._scene.multiscale_state.get('current_level', 0)))
-        except Exception:
-            logger.debug('prime metrics update failed', exc_info=True)
-
-        decision = snapshot.get('last_decision')
-        if isinstance(decision, dict) and decision:
-            try:
-                intent = float(decision.get('intent_level', -1))
-            except Exception:
-                intent = -1.0
-            try:
-                desired = float(decision.get('desired_level', -1))
-            except Exception:
-                desired = -1.0
-            try:
-                applied = float(decision.get('applied_level', -1))
-            except Exception:
-                applied = -1.0
-            try:
-                idle_ms = float(decision.get('idle_ms', 0.0))
-            except Exception:
-                idle_ms = 0.0
-            try:
-                self.metrics.set('napari_cuda_policy_intent_level', intent)
-                self.metrics.set('napari_cuda_policy_desired_level', desired)
-                self.metrics.set('napari_cuda_policy_applied_level', applied)
-                self.metrics.set('napari_cuda_policy_idle_ms', idle_ms)
-                self.metrics.set(
-                    'napari_cuda_policy_downgraded', 1.0 if decision.get('downgraded') else 0.0
-                )
-            except Exception:
-                logger.debug('policy decision gauge update failed', exc_info=True)
-
-    async def _start_metrics_server(self):
-        # Start Dash/Plotly dashboard on a background thread with a Flask server.
-        port = int(self._ctx.metrics_port)
-        refresh_ms = int(self._ctx.metrics_refresh_ms)
-        try:
-            # Import here to allow running without dash installed (graceful fallback)
-            from .dash_dashboard import start_dash_dashboard  # type: ignore
-            th = start_dash_dashboard(self.host, port, self.metrics, refresh_ms)
-            return th
-        except Exception as e:
-            logger.error("Dashboard init failed; continuing without UI: %s", e)
-            return None
-
-    async def _stop_metrics_server(self, runner):
-        # Dash thread is daemonized; nothing to stop cleanly at shutdown.
-        return None
+        metrics_server.update_policy_metrics(
+            self._scene,
+            self.metrics,
+            snapshot,
+        )
 
 
 def main() -> None:

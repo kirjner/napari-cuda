@@ -125,9 +125,9 @@ Implementation slices:
      - `PixelChannelState` wraps the existing broadcaster bag and tracks avcC cache, pacing bypass, drops, and watchdog handles while `PixelChannelConfig` captures the static codec geometry.
      - `EGLHeadlessServer` delegates client attach/detach, keyframe forcing, queue draining, and video-config broadcasts to the new helpers; only lifecycle wiring remains inline.
      - Added focused tests (`test_pixel_channel.py`) covering queue overflow drop counting, video-config caching, and watchdog cooldown behaviour without spinning up websockets.
-  8. **Metrics/Dash helper** — hoist the metrics server startup/shutdown (`_start_metrics_server`, `_stop_metrics_server`, Dash wiring) into `server_metrics.py`:
-     - The helper should own the Dash app factory and HTTP routes, accepting the `Metrics` object and config. `EGLHeadlessServer` just calls `start_metrics(server_ctx)` / `stop_metrics(handle)`.
-     - Update docs to describe the new module and move the current logging/exception handling out of `egl_headless_server`.
+  8. **Metrics/Dash helper ✅** — metrics startup/shutdown now lives in `metrics_server.py`:
+     - `metrics_core.Metrics` remains the shared aggregator; `metrics_server.start_metrics_dashboard` boots Dash while `update_policy_metrics` encapsulates gauge updates + JSON dumps.
+     - `EGLHeadlessServer` lost `_start/_stop_metrics_server` and simply retains the runner handle; docs now describe the split under “Metrics Helpers.”
   9. **Worker lifecycle module** — extract worker start/stop + scene refresh wiring into `server_worker.py`:
      - Provide functions for `start_worker(server, loop)` and `stop_worker(server)` that build the renderer, register callbacks, and handle cleanup.
      - This trims the 300+ lines of worker boot logic from `egl_headless_server` and gives us a single place to reason about worker creation.

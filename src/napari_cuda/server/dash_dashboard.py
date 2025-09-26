@@ -16,7 +16,7 @@ import os
 from collections import deque
 from typing import Deque, Dict, Tuple
 
-from .metrics import Metrics
+from .metrics_core import Metrics
 
 
 def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int = 1000) -> threading.Thread:
