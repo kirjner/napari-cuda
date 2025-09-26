@@ -77,14 +77,30 @@ leases once the draw call finishes.
 ### ClientStreamLoop
 
 - Coordinates lifecycle for pipelines, presenter, renderer, input, telemetry.
-- Maintains `_frame_q` (render queue), `_last_vt_lease` (cached lease for VT
-  fallback), and `_last_pyav_frame` (software fallback).
-- Handles gating on keyframes via `_vt_wait_keyframe` and schedules redraws
-  through `WakeProxy`/`CallProxy` onto the GUI thread.
-- **Future direction:** replace the growing set of ad hoc attributes with a
-  `ClientLoopState` dataclass (see sketch below) so routines operate on an
-  explicit data bag instead of `self`. This aligns with the Casey Muratori
-  “data + procedures” style and will make it easier to unit-test helpers.
+- Holds a `ClientLoopState` data bag (`src/napari_cuda/client/streaming/client_loop/loop_state.py`)
+  that owns the render queue, wake scheduling handles, timers, metrics facade,
+  and VT/PyAV gating flags so helpers no longer poke private attributes.
+- Tracks cached VT/PyAV fallbacks through the state bag instead of ad-hoc
+  `_last_*` attributes; presenter façade simply pulls from the state.
+- Wake scheduling still flows through `WakeProxy`/`CallProxy`, but helpers now
+  dereference proxies and timers through `ClientLoopState`, keeping draw/update
+  routines pure.
+
+#### Planned extractions (2025-10)
+
+- `client_loop/warmup.py`: encapsulate the VT gate lift ramp, offset relearn,
+  and watchdog-friendly latency adjustments so `ClientStreamLoop.draw` becomes
+  plumbing plus assertions.
+- `client_loop/intents.py`: own dims/settings payload normalisation, viewer
+  mirroring, and intent ack bookkeeping. This module will expose pure
+  functions that operate on `ClientLoopState` and collaborators, paving the way
+  for the layer-intent bridge.
+- `client_loop/camera.py`: isolate pan/orbit/zoom accumulation and rate limits.
+- `client_loop/lifecycle.py`: handle start/stop bookkeeping (Qt timers,
+  fallbacks, reconnect) with explicit enter/exit routines.
+
+Once those seams land, `ClientStreamLoop` should shrink to ~800–900 LOC and act
+mostly as a coordinator that wires collaborators together.
 
 ### Presenter / SourceMux
 
@@ -137,54 +153,61 @@ This diagram acts as the baseline for the ongoing client refactor. Future
 iterations can evolve it as modules split out from `ClientStreamLoop` and the
 presenter gains a dedicated facade.
 
-## `ClientLoopState` Sketch (Future Work)
+## ClientLoopState Data Bag
+
+`ClientStreamLoop` now instantiates `ClientLoopState` from
+`src/napari_cuda/client/streaming/client_loop/loop_state.py`. The bag groups
+threads, channels, render queue, pipelines, timers, and warmup/gating flags so
+helpers manipulate explicit state instead of mutating `self` attributes. The
+core fields look like this:
 
 ```python
 from dataclasses import dataclass, field
-from typing import Optional, Deque
 from threading import Thread
+from queue import Queue
 
 @dataclass
 class ClientLoopState:
-    # Threads and channels
     threads: list[Thread] = field(default_factory=list)
-    state_channel: "StateChannel | None" = None
-    pixel_receiver: "PixelReceiver | None" = None
-    presenter: "FixedLatencyPresenter | None" = None
+    state_channel: StateChannel | None = None
+    pixel_receiver: PixelReceiver | None = None
+    presenter: FixedLatencyPresenter | None = None
 
-    # Scheduling / wake coordination
     next_due_pending_until: float = 0.0
     in_present: bool = False
-    wake_proxy: "WakeProxy | None" = None
+    wake_proxy: WakeProxy | None = None
+    wake_timer: QtCore.QTimer | None = None
+    gui_thread: QtCore.QThread | None = None
 
-    # Renderer queue + fallbacks
-    frame_queue: "queue.Queue[object] | None" = None
-    fallbacks: "RendererFallbacks | None" = None
+    frame_queue: Queue[object] | None = None
+    fallbacks: RendererFallbacks | None = None
 
-    # Smoke / pipelines
-    vt_pipeline: "VTPipeline | None" = None
-    pyav_pipeline: "PyAVPipeline | None" = None
+    vt_pipeline: VTPipeline | None = None
+    pyav_pipeline: PyAVPipeline | None = None
+    vt_wait_keyframe: bool = False
+    pyav_wait_keyframe: bool = False
 
-    # Metrics / telemetry
-    metrics_timer: "QtCore.QTimer | None" = None
-    stats_timer: "QtCore.QTimer | None" = None
-    metrics: "Metrics | None" = None
+    metrics: ClientMetrics | None = None
+    stats_timer: QtCore.QTimer | None = None
+    metrics_timer: QtCore.QTimer | None = None
+    warmup_reset_timer: QtCore.QTimer | None = None
+    watchdog_timer: QtCore.QTimer | None = None
+    evloop_monitor: EventLoopMonitor | None = None
 
-    # Input + shortcuts
-    input_sender: "InputSender | None" = None
-    shortcuts: list[object] = field(default_factory=list)
+    pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
+    last_dims_seq: int | None = None
+    last_dims_payload: dict[str, object] | None = None
 
-    # Stream continuity / gating
-    vt_wait_keyframe: bool = True
-    pyro_wait_keyframe: bool = False
-    sync: _SyncState = field(default_factory=_SyncState)
-
-    # Misc client telemetry
+    sync: LoopSyncState = field(default_factory=LoopSyncState)
+    disco_gated: bool = False
     last_draw_pc: float = 0.0
     last_present_mono: float = 0.0
     warmup_until: float = 0.0
-
+    warmup_extra_active_s: float = 0.0
 ```
+
+`LoopSyncState` replaces the inline `_SyncState` helper and continues to emit a
+rate-limited discontinuity log when sequence numbers jump.
 
 Once the state object exists, helper routines (draw loop, gating logic,
 shutdown) can be rewritten to accept `ClientLoopState` explicitly, reducing the

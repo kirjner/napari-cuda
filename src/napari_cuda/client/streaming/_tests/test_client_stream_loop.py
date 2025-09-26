@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from napari_cuda.client.streaming.client_stream_loop import LoopState, ClientStreamLoop
+from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
+from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 
 
 def _make_loop() -> ClientStreamLoop:
@@ -9,7 +10,7 @@ def _make_loop() -> ClientStreamLoop:
     loop._dims_ready = False
     loop._log_dims_info = False
     loop._primary_axis_index = None
-    loop._loop_state = LoopState()
+    loop._loop_state = ClientLoopState()
     loop._viewer_mirror = lambda: None
     loop._mirror_dims_to_viewer = lambda *args, **kwargs: None
     loop._first_dims_ready_cb = None

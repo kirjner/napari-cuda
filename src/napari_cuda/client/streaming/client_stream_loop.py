@@ -9,7 +9,6 @@ import time
 from threading import Thread
 from typing import Callable, Dict, Optional, TYPE_CHECKING
 import weakref
-from dataclasses import dataclass, field
 from contextlib import ExitStack
 
 import numpy as np
@@ -43,6 +42,8 @@ from napari_cuda.client.streaming.client_loop.pipelines import (
     build_vt_pipeline,
 )
 from napari_cuda.client.streaming.client_loop.renderer_fallbacks import RendererFallbacks
+from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
+
 from napari_cuda.client.streaming.client_loop.input_helpers import (
     attach_input_sender,
     bind_shortcuts,
@@ -111,45 +112,6 @@ def _bool_or_none(value: object) -> Optional[bool]:
     return bool(value)
 
 
-@dataclass
-class _SyncState:
-    last_seq: Optional[int] = None
-    last_disco_log: float = 0.0
-    keyframes_seen: int = 0
-
-    def update_and_check(self, cur: int) -> bool:
-        """Return True if sequence discontinuity detected."""
-        if self.last_seq is None:
-            self.last_seq = int(cur)
-            return False
-        expected = (int(self.last_seq) + 1) & 0xFFFFFFFF
-        if int(cur) != expected:
-            now = time.time()
-            if (now - self.last_disco_log) > 0.2:
-                logger.warning(
-                    "Pixel stream discontinuity: expected=%d got=%d; gating until keyframe",
-                    expected,
-                    int(cur),
-                )
-                self.last_disco_log = now
-            self.last_seq = int(cur)
-            return True
-        self.last_seq = int(cur)
-        return False
-
-
-@dataclass
-class LoopState:
-    """Aggregate threads, channel, and cached state for the client loop."""
-
-    threads: list[Thread] = field(default_factory=list)
-    state_channel: 'StateChannel | None' = None
-    state_thread: Thread | None = None
-    pixel_receiver: 'PixelReceiver | None' = None
-    pixel_thread: Thread | None = None
-    pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
-    last_dims_seq: int | None = None
-    last_dims_payload: dict[str, object] | None = None
 
 
 class ClientStreamLoop:
@@ -188,7 +150,7 @@ class ClientStreamLoop:
         )
         self._first_dims_ready_cb = on_first_dims_ready
         self._first_dims_notified = False
-        self._loop_state = LoopState()
+        self._loop_state = ClientLoopState()
         self.server_host = server_host
         self.server_port = int(server_port)
         self.state_port = int(state_port)
@@ -211,6 +173,7 @@ class ClientStreamLoop:
             buffer_limit=int(vt_buffer_limit),
             preview_guard_s=float(preview_guard_ms) / 1000.0,
         )
+        self._loop_state.presenter = self._presenter
         logger.info(
             "Presenter init: preview_guard=%.1fms latency=%.0fms",
             float(preview_guard_ms),
@@ -229,15 +192,12 @@ class ClientStreamLoop:
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         # Monotonic scheduling marker for next due
-        self._next_due_pending_until: float = 0.0
         # Startup warmup (arrival mode): temporarily increase latency then ramp down
         # Auto-sized to roughly exceed one frame interval (assume 60 Hz if FPS unknown)
         self._warmup_ms_override = self._env_cfg.warmup_ms_override
         self._warmup_window_s = self._env_cfg.warmup_window_s
         self._warmup_margin_ms = self._env_cfg.warmup_margin_ms
         self._warmup_max_ms = self._env_cfg.warmup_max_ms
-        self._warmup_until: float = 0.0
-        self._warmup_extra_active_s: float = 0.0
         self._fps: Optional[float] = None
 
         # Renderer
@@ -249,7 +209,6 @@ class ClientStreamLoop:
         self._vt_decoder: Optional[VTLiveDecoder] = None
         self._vt_backend: Optional[str] = None
         self._vt_cfg_key = None
-        self._vt_wait_keyframe: bool = False
         self._vt_gate_lift_time: float = 0.0  # wall time at VT gate lift
         self._mono_at_gate: float = 0.0       # perf_counter() at VT gate lift
         self._wall_to_mono: Optional[float] = None  # server_wall -> client_mono offset
@@ -266,14 +225,10 @@ class ClientStreamLoop:
         self._vt_backlog_trigger = int(vt_backlog_trigger)
         self._vt_enqueued = 0
         # Client metrics (optional, env-controlled)
-        self._metrics = create_metrics(self._telemetry_cfg)
+        self._loop_state.metrics = create_metrics(self._telemetry_cfg)
 
         # Presenter-owned wake scheduling helper
-        self._wake_timer = None
-        self._in_present = False
         self._use_display_loop = self._env_cfg.use_display_loop
-        self._wake_proxy: WakeProxy | None = None
-        self._gui_thread = None
         self._schedule_next_wake = init_wake_scheduler(self)
 
         self._presenter_facade.start_presenting(
@@ -287,22 +242,21 @@ class ClientStreamLoop:
 
         # Build pipelines after scheduler hooks are ready
         # Create a wake proxy so pipelines can nudge scheduling from any thread
-        if not self._use_display_loop and self._wake_proxy is not None:
-            wake_cb = self._wake_proxy.trigger.emit
+        if not self._use_display_loop and self._loop_state.wake_proxy is not None:
+            wake_cb = self._loop_state.wake_proxy.trigger.emit
         else:
             wake_cb = (lambda: None)
-        self._vt_pipeline = build_vt_pipeline(self, schedule_next_wake=wake_cb, logger=logger)
+        self._loop_state.vt_pipeline = build_vt_pipeline(self, schedule_next_wake=wake_cb, logger=logger)
         self._pyav_backlog_trigger = int(pyav_backlog_trigger)
         self._pyav_enqueued = 0
-        self._pyav_pipeline = build_pyav_pipeline(self, schedule_next_wake=wake_cb)
-        self._pyav_wait_keyframe: bool = False
+        self._loop_state.pyav_pipeline = build_pyav_pipeline(self, schedule_next_wake=wake_cb)
 
         # Renderer fallback manager (VT cache + PyAV reuse)
-        self._renderer_fallbacks = RendererFallbacks()
+        self._loop_state.fallbacks = RendererFallbacks()
 
         # Frame queue for renderer (latest-wins)
         # Holds either numpy arrays or (capsule, release_cb) tuples for VT
-        self._frame_q: "queue.Queue[object]" = queue.Queue(maxsize=3)
+        self._loop_state.frame_queue = queue.Queue(maxsize=3)
 
         # Receiver/state flags
         self._stream_seen_keyframe = False
@@ -310,28 +264,18 @@ class ClientStreamLoop:
         # Stats/logging and diagnostics
         self._stats_level = self._telemetry_cfg.stats_level
         self._last_stats_time: float = 0.0
-        self._stats_timer = None
-        self._metrics_timer = None
-        self._warmup_reset_timer = None
         self._relearn_logged: bool = False
         self._last_relearn_log_ts: float = 0.0
         # Debounce duplicate video_config
         self._last_vcfg_key = None
         # Stream continuity and gate tracking
-        self._sync = _SyncState()
-        self._disco_gated: bool = False
-        self._last_key_logged: Optional[int] = None
         # Draw pacing diagnostics
-        self._last_draw_pc: float = 0.0
-        self._last_present_mono: float = 0.0
         self._in_draw: bool = False
         # Draw watchdog
-        self._watchdog_timer = None
         self._watchdog_ms = self._env_cfg.watchdog_ms
         # Event loop stall monitor (disabled by default)
         self._evloop_stall_ms = self._env_cfg.evloop_stall_ms
         self._evloop_sample_ms = self._env_cfg.evloop_sample_ms
-        self._evloop_mon: Optional[EventLoopMonitor] = None
         self._quit_hook_connected = False
         self._stopped = False
         # Video dimensions (from video_config)
@@ -400,7 +344,7 @@ class ClientStreamLoop:
 
     # --- Thread-safe scheduling helpers --------------------------------------
     def _on_gui_thread(self) -> bool:
-        gui_thr = self._gui_thread
+        gui_thr = self._loop_state.gui_thread
         if gui_thr is None:
             return True
         return QtCore.QThread.currentThread() == gui_thr
@@ -414,8 +358,8 @@ class ClientStreamLoop:
             self._schedule_next_wake()
             return
 
-        if self._wake_proxy is not None:
-            self._wake_proxy.trigger.emit()
+        if self._loop_state.wake_proxy is not None:
+            self._loop_state.wake_proxy.trigger.emit()
             return
 
         if self._ui_call is not None:
@@ -438,14 +382,14 @@ class ClientStreamLoop:
     def _on_present_timer(self) -> None:
         with ExitStack() as stack:
             # On wake, request a paint; the actual GL draw happens inside the canvas draw event
-            self._in_present = True
+            self._loop_state.in_present = True
             stack.callback(self._present_reset)
             # Clear pending marker to allow next wake to be scheduled freely
-            self._next_due_pending_until = 0.0
+            self._loop_state.next_due_pending_until = 0.0
             self._scene_canvas_update()
 
     def _present_reset(self) -> None:
-        self._in_present = False
+        self._loop_state.in_present = False
 
     def start(self) -> None:
         self._stopped = False
@@ -471,10 +415,10 @@ class ClientStreamLoop:
         bind_shortcuts(self)
 
         # Start VT pipeline workers
-        self._vt_pipeline.start()
+        self._loop_state.vt_pipeline.start()
 
         # Start PyAV pipeline worker
-        self._pyav_pipeline.start()
+        self._loop_state.pyav_pipeline.start()
 
         # Receiver thread
         rc = ReceiveController(
@@ -490,7 +434,7 @@ class ClientStreamLoop:
         self._loop_state.threads.append(t_rx)
 
         # Dedicated 1 Hz presenter stats timer (decoupled from draw loop)
-        self._stats_timer = start_stats_timer(
+        self._loop_state.stats_timer = start_stats_timer(
             self._scene_canvas.native,
             stats_level=self._stats_level,
             callback=self._log_stats,
@@ -498,10 +442,10 @@ class ClientStreamLoop:
         )
 
         # Client metrics CSV dump timer (independent of stats log level)
-        self._metrics_timer = start_metrics_timer(
+        self._loop_state.metrics_timer = start_metrics_timer(
             self._scene_canvas.native,
             config=self._telemetry_cfg,
-            metrics=self._metrics,
+            metrics=self._loop_state.metrics,
             logger=logger,
         )
         # Optional draw watchdog: if no draw observed for threshold, kick an update
@@ -513,7 +457,7 @@ class ClientStreamLoop:
             timer.setInterval(max(100, int(self._watchdog_ms // 2) or 100))
 
             def _wd_tick() -> None:
-                last = float(self._last_draw_pc or 0.0)
+                last = float(self._loop_state.last_draw_pc or 0.0)
                 if last <= 0.0:
                     return
                 now = time.perf_counter()
@@ -522,21 +466,21 @@ class ClientStreamLoop:
                 if self._presenter.peek_next_due(self._source_mux.active) is None:
                     return
                 self._scene_canvas_update()
-                if self._metrics is not None:
-                    self._metrics.inc('napari_cuda_client_draw_watchdog_kicks', 1.0)
+                if self._loop_state.metrics is not None:
+                    self._loop_state.metrics.inc('napari_cuda_client_draw_watchdog_kicks', 1.0)
 
             timer.timeout.connect(_wd_tick)
             timer.start()
-            self._watchdog_timer = timer
+            self._loop_state.watchdog_timer = timer
             logger.info("Draw watchdog enabled: threshold=%d ms", self._watchdog_ms)
         # Optional event loop monitor (diagnostic): logs and metrics on stalls
         if self._evloop_stall_ms > 0:
             def _kick() -> None:
                 self._scene_canvas_update()
 
-            self._evloop_mon = EventLoopMonitor(
+            self._loop_state.evloop_monitor = EventLoopMonitor(
                 parent=self._scene_canvas.native,
-                metrics=self._metrics,
+                metrics=self._loop_state.metrics,
                 stall_threshold_ms=int(self._evloop_stall_ms),
                 sample_interval_ms=int(self._evloop_sample_ms),
                 on_stall_kick=_kick,
@@ -549,9 +493,9 @@ class ClientStreamLoop:
                 self._quit_hook_connected = True
 
     def _enqueue_frame(self, frame: object) -> None:
-        if self._frame_q.full():
-            self._frame_q.get_nowait()
-        self._frame_q.put(frame)
+        if self._loop_state.frame_queue.full():
+            self._loop_state.frame_queue.get_nowait()
+        self._loop_state.frame_queue.put(frame)
 
     def draw(self) -> None:
         # Guard to avoid scheduling immediate repaints from within draw
@@ -559,10 +503,10 @@ class ClientStreamLoop:
         self._in_draw = True
         # Draw-loop pacing metric (perf_counter for monotonic interval)
         now_pc = time.perf_counter()
-        last_pc = float(self._last_draw_pc or 0.0)
-        if last_pc > 0.0 and self._metrics is not None:
-            self._metrics.observe_ms('napari_cuda_client_draw_interval_ms', (now_pc - last_pc) * 1000.0)
-        self._last_draw_pc = now_pc
+        last_pc = float(self._loop_state.last_draw_pc or 0.0)
+        if last_pc > 0.0 and self._loop_state.metrics is not None:
+            self._loop_state.metrics.observe_ms('napari_cuda_client_draw_interval_ms', (now_pc - last_pc) * 1000.0)
+        self._loop_state.last_draw_pc = now_pc
         # Apply warmup ramp/restore on GUI thread (timer-less)
         self._apply_warmup(now_pc)
         # VT output is drained continuously by worker; draw focuses on presenting
@@ -577,9 +521,9 @@ class ClientStreamLoop:
         if ready is not None:
             src_val = ready.source.value
             # Record presentation lateness relative to due time for non-preview frames
-            if not ready.preview and self._metrics is not None and self._metrics.enabled:
+            if not ready.preview and self._loop_state.metrics is not None and self._loop_state.metrics.enabled:
                 late_ms = (time.perf_counter() - float(ready.due_ts)) * 1000.0
-                self._metrics.observe_ms('napari_cuda_client_present_lateness_ms', float(late_ms))
+                self._loop_state.metrics.observe_ms('napari_cuda_client_present_lateness_ms', float(late_ms))
             # Optional: log a one-time relearn attempt on early preview streaks (lightweight)
             if src_val == 'vt':
                 if ready.preview and not self._relearn_logged:
@@ -606,41 +550,41 @@ class ClientStreamLoop:
                 self._enqueue_frame((ready.payload, ready.release_cb))
             else:
                 # Cache for last-frame fallback and enqueue
-                self._renderer_fallbacks.store_pyav_frame(ready.payload)
+                self._loop_state.fallbacks.store_pyav_frame(ready.payload)
                 self._enqueue_frame(ready.payload)
 
         frame = None
         if ready is None:
             if self._source_mux.active == Source.VT:
-                self._renderer_fallbacks.try_enqueue_cached_vt(self._enqueue_frame)
+                self._loop_state.fallbacks.try_enqueue_cached_vt(self._enqueue_frame)
             elif self._source_mux.active == Source.PYAV:
-                self._renderer_fallbacks.try_enqueue_pyav(self._enqueue_frame)
+                self._loop_state.fallbacks.try_enqueue_pyav(self._enqueue_frame)
         # Schedule next wake based on earliest due; avoids relying on a 60 Hz loop
         # Safe: draw() runs on GUI thread
         self._schedule_next_wake()
-        while not self._frame_q.empty():
-            frame = self._frame_q.get_nowait()
+        while not self._loop_state.frame_queue.empty():
+            frame = self._loop_state.frame_queue.get_nowait()
         # Time the render operation based on frame type
         if frame is not None:
             is_vt = isinstance(frame, tuple) and len(frame) == 2
             t_render0 = time.perf_counter()
             self._renderer.draw(frame)
             t_render1 = time.perf_counter()
-            if self._metrics is not None and self._metrics.enabled:
+            if self._loop_state.metrics is not None and self._loop_state.metrics.enabled:
                 metric_name = 'napari_cuda_client_render_vt_ms' if is_vt else 'napari_cuda_client_render_pyav_ms'
-                self._metrics.observe_ms(metric_name, (t_render1 - t_render0) * 1000.0)
+                self._loop_state.metrics.observe_ms(metric_name, (t_render1 - t_render0) * 1000.0)
             # Count a presented frame for client-side FPS derivation (only when a frame was actually drawn)
-            if self._metrics is not None:
-                self._metrics.inc('napari_cuda_client_presented_total', 1.0)
+            if self._loop_state.metrics is not None:
+                self._loop_state.metrics.inc('napari_cuda_client_presented_total', 1.0)
             now = time.perf_counter()
-            last = self._last_present_mono
+            last = self._loop_state.last_present_mono
             if last:
                 # Only log PRESENT timing when explicitly enabled to avoid spam
                 import os as _os
                 if (_os.getenv('NAPARI_CUDA_PRESENT_DEBUG') or '').lower() in ('1','true','yes','on','dbg','debug'):
                     inter_ms = (now - float(last)) * 1000.0
                     logger.debug("PRESENT inter_ms=%.3f", float(inter_ms))
-            self._last_present_mono = now
+            self._loop_state.last_present_mono = now
         else:
             self._renderer.draw(frame)
         # Clear draw guard
@@ -650,17 +594,17 @@ class ClientStreamLoop:
         if self._stats_level is None:
             return
         pres_stats = self._presenter.stats()
-        vt_counts = self._vt_pipeline.counts()
-        if self._metrics is not None:
-            self._metrics.set('napari_cuda_client_present_buf_vt', float(pres_stats['buf'].get('vt', 0)))
-            self._metrics.set('napari_cuda_client_present_buf_pyav', float(pres_stats['buf'].get('pyav', 0)))
-            self._metrics.set('napari_cuda_client_present_latency_ms', float(pres_stats.get('latency_ms', 0.0)))
+        vt_counts = self._loop_state.vt_pipeline.counts()
+        if self._loop_state.metrics is not None:
+            self._loop_state.metrics.set('napari_cuda_client_present_buf_vt', float(pres_stats['buf'].get('vt', 0)))
+            self._loop_state.metrics.set('napari_cuda_client_present_buf_pyav', float(pres_stats['buf'].get('pyav', 0)))
+            self._loop_state.metrics.set('napari_cuda_client_present_latency_ms', float(pres_stats.get('latency_ms', 0.0)))
         logger.log(
             self._stats_level,
             "presenter=%s vt_counts=%s keyframes_seen=%d",
             pres_stats,
             vt_counts,
-            self._sync.keyframes_seen,
+            self._loop_state.sync.keyframes_seen,
         )
 
     def _init_decoder(self) -> None:
@@ -688,7 +632,7 @@ class ClientStreamLoop:
             try:
                 self._vt_decoder = VTLiveDecoder(avcc, width, height)
                 self._vt_backend = 'shim'
-                self._vt_pipeline.set_decoder(self._vt_decoder)
+                self._loop_state.vt_pipeline.set_decoder(self._vt_decoder)
             except Exception as exc:
                 logger.warning("VT shim unavailable: %s; falling back to PyAV", exc)
                 self._vt_decoder = None
@@ -696,7 +640,7 @@ class ClientStreamLoop:
             self._vt_decoder = None
         self._vt_cfg_key = cfg_key
         self._last_vcfg_key = cfg_key
-        self._vt_wait_keyframe = True
+        self._loop_state.vt_wait_keyframe = True
         # Parse nal length size from avcC if available (5th byte low 2 bits + 1)
         if len(avcc) >= 5:
             nsz = int((avcc[4] & 0x03) + 1)
@@ -708,7 +652,7 @@ class ClientStreamLoop:
         else:
             logger.warning("avcC too short (%d); defaulting nal_length_size=4", len(avcc))
             self._nal_length_size = 4
-        self._vt_pipeline.update_nal_length_size(self._nal_length_size)
+        self._loop_state.vt_pipeline.update_nal_length_size(self._nal_length_size)
         logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
 
     def _request_keyframe_once(self) -> None:
@@ -910,7 +854,7 @@ class ClientStreamLoop:
     def _handle_connected(self) -> None:
         self._init_decoder()
         dec = self.decoder.decode if self.decoder else None
-        self._pyav_pipeline.set_decoder(dec)
+        self._loop_state.pyav_pipeline.set_decoder(dec)
 
     def _handle_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
@@ -1671,28 +1615,28 @@ class ClientStreamLoop:
 
     def _on_frame(self, pkt: Packet) -> None:
         cur = int(pkt.seq)
-        if not (self._vt_wait_keyframe or self._pyav_wait_keyframe):
-            if self._sync.update_and_check(cur):
+        if not (self._loop_state.vt_wait_keyframe or self._loop_state.pyav_wait_keyframe):
+            if self._loop_state.sync.update_and_check(cur):
                 if self._vt_decoder is not None:
-                    self._vt_wait_keyframe = True
-                    self._vt_pipeline.clear(preserve_cache=True)
+                    self._loop_state.vt_wait_keyframe = True
+                    self._loop_state.vt_pipeline.clear(preserve_cache=True)
                     self._presenter.clear(Source.VT)
                     self._request_keyframe_once()
-                self._pyav_wait_keyframe = True
-                self._pyav_pipeline.clear()
+                self._loop_state.pyav_wait_keyframe = True
+                self._loop_state.pyav_pipeline.clear()
                 self._presenter.clear(Source.PYAV)
                 self._init_decoder()
                 dec = self.decoder.decode if self.decoder else None
-                self._pyav_pipeline.set_decoder(dec)
-                self._disco_gated = True
+                self._loop_state.pyav_pipeline.set_decoder(dec)
+                self._loop_state.disco_gated = True
         if not self._stream_seen_keyframe:
             if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
                 self._stream_seen_keyframe = True
             else:
                 return
-        if self._vt_decoder is not None and self._vt_wait_keyframe:
+        if self._vt_decoder is not None and self._loop_state.vt_wait_keyframe:
             if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
-                self._vt_wait_keyframe = False
+                self._loop_state.vt_wait_keyframe = False
                 self._vt_gate_lift_time = time.time()
                 self._mono_at_gate = time.perf_counter()
                 # Compute wall->mono offset once at gate lift
@@ -1704,7 +1648,7 @@ class ClientStreamLoop:
                 self._presenter.set_latency(self._vt_latency_s)
                 self._presenter.clear(Source.PYAV)
                 logger.info("VT gate lifted on keyframe (seq=%d); presenter=VT", cur)
-                self._disco_gated = False
+                self._loop_state.disco_gated = False
                 if self._warmup_window_s > 0:
                     if self._warmup_ms_override is not None:
                         extra_ms = max(0.0, float(self._warmup_ms_override))
@@ -1717,47 +1661,47 @@ class ClientStreamLoop:
                     if extra_s > 0.0:
                         # Timer-less warmup: set extra latency and let draw() ramp it down
                         self._presenter.set_latency(self._vt_latency_s + extra_s)
-                        self._warmup_extra_active_s = extra_s
-                        self._warmup_until = time.perf_counter() + float(self._warmup_window_s)
+                        self._loop_state.warmup_extra_active_s = extra_s
+                        self._loop_state.warmup_until = time.perf_counter() + float(self._warmup_window_s)
                 # Schedule first wake after VT becomes active (thread-safe)
                 self.schedule_next_wake_threadsafe()
             else:
                 self._request_keyframe_once()
                 return
-        if self._vt_decoder is not None and not self._vt_wait_keyframe:
+        if self._vt_decoder is not None and not self._loop_state.vt_wait_keyframe:
             ts_float = float(pkt.ts)
             b = pkt.payload
-            self._vt_pipeline.enqueue(b, ts_float)
+            self._loop_state.vt_pipeline.enqueue(b, ts_float)
             self._vt_enqueued += 1
         else:
             ts_val = pkt.ts
             ts_float = float(ts_val) if ts_val is not None else None
             b = pkt.payload
-            if self._pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
-                self._pyav_wait_keyframe = True
-                self._pyav_pipeline.clear()
+            if self._loop_state.pyav_pipeline.qsize() >= max(2, self._pyav_backlog_trigger - 1):
+                self._loop_state.pyav_wait_keyframe = True
+                self._loop_state.pyav_pipeline.clear()
                 self._presenter.clear(Source.PYAV)
                 self._init_decoder()
                 dec = self.decoder.decode if self.decoder else None
-                self._pyav_pipeline.set_decoder(dec)
-            if self._pyav_wait_keyframe:
+                self._loop_state.pyav_pipeline.set_decoder(dec)
+            if self._loop_state.pyav_wait_keyframe:
                 if not (self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01)):
                     return
-                self._pyav_wait_keyframe = False
+                self._loop_state.pyav_wait_keyframe = False
                 self._init_decoder()
-                self._disco_gated = False
-            self._pyav_pipeline.enqueue(b, ts_float)
+                self._loop_state.disco_gated = False
+            self._loop_state.pyav_pipeline.enqueue(b, ts_float)
             self._pyav_enqueued += 1
 
     def _apply_warmup(self, now: float) -> None:
-        if self._warmup_until > 0:
-            if now >= self._warmup_until:
+        if self._loop_state.warmup_until > 0:
+            if now >= self._loop_state.warmup_until:
                 self._presenter.set_latency(self._vt_latency_s)
-                self._warmup_until = 0.0
+                self._loop_state.warmup_until = 0.0
             else:
-                remain = max(0.0, self._warmup_until - now)
+                remain = max(0.0, self._loop_state.warmup_until - now)
                 frac = remain / max(1e-6, self._warmup_window_s)
-                cur = self._vt_latency_s + self._warmup_extra_active_s * frac
+                cur = self._vt_latency_s + self._loop_state.warmup_extra_active_s * frac
                 self._presenter.set_latency(cur)
 
     def stop(self) -> None:
@@ -1765,28 +1709,28 @@ class ClientStreamLoop:
             return
         self._stopped = True
 
-        if self._stats_timer is not None:
-            self._stats_timer.stop()
-            self._stats_timer = None
-        if self._metrics_timer is not None:
-            self._metrics_timer.stop()
-            self._metrics_timer = None
-        if self._warmup_reset_timer is not None:
-            self._warmup_reset_timer.stop()
-            self._warmup_reset_timer = None
-        if self._watchdog_timer is not None:
-            self._watchdog_timer.stop()
-            self._watchdog_timer = None
-        if self._evloop_mon is not None:
-            self._evloop_mon.stop()
-        self._evloop_mon = None
+        if self._loop_state.stats_timer is not None:
+            self._loop_state.stats_timer.stop()
+            self._loop_state.stats_timer = None
+        if self._loop_state.metrics_timer is not None:
+            self._loop_state.metrics_timer.stop()
+            self._loop_state.metrics_timer = None
+        if self._loop_state.warmup_reset_timer is not None:
+            self._loop_state.warmup_reset_timer.stop()
+            self._loop_state.warmup_reset_timer = None
+        if self._loop_state.watchdog_timer is not None:
+            self._loop_state.watchdog_timer.stop()
+            self._loop_state.watchdog_timer = None
+        if self._loop_state.evloop_monitor is not None:
+            self._loop_state.evloop_monitor.stop()
+        self._loop_state.evloop_monitor = None
 
         self._presenter.clear()
         self._presenter_facade.shutdown()
 
         while True:
             try:
-                frame = self._frame_q.get_nowait()
+                frame = self._loop_state.frame_queue.get_nowait()
             except queue.Empty:
                 break
             if isinstance(frame, tuple) and len(frame) == 2:
@@ -1794,13 +1738,13 @@ class ClientStreamLoop:
                 if release_cb is not None:
                     release_cb(payload)  # type: ignore[misc]
 
-        lease = self._renderer_fallbacks.pop_vt_cache()
+        lease = self._loop_state.fallbacks.pop_vt_cache()
         if lease is not None:
             lease.close()
-        self._renderer_fallbacks.clear_pyav()
+        self._loop_state.fallbacks.clear_pyav()
 
-        self._vt_pipeline.stop()
-        self._pyav_pipeline.stop()
+        self._loop_state.vt_pipeline.stop()
+        self._loop_state.pyav_pipeline.stop()
 
         if self._vt_decoder is not None:
             self._vt_decoder.flush()

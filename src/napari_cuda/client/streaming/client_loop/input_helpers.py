@@ -32,7 +32,7 @@ def attach_input_sender(loop: "ClientStreamLoop") -> None:
         log_info=loop._env_cfg.input_log,  # noqa: SLF001
     )
     sender.start()
-    loop._input_sender = sender  # noqa: SLF001
+    loop._loop_state.input_sender = sender  # noqa: SLF001
     logger.info("InputSender attached (wheel+resize+pointer)")
 
 
@@ -69,6 +69,6 @@ def bind_shortcuts(loop: "ClientStreamLoop") -> None:
         sc.activated.connect(cb)  # type: ignore
         created.append(sc)
 
-    loop._shortcuts = created  # noqa: SLF001
+    loop._loop_state.shortcuts = created  # noqa: SLF001
     logger.info("Shortcuts bound: +/-/=→zoom, Home→reset (arrows via keycb)")
 

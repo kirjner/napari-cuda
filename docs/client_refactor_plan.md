@@ -32,14 +32,14 @@
 - Add tests covering dims ack handling and scene caching.
 
 ### Phase B — Client Stream Loop Degodification
-- Rename `StreamCoordinator` → `ClientStreamLoop` and collapse constructor; move thread bookkeeping into a `LoopState` dataclass.
+- Rename `StreamCoordinator` → `ClientStreamLoop` and collapse constructor; move thread bookkeeping into a `ClientLoopState` dataclass.
 - Extract VT/PyAV pipeline toggles into module-level helpers returning simple structs (no classes unless absolutely required by Qt).
 - Delete `_CallProxy`/`_WakeProxy`; replace with direct `QtCore.QMetaObject.invokeMethod` usage.
 - Assert invariants (e.g. decoder readiness) instead of logging-only fallbacks.
 
 #### Phase B Work Plan (target: ≤1,000 LOC in `ClientStreamLoop` post-split)
 - **Bootstrap & rename** *(done)*
-  1. `LoopState` dataclass introduced to gather threads, channel refs, and cached payloads.
+  1. `ClientLoopState` dataclass introduced to gather threads, channel refs, and cached payloads.
   2. Class/public rename to `ClientStreamLoop`; docs/tests/imports updated.
   3. `send_json` renamed to `post` across channel/controller layers.
 - **Scheduler & wake helper**
@@ -84,6 +84,7 @@
 - `_pending_intents` → `pending_intents`
 - `_vt_gate_lift_time` → `vt_gate_open_at`
 - `send_json` → `post`
+- Move thread bookkeeping into a `ClientLoopState` dataclass (landed).
 - Tests follow the same vocabulary (`test_dims_payload_normalises_axes`).
 
 ## Metrics & Checkpoints
@@ -100,15 +101,30 @@
    - Block implementation work for the bridge until this façade is in place.
    - Status: façade implemented at `src/napari_cuda/client/streaming/presenter_facade.py`; it now owns draw wiring, display-loop setup, and the HUD while `StreamingCanvas` delegates presenter responsibilities.
 2. Keep exercising the VT soak checklist from the resolved spike to confirm the FrameLease fix holds while we touch renderer code paths; update the debugging note if anything regresses.
-3. Draft a `ClientLoopState` dataclass that aggregates the mutable fields we currently hang off `self`, so a later pass can convert the loop methods into Casey-Muratori-style routines operating on an explicit data bag instead of an ever-growing object.
-   - Include a sketch of how draw/present/shutdown helpers would accept the state bag and explicit collaborators.
-   - Land the state bag + helper module before adding any new public methods to `ClientStreamLoop`.
-4. Sweep `proxy_viewer.py` for blanket guards next, then revisit `state.py`/`vt_pipeline.py` to continue shrinking the package-wide try/except count.
-5. Blueprint the layer control intent bridge (doc-only while hoists land):
+3. (done) `ClientLoopState` now aggregates loop state (`src/napari_cuda/client/streaming/client_loop/loop_state.py`).
+   - Draw/present/shutdown helpers read timers, frame queue, metrics, and gating flags via the bag; presenter façade consults it for HUD stats.
+   - Follow-up: migrate the remaining helper modules (scheduler, input, pipelines) to accept an explicit `ClientLoopState` parameter instead of reaching into `loop` directly.
+4. Hoist the remaining hot-path helpers out of `ClientStreamLoop` before adding
+   new features:
+   - `client_loop/warmup.py`: expose `apply_warmup(state, presenter, env_cfg)`
+     and friends so draw/shutdown only delegate.
+   - `client_loop/intents.py`: own dims/settings payload prep, ack clearing,
+     and viewer mirroring.
+   - `client_loop/camera.py`: hold pan/orbit accumulation and rate limits.
+   - `client_loop/lifecycle.py`: start/stop helpers for timers, fallbacks,
+     reconnect, and watchdog wiring.
+   Each module should land with focused unit coverage and drop the loop file to
+   ≤1 000 LOC.
+5. Sweep `proxy_viewer.py` for blanket guards next, then revisit
+   `state.py`/`vt_pipeline.py` to continue shrinking the package-wide
+   try/except count.
+6. Blueprint the layer control intent bridge (doc-only while hoists land):
    - Enumerate every Qt control we need to intercept (opacity, blending, contrast range + auto buttons, gamma, colormap, projection mode, interpolation, depiction toggles).
    - Decide whether to subclass napari’s Qt controls or override `RemoteImageLayer` setters; the goal is to guarantee all writes funnel through `ClientStreamLoop` via `image.intent.*` payloads keyed by `RemoteImageLayer._remote_id`.
    - Document the required client intent helpers (`loop.image_set_opacity`, etc.) so the server agent can implement matching handlers without guesswork.
-6. After the façade + state bag are merged, implement the `LayerIntentBridge` module behind `NAPARI_CUDA_LAYER_BRIDGE` and wire it through the new seams; keep legacy behaviour intact until the server handlers ship.
+7. After the façade + state bag are merged, implement the `LayerIntentBridge`
+   module behind `NAPARI_CUDA_LAYER_BRIDGE` and wire it through the new seams;
+   keep legacy behaviour intact until the server handlers ship.
 
 ### Guard Snapshot (2025-09-27)
 

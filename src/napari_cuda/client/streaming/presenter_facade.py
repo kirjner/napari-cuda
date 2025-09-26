@@ -350,7 +350,8 @@ class PresenterFacade:
         buf_vt = int(buf.get('vt', 0))
         buf_py = int(buf.get('pyav', 0))
 
-        vt_pipeline = getattr(self._loop, '_vt_pipeline', None)
+        state = self._loop._loop_state  # type: ignore[attr-defined]
+        vt_pipeline = state.vt_pipeline
         vt_q_len = None
         if vt_pipeline is not None and hasattr(vt_pipeline, 'counts'):
             with contextlib.suppress(Exception):
@@ -361,13 +362,13 @@ class PresenterFacade:
         if vt_pipeline is not None and hasattr(vt_pipeline, 'qsize'):
             with contextlib.suppress(Exception):
                 q_vt = int(vt_pipeline.qsize())
-        pyav_pipeline = getattr(self._loop, '_pyav_pipeline', None)
+        pyav_pipeline = state.pyav_pipeline
         q_py = 0
         if pyav_pipeline is not None and hasattr(pyav_pipeline, 'qsize'):
             with contextlib.suppress(Exception):
                 q_py = int(pyav_pipeline.qsize())
 
-        metrics = getattr(self._loop, '_metrics', None)
+        metrics = state.metrics
         dec_py_ms = vt_dec_ms = vt_submit_ms = None
         render_vt_ms = render_pyav_ms = None
         draw_mean_ms = draw_last_ms = None

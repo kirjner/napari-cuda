@@ -68,7 +68,7 @@
 - **Intent Hook Smoke**: Test registering a stub dispatcher, calling `apply_dims_update`, and asserting the dispatcher sees a `('dims', payload)` tuple.
 
 ## Open Questions / Follow-ups
-- Once the `ClientLoopState` dataclass lands, migrate façade construction to accept the state bag and collaborators explicitly (reduces `self` reach).
+- With the `ClientLoopState` dataclass in place, migrate façade construction to accept the state bag and collaborators explicitly (reduces `self` reach).
 - `PresenterFacade` exposes `set_intent_dispatcher`; the upcoming `LayerIntentBridge` must document how it plugs into this hook.
 
 ## Current Status
