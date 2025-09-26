@@ -518,6 +518,7 @@ filterwarnings = [
 markers = [
     "examples: Test of examples",
     "disable_qthread_start: Disable thread start in this Test",
+    "asyncio: mark a test as using the asyncio event loop",
     "disable_qthread_pool_start: Disable strarting QRunnable using QThreadPool start in this Test",
     "disable_qtimer_start: Disable timer start in this Test",
     "disable_qanimation_start: Disable animation start in this Test",

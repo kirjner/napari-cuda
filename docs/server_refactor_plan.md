@@ -100,7 +100,16 @@ Implementation slices:
 4. **Cleanup + guard audit** — remove remaining direct env reads (policy/patterns/CLI), tighten logging guards, wire Ruff lint/test enforcement, and refresh the metrics table above.
 
 ### Phase E — Server Decomposition
-- Mirror worker work: extract `PixelBroadcaster`, `StateServer`, `SceneSpecBuilder`. Apply same hostility to try/except & getattr.
+- Guiding style: follow the Casey Muratori “bag of data + free functions” playbook. Prefer simple dataclasses or TypedDict snapshots that describe state explicitly, and keep helpers procedural rather than adding new classes or inheritance.
+- Sequence of work (**work-in-progress**):
+  1. **Baseline snapshot** — record current LOC, `try:` counts, and websocket handler responsibilities for `egl_headless_server.py` (targets: trim from 2.2 k LOC toward 1.0 k, keep existing guard counts steady during extraction). *Status 2025-09-26:* 2,347 LOC (`wc -l`), 134 `try:` blocks (`rg -c "try:"`), pixel channel helpers concentrated in `_handle_pixel`, `_broadcast_loop`, and `_safe_send` with shared state (`_clients`, `_frame_q`, `_bypass_until_key`, `_kf_watchdog_task`, metrics counters).
+  2. **PixelBroadcaster split** — move websocket broadcast/writeback logic into `pixel_broadcaster.py`, exposing pure functions that accept a broadcaster state bag (maps of clients, queue metrics, watchdog timestamps) and emit packets or scheduling decisions. Ensure encode pacing stays untouched; add focused unit tests around queue coalescing and watchdog cooldown. *Status 2025-09-26:* Implemented via `PixelBroadcastState`/`PixelBroadcastConfig`; `_broadcast_loop` now delegates to `pixel_broadcaster.broadcast_loop`, LOC reduced to 2,181 and broadcaster unit tests cover safe-send pruning + bypass keyframe delivery. Server `try:` count dropped to 120 (package total 330).
+  3. **StateServer split** — introduce a `state_server.py` module with a `StateServerState` databag capturing the latest `SceneSpec`, dims payloads, and command queues. Provide procedural helpers for command ingestion and metrics updates so `EGLHeadlessServer` simply forwards inbound messages.
+  4. **SceneSpecBuilder extraction** — centralise SceneSpec construction in `scene_spec_builder.py`, consuming the viewer snapshot + config databag and returning the serialisable payload. Cover with unit tests for axis/dims permutations.
+  5. **Re-wire headless server** — refactor `egl_headless_server.py` to orchestrate these helpers, keeping only lifecycle wiring, thread startup, and boundary I/O. Any transient state should live in explicit structs handed to the helpers.
+  6. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
+  7. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
+- Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.
 
 ### Phase F — Worker State Extraction (later)
 - Introduce an explicit `WorkerState` data bag capturing mutable fields consumed by helpers.

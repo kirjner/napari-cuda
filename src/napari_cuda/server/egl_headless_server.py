@@ -98,6 +98,7 @@ from napari_cuda.server.config import (
     ServerCtx,
     load_server_ctx,
 )
+from . import pixel_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -161,14 +162,18 @@ class EGLHeadlessServer:
         except Exception:
             self._animate_dps = 30.0
 
+        policy_logging = self._ctx.debug_policy.logging
         self.metrics = Metrics()
-        self._clients: Set[websockets.WebSocketServerProtocol] = set()
         self._state_clients: Set[websockets.WebSocketServerProtocol] = set()
         # Keep queue size at 1 for latest-wins, never-block behavior
         qsize = int(self._ctx.frame_queue)
-        # Queue holds tuples of (payload_bytes, flags, seq, stamp_ts)
-        # stamp_ts is minted post-pack in on_frame to keep encode/pack jitter common-mode
-        self._frame_q: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
+        frame_queue: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
+        log_sends_flag = bool(log_sends or policy_logging.log_sends_env)
+        self._pixel = pixel_broadcaster.PixelBroadcastState(
+            frame_queue=frame_queue,
+            clients=set(),
+            log_sends=log_sends_flag,
+        )
         self._seq = 0
         self._stop = threading.Event()
         
@@ -185,19 +190,10 @@ class EGLHeadlessServer:
         self._dump_remaining = int(self._ctx.dump_bitstream)
         self._dump_dir = self._ctx.dump_dir
         self._dump_path: Optional[str] = None
-        # Track last keyframe for metrics only
-        self._last_key_seq: Optional[int] = None
-        self._last_key_ts: Optional[float] = None
-        # Watchdog task handle (cancel when keyframe arrives)
-        self._kf_watchdog_task: Optional[asyncio.Task] = None
-        # Broadcaster pacing: bypass once until keyframe for immediate start
-        self._bypass_until_key: bool = False
         # Keyframe watchdog cooldown to avoid rapid encoder resets
-        self._kf_last_reset_ts: Optional[float] = None
         self._kf_watchdog_cooldown_s = float(self._ctx.kf_watchdog_cooldown_s)
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.Lock()
-        policy_logging = self._ctx.debug_policy.logging
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops
@@ -214,13 +210,6 @@ class EGLHeadlessServer:
         self._log_volume_info = bool(policy_logging.log_volume_info)
         # Force IDR on reset (default True)
         self._idr_on_reset = bool(self._ctx.cfg.idr_on_reset)
-
-        # Drop/send tracking
-        self._drops_total: int = 0
-        self._last_send_ts: Optional[float] = None
-        self._send_count: int = 0
-        # Optional detailed per-send logging (seq, send_ts, stamp_ts, delta)
-        self._log_sends = bool(log_sends or policy_logging.log_sends_env)
 
         # Data configuration (optional OME-Zarr dataset for real data)
         self._zarr_path = zarr_path or self._ctx.cfg.zarr_path or None
@@ -467,9 +456,9 @@ class EGLHeadlessServer:
             except Exception:
                 logger.exception("Encoder reset failed in ensure_keyframe")
                 return
-            self._kf_last_reset_ts = time.time()
+            self._pixel.kf_last_reset_ts = time.time()
         # Bypass pacing once to deliver next keyframe immediately
-        self._bypass_until_key = True
+        self._pixel.bypass_until_key = True
         # Count encoder force/reset; log failure instead of passing
         try:
             self.metrics.inc('napari_cuda_encoder_resets')
@@ -525,7 +514,7 @@ class EGLHeadlessServer:
                 # Force a keyframe and bypass pacing so the switch is immediate
                 try:
                     self._worker.force_idr()
-                    self._bypass_until_key = True
+                    self._pixel.bypass_until_key = True
                 except Exception:
                     logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
             except Exception:
@@ -533,12 +522,14 @@ class EGLHeadlessServer:
         # Let the worker-driven scene refresh broadcast updated dims once the toggle completes
 
     def _start_kf_watchdog(self) -> None:
+        state = self._pixel
+
         async def _kf_watchdog(last_key_seq: Optional[int]):
             await asyncio.sleep(0.30)
-            if self._last_key_seq == last_key_seq and self._worker is not None:
+            if state.last_key_seq == last_key_seq and self._worker is not None:
                 now = time.time()
-                if self._kf_last_reset_ts is not None and (now - self._kf_last_reset_ts) < self._kf_watchdog_cooldown_s:
-                    rem = self._kf_watchdog_cooldown_s - (now - self._kf_last_reset_ts)
+                if state.kf_last_reset_ts is not None and (now - state.kf_last_reset_ts) < self._kf_watchdog_cooldown_s:
+                    rem = self._kf_watchdog_cooldown_s - (now - state.kf_last_reset_ts)
                     logger.debug("Keyframe watchdog cooldown active (%.2fs remaining); skip reset", rem)
                     return
                 logger.warning("Keyframe watchdog fired; resetting encoder")
@@ -547,12 +538,13 @@ class EGLHeadlessServer:
                 except Exception:
                     logger.exception("Encoder reset failed during keyframe watchdog")
                     return
-                self._bypass_until_key = True
-                self._kf_last_reset_ts = now
+                state.bypass_until_key = True
+                state.kf_last_reset_ts = now
         try:
-            if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
-                self._kf_watchdog_task.cancel()
-            self._kf_watchdog_task = asyncio.create_task(_kf_watchdog(self._last_key_seq))
+            task = state.kf_watchdog_task
+            if task is not None and not task.done():
+                task.cancel()
+            state.kf_watchdog_task = asyncio.create_task(_kf_watchdog(state.last_key_seq))
         except Exception:
             logger.debug("start watchdog failed", exc_info=True)
 
@@ -1195,11 +1187,13 @@ class EGLHeadlessServer:
             seq_val = self._seq & 0xFFFFFFFF
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             # Enqueue via callback that handles QueueFull inside the event loop thread
-            def _enqueue():
+            queue = self._pixel.frame_queue
+
+            def _enqueue() -> None:
                 try:
-                    self._frame_q.put_nowait((avcc_pkt, flags, seq_val, stamp_ts))
+                    queue.put_nowait((avcc_pkt, flags, seq_val, stamp_ts))
                     try:
-                        self.metrics.set('napari_cuda_frame_queue_depth', float(self._frame_q.qsize()))
+                        self.metrics.set('napari_cuda_frame_queue_depth', float(queue.qsize()))
                     except Exception:
                         logger.debug('metrics set frame_queue_depth failed', exc_info=True)
                 except asyncio.QueueFull:
@@ -1207,9 +1201,12 @@ class EGLHeadlessServer:
                         self._drain_and_put((avcc_pkt, flags, seq_val, stamp_ts))
                         try:
                             self.metrics.inc('napari_cuda_frames_dropped')
-                            self._drops_total += 1
-                            if (self._drops_total % 100) == 1:
-                                logger.info("Pixel queue full: dropped oldest (total drops=%d)", self._drops_total)
+                            self._pixel.drops_total += 1
+                            if (self._pixel.drops_total % 100) == 1:
+                                logger.info(
+                                    "Pixel queue full: dropped oldest (total drops=%d)",
+                                    self._pixel.drops_total,
+                                )
                         except Exception:
                             logger.debug('metrics inc frames_dropped failed', exc_info=True)
                     except Exception as e:
@@ -1420,13 +1417,14 @@ class EGLHeadlessServer:
             self._worker_thread.join(timeout=3.0)
 
     def _drain_and_put(self, data: tuple[bytes, int, int, float]) -> None:
+        queue = self._pixel.frame_queue
         try:
-            while not self._frame_q.empty():
-                self._frame_q.get_nowait()
+            while not queue.empty():
+                queue.get_nowait()
         except Exception as e:
             logger.debug("Queue drain error: %s", e)
         try:
-            self._frame_q.put_nowait(data)
+            queue.put_nowait(data)
         except Exception as e:
             logger.debug("Frame enqueue error: %s", e)
 
@@ -1777,7 +1775,7 @@ class EGLHeadlessServer:
                         (logger.info if self._log_state_traces else logger.debug)(
                             "state: set_level -> worker.force_idr done"
                         )
-                        self._bypass_until_key = True
+                        self._pixel.bypass_until_key = True
                     except Exception:
                         logger.exception("multiscale level switch request failed")
                 self._schedule_coro(
@@ -1894,24 +1892,19 @@ class EGLHeadlessServer:
             if self._log_state_traces:
                 logger.info("state message end type=%s seq=%s handled=%s", t, seq, handled)
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
-        self._clients.add(ws)
+        self._pixel.clients.add(ws)
         self._update_client_gauges()
         # Reduce latency: disable Nagle for binary pixel stream
-        try:
-            sock = ws.transport.get_extra_info('socket')  # type: ignore[attr-defined]
-            if sock is not None:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except Exception:
-            logger.debug('pixel ws: TCP_NODELAY toggle failed', exc_info=True)
+        pixel_broadcaster.configure_socket(ws, label='pixel ws')
         # Reset encoder on new client to guarantee an immediate keyframe
         try:
             if self._worker is not None:
                 logger.info("Resetting encoder for new pixel client to force keyframe")
                 self._worker.reset_encoder()
                 # Allow immediate send of the first keyframe when pacing is enabled
-                self._bypass_until_key = True
+                self._pixel.bypass_until_key = True
                 # Record reset time for watchdog cooldown
-                self._kf_last_reset_ts = time.time()
+                self._pixel.kf_last_reset_ts = time.time()
                 # Request re-send of video configuration for new clients
                 self._needs_config = True
                 # If we already have a cached avcC, proactively re-broadcast on state channel
@@ -1934,180 +1927,21 @@ class EGLHeadlessServer:
                 except Exception:
                     logger.debug('metrics inc encoder_resets failed', exc_info=True)
         except Exception as e:
-            logger.debug("Encoder reset on client connect failed: %s", e)
+                logger.debug("Encoder reset on client connect failed: %s", e)
         try:
             await ws.wait_closed()
         finally:
-            self._clients.discard(ws)
+            self._pixel.clients.discard(ws)
             self._update_client_gauges()
 
     async def _broadcast_loop(self) -> None:
-        # Always use paced broadcasting with latest-wins coalescing for smooth delivery
-        target_fps = float(getattr(self._ctx.cfg.encode, 'fps', getattr(self.cfg, 'fps', 60)))
-        loop = asyncio.get_running_loop()
-        tick = 1.0 / max(1.0, target_fps)
-        next_t = loop.time()
-        # Map loop.time() monotonic clock to wall time for stable header timestamps
-        mono0 = loop.time()
-        wall0 = time.time()
-        latest: Optional[tuple[bytes, int, int, float]] = None
-
-        async def _fill_until(deadline: float) -> None:
-            nonlocal latest
-            remaining = max(0.0, deadline - loop.time())
-            try:
-                item = await asyncio.wait_for(self._frame_q.get(), timeout=remaining if remaining > 0 else 1e-6)
-                latest = item
-                # Drain rest without waiting; keep the newest only
-                while True:
-                    try:
-                        latest = self._frame_q.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-            except asyncio.TimeoutError:
-                return
-
-        async def _fill_and_find_key(deadline: float) -> Optional[tuple[bytes, int, int, float]]:
-            """Drain queue up to deadline and return the FIRST keyframe seen (if any).
-
-            If no keyframe found, returns None and leaves `latest` pointing to the newest item.
-            """
-            nonlocal latest
-            found: Optional[tuple[bytes, int, int, float]] = None
-            remaining = max(0.0, deadline - loop.time())
-            try:
-                item = await asyncio.wait_for(self._frame_q.get(), timeout=remaining if remaining > 0 else 1e-6)
-            except asyncio.TimeoutError:
-                return None
-            latest = item
-            payload, flags, _seq, _stamp_ts = item
-            if (flags & 0x01) != 0:
-                found = item
-            # Drain the rest without waiting, but capture the first keyframe encountered
-            while True:
-                try:
-                    it2 = self._frame_q.get_nowait()
-                    latest = it2
-                    if found is None:
-                        _payload2, flags2, _seq2, _stamp_ts2 = it2
-                        if (flags2 & 0x01) != 0:
-                            found = it2
-                except asyncio.QueueEmpty:
-                    break
-            return found
-
-        while True:
-            # Immediate keyframe bypass for new clients or after keyframe request
-            if self._bypass_until_key:
-                key_item = await _fill_and_find_key(loop.time() + 0.050)
-                if key_item is not None:
-                    if self._clients:
-                        # Build header timestamp from stamp minted post-pack (common-mode with encode/pack)
-                        payload, flags, seq_cap, stamp_ts = key_item
-                        send_ts_mono = loop.time()
-                        send_ts_wall = wall0 + (send_ts_mono - mono0)
-                        seq32 = int(seq_cap) & 0xFFFFFFFF
-                        header = struct.pack('!IdIIBBH', seq32, float(stamp_ts), self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
-                        to_send = header + payload
-                        await asyncio.gather(*(self._safe_send(c, to_send) for c in list(self._clients)), return_exceptions=True)
-                        # Update counters/metrics and log
-                        try:
-                            self.metrics.inc('napari_cuda_frames_total')
-                            self.metrics.inc('napari_cuda_bytes_total', len(payload))
-                            if flags & 0x01:
-                                self.metrics.inc('napari_cuda_keyframes_total')
-                                self._last_key_seq = seq32
-                                # Track last keyframe timestamp based on stamped header time
-                                self._last_key_ts = float(stamp_ts)
-                                try:
-                                    self.metrics.set('napari_cuda_last_key_seq', float(self._last_key_seq))
-                                    self.metrics.set('napari_cuda_last_key_ts', float(self._last_key_ts))
-                                except Exception:
-                                    logger.debug('metrics set last_key_* failed', exc_info=True)
-                                # Cancel any pending keyframe watchdog once a keyframe is observed
-                                try:
-                                    if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
-                                        self._kf_watchdog_task.cancel()
-                                except Exception:
-                                    logger.debug('keyframe watchdog cancel failed', exc_info=True)
-                            if self._log_sends:
-                                # Keep broadcaster-to-stamp delta for observability
-                                stamp_to_send_ms = (send_ts_wall - float(stamp_ts)) * 1000.0
-                                logger.info("Send frame seq=%d send_ts=%.6f stamp_ts=%.6f delta=%.3f ms (bypass)", seq32, send_ts_mono, float(stamp_ts), stamp_to_send_ms)
-                        except Exception:
-                            logger.debug('metrics update (bypass) failed', exc_info=True)
-                    latest = None
-                    self._bypass_until_key = False
-                    next_t = loop.time() + tick
-                    continue
-
-            now = loop.time()
-            if now < next_t:
-                await _fill_until(next_t)
-            else:
-                missed = int((now - next_t) // tick) + 1
-                next_t += missed * tick
-
-            if latest is not None:
-                if self._clients:
-                    payload, flags, seq_cap, stamp_ts = latest
-                    send_ts_mono = loop.time()
-                    send_ts_wall = wall0 + (send_ts_mono - mono0)
-                    seq32 = int(seq_cap) & 0xFFFFFFFF
-                    # Use stamped post-pack timestamp in header for paced sends
-                    header = struct.pack('!IdIIBBH', seq32, float(stamp_ts), self.width, self.height, self.cfg.codec & 0xFF, flags & 0xFF, 0)
-                    to_send = header + payload
-                    await asyncio.gather(*(self._safe_send(c, to_send) for c in list(self._clients)), return_exceptions=True)
-                    # Update counters/metrics and log
-                    try:
-                        self.metrics.inc('napari_cuda_frames_total')
-                        self.metrics.inc('napari_cuda_bytes_total', len(payload))
-                        if flags & 0x01:
-                            self.metrics.inc('napari_cuda_keyframes_total')
-                            self._last_key_seq = seq32
-                            # Track last keyframe timestamp based on stamped header time
-                            self._last_key_ts = float(stamp_ts)
-                            try:
-                                self.metrics.set('napari_cuda_last_key_seq', float(self._last_key_seq))
-                                self.metrics.set('napari_cuda_last_key_ts', float(self._last_key_ts))
-                            except Exception:
-                                logger.debug('metrics set last_key_* failed', exc_info=True)
-                            # Cancel any pending keyframe watchdog once a keyframe is observed
-                            try:
-                                if self._kf_watchdog_task is not None and not self._kf_watchdog_task.done():
-                                    self._kf_watchdog_task.cancel()
-                            except Exception:
-                                logger.debug('keyframe watchdog cancel failed', exc_info=True)
-                        if self._log_sends:
-                            # Keep broadcaster-to-stamp delta for observability
-                            stamp_to_send_ms = (send_ts_wall - float(stamp_ts)) * 1000.0
-                            logger.info("Send frame seq=%d send_ts=%.6f stamp_ts=%.6f delta=%.3f ms", seq32, send_ts_mono, float(stamp_ts), stamp_to_send_ms)
-                    except Exception:
-                        logger.debug('metrics update (paced) failed', exc_info=True)
-                    # Simple send timing log for smoothing diagnostics
-                    try:
-                        now2 = loop.time()
-                        if self._last_send_ts is not None:
-                            dt = now2 - self._last_send_ts
-                            self._send_count += 1
-                            if self._log_sends and (self._send_count % int(max(1, self.cfg.fps))) == 0:
-                                logger.debug("Pixel send dt=%.3f s (target=%.3f), drops=%d", dt, 1.0/max(1, self.cfg.fps), self._drops_total)
-                        self._last_send_ts = now2
-                    except Exception:
-                        logger.debug('send timing update failed', exc_info=True)
-                latest = None
-            next_t += tick
-
-    async def _safe_send(self, ws: websockets.WebSocketServerProtocol, data: bytes) -> None:
-        try:
-            await ws.send(data)
-        except Exception as e:
-            logger.debug("Pixel send error: %s", e)
-            try:
-                await ws.close()
-            except Exception as e2:
-                logger.debug("Pixel WS close error: %s", e2)
-            self._clients.discard(ws)
+        cfg = pixel_broadcaster.PixelBroadcastConfig(
+            width=self.width,
+            height=self.height,
+            codec=self.cfg.codec,
+            fps=float(getattr(self._ctx.cfg.encode, 'fps', getattr(self.cfg, 'fps', 60))),
+        )
+        await pixel_broadcaster.broadcast_loop(self._pixel, cfg, self.metrics)
 
     def _scene_spec_json(self) -> Optional[str]:
         try:
@@ -2190,7 +2024,7 @@ class EGLHeadlessServer:
 
     def _update_client_gauges(self) -> None:
         try:
-            self.metrics.set('napari_cuda_pixel_clients', float(len(self._clients)))
+            self.metrics.set('napari_cuda_pixel_clients', float(len(self._pixel.clients)))
             # We could track state clients separately if desired; here we reuse pixel_clients for demo
         except Exception:
             logger.debug('metrics set pixel_clients failed', exc_info=True)
