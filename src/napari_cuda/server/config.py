@@ -14,13 +14,14 @@ Usage plan (PR1/PR2):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Mapping, Optional
+from dataclasses import dataclass, field, fields, replace
+from typing import Mapping, Optional, TypeVar
 import json
 import logging
 import os
 
 from napari_cuda.server.logging_policy import DebugPolicy, load_debug_policy
+from napari_cuda.server.presets import resolve_preset
 
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,20 @@ def _load_json_config(env: Mapping[str, str], name: str) -> dict[str, object]:
         return data
     logger.warning("%s must be a JSON object; ignoring", name)
     return {}
+
+
+_D = TypeVar("_D")
+
+
+def _apply_dataclass_overrides(obj: _D, overrides: Mapping[str, object], label: str) -> _D:
+    if not overrides:
+        return obj
+    valid = {f.name for f in fields(obj)}
+    unknown = [key for key in overrides if key not in valid]
+    if unknown:
+        keys = ", ".join(sorted(unknown))
+        raise KeyError(f"Unknown {label} override keys: {keys}")
+    return replace(obj, **{k: overrides[k] for k in overrides})
 
 
 # ---- Types -------------------------------------------------------------------
@@ -418,6 +433,15 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     cfg = load_server_config(env)
     encoder_cfg = _load_json_config(env, "NAPARI_CUDA_ENCODER_CONFIG")
 
+    preset_name = _env_str(env, "NAPARI_CUDA_PRESET")
+    preset_entry = resolve_preset(preset_name)
+    if preset_entry:
+        if preset_entry.server:
+            cfg = _apply_dataclass_overrides(cfg, preset_entry.server, "ServerConfig")
+        if preset_entry.encode:
+            new_encode = _apply_dataclass_overrides(cfg.encode, preset_entry.encode, "EncodeCfg")
+            cfg = replace(cfg, encode=new_encode)
+
     frame_queue = max(1, int(getattr(cfg, "frame_queue", 1)))
     dump_bitstream = max(0, _cfg_int(encoder_cfg.get("dump_bitstream") if encoder_cfg else None, 0))
     dump_dir = _cfg_str(encoder_cfg.get("dump_dir") if encoder_cfg else "benchmarks/bitstreams", "benchmarks/bitstreams")
@@ -431,12 +455,11 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     debug_policy = load_debug_policy(env)
 
     # Encoder runtime overrides
-    runtime_cfg = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
-    if not isinstance(runtime_cfg, dict):
-        runtime_cfg = {}
+    runtime_cfg_in = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
+    runtime_cfg = dict(runtime_cfg_in) if isinstance(runtime_cfg_in, dict) else {}
     input_fmt = _cfg_str(runtime_cfg.get("input_format"), "YUV444").upper()
     rc_mode = _cfg_str(runtime_cfg.get("rc_mode"), "cbr").lower()
-    preset = _cfg_str(runtime_cfg.get("preset"), "P3")
+    runtime_preset = _cfg_str(runtime_cfg.get("preset"), "P3")
     max_bitrate_val = _cfg_optional_int(runtime_cfg.get("max_bitrate"), None)
     lookahead = max(0, _cfg_int(runtime_cfg.get("lookahead"), 0))
     aq = max(0, _cfg_int(runtime_cfg.get("aq"), 0))
@@ -447,7 +470,7 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     encoder_runtime = EncoderRuntime(
         input_format=input_fmt or "YUV444",
         rc_mode=rc_mode or "cbr",
-        preset=preset or "P3",
+        preset=runtime_preset or "P3",
         max_bitrate=max_bitrate_val if (max_bitrate_val or 0) > 0 else None,
         lookahead=lookahead,
         aq=aq,
@@ -457,6 +480,9 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         idr_period=int(idr_period),
     )
 
+    if preset_entry and preset_entry.encoder_runtime:
+        encoder_runtime = _apply_dataclass_overrides(encoder_runtime, preset_entry.encoder_runtime, "EncoderRuntime")
+
     bitstream_cfg = encoder_cfg.get("bitstream") if isinstance(encoder_cfg, dict) else {}
     if not isinstance(bitstream_cfg, dict):
         bitstream_cfg = {}
@@ -465,6 +491,9 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         disable_fast_pack=_cfg_bool(bitstream_cfg.get("disable_fast_pack"), False),
         allow_py_fallback=_cfg_bool(bitstream_cfg.get("allow_py_fallback"), False),
     )
+
+    if preset_entry and preset_entry.bitstream:
+        bitstream_runtime = _apply_dataclass_overrides(bitstream_runtime, preset_entry.bitstream, "BitstreamRuntime")
 
     metrics_port = _env_int(env, "NAPARI_CUDA_METRICS_PORT", 8083)
     metrics_refresh_ms = _env_int(env, "NAPARI_CUDA_METRICS_REFRESH_MS", 1000)

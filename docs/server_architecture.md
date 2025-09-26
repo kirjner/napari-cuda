@@ -142,6 +142,8 @@ graph LR
     immutable snapshots instead of reading environment variables directly.
   - `logging_policy.py` materialises every debug/logging toggle; worker, rendering, and bitstream
     code paths now consume the policy object exclusively.
+  - `presets.py` registers named runtime presets (streaming profiles and NVENC tiers) and merges their
+    overrides into `ServerCtx` so the server honours `NAPARI_CUDA_PRESET` without scattering env checks.
 - **Metrics Helpers** (`metrics_core.py`, `metrics_server.py`, `dash_dashboard.py`)
   - `metrics_core.Metrics` is the dependency-free aggregator used by the server, dashboard, and tests.
   - `metrics_server` wires Dash startup and policy gauge updates so `egl_headless_server` only calls concise helpers.
