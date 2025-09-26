@@ -68,10 +68,10 @@ from napari_cuda.server.scene_state_applier import (
 )
 from napari_cuda.server.camera_controller import process_commands
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.state_machine import (
-    CameraCommand,
-    PendingSceneUpdate,
-    SceneStateQueue,
+from napari_cuda.server.server_scene_queue import (
+    PendingServerSceneUpdate,
+    ServerSceneCommand,
+    ServerSceneQueue,
 )
 from napari_cuda.server.policy_metrics import PolicyMetrics
 from napari_cuda.server.level_logging import LayerAssignmentLogger, LevelSwitchLogger
@@ -372,7 +372,7 @@ class EGLRendererWorker:
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.Lock()
-        self._scene_state_queue = SceneStateQueue()
+        self._scene_state_queue = ServerSceneQueue()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0
         self._ensure_log_interval_s = 1.0
@@ -760,7 +760,7 @@ class EGLRendererWorker:
         )
         self._scene_state_queue.queue_scene_state(normalized)
 
-    def process_camera_commands(self, commands: Sequence[CameraCommand]) -> None:
+    def process_camera_commands(self, commands: Sequence[ServerSceneCommand]) -> None:
         process_commands(self, commands)
 
     def _apply_camera_reset(self, cam) -> None:
@@ -792,7 +792,7 @@ class EGLRendererWorker:
         )
 
     def drain_scene_updates(self) -> None:
-        updates: PendingSceneUpdate = self._scene_state_queue.drain_pending_updates()
+        updates: PendingServerSceneUpdate = self._scene_state_queue.drain_pending_updates()
 
         if updates.display_mode is not None:
             apply_ndisplay_switch(self, updates.display_mode)

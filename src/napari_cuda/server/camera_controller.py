@@ -15,7 +15,7 @@ import time
 from vispy import scene  # type: ignore
 
 from napari_cuda.server import camera_ops as camops
-from napari_cuda.server.state_machine import CameraCommand
+from napari_cuda.server.server_scene_queue import ServerSceneCommand
 
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class CameraCommandOutcome:
 
 
 def apply_camera_commands(
-    commands: Sequence[CameraCommand],
+    commands: Sequence[ServerSceneCommand],
     *,
     camera,
     view,
@@ -165,7 +165,7 @@ def apply_camera_commands(
     )
 
 
-def process_commands(worker, commands: Sequence[CameraCommand]) -> None:
+def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
     """Process camera commands on the worker, updating its state as needed."""
 
     if not commands:

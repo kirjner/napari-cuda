@@ -1,9 +1,4 @@
-"""Scene state queue helpers for the EGL renderer worker.
-
-This module centralises the bookkeeping previously embedded in ``egl_worker``
-so the worker can delegate state queuing, signature tracking, and zoom intent
-handling to small, testable components.
-"""
+"""ServerScene queue helpers shared between the headless server and worker."""
 
 from __future__ import annotations
 
@@ -20,7 +15,7 @@ from napari_cuda.server.scene_state import ServerSceneState
 
 
 @dataclass(frozen=True)
-class CameraCommand:
+class ServerSceneCommand:
     """Queued camera command consumed by the render thread."""
 
     kind: Literal["zoom", "pan", "orbit", "reset"]
@@ -33,33 +28,33 @@ class CameraCommand:
 
 
 @dataclass(frozen=True)
-class MultiscaleLevelRequest:
+class ServerSceneLevelRequest:
     level: int
     path: Optional[str] = None
 
 
 @dataclass(frozen=True)
-class PendingSceneUpdate:
+class PendingServerSceneUpdate:
     display_mode: Optional[int] = None
-    multiscale: Optional[MultiscaleLevelRequest] = None
+    multiscale: Optional[ServerSceneLevelRequest] = None
     scene_state: Optional[ServerSceneState] = None
 
 
 @dataclass(frozen=True)
-class ZoomIntent:
+class ServerSceneZoomIntent:
     ratio: float
     timestamp: float
 
 
-class SceneStateQueue:
+class ServerSceneQueue:
     """Thread-safe queue for pending scene updates and zoom intents."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._lock = threading.Lock()
         self._pending_display_mode: Optional[int] = None
-        self._pending_multiscale: Optional[MultiscaleLevelRequest] = None
+        self._pending_multiscale: Optional[ServerSceneLevelRequest] = None
         self._pending_scene_state: Optional[ServerSceneState] = None
-        self._zoom_intent: Optional[ZoomIntent] = None
+        self._zoom_intent: Optional[ServerSceneZoomIntent] = None
         self._last_signature: Optional[tuple] = None
         self._time_fn = time_fn
 
@@ -69,15 +64,15 @@ class SceneStateQueue:
 
     def queue_multiscale_level(self, level: int, path: Optional[str]) -> None:
         with self._lock:
-            self._pending_multiscale = MultiscaleLevelRequest(int(level), str(path) if path else None)
+            self._pending_multiscale = ServerSceneLevelRequest(int(level), str(path) if path else None)
 
     def queue_scene_state(self, state: ServerSceneState) -> None:
         with self._lock:
             self._pending_scene_state = state
 
-    def drain_pending_updates(self) -> PendingSceneUpdate:
+    def drain_pending_updates(self) -> PendingServerSceneUpdate:
         with self._lock:
-            updates = PendingSceneUpdate(
+            updates = PendingServerSceneUpdate(
                 display_mode=self._pending_display_mode,
                 multiscale=self._pending_multiscale,
                 scene_state=self._pending_scene_state,
@@ -92,9 +87,9 @@ class SceneStateQueue:
             raise ValueError("zoom ratio must be positive")
         ts = self._time_fn() if timestamp is None else float(timestamp)
         with self._lock:
-            self._zoom_intent = ZoomIntent(float(ratio), ts)
+            self._zoom_intent = ServerSceneZoomIntent(float(ratio), ts)
 
-    def consume_zoom_intent(self, max_age: float) -> Optional[ZoomIntent]:
+    def consume_zoom_intent(self, max_age: float) -> Optional[ServerSceneZoomIntent]:
         now = self._time_fn()
         with self._lock:
             zoom = self._zoom_intent
@@ -129,9 +124,9 @@ class SceneStateQueue:
 
 
 __all__ = [
-    "CameraCommand",
-    "MultiscaleLevelRequest",
-    "PendingSceneUpdate",
-    "SceneStateQueue",
-    "ZoomIntent",
+    "ServerSceneCommand",
+    "ServerSceneLevelRequest",
+    "PendingServerSceneUpdate",
+    "ServerSceneQueue",
+    "ServerSceneZoomIntent",
 ]

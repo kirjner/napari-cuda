@@ -9,7 +9,7 @@ import pytest
 from napari_cuda.server.config import LevelPolicySettings, ServerConfig, ServerCtx
 from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.display_mode import apply_ndisplay_switch
-from napari_cuda.server.state_machine import CameraCommand
+from napari_cuda.server.server_scene_queue import ServerSceneCommand
 
 
 class _IdentityTransform:
@@ -379,7 +379,7 @@ def test_zoom_intent_reaches_lod_selector(egl_worker_fixture, monkeypatch):
 
     monkeypatch.setattr(ew, "select_level", _fake_select_level)
 
-    worker.process_camera_commands([CameraCommand(kind="zoom", factor=2.0)])
+    worker.process_camera_commands([ServerSceneCommand(kind="zoom", factor=2.0)])
     assert worker._level_policy_refresh_needed is True
 
     worker._evaluate_level_policy()
@@ -427,7 +427,7 @@ def test_zoom_intent_triggers_level_switch_end_to_end(egl_worker_fixture):
     worker._oversampling_for_level = MethodType(_oversampling, worker)
     worker._napari_layer.applied.clear()
 
-    worker.process_camera_commands([CameraCommand(kind="zoom", factor=2.0)])
+    worker.process_camera_commands([ServerSceneCommand(kind="zoom", factor=2.0)])
     worker._evaluate_level_policy()
 
     assert worker._active_ms_level == 0

@@ -29,7 +29,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 
 ### Phase B — State/Camera Core (in flight)
 - **Implemented**:
-  - `state_machine.py` now owns scene snapshots, zoom intent tracking, and signature change detection; `_pending_*` fields and state signatures were removed from the worker.
+  - `server_scene_queue.py` now owns scene snapshots, zoom intent tracking, and signature change detection; `_pending_*` fields and state signatures were removed from the worker.
   - `camera_controller.py` applies zoom/pan/orbit/reset commands and returns intent metadata so the worker only schedules renders/policy once.
   - `roi_applier.py` handles ROI drift detection + slab placement, with `render_tick` delegating ROI refreshes to `SceneStateApplier` rather than reimplementing translate logic.
   - `SceneStateApplier` extracted from `drain_scene_updates`; dims/Z updates and 3D volume params are now applied through a procedural context. Hot-path `try/except` and `hasattr` guards were removed in favour of assertions, aligning with the “hostility to just-in-case” tenet.
@@ -41,7 +41,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
 - **Remaining milestones to close Phase B**:
   1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `CaptureFacade` now fronts GL capture, CUDA interop, and the frame pipeline.
-  2. **Guard + naming audit** — ✅ renamed to `SceneStateQueue`/`PendingSceneUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
+  2. **Guard + naming audit** — ✅ renamed to `ServerSceneQueue`/`PendingServerSceneUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
   3. **ServerCtx policy surface** — ✅ `ServerCtx.policy` is now authoritative and callers must provide an explicit ctx (`EGLRendererWorker` no longer falls back to `load_server_ctx()`; experiments/headless server wire it through).
   4. **Integration tests** — ✅ added zoom-intent coverage and preserve-view smoke harness in `src/napari_cuda/server/_tests/test_worker_integration.py` to exercise the worker pipeline end-to-end.
 
@@ -104,16 +104,17 @@ Implementation slices:
 - Sequence of work (**work-in-progress**):
   1. **Baseline snapshot** — record current LOC, `try:` counts, and websocket handler responsibilities for `egl_headless_server.py` (targets: trim from 2.2 k LOC toward 1.0 k, keep existing guard counts steady during extraction). *Status 2025-09-27:* 2,181 LOC (`wc -l`), 120 `try:` blocks (`rg -c "try:"`), pixel channel helpers concentrated in `_handle_pixel`, `_broadcast_loop`, and `_safe_send` with shared state (`_clients`, `_frame_q`, `_bypass_until_key`, `_kf_watchdog_task`, metrics counters).
   2. **PixelBroadcaster split** — move websocket broadcast/writeback logic into `pixel_broadcaster.py`, exposing pure functions that accept a broadcaster state bag (maps of clients, queue metrics, watchdog timestamps) and emit packets or scheduling decisions. Ensure encode pacing stays untouched; add focused unit tests around queue coalescing and watchdog cooldown. *Status 2025-09-27:* Implemented via `PixelBroadcastState`/`PixelBroadcastConfig`; `_broadcast_loop` delegates to `pixel_broadcaster.broadcast_loop`, LOC trimmed to 2,181 and broadcaster unit tests cover safe-send pruning + bypass keyframe delivery. Server `try:` count dropped to 120 (package total 330).
-  3. **StateServer split** — introduce a `server_scene.py` module with a `ServerSceneData` databag capturing the latest `SceneSpec`, dims payloads, and command queues. Provide procedural helpers for command ingestion and metrics updates so `EGLHeadlessServer` simply forwards inbound messages.
+  3. **ServerScene split** — relocate the state-channel queue helpers into `server_scene_queue.py` (renaming types to `ServerSceneQueue`, `ServerSceneCommand`, `PendingServerSceneUpdate`) and introduce `server_scene.py` exposing the mutable `ServerSceneData` bag. The bag must carry the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, policy metrics snapshot, SceneSpec caches, and policy log bookkeeping so intent handlers operate on a single data source.
   4. **SceneSpecBuilder extraction** — centralise SceneSpec construction in `scene_spec_builder.py`, consuming the viewer snapshot + config databag and returning the serialisable payload. Cover with unit tests for axis/dims permutations.
   5. **Re-wire headless server** — refactor `egl_headless_server.py` to orchestrate these helpers, keeping only lifecycle wiring, thread startup, and boundary I/O. Any transient state should live in explicit structs handed to the helpers.
   6. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
   7. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
   8. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
      - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap, projection, interpolation, depiction) alongside validation helpers.
-     - Extend the upcoming `ServerSceneData` bag with render-property fields so handlers mutate data snapshots instead of `self`.
-     - Add procedural helpers to apply each mutation and trigger rebroadcast; keep napari-layer mutations behind worker-queue functions.
+     - Extend `ServerSceneData` with render-property fields so handlers mutate data snapshots instead of `self`.
+     - Add procedural helpers to apply each mutation, enqueue worker commands, and trigger authoritative rebroadcasts.
      - Cover with focused tests asserting state updates and outgoing `layer.update` mirrors.
+  9. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
 - Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.
 
 ### Phase F — Worker State Extraction (later)
@@ -124,7 +125,7 @@ Implementation slices:
 ### Targets & Metrics
 - Module size goals (track in weekly snapshots):
   - `egl_worker.py` → target 700–900 LOC (never above 900); reductions come from camera/state, ROI/LOD, and capture helpers.
-  - `state_machine.py` (new) → 200–300 LOC covering pending state application and camera command processing.
+  - `server_scene_queue.py` (new) → 200–300 LOC covering pending state application and camera command processing.
   - `roi.py` → ≤250 LOC focused purely on ROI math once the remaining helpers move across.
   - `lod.py` → <400 LOC after we delete the legacy `LevelDecision` scaffolding, shift ROI math to `roi.py`, and collapse unused code paths when the napari-gated selector matures.
   - `capture.py` (new) → ≤200 LOC for render→blit glue; `cuda_interop.py` (existing) → ≤150 LOC once trimmed to map/unmap and cleanup.

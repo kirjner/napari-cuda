@@ -9,7 +9,7 @@ from napari_cuda.server.camera_controller import (
     CameraDebugFlags,
     apply_camera_commands,
 )
-from napari_cuda.server.state_machine import CameraCommand
+from napari_cuda.server.server_scene_queue import ServerSceneCommand
 
 
 @dataclass
@@ -45,7 +45,7 @@ def _patch_camops(monkeypatch):
 
 def test_apply_camera_commands_zoom_records_intent_and_callbacks() -> None:
     cam = _StubCamera([], [])
-    cmd = CameraCommand(kind="zoom", factor=1.5)
+    cmd = ServerSceneCommand(kind="zoom", factor=1.5)
     zooms: list[float] = []
     render_marks: list[bool] = []
     policy_marks: list[bool] = []
@@ -79,7 +79,7 @@ def test_apply_camera_commands_zoom_records_intent_and_callbacks() -> None:
 
 def test_apply_camera_commands_zoom_honours_hold_window() -> None:
     cam = _StubCamera([], [])
-    cmd = CameraCommand(kind="zoom", factor=2.0)
+    cmd = ServerSceneCommand(kind="zoom", factor=2.0)
     recorded: list[float] = []
 
     outcome = apply_camera_commands(
@@ -102,7 +102,7 @@ def test_apply_camera_commands_zoom_honours_hold_window() -> None:
 
 def test_apply_camera_commands_pan_without_zoom_passthrough() -> None:
     cam = _StubCamera([], [])
-    cmd = CameraCommand(kind="pan", dx_px=3.0, dy_px=-2.0)
+    cmd = ServerSceneCommand(kind="pan", dx_px=3.0, dy_px=-2.0)
     outcome = apply_camera_commands(
         [cmd],
         camera=cam,
@@ -121,7 +121,7 @@ def test_apply_camera_commands_pan_without_zoom_passthrough() -> None:
 
 def test_apply_camera_commands_requires_positive_zoom() -> None:
     cam = _StubCamera([], [])
-    bad = CameraCommand(kind="zoom", factor=0.0)
+    bad = ServerSceneCommand(kind="zoom", factor=0.0)
     with pytest.raises(ValueError):
         apply_camera_commands(
             [bad],

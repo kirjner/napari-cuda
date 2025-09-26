@@ -32,7 +32,7 @@ Websocket Clients (state + pixel)
             │                         │
             ▼                         ▼
    +------------------+     +-------------------------+
-   | SceneStateQueue  |     | CaptureFacade           |
+   | ServerSceneQueue  |     | CaptureFacade           |
    | + CameraController|    | + GLCapture             |
    | + SceneStateApplier|   | + CudaInterop           |
    +------------------+     | + FramePipeline         |
@@ -52,6 +52,10 @@ Websocket Clients (state + pixel)
   - Delegates SceneSpec construction to `ViewerSceneManager` and render work to `EGLRendererWorker`.
   - Maintains config (`ServerCtx`) and async orchestration (broadcasts, keyframe watchdog).
 
+- **ServerSceneData** (`src/napari_cuda/server/server_scene.py`)
+  - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, SceneSpec caches, and policy logging state.
+  - Intent handlers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
+
 - **ViewerSceneManager** (`src/napari_cuda/server/layer_manager.py`)
   - Maintains a headless `ViewerModel` mirror for scene metadata.
   - Produces `SceneSpec`/`dims.update` payloads used by clients and the server HUD.
@@ -61,8 +65,8 @@ Websocket Clients (state + pixel)
   - Coordinates render ticks, applies pending scene updates, and liaises with ROI/LOD helpers.
   - Delegates capture/encode to `CaptureFacade` and camera/scene logic to extracted helpers.
 
-- **SceneState Helpers** (`scene_state_applier.py`, `state_machine.py`, `camera_controller.py`)
-  - `SceneStateQueue` coalesces pending updates across threads.
+- **SceneState Helpers** (`scene_state_applier.py`, `server_scene_queue.py`, `camera_controller.py`)
+  - `ServerSceneQueue` coalesces pending updates across threads before the worker drains them.
   - `SceneStateApplier` applies dims/camera/volume changes to viewer + layer objects.
   - `CameraController` executes queued camera commands and reports policy triggers.
 
@@ -84,8 +88,8 @@ Websocket Clients (state + pixel)
 ## Data Flow Summary
 
 1. Clients connect via websocket; `EGLHeadlessServer` registers them and pushes an initial `SceneSpec`.
-2. User interactions or policy decisions enqueue updates in `SceneStateQueue`.
-3. The worker thread drains updates, applies them through `SceneStateApplier`, and kicks ROI/LOD recalculation as needed.
+2. Incoming intents mutate `ServerSceneData` (dims sequence, volume/multiscale hints, camera queue) and enqueue work in `ServerSceneQueue` when the worker needs to react.
+3. The worker thread drains updates from `ServerSceneQueue`, applies them through `SceneStateApplier`, and kicks ROI/LOD recalculation as needed.
 4. `CaptureFacade` captures rendered frames, hands them to NVENC, and returns packet bytes to the server.
    - The NVENC helper (`rendering/encoder.py`) reads preset/bitrate/RC overrides from
      `ServerCtx.encoder_runtime` and honours `DebugPolicy.encoder` logging toggles.
@@ -100,5 +104,5 @@ Websocket Clients (state + pixel)
 - Phase D is underway: logging/debug toggles live in `logging_policy.py`, and rendering/bitstream
   modules rely on the `ServerCtx` snapshots. Remaining work focuses on the logging-guard audit and
   lint/test enforcement.
-- Phase E targets further decomposition of `EGLHeadlessServer` into discrete broadcaster/state-manager components to mirror the worker split.
+- Phase E targets further decomposition of `EGLHeadlessServer` into discrete broadcaster/state-manager components, with `ServerSceneData` acting as the authoritative state bag shared by future intent/MCP helpers.
 - Capture resizing and dynamic canvas negotiation remain TODO items once client capabilities land.

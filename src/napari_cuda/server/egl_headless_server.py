@@ -15,7 +15,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Deque, Dict, List, Optional, Set, Mapping
+from typing import Awaitable, Dict, List, Optional, Set, Mapping
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -87,7 +87,12 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
 
 from .egl_worker import EGLRendererWorker
 from .scene_state import ServerSceneState
-from .state_machine import CameraCommand
+from .server_scene import (
+    ServerSceneData,
+    create_server_scene_data,
+    increment_dims_sequence,
+)
+from .server_scene_queue import ServerSceneCommand
 from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, pack_to_avcc, build_avcc_config, configure_bitstream
 from .metrics import Metrics
@@ -180,8 +185,9 @@ class EGLHeadlessServer:
 
         self._worker: Optional[EGLRendererWorker] = None
         self._worker_thread: Optional[threading.Thread] = None
-        self._latest_state = ServerSceneState()
-        self._camera_commands: Deque[CameraCommand] = deque()
+        self._scene: ServerSceneData = create_server_scene_data(
+            policy_event_path=self._ctx.policy_event_path
+        )
         # Bitstream parameter cache and config tracking (server-side)
         self._param_cache = ParamCache()
         self._needs_config = True
@@ -218,34 +224,10 @@ class EGLHeadlessServer:
         _z_fallback = self._ctx.cfg.zarr_z
         _z_resolved = zarr_z if zarr_z is not None else _z_fallback
         self._zarr_z = (_z_resolved if (_z_resolved is not None and int(_z_resolved) >= 0) else None)
-        self._policy_metrics_snapshot: Dict[str, object] = {}
-        # Policy event writer state (single-writer JSONL)
-        try:
-            self._last_written_decision_seq: int = 0
-        except Exception:
-            self._last_written_decision_seq = 0
-        self._policy_event_path = Path(self._ctx.policy_event_path)
         # Verbose dims logging control: default debug, upgrade to info with flag
         self._log_dims_info = bool(policy_logging.log_dims_info)
         # Dedicated debug control for this module only (no dependency loggers)
         self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug_policy.enabled)
-        # Dims intent/update tracking (server-authoritative dims seq and last client)
-        self._dims_seq: int = 0
-        self._last_dims_client_id: Optional[str] = None
-        # Volume and multiscale server-side state (reported via dims.update meta)
-        self._volume_state: dict = {
-            'mode': 'mip',           # 'mip' | 'translucent' | 'iso'
-            'colormap': 'gray',      # name string
-            'clim': [0.0, 1.0],      # [lo, hi]
-            'opacity': 1.0,          # 0..1
-            'sample_step': 1.0,      # relative multiplier
-        }
-        self._ms_state: dict = {
-            'levels': [],            # [{shape: [...], downsample: [...]}]
-            'current_level': 0,
-            'policy': 'oversampling',  # simplified policy; legacy 'fixed' removed
-            'index_space': 'base',
-        }
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
         # Populate multiscale description from NGFF metadata if available
         try:
@@ -256,10 +238,10 @@ class EGLHeadlessServer:
         self._scene_manager = ViewerSceneManager((self.width, self.height))
 
     # --- Logging + Broadcast helpers --------------------------------------------
-    def _enqueue_camera_command(self, cmd: CameraCommand) -> None:
+    def _enqueue_camera_command(self, cmd: ServerSceneCommand) -> None:
         with self._state_lock:
-            self._camera_commands.append(cmd)
-            queue_len = len(self._camera_commands)
+            self._scene.camera_commands.append(cmd)
+            queue_len = len(self._scene.camera_commands)
         if self._log_cam_info or self._log_cam_debug:
             logger.info(
                 "enqueue camera command kind=%s queue_len=%d payload=%s",
@@ -344,7 +326,7 @@ class EGLHeadlessServer:
             # Gather steps from server state, worker viewer, and source
             state_step: list[int] | None = None
             with self._state_lock:
-                cur = self._latest_state.current_step
+                cur = self._scene.latest_state.current_step
                 state_step = list(cur) if isinstance(cur, (list, tuple)) else None
 
             w_step = None
@@ -409,8 +391,8 @@ class EGLHeadlessServer:
             # Synchronize server state with chosen step to keep intents consistent
             try:
                 with self._state_lock:
-                    s = self._latest_state
-                    self._latest_state = ServerSceneState(
+                    s = self._scene.latest_state
+                    self._scene.latest_state = ServerSceneState(
                         center=s.center,
                         zoom=s.zoom,
                         angles=s.angles,
@@ -503,7 +485,7 @@ class EGLHeadlessServer:
             {
                 'requested': int(ndisp),
                 'use_volume': self.use_volume,
-                'latest_step': getattr(self._latest_state, 'current_step', None),
+                'latest_step': getattr(self._scene.latest_state, 'current_step', None),
             },
             flush=True,
         )
@@ -550,7 +532,7 @@ class EGLHeadlessServer:
 
     # --- Meta builders ------------------------------------------------------------
     def _populate_multiscale_state(self) -> None:
-        """Populate self._ms_state['levels'] from NGFF multiscales if available.
+        """Populate self._scene.multiscale_state['levels'] from NGFF multiscales if available.
 
         Stores minimal fields needed by clients and worker switching:
         - path: dataset subpath (e.g., 'level_03')
@@ -581,8 +563,8 @@ class EGLHeadlessServer:
             )
 
         if levels:
-            self._ms_state['levels'] = levels
-            self._ms_state['current_level'] = int(source.current_level)
+            self._scene.multiscale_state['levels'] = levels
+            self._scene.multiscale_state['current_level'] = int(source.current_level)
             self._zarr_axes = ''.join(source.axes)
             current_desc = source.level_descriptors[source.current_level]
             if current_desc.path:
@@ -631,14 +613,14 @@ class EGLHeadlessServer:
     def _update_scene_manager(self) -> None:
         current_step = None
         with self._state_lock:
-            if self._latest_state.current_step is not None:
-                current_step = list(self._latest_state.current_step)  # type: ignore[arg-type]
+            if self._scene.latest_state.current_step is not None:
+                current_step = list(self._scene.latest_state.current_step)  # type: ignore[arg-type]
         extras = {
             'zarr_axes': (self._worker._zarr_axes if self._worker is not None else None),
             'zarr_level': self._zarr_level,
         }
-        if self._policy_metrics_snapshot:
-            extras['policy_metrics'] = self._policy_metrics_snapshot
+        if self._scene.policy_metrics_snapshot:
+            extras['policy_metrics'] = self._scene.policy_metrics_snapshot
         if self._worker is not None:
             source = getattr(self._worker, '_scene_source', None)
             if source is not None:
@@ -656,12 +638,12 @@ class EGLHeadlessServer:
                 # Keep multiscale server state in sync so client HUD reflects live level
                 try:
                     # Advertise adaptive policy; reflect zoom-driven switches
-                    self._ms_state['policy'] = 'auto'
-                    self._ms_state['current_level'] = int(source.current_level)
+                    self._scene.multiscale_state['policy'] = 'auto'
+                    self._scene.multiscale_state['current_level'] = int(source.current_level)
                     # Refresh levels if descriptor count changed (defensive)
-                    levels = self._ms_state.get('levels') or []
+                    levels = self._scene.multiscale_state.get('levels') or []
                     if not isinstance(levels, list) or len(levels) != len(source.level_descriptors):
-                        self._ms_state['levels'] = [
+                        self._scene.multiscale_state['levels'] = [
                             {
                                 'path': desc.path,
                                 'downsample': list(desc.downsample),
@@ -681,9 +663,9 @@ class EGLHeadlessServer:
                 logger.debug('worker viewer_model fetch failed', exc_info=True)
         self._scene_manager.update_from_sources(
             worker=self._worker,
-            scene_state=self._latest_state,
-            multiscale_state=dict(self._ms_state),
-            volume_state=dict(self._volume_state),
+            scene_state=self._scene.latest_state,
+            multiscale_state=dict(self._scene.multiscale_state),
+            volume_state=dict(self._scene.volume_state),
             current_step=current_step,
             ndisplay=self._current_ndisplay(),
             zarr_path=self._zarr_path,
@@ -731,7 +713,7 @@ class EGLHeadlessServer:
             iv = int(lvl)
         except Exception:
             return None
-        levels = self._ms_state.get('levels') or []
+        levels = self._scene.multiscale_state.get('levels') or []
         n = len(levels)
         if n > 0:
             return max(0, min(n - 1, iv))
@@ -837,8 +819,7 @@ class EGLHeadlessServer:
             except Exception:
                 logger.debug("dims.update clamp in builder failed", exc_info=True)
         # New shape with nested meta
-        seq_val = int(self._dims_seq) & 0x7FFFFFFF
-        self._dims_seq = (int(self._dims_seq) + 1) & 0x7FFFFFFF
+        seq_val = increment_dims_sequence(self._scene, last_client_id)
         # Build base message
         new_msg: dict = {
             'type': 'dims.update',
@@ -909,7 +890,7 @@ class EGLHeadlessServer:
                         meta_obj['multiscale'] = {
                             'levels': levels_meta,
                             'current_level': cur,
-                            'policy': (self._ms_state.get('policy') if isinstance(self._ms_state, dict) else None) or 'auto',
+                            'policy': (self._scene.multiscale_state.get('policy') if isinstance(self._scene.multiscale_state, dict) else None) or 'auto',
                             'index_space': 'base',
                         }
                         if 0 <= cur < len(levels_meta):
@@ -974,7 +955,7 @@ class EGLHeadlessServer:
         Never raises; logs and continues on failure.
         """
         try:
-            self._last_dims_client_id = last_client_id
+            self._scene.last_dims_client_id = last_client_id
             obj = self._build_dims_update_message(step_list, last_client_id, ack=ack, intent_seq=intent_seq)
             await self._broadcast_state_json(obj)
             # Intentionally skip scene.spec here to avoid client layer churn on
@@ -990,7 +971,7 @@ class EGLHeadlessServer:
         """
         # Capture current step and infer length
         with self._state_lock:
-            cur = self._latest_state.current_step
+            cur = self._scene.latest_state.current_step
         meta = self._dims_metadata() or {}
         try:
             ndim = int(meta.get('ndim') or (len(cur) if cur is not None else 0))
@@ -1036,8 +1017,8 @@ class EGLHeadlessServer:
         # Update state
         step[idx] = int(target)
         with self._state_lock:
-            s = self._latest_state
-            self._latest_state = ServerSceneState(
+            s = self._scene.latest_state
+            self._scene.latest_state = ServerSceneState(
                 center=s.center,
                 zoom=s.zoom,
                 angles=s.angles,
@@ -1224,8 +1205,8 @@ class EGLHeadlessServer:
                             # Synchronize server state so future intents use this baseline
                             try:
                                 with self._state_lock:
-                                    s = self._latest_state
-                                    self._latest_state = ServerSceneState(
+                                    s = self._scene.latest_state
+                                    self._scene.latest_state = ServerSceneState(
                                         center=s.center,
                                         zoom=s.zoom,
                                         angles=s.angles,
@@ -1254,7 +1235,7 @@ class EGLHeadlessServer:
                     zarr_level=self._zarr_level,
                     zarr_axes=self._zarr_axes,
                     zarr_z=self._zarr_z,
-                    policy_name=self._ms_state.get('policy'),
+                    policy_name=self._scene.multiscale_state.get('policy'),
                     scene_refresh_cb=_on_scene_refresh,
                     ctx=self._ctx,
                     env=self._ctx_env,
@@ -1263,8 +1244,8 @@ class EGLHeadlessServer:
                 z0 = self._worker._z_index
                 if z0 is not None:
                     with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
+                        s = self._scene.latest_state
+                        self._scene.latest_state = ServerSceneState(
                             center=s.center,
                             zoom=s.zoom,
                             angles=s.angles,
@@ -1302,11 +1283,11 @@ class EGLHeadlessServer:
                 while not self._stop.is_set():
                     # Snapshot state and queued camera commands atomically
                     with self._state_lock:
-                        queued = self._latest_state
-                        commands = list(self._camera_commands)
-                        self._camera_commands.clear()
+                        queued = self._scene.latest_state
+                        commands = list(self._scene.camera_commands)
+                        self._scene.camera_commands.clear()
                         # Clear one-shot fields so subsequent intents accumulate deltas until next frame
-                        self._latest_state = ServerSceneState(
+                        self._scene.latest_state = ServerSceneState(
                             center=queued.center,
                             zoom=queued.zoom,
                             angles=queued.angles,
@@ -1379,15 +1360,15 @@ class EGLHeadlessServer:
                     # Refresh policy metrics + append event if new decision was recorded
                     try:
                         self._publish_policy_metrics()
-                        snap = self._policy_metrics_snapshot if isinstance(self._policy_metrics_snapshot, dict) else {}
+                        snap = self._scene.policy_metrics_snapshot if isinstance(self._scene.policy_metrics_snapshot, dict) else {}
                         last = snap.get('last_decision') if isinstance(snap, dict) else None
                         if isinstance(last, dict):
                             seq_dec = int(last.get('seq') or 0)
-                            if seq_dec > self._last_written_decision_seq:
-                                self._policy_event_path.parent.mkdir(parents=True, exist_ok=True)
-                                with self._policy_event_path.open('a', encoding='utf-8') as f:
+                            if seq_dec > self._scene.last_written_decision_seq:
+                                self._scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
+                                with self._scene.policy_event_path.open('a', encoding='utf-8') as f:
                                     f.write(json.dumps(last) + "\n")
-                                self._last_written_decision_seq = seq_dec
+                                self._scene.last_written_decision_seq = seq_dec
                     except Exception:
                         logger.debug('policy metrics/event publish failed', exc_info=True)
                     next_t += tick
@@ -1445,7 +1426,7 @@ class EGLHeadlessServer:
                 await self._await_adapter_level_ready(0.5)
                 cur = None
                 with self._state_lock:
-                    cur = self._latest_state.current_step
+                    cur = self._scene.latest_state.current_step
                 if cur is not None:
                     # Build once so logs match sent payload
                     obj = self._build_dims_update_message(list(cur), last_client_id=None)
@@ -1531,11 +1512,11 @@ class EGLHeadlessServer:
                 elif self._log_cam_debug:
                     logger.debug("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
                 with self._state_lock:
-                    self._latest_state = ServerSceneState(
+                    self._scene.latest_state = ServerSceneState(
                         center=tuple(center) if center else None,
                         zoom=float(zoom) if zoom is not None else None,
                         angles=tuple(angles) if angles else None,
-                        current_step=self._latest_state.current_step,
+                        current_step=self._scene.latest_state.current_step,
                     )
                 handled = True
                 return
@@ -1603,11 +1584,11 @@ class EGLHeadlessServer:
                 client_seq = data.get('client_seq')
                 client_id = data.get('client_id') or None
                 if self._is_valid_render_mode(mode):
-                    self._volume_state['mode'] = mode
+                    self._scene.volume_state['mode'] = mode
                     self._log_volume_intent("intent: volume.set_render_mode mode=%s client_id=%s seq=%s", mode, client_id, client_seq)
                     with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
+                        s = self._scene.latest_state
+                        self._scene.latest_state = ServerSceneState(
                             center=s.center,
                             zoom=s.zoom,
                             angles=s.angles,
@@ -1626,11 +1607,11 @@ class EGLHeadlessServer:
                 client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
                 if pair is not None:
                     lo, hi = pair
-                    self._volume_state['clim'] = [lo, hi]
+                    self._scene.volume_state['clim'] = [lo, hi]
                     self._log_volume_intent("intent: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s", lo, hi, client_id, client_seq)
                     with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
+                        s = self._scene.latest_state
+                        self._scene.latest_state = ServerSceneState(
                             center=s.center,
                             zoom=s.zoom,
                             angles=s.angles,
@@ -1648,11 +1629,11 @@ class EGLHeadlessServer:
                 name = data.get('name')
                 client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
                 if isinstance(name, str) and name.strip():
-                    self._volume_state['colormap'] = str(name)
+                    self._scene.volume_state['colormap'] = str(name)
                     self._log_volume_intent("intent: volume.set_colormap name=%s client_id=%s seq=%s", name, client_id, client_seq)
                     with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
+                        s = self._scene.latest_state
+                        self._scene.latest_state = ServerSceneState(
                             center=s.center,
                             zoom=s.zoom,
                             angles=s.angles,
@@ -1670,11 +1651,11 @@ class EGLHeadlessServer:
                 a = self._clamp_opacity(data.get('alpha'))
                 client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
                 if a is not None:
-                    self._volume_state['opacity'] = float(a)
+                    self._scene.volume_state['opacity'] = float(a)
                     self._log_volume_intent("intent: volume.set_opacity alpha=%.3f client_id=%s seq=%s", a, client_id, client_seq)
                     with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
+                        s = self._scene.latest_state
+                        self._scene.latest_state = ServerSceneState(
                             center=s.center,
                             zoom=s.zoom,
                             angles=s.angles,
@@ -1692,11 +1673,11 @@ class EGLHeadlessServer:
                 rr = self._clamp_sample_step(data.get('relative'))
                 client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
                 if rr is not None:
-                    self._volume_state['sample_step'] = float(rr)
+                    self._scene.volume_state['sample_step'] = float(rr)
                     self._log_volume_intent("intent: volume.set_sample_step relative=%.3f client_id=%s seq=%s", rr, client_id, client_seq)
                     with self._state_lock:
-                        s = self._latest_state
-                        self._latest_state = ServerSceneState(
+                        s = self._scene.latest_state
+                        self._scene.latest_state = ServerSceneState(
                             center=s.center,
                             zoom=s.zoom,
                             angles=s.angles,
@@ -1723,7 +1704,7 @@ class EGLHeadlessServer:
                     )
                     handled = True
                     return
-                self._ms_state['policy'] = pol
+                self._scene.multiscale_state['policy'] = pol
                 self._log_volume_intent(
                     "intent: multiscale.set_policy policy=%s client_id=%s seq=%s",
                     pol, client_id, client_seq,
@@ -1752,12 +1733,12 @@ class EGLHeadlessServer:
                 if lvl is None:
                     handled = True
                     return
-                self._ms_state['current_level'] = int(lvl)
+                self._scene.multiscale_state['current_level'] = int(lvl)
                 # Keep ms_state policy unchanged
                 self._log_volume_intent("intent: multiscale.set_level level=%d client_id=%s seq=%s", int(lvl), client_id, client_seq)
                 if self._worker is not None:
                     try:
-                        levels = self._ms_state.get('levels') or []
+                        levels = self._scene.multiscale_state.get('levels') or []
                         path = None
                         if isinstance(levels, list) and 0 <= int(lvl) < len(levels):
                             path = levels[int(lvl)].get('path')
@@ -1816,7 +1797,7 @@ class EGLHeadlessServer:
                     elif self._log_cam_debug:
                         logger.debug("state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)", factor, float(anc_t[0]), float(anc_t[1]))
                     self._enqueue_camera_command(
-                        CameraCommand(
+                        ServerSceneCommand(
                             kind='zoom',
                             factor=float(factor),
                             anchor_px=(float(anc_t[0]), float(anc_t[1])),
@@ -1838,7 +1819,7 @@ class EGLHeadlessServer:
                         logger.debug("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
                     self.metrics.inc('napari_cuda_state_camera_intents')
                     self._enqueue_camera_command(
-                        CameraCommand(kind='pan', dx_px=float(dx), dy_px=float(dy))
+                        ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy))
                     )
                 handled = True
                 return
@@ -1856,7 +1837,7 @@ class EGLHeadlessServer:
                         logger.debug("state: camera.orbit daz=%.2f del=%.2f", daz, delv)
                     self.metrics.inc('napari_cuda_state_camera_intents')
                     self._enqueue_camera_command(
-                        CameraCommand(kind='orbit', d_az_deg=float(daz), d_el_deg=float(delv))
+                        ServerSceneCommand(kind='orbit', d_az_deg=float(daz), d_el_deg=float(delv))
                     )
                     self.metrics.inc('napari_cuda_orbit_events')
                 handled = True
@@ -1868,7 +1849,7 @@ class EGLHeadlessServer:
                 elif self._log_cam_debug:
                     logger.debug("state: camera.reset")
                 self.metrics.inc('napari_cuda_state_camera_intents')
-                self._enqueue_camera_command(CameraCommand(kind='reset'))
+                self._enqueue_camera_command(ServerSceneCommand(kind='reset'))
                 if self._idr_on_reset and self._worker is not None:
                     logger.info("state: camera.reset -> ensure_keyframe start")
                     await self._ensure_keyframe()
@@ -2043,12 +2024,12 @@ class EGLHeadlessServer:
         if not isinstance(snapshot, dict):
             return
 
-        self._policy_metrics_snapshot = snapshot
+        self._scene.policy_metrics_snapshot = snapshot
         try:
-            self._ms_state['prime_complete'] = bool(snapshot.get('prime_complete'))
+            self._scene.multiscale_state['prime_complete'] = bool(snapshot.get('prime_complete'))
             if 'active_level' in snapshot:
-                self._ms_state['current_level'] = int(snapshot['active_level'])
-            self._ms_state['downgraded'] = bool(snapshot.get('level_downgraded'))
+                self._scene.multiscale_state['current_level'] = int(snapshot['active_level'])
+            self._scene.multiscale_state['downgraded'] = bool(snapshot.get('level_downgraded'))
         except Exception:
             logger.debug('ms_state prime update failed', exc_info=True)
         try:
@@ -2083,8 +2064,8 @@ class EGLHeadlessServer:
                     logger.debug('policy metrics gauge update failed for level %s', lvl, exc_info=True)
 
         try:
-            self.metrics.set('napari_cuda_ms_prime_complete', 1.0 if self._ms_state.get('prime_complete') else 0.0)
-            self.metrics.set('napari_cuda_ms_active_level', float(self._ms_state.get('current_level', 0)))
+            self.metrics.set('napari_cuda_ms_prime_complete', 1.0 if self._scene.multiscale_state.get('prime_complete') else 0.0)
+            self.metrics.set('napari_cuda_ms_active_level', float(self._scene.multiscale_state.get('current_level', 0)))
         except Exception:
             logger.debug('prime metrics update failed', exc_info=True)
 

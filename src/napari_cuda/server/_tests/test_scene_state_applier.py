@@ -11,7 +11,7 @@ from napari_cuda.server.scene_state_applier import (
     SceneStateApplyContext,
 )
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.state_machine import SceneStateQueue
+from napari_cuda.server.server_scene_queue import ServerSceneQueue
 from napari_cuda.server.scene_types import SliceROI
 
 
@@ -315,7 +315,7 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
         request_encoder_idr=None,
     )
 
-    queue = SceneStateQueue()
+    queue = ServerSceneQueue()
     state = ServerSceneState(current_step=(1, 0, 0))
 
     result = SceneStateApplier.drain_updates(ctx, state=state, queue=queue)
@@ -357,7 +357,7 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
         request_encoder_idr=None,
     )
 
-    queue = SceneStateQueue()
+    queue = ServerSceneQueue()
     state = ServerSceneState(
         current_step=(1, 0, 0),
         center=(5.0, 6.0, 7.0),

@@ -80,7 +80,7 @@ Default for first cut: keep lowest resolution in 3D for stability; add the heuri
 ## Server Changes
 
 - Add a worker→server callback (set once when starting worker) for `on_ms_level_changed(level)` that:
-  - Sets `self._ms_state['current_level'] = level; self._ms_state['policy'] = 'latency'`
+  - Sets `self._scene.multiscale_state['current_level'] = level; self._scene.multiscale_state['policy'] = 'latency'`
   - Calls `await self._rebroadcast_meta(last_client_id=None)`
   - Triggers `_ensure_keyframe()` to make the change immediate.
 - Expose env flags for auto enable/tuning: `NAPARI_CUDA_MS_AUTO=1`, thresholds above.

@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.state_machine import SceneStateQueue
+from napari_cuda.server.server_scene_queue import ServerSceneQueue
 
 
 class _FakeClock:
@@ -22,7 +22,7 @@ class _FakeClock:
 
 def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
-    machine = SceneStateQueue(time_fn=clock)
+    machine = ServerSceneQueue(time_fn=clock)
 
     machine.queue_display_mode(2)
     machine.queue_display_mode(3)
@@ -47,7 +47,7 @@ def test_drain_pending_updates_returns_last_values() -> None:
 
 def test_zoom_intent_recent_then_stale() -> None:
     clock = _FakeClock()
-    machine = SceneStateQueue(time_fn=clock)
+    machine = ServerSceneQueue(time_fn=clock)
 
     machine.record_zoom_intent(1.2)
     zoom = machine.consume_zoom_intent(max_age=0.5)
@@ -67,7 +67,7 @@ def test_zoom_intent_recent_then_stale() -> None:
 
 
 def test_update_state_signature_detects_changes() -> None:
-    machine = SceneStateQueue()
+    machine = ServerSceneQueue()
 
     base = ServerSceneState(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
     assert machine.update_state_signature(base)

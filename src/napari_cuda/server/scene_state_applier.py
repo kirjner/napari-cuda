@@ -18,7 +18,7 @@ import numpy as np
 from napari_cuda.server.scene_types import SliceROI
 from napari_cuda.server.roi_applier import SliceDataApplier
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.state_machine import SceneStateQueue
+from napari_cuda.server.server_scene_queue import ServerSceneQueue
 
 
 logger = logging.getLogger(__name__)
@@ -277,7 +277,7 @@ class SceneStateApplier:
         ctx: SceneStateApplyContext,
         *,
         state: ServerSceneState,
-        queue: SceneStateQueue,
+        queue: ServerSceneQueue,
     ) -> SceneDrainResult:
         """Apply pending scene state updates and report side effects."""
 
