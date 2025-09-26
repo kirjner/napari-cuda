@@ -52,7 +52,7 @@ Websocket Clients (state + pixel)
 - **EGLHeadlessServer** (`src/napari_cuda/server/egl_headless_server.py`)
   - Owns websocket listeners for state and pixel channels.
   - Tracks authoritative scene state, metrics, and watchdogs.
-  - Delegates SceneSpec construction to `ViewerSceneManager` and render work to `EGLRendererWorker`.
+  - Delegates SceneSpec construction to `ViewerSceneManager`, render work to `EGLRendererWorker`, and render-thread lifecycle to `worker_lifecycle.start_worker/stop_worker`.
   - Maintains config (`ServerCtx`) and async orchestration (broadcasts, keyframe watchdog).
 
 - **ServerSceneData** (`src/napari_cuda/server/server_scene.py`)
@@ -65,6 +65,10 @@ Websocket Clients (state + pixel)
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
   - Worker refresh notifications travel through a dedicated worker→control queue, so the control loop updates the scene manager before emitting dims/spec payloads; no deferred flushes or ad-hoc regeneration needed.
+- **Worker Lifecycle Helpers** (`worker_lifecycle.py`)
+  - `WorkerLifecycleState` tracks the render thread, worker instance, and stop event in a single bag controlled by the lifecycle helpers.
+  - `start_worker` spins up `EGLRendererWorker`, wires callbacks (`on_frame`, `_on_scene_refresh`), emits baseline dims updates, and pushes packets through `pixel_channel` without touching asyncio internals.
+  - `stop_worker` signals the render loop, joins the thread, and ensures cleanup so the server shell only needs a thin delegating wrapper.
 
 - **Pixel Channel Helpers** (`pixel_channel.py` + `pixel_broadcaster.py`)
   - `PixelChannelState` + `PixelChannelConfig` own websocket lifecycle data (clients, bypass, keyframe watchdogs, avcC cache) while the broadcaster continues to handle raw frame draining.

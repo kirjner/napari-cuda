@@ -128,9 +128,9 @@ Implementation slices:
   8. **Metrics/Dash helper ✅** — metrics startup/shutdown now lives in `metrics_server.py`:
      - `metrics_core.Metrics` remains the shared aggregator; `metrics_server.start_metrics_dashboard` boots Dash while `update_policy_metrics` encapsulates gauge updates + JSON dumps.
      - `EGLHeadlessServer` lost `_start/_stop_metrics_server` and simply retains the runner handle; docs now describe the split under “Metrics Helpers.”
-  9. **Worker lifecycle module** — extract worker start/stop + scene refresh wiring into `server_worker.py`:
-     - Provide functions for `start_worker(server, loop)` and `stop_worker(server)` that build the renderer, register callbacks, and handle cleanup.
-     - This trims the 300+ lines of worker boot logic from `egl_headless_server` and gives us a single place to reason about worker creation.
+  9. **Worker lifecycle module (in progress)** — `worker_lifecycle.py` now owns worker start/stop + scene refresh wiring:
+     - `WorkerLifecycleState` tracks the thread, worker instance, and stop event; `start_worker(server, loop, state)`/`stop_worker(state)` encapsulate bootstrap and teardown.
+     - Follow-ups: tighten remaining defensive guards in the helpers, add focused tests for notification draining + keyframe scheduling, and remove any lingering direct lifecycle code from `egl_headless_server`.
   10. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
      - Add a focused pytest (`test_server_scene_data.py`) to cover the new helper functions and dim-sequence wraparound once they land.
   11. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.

@@ -14,7 +14,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Dict, List, Optional, Set, Mapping
+from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING
 
 import websockets
 import importlib.resources as ilr
@@ -84,7 +84,6 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
         logger.info("Encoder profile '%s' resolved overrides: %s", profile, settings)
     return settings
 
-from .egl_worker import EGLRendererWorker
 from .scene_state import ServerSceneState
 from .server_scene import ServerSceneData, create_server_scene_data
 from .server_scene_queue import (
@@ -98,7 +97,7 @@ from .server_scene_spec import (
     build_scene_spec_json,
 )
 from .layer_manager import ViewerSceneManager
-from .bitstream import ParamCache, pack_to_avcc, build_avcc_config, configure_bitstream
+from .bitstream import ParamCache, configure_bitstream
 from .metrics_core import Metrics
 from napari_cuda.utils.env import env_bool
 from .zarr_source import ZarrSceneSource, ZarrSceneSourceError
@@ -115,8 +114,16 @@ from .server_scene_control import (
     process_worker_notifications,
     rebroadcast_meta,
 )
+from .worker_lifecycle import (
+    WorkerLifecycleState,
+    start_worker as lifecycle_start_worker,
+    stop_worker as lifecycle_stop_worker,
+)
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from .egl_worker import EGLRendererWorker
 
 
 @dataclass
@@ -208,11 +215,9 @@ class EGLHeadlessServer:
             kf_watchdog_cooldown_s=self._pixel_config.kf_watchdog_cooldown_s,
         )
         self._seq = 0
-        self._stop = threading.Event()
-        
-
-        self._worker: Optional[EGLRendererWorker] = None
-        self._worker_thread: Optional[threading.Thread] = None
+        self._worker_lifecycle = WorkerLifecycleState()
+        self._scene_manager = ViewerSceneManager((self.width, self.height))
+        self._worker_notifications = WorkerSceneNotificationQueue()
         self._scene: ServerSceneData = create_server_scene_data(
             policy_event_path=self._ctx.policy_event_path
         )
@@ -259,8 +264,13 @@ class EGLHeadlessServer:
         except Exception:
             logger.debug("populate multiscale state failed", exc_info=True)
 
-        self._scene_manager = ViewerSceneManager((self.width, self.height))
-        self._worker_notifications = WorkerSceneNotificationQueue()
+    @property
+    def _worker(self) -> Optional["EGLRendererWorker"]:
+        return self._worker_lifecycle.worker
+
+    @_worker.setter
+    def _worker(self, worker: Optional["EGLRendererWorker"]) -> None:
+        self._worker_lifecycle.worker = worker
 
     # --- Logging + Broadcast helpers --------------------------------------------
     def _enqueue_camera_command(self, cmd: ServerSceneCommand) -> None:
@@ -772,321 +782,10 @@ class EGLHeadlessServer:
             self._stop_worker()
 
     def _start_worker(self, loop: asyncio.AbstractEventLoop) -> None:
-        def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
-            # Hold pixel emission until worker orientation is ready to avoid a momentary inverted frame
-            if self._worker is not None:
-                if self._worker._orientation_ready is False:
-                    return
-            # Convert encoder AU (Annex B or AVCC) to AVCC and detect keyframe, and record pack time
-            # Optional: raw NAL summary before packing for diagnostics
-            try:
-                if self._ctx.debug_policy.encoder.log_nals:
-                    from .bitstream import parse_nals
-                    raw_bytes: bytes
-                    if isinstance(payload_obj, (bytes, bytearray, memoryview)):
-                        raw_bytes = bytes(payload_obj)
-                    elif isinstance(payload_obj, (list, tuple)):
-                        raw_bytes = b''.join([bytes(x) for x in payload_obj if x is not None])
-                    else:
-                        raw_bytes = bytes(payload_obj) if payload_obj is not None else b''
-                    nals = parse_nals(raw_bytes)
-                    has_sps = any(((n[0] & 0x1F) == 7) or (((n[0] >> 1) & 0x3F) == 33) for n in nals if n)
-                    has_pps = any(((n[0] & 0x1F) == 8) or (((n[0] >> 1) & 0x3F) == 34) for n in nals if n)
-                    has_idr = any(((n[0] & 0x1F) == 5) or (((n[0] >> 1) & 0x3F) in (19, 20, 21)) for n in nals if n)
-                    logger.debug("Raw NALs: count=%d sps=%s pps=%s idr=%s", len(nals), has_sps, has_pps, has_idr)
-            except Exception as e:
-                logger.debug("Raw NAL summary failed: %s", e)
-            t_p0 = time.perf_counter()
-            avcc_pkt, is_key = pack_to_avcc(
-                payload_obj,
-                self._param_cache,
-                encoder_logging=self._ctx.debug_policy.encoder,
-            )
-            t_p1 = time.perf_counter()
-            try:
-                self.metrics.observe_ms('napari_cuda_pack_ms', (t_p1 - t_p0) * 1000.0)
-            except Exception:
-                logger.debug('metrics observe napari_cuda_pack_ms failed', exc_info=True)
-            try:
-                if self._ctx.debug_policy.encoder.log_nals and avcc_pkt is not None:
-                    from .bitstream import parse_nals
-                    nals2 = parse_nals(avcc_pkt)
-                    has_idr2 = any(((n[0] & 0x1F) == 5) or (((n[0] >> 1) & 0x3F) in (19, 20, 21)) for n in nals2 if n)
-                    if bool(has_idr2) != bool(is_key):
-                        logger.warning("Keyframe detect mismatch: parse=%s is_key=%s nals_after=%d", has_idr2, is_key, len(nals2))
-            except Exception as e:
-                logger.debug("Post-pack NAL summary failed: %s", e)
-            if not avcc_pkt:
-                return
-            # Build and send video_config if needed or changed
-            avcc_cfg = build_avcc_config(self._param_cache)
-            if avcc_cfg is not None:
-                def _send_config(avcc_bytes: bytes) -> None:
-                    self._schedule_coro(
-                        pixel_channel.maybe_send_video_config(
-                            self._pixel_channel,
-                            config=self._pixel_config,
-                            metrics=self.metrics,
-                            avcc=avcc_bytes,
-                            send_state_json=self._broadcast_state_json,
-                        ),
-                        "video_config",
-                    )
-
-                loop.call_soon_threadsafe(_send_config, avcc_cfg)
-            # Optional payload dump (AVCC payload)
-            if self._dump_remaining > 0:
-                try:
-                    os.makedirs(self._dump_dir, exist_ok=True)
-                    if not self._dump_path:
-                        ts = int(time.time())
-                        self._dump_path = os.path.join(self._dump_dir, f"dump_{self.width}x{self.height}_{ts}.h264")
-                    with open(self._dump_path, 'ab') as f:
-                        f.write(avcc_pkt)
-                    self._dump_remaining -= 1
-                    if self._dump_remaining == 0:
-                        logger.info("Bitstream dump complete: %s", self._dump_path)
-                except Exception as e:
-                    logger.debug("Bitstream dump error: %s", e)
-            # Mint the header timestamp at post-pack time to keep encode/pack jitter common-mode
-            stamp_ts = time.time()
-            flags = 0x01 if is_key else 0
-            # Mint sequence at pack/enqueue time to match previous semantics
-            seq_val = self._seq & 0xFFFFFFFF
-            self._seq = (self._seq + 1) & 0xFFFFFFFF
-            # Enqueue via callback that handles QueueFull inside the event loop thread
-            packet = (avcc_pkt, flags, seq_val, stamp_ts)
-
-            def _enqueue() -> None:
-                pixel_channel.enqueue_frame(
-                    self._pixel_channel,
-                    packet,
-                    metrics=self.metrics,
-                )
-            loop.call_soon_threadsafe(_enqueue)
-
-        def worker_loop() -> None:
-            try:
-                # Scene refresh callback: rebroadcast current dims/meta on worker-driven changes
-                def _on_scene_refresh(step: object = None) -> None:
-                    try:
-                        if step is not None and isinstance(step, (list, tuple)):
-                            chosen = [int(x) for x in step]
-                            try:
-                                with self._state_lock:
-                                    s = self._scene.latest_state
-                                    self._scene.latest_state = ServerSceneState(
-                                        center=s.center,
-                                        zoom=s.zoom,
-                                        angles=s.angles,
-                                        current_step=tuple(chosen),
-                                    )
-                            except Exception:
-                                logger.debug("scene.refresh: failed to sync server state step", exc_info=True)
-                            self._worker_notifications.push(
-                                WorkerSceneNotification(
-                                    kind="dims_update",
-                                    step=tuple(chosen),
-                                    last_client_id=None,
-                                    ack=True,
-                                    intent_seq=None,
-                                )
-                            )
-                        else:
-                            self._worker_notifications.push(
-                                WorkerSceneNotification(
-                                    kind="meta_refresh",
-                                    last_client_id=None,
-                                )
-                            )
-                        loop.call_soon_threadsafe(self._process_worker_notifications)
-                    except Exception:
-                        logger.debug("scene.refresh scheduling failed", exc_info=True)
-
-                self._worker = EGLRendererWorker(
-                    width=self.width,
-                    height=self.height,
-                    use_volume=self.use_volume,
-                    fps=self.cfg.fps,
-                    animate=self._animate,
-                    animate_dps=self._animate_dps,
-                    zarr_path=self._zarr_path,
-                    zarr_level=self._zarr_level,
-                    zarr_axes=self._zarr_axes,
-                    zarr_z=self._zarr_z,
-                    policy_name=self._scene.multiscale_state.get('policy'),
-                    scene_refresh_cb=_on_scene_refresh,
-                    ctx=self._ctx,
-                    env=self._ctx_env,
-                )
-                # After worker init, capture initial Z (if any) and broadcast a baseline dims_update.
-                z0 = self._worker._z_index
-                if z0 is not None:
-                    with self._state_lock:
-                        s = self._scene.latest_state
-                        self._scene.latest_state = ServerSceneState(
-                            center=s.center,
-                            zoom=s.zoom,
-                            angles=s.angles,
-                            current_step=(int(z0),),
-                        )
-                    # Build the authoritative dims.update once so logs match the sent payload
-                    step_list = [int(z0)]
-                    obj = build_dims_update_message(
-                        self,
-                        step_list=step_list,
-                        last_client_id=None,
-                        ack=False,
-                        intent_seq=None,
-                    )
-                    # Schedule broadcast of this exact object on the asyncio loop thread
-                    loop.call_soon_threadsafe(
-                        lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
-                    )
-                    if self._log_dims_info:
-                        logger.info("init: dims.update current_step=%s", obj.get('current_step'))
-                    else:
-                        logger.debug("init: dims.update current_step=%s", obj.get('current_step'))
-                else:
-                    # Pure 3D volume startup: send baseline dims so client enters volume mode
-                    meta = self._dims_metadata() or {}
-                    nd = int(meta.get('ndim') or 3)
-                    step_list = [0 for _ in range(max(1, nd))]
-                    # Do not mutate state.current_step here; worker has no discrete Z
-                    obj = build_dims_update_message(
-                        self,
-                        step_list=step_list,
-                        last_client_id=None,
-                        ack=False,
-                        intent_seq=None,
-                    )
-                    loop.call_soon_threadsafe(
-                        lambda o=obj: asyncio.create_task(self._broadcast_state_json(o))
-                    )
-                    if self._log_dims_info:
-                        logger.info("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
-                    else:
-                        logger.debug("init: dims.update current_step=%s (baseline volume)", obj.get('current_step'))
-
-                tick = 1.0 / max(1, self.cfg.fps)
-                next_t = time.perf_counter()
-                
-                while not self._stop.is_set():
-                    # Snapshot state and queued camera commands atomically
-                    with self._state_lock:
-                        queued = self._scene.latest_state
-                        commands = list(self._scene.camera_commands)
-                        self._scene.camera_commands.clear()
-                        # Clear one-shot fields so subsequent intents accumulate deltas until next frame
-                        self._scene.latest_state = ServerSceneState(
-                            center=queued.center,
-                            zoom=queued.zoom,
-                            angles=queued.angles,
-                            current_step=queued.current_step,
-                        )
-                    # Only log command snapshots when state trace logging is enabled
-                    if commands and self._log_state_traces:
-                        logger.info("frame commands snapshot count=%d", len(commands))
-                    state = ServerSceneState(
-                        center=queued.center,
-                        zoom=queued.zoom,
-                        angles=queued.angles,
-                        current_step=queued.current_step,
-                        volume_mode=getattr(queued, 'volume_mode', None),
-                        volume_colormap=getattr(queued, 'volume_colormap', None),
-                        volume_clim=getattr(queued, 'volume_clim', None),
-                        volume_opacity=getattr(queued, 'volume_opacity', None),
-                        volume_sample_step=getattr(queued, 'volume_sample_step', None),
-                    )
-                    if commands and (self._log_cam_info or self._log_cam_debug):
-                        summaries: List[str] = []
-                        for cmd in commands:
-                            if cmd.kind == 'zoom':
-                                factor = cmd.factor if cmd.factor is not None else 0.0
-                                if cmd.anchor_px is not None:
-                                    ax, ay = cmd.anchor_px
-                                    summaries.append(
-                                        f"zoom factor={factor:.4f} anchor=({ax:.1f},{ay:.1f})"
-                                    )
-                                else:
-                                    summaries.append(f"zoom factor={factor:.4f}")
-                            elif cmd.kind == 'pan':
-                                summaries.append(f"pan dx={cmd.dx_px:.2f} dy={cmd.dy_px:.2f}")
-                            elif cmd.kind == 'orbit':
-                                summaries.append(f"orbit daz={cmd.d_az_deg:.2f} del={cmd.d_el_deg:.2f}")
-                            elif cmd.kind == 'reset':
-                                summaries.append('reset')
-                            else:
-                                summaries.append(cmd.kind)
-                        msg = "apply: cam cmds=" + "; ".join(summaries)
-                        if self._log_cam_info:
-                            logger.info(msg)
-                        else:
-                            logger.debug(msg)
-                    self._worker.apply_state(state)
-                    if commands:
-                        self._worker.process_camera_commands(commands)
-
-                    timings, pkt, flags, seq = self._worker.capture_and_encode_packet()
-                    # Observe timings (ms)
-                    try:
-                        self.metrics.observe_ms('napari_cuda_render_ms', timings.render_ms)
-                        if timings.blit_gpu_ns is not None:
-                            self.metrics.observe_ms('napari_cuda_capture_blit_ms', timings.blit_gpu_ns / 1e6)
-                        # CPU wall time for blit (adds to additivity)
-                        self.metrics.observe_ms('napari_cuda_capture_blit_cpu_ms', getattr(timings, 'blit_cpu_ms', 0.0))
-                        self.metrics.observe_ms('napari_cuda_map_ms', timings.map_ms)
-                        self.metrics.observe_ms('napari_cuda_copy_ms', timings.copy_ms)
-                        self.metrics.observe_ms('napari_cuda_convert_ms', getattr(timings, 'convert_ms', 0.0))
-                        self.metrics.observe_ms('napari_cuda_encode_ms', timings.encode_ms)
-                        self.metrics.observe_ms('napari_cuda_pack_ms', getattr(timings, 'pack_ms', 0.0))
-                        self.metrics.observe_ms('napari_cuda_total_ms', timings.total_ms)
-                    except Exception:
-                        logger.debug('metrics observe render timings failed', exc_info=True)
-                    # Track last keyframe timestamp/seq for metrics if needed
-                    # Keyframe tracking is handled after AVCC packing in on_frame
-                    # Forward the encoder output along with the capture wall timestamp
-                    cap_ts = getattr(timings, 'capture_wall_ts', None)
-                    on_frame(pkt, flags, cap_ts, seq)
-                    # Refresh policy metrics + append event if new decision was recorded
-                    try:
-                        self._publish_policy_metrics()
-                        snap = self._scene.policy_metrics_snapshot if isinstance(self._scene.policy_metrics_snapshot, dict) else {}
-                        last = snap.get('last_decision') if isinstance(snap, dict) else None
-                        if isinstance(last, dict):
-                            seq_dec = int(last.get('seq') or 0)
-                            if seq_dec > self._scene.last_written_decision_seq:
-                                self._scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
-                                with self._scene.policy_event_path.open('a', encoding='utf-8') as f:
-                                    f.write(json.dumps(last) + "\n")
-                                self._scene.last_written_decision_seq = seq_dec
-                    except Exception:
-                        logger.debug('policy metrics/event publish failed', exc_info=True)
-                    next_t += tick
-                    sleep = next_t - time.perf_counter()
-                    if sleep > 0:
-                        time.sleep(sleep)
-                    else:
-                        next_t = time.perf_counter()
-            except Exception as e:
-                logger.exception("Render worker error: %s", e)
-            finally:
-                try:
-                    if self._worker:
-                        self._worker.cleanup()
-                except Exception as e:
-                    logger.debug("Worker cleanup error: %s", e)
-
-        # Start render thread outside of worker_loop definition
-        self._worker_thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
-        self._worker_thread.start()
-
-    # No per-frame header color hints; reserved set to 0
+        lifecycle_start_worker(self, loop, self._worker_lifecycle)
 
     def _stop_worker(self) -> None:
-        self._stop.set()
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=3.0)
+        lifecycle_stop_worker(self._worker_lifecycle)
 
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
         await pixel_channel.handle_client(
