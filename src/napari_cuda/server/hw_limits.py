@@ -53,10 +53,7 @@ def get_hw_limits() -> HWLimits:
     volume_max_voxels = volume_max_bytes // 4
     # Parallelism for loader (tuneable)
     loader_parallel = 4 if vram_mb <= 16_384 else 6 if vram_mb <= 24_576 else 8
-    try:
-        logger.info("HW: %s, VRAM=%d MB, vol_budget=%d MB", name, vram_mb, volume_budget_mb)
-    except Exception:
-        pass
+    logger.info("HW: %s, VRAM=%d MB, vol_budget=%d MB", name, vram_mb, volume_budget_mb)
     return HWLimits(
         gpu_name=name,
         vram_mb=vram_mb,
@@ -65,4 +62,3 @@ def get_hw_limits() -> HWLimits:
         loader_parallel=int(loader_parallel),
         reserve_mb=reserve_mb,
     )
-

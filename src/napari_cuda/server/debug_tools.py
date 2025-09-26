@@ -64,16 +64,13 @@ class DebugDumper:
     def log_env_once(self) -> None:
         if self._env_logged:
             return
-        try:
-            logger.info(
-                "Debug: frames=%d, out_dir=%s, flip_cuda=%s, have_imageio=%s",
-                self.cfg.frames_remaining,
-                self.cfg.out_dir,
-                self.cfg.flip_cuda_for_view,
-                self.cfg.have_imageio,
-            )
-        except Exception:
-            pass
+        logger.info(
+            "Debug: frames=%d, out_dir=%s, flip_cuda=%s, have_imageio=%s",
+            self.cfg.frames_remaining,
+            self.cfg.out_dir,
+            self.cfg.flip_cuda_for_view,
+            self.cfg.have_imageio,
+        )
         self._env_logged = True
 
     def ensure_out_dir(self) -> None:

@@ -193,10 +193,7 @@ def pack_to_annexb(
         if n264 == 7:  # SPS
             saw_sps = True; cache.sps = nal
             if log_sps:
-                try:
-                    logger.info("H264 SPS len=%d first16=%s", len(nal), nal[:16].hex())
-                except Exception:
-                    pass
+                logger.info("H264 SPS len=%d first16=%s", len(nal), nal[:16].hex())
         elif n264 == 8:  # PPS
             saw_pps = True; cache.pps = nal
         elif n264 == 5:  # IDR
@@ -206,10 +203,7 @@ def pack_to_annexb(
         elif n265 == 33:  # SPS
             saw_sps = True; cache.sps = nal
             if log_sps:
-                try:
-                    logger.info("H265 SPS len=%d first16=%s", len(nal), nal[:16].hex())
-                except Exception:
-                    pass
+                logger.info("H265 SPS len=%d first16=%s", len(nal), nal[:16].hex())
         elif n265 == 34:  # PPS
             saw_pps = True; cache.pps = nal
         elif n265 in (19, 20, 21):  # IDR/CRA
@@ -301,10 +295,7 @@ def pack_to_avcc(
         if n264 == 7:  # SPS
             cache.sps = nal
             if log_sps:
-                try:
-                    logger.info("H264 SPS len=%d first16=%s", len(nal), nal[:16].hex())
-                except Exception:
-                    pass
+                logger.info("H264 SPS len=%d first16=%s", len(nal), nal[:16].hex())
         elif n264 == 8:  # PPS
             cache.pps = nal
         elif n264 == 5:  # IDR
@@ -314,10 +305,7 @@ def pack_to_avcc(
         elif n265 == 33:  # SPS
             cache.sps = nal
             if log_sps:
-                try:
-                    logger.info("H265 SPS len=%d first16=%s", len(nal), nal[:16].hex())
-                except Exception:
-                    pass
+                logger.info("H265 SPS len=%d first16=%s", len(nal), nal[:16].hex())
         elif n265 == 34:  # PPS
             cache.pps = nal
         elif n265 in (19, 20, 21):  # IDR/CRA
