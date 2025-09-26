@@ -102,7 +102,7 @@ Implementation slices:
 ### Phase E — Server Decomposition
 - Guiding style: follow the Casey Muratori “bag of data + free functions” playbook. Prefer simple dataclasses or TypedDict snapshots that describe state explicitly, and keep helpers procedural rather than adding new classes or inheritance.
 - Sequence of work (**work-in-progress**):
-  1. **Baseline snapshot** — record current LOC, `try:` counts, and websocket handler responsibilities for `egl_headless_server.py` (targets: trim from 2.2 k LOC toward 1.0 k, keep existing guard counts steady during extraction). *Status 2025-09-27:* 2,181 LOC (`wc -l`), 120 `try:` blocks (`rg -c "try:"`), pixel channel helpers concentrated in `_handle_pixel`, `_broadcast_loop`, and `_safe_send` with shared state (`_clients`, `_frame_q`, `_bypass_until_key`, `_kf_watchdog_task`, metrics counters).
+  1. **Baseline snapshot** — record current LOC, `try:` counts, and websocket handler responsibilities for `egl_headless_server.py` (targets: trim from 2.2 k LOC toward 1.0 k, keep existing guard counts steady during extraction). *Status 2025-09-27:* 1,394 LOC (`wc -l`), 75 `try:` blocks (`rg -c "try:"`), with the remaining hot spots in `_handle_pixel`, `_broadcast_loop`, and the metrics writers.
   2. **PixelBroadcaster split** — move websocket broadcast/writeback logic into `pixel_broadcaster.py`, exposing pure functions that accept a broadcaster state bag (maps of clients, queue metrics, watchdog timestamps) and emit packets or scheduling decisions. Ensure encode pacing stays untouched; add focused unit tests around queue coalescing and watchdog cooldown. *Status 2025-09-27:* Implemented via `PixelBroadcastState`/`PixelBroadcastConfig`; `_broadcast_loop` delegates to `pixel_broadcaster.broadcast_loop`, LOC trimmed to 2,181 and broadcaster unit tests cover safe-send pruning + bypass keyframe delivery. Server `try:` count dropped to 120 (package total 330).
   3. **ServerScene split** — relocate the state-channel queue helpers into `server_scene_queue.py` (renaming types to `ServerSceneQueue`, `ServerSceneCommand`, `PendingServerSceneUpdate`) and introduce `server_scene.py` exposing the mutable `ServerSceneData` bag. The bag must carry the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, policy metrics snapshot, SceneSpec caches, and policy log bookkeeping so intent handlers operate on a single data source.
   4. **SceneSpecBuilder extraction** — centralise SceneSpec construction in `server_scene_spec.py`, consuming the viewer snapshot + config databag and returning the serialisable payload. Cover with unit tests for axis/dims permutations.
@@ -113,6 +113,14 @@ Implementation slices:
      - Replace direct attribute mutations with helper calls that operate on `ServerSceneData` (e.g. `server_scene.update_volume_state(...)`).
      - Emit immutable `ServerSceneState` snapshots by copying from the bag before handing off to the worker.
      - Ensure the dims/spec broadcast helpers only read from the bag; no hidden state on the server object.
+     - Remaining LOC now sits in `_handle_pixel`, metrics/event plumbing, and worker lifecycle glue; future slices target those clusters.
+     - State-channel orchestration lives in `server_scene_control.py` (`handle_state`, `process_state_message`, `broadcast_dims_update`, `rebroadcast_meta`, metrics writers); `EGLHeadlessServer` now only wires the websocket handlers to these helpers.
+     - Helpers operate as free functions over the scene bag and server interface, matching the data-oriented style we committed to for Phase E.
+  6. **Worker→control ordering fix** — ensure the server never broadcasts dims updates that the metadata bag cannot describe:
+     - Populate the dims metadata bag (`ServerSceneData.last_dims_payload`) before the worker loop starts so axis counts are authoritative when `_on_scene_refresh` fires.
+     - On worker refresh, stash the step vector (`pending_worker_step`) and broadcast only when the metadata update observes a matching axis count.
+     - This keeps `build_dims_payload` invariants intact without post-hoc “ensure” helpers and eliminates the race exposed by the refactor.
+
   6. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
      - Add a focused pytest (`test_server_scene_data.py`) to cover the new helper functions and dim-sequence wraparound once they land.
   7. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.

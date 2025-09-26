@@ -55,6 +55,15 @@ Websocket Clients (state + pixel)
 - **ServerSceneData** (`src/napari_cuda/server/server_scene.py`)
   - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, SceneSpec caches, and policy logging state.
   - Intent handlers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
+  - Tracks deferred worker steps (`pending_worker_step`) so the control layer only broadcasts dims updates once metadata reflects the same axis topology.
+  - Lives alongside `server_scene_queue.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
+  - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
+- **Control Channel Helpers** (`server_scene_control.py`)
+  - Orchestrate state-channel websocket flow: connection setup, intent dispatch, dims/spec broadcasting, and policy/metrics logging.
+  - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
+  - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
+  - Worker refreshes no longer broadcast immediately; the helpers stash the pending step until the metadata bag reflects the same axis topology, ensuring payload invariants hold without ad-hoc regeneration.
+
 
 - **ViewerSceneManager** (`src/napari_cuda/server/layer_manager.py`)
   - Maintains a headless `ViewerModel` mirror for scene metadata.
