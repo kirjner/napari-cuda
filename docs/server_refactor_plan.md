@@ -130,22 +130,26 @@ Implementation slices:
      - `EGLHeadlessServer` lost `_start/_stop_metrics_server` and simply retains the runner handle; docs now describe the split under “Metrics Helpers.”
   9. **Worker lifecycle module (in progress)** — `worker_lifecycle.py` now owns worker start/stop + scene refresh wiring:
      - `WorkerLifecycleState` tracks the thread, worker instance, and stop event; `start_worker(server, loop, state)`/`stop_worker(state)` encapsulate bootstrap and teardown.
-     - Follow-ups: tighten remaining defensive guards in the helpers, add focused tests for notification draining + keyframe scheduling, and remove any lingering direct lifecycle code from `egl_headless_server`.
-  10. **Preset registry ✅** — profile/env toggles now flow through a dedicated registry:
+     - Follow-ups: tighten remaining defensive guards in the helpers and remove any lingering direct lifecycle code from `egl_headless_server`; coverage now includes focussed tests (`test_worker_lifecycle.py`) for notification draining and keyframe scheduling.
+  10. **Intent helper extraction ✅** — state intents now funnel through `server_scene_intents.py`:
+     - Dims and volume mutations operate on `ServerSceneData` via pure helpers that take a lock + metadata, keeping the websocket dispatcher thin.
+     - Legacy `_apply_dims_intent` and volume clamp utilities were dropped from `EGLHeadlessServer`; new unit tests (`test_server_scene_intents.py`) cover range clamping, axis resolution, and volume updates.
+     - Upcoming MCP/bridge work can reuse these helpers directly, ensuring a single authoritative path for all intent surfaces.
+  11. **Preset registry ✅** — profile/env toggles now flow through a dedicated registry:
      - `server/presets.py` maps preset tokens to structured overrides across `ServerConfig`, `EncodeCfg`, `EncoderRuntime`, and `BitstreamRuntime`.
      - Streaming profiles (`latency`, `quality`) now override encode bitrate, NVENC runtime tuning, and the `ServerConfig.profile` flag alongside the NVENC preset tiers (`P1`–`P7`).
      - `load_server_ctx()` resolves `NAPARI_CUDA_PRESET` once, merges overrides via `_apply_dataclass_overrides`, and no longer relies on ad-hoc env reads inside NVENC plumbing.
      - Unit coverage (`test_presets.py`) verifies case-insensitive resolution, streaming-profile overrides, and that registry entries dominate JSON runtime settings.
-  11. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
+  12. **Smoke + regression** — after each extraction, run `uv run napari-cuda-server …` (with `--debug --log-sends`) and the server pytest subset (`uv run pytest src/napari_cuda/server/_tests/test_*.py`) to catch behavioural drift.
      - Add a focused pytest (`test_server_scene_data.py`) to cover the new helper functions and dim-sequence wraparound once they land.
-  12. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
+  13. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
      - Document the `server_scene` helpers inline (docstrings) and add a `ServerScene` section to the architecture doc once the spec builder is in place.
-  13. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
+  14. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
      - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap, projection, interpolation, depiction) alongside validation helpers.
      - Extend `ServerSceneData` with render-property fields so handlers mutate data snapshots instead of `self`.
      - Add procedural helpers to apply each mutation, enqueue worker commands, and trigger authoritative rebroadcasts.
      - Cover with focused tests asserting state updates and outgoing `layer.update` mirrors.
-  14. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
+  15. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
 - Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.
 
 ### Phase F — Worker State Extraction (later)

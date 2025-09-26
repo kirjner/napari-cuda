@@ -10,6 +10,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
 
+from napari_cuda.server import server_scene_intents as intents
 from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.server_scene_queue import (
     ServerSceneCommand,
@@ -103,7 +104,15 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             else:
                 logger.debug("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
             try:
-                new_step = server._apply_dims_intent(axis=axis, step_delta=delta, set_value=None)
+                meta = server._dims_metadata() or {}
+                new_step = intents.apply_dims_intent(
+                    server._scene,
+                    server._state_lock,
+                    meta,
+                    axis=axis,
+                    step_delta=delta,
+                    set_value=None,
+                )
                 if new_step is not None:
                     try:
                         intent_i = int(client_seq) if client_seq is not None else None
@@ -131,7 +140,15 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             else:
                 logger.debug("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
             try:
-                new_step = server._apply_dims_intent(axis=axis, step_delta=None, set_value=value)
+                meta = server._dims_metadata() or {}
+                new_step = intents.apply_dims_intent(
+                    server._scene,
+                    server._state_lock,
+                    meta,
+                    axis=axis,
+                    step_delta=None,
+                    set_value=value,
+                )
                 if new_step is not None:
                     try:
                         intent_i = int(client_seq) if client_seq is not None else None
@@ -150,18 +167,9 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             mode = str(data.get('mode') or '').lower()
             client_seq = data.get('client_seq')
             client_id = data.get('client_id') or None
-            if server._is_valid_render_mode(mode):
-                server._scene.volume_state['mode'] = mode
+            if intents.is_valid_render_mode(mode, server._allowed_render_modes):
+                intents.update_volume_mode(server._scene, server._state_lock, mode)
                 server._log_volume_intent("intent: volume.set_render_mode mode=%s client_id=%s seq=%s", mode, client_id, client_seq)
-                with server._state_lock:
-                    s = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=s.center,
-                        zoom=s.zoom,
-                        angles=s.angles,
-                        current_step=s.current_step,
-                        volume_mode=str(mode),
-                    )
                 server._schedule_coro(
                     rebroadcast_meta(server, client_id),
                     'rebroadcast-volume-mode',
@@ -170,21 +178,12 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             return
 
         if t == 'volume.intent.set_clim':
-            pair = server._normalize_clim(data.get('lo'), data.get('hi'))
+            pair = intents.normalize_clim(data.get('lo'), data.get('hi'))
             client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
             if pair is not None:
                 lo, hi = pair
-                server._scene.volume_state['clim'] = [lo, hi]
                 server._log_volume_intent("intent: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s", lo, hi, client_id, client_seq)
-                with server._state_lock:
-                    s = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=s.center,
-                        zoom=s.zoom,
-                        angles=s.angles,
-                        current_step=s.current_step,
-                        volume_clim=(float(lo), float(hi)),
-                    )
+                intents.update_volume_clim(server._scene, server._state_lock, lo, hi)
                 server._schedule_coro(
                     rebroadcast_meta(server, client_id),
                     'rebroadcast-volume-clim',
@@ -196,17 +195,8 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             name = data.get('name')
             client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
             if isinstance(name, str) and name.strip():
-                server._scene.volume_state['colormap'] = str(name)
                 server._log_volume_intent("intent: volume.set_colormap name=%s client_id=%s seq=%s", name, client_id, client_seq)
-                with server._state_lock:
-                    s = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=s.center,
-                        zoom=s.zoom,
-                        angles=s.angles,
-                        current_step=s.current_step,
-                        volume_colormap=str(name),
-                    )
+                intents.update_volume_colormap(server._scene, server._state_lock, str(name))
                 server._schedule_coro(
                     rebroadcast_meta(server, client_id),
                     'rebroadcast-volume-colormap',
@@ -215,20 +205,11 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             return
 
         if t == 'volume.intent.set_opacity':
-            a = server._clamp_opacity(data.get('alpha'))
+            a = intents.clamp_opacity(data.get('alpha'))
             client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
             if a is not None:
-                server._scene.volume_state['opacity'] = float(a)
                 server._log_volume_intent("intent: volume.set_opacity alpha=%.3f client_id=%s seq=%s", a, client_id, client_seq)
-                with server._state_lock:
-                    s = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=s.center,
-                        zoom=s.zoom,
-                        angles=s.angles,
-                        current_step=s.current_step,
-                        volume_opacity=float(a),
-                    )
+                intents.update_volume_opacity(server._scene, server._state_lock, float(a))
                 server._schedule_coro(
                     rebroadcast_meta(server, client_id),
                     'rebroadcast-volume-opacity',
@@ -237,20 +218,11 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             return
 
         if t == 'volume.intent.set_sample_step':
-            rr = server._clamp_sample_step(data.get('relative'))
+            rr = intents.clamp_sample_step(data.get('relative'))
             client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
             if rr is not None:
-                server._scene.volume_state['sample_step'] = float(rr)
                 server._log_volume_intent("intent: volume.set_sample_step relative=%.3f client_id=%s seq=%s", rr, client_id, client_seq)
-                with server._state_lock:
-                    s = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=s.center,
-                        zoom=s.zoom,
-                        angles=s.angles,
-                        current_step=s.current_step,
-                        volume_sample_step=float(rr),
-                    )
+                intents.update_volume_sample_step(server._scene, server._state_lock, float(rr))
                 server._schedule_coro(
                     rebroadcast_meta(server, client_id),
                     'rebroadcast-volume-sample-step',
@@ -295,7 +267,8 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             return
 
         if t == 'multiscale.intent.set_level':
-            lvl = server._clamp_level(data.get('level'))
+            levels = server._scene.multiscale_state.get('levels') or []
+            lvl = intents.clamp_level(data.get('level'), levels)
             client_seq = data.get('client_seq'); client_id = data.get('client_id') or None
             if lvl is None:
                 handled = True
