@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from threading import Thread
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, TYPE_CHECKING
 import weakref
 from dataclasses import dataclass, field
 from contextlib import ExitStack
@@ -17,6 +17,7 @@ from qtpy import QtCore
 import uuid
 
 from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, SourceMux
+from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
 from napari_cuda.client.streaming.state import StateChannel
 from napari_cuda.client.streaming.controllers import StateController, ReceiveController
@@ -42,7 +43,6 @@ from napari_cuda.client.streaming.client_loop.pipelines import (
     build_vt_pipeline,
 )
 from napari_cuda.client.streaming.client_loop.renderer_fallbacks import RendererFallbacks
-from napari_cuda.client.streaming.client_loop.smoke_helpers import start_smoke_mode
 from napari_cuda.client.streaming.client_loop.input_helpers import (
     attach_input_sender,
     bind_shortcuts,
@@ -65,6 +65,9 @@ from napari_cuda.protocol.messages import (
     LayerUpdateMessage,
     SceneSpecMessage,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from napari_cuda.client.streaming.config import ClientConfig
 
 logger = logging.getLogger(__name__)
 
@@ -168,16 +171,13 @@ class ClientStreamLoop:
         stream_format: str = 'avcc',
         vt_backlog_trigger: int = 16,
         pyav_backlog_trigger: int = 16,
-        vt_smoke: bool = False,
-        client_cfg: object | None = None,
+        client_cfg: 'ClientConfig | None' = None,
         *,
         on_first_dims_ready: Optional[Callable[[], None]] = None,
     ) -> None:
         self._scene_canvas = scene_canvas
         self._canvas_native = scene_canvas.native if hasattr(scene_canvas, 'native') else None
         _maybe_enable_debug_logger()
-        # Set smoke mode early so start() can rely on it even if later init changes
-        self._vt_smoke = bool(vt_smoke)
         # Phase 0: stash client config for future phases (no behavior change)
         self._client_cfg = client_cfg
         self._env_cfg = load_client_loop_config()
@@ -242,6 +242,7 @@ class ClientStreamLoop:
 
         # Renderer
         self._renderer = GLRenderer(self._scene_canvas)
+        self._presenter_facade = PresenterFacade()
 
         # Decoders
         self.decoder: Optional[PyAVDecoder] = None
@@ -275,6 +276,15 @@ class ClientStreamLoop:
         self._gui_thread = None
         self._schedule_next_wake = init_wake_scheduler(self)
 
+        self._presenter_facade.start_presenting(
+            scene_canvas=self._scene_canvas,
+            loop=self,
+            presenter=self._presenter,
+            renderer=self._renderer,
+            client_cfg=self._client_cfg,
+            use_display_loop=self._use_display_loop,
+        )
+
         # Build pipelines after scheduler hooks are ready
         # Create a wake proxy so pipelines can nudge scheduling from any thread
         if not self._use_display_loop and self._wake_proxy is not None:
@@ -289,9 +299,6 @@ class ClientStreamLoop:
 
         # Renderer fallback manager (VT cache + PyAV reuse)
         self._renderer_fallbacks = RendererFallbacks()
-
-        # Smoke harness (optional)
-        self._smoke = None
 
         # Frame queue for renderer (latest-wins)
         # Holds either numpy arrays or (capsule, release_cb) tuples for VT
@@ -442,28 +449,26 @@ class ClientStreamLoop:
 
     def start(self) -> None:
         self._stopped = False
-        # State channel thread (disabled in offline VT smoke mode)
-        if not self._vt_smoke:
-            st = StateController(
-                self.server_host,
-                self.state_port,
-                handle_video_config=self._handle_video_config,
-                handle_dims_update=self._handle_dims_update,
-                handle_scene_spec=self._handle_scene_spec,
-                handle_layer_update=self._handle_layer_update,
-                handle_layer_remove=self._handle_layer_remove,
-                handle_connected=self._on_state_connected,
-                handle_disconnect=self._on_state_disconnect,
-            )
-            state_channel, t_state = st.start()
-            self._loop_state.state_channel = state_channel
-            self._loop_state.state_thread = t_state
-            self._loop_state.threads.append(t_state)
-            # Attach input forwarding (wheel + resize) now that state channel exists
-            # Use same flag for dims logging (INFO when enabled, DEBUG otherwise)
-            self._log_dims_info = bool(self._env_cfg.input_log)  # type: ignore[attr-defined]
-            attach_input_sender(self)
-            bind_shortcuts(self)
+        # State channel thread
+        st = StateController(
+            self.server_host,
+            self.state_port,
+            handle_video_config=self._handle_video_config,
+            handle_dims_update=self._handle_dims_update,
+            handle_scene_spec=self._handle_scene_spec,
+            handle_layer_update=self._handle_layer_update,
+            handle_layer_remove=self._handle_layer_remove,
+            handle_connected=self._on_state_connected,
+            handle_disconnect=self._on_state_disconnect,
+        )
+        state_channel, t_state = st.start()
+        self._loop_state.state_channel = state_channel
+        self._loop_state.state_thread = t_state
+        self._loop_state.threads.append(t_state)
+        # Attach input forwarding (wheel + resize) now that state channel exists
+        self._log_dims_info = bool(self._env_cfg.input_log)  # type: ignore[attr-defined]
+        attach_input_sender(self)
+        bind_shortcuts(self)
 
         # Start VT pipeline workers
         self._vt_pipeline.start()
@@ -471,21 +476,18 @@ class ClientStreamLoop:
         # Start PyAV pipeline worker
         self._pyav_pipeline.start()
 
-        # Receiver thread or smoke mode
-        if self._vt_smoke:
-            self._smoke = start_smoke_mode(self)
-        else:
-            rc = ReceiveController(
-                self.server_host,
-                self.server_port,
-                on_connected=self._handle_connected,
-                on_frame=self._on_frame,
-                on_disconnect=self._handle_disconnect,
-            )
-            receiver, t_rx = rc.start()
-            self._loop_state.pixel_receiver = receiver
-            self._loop_state.pixel_thread = t_rx
-            self._loop_state.threads.append(t_rx)
+        # Receiver thread
+        rc = ReceiveController(
+            self.server_host,
+            self.server_port,
+            on_connected=self._handle_connected,
+            on_frame=self._on_frame,
+            on_disconnect=self._handle_disconnect,
+        )
+        receiver, t_rx = rc.start()
+        self._loop_state.pixel_receiver = receiver
+        self._loop_state.pixel_thread = t_rx
+        self._loop_state.threads.append(t_rx)
 
         # Dedicated 1 Hz presenter stats timer (decoupled from draw loop)
         self._stats_timer = start_stats_timer(
@@ -564,7 +566,7 @@ class ClientStreamLoop:
         # Apply warmup ramp/restore on GUI thread (timer-less)
         self._apply_warmup(now_pc)
         # VT output is drained continuously by worker; draw focuses on presenting
-        # If no offset learned yet (common in smoke/offline), derive from buffer samples.
+        # If no offset learned yet (e.g., during early startup), derive from buffer samples.
         clock_offset = self._presenter.clock.offset
         if clock_offset is None:
             learned = self._presenter.relearn_offset(Source.VT)
@@ -827,6 +829,7 @@ class ClientStreamLoop:
             'sizes': sizes,
             'displayed': displayed,
         }
+        self._presenter_facade.apply_dims_update(dict(data))
 
     def _notify_first_dims_ready(self) -> None:
         if self._first_dims_notified:
@@ -1088,7 +1091,14 @@ class ClientStreamLoop:
         Stores a weak reference to avoid lifetime coupling.
         """
         self._viewer_mirror = weakref.ref(viewer)  # type: ignore[attr-defined]
+        self._presenter_facade.set_viewer_mirror(viewer)
         self._replay_last_dims_payload()
+
+    @property
+    def presenter_facade(self) -> PresenterFacade:
+        """Expose the client presenter façade for auxiliary wiring."""
+
+        return self._presenter_facade
 
     def post(self, obj: dict) -> bool:
         ch = self._loop_state.state_channel
@@ -1772,10 +1782,7 @@ class ClientStreamLoop:
         self._evloop_mon = None
 
         self._presenter.clear()
-
-        if self._smoke is not None:
-            self._smoke.stop()
-            self._smoke = None
+        self._presenter_facade.shutdown()
 
         while True:
             try:

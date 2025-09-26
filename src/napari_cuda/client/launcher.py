@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 def launch_streaming_client(server_host='localhost', 
                           state_port=8081,
                           pixel_port=8082,
-                          debug=False,
-                          vt_smoke: bool = False):
+                          debug=False):
     """
     Launch napari client connected to remote server.
     
@@ -87,7 +86,6 @@ def launch_streaming_client(server_host='localhost',
         proxy_viewer,
         server_host=server_host,
         server_port=pixel_port,
-        vt_smoke=vt_smoke,
         key_map_handler=getattr(qt_viewer, '_key_map_handler', None),
         parent=qt_viewer
     )
@@ -257,33 +255,6 @@ def main():
         action='store_true',
         help='Enable debug logging'
     )
-    # Unified smoke flag (offline; no server)
-    parser.add_argument(
-        '--smoke',
-        action='store_true',
-        help='Run client-side smoke test (offline)'
-    )
-    parser.add_argument(
-        '--preset',
-        default=None,
-        help='Smoke preset (e.g., 4k60)'
-    )
-    parser.add_argument(
-        '--preencode',
-        action='store_true',
-        help='Enable preencode smoke mode (encode once, then replay)'
-    )
-    parser.add_argument(
-        '--pre-mb',
-        type=int,
-        default=None,
-        help='Preencode memory cap in MB (0 = unlimited)'
-    )
-    parser.add_argument(
-        '--pre-path',
-        default=None,
-        help='Directory path for disk-backed preencode cache'
-    )
     parser.add_argument(
         '--metrics',
         action='store_true',
@@ -342,17 +313,6 @@ def main():
         print("\nThen run client with: --host localhost")
         sys.exit(0)
     
-    # Apply smoke-related CLI envs before launch
-    if args.smoke:
-        os.environ.setdefault('NAPARI_CUDA_SMOKE', '1')
-    if args.preset:
-        os.environ['NAPARI_CUDA_SMOKE_PRESET'] = str(args.preset)
-    if args.preencode:
-        os.environ['NAPARI_CUDA_SMOKE_PREENCODE'] = '1'
-    if args.pre_mb is not None:
-        os.environ['NAPARI_CUDA_SMOKE_PRE_MB'] = str(int(args.pre_mb))
-    if args.pre_path:
-        os.environ['NAPARI_CUDA_SMOKE_PRE_PATH'] = str(args.pre_path)
     # Client metrics envs
     if args.metrics:
         os.environ['NAPARI_CUDA_CLIENT_METRICS'] = '1'
@@ -387,13 +347,11 @@ def main():
         logger.exception('launcher: jitter preset handling failed')
 
     # Launch client
-    smoke = bool(args.smoke)
     launch_streaming_client(
         server_host=args.host,
         state_port=args.state_port,
         pixel_port=args.pixel_port,
         debug=args.debug,
-        vt_smoke=smoke
     )
 
 

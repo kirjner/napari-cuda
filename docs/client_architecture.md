@@ -94,6 +94,10 @@ leases once the draw call finishes.
   non-active pipeline to warm caches.
 - Presenter release callbacks now delegate to `FrameLease.release_presenter`
   so ownership is explicit.
+- `PresenterFacade` (scaffolded) is instantiated by `ClientStreamLoop` so the
+  upcoming Phase C hoists can take over draw/HUD wiring without modifying the
+  canvas again. The façade currently records collaborators and caches dims
+  payloads while behaviour stays routed through `StreamingCanvas`.
 
 ### Pipelines
 
@@ -120,6 +124,14 @@ leases once the draw call finishes.
 - **InputSender** mirrors user input (pointer, wheel, resize) back to the
   server.
 - **Telemetry** (metrics + stats timers) expose client health to Prometheus.
+- **Layer Control Bridge (planned)** will sit alongside `InputSender` to
+  translate Qt layer-control mutations (opacity sliders, contrast ranges,
+  colormap pickers, etc.) into remote intents. Rather than letting napari’s
+  widgets mutate the `RemoteImageLayer` directly, we’ll override the thin
+  layer’s setters to dispatch `image.intent.*` messages through
+  `ClientStreamLoop`, then wait for the server’s `layer.update` mirror to land
+  before the UI reflects the change. This keeps the streaming client
+  server-authoritative while preserving the familiar Qt controls panel.
 
 This diagram acts as the baseline for the ongoing client refactor. Future
 iterations can evolve it as modules split out from `ClientStreamLoop` and the
@@ -150,7 +162,6 @@ class ClientLoopState:
     fallbacks: "RendererFallbacks | None" = None
 
     # Smoke / pipelines
-    smoke: "SmokePipeline | None" = None
     vt_pipeline: "VTPipeline | None" = None
     pyav_pipeline: "PyAVPipeline | None" = None
 

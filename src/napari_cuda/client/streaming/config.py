@@ -69,10 +69,8 @@ class ClientConfig:
         base_latency_ms = _env_float("NAPARI_CUDA_CLIENT_VT_LATENCY_MS", default_latency_ms)
         # Buffer limit: mirror existing env; coordinator/Presenter still own the logic
         buffer_limit = _env_int("NAPARI_CUDA_CLIENT_VT_BUFFER", default_buffer_limit)
-        # Draw FPS: prefer client display env; else fallback to smoke fps
+        # Draw FPS: prefer client display env; fall back to provided default
         draw_fps = _env_float("NAPARI_CUDA_CLIENT_DISPLAY_FPS", default_draw_fps)
-        if draw_fps == default_draw_fps:
-            draw_fps = _env_float("NAPARI_CUDA_SMOKE_FPS", draw_fps)
 
         # (legacy feature flags removed)
 

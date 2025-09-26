@@ -57,16 +57,6 @@ class ClientLoopConfig:
     input_max_rate_hz: float
     resize_debounce_ms: int
     input_log: bool
-    smoke_source: str
-    smoke_width: int
-    smoke_height: int
-    smoke_preset: str
-    smoke_fps: float
-    smoke_mode: str
-    smoke_preencode: bool
-    smoke_pre_frames: int
-    smoke_pre_mb: int
-    smoke_pre_path: Optional[str]
     zoom_base: float
 
 
@@ -110,17 +100,6 @@ def load_client_loop_config() -> ClientLoopConfig:
     resize_debounce_ms = max(0, int(env_float("NAPARI_CUDA_RESIZE_DEBOUNCE_MS", 80.0)))
     input_log = env_bool("NAPARI_CUDA_INPUT_LOG", False)
 
-    smoke_source = (env_str("NAPARI_CUDA_SMOKE_SOURCE", "vt") or "vt").lower()
-    smoke_preset = (env_str("NAPARI_CUDA_SMOKE_PRESET", "") or "").strip().lower()
-    smoke_mode = (env_str("NAPARI_CUDA_SMOKE_MODE", "checker") or "checker").lower()
-    smoke_preencode = env_bool("NAPARI_CUDA_SMOKE_PREENCODE", False)
-    smoke_pre_frames = int(env_float("NAPARI_CUDA_SMOKE_PRE_FRAMES", 180.0))
-    smoke_pre_mb = max(0, int(env_float("NAPARI_CUDA_SMOKE_PRE_MB", 0.0)))
-    smoke_pre_path = env_str("NAPARI_CUDA_SMOKE_PRE_PATH", None)
-
-    smoke_width = int(env_float("NAPARI_CUDA_SMOKE_W", 1280.0))
-    smoke_height = int(env_float("NAPARI_CUDA_SMOKE_H", 720.0))
-    smoke_fps = float(env_float("NAPARI_CUDA_SMOKE_FPS", 60.0))
     zoom_base = float(env_float("NAPARI_CUDA_ZOOM_BASE", 1.1))
 
     return ClientLoopConfig(
@@ -149,15 +128,5 @@ def load_client_loop_config() -> ClientLoopConfig:
         input_max_rate_hz=input_max_rate_hz,
         resize_debounce_ms=resize_debounce_ms,
         input_log=input_log,
-        smoke_source=smoke_source,
-        smoke_width=smoke_width,
-        smoke_height=smoke_height,
-        smoke_preset=smoke_preset,
-        smoke_fps=smoke_fps,
-        smoke_mode=smoke_mode,
-        smoke_preencode=smoke_preencode,
-        smoke_pre_frames=smoke_pre_frames,
-        smoke_pre_mb=smoke_pre_mb,
-        smoke_pre_path=smoke_pre_path,
         zoom_base=zoom_base,
     )

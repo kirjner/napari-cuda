@@ -31,7 +31,7 @@ class DisplayLoop:
         - scene_canvas: VisPy canvas wrapper with `.update()` and `.native` QWidget
         - callback: function to invoke each tick; defaults to `scene_canvas.update`
         - fps: target frames per second (default: env or 60)
-        - prefer_vispy: whether to prefer VisPy timer (default: env or True when smoke)
+        - prefer_vispy: whether to prefer VisPy timer (default: env or True)
         """
         self._canvas = scene_canvas
         # Prefer native.update() (Qt) for scheduling draws; fall back to canvas.update
@@ -42,10 +42,8 @@ class DisplayLoop:
             self._callback = getattr(native, 'update', None) or getattr(scene_canvas, 'update')
         # Resolve FPS
         try:
-            # Prefer explicit arg, else client display env, else smoke fps env
+            # Prefer explicit arg, else client display env, else default 60
             env_fps = os.getenv('NAPARI_CUDA_CLIENT_DISPLAY_FPS')
-            if env_fps is None:
-                env_fps = os.getenv('NAPARI_CUDA_SMOKE_FPS')
             self._fps = float(fps if fps is not None else (env_fps if env_fps is not None else 60.0))
         except Exception:
             self._fps = 60.0

@@ -1,5 +1,9 @@
 napari-cuda Client Quickstart (macOS VT)
 
+NOTE (2025-09): Offline “smoke” mode was removed alongside the presenter façade
+hoist. The smoke-specific environment variables documented below remain for
+historical context only.
+
 Recommended settings (smooth, low-latency)
 - Start with 16–24 ms latency for interactive work
 - Example: `NAPARI_CUDA_VT_STATS=info NAPARI_CUDA_CLIENT_VT_LATENCY_MS=16 uv run napari-cuda-client`

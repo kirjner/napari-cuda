@@ -4,7 +4,7 @@
 - `streaming/client_stream_loop.py`: 1,903 LOC after the Phase B bootstrap. Still owns dims intents, decode orchestration, presenter policy, registry mirroring, Qt wakeups, and logging in one class. Only the VT shim fallback keeps a `try` block in the hot path; `getattr` calls remain purged.
 - `streaming/input.py`: event handlers now assert on Qt invariants; the blanket `_safe_call` plumbing is gone so failures surface immediately unless they cross a Qt boundary.
 - `streaming/renderer.py`: `_safe_call` is restricted to OpenGL / VideoToolbox boundaries with explicit logging; texture/cache lifetime expectations are enforced with asserts.
-- `streaming_canvas.py`: 829 LOC mixing Qt bootstrap, decoder gatekeeping, presenter config, and the smoke harness; internal handlers now assert by default with `try` blocks limited to import fallbacks and queue drains.
+- `streaming_canvas.py`: now trimmed to Qt bootstrap, keymap, and deferred window handling; presenter wiring lives in `PresenterFacade`.
 - `streaming/state.py`: 401 LOC combining websocket lifecycle, payload normalisation, throttled requests, and debug logger wiring. Most helpers still live as nested try/except with minimal test coverage.
 - `client/proxy_viewer.py`: 517 LOC; mirrors the napari viewer, rate limits dims, owns timers, and forwards events. Naming still reflects legacy socket days.
 - Tests remain limited to the websocket shim and the new helper modules; no direct coverage yet for intent ack bookkeeping, presenter scheduling, or dims replay.
@@ -16,7 +16,7 @@
 3. **One env read, one place**: resolve flags/config at startup into a simple struct; pass values explicitly rather than lazily reading env vars mid-frame.
 4. **Explicit state struct**: represent coordinator state with dataclasses or plain dicts. No indirection layers for “maybe someday” abstraction.
 5. **Meaningful names**: rename surfaces to describe behaviour (`ClientStreamLoop`, `DimsIntentTracker`, `send_step_request`). Avoid placeholder terms like “coordinator” or “pending”.
-6. **Tests before extraction**: every new pure helper gets a colocated test; leverage recorded payloads (e.g. `dims_update.json`) for smoke coverage.
+6. **Tests before extraction**: every new pure helper gets a colocated test; leverage recorded payloads (e.g. `dims_update.json`).
 
 ## Branch Strategy
 - Commit current work on `layer-sync-phase2`, then create `client-refactor` from that point (mirroring `server-refactor`).
@@ -53,7 +53,7 @@
 - **Config & env plumbing**
   1. ✓ `client_loop_config.py` now loads warmup, metrics, dims, and input env knobs once; loop ctor consumes the struct and `_tests/test_config.py` locks parsing behaviour.
   2. After env centralisation, sweep remaining `try`/`getattr` usage in the loop to boundary-only assertions.
-     - ✓ Draw/watchdog path now assertion-based; remaining blanket guards live in smoke harness + renderer fallbacks.
+     - ✓ Draw/watchdog path now assertion-based; remaining blanket guards live around renderer fallbacks.
 - **Exit criteria**
   - `ClientStreamLoop` ≤1,000 LOC with `<10` `try` blocks and ≤10 `getattr` calls (stretch goal: 0 in hot paths).
   - New helper modules each ≤200 LOC with ≥85 % coverage.
@@ -62,7 +62,6 @@
 ### Phase C — Presentation & Canvas Simplification
 - Formalise a `ClientConfig` struct resolved once at canvas init; drop dummy keymap layers and env re-reads.
 - Trim `StreamingCanvas` to focus on Qt wiring and rendering entry points. Move presenter warmup, VT gate state, and fallback buffer policy into `presentation.py` module-level helpers.
-- Add smoke test feeding recorded frames to ensure presenter & renderer interplay.
 
 ### Phase D — Viewer Intent Surface
 - Rename key methods to describe actions (`queue_dims_update`, `flush_dims_update`).
@@ -97,10 +96,19 @@
 0. Keep `docs/client_architecture.md` updated as the canonical snapshot of the current client topology while work proceeds.
 1. Capture the presenter/canvas facade plan (draft `docs/client_presenter_facade.md`) so Phase C can start immediately after the current branch lands.
    - Outline the public surface (`start_presenting`, `apply_dims_update`, `shutdown`) plus the regression tests required before moving code out of `streaming_canvas.py`.
+   - Record how the facade will expose a hook for intent dispatch so layer-control bridging can attach without touching canvas internals twice.
+   - Block implementation work for the bridge until this façade is in place.
+   - Status: façade implemented at `src/napari_cuda/client/streaming/presenter_facade.py`; it now owns draw wiring, display-loop setup, and the HUD while `StreamingCanvas` delegates presenter responsibilities.
 2. Keep exercising the VT soak checklist from the resolved spike to confirm the FrameLease fix holds while we touch renderer code paths; update the debugging note if anything regresses.
 3. Draft a `ClientLoopState` dataclass that aggregates the mutable fields we currently hang off `self`, so a later pass can convert the loop methods into Casey-Muratori-style routines operating on an explicit data bag instead of an ever-growing object.
    - Include a sketch of how draw/present/shutdown helpers would accept the state bag and explicit collaborators.
+   - Land the state bag + helper module before adding any new public methods to `ClientStreamLoop`.
 4. Sweep `proxy_viewer.py` for blanket guards next, then revisit `state.py`/`vt_pipeline.py` to continue shrinking the package-wide try/except count.
+5. Blueprint the layer control intent bridge (doc-only while hoists land):
+   - Enumerate every Qt control we need to intercept (opacity, blending, contrast range + auto buttons, gamma, colormap, projection mode, interpolation, depiction toggles).
+   - Decide whether to subclass napari’s Qt controls or override `RemoteImageLayer` setters; the goal is to guarantee all writes funnel through `ClientStreamLoop` via `image.intent.*` payloads keyed by `RemoteImageLayer._remote_id`.
+   - Document the required client intent helpers (`loop.image_set_opacity`, etc.) so the server agent can implement matching handlers without guesswork.
+6. After the façade + state bag are merged, implement the `LayerIntentBridge` module behind `NAPARI_CUDA_LAYER_BRIDGE` and wire it through the new seams; keep legacy behaviour intact until the server handlers ship.
 
 ### Guard Snapshot (2025-09-27)
 
