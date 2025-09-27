@@ -240,6 +240,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         zoom=queued.zoom,
                         angles=queued.angles,
                         current_step=queued.current_step,
+                        layer_updates=None,
                     )
 
                 if commands and server._log_state_traces:
@@ -255,6 +256,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     volume_clim=queued.volume_clim,
                     volume_opacity=queued.volume_opacity,
                     volume_sample_step=queued.volume_sample_step,
+                    layer_updates=queued.layer_updates,
                 )
 
                 if commands and (server._log_cam_info or server._log_cam_debug):

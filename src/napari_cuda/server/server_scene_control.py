@@ -18,6 +18,7 @@ from napari_cuda.server.server_scene_queue import (
 )
 from napari_cuda.server.server_scene_spec import (
     build_dims_payload,
+    build_layer_update_payload,
     build_scene_spec_json,
 )
 from napari_cuda.server import pixel_channel
@@ -227,6 +228,77 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
                     rebroadcast_meta(server, client_id),
                     'rebroadcast-volume-sample-step',
                 )
+            handled = True
+            return
+
+        if isinstance(t, str) and (t.startswith('image.intent.') or t.startswith('layer.intent.')):
+            prefix = 'image.intent.' if t.startswith('image.intent.') else 'layer.intent.'
+            prop_token = t[len(prefix):]
+            if prop_token.startswith('set_'):
+                prop = prop_token[4:]
+            else:
+                prop = prop_token
+            prop = prop.strip().lower()
+            layer_id = str(data.get('layer_id') or 'layer-0')
+            client_id = data.get('client_id') or None
+            client_seq = data.get('client_seq')
+
+            value = data.get('value')
+            if value is None and prop in data:
+                value = data[prop]
+            if value is None:
+                if prop == 'opacity':
+                    value = data.get('alpha')
+                elif prop == 'gamma':
+                    value = data.get('gamma')
+                elif prop == 'contrast_limits':
+                    value = data.get('contrast_limits') or data.get('limits')
+                elif prop == 'colormap':
+                    value = data.get('colormap')
+                elif prop == 'visible':
+                    value = data.get('visible')
+            if value is None:
+                logger.debug("layer intent missing value for prop=%s", prop)
+                handled = True
+                return
+
+            try:
+                applied = intents.apply_layer_intent(
+                    server._scene,
+                    server._state_lock,
+                    layer_id=layer_id,
+                    prop=prop,
+                    value=value,
+                )
+            except Exception as exc:
+                logger.debug("layer intent failed prop=%s layer=%s error=%s", prop, layer_id, exc)
+                handled = True
+                return
+
+            log_fn = logger.info if server._log_state_traces else logger.debug
+            log_fn(
+                "intent: layer.%s layer_id=%s value=%s client_id=%s seq=%s",
+                prop,
+                layer_id,
+                applied.get(prop),
+                client_id,
+                client_seq,
+            )
+
+            try:
+                intent_i = int(client_seq) if client_seq is not None else None
+            except Exception:
+                intent_i = None
+
+            server._schedule_coro(
+                broadcast_layer_update(
+                    server,
+                    layer_id=layer_id,
+                    changes=applied,
+                    intent_seq=intent_i,
+                ),
+                f'layer_update-{prop}',
+            )
             handled = True
             return
 
@@ -526,6 +598,27 @@ async def broadcast_dims_update(
         step_list=step,
         last_client_id=last_client_id,
         ack=ack,
+        intent_seq=intent_seq,
+    )
+    await server._broadcast_state_json(payload)
+
+
+async def broadcast_layer_update(
+    server: Any,
+    *,
+    layer_id: str,
+    changes: Mapping[str, Any],
+    intent_seq: Optional[int],
+) -> None:
+    """Broadcast a layer.update payload for the given *layer_id*."""
+
+    if not changes:
+        return
+    payload = build_layer_update_payload(
+        server._scene,
+        server._scene_manager,
+        layer_id=layer_id,
+        changes=changes,
         intent_seq=intent_seq,
     )
     await server._broadcast_state_json(payload)

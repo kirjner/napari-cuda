@@ -21,6 +21,7 @@ from napari_cuda.protocol.messages import (
     SceneSpecMessage,
 )
 from napari_cuda.server import scene_spec as _scene
+from napari_cuda.server.server_scene import LayerControlState
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class ViewerSceneManager:
         zarr_path: Optional[str],
         viewer_model: Optional[ViewerModel] = None,
         extras: Optional[Dict[str, Any]] = None,
+        layer_controls: Optional[Dict[str, LayerControlState]] = None,
     ) -> SceneSpec:
         """Refresh the cached scene metadata from the latest server state."""
 
@@ -92,11 +94,23 @@ class ViewerSceneManager:
         if adapter_layer is not None:
             extras_map.update(self._adapter_layer_extras(adapter_layer))
 
+        canonical_layers = layer_controls or {}
+        control_snapshot: Optional[LayerControlState] = None
+        if canonical_layers:
+            control_snapshot = canonical_layers.get(self._default_layer_id)
+            if control_snapshot is not None:
+                for key, value in control_snapshot.__dict__.items():
+                    if value is not None:
+                        extras_map[key] = value
+
         layer_metadata: Dict[str, Any] = {}
         if adapter_layer is not None:
             thumbnail = self._adapter_layer_thumbnail(adapter_layer)
             if thumbnail is not None:
                 layer_metadata["thumbnail"] = thumbnail
+
+        if control_snapshot is not None:
+            extras_map.setdefault("controls", control_snapshot.__dict__.copy())
 
         layer_spec = self._build_layer_spec(
             worker_info,

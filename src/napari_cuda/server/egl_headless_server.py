@@ -572,6 +572,7 @@ class EGLHeadlessServer:
             zarr_path=self._zarr_path,
             viewer_model=viewer_model,
             extras=extras,
+            layer_controls=dict(self._scene.layer_controls),
         )
 
     def _current_ndisplay(self) -> int:

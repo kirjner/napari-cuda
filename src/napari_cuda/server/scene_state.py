@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class ServerSceneState:
     volume_clim: Optional[tuple[float, float]] = None
     volume_opacity: Optional[float] = None
     volume_sample_step: Optional[float] = None
+    layer_updates: Optional[dict[str, dict[str, Any]]] = None
 
 
 __all__ = ["ServerSceneState"]

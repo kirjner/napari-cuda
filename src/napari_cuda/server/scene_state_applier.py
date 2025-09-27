@@ -9,7 +9,7 @@ return value.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 import math
 import logging
 
@@ -169,10 +169,6 @@ class SceneStateApplier:
         roi_to_apply = roi or SliceROI(0, int(slab.shape[0]), 0, int(slab.shape[1]))
         SliceDataApplier(layer=layer).apply(slab=slab, roi=roi_to_apply, scale=(sy, sx))
 
-        layer.visible = True  # type: ignore[assignment]
-        layer.opacity = 1.0  # type: ignore[assignment]
-        layer.blending = "opaque"  # type: ignore[assignment]
-
         if update_contrast:
             smin = float(np.nanmin(slab)) if hasattr(np, "nanmin") else float(np.min(slab))
             smax = float(np.nanmax(slab)) if hasattr(np, "nanmax") else float(np.max(slab))
@@ -273,6 +269,57 @@ class SceneStateApplier:
             vis.relative_step_size = float(max(0.1, min(4.0, float(sample_step))))  # type: ignore[attr-defined]
 
     @staticmethod
+    def apply_layer_updates(
+        ctx: SceneStateApplyContext,
+        updates: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        layer = ctx.layer
+        if layer is None or not updates:
+            return
+
+        def _apply(prop: str, value: Any) -> None:
+            if prop == "visible":
+                layer.visible = bool(value)  # type: ignore[assignment]
+            elif prop == "opacity":
+                layer.opacity = float(max(0.0, min(1.0, float(value))))  # type: ignore[assignment]
+            elif prop == "blending":
+                layer.blending = str(value)  # type: ignore[assignment]
+            elif prop == "interpolation":
+                layer.interpolation = str(value)  # type: ignore[assignment]
+            elif prop == "gamma":
+                gamma = float(value)
+                if not gamma > 0.0:
+                    raise ValueError("gamma must be positive")
+                layer.gamma = gamma  # type: ignore[assignment]
+            elif prop == "contrast_limits":
+                if not isinstance(value, (list, tuple)) or len(value) < 2:
+                    raise ValueError("contrast_limits must be a length-2 sequence")
+                lo = float(value[0])
+                hi = float(value[1])
+                if hi < lo:
+                    lo, hi = hi, lo
+                layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
+            elif prop == "colormap":
+                layer.colormap = str(value)  # type: ignore[assignment]
+            elif prop == "depiction":
+                layer.depiction = str(value)  # type: ignore[assignment]
+            elif prop == "rendering":
+                layer.rendering = str(value)  # type: ignore[assignment]
+            elif prop == "attenuation":
+                if hasattr(layer, "attenuation"):
+                    setattr(layer, "attenuation", float(value))
+            elif prop == "iso_threshold":
+                if hasattr(layer, "iso_threshold"):
+                    setattr(layer, "iso_threshold", float(value))
+            else:
+                raise KeyError(f"Unsupported layer property '{prop}'")
+
+        for props in updates.values():
+            for key, val in props.items():
+                _apply(key, val)
+        ctx.mark_render_tick_needed()
+
+    @staticmethod
     def drain_updates(
         ctx: SceneStateApplyContext,
         *,
@@ -316,6 +363,10 @@ class SceneStateApplier:
                 opacity=state.volume_opacity,
                 sample_step=state.volume_sample_step,
             )
+
+        layer_updates = state.layer_updates or {}
+        if layer_updates:
+            SceneStateApplier.apply_layer_updates(ctx_for_apply, layer_updates)
 
         cam = ctx.camera
         if cam is None:

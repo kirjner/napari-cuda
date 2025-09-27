@@ -17,8 +17,10 @@ from napari_cuda.server.server_scene_queue import ServerSceneCommand
 
 
 __all__ = [
+    "LayerControlState",
     "ServerSceneData",
     "create_server_scene_data",
+    "default_layer_controls",
     "default_multiscale_state",
     "default_volume_state",
     "increment_dims_sequence",
@@ -49,6 +51,29 @@ def default_multiscale_state() -> Dict[str, Any]:
 
 
 @dataclass
+class LayerControlState:
+    """Canonical per-layer controls owned by the control thread."""
+
+    visible: bool = True
+    opacity: float = 1.0
+    blending: str = "opaque"
+    interpolation: str = "bilinear"
+    gamma: float = 1.0
+    colormap: Optional[str] = None
+    contrast_limits: Optional[tuple[float, float]] = None
+    depiction: Optional[str] = None
+    rendering: Optional[str] = None
+    attenuation: Optional[float] = None
+    iso_threshold: Optional[float] = None
+
+
+def default_layer_controls() -> LayerControlState:
+    """Return the default LayerControlState for new layers."""
+
+    return LayerControlState()
+
+
+@dataclass
 class ServerSceneData:
     """Mutable scene metadata owned by the headless server."""
 
@@ -65,6 +90,7 @@ class ServerSceneData:
     pending_scene_spec: Optional[Dict[str, Any]] = None
     last_dims_payload: Optional[Dict[str, Any]] = None
     last_scene_spec_json: Optional[str] = None
+    layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
 
 
 def create_server_scene_data(*, policy_event_path: Optional[str | Path] = None) -> ServerSceneData:

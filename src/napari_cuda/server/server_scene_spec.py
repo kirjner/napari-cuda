@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
-from napari_cuda.protocol.messages import SceneSpecMessage
+from dataclasses import asdict
+
+from napari_cuda.protocol.messages import LayerSpec, LayerUpdateMessage, SceneSpecMessage
 from napari_cuda.server.layer_manager import ViewerSceneManager
 from napari_cuda.server.server_scene import ServerSceneData, increment_dims_sequence
 
@@ -156,4 +158,51 @@ def build_dims_payload(
                 meta_out["range"] = [[0, max(0, s - 1)] for s in sizes]
 
     scene.last_dims_payload = payload
+    return payload
+
+
+def build_layer_update_payload(
+    scene: ServerSceneData,
+    manager: ViewerSceneManager,
+    *,
+    layer_id: str,
+    changes: Mapping[str, Any],
+    intent_seq: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Construct a layer.update payload reflecting *changes* for *layer_id*."""
+
+    spec = manager.scene_spec()
+    if spec is None or not spec.layers:
+        raise RuntimeError("no scene spec available for layer update")
+
+    layer_spec = None
+    for layer in spec.layers:
+        if layer.layer_id == layer_id:
+            layer_spec = layer
+            break
+    if layer_spec is None:
+        raise KeyError(f"unknown layer_id '{layer_id}'")
+
+    # Merge canonical server-side state with delta to keep extras authoritative.
+    base_dict = layer_spec.to_dict()
+    extras = dict(base_dict.get("extras") or {})
+    control_state = scene.layer_controls.get(layer_id)
+    control_map: dict[str, Any] = asdict(control_state) if control_state is not None else {}
+    if control_map:
+        extras.update({k: v for k, v in control_map.items() if v is not None})
+    extras.update(changes)
+    base_dict["extras"] = extras
+
+    if "contrast_limits" in changes:
+        pair = changes["contrast_limits"]
+        base_dict["contrast_limits"] = [float(pair[0]), float(pair[1])]
+
+    patch = LayerSpec.from_dict(base_dict)
+    message = LayerUpdateMessage(layer=patch, partial=True)
+    payload = message.to_dict()
+    payload["ack"] = True
+    if intent_seq is not None:
+        payload["intent_seq"] = int(intent_seq)
+    if control_map:
+        payload["controls"] = control_map
     return payload

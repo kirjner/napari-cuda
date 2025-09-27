@@ -14,7 +14,7 @@ from threading import Lock
 from typing import Any, Mapping, Optional, Sequence
 
 from .scene_state import ServerSceneState
-from .server_scene import ServerSceneData
+from .server_scene import LayerControlState, ServerSceneData, default_layer_controls
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -180,3 +180,149 @@ def update_volume_sample_step(scene: ServerSceneData, lock: Lock, rel: float) ->
     scene.volume_state["sample_step"] = float(rel)
     _update_latest_state(scene, lock, volume_sample_step=float(rel))
 
+
+_BOOL_TRUE = {"1", "true", "yes", "on"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
+
+_ALLOWED_BLENDING = {
+    "opaque",
+    "translucent",
+    "additive",
+    "minimum",
+    "maximum",
+    "average",
+}
+
+_INTERPOLATION_MODES = {
+    "nearest": "nearest",
+    "linear": "linear",
+    "bilinear": "linear",
+    "bicubic": "cubic",
+    "cubic": "cubic",
+}
+
+_ALLOWED_DEPICTION = {"volume", "plane"}
+
+_ALLOWED_RENDERING = {
+    "mip",
+    "attenuated_mip",
+    "translucent",
+    "iso",
+    "additive",
+    "average",
+}
+
+
+def _normalize_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _BOOL_TRUE:
+            return True
+        if lowered in _BOOL_FALSE:
+            return False
+    raise ValueError("invalid boolean value")
+
+
+def _normalize_opacity(value: object) -> float:
+    val = float(value)
+    return max(0.0, min(1.0, val))
+
+
+def _normalize_gamma(value: object) -> float:
+    val = float(value)
+    if not val > 0.0:
+        raise ValueError("gamma must be positive")
+    return val
+
+
+def _normalize_string(value: object, *, allowed: Optional[set[str]] = None) -> str:
+    if isinstance(value, str):
+        lowered = value.strip()
+    elif isinstance(value, Mapping):
+        name = value.get("name")  # type: ignore[arg-type]
+        if not isinstance(name, str):
+            raise ValueError("mapping requires a 'name' field")
+        lowered = name.strip()
+    else:
+        lowered = str(value).strip()
+    if lowered == "":
+        raise ValueError("string intent value may not be empty")
+    normalized = lowered.lower()
+    if allowed is not None and normalized not in allowed:
+        raise ValueError(f"value '{normalized}' not in allowed set {sorted(allowed)}")
+    return normalized
+
+
+def _normalize_contrast_limits(value: object) -> list[float]:
+    if isinstance(value, Mapping):
+        low = value.get("lo")
+        high = value.get("hi")
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if len(value) < 2:
+            raise ValueError("contrast_limits requires two values")
+        low, high = value[0], value[1]
+    else:
+        raise ValueError("contrast_limits requires a sequence or mapping")
+
+    pair = normalize_clim(low, high)
+    if pair is None:
+        raise ValueError("contrast_limits failed normalization")
+    return [float(pair[0]), float(pair[1])]
+
+
+def _normalize_layer_property(prop: str, value: object) -> Any:
+    if prop == "visible":
+        return _normalize_bool(value)
+    if prop == "opacity":
+        return _normalize_opacity(value)
+    if prop == "blending":
+        return _normalize_string(value, allowed=_ALLOWED_BLENDING)
+    if prop == "interpolation":
+        normal = _normalize_string(value, allowed=set(_INTERPOLATION_MODES.keys()))
+        return _INTERPOLATION_MODES[normal]
+    if prop == "gamma":
+        return _normalize_gamma(value)
+    if prop == "contrast_limits":
+        pair = _normalize_contrast_limits(value)
+        return (float(pair[0]), float(pair[1]))
+    if prop == "colormap":
+        return _normalize_string(value)
+    if prop == "depiction":
+        return _normalize_string(value, allowed=_ALLOWED_DEPICTION)
+    if prop == "rendering":
+        return _normalize_string(value, allowed=_ALLOWED_RENDERING)
+    if prop == "attenuation":
+        return max(0.0, float(value))
+    if prop == "iso_threshold":
+        return float(value)
+    raise KeyError(f"unsupported layer property '{prop}'")
+
+
+def apply_layer_intent(
+    scene: ServerSceneData,
+    lock: Lock,
+    *,
+    layer_id: str,
+    prop: str,
+    value: object,
+) -> dict[str, Any]:
+    """Normalize and stash a layer intent, returning applied updates."""
+
+    canonical = _normalize_layer_property(prop, value)
+
+    with lock:
+        control = scene.layer_controls.setdefault(layer_id, default_layer_controls())
+        setattr(control, prop, canonical)
+
+        latest = scene.latest_state
+        pending = dict(latest.layer_updates or {})
+        layer_updates = dict(pending.get(layer_id, {}))
+        layer_updates[prop] = canonical
+        pending[layer_id] = layer_updates
+        scene.latest_state = replace(latest, layer_updates=pending)
+
+    return {prop: canonical}

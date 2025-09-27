@@ -10,6 +10,7 @@ from napari_cuda.server.server_scene_spec import (
     build_scene_spec_json,
     build_scene_spec_message,
     build_dims_payload,
+    build_layer_update_payload,
 )
 
 
@@ -83,3 +84,51 @@ def test_build_dims_payload_invalid(scene: ServerSceneData, bad_step: list[int])
             worker_scene_source=None,
             use_volume=False,
         )
+
+
+def test_build_layer_update_payload(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
+    from napari_cuda.server.server_scene import LayerControlState
+
+    scene.layer_controls["layer-0"] = LayerControlState(opacity=0.5)
+    payload = build_layer_update_payload(
+        scene,
+        manager,
+        layer_id="layer-0",
+        changes={"opacity": 0.5},
+        intent_seq=7,
+    )
+    assert payload["type"] == "layer.update"
+    assert payload["ack"] is True
+    assert payload["intent_seq"] == 7
+    layer = payload["layer"]
+    assert layer["extras"]["opacity"] == 0.5
+    assert payload["controls"]["opacity"] == 0.5
+
+
+def test_viewer_scene_manager_prefers_control_state(scene: ServerSceneData) -> None:
+    from napari_cuda.server.server_scene import LayerControlState
+
+    manager = ViewerSceneManager((640, 480))
+    # Seed canonical state with a non-default opacity
+    scene.layer_controls["layer-0"] = LayerControlState(opacity=0.42)
+
+    # Update viewer with adapter extras that disagree (simulate legacy napari layer state)
+    manager.update_from_sources(
+        worker=None,
+        scene_state=None,
+        multiscale_state=None,
+        volume_state=None,
+        current_step=None,
+        ndisplay=2,
+        zarr_path=None,
+        extras={"opacity": 1.0},
+        layer_controls=scene.layer_controls,
+    )
+
+    spec = manager.scene_spec()
+    assert spec is not None
+    layer = spec.layers[0]
+    assert layer.extras is not None
+    assert layer.extras.get("opacity") == 0.42
+    controls = layer.extras.get("controls") or {}
+    assert controls.get("opacity") == 0.42

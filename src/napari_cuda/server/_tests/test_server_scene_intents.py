@@ -82,3 +82,27 @@ def test_clamp_level_uses_level_count():
     assert intents.clamp_level("1", levels) == 1
     assert intents.clamp_level("bad", levels) is None
 
+
+def test_apply_layer_intent_updates_state():
+    scene = create_server_scene_data()
+    lock = _lock()
+
+    applied = intents.apply_layer_intent(
+        scene,
+        lock,
+        layer_id="layer-0",
+        prop="opacity",
+        value=0.4,
+    )
+
+    assert applied == {"opacity": 0.4}
+    assert scene.layer_controls["layer-0"].opacity == 0.4
+    assert scene.latest_state.layer_updates == {"layer-0": {"opacity": 0.4}}
+
+
+def test_apply_layer_intent_rejects_invalid_property():
+    scene = create_server_scene_data()
+    lock = _lock()
+
+    with pytest.raises(KeyError):
+        intents.apply_layer_intent(scene, lock, layer_id="layer-0", prop="unknown", value="x")

@@ -57,14 +57,16 @@ Websocket Clients (state + pixel)
 
 - **ServerSceneData** (`src/napari_cuda/server/server_scene.py`)
   - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, SceneSpec caches, and policy logging state.
-  - Intent handlers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
+  - Tracks canonical per-layer controls via `LayerControlState`; `layer.intent.*` handlers mutate this bag, which then feeds both the worker (planar updates) and the spec builders.
+  - Intent helpers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
   - Lives alongside `server_scene_queue.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
   - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
+  - Compatibility note: layer controls are mirrored into `LayerSpec.extras` for older clients, but also exposed as a dedicated `controls` payload in `layer.update` messages.
 - **Control Channel Helpers** (`server_scene_control.py`)
   - Orchestrate state-channel websocket flow: connection setup, intent dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
-  - Delegate intent mutations to `server_scene_intents.py`, keeping dims/volume updates as pure helpers that operate on `ServerSceneData` and a lock.
+  - Delegate intent mutations to `server_scene_intents.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a lock.
   - Worker refresh notifications travel through a dedicated worker→control queue, so the control loop updates the scene manager before emitting dims/spec payloads; no deferred flushes or ad-hoc regeneration needed.
 - **Worker Lifecycle Helpers** (`worker_lifecycle.py`)
   - `WorkerLifecycleState` tracks the render thread, worker instance, and stop event in a single bag controlled by the lifecycle helpers.
@@ -125,8 +127,8 @@ graph LR
 - **SceneState Helpers** (`scene_state_applier.py`, `server_scene_queue.py`, `server_scene_spec.py`, `camera_controller.py`)
   - `ServerSceneQueue` coalesces pending updates across threads before the worker drains them.
   - `WorkerSceneNotificationQueue` carries worker-driven refresh notices back to the control loop so metadata and broadcasts stay aligned.
-  - `server_scene_spec.py` builds `scene.spec` and `dims.update` payloads from `ServerSceneData` for WebSocket and MCP callers.
-  - `SceneStateApplier` applies dims/camera/volume changes to viewer + layer objects.
+  - `server_scene_spec.py` builds `scene.spec`, `dims.update`, and now `layer.update` payloads from `ServerSceneData` for WebSocket and MCP callers.
+  - `SceneStateApplier` applies dims/camera/volume changes and layer property overrides to viewer + layer objects.
   - `CameraController` executes queued camera commands and reports policy triggers.
 
 - **ROI & Level Helpers** (`roi.py`, `lod.py`, `level_budget.py`, `worker_runtime.py`)
