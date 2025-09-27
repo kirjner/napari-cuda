@@ -100,6 +100,24 @@ def test_apply_layer_intent_updates_state():
     assert scene.latest_state.layer_updates == {"layer-0": {"opacity": 0.4}}
 
 
+@pytest.mark.parametrize("value", ["I Blue", "i blue", " I Blue "])
+def test_apply_layer_intent_normalizes_colormap(value):
+    scene = create_server_scene_data()
+    lock = _lock()
+
+    applied = intents.apply_layer_intent(
+        scene,
+        lock,
+        layer_id="layer-0",
+        prop="colormap",
+        value=value,
+    )
+
+    assert applied == {"colormap": "I Blue"}
+    assert scene.layer_controls["layer-0"].colormap == "I Blue"
+    assert scene.latest_state.layer_updates == {"layer-0": {"colormap": "I Blue"}}
+
+
 def test_apply_layer_intent_rejects_invalid_property():
     scene = create_server_scene_data()
     lock = _lock()

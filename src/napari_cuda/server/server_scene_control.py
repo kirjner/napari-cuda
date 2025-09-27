@@ -242,7 +242,6 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
             layer_id = str(data.get('layer_id') or 'layer-0')
             client_id = data.get('client_id') or None
             client_seq = data.get('client_seq')
-
             value = data.get('value')
             if value is None and prop in data:
                 value = data[prop]
@@ -254,7 +253,7 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
                 elif prop == 'contrast_limits':
                     value = data.get('contrast_limits') or data.get('limits')
                 elif prop == 'colormap':
-                    value = data.get('colormap')
+                    value = data.get('name')
                 elif prop == 'visible':
                     value = data.get('visible')
             if value is None:

@@ -266,6 +266,7 @@ class LayerRenderHints:
     attenuation: Optional[float] = None
     gamma: Optional[float] = None
     shading: Optional[str] = None
+    sample_step: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return _strip_none(asdict(self))
@@ -296,6 +297,7 @@ class LayerSpec:
     render: Optional[LayerRenderHints] = None
     multiscale: Optional[MultiscaleSpec] = None
     extras: Optional[Dict[str, Any]] = None
+    controls: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.layer_id = str(self.layer_id)
@@ -331,6 +333,8 @@ class LayerSpec:
             self.multiscale = MultiscaleSpec.from_dict(self.multiscale)
         if self.extras is not None:
             self.extras = dict(self.extras)
+        if self.controls is not None:
+            self.controls = dict(self.controls)
 
     def to_dict(self) -> Dict[str, Any]:
         payload = {
@@ -351,6 +355,7 @@ class LayerSpec:
             "render": self.render.to_dict() if isinstance(self.render, LayerRenderHints) else self.render,
             "multiscale": self.multiscale.to_dict() if isinstance(self.multiscale, MultiscaleSpec) else self.multiscale,
             "extras": self.extras,
+            "controls": self.controls,
         }
         return _strip_none(payload)
 

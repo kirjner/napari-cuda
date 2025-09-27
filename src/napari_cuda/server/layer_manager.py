@@ -21,7 +21,12 @@ from napari_cuda.protocol.messages import (
     SceneSpecMessage,
 )
 from napari_cuda.server import scene_spec as _scene
-from napari_cuda.server.server_scene import LayerControlState
+from napari_cuda.server.server_scene import (
+    CONTROL_KEYS,
+    LayerControlState,
+    default_layer_controls,
+    layer_controls_to_dict,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -95,13 +100,17 @@ class ViewerSceneManager:
             extras_map.update(self._adapter_layer_extras(adapter_layer))
 
         canonical_layers = layer_controls or {}
-        control_snapshot: Optional[LayerControlState] = None
+        control_snapshot: LayerControlState | None = None
+        control_map: Optional[Dict[str, Any]] = None
         if canonical_layers:
             control_snapshot = canonical_layers.get(self._default_layer_id)
-            if control_snapshot is not None:
-                for key, value in control_snapshot.__dict__.items():
-                    if value is not None:
-                        extras_map[key] = value
+        if control_snapshot is None:
+            control_snapshot = default_layer_controls()
+        control_map = layer_controls_to_dict(control_snapshot)
+
+        if extras_map:
+            for key in CONTROL_KEYS:
+                extras_map.pop(key, None)
 
         layer_metadata: Dict[str, Any] = {}
         if adapter_layer is not None:
@@ -109,15 +118,15 @@ class ViewerSceneManager:
             if thumbnail is not None:
                 layer_metadata["thumbnail"] = thumbnail
 
-        if control_snapshot is not None:
-            extras_map.setdefault("controls", control_snapshot.__dict__.copy())
+        render_volume_state = volume_state if worker_info.is_volume else None
 
         layer_spec = self._build_layer_spec(
             worker_info,
             multiscale_state=multiscale_state,
-            volume_state=volume_state,
+            volume_state=render_volume_state,
             zarr_path=zarr_path,
             extras=extras_map or None,
+            controls=control_map,
             metadata=layer_metadata or None,
             adapter_layer=adapter_layer,
         )
@@ -180,8 +189,10 @@ class ViewerSceneManager:
             extras = layer.extras or {}
             if "is_volume" in extras:
                 meta["volume"] = bool(extras["is_volume"])
-            if layer.render is not None:
+            if layer.render is not None and bool(meta.get("volume")):
                 meta["render"] = layer.render.to_dict()
+            if layer.controls is not None:
+                meta["controls"] = dict(layer.controls)
             if layer.multiscale is not None:
                 ms_dict = layer.multiscale.to_dict()
                 policy = None
@@ -489,6 +500,7 @@ class ViewerSceneManager:
         volume_state: Optional[Dict[str, Any]],
         zarr_path: Optional[str],
         extras: Optional[Dict[str, Any]],
+        controls: Optional[Dict[str, Any]],
         metadata: Optional[Dict[str, Any]],
         adapter_layer: Optional[Any] = None,
     ) -> LayerSpec:
@@ -527,6 +539,7 @@ class ViewerSceneManager:
             multiscale_current_level=cur_level,
             render_hints=render_hints.to_dict() if render_hints else None,  # type: ignore[arg-type]
             extras=layer_extras or None,
+            controls=controls,
             metadata=metadata or None,
         )
         if spec.multiscale is not None and ms_metadata:
@@ -712,25 +725,13 @@ class ViewerSceneManager:
         if not volume_state:
             return None
 
-        return LayerRenderHints(
-            mode=str(volume_state.get("mode")) if volume_state.get("mode") else None,
-            colormap=str(volume_state.get("colormap")) if volume_state.get("colormap") else None,
-            opacity=float(volume_state["opacity"])
-            if volume_state.get("opacity") is not None
-            else None,
-            iso_threshold=float(volume_state.get("iso_threshold"))
-            if volume_state.get("iso_threshold") is not None
-            else None,
-            attenuation=float(volume_state.get("attenuation"))
-            if volume_state.get("attenuation") is not None
-            else None,
-            gamma=float(volume_state.get("gamma"))
-            if volume_state.get("gamma") is not None
-            else None,
-            shading=str(volume_state.get("shade"))
-            if volume_state.get("shade")
-            else None,
+        shading = volume_state.get("shade")
+        sample_step = volume_state.get("sample_step")
+        hints = LayerRenderHints(
+            shading=str(shading) if shading else None,
+            sample_step=float(sample_step) if sample_step is not None else None,
         )
+        return hints if any((hints.shading, hints.sample_step)) else None
 
     def _apply_to_viewer(
         self,

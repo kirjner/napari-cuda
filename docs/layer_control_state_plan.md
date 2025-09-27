@@ -21,8 +21,8 @@ This document captures the ongoing work to make layer intents (opacity, visibili
    - `SceneStateApplier` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.
 
 4. **Spec emission** ✅
-   - When `use_volume` is true, derive `LayerRenderHints` from `LayerControlState` so volume clients still consume the existing schema.
-   - In planar mode, emit the same control bag as both a dedicated `controls` payload (for new clients) and mirrored values in `extras` (for compatibility).
+   - `LayerSpec` now carries a dedicated `controls` map; `extras` retains transport metadata only (e.g., volume flags, zarr paths).
+   - `LayerRenderHints` is reduced to renderer-only toggles (e.g., shade/sample-step) so UI controls are not duplicated.
 
 5. **ViewerSceneManager** ✅
    - `update_from_sources` receives the control state and merges it before querying the napari adapter, guaranteeing `scene.spec` echoes the canonical values even if the worker has not yet mutated the layer object.
@@ -33,13 +33,14 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 
 ## Client considerations
 
-- The bridge already reads `layer.update.intent_seq` from the top-level payload; keeping a `controls` map (instead of `extras`) with the same keys keeps the contract compatible.
-- Volume render hints remain in `render` so the client registry continues to work without modification.
-- Once the rename is in place we’ll expose both `controls` and (temporarily) `extras` with matching values to give downstream code time to migrate.
+- Clients should consume the `controls` map exclusively; `extras` and `render` no longer contain UI state.
+- Remote layer mirrors must apply acknowledgements from `controls` (opacity, visibility, rendering, etc.) and ignore the deprecated paths.
+- The bridge can treat `controls` as authoritative and drop the fallback normalisation logic once the corresponding client patch lands.
+- Colormap intents deliver `name` strings that must match napari’s registered palette names; the server normalises case but no longer honours the legacy `colormap` field.
 
 ## Next steps
 
-1. Implement `LayerControlState` and migrate intent helpers to it.
-2. Update `SceneStateApplier` / `ViewerSceneManager` to consume the canonical bag.
-3. Rename `extras` → `controls` in `LayerSpec` once clients have switched over.
-4. Remove transitional fallbacks and document the final schema in `docs/server_architecture.md`.
+1. Implement `LayerControlState` and migrate intent helpers to it. ✅
+2. Update `SceneStateApplier` / `ViewerSceneManager` to consume the canonical bag. ✅
+3. Rename `extras` → `controls` in `LayerSpec` and strip mirrored fields. ✅
+4. Roll client changes so the bridge and registry rely solely on the new map. (In progress with client agent.)

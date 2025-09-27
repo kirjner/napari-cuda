@@ -263,31 +263,21 @@ class AdapterScene:
                 scene_src = "napari-adapter-image"
                 scene_meta = f"synthetic shape={h}x{w}"
 
+        self._bridge._viewer = viewer
+        self._bridge._napari_layer = layer
+
         def _ensure_node_registered() -> None:
-            try:
-                n = adapter.node
-                # Register node with the viewbox scene explicitly
-                try:
-                    if getattr(n, 'parent', None) is not view.scene:
-                        view.add(n)  # ensures proper ViewBox registration
-                except Exception:
-                    # fallback to direct parent assignment
-                    n.parent = view.scene
-                # Force visibility/opacity in case layer state hasn’t propagated yet
-                try:
-                    n.visible = True
-                    n.opacity = 1.0
-                except Exception:
-                    pass
-                try:
-                    # Prefer adapter property to trigger proper blending updates
-                    setattr(adapter, 'order', 10_000)
-                except Exception:
-                    setattr(n, 'order', 10_000)
-                # Update bridge visual pointer so downstream volume params hit the active node
-                self._bridge._visual = n
-            except Exception:
-                logger.debug("adapter: ensure_node_registered failed", exc_info=True)
+            n = adapter.node
+            if getattr(n, 'parent', None) is not view.scene:
+                view.add(n)  # ensures proper ViewBox registration
+            n.visible = True
+            if hasattr(n, 'opacity'):
+                n.opacity = 1.0
+            if hasattr(adapter, 'order'):
+                adapter.order = 10_000  # type: ignore[attr-defined]
+            else:
+                setattr(n, 'order', 10_000)
+            self._bridge._visual = n
 
         _ensure_node_registered()
 
@@ -300,8 +290,6 @@ class AdapterScene:
             logger.debug("adapter: connecting layer events failed", exc_info=True)
 
         self._bridge._visual = adapter.node
-        self._bridge._viewer = viewer
-        self._bridge._napari_layer = layer
         
 
         if self._bridge._log_layer_debug:

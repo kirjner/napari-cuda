@@ -94,7 +94,7 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
     assert meta["ndim"] == 3
     assert meta["sizes"] == [20, 40, 60]
     assert meta["volume"] is True
-    assert meta["render"]["mode"] == "mip"
+    assert meta["controls"]["visible"] is True
     assert meta["multiscale"]["current_level"] == 0
     assert meta["multiscale"]["policy"] == "latency"
 
@@ -128,7 +128,7 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
     assert meta["ndim"] == 2
     assert meta["sizes"] == [256, 128]
     assert meta.get("multiscale") is None
-    assert meta.get("render") is None
+    assert meta.get("controls") is not None
     assert meta.get("volume") is False
 
     scene = manager.scene_spec()

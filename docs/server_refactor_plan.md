@@ -145,13 +145,13 @@ Implementation slices:
   13. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
      - Document the `server_scene` helpers inline (docstrings) and add a `ServerScene` section to the architecture doc once the spec builder is in place.
   14. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
-     - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap, projection, interpolation, depiction) alongside validation helpers.
+     - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap via `name`, projection, interpolation, depiction) alongside validation helpers.
      - Extend `ServerSceneData` with render-property fields so handlers mutate data snapshots instead of `self`.
      - Add procedural helpers to apply each mutation, enqueue worker commands, and trigger authoritative rebroadcasts.
      - Cover with focused tests asserting state updates and outgoing `layer.update` mirrors.
      - ✅ Canonical layer extras now live in `ServerSceneData.layer_state`; `server_scene_intents.apply_layer_intent` normalizes payloads, the worker applies updates through `SceneStateApplier`, and `server_scene_spec.build_layer_update_payload` drives `layer.update` acks (tests: `test_server_scene_intents.py`, `test_server_scene_spec.py`). Remaining work: wire the client bridge + expand coverage for projection/depiction once the schema is finalised.
-     - ✅ Layer controls now live in `LayerControlState`; the worker consumes updates via `SceneStateApplier`, and `layer.update` includes a `controls` payload while keeping `extras` mirrored for compatibility.
-     - ⬜ Remaining cleanup: rename the planar payload from `extras` to `controls` once clients have migrated, and extend coverage to mode switches (2D↔3D) to ensure render hints stay aligned.
+    - ✅ Layer controls now live in `LayerControlState`; the worker consumes updates via `SceneStateApplier`, and `layer.update`/`scene.spec` expose a dedicated `controls` map while `extras` is reserved for transport metadata.
+    - ⬜ Follow-up: add mixed-mode regression coverage (2D↔3D) once the client bridge consumes the new contract.
   15. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
 - Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.
 

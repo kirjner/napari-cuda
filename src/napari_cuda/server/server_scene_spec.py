@@ -8,7 +8,12 @@ from dataclasses import asdict
 
 from napari_cuda.protocol.messages import LayerSpec, LayerUpdateMessage, SceneSpecMessage
 from napari_cuda.server.layer_manager import ViewerSceneManager
-from napari_cuda.server.server_scene import ServerSceneData, increment_dims_sequence
+from napari_cuda.server.server_scene import (
+    CONTROL_KEYS,
+    ServerSceneData,
+    increment_dims_sequence,
+    layer_controls_to_dict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -185,13 +190,18 @@ def build_layer_update_payload(
 
     # Merge canonical server-side state with delta to keep extras authoritative.
     base_dict = layer_spec.to_dict()
-    extras = dict(base_dict.get("extras") or {})
+    extras = {
+        key: value
+        for key, value in dict(base_dict.get("extras") or {}).items()
+        if key not in CONTROL_KEYS
+    }
     control_state = scene.layer_controls.get(layer_id)
-    control_map: dict[str, Any] = asdict(control_state) if control_state is not None else {}
-    if control_map:
-        extras.update({k: v for k, v in control_map.items() if v is not None})
-    extras.update(changes)
-    base_dict["extras"] = extras
+    control_map = (
+        layer_controls_to_dict(control_state)
+        if control_state is not None
+        else {}
+    )
+    base_dict["extras"] = extras or None
 
     if "contrast_limits" in changes:
         pair = changes["contrast_limits"]

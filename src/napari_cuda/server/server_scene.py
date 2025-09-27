@@ -16,7 +16,38 @@ from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.server_scene_queue import ServerSceneCommand
 
 
+CONTROL_KEYS: tuple[str, ...] = (
+    "visible",
+    "opacity",
+    "blending",
+    "interpolation",
+    "gamma",
+    "colormap",
+    "contrast_limits",
+    "depiction",
+    "rendering",
+    "attenuation",
+    "iso_threshold",
+)
+
+
+def layer_controls_to_dict(control: LayerControlState) -> dict[str, Any]:
+    """Serialise a LayerControlState into JSON-friendly primitives."""
+
+    payload: dict[str, Any] = {}
+    for key in CONTROL_KEYS:
+        value = getattr(control, key)
+        if value is None:
+            continue
+        if isinstance(value, tuple):
+            payload[key] = list(value)
+        else:
+            payload[key] = value
+    return payload
+
+
 __all__ = [
+    "CONTROL_KEYS",
     "LayerControlState",
     "ServerSceneData",
     "create_server_scene_data",
@@ -24,6 +55,7 @@ __all__ = [
     "default_multiscale_state",
     "default_volume_state",
     "increment_dims_sequence",
+    "layer_controls_to_dict",
 ]
 
 

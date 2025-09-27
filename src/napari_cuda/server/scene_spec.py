@@ -31,6 +31,7 @@ def build_layer_spec(
     multiscale_current_level: Optional[int],
     render_hints: Optional[LayerRenderHints] = None,
     extras: Optional[Dict[str, Any]] = None,
+    controls: Optional[Dict[str, Any]] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> LayerSpec:
     """Build a LayerSpec dataclass from simple inputs.
@@ -81,6 +82,7 @@ def build_layer_spec(
         render=rh,
         multiscale=ms,
         extras=base_extras or None,
+        controls=dict(controls) if controls else None,
         metadata=metadata or None,
     )
 
@@ -220,6 +222,9 @@ def dims_metadata(scene: Optional[Union[SceneSpec, Dict[str, Any]]]) -> Dict[str
         render = layer0.get("render")
         if render is not None:
             meta["render"] = render if isinstance(render, dict) else asdict(render)
+        controls = layer0.get("controls")
+        if isinstance(controls, dict):
+            meta["controls"] = dict(controls)
         ms = layer0.get("multiscale")
         if isinstance(ms, dict):
             ms_dict = dict(ms)

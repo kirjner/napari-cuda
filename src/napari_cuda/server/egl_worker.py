@@ -33,7 +33,7 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 from vispy import scene  # type: ignore
 
 from napari.components.viewer_model import ViewerModel
-from napari._vispy.layers.image import VispyImageLayer
+from napari._vispy.layers.image import VispyImageLayer, _napari_cmap_to_vispy
 
 import pycuda.driver as cuda  # type: ignore
 # Bitstream packing happens in the server layer
@@ -667,6 +667,24 @@ class EGLRendererWorker:
             self._visual.parent = None  # type: ignore[attr-defined]
         self._visual = None
 
+    def _resolve_visual(self) -> Any:
+        if self._visual is not None:
+            return self._visual
+
+        view = self.view
+        assert view is not None, "VisPy view must exist before resolving the active visual"
+
+        children = getattr(view.scene, "children", None) or ()
+        for child in children:
+            if not hasattr(child, "set_data"):
+                continue
+            if not (hasattr(child, "cmap") or hasattr(child, "clim")):
+                continue
+            self._visual = child
+            return child
+
+        assert False, "EGLRendererWorker could not locate an active VisPy visual"
+
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
         if self._data_d is not None and self._data_wh is not None:
             w, h = self._data_wh
@@ -747,6 +765,13 @@ class EGLRendererWorker:
     def apply_state(self, state: ServerSceneState) -> None:
         """Queue a complete scene state snapshot for the next frame."""
         self._last_interaction_ts = time.perf_counter()
+        layer_updates = None
+        if state.layer_updates:
+            layer_updates = {
+                str(layer_id): dict(props)
+                for layer_id, props in state.layer_updates.items()
+            }
+
         normalized = ServerSceneState(
             center=tuple(float(c) for c in state.center) if state.center is not None else None,
             zoom=float(state.zoom) if state.zoom is not None else None,
@@ -757,6 +782,7 @@ class EGLRendererWorker:
             volume_clim=tuple(float(v) for v in state.volume_clim) if state.volume_clim is not None else None,
             volume_opacity=float(state.volume_opacity) if state.volume_opacity is not None else None,
             volume_sample_step=float(state.volume_sample_step) if state.volume_sample_step is not None else None,
+            layer_updates=layer_updates,
         )
         self._scene_state_queue.queue_scene_state(normalized)
 
@@ -771,7 +797,7 @@ class EGLRendererWorker:
             use_volume=bool(self.use_volume),
             viewer=self._viewer,
             camera=cam,
-            visual=self._visual,
+            visual=self._resolve_visual(),
             layer=self._napari_layer,
             scene_source=self._scene_source,
             active_ms_level=int(self._active_ms_level),

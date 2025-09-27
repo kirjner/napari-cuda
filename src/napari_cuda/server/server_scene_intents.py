@@ -13,8 +13,15 @@ from dataclasses import replace
 from threading import Lock
 from typing import Any, Mapping, Optional, Sequence
 
+from napari.utils.colormaps import AVAILABLE_COLORMAPS
+from napari.utils.colormaps.colormap_utils import ensure_colormap
+
 from .scene_state import ServerSceneState
-from .server_scene import LayerControlState, ServerSceneData, default_layer_controls
+from .server_scene import (
+    LayerControlState,
+    ServerSceneData,
+    default_layer_controls,
+)
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -257,6 +264,21 @@ def _normalize_string(value: object, *, allowed: Optional[set[str]] = None) -> s
     return normalized
 
 
+def _normalize_colormap(value: object) -> str:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped in AVAILABLE_COLORMAPS:
+            return ensure_colormap(stripped).name
+
+        lowered = stripped.lower()
+        for key in AVAILABLE_COLORMAPS:
+            if key.lower() == lowered:
+                return ensure_colormap(key).name
+
+    cmap = ensure_colormap(value)
+    return cmap.name
+
+
 def _normalize_contrast_limits(value: object) -> list[float]:
     if isinstance(value, Mapping):
         low = value.get("lo")
@@ -290,7 +312,7 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
         pair = _normalize_contrast_limits(value)
         return (float(pair[0]), float(pair[1]))
     if prop == "colormap":
-        return _normalize_string(value)
+        return _normalize_colormap(value)
     if prop == "depiction":
         return _normalize_string(value, allowed=_ALLOWED_DEPICTION)
     if prop == "rendering":

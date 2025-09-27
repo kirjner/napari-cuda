@@ -101,7 +101,7 @@ def test_build_layer_update_payload(scene: ServerSceneData, manager: ViewerScene
     assert payload["ack"] is True
     assert payload["intent_seq"] == 7
     layer = payload["layer"]
-    assert layer["extras"]["opacity"] == 0.5
+    assert "opacity" not in layer.get("extras", {})
     assert payload["controls"]["opacity"] == 0.5
 
 
@@ -129,6 +129,6 @@ def test_viewer_scene_manager_prefers_control_state(scene: ServerSceneData) -> N
     assert spec is not None
     layer = spec.layers[0]
     assert layer.extras is not None
-    assert layer.extras.get("opacity") == 0.42
-    controls = layer.extras.get("controls") or {}
-    assert controls.get("opacity") == 0.42
+    assert "opacity" not in layer.extras
+    assert layer.controls is not None
+    assert layer.controls.get("opacity") == 0.42

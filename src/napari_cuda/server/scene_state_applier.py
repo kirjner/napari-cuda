@@ -20,6 +20,9 @@ from napari_cuda.server.roi_applier import SliceDataApplier
 from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.server_scene_queue import ServerSceneQueue
 
+from napari._vispy.layers.image import _napari_cmap_to_vispy
+from napari.utils.colormaps.colormap_utils import ensure_colormap
+
 
 logger = logging.getLogger(__name__)
 
@@ -299,8 +302,16 @@ class SceneStateApplier:
                 if hi < lo:
                     lo, hi = hi, lo
                 layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
+                if ctx.visual is not None:
+                    ctx.visual.clim = (lo, hi)  # type: ignore[attr-defined]
             elif prop == "colormap":
-                layer.colormap = str(value)  # type: ignore[assignment]
+                cmap = ensure_colormap(value)
+                layer.colormap = cmap  # type: ignore[assignment]
+                if ctx.visual is not None:
+                    logger.debug(
+                        "apply_layer_updates: updating visual colormap to %s", cmap.name
+                    )
+                    ctx.visual.cmap = _napari_cmap_to_vispy(cmap)
             elif prop == "depiction":
                 layer.depiction = str(value)  # type: ignore[assignment]
             elif prop == "rendering":

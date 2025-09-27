@@ -131,6 +131,10 @@ class _FakeLayer:
 class _FakeVisual:
     def __init__(self) -> None:
         self.data = None
+        self.cmap = None
+        self.clim = None
+        self.opacity = 1.0
+        self.visible = True
 
     def set_data(self, data: np.ndarray) -> None:
         self.data = data
@@ -416,6 +420,38 @@ def test_preserve_view_disabled_resets_camera(egl_worker_fixture):
     worker.drain_scene_updates()
 
     assert camera.set_range_calls, "camera.set_range should be invoked when preserve-view is disabled"
+
+
+def test_layer_updates_drive_napari_layer(egl_worker_fixture):
+    worker = egl_worker_fixture
+    worker._render_tick_required = False
+
+    worker.apply_state(
+        ServerSceneState(
+            layer_updates={
+                "layer-0": {
+                    "colormap": "red",
+                    "gamma": 0.5,
+                }
+            }
+        )
+    )
+
+    worker.drain_scene_updates()
+
+    layer = worker._napari_layer
+    cmap = getattr(layer, "colormap", None)
+    assert getattr(cmap, "name", cmap) == "red"
+    if worker._visual is not None:
+        vis_cmap = getattr(worker._visual, "cmap", None)
+        from napari._vispy.layers.image import _napari_cmap_to_vispy  # type: ignore
+        from napari.utils.colormaps.colormap_utils import ensure_colormap
+
+        expected = _napari_cmap_to_vispy(ensure_colormap("red"))
+        assert vis_cmap is not None
+        assert np.allclose(expected.colors, vis_cmap.colors)
+    assert math.isclose(float(getattr(layer, "gamma", 0.0)), 0.5, rel_tol=1e-6)
+    assert worker._render_tick_required is True
 
 
 def test_zoom_intent_triggers_level_switch_end_to_end(egl_worker_fixture):

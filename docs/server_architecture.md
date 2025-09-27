@@ -61,7 +61,7 @@ Websocket Clients (state + pixel)
   - Intent helpers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
   - Lives alongside `server_scene_queue.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
   - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
-  - Compatibility note: layer controls are mirrored into `LayerSpec.extras` for older clients, but also exposed as a dedicated `controls` payload in `layer.update` messages.
+  - Layer controls surface through a dedicated `controls` map on every `scene.spec` / `layer.update`; `extras` now carries transport metadata only (volume flags, zarr paths, adapter hints).
 - **Control Channel Helpers** (`server_scene_control.py`)
   - Orchestrate state-channel websocket flow: connection setup, intent dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
@@ -77,6 +77,27 @@ Websocket Clients (state + pixel)
   - `PixelChannelState` + `PixelChannelConfig` own websocket lifecycle data (clients, bypass, keyframe watchdogs, avcC cache) while the broadcaster continues to handle raw frame draining.
   - `EGLHeadlessServer` relies on these helpers to attach/detach clients, enqueue frames from the encoder thread, force keyframes, and rebroadcast video configuration snapshots.
   - Isolating pixel logic keeps the server shell thin and enables unit tests that exercise queue overflow, watchdog cooldowns, and config caching without real websockets.
+
+## System Overview
+
+The headless server works as two cooperating loops around a single scene record:
+
+1. **State channel (async loop)** – receives intents from the UI, normalises them, and mutates the
+   authoritative `ServerSceneData`. Each mutation produces a delta that is recorded for
+   acknowledgements and handed to the render worker through its update mailbox. The async loop also
+   broadcasts the canonical scene spec, dims metadata, and the layer `controls` map back to clients,
+   and forwards encoded frames to the pixel broadcaster.
+
+2. **Render worker (dedicated thread)** – maintains the napari `ViewerModel` and the VisPy visual. It
+   drains the update mailbox each tick, applies the coalesced deltas via `SceneStateApplier`, renders
+   a frame, and passes the result into the capture/encode façade before the pixel channel ships it to
+   clients. Whenever the worker changes state internally (for example, multiscale policy or ROI
+   adjustments) it notifies the async loop so the scene record stays authoritative before the next
+   broadcast.
+
+A small viewer builder runs once at worker start-up to construct the napari viewer and VisPy node and
+hand those handles to the worker so the render loop can focus purely on draining updates and
+producing frames.
 
 ### Pixel Channel & Control Flow
 
@@ -100,7 +121,7 @@ graph LR
 
     StateClient -->|intents| SSC
     SSC -->|mutate| SceneBag
-    SSC -->|broadcast dims/spec| StateClient
+    SSC -->|broadcast dims/spec + controls| StateClient
     SceneBag -->|enqueue updates| SceneQueue
     SceneQueue --> Worker
     Worker -->|scene_refresh| WQueue
