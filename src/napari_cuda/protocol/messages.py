@@ -528,6 +528,8 @@ class LayerUpdateMessage(StateMessage):
     version: int = SPEC_VERSION
     layer: Optional[LayerSpec] = None
     partial: bool = False
+    ack: Optional[bool] = None
+    intent_seq: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         if self.layer is None:
@@ -538,6 +540,8 @@ class LayerUpdateMessage(StateMessage):
             "timestamp": self.timestamp,
             "layer": self.layer.to_dict(),
             "partial": bool(self.partial),
+            "ack": self.ack,
+            "intent_seq": int(self.intent_seq) if self.intent_seq is not None else None,
         }
         return _strip_none(payload)
 
@@ -548,12 +552,25 @@ class LayerUpdateMessage(StateMessage):
     def from_dict(cls, data: Dict[str, Any]) -> "LayerUpdateMessage":
         layer_data = data.get("layer")
         layer = LayerSpec.from_dict(layer_data) if isinstance(layer_data, dict) else None
+        if "intent_seq" in data and data["intent_seq"] is not None:
+            intent_seq_int = int(data["intent_seq"])
+        else:
+            intent_seq_int = None
+
+        if "ack" in data and data["ack"] is not None:
+            ack_val = data["ack"]
+            if not isinstance(ack_val, bool):
+                raise TypeError("LayerUpdateMessage ack must be a boolean")
+        else:
+            ack_val = None
         return cls(
             type=data.get("type", LAYER_UPDATE_TYPE),
             version=int(data.get("version", SPEC_VERSION)),
             timestamp=data.get("timestamp"),
             layer=layer,
             partial=bool(data.get("partial", False)),
+            ack=ack_val,
+            intent_seq=intent_seq_int,
         )
 
 

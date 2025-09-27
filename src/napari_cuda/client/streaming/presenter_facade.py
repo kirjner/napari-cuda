@@ -214,16 +214,26 @@ class PresenterFacade:
             logger.debug('PresenterFacade: viewer mirror registered')
 
     def set_intent_dispatcher(
-        self, dispatcher: Optional[Callable[[str, dict[str, Any]], None]]
-    ) -> None:
+        self, dispatcher: Optional[Callable[[str, Any], None]]
+    ) -> Optional[Callable[[str, Any], None]]:
+        prev = self._intent_dispatcher
         self._intent_dispatcher = dispatcher
         logger.debug('PresenterFacade: intent dispatcher set=%s', bool(dispatcher))
+        return prev
 
     def cached_dims_payload(self) -> Optional[dict[str, Any]]:
         return dict(self._last_dims_payload) if self._last_dims_payload is not None else None
 
     def current_viewer(self) -> Optional[object]:
         return self._viewer_ref() if self._viewer_ref is not None else None
+
+    def apply_layer_update(self, message: Any) -> None:
+        if self._intent_dispatcher is None:
+            return
+        try:
+            self._intent_dispatcher('layer-update', message)
+        except Exception:
+            logger.exception('PresenterFacade layer dispatcher failed')
 
     # ------------------------------------------------------------------ internals
     def _compute_hud_enabled(self) -> None:

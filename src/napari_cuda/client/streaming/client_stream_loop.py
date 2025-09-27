@@ -57,6 +57,7 @@ from napari_cuda.protocol.messages import (
     LayerUpdateMessage,
     SceneSpecMessage,
 )
+from napari_cuda.client.streaming.layer_intent_bridge import LayerIntentBridge
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.config import ClientConfig
@@ -178,6 +179,8 @@ class ClientStreamLoop:
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
         self._latest_scene_spec: Optional[SceneSpecMessage] = None
+        self._intent_state = intents.IntentState.from_env(self._env_cfg)
+        self._loop_state.intents = self._intent_state
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
         # Keep-last-frame fallback default enabled for smoother presentation
@@ -196,6 +199,14 @@ class ClientStreamLoop:
         # Renderer
         self._renderer = GLRenderer(self._scene_canvas)
         self._presenter_facade = PresenterFacade()
+
+        self._layer_bridge = LayerIntentBridge(
+            self,
+            self._presenter_facade,
+            self._layer_registry,
+            intent_state=self._intent_state,
+            loop_state=self._loop_state,
+        )
 
         # Decoders
         self.decoder: Optional[PyAVDecoder] = None
@@ -283,10 +294,6 @@ class ClientStreamLoop:
         self._camera_state.orbit_deg_per_px_x = float(self._env_cfg.orbit_deg_per_px_x)
         self._camera_state.orbit_deg_per_px_y = float(self._env_cfg.orbit_deg_per_px_y)
         self._camera_state.zoom_base = float(self._env_cfg.zoom_base)
-        # --- Dims/intent state (intent-only client) ----------------------------
-        self._intent_state = intents.IntentState.from_env(self._env_cfg)
-        self._loop_state.intents = self._intent_state
-
     # --- Thread-safe scheduling helpers --------------------------------------
     def _on_gui_thread(self) -> bool:
         gui_thr = self._loop_state.gui_thread
@@ -579,6 +586,7 @@ class ClientStreamLoop:
         self._layer_registry.apply_update(msg)
         layer_id = msg.layer.layer_id if msg.layer else None
         logger.debug("layer.update: id=%s partial=%s", layer_id, msg.partial)
+        self._presenter_facade.apply_layer_update(msg)
 
     def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
         self._layer_registry.remove_layer(msg)

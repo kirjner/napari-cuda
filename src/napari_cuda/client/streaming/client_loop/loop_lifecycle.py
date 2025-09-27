@@ -149,6 +149,12 @@ def stop_loop(loop: "ClientStreamLoop") -> None:
     loop._loop_state.evloop_monitor = None
 
     # Presenter + fallback cleanup
+    if getattr(loop, "_layer_bridge", None) is not None:  # noqa: SLF001
+        try:
+            loop._layer_bridge.shutdown()  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive guard
+            logger.debug('LayerIntentBridge shutdown failed', exc_info=True)
+
     if loop._warmup_policy is not None:  # noqa: SLF001
         from . import warmup  # local import to avoid cycle
 

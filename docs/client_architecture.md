@@ -149,8 +149,26 @@ flow; hot-path logic lives in compact helper modules with targeted tests.
   widgets mutate the `RemoteImageLayer` directly, we’ll override the thin
   layer’s setters to dispatch `image.intent.*` messages through
   `ClientStreamLoop`, then wait for the server’s `layer.update` mirror to land
-  before the UI reflects the change. This keeps the streaming client
-  server-authoritative while preserving the familiar Qt controls panel.
+  before the UI reflects the change. The bridge will target the new
+  `server_scene_intents.py` helpers introduced on the server `server-refactor`
+  branch (commit `695ccf3c`), so each client-side `image.intent.*` payload has a
+  corresponding handler on the coordinator.
+  - PresenterFacade already exposes `set_intent_dispatcher`; the bridge will
+    register a dispatcher that emits structured `layer.intent.*` messages keyed
+    by `RemoteImageLayer._remote_id`.
+  - Layer widgets will observe server acks by listening for
+    `layer.update`/`scene.update` broadcasts; reentrancy is avoided by gating
+    local widget updates until those mirrors land.
+  - Contrast and gamma payloads are forwarded in the exact units advertised by
+    the server (`LayerSpec.contrast_limits`, `LayerRenderHints.gamma`). Avoid
+    introducing local re-normalisation—past bugs stemmed from clients rescaling
+    slider values before emitting intents, which desynchronised the server
+    mirror. If a new control needs custom mapping, document the conversion next
+    to its payload builder and confirm the server helper expects the same
+    units.
+  - Initial scope covers volume properties (opacity, clim, colormap, sample
+    step) and dims/ndisplay toggles; follow-up passes can fold in blending,
+    interpolation, and future scene intents.
 
 This diagram acts as the baseline for the ongoing client refactor. Future
 iterations can evolve it as modules split out from `ClientStreamLoop` and the
