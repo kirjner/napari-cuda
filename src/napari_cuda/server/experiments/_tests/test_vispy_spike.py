@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from napari_cuda.server.egl_worker import FrameTimings
+from napari_cuda.server.render_worker import FrameTimings
 from napari_cuda.server.experiments import baseline_capture as base
 from napari_cuda.server.experiments import vispy_spike as spike
 

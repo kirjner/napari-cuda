@@ -176,8 +176,8 @@ class _FakeSceneSource:
 
 
 @pytest.fixture()
-def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendererWorker":
-    from napari_cuda.server import egl_worker as ew
+def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLRendererWorker":
+    from napari_cuda.server import render_worker as rw
     from napari_cuda.server import scene_state_applier as ssa
 
     class _DummyEglContext:
@@ -304,20 +304,20 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         layer.applied.append((slab, roi, bool(update_contrast)))
         return 1.0, 1.0
 
-    monkeypatch.setattr(ew.scene.cameras, "PanZoomCamera", _FakeCamera2D)
-    monkeypatch.setattr(ew.scene.cameras, "TurntableCamera", _FakeCamera3D)
-    monkeypatch.setattr(ew, "EglContext", _DummyEglContext)
-    monkeypatch.setattr(ew, "CaptureFacade", _DummyCaptureFacade)
-    monkeypatch.setattr(ew, "AdapterScene", _DummyAdapterScene)
-    monkeypatch.setattr(ew, "Encoder", _DummyEncoder)
-    monkeypatch.setattr(ew, "plane_scale_for_level", _fake_plane_scale_for_level)
+    monkeypatch.setattr(rw.scene.cameras, "PanZoomCamera", _FakeCamera2D)
+    monkeypatch.setattr(rw.scene.cameras, "TurntableCamera", _FakeCamera3D)
+    monkeypatch.setattr(rw, "EglContext", _DummyEglContext)
+    monkeypatch.setattr(rw, "CaptureFacade", _DummyCaptureFacade)
+    monkeypatch.setattr(rw, "AdapterScene", _DummyAdapterScene)
+    monkeypatch.setattr(rw, "Encoder", _DummyEncoder)
+    monkeypatch.setattr(rw, "plane_scale_for_level", _fake_plane_scale_for_level)
     monkeypatch.setattr(ssa.SceneStateApplier, "apply_slice_to_layer", staticmethod(_fake_apply_slice_to_layer))
 
-    monkeypatch.setattr(ew.EGLRendererWorker, "_init_cuda", lambda self: None)
-    monkeypatch.setattr(ew.EGLRendererWorker, "_init_vispy_scene", lambda self: None)
-    monkeypatch.setattr(ew.EGLRendererWorker, "_init_egl", lambda self: None)
-    monkeypatch.setattr(ew.EGLRendererWorker, "_init_capture", lambda self: None)
-    monkeypatch.setattr(ew.EGLRendererWorker, "_init_encoder", lambda self: None)
+    monkeypatch.setattr(rw.EGLRendererWorker, "_init_cuda", lambda self: None)
+    monkeypatch.setattr(rw.EGLRendererWorker, "_init_vispy_scene", lambda self: None)
+    monkeypatch.setattr(rw.EGLRendererWorker, "_init_egl", lambda self: None)
+    monkeypatch.setattr(rw.EGLRendererWorker, "_init_capture", lambda self: None)
+    monkeypatch.setattr(rw.EGLRendererWorker, "_init_encoder", lambda self: None)
 
     ctx = ServerCtx(
         cfg=ServerConfig(width=320, height=180),
@@ -333,7 +333,7 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
         ),
     )
 
-    worker = ew.EGLRendererWorker(width=320, height=180, ctx=ctx)
+    worker = rw.EGLRendererWorker(width=320, height=180, ctx=ctx)
     worker.canvas = _FakeCanvas(worker.width, worker.height)
     camera = _FakeCamera2D()
     worker.view = _FakeView(camera)
@@ -364,10 +364,10 @@ def egl_worker_fixture(monkeypatch) -> "napari_cuda.server.egl_worker.EGLRendere
     return worker
 
 
-def test_zoom_intent_reaches_lod_selector(egl_worker_fixture, monkeypatch):
-    from napari_cuda.server import egl_worker as ew
+def test_zoom_intent_reaches_lod_selector(render_worker_fixture, monkeypatch):
+    from napari_cuda.server import render_worker as rw
 
-    worker = egl_worker_fixture
+    worker = render_worker_fixture
     ratios: list[float | None] = []
 
     def _fake_select_level(config, inputs):  # type: ignore[no-untyped-def]
@@ -381,7 +381,7 @@ def test_zoom_intent_reaches_lod_selector(egl_worker_fixture, monkeypatch):
             cooldown_remaining_ms=0.0,
         )
 
-    monkeypatch.setattr(ew, "select_level", _fake_select_level)
+    monkeypatch.setattr(rw, "select_level", _fake_select_level)
 
     worker.process_camera_commands([ServerSceneCommand(kind="zoom", factor=2.0)])
     assert worker._level_policy_refresh_needed is True
@@ -393,8 +393,8 @@ def test_zoom_intent_reaches_lod_selector(egl_worker_fixture, monkeypatch):
     assert worker._render_mailbox.consume_zoom_intent(max_age=0.5) is None
 
 
-def test_preserve_view_switch_keeps_camera_range(egl_worker_fixture):
-    worker = egl_worker_fixture
+def test_preserve_view_switch_keeps_camera_range(render_worker_fixture):
+    worker = render_worker_fixture
     camera: _FakeCamera2D = worker.view.camera  # type: ignore[assignment]
     camera.set_range_calls.clear()
     worker._render_tick_required = False
@@ -409,8 +409,8 @@ def test_preserve_view_switch_keeps_camera_range(egl_worker_fixture):
     assert tuple(worker._data_wh) == (4, 4)
 
 
-def test_preserve_view_disabled_resets_camera(egl_worker_fixture):
-    worker = egl_worker_fixture
+def test_preserve_view_disabled_resets_camera(render_worker_fixture):
+    worker = render_worker_fixture
     worker._preserve_view_on_switch = False
     camera: _FakeCamera2D = worker.view.camera  # type: ignore[assignment]
     camera.set_range_calls.clear()
@@ -422,8 +422,8 @@ def test_preserve_view_disabled_resets_camera(egl_worker_fixture):
     assert camera.set_range_calls, "camera.set_range should be invoked when preserve-view is disabled"
 
 
-def test_layer_updates_drive_napari_layer(egl_worker_fixture):
-    worker = egl_worker_fixture
+def test_layer_updates_drive_napari_layer(render_worker_fixture):
+    worker = render_worker_fixture
     worker._render_tick_required = False
 
     worker.apply_state(
@@ -454,8 +454,8 @@ def test_layer_updates_drive_napari_layer(egl_worker_fixture):
     assert worker._render_tick_required is True
 
 
-def test_zoom_intent_triggers_level_switch_end_to_end(egl_worker_fixture):
-    worker = egl_worker_fixture
+def test_zoom_intent_triggers_level_switch_end_to_end(render_worker_fixture):
+    worker = render_worker_fixture
 
     def _oversampling(self, source, level):  # type: ignore[no-untyped-def]
         return {0: 0.8, 1: 1.0, 2: 1.6}.get(int(level), 1.0)
@@ -472,8 +472,8 @@ def test_zoom_intent_triggers_level_switch_end_to_end(egl_worker_fixture):
     assert worker._last_level_switch_ts > 0.0
 
 
-def test_render_tick_preserve_view_smoke(egl_worker_fixture):
-    worker = egl_worker_fixture
+def test_render_tick_preserve_view_smoke(render_worker_fixture):
+    worker = render_worker_fixture
     camera: _FakeCamera2D = worker.view.camera  # type: ignore[assignment]
     camera.set_range_calls.clear()
     worker._napari_layer.applied.clear()
@@ -487,8 +487,8 @@ def test_render_tick_preserve_view_smoke(egl_worker_fixture):
     assert camera.set_range_calls == []
 
 
-def test_ndisplay_switch_to_volume_pins_coarsest_level(egl_worker_fixture, monkeypatch):
-    worker = egl_worker_fixture
+def test_ndisplay_switch_to_volume_pins_coarsest_level(render_worker_fixture, monkeypatch):
+    worker = render_worker_fixture
 
     recorded: dict[str, object] = {}
 
@@ -517,8 +517,8 @@ def test_ndisplay_switch_to_volume_pins_coarsest_level(egl_worker_fixture, monke
     assert worker._z_index == 0
 
 
-def test_ndisplay_switch_back_to_plane_resumes_policy(egl_worker_fixture, monkeypatch):
-    worker = egl_worker_fixture
+def test_ndisplay_switch_back_to_plane_resumes_policy(render_worker_fixture, monkeypatch):
+    worker = render_worker_fixture
     worker.use_volume = True
     worker._viewer.dims.ndisplay = 3
 

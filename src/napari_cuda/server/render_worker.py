@@ -1,12 +1,17 @@
-"""
-EGLRendererWorker - Headless VisPy renderer with EGL + CUDA interop + NVENC.
+"""Render-thread orchestration for the server.
 
-This worker owns an EGL OpenGL context and a CUDA context on a single thread.
-It renders a minimal VisPy scene (Image/Volume), captures the composited frame
-into an FBO-attached texture (GPU-only blit), maps it to CUDA, copies to a
-linear CuPy buffer, and encodes via NVENC (PyNvVideoCodec).
+`EGLRendererWorker` lives in this module and is still EGL-backed internally, but
+the neutral module name reflects its broader responsibilities:
 
-Intended for server-side headless rendering and benchmarking.
+* bootstrap the napari Viewer/VisPy canvas and keep it on the worker thread,
+* drain `RenderMailbox` updates and apply them through `SceneStateApplier`,
+* drive the render loop, including camera animation and policy evaluation,
+* capture frames via `CaptureFacade`, hand them to the encoder, and surface
+  timing metadata for downstream metrics.
+
+The worker owns the EGL + CUDA context pair, renders into an FBO-backed texture,
+maps the texture into CUDA memory, stages the pixels for NVENC, and hands the
+encoded packets back to the asyncio side through callbacks.
 """
 
 from __future__ import annotations

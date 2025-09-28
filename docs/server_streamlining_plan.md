@@ -9,7 +9,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 - `state_channel_handler.py` mixes websocket plumbing, intent routing, and broadcast scheduling.
 - `server_scene_queue.py` adds an extra layer between the dispatcher and worker just to coalesce
   updates.
-- `egl_worker.py` still owns viewer bootstrapping, mailbox draining, capture orchestration, and
+- `render_worker.py` (formerly `egl_worker.py`) still owns viewer bootstrapping, mailbox draining, capture orchestration, and
   visual wiring in a single monolith.
 - `rendering/adapter_scene.py` serves only as a one-time bootstrap; keeping it separate obscures the
   lifecycle.
@@ -45,7 +45,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 - [x] Delete the old queue module once callers were updated.
 
 ### 3. Render Worker Refactor
-- [ ] Rename `egl_worker.py` → `render_worker.py`; add a module docstring describing responsibilities.
+- [x] Rename `egl_worker.py` → `render_worker.py`; add a module docstring describing responsibilities.
 - [ ] Inline viewer bootstrap at start-up (call the builder) and drop `_sync_visual_state` helpers.
 - [ ] Adopt the new mailbox, exposing `enqueue_update` and `drain_updates` methods.
 - [ ] Move capture/encode orchestration into a dedicated helper (`capture_encode.py`) only if we need

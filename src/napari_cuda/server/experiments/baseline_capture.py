@@ -14,7 +14,7 @@ from typing import Iterable, Optional
 import numpy as np
 
 from ..config import load_server_ctx
-from ..egl_worker import EGLRendererWorker, FrameTimings
+from ..render_worker import EGLRendererWorker, FrameTimings
 
 logger = logging.getLogger(__name__)
 

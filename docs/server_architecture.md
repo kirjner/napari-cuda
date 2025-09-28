@@ -140,7 +140,7 @@ graph LR
   - Maintains a headless `ViewerModel` mirror for scene metadata.
   - Produces `SceneSpec`/`dims.update` payloads used by clients and the server HUD.
 
-- **EGLRendererWorker** (`src/napari_cuda/server/egl_worker.py`)
+- **EGLRendererWorker** (`src/napari_cuda/server/render_worker.py`)
   - Runs on a dedicated thread with EGL + CUDA contexts.
   - Coordinates render ticks, applies pending scene updates, and liaises with ROI/LOD helpers.
   - Delegates capture/encode to `CaptureFacade` and camera/scene logic to extracted helpers.

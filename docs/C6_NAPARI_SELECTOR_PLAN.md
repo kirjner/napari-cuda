@@ -31,7 +31,7 @@ Implementation Steps
    - Call napari’s compute and return desired level.
 
 2) Selection gate in worker
-  - In `egl_worker._evaluate_level_policy`, when `NAPARI_CUDA_USE_NAPARI_LEVEL=1`:
+- In `render_worker._evaluate_level_policy`, when `NAPARI_CUDA_USE_NAPARI_LEVEL=1`:
      - `desired = lod.compute_napari_level(self._viewer, source)`
      - `selected = lod.stabilize_level(desired, current, hysteresis)`
      - Apply cooldown; enforce budgets; apply level via existing code.
@@ -44,7 +44,7 @@ Implementation Steps
 
 Files to Touch
 - `src/napari_cuda/server/lod.py`: add `compute_napari_level`; keep selector helpers (`LevelPolicy*`, `select_level`) co-located to avoid duplicate modules.
-- `src/napari_cuda/server/egl_worker.py`: wire gate in `_evaluate_level_policy` (no change to apply path).
+- `src/napari_cuda/server/render_worker.py`: wire gate in `_evaluate_level_policy` (no change to apply path).
 
 Gating / Rollout
 - Enable: `export NAPARI_CUDA_USE_NAPARI_LEVEL=1` (default off).

@@ -22,7 +22,7 @@ from napari.components import ViewerModel
 from napari.layers import Image
 
 from ..config import load_server_ctx
-from ..egl_worker import EGLRendererWorker, FrameTimings
+from ..render_worker import EGLRendererWorker, FrameTimings
 
 logger = logging.getLogger(__name__)
 

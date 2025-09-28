@@ -1,7 +1,7 @@
 """Camera operations (free functions) extracted from the worker.
 
 These functions mirror the behavior of the internal `_CameraOps` helper inside
-``egl_worker``. ``egl_worker`` delegates to these helpers to keep behavior
+``render_worker``. ``render_worker`` delegates to these helpers to keep behavior
 unchanged while making the math testable and reusable.
 """
 

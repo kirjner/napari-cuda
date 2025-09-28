@@ -1,7 +1,7 @@
 # Server De-Godification & Defensive-Guard Reduction Plan
 
 ## Current Snapshot (2025-09-24)
-- `egl_worker.py`: 994 LOC (finally under four digits after hoisting scene, ROI, and camera reset helpers). Longest blocks are `__init__` (91 lines), `_evaluate_level_policy` (77), and `_build_scene_state_context` (24).
+- `render_worker.py` (formerly `egl_worker.py`): 994 LOC (finally under four digits after hoisting scene, ROI, and camera reset helpers). Longest blocks are `__init__` (91 lines), `_evaluate_level_policy` (77), and `_build_scene_state_context` (24).
 - `worker_runtime.py`: 492 LOC covering scene-source bootstrap, ROI refresh, camera reset, and multiscale orchestration shared by the worker.
 - `scene_state_applier.py`: 357 LOC handling dims/Z and volume state application.
 - `lod.py`: 651 LOC; policy runner + budget helpers remain, with further slimming deferred.
@@ -41,12 +41,12 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
 - **Remaining milestones to close Phase B**:
   1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `CaptureFacade` now fronts GL capture, CUDA interop, and the frame pipeline.
-  2. **Guard + naming audit** — ✅ renamed to `RenderMailbox`/`PendingRenderUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
+  2. **Guard + naming audit** — ✅ renamed to `RenderMailbox`/`PendingRenderUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `render_worker.py` (boundary-only holds).
   3. **ServerCtx policy surface** — ✅ `ServerCtx.policy` is now authoritative and callers must provide an explicit ctx (`EGLRendererWorker` no longer falls back to `load_server_ctx()`; experiments/headless server wire it through).
   4. **Integration tests** — ✅ added zoom-intent coverage and preserve-view smoke harness in `src/napari_cuda/server/_tests/test_worker_integration.py` to exercise the worker pipeline end-to-end.
 
 ### Phase C — ROI & LOD Minimization
-- **Worker LOC reduction roadmap (pre-Phase E)**: target ≈−490 LOC to bring `egl_worker.py` under 1,200 before we decompose the server layer. Execute the extractions below while Phase C remains in flight:
+- **Worker LOC reduction roadmap (pre-Phase E)**: target ≈−490 LOC to bring `render_worker.py` under 1,200 before we decompose the server layer. Execute the extractions below while Phase C remains in flight:
   - Add procedural helpers in a `display_mode.py` module for `_apply_ndisplay_switch` and `_reset_volume_step`; worker just logs and forwards (≈−120 LOC).
   - Extend `camera_controller` with a `process_commands` wrapper that subsumes `process_camera_commands` and `_log_zoom_drift` (≈−80 LOC).
   - Collapse `_set_level_with_budget`, `_perform_level_switch`, `_configure_camera_for_mode`, and `_viewport_roi_for_level` into procedural functions inside `worker_runtime.py` (≈−150 LOC).
@@ -61,7 +61,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
   1. **ROI consolidation** — ✅ Done. Worker calls the shared helper, `lod.compute_viewport_roi` is removed, and fallback logging/log counters were excised.
   2. **Slim `lod.py`** — ✅ Done for Phase C scope. Budget orchestration moved into `level_budget.apply_level_with_budget`; residual policy trimming is deferred to the next pass.
   3. **Capture façade** — ✅ Done. `CaptureFacade` exposes `capture_frame_for_encoder`, shrinking the worker’s encode path. Follow-up: fold resize handling once dynamic canvas sizing lands.
-  4. **Regression sweep** — Ongoing. Worker + LOD suites green (`uv run pytest src/napari_cuda/server/_tests/test_lod_selector.py src/napari_cuda/server/_tests/test_worker_integration.py`); queue ROI unit suite next and keep recording LOC snapshots (`wc -l src/napari_cuda/server/{egl_worker,lod,roi,capture}.py`).
+  4. **Regression sweep** — Ongoing. Worker + LOD suites green (`uv run pytest src/napari_cuda/server/_tests/test_lod_selector.py src/napari_cuda/server/_tests/test_worker_integration.py`); queue ROI unit suite next and keep recording LOC snapshots (`wc -l src/napari_cuda/server/{render_worker,lod,roi,capture}.py`).
   5. **Residual god-object trimming** — In flight. The worker still orchestrates capture/encode timing, camera command side-effects, scene draining, and budget logging. Each will be delegated to the new helpers below to push the worker under 1,600 LOC.
 
 ### Phase D — Logging & Debug Policy (next)
@@ -81,16 +81,16 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 
   | Metric | Current value | Collection command |
   | --- | --- | --- |
-  | `try:` blocks in `egl_worker.py` | 18 | `rg -c "try:" src/napari_cuda/server/egl_worker.py` |
+| `try:` blocks in `render_worker.py` | 18 | `rg -c "try:" src/napari_cuda/server/render_worker.py` |
   | `try:` blocks in `src/napari_cuda/server` | 342 | `uv run python - <<'PY' ...` *(inline reducer summing `rg -c` output)* |
 - **D1: Debug policy surface** — introduce `logging_policy.py` (or `config.debug`) that materialises a `DebugPolicy` dataclass from `ServerCtx`. Enumerate every logging/dump toggle we found (`NAPARI_CUDA_LOG_*`, `NAPARI_CUDA_DEBUG_*`, dump + policy flags) with type hints and defaults. Acceptance: the dataclass is the only place that knows about these env keys and ships descriptive docstrings.
 - **D1: Debug policy surface** ✅ — `logging_policy.py` now materialises `DebugPolicy` (with nested dataclasses) from `ServerCtx`. Every logging/dump flag lives there with docstrings + type hints, and unit coverage exists in `_tests/test_logging_policy.py`.
 - **D2: Context + CLI wiring** ✅ — `load_server_ctx` builds and carries the policy; `EGLHeadlessServer` logs the snapshot and passes it through to worker/capture. CLI still controls env overrides pre-load; future work can add explicit flags if needed.
-- **D3: Worker + pipeline adoption** ✅ — worker/rendering/capture stack consume the policy directly. `DebugDumper` and `FramePipeline` respect policy budgets, and raw dumps no longer mutate `os.environ`. `git grep os.getenv src/napari_cuda/server/egl_worker.py` is clean.
+- **D3: Worker + pipeline adoption** ✅ — worker/rendering/capture stack consume the policy directly. `DebugDumper` and `FramePipeline` respect policy budgets, and raw dumps no longer mutate `os.environ`. `git grep os.getenv src/napari_cuda/server/render_worker.py` is clean.
 - **D4: Rendering + bitstream alignment** ✅ — `ServerCtx` now exposes `encoder_runtime`/`bitstream` dataclasses feeding `rendering/encoder.py` and `bitstream.py`; `AdapterScene` pulls interpolation from the debug policy; bitstream packer wiring is configured via `configure_bitstream(self._ctx.bitstream)`. Direct env reads in these modules are gone—`rg "NAPARI_CUDA_" src/napari_cuda/server/rendering` and `rg "NAPARI_CUDA_" src/napari_cuda/server/bitstream.py` are clean.
 - **D5: Debug flag consolidation** ✅ — `NAPARI_CUDA_DEBUG` now carries JSON (`{"enabled": true, "flags": [...], "dumps": {...}, "worker": {...}}`) parsed by `logging_policy`. All legacy `NAPARI_CUDA_DEBUG_*` / `NAPARI_CUDA_LOG_*` vars are gone, tests updated, and docs refreshed.
 - **D6: Encoder override bundle** ✅ — `NAPARI_CUDA_ENCODER_CONFIG` replaces the NVENC/bitstream env sprawl. `load_server_ctx` hydrates encode/runtime/bitstream structures from JSON, CLI profiles merge through `_build_encoder_override_env`, and `egl_headless_server` no longer peeks at `NAPARI_CUDA_BROADCAST_FPS`.
-- **D7: Logging guard cleanup** — audit `try/except` blocks that only defend logging/formatting (`debug_tools.DebugDumper.log_env_once`, budget loggers, adapter scene stats). Replace internal guards with assertions or boundary helpers so only I/O surfaces retain broad catches. Acceptance: worker `try:` count stays ≤18 while the whole server package drops below 250 on the path to the <50 target post-refactor, with before/after numbers recorded here. 2025-09-26 snapshot: `egl_worker.py` remains at 18 `try:` blocks; package total is 333 (down from 339 after trimming `debug_tools`, `hw_limits`, and `bitstream`). The remaining 134 guards live in `egl_headless_server.py` and are deferred to Phase E per the decomposition boundary.
+- **D7: Logging guard cleanup** — audit `try/except` blocks that only defend logging/formatting (`debug_tools.DebugDumper.log_env_once`, budget loggers, adapter scene stats). Replace internal guards with assertions or boundary helpers so only I/O surfaces retain broad catches. Acceptance: worker `try:` count stays ≤18 while the whole server package drops below 250 on the path to the <50 target post-refactor, with before/after numbers recorded here. 2025-09-26 snapshot: `render_worker.py` remains at 18 `try:` blocks; package total is 333 (down from 339 after trimming `debug_tools`, `hw_limits`, and `bitstream`). The remaining 134 guards live in `egl_headless_server.py` and are deferred to Phase E per the decomposition boundary.
 - **D8: Docs, tests, lint policy** — document the consolidated policy flow in `docs/server_architecture.md`, add regression coverage for the new parsers, and codify a Ruff-backed lint policy that blocks fresh `os.getenv`/`env_bool` usage and logging-only try/except blocks inside `src/napari_cuda/server`. Acceptance: lint rule enabled, docs updated, and CI fails on regressions. 2025-09-26: `docs/server_architecture.md` already reflects the policy flow; the config-context regression test now lives in `_tests/test_config_ctx.py` and the global pytest `testpaths` includes `napari_cuda` so it runs by default. Lint gating remains to be wired into Ruff after the Phase E server trims unblock broader enforcement.
 
 Implementation slices:
@@ -162,7 +162,7 @@ Implementation slices:
 
 ### Targets & Metrics
 - Module size goals (track in weekly snapshots):
-  - `egl_worker.py` → target 700–900 LOC (never above 900); reductions come from camera/state, ROI/LOD, and capture helpers.
+- `render_worker.py` → target 700–900 LOC (never above 900); reductions come from camera/state, ROI/LOD, and capture helpers.
   - `render_mailbox.py` (new) → 200–300 LOC covering pending state application and camera command processing.
   - `roi.py` → ≤250 LOC focused purely on ROI math once the remaining helpers move across.
   - `lod.py` → <400 LOC after we delete the legacy `LevelDecision` scaffolding, shift ROI math to `roi.py`, and collapse unused code paths when the napari-gated selector matures.
@@ -189,7 +189,7 @@ Implementation slices:
 - Animation gating lives in `server.camera_animator.animate_if_enabled(...)`, keeping VisPy camera checks bundled for reuse.
 
 ## Immediate Next Steps
-1. Finish Phase C trims by extracting policy metrics + level apply bookkeeping so `egl_worker.py` drops to ~1.3 k LOC, then reassess hotspots toward the 1.2 k target.
+1. Finish Phase C trims by extracting policy metrics + level apply bookkeeping so `render_worker.py` drops to ~1.3 k LOC, then reassess hotspots toward the 1.2 k target.
 2. Re-run end-to-end GPU smoke (headless server loop) and the full server pytest suite after the next helper drop to confirm selection + capture still cooperate.
 3. Backfill docstrings on the new helpers (`render_loop.run_render_tick`, `lod.run_policy_switch`, `roi.resolve_worker_viewport_roi`) and link them from dev notes for the server refactor.
 

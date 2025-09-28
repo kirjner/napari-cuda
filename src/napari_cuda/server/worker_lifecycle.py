@@ -15,7 +15,7 @@ from .bitstream import build_avcc_config, pack_to_avcc
 from .scene_state import ServerSceneState
 from .state_channel_handler import build_dims_update_message
 from .worker_notifications import WorkerSceneNotification
-from .egl_worker import EGLRendererWorker
+from .render_worker import EGLRendererWorker
 
 logger = logging.getLogger(__name__)
 

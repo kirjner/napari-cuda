@@ -1,4 +1,4 @@
-"""Render loop driver helpers for :mod:`napari_cuda.server.egl_worker`."""
+"""Render loop driver helpers for :mod:`napari_cuda.server.render_worker`."""
 
 from __future__ import annotations
 

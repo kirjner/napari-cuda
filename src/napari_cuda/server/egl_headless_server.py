@@ -121,7 +121,7 @@ from .worker_lifecycle import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
-    from .egl_worker import EGLRendererWorker
+    from .render_worker import EGLRendererWorker
 
 
 @dataclass
