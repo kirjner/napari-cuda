@@ -254,11 +254,11 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
         def black_reset_done(self) -> bool:
             return self.pipeline.black_reset_done
 
-    class _DummyAdapterScene:
+    class _DummyViewerBuilder:
         def __init__(self, worker):  # type: ignore[no-untyped-def]
             self._worker = worker
 
-        def init(self, source):  # type: ignore[no-untyped-def]
+        def build(self, source):  # type: ignore[no-untyped-def]
             canvas = _FakeCanvas(self._worker.width, self._worker.height)
             view = _FakeView(_FakeCamera2D())
             viewer = _FakeViewer()
@@ -308,7 +308,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
     monkeypatch.setattr(rw.scene.cameras, "TurntableCamera", _FakeCamera3D)
     monkeypatch.setattr(rw, "EglContext", _DummyEglContext)
     monkeypatch.setattr(rw, "CaptureFacade", _DummyCaptureFacade)
-    monkeypatch.setattr(rw, "AdapterScene", _DummyAdapterScene)
+    monkeypatch.setattr(rw, "ViewerBuilder", _DummyViewerBuilder)
     monkeypatch.setattr(rw, "Encoder", _DummyEncoder)
     monkeypatch.setattr(rw, "plane_scale_for_level", _fake_plane_scale_for_level)
     monkeypatch.setattr(ssa.SceneStateApplier, "apply_slice_to_layer", staticmethod(_fake_apply_slice_to_layer))

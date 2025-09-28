@@ -1,3 +1,12 @@
+"""Construct the napari + VisPy viewer stack for the render worker.
+
+The worker invokes this helper once during startup to create the EGL-backed
+`SceneCanvas`, attach a `ViewBox`, and bootstrap a headless napari `ViewerModel`
+with either an image slice or volume layer. All worker-specific policy hooks
+are delegated back via the bridge object so the builder stays focused on the
+initial scene wiring.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -13,18 +22,13 @@ from napari_cuda.server.zarr_source import ZarrSceneSource
 logger = logging.getLogger(__name__)
 
 
-class AdapterScene:
-    """Thin wrapper around the napari/vispy adapter scene setup.
-
-    This class still delegates lifecycle hooks back to the worker via ``bridge``
-    but relies on shared helpers for plane geometry so scale/ROI math remains in
-    a single module.
-    """
+class ViewerBuilder:
+    """Bootstrap the viewer and VisPy canvas for the render worker."""
 
     def __init__(self, bridge) -> None:
         self._bridge = bridge
 
-    def init(self, source: Optional[ZarrSceneSource]) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
+    def build(self, source: Optional[ZarrSceneSource]) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
         worker_policy = getattr(self._bridge, "_debug_policy", None)
         worker_debug = getattr(worker_policy, "worker", None)
         debug_bg = bool(getattr(worker_debug, "debug_bg_overlay", False))
@@ -145,22 +149,13 @@ class AdapterScene:
                 )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
-                        "adapter volume init extent=(%.3f, %.3f, %.3f) translate=%s scale=%s",
+                        "viewer builder volume extent=(%.3f, %.3f, %.3f) translate=%s scale=%s",
                         world_w,
                         world_h,
                         world_d,
                         getattr(layer, 'translate', None),
                         getattr(layer, 'scale', None),
                     )
-                print(
-                    "adapter_scene volume",
-                    {
-                        'extent': (float(world_w), float(world_h), float(world_d)),
-                        'layer_translate': getattr(layer, 'translate', None),
-                        'layer_scale': getattr(layer, 'scale', None),
-                    },
-                    flush=True,
-                )
                 self._bridge._frame_volume_camera(world_w, world_h, world_d)
                 self._bridge._z_index = 0
                 layer.rendering = "mip"

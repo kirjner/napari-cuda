@@ -47,7 +47,7 @@ from .debug_tools import DebugConfig, DebugDumper
 from .hw_limits import get_hw_limits
 from .zarr_source import ZarrSceneSource
 from .scene_types import SliceROI
-from napari_cuda.server.rendering.adapter_scene import AdapterScene
+from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
 from napari_cuda.server.camera_animator import animate_if_enabled
 from . import policy as level_policy
 import napari_cuda.server.lod as lod
@@ -225,9 +225,9 @@ class EGLRendererWorker:
                 float(cam.distance),
             )
 
-    def _init_adapter_scene(self, source: Optional[ZarrSceneSource]) -> None:
-        adapter = AdapterScene(self)
-        canvas, view, viewer = adapter.init(source)
+    def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
+        builder = ViewerBuilder(self)
+        canvas, view, viewer = builder.build(source)
         # Mirror attributes for call sites expecting them
         self.canvas = canvas
         self.view = view
@@ -296,7 +296,7 @@ class EGLRendererWorker:
                 logger.debug("scene source metadata bootstrap failed", exc_info=True)
 
         try:
-            self._init_adapter_scene(source)
+            self._init_viewer_scene(source)
         except Exception:
             logger.exception("Adapter scene initialization failed (legacy path removed)")
             # Fail fast: adapter is mandatory

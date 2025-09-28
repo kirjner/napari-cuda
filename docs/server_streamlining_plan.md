@@ -11,7 +11,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
   updates.
 - `render_worker.py` (formerly `egl_worker.py`) still owns viewer bootstrapping, mailbox draining, capture orchestration, and
   visual wiring in a single monolith.
-- `rendering/adapter_scene.py` serves only as a one-time bootstrap; keeping it separate obscures the
+- `rendering/viewer_builder.py` serves only as a one-time bootstrap; keeping it separate obscures the
   lifecycle.
 - Layer control values continue to be mirrored into `extras`; clients should rely solely on the
   `controls` map.
@@ -52,8 +52,8 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
       swappable backends; otherwise keep it private to the worker.
 
 ### 4. Viewer Builder
-- [ ] Rename `rendering/adapter_scene.py` → `viewer_builder.py`; document that it runs once and
-      returns `(viewer, viewbox, napari_layer, visual)`.
+- [x] Rename `rendering/adapter_scene.py` → `viewer_builder.py`; document that it runs once and
+      returns `(canvas, viewbox, viewer)`.
 - [ ] Slim the module to the minimal napari/VisPy bootstrap; remove event re-sync if not required.
 
 ### 5. Controls Map & Extras
