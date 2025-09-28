@@ -28,7 +28,7 @@ class FakeUICall:
         return self
 
 
-def _make_state() -> tuple[intents.IntentState, ClientLoopState, FakeChannel]:
+def _make_state() -> tuple[intents.ClientStateContext, ClientLoopState, FakeChannel]:
     env = SimpleNamespace(
         dims_rate_hz=60.0,
         wheel_step=1,
@@ -37,7 +37,7 @@ def _make_state() -> tuple[intents.IntentState, ClientLoopState, FakeChannel]:
         dims_z_min=None,
         dims_z_max=None,
     )
-    state = intents.IntentState.from_env(env)
+    state = intents.ClientStateContext.from_env(env)
     loop_state = ClientLoopState()
     channel = FakeChannel()
     loop_state.state_channel = channel

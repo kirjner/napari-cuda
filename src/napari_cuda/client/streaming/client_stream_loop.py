@@ -56,8 +56,9 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     SceneSpecMessage,
+    StateUpdateMessage,
 )
-from napari_cuda.client.streaming.layer_intent_bridge import LayerIntentBridge
+from napari_cuda.client.streaming.layer_state_bridge import LayerStateBridge
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.config import ClientConfig
@@ -179,7 +180,7 @@ class ClientStreamLoop:
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
         self._latest_scene_spec: Optional[SceneSpecMessage] = None
-        self._intent_state = intents.IntentState.from_env(self._env_cfg)
+        self._intent_state = intents.ClientStateContext.from_env(self._env_cfg)
         self._loop_state.intents = self._intent_state
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
@@ -200,7 +201,7 @@ class ClientStreamLoop:
         self._renderer = GLRenderer(self._scene_canvas)
         self._presenter_facade = PresenterFacade()
 
-        self._layer_bridge = LayerIntentBridge(
+        self._layer_bridge = LayerStateBridge(
             self,
             self._presenter_facade,
             self._layer_registry,
@@ -588,6 +589,16 @@ class ClientStreamLoop:
         logger.debug("layer.update: id=%s partial=%s", layer_id, msg.partial)
         self._presenter_facade.apply_layer_update(msg)
 
+    def _handle_state_update(self, msg: StateUpdateMessage) -> None:
+        logger.debug(
+            "state.update: scope=%s target=%s key=%s phase=%s",
+            msg.scope,
+            msg.target,
+            msg.key,
+            msg.phase,
+        )
+        self._layer_bridge.handle_state_update(msg)
+
     def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
         self._layer_registry.remove_layer(msg)
         logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
@@ -623,6 +634,7 @@ class ClientStreamLoop:
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
         intents.on_state_disconnected(self._loop_state, self._intent_state)
+        self._layer_bridge.clear_pending_on_reconnect()
         logger.info("StateChannel disconnected: %s; dims control commands gated", exc)
 
     # --- Input mapping: unified wheel handler -------------------------------------

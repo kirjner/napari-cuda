@@ -3,7 +3,7 @@
 ## Motivation
 - Historically `src/napari_cuda/client/streaming_canvas.py` owned Qt bootstrap, draw-hook wiring, FPS HUD timers, and ad-hoc presenter plumbing. This duplicated logic already present in `ClientStreamLoop` and made refactors risky.
 - `ClientStreamLoop` is the authoritative home for the presenter (`FixedLatencyPresenter`), renderer, intent dispatch, and dims mirroring. We now expose that functionality through a façade so Qt-specific code can stay thin and testable.
-- A dedicated façade gives the upcoming `LayerIntentBridge` a stable hook while keeping the Qt canvas focused on window deferral and keymap setup.
+- A dedicated façade gives the upcoming `LayerStateBridge` a stable hook while keeping the Qt canvas focused on window deferral and keymap setup.
 
 ## Target Module
 - New module: `src/napari_cuda/client/streaming/presenter_facade.py` (lives alongside `presenter.py`, `renderer.py`, etc.).
@@ -39,7 +39,7 @@
 
 ### Hook for Layer Intents
 - `PresenterFacade.set_intent_dispatcher(callable | None)` registers a callable that accepts `(intent_type, payload)`; default is `None`.
-- During bridge work, `LayerIntentBridge` will register here so Qt layer widgets can emit through the façade without poking at the loop or canvas.
+- During bridge work, `LayerStateBridge` will register here so Qt layer widgets can emit through the façade without poking at the loop or canvas.
 
 ## Implementation Notes
 - `PresenterFacade` owns the draw-event wiring, optional display-loop lifecycle, and HUD timing updates. It holds only references to loop collaborators; no new threads are spawned.
@@ -69,7 +69,7 @@
 
 ## Open Questions / Follow-ups
 - With the `ClientLoopState` dataclass in place, migrate façade construction to accept the state bag and collaborators explicitly (reduces `self` reach).
-- `PresenterFacade` exposes `set_intent_dispatcher`; the upcoming `LayerIntentBridge` must document how it plugs into this hook.
+- `PresenterFacade` exposes `set_intent_dispatcher`; the upcoming `LayerStateBridge` must document how it plugs into this hook.
 
 ## Current Status
 - `PresenterFacade` manages draw wiring, HUD updates, and optional display loop creation. It caches viewer weakrefs and dims payloads for the forthcoming layer-intent bridge.

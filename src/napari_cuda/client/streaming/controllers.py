@@ -15,6 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing aid only
         LayerRemoveMessage,
         LayerUpdateMessage,
         SceneSpecMessage,
+        StateUpdateMessage,
     )
 
 from .receiver import PixelReceiver
@@ -30,6 +31,7 @@ class StateController:
     handle_scene_spec: Optional[Callable[["SceneSpecMessage"], None]] = None
     handle_layer_update: Optional[Callable[["LayerUpdateMessage"], None]] = None
     handle_layer_remove: Optional[Callable[["LayerRemoveMessage"], None]] = None
+    handle_state_update: Optional[Callable[["StateUpdateMessage"], None]] = None
     handle_connected: Optional[Callable[[], None]] = None
     handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None
 
@@ -42,6 +44,7 @@ class StateController:
             handle_scene_spec=self.handle_scene_spec,
             handle_layer_update=self.handle_layer_update,
             handle_layer_remove=self.handle_layer_remove,
+            handle_state_update=self.handle_state_update,
             handle_connected=self.handle_connected,
             handle_disconnect=self.handle_disconnect,
         )

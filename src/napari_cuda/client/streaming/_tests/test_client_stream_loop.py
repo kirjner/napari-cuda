@@ -4,7 +4,7 @@ from typing import Any
 
 from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.streaming.client_loop.intents import IntentState
+from napari_cuda.client.streaming.client_loop.intents import ClientStateContext
 from napari_cuda.client.streaming.control_sessions import ControlSession
 from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE
 
@@ -23,7 +23,7 @@ def _make_loop() -> ClientStreamLoop:
     loop._ui_call = None
     loop._loop_state.last_dims_payload = None
     loop._compute_primary_axis_index = lambda: 0
-    loop._intent_state = IntentState()
+    loop._intent_state = ClientStateContext()
     loop._intent_state.dims_meta = loop._dims_meta
     loop._loop_state.intents = loop._intent_state
 

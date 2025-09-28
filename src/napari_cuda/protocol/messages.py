@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 
 
 CONTROL_COMMAND_TYPE = "control.command"
+STATE_UPDATE_TYPE = "state.update"
 
 
 class MessageType(enum.Enum):
@@ -122,6 +123,58 @@ class ControlCommand:
             "extras": self.extras,
         }
         return _strip_none(payload)
+
+
+@dataclass(kw_only=True)
+class StateUpdateMessage(StateMessage):
+    """Unified state update message shared between client and server."""
+
+    scope: str
+    target: str
+    key: str
+    value: Any
+    type: str = STATE_UPDATE_TYPE
+    client_id: Optional[str] = None
+    client_seq: Optional[int] = None
+    interaction_id: Optional[str] = None
+    phase: Optional[str] = None
+    timestamp: Optional[float] = None
+    server_seq: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": self.type,
+            "scope": self.scope,
+            "target": self.target,
+            "key": self.key,
+            "value": self.value,
+            "client_id": self.client_id,
+            "client_seq": self.client_seq,
+            "interaction_id": self.interaction_id,
+            "phase": self.phase,
+            "timestamp": self.timestamp,
+            "server_seq": self.server_seq,
+        }
+        return _strip_none(payload)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StateUpdateMessage":
+        return cls(
+            type=data.get("type", STATE_UPDATE_TYPE),
+            scope=str(data["scope"]),
+            target=str(data["target"]),
+            key=str(data["key"]),
+            value=data.get("value"),
+            client_id=data.get("client_id"),
+            client_seq=data.get("client_seq"),
+            interaction_id=data.get("interaction_id"),
+            phase=data.get("phase"),
+            timestamp=data.get("timestamp"),
+            server_seq=data.get("server_seq"),
+        )
 
 
 @dataclass
@@ -698,6 +751,8 @@ class StreamProtocol:
             return LayerUpdateMessage.from_dict(msg_dict)
         if msg_type == LAYER_REMOVE_TYPE:
             return LayerRemoveMessage.from_dict(msg_dict)
+        if msg_type == STATE_UPDATE_TYPE:
+            return StateUpdateMessage.from_dict(msg_dict)
         if msg_type in [t.value for t in MessageType]:
             return StateMessage(**msg_dict)
         return Command(**msg_dict)

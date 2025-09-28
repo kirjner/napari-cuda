@@ -108,7 +108,7 @@
    - `client_loop/warmup.py` carries the `WarmupPolicy` ramp and shutdown
      cleanup; draw/shutdown simply delegate to `warmup.apply_ramp` /
      `warmup.cancel`.
-   - `client_loop/intents.py` owns the `IntentState`, dims/settings payload
+   - `client_loop/intents.py` owns the `ClientStateContext`, dims/settings payload
      normalisation, ACK bookkeeping, and viewer mirroring hooks.
    - `client_loop/camera.py` isolates pan/orbit accumulation, zoom helpers, and
      reset/set dispatch backed by `CameraState`.
@@ -124,7 +124,7 @@
    - Enumerate every Qt control we need to intercept (opacity, blending, contrast range + auto buttons, gamma, colormap, projection mode, interpolation, depiction toggles).
    - Decide whether to subclass napari’s Qt controls or override `RemoteImageLayer` setters; the goal is to guarantee all writes funnel through `ClientStreamLoop` via `image.intent.*` payloads keyed by `RemoteImageLayer._remote_id`.
    - Document the required client intent helpers (`loop.image_set_opacity`, etc.) so the server agent can implement matching handlers without guesswork.
-7. After the façade + state bag are merged, implement the `LayerIntentBridge`
+7. After the façade + state bag are merged, implement the `LayerStateBridge`
    module behind `NAPARI_CUDA_LAYER_BRIDGE` and wire it through the new seams;
    keep legacy behaviour intact until the server handlers ship.
 

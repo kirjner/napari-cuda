@@ -34,7 +34,7 @@ def _default_dims_meta() -> dict[str, object | None]:
 
 
 @dataclass
-class IntentState:
+class ClientStateContext:
     """Mutable intent-related state hoisted out of the loop object."""
 
     dims_ready: bool = False
@@ -54,7 +54,7 @@ class IntentState:
     control_sessions: Dict[str, ControlSession] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, env_cfg: Any) -> "IntentState":
+    def from_env(cls, env_cfg: Any) -> "ClientStateContext":
         state = cls()
         dims_rate = getattr(env_cfg, 'dims_rate_hz', 1.0) or 1.0
         state.dims_min_dt = 1.0 / max(1.0, float(dims_rate))
@@ -76,12 +76,12 @@ class IntentState:
         return int(self.client_seq)
 
 
-def on_state_connected(state: IntentState) -> None:
+def on_state_connected(state: ClientStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
 
 
-def on_state_disconnected(loop_state: "ClientLoopState", state: IntentState) -> None:
+def on_state_disconnected(loop_state: "ClientLoopState", state: ClientStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
@@ -91,7 +91,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: IntentState) -> 
 
 
 def handle_dims_update(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     data: dict[str, object],
     *,
@@ -298,7 +298,7 @@ def _parse_dims_session_key(key: str) -> tuple[str, int]:
     return prop, axis_idx
 
 
-def _ensure_dims_session(state: IntentState, axis_idx: int, prop: str) -> ControlSession:
+def _ensure_dims_session(state: ClientStateContext, axis_idx: int, prop: str) -> ControlSession:
     key = _dims_session_key(axis_idx, prop)
     session = state.control_sessions.get(key)
     if session is None:
@@ -308,7 +308,7 @@ def _ensure_dims_session(state: IntentState, axis_idx: int, prop: str) -> Contro
 
 
 def _send_dims_command(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     *,
     axis_idx: int,
@@ -367,7 +367,7 @@ def _send_dims_command(
 
 
 def _send_dims_commit(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     *,
     axis_idx: int,
@@ -391,7 +391,7 @@ def _send_dims_commit(
 
 
 def _handle_dims_ack_session(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     *,
     client_seq: int,
@@ -467,7 +467,7 @@ def mirror_dims_to_viewer(
     _apply()
 
 
-def replay_last_dims_payload(state: IntentState, loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
+def replay_last_dims_payload(state: ClientStateContext, loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
     payload = loop_state.last_dims_payload
     if not payload:
         return
@@ -489,7 +489,7 @@ def replay_last_dims_payload(state: IntentState, loop_state: "ClientLoopState", 
 
 
 def dims_step(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     axis: int | str,
     delta: int,
@@ -528,7 +528,7 @@ def dims_step(
 
 
 def handle_wheel_for_dims(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     data: dict,
     *,
@@ -569,7 +569,7 @@ def handle_wheel_for_dims(
 
 
 def dims_set_index(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     axis: int | str,
     value: int,
@@ -607,11 +607,11 @@ def dims_set_index(
     return True
 
 
-def current_ndisplay(state: IntentState) -> Optional[int]:
+def current_ndisplay(state: ClientStateContext) -> Optional[int]:
     return _int_or_none(state.dims_meta.get('ndisplay'))
 
 
-def toggle_ndisplay(state: IntentState, loop_state: "ClientLoopState", *, origin: str) -> bool:
+def toggle_ndisplay(state: ClientStateContext, loop_state: "ClientLoopState", *, origin: str) -> bool:
     if not state.dims_ready:
         return False
     current = current_ndisplay(state)
@@ -671,7 +671,7 @@ def handle_key_event(
 
 
 def view_set_ndisplay(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     ndisplay: int,
     *,
@@ -690,7 +690,7 @@ def view_set_ndisplay(
 
 
 def volume_set_render_mode(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     mode: str,
     *,
@@ -704,7 +704,7 @@ def volume_set_render_mode(
 
 
 def volume_set_clim(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     lo: float,
     hi: float,
@@ -720,7 +720,7 @@ def volume_set_clim(
 
 
 def volume_set_colormap(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     name: str,
     *,
@@ -734,7 +734,7 @@ def volume_set_colormap(
 
 
 def volume_set_opacity(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     alpha: float,
     *,
@@ -749,7 +749,7 @@ def volume_set_opacity(
 
 
 def volume_set_sample_step(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     relative: float,
     *,
@@ -764,7 +764,7 @@ def volume_set_sample_step(
 
 
 def multiscale_set_policy(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     policy: str,
     *,
@@ -782,7 +782,7 @@ def multiscale_set_policy(
 
 
 def multiscale_set_level(
-    state: IntentState,
+    state: ClientStateContext,
     loop_state: "ClientLoopState",
     level: int,
     *,
@@ -796,7 +796,7 @@ def multiscale_set_level(
     return _send_intent(loop_state, state, 'multiscale.intent.set_level', {'level': int(lv)}, origin)
 
 
-def hud_snapshot(state: IntentState, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
+def hud_snapshot(state: ClientStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
     meta = state.dims_meta
     snap: dict[str, object] = {}
     snap['ndisplay'] = _int_or_none(meta.get('ndisplay'))
@@ -846,7 +846,7 @@ def hud_snapshot(state: IntentState, *, video_size: tuple[Optional[int], Optiona
     return snap
 
 
-def _axis_to_index(state: IntentState, axis: int | str) -> Optional[int]:
+def _axis_to_index(state: ClientStateContext, axis: int | str) -> Optional[int]:
     if axis == 'primary':
         return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
     if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
@@ -876,7 +876,7 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
     return 0
 
 
-def _rate_gate_settings(state: IntentState, origin: str) -> bool:
+def _rate_gate_settings(state: ClientStateContext, origin: str) -> bool:
     now = time.perf_counter()
     if (now - float(state.last_settings_send or 0.0)) < state.settings_min_dt:
         logger.debug("settings intent gated by rate limiter (%s)", origin)
@@ -887,7 +887,7 @@ def _rate_gate_settings(state: IntentState, origin: str) -> bool:
 
 def _send_intent(
     loop_state: "ClientLoopState",
-    state: IntentState,
+    state: ClientStateContext,
     type_str: str,
     fields: dict[str, object],
     origin: str,
@@ -906,7 +906,7 @@ def _send_intent(
     return bool(ok)
 
 
-def _is_volume_mode(state: IntentState) -> bool:
+def _is_volume_mode(state: ClientStateContext) -> bool:
     vol = bool(state.dims_meta.get('volume'))
     nd = int(state.dims_meta.get('ndisplay') or 2)
     return bool(vol) and int(nd) == 3
@@ -946,7 +946,7 @@ def _ensure_lo_hi(lo: float, hi: float) -> tuple[float, float]:
     return lo_f, hi_f
 
 
-def _clamp_level(state: IntentState, level: int) -> int:
+def _clamp_level(state: ClientStateContext, level: int) -> int:
     multiscale = state.dims_meta.get('multiscale')
     if isinstance(multiscale, dict):
         levels = multiscale.get('levels')

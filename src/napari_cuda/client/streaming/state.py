@@ -17,9 +17,11 @@ from napari_cuda.protocol.messages import (
     LAYER_REMOVE_TYPE,
     LAYER_UPDATE_TYPE,
     SCENE_SPEC_TYPE,
+    STATE_UPDATE_TYPE,
     LayerRemoveMessage,
     LayerUpdateMessage,
     SceneSpecMessage,
+    StateUpdateMessage,
 )
 
 
@@ -71,6 +73,7 @@ class StateChannel:
         handle_scene_spec: Optional[Callable[[SceneSpecMessage], None]] = None,
         handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
         handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
+        handle_state_update: Optional[Callable[[StateUpdateMessage], None]] = None,
         handle_connected: Optional[Callable[[], None]] = None,
         handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
     ) -> None:
@@ -81,6 +84,7 @@ class StateChannel:
         self.handle_scene_spec = handle_scene_spec
         self.handle_layer_update = handle_layer_update
         self.handle_layer_remove = handle_layer_remove
+        self.handle_state_update = handle_state_update
         self.handle_connected = handle_connected
         self.handle_disconnect = handle_disconnect
         self._last_key_req: Optional[float] = None
@@ -331,6 +335,23 @@ class StateChannel:
                     self.handle_layer_remove(removal)
                 except Exception:
                     logger.debug("handle_layer_remove callback failed", exc_info=True)
+            return
+
+        if msg_type == STATE_UPDATE_TYPE:
+            if self.handle_state_update:
+                try:
+                    update = StateUpdateMessage.from_dict(data)
+                    if _STATE_DEBUG:
+                        logger.debug(
+                            "received state.update: scope=%s target=%s key=%s phase=%s",
+                            update.scope,
+                            update.target,
+                            update.key,
+                            update.phase,
+                        )
+                    self.handle_state_update(update)
+                except Exception:
+                    logger.debug("handle_state_update callback failed", exc_info=True)
             return
 
     def request_keyframe_once(self) -> None:
