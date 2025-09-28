@@ -115,7 +115,7 @@ class LayerControlState:
 def default_layer_controls() -> LayerControlState:
     """Return the default LayerControlState for new layers."""
 
-    return LayerControlState()
+    return LayerControlState(colormap="gray")
 
 
 @dataclass
@@ -123,6 +123,7 @@ class ServerSceneData:
     """Mutable scene metadata owned by the headless server."""
 
     latest_state: ServerSceneState = field(default_factory=ServerSceneState)
+    use_volume: bool = False
     camera_commands: Deque[ServerSceneCommand] = field(default_factory=deque)
     dims_seq: int = 0
     last_dims_client_id: Optional[str] = None

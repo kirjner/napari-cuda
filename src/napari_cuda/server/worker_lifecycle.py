@@ -343,7 +343,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 except Exception as cleanup_exc:  # pragma: no cover - defensive cleanup
                     logger.debug("Worker cleanup error: %s", cleanup_exc)
             state.worker = None
-            state.thread = None
 
     thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
     state.thread = thread

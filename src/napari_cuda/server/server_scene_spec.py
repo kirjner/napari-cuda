@@ -57,7 +57,6 @@ def build_dims_payload(
     step_list: Sequence[int],
     last_client_id: Optional[str],
     meta: Mapping[str, Any],
-    worker_scene_source: Optional[Any],
     use_volume: bool,
     ack: bool = False,
     intent_seq: Optional[int] = None,
@@ -116,32 +115,47 @@ def build_dims_payload(
     meta_out = payload["meta"]
     assert isinstance(meta_out, dict)
 
-    src = worker_scene_source
-    if src is not None:
-        level = int(getattr(src, "current_level", 0))
-        meta_out["level"] = level
-
-        descs = getattr(src, "level_descriptors", [])
-        if isinstance(descs, Sequence) and descs:
-            level = max(0, min(level, len(descs) - 1))
-            shape = getattr(descs[level], "shape", None)
-            if shape is not None:
-                meta_out["level_shape"] = [int(s) for s in shape]
-            levels_meta = []
-            for desc in descs:
-                levels_meta.append(
+    multiscale_state = scene.multiscale_state or {}
+    levels_state = multiscale_state.get("levels")
+    levels: list[dict[str, Any]] = []
+    if isinstance(levels_state, Sequence):
+        for entry in levels_state:
+            if isinstance(entry, Mapping):
+                shape_seq = entry.get("shape")
+                shape_vals = (
+                    [int(s) for s in shape_seq]
+                    if isinstance(shape_seq, Sequence)
+                    else []
+                )
+                downsample_seq = entry.get("downsample")
+                downsample_vals = (
+                    list(downsample_seq)
+                    if isinstance(downsample_seq, Sequence)
+                    else []
+                )
+                levels.append(
                     {
-                        "shape": [int(s) for s in getattr(desc, "shape", [])],
-                        "downsample": list(getattr(desc, "downsample", [])),
-                        "path": getattr(desc, "path", None),
+                        "shape": shape_vals,
+                        "downsample": downsample_vals,
+                        "path": entry.get("path"),
                     }
                 )
-            meta_out["multiscale"] = {
-                "levels": levels_meta,
-                "current_level": level,
-                "policy": scene.multiscale_state.get("policy", "auto"),
-                "index_space": "base",
-            }
+
+    if levels:
+        level = int(multiscale_state.get("current_level", 0))
+        level = max(0, min(level, len(levels) - 1))
+        meta_out["level"] = level
+
+        shape = levels[level].get("shape")
+        if isinstance(shape, Sequence) and shape:
+            meta_out["level_shape"] = [int(s) for s in shape]
+
+        meta_out["multiscale"] = {
+            "levels": levels,
+            "current_level": level,
+            "policy": multiscale_state.get("policy", "auto"),
+            "index_space": multiscale_state.get("index_space", "base"),
+        }
 
     if meta_out.get("range"):
         meta_out.setdefault("ranges", meta_out["range"])
@@ -152,11 +166,11 @@ def build_dims_payload(
             payload["intent_seq"] = int(intent_seq)
 
     meta_out["normalized"] = not bool(use_volume)
-    if src is not None and meta_out.get("multiscale"):
-        levels = meta_out["multiscale"]["levels"]
+    if meta_out.get("multiscale"):
+        levels_meta = meta_out["multiscale"]["levels"]
         level = int(meta_out["multiscale"].get("current_level", 0))
-        if 0 <= level < len(levels):
-            shape = levels[level].get("shape")
+        if 0 <= level < len(levels_meta):
+            shape = levels_meta[level].get("shape")
             if isinstance(shape, Sequence):
                 sizes = [max(1, int(s)) for s in shape]
                 meta_out["sizes"] = sizes

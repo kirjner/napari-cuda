@@ -219,6 +219,7 @@ class EGLHeadlessServer:
         self._scene: ServerSceneData = create_server_scene_data(
             policy_event_path=self._ctx.policy_event_path
         )
+        self._scene.use_volume = bool(self.use_volume)
         # Bitstream parameter cache and config tracking (server-side)
         self._param_cache = ParamCache()
         # Optional bitstream dump for validation
@@ -399,6 +400,7 @@ class EGLHeadlessServer:
         else:
             logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
         self.use_volume = bool(ndisp == 3)
+        self._scene.use_volume = self.use_volume
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:

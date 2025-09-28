@@ -35,8 +35,8 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 - [x] Rename `server_scene_control.py` → `state_channel_handler.py`; keep module-level docstring.
 - [x] Replace the open-coded intent branching with a table-driven dispatcher that delegates to
       `server_scene_intents`.
-- [ ] Record deltas in `ServerSceneData` then call `render_worker.enqueue_update(delta)` directly.
-- [ ] Ensure acknowledgements/broadcasts are derived from the canonical store (no mirror dicts).
+- [x] Record deltas in `ServerSceneData` then call `render_worker.enqueue_update(delta)` directly.
+- [x] Ensure acknowledgements/broadcasts are derived from the canonical store (no mirror dicts).
 
 ### 2. Scene Update Mailbox
 - [x] Move the coalescing logic from `server_scene_queue.py` into `render_mailbox.py` owned by

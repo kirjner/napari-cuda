@@ -71,6 +71,7 @@ from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.server_scene import ServerSceneCommand
 from napari_cuda.server.render_mailbox import (
     PendingRenderUpdate,
+    RenderDelta,
     RenderMailbox,
 )
 from napari_cuda.server.policy_metrics import PolicyMetrics
@@ -762,29 +763,76 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def apply_state(self, state: ServerSceneState) -> None:
-        """Queue a complete scene state snapshot for the next frame."""
-        self._last_interaction_ts = time.perf_counter()
+    def _normalize_scene_state(self, state: ServerSceneState) -> ServerSceneState:
+        """Return the render-thread-friendly copy of *state*."""
+
         layer_updates = None
         if state.layer_updates:
-            layer_updates = {
-                str(layer_id): dict(props)
-                for layer_id, props in state.layer_updates.items()
-            }
+            updates: Dict[str, Dict[str, object]] = {}
+            for layer_id, props in state.layer_updates.items():
+                if not props:
+                    continue
+                updates[str(layer_id)] = {str(key): value for key, value in props.items()}
+            if updates:
+                layer_updates = updates
 
-        normalized = ServerSceneState(
-            center=tuple(float(c) for c in state.center) if state.center is not None else None,
-            zoom=float(state.zoom) if state.zoom is not None else None,
-            angles=tuple(float(a) for a in state.angles) if state.angles is not None else None,
-            current_step=tuple(int(s) for s in state.current_step) if state.current_step is not None else None,
-            volume_mode=str(state.volume_mode) if state.volume_mode is not None else None,
-            volume_colormap=str(state.volume_colormap) if state.volume_colormap is not None else None,
-            volume_clim=tuple(float(v) for v in state.volume_clim) if state.volume_clim is not None else None,
-            volume_opacity=float(state.volume_opacity) if state.volume_opacity is not None else None,
-            volume_sample_step=float(state.volume_sample_step) if state.volume_sample_step is not None else None,
+        return ServerSceneState(
+            center=(tuple(float(c) for c in state.center) if state.center is not None else None),
+            zoom=(float(state.zoom) if state.zoom is not None else None),
+            angles=(tuple(float(a) for a in state.angles) if state.angles is not None else None),
+            current_step=(
+                tuple(int(s) for s in state.current_step)
+                if state.current_step is not None
+                else None
+            ),
+            volume_mode=(str(state.volume_mode) if state.volume_mode is not None else None),
+            volume_colormap=(
+                str(state.volume_colormap) if state.volume_colormap is not None else None
+            ),
+            volume_clim=(
+                tuple(float(v) for v in state.volume_clim)
+                if state.volume_clim is not None
+                else None
+            ),
+            volume_opacity=(
+                float(state.volume_opacity) if state.volume_opacity is not None else None
+            ),
+            volume_sample_step=(
+                float(state.volume_sample_step)
+                if state.volume_sample_step is not None
+                else None
+            ),
             layer_updates=layer_updates,
         )
-        self._render_mailbox.enqueue_scene_state(normalized)
+
+    def enqueue_update(self, delta: RenderDelta) -> None:
+        """Normalize and enqueue a render delta for the worker mailbox."""
+
+        scene_state = None
+        if delta.scene_state is not None:
+            self._last_interaction_ts = time.perf_counter()
+            scene_state = self._normalize_scene_state(delta.scene_state)
+
+        normalized = RenderDelta(
+            display_mode=delta.display_mode,
+            multiscale=delta.multiscale,
+            scene_state=scene_state,
+        )
+
+        if (
+            normalized.display_mode is None
+            and normalized.multiscale is None
+            and normalized.scene_state is None
+        ):
+            return
+
+        self._render_mailbox.enqueue(normalized)
+        self._mark_render_tick_needed()
+
+    def apply_state(self, state: ServerSceneState) -> None:
+        """Queue a complete scene state snapshot for the next frame."""
+
+        self.enqueue_update(RenderDelta(scene_state=state))
 
     def process_camera_commands(self, commands: Sequence[ServerSceneCommand]) -> None:
         process_commands(self, commands)

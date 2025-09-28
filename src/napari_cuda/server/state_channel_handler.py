@@ -12,8 +12,9 @@ from typing import Any, Mapping, Optional, Sequence
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server import server_scene_intents as intents
+from napari_cuda.server.render_mailbox import RenderDelta
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene import ServerSceneCommand
+from napari_cuda.server.server_scene import ServerSceneCommand, layer_controls_to_dict
 from napari_cuda.server.worker_notifications import WorkerSceneNotification
 from napari_cuda.server.server_scene_spec import (
     build_dims_payload,
@@ -82,6 +83,7 @@ async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> b
             angles=tuple(angles) if angles else None,
             current_step=server._scene.latest_state.current_step,
         )
+    _enqueue_latest_state_for_worker(server)
     return True
 
 
@@ -114,6 +116,7 @@ async def _handle_dims_step(server: Any, data: Mapping[str, Any], ws: Any) -> bo
                 intent_i = int(client_seq) if client_seq is not None else None
             except Exception:
                 intent_i = None
+            _enqueue_latest_state_for_worker(server)
             server._schedule_coro(
                 broadcast_dims_update(
                     server,
@@ -156,6 +159,7 @@ async def _handle_dims_set_index(server: Any, data: Mapping[str, Any], ws: Any) 
                 intent_i = int(client_seq) if client_seq is not None else None
             except Exception:
                 intent_i = None
+            _enqueue_latest_state_for_worker(server)
             server._schedule_coro(
                 broadcast_dims_update(
                     server,
@@ -183,6 +187,7 @@ async def _handle_volume_render_mode(server: Any, data: Mapping[str, Any], ws: A
             client_id,
             client_seq,
         )
+        _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
             'rebroadcast-volume-mode',
@@ -204,6 +209,7 @@ async def _handle_volume_clim(server: Any, data: Mapping[str, Any], ws: Any) -> 
             client_seq,
         )
         intents.update_volume_clim(server._scene, server._state_lock, lo, hi)
+        _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
             'rebroadcast-volume-clim',
@@ -223,6 +229,7 @@ async def _handle_volume_colormap(server: Any, data: Mapping[str, Any], ws: Any)
             client_seq,
         )
         intents.update_volume_colormap(server._scene, server._state_lock, str(name))
+        _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
             'rebroadcast-volume-colormap',
@@ -242,6 +249,7 @@ async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) 
             client_seq,
         )
         intents.update_volume_opacity(server._scene, server._state_lock, float(opacity))
+        _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
             'rebroadcast-volume-opacity',
@@ -265,6 +273,7 @@ async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: A
             rebroadcast_meta(server, client_id),
             'rebroadcast-volume-sample-step',
         )
+        _enqueue_latest_state_for_worker(server)
     return True
 
 
@@ -315,6 +324,7 @@ async def _handle_layer_intent(server: Any, data: Mapping[str, Any], ws: Any) ->
         client_id,
         client_seq,
     )
+    _enqueue_latest_state_for_worker(server)
     try:
         intent_i = int(client_seq) if client_seq is not None else None
     except Exception:
@@ -588,6 +598,26 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
         if server._log_state_traces:
             logger.info("state message end type=%s seq=%s handled=%s", msg_type, seq, handled)
 
+
+def _enqueue_latest_state_for_worker(server: Any) -> None:
+    """Snapshot the current scene state and push it into the render mailbox."""
+
+    worker = getattr(server, "_worker", None)
+    if worker is None or not hasattr(worker, "enqueue_update"):
+        return
+
+    try:
+        with server._state_lock:
+            snapshot = server._scene.latest_state
+    except Exception:
+        logger.debug("state: failed to snapshot latest scene state", exc_info=True)
+        return
+
+    try:
+        worker.enqueue_update(RenderDelta(scene_state=snapshot))
+    except Exception:
+        logger.debug("state: worker enqueue_update failed", exc_info=True)
+
 async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
     """Re-broadcast a dims.update with current_step and updated meta.
 
@@ -658,6 +688,7 @@ async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
                     angles=s.angles,
                     current_step=tuple(chosen),
                 )
+            _enqueue_latest_state_for_worker(server)
         except Exception:
             logger.debug('rebroadcast: failed to sync server state step', exc_info=True)
 
@@ -797,6 +828,11 @@ def _disable_nagle(ws: Any) -> None:
 async def _send_state_baseline(server: Any, ws: Any) -> None:
     try:
         await server._await_adapter_level_ready(0.5)
+        try:
+            if hasattr(server, "_update_scene_manager"):
+                server._update_scene_manager()
+        except Exception:
+            logger.debug("Initial scene manager sync failed", exc_info=True)
         with server._state_lock:
             current_step = server._scene.latest_state.current_step
         if current_step is not None:
@@ -832,6 +868,11 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         logger.exception("Initial scene.spec send failed")
 
     try:
+        await _send_layer_baseline(server, ws)
+    except Exception:
+        logger.exception("Initial layer baseline send failed")
+
+    try:
         channel = getattr(server, "_pixel_channel", None)
         cfg = getattr(server, "_pixel_config", None)
         assert channel is not None and cfg is not None, "Pixel channel not initialized"
@@ -865,6 +906,46 @@ async def broadcast_scene_spec_payload(server: Any, payload: str, *, reason: str
         logger.debug("%s: scene.spec broadcast to %d clients", reason)
 
 
+async def _send_layer_baseline(server: Any, ws: Any) -> None:
+    """Send canonical layer controls for all known layers to *ws*."""
+
+    scene = server._scene
+    manager = server._scene_manager
+    spec = manager.scene_spec()
+    if spec is None or not spec.layers:
+        return
+
+    latest_updates = scene.latest_state.layer_updates or {}
+
+    for layer in spec.layers:
+        layer_id = layer.layer_id
+        if not layer_id:
+            continue
+
+        changes: dict[str, Any] = {}
+        control_state = scene.layer_controls.get(layer_id)
+        if control_state is not None:
+            changes.update(layer_controls_to_dict(control_state))
+
+        pending = latest_updates.get(layer_id, {})
+        if pending:
+            changes.update(pending)
+
+        if not changes:
+            continue
+
+        payload = build_layer_update_payload(
+            scene,
+            manager,
+            layer_id=layer_id,
+            changes=changes,
+            intent_seq=None,
+        )
+        payload["ack"] = False
+        payload.pop("intent_seq", None)
+        await server._safe_state_send(ws, json.dumps(payload))
+
+
 def build_dims_update_message(
     server: Any,
     *,
@@ -876,15 +957,15 @@ def build_dims_update_message(
     """Create a dims.update payload for the current server context."""
 
     meta = server._dims_metadata() or {}
-    worker = getattr(server, '_worker', None)
-    src = getattr(worker, '_scene_source', None) if worker is not None else None
-    use_volume = bool(getattr(worker, 'use_volume', getattr(server, 'use_volume', False)) if worker is not None else getattr(server, 'use_volume', False))
+    scene = server._scene
+    use_volume = bool(getattr(scene, "use_volume", False))
+    if not use_volume:
+        use_volume = bool(getattr(server, 'use_volume', False))
     return build_dims_payload(
-        server._scene,
+        scene,
         step_list=step_list,
         last_client_id=last_client_id,
         meta=meta,
-        worker_scene_source=src,
         use_volume=use_volume,
         ack=ack,
         intent_seq=intent_seq,

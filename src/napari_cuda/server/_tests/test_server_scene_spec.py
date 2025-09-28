@@ -46,23 +46,27 @@ def test_build_scene_spec_json_round_trip(scene: ServerSceneData, manager: Viewe
     assert json_payload == scene.last_scene_spec_json
 
 
-class _StubSceneSource:
-    def __init__(self) -> None:
-        self.current_level = 0
-        self.level_descriptors = [
-            type("Desc", (), {"shape": (32, 32), "downsample": (1, 1), "path": "level_0"})
-        ]
-
-
 @pytest.mark.parametrize("step", ([0, 0], [3], [7, 1, 2]))
 def test_build_dims_payload(scene: ServerSceneData, step: list[int]) -> None:
     meta = {"ndim": max(1, len(step)), "order": ["z", "y", "x"], "volume": False}
+    scene.use_volume = False
+    scene.multiscale_state = {
+        "levels": [
+            {
+                "shape": [32 for _ in range(max(1, len(step)))],
+                "downsample": [1 for _ in range(max(1, len(step)))],
+                "path": "level_0",
+            }
+        ],
+        "current_level": 0,
+        "policy": "auto",
+        "index_space": "base",
+    }
     payload = build_dims_payload(
         scene,
         step_list=step,
         last_client_id="client-1",
         meta=meta,
-        worker_scene_source=_StubSceneSource(),
         use_volume=False,
     )
     assert payload["type"] == "dims.update"
@@ -81,7 +85,6 @@ def test_build_dims_payload_invalid(scene: ServerSceneData, bad_step: list[int])
             step_list=bad_step,
             last_client_id=None,
             meta=meta,
-            worker_scene_source=None,
             use_volume=False,
         )
 
