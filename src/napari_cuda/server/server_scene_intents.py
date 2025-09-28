@@ -35,6 +35,22 @@ class LayerIntentResult:
     server_seq: int
     client_seq: Optional[int]
     client_id: Optional[str]
+    interaction_id: Optional[str]
+    phase: Optional[str]
+
+
+@dataclass(frozen=True)
+class DimsCommandResult:
+    """Result of applying a dims control command."""
+
+    step: list[int]
+    prop: str
+    axis_key: str
+    server_seq: int
+    client_seq: Optional[int]
+    client_id: Optional[str]
+    interaction_id: Optional[str]
+    phase: Optional[str]
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -346,6 +362,8 @@ def apply_layer_intent(
     value: object,
     client_id: Optional[str] = None,
     client_seq: Optional[object] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
 ) -> Optional[LayerIntentResult]:
     """Normalize, gate, and stash a layer intent.
 
@@ -362,6 +380,15 @@ def apply_layer_intent(
         seq_int = None
 
     client_key = client_id if client_id is not None else "__anon__"
+    if interaction_id is not None:
+        interaction_id = str(interaction_id)
+    if phase is not None:
+        phase = str(phase)
+
+    if interaction_id is not None:
+        interaction_id = str(interaction_id)
+    if phase is not None:
+        phase = str(phase)
 
     with lock:
         control = scene.layer_controls.setdefault(layer_id, default_layer_controls())
@@ -392,6 +419,8 @@ def apply_layer_intent(
         meta.last_server_seq = server_seq
         meta.last_client_id = client_id
         meta.last_client_seq = seq_int
+        meta.last_interaction_id = interaction_id
+        meta.last_phase = phase
         if seq_int is not None:
             meta.client_seq_by_id[client_key] = seq_int
 
@@ -402,4 +431,111 @@ def apply_layer_intent(
         server_seq=server_seq,
         client_seq=seq_int,
         client_id=client_id,
+        interaction_id=interaction_id,
+        phase=phase,
+    )
+
+
+def apply_dims_command(
+    scene: ServerSceneData,
+    lock: Lock,
+    meta: Mapping[str, Any],
+    *,
+    axis: object,
+    prop: str,
+    step_delta: Optional[int],
+    set_value: Optional[int],
+    client_id: Optional[str] = None,
+    client_seq: Optional[object] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
+) -> Optional[DimsCommandResult]:
+    """Apply a dims control command returning the updated step list."""
+
+    seq_int: Optional[int]
+    try:
+        seq_int = int(client_seq) if client_seq is not None else None
+    except (TypeError, ValueError):
+        seq_int = None
+
+    client_key = client_id if client_id is not None else "__anon__"
+
+    with lock:
+        current = scene.latest_state.current_step
+    try:
+        ndim = int(meta.get("ndim") or (len(current) if current is not None else 0))
+    except Exception:
+        ndim = len(current) if current is not None else 0
+    if ndim <= 0:
+        ndim = len(current) if current is not None else 1
+
+    step = list(int(x) for x in (current or (0,) * int(ndim)))
+    if len(step) < int(ndim):
+        step.extend([0] * (int(ndim) - len(step)))
+
+    idx = resolve_axis_index(axis, meta, len(step))
+    if idx is None:
+        idx = 0 if step else None
+    if idx is None:
+        return None
+
+    control_key = f"{prop}:{idx}"
+
+    with lock:
+        meta_entry = scene.dims_control_meta.setdefault(control_key, LayerControlMeta())
+        if seq_int is not None:
+            last_seq = meta_entry.client_seq_by_id.get(client_key)
+            if last_seq is not None and seq_int <= last_seq:
+                return None
+
+        target = int(step[idx])
+        if step_delta is not None:
+            try:
+                target = target + int(step_delta)
+            except Exception:
+                pass
+        if set_value is not None:
+            try:
+                target = int(set_value)
+            except Exception:
+                pass
+
+        try:
+            rng = meta.get("range")
+            if isinstance(rng, Sequence) and idx < len(rng):
+                bounds = rng[idx]
+                if isinstance(bounds, Sequence) and len(bounds) >= 2:
+                    lo, hi = int(bounds[0]), int(bounds[1])
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    target = max(lo, min(hi, target))
+        except Exception:
+            pass
+
+        step[idx] = int(target)
+
+        latest = replace(scene.latest_state, current_step=tuple(step))
+        scene.latest_state = latest
+
+        server_seq = int(scene.dims_seq) & 0x7FFFFFFF
+        scene.dims_seq = (int(scene.dims_seq) + 1) & 0x7FFFFFFF
+        scene.last_dims_client_id = client_id
+
+        meta_entry.last_server_seq = server_seq
+        meta_entry.last_client_id = client_id
+        meta_entry.last_client_seq = seq_int
+        meta_entry.last_interaction_id = interaction_id
+        meta_entry.last_phase = phase
+        if seq_int is not None:
+            meta_entry.client_seq_by_id[client_key] = seq_int
+
+    return DimsCommandResult(
+        step=step,
+        prop=prop,
+        axis_key=str(idx),
+        server_seq=server_seq,
+        client_seq=seq_int,
+        client_id=client_id,
+        interaction_id=interaction_id,
+        phase=phase,
     )

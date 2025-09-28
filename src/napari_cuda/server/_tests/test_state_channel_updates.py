@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Coroutine
 
+from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE
 from napari_cuda.server import server_scene_intents as intents
 from napari_cuda.server import state_channel_handler
 from napari_cuda.server.render_mailbox import RenderDelta
@@ -26,7 +27,7 @@ async def _noop_broadcast(*_args, **_kwargs) -> None:
 def test_layer_intent_pushes_scene_state(monkeypatch) -> None:
     server = SimpleNamespace()
     server._scene = create_server_scene_data()
-    server._state_lock = threading.Lock()
+    server._state_lock = threading.RLock()
     server._worker = _CaptureWorker()
     server._log_state_traces = False
     server._allowed_render_modes = {"mip"}
@@ -47,12 +48,14 @@ def test_layer_intent_pushes_scene_state(monkeypatch) -> None:
     )
 
     payload = {
-        "type": "layer.intent.set_colormap",
-        "layer_id": "layer-0",
-        "name": "red",
+        "type": CONTROL_COMMAND_TYPE,
+        "scope": "layer",
+        "target": "layer-0",
+        "prop": "colormap",
+        "value": "red",
     }
 
-    asyncio.run(state_channel_handler._handle_layer_intent(server, payload, None))
+    asyncio.run(state_channel_handler._handle_control_command(server, payload, None))
     for coro in scheduled:
         asyncio.run(coro)
     scheduled.clear()
@@ -66,12 +69,13 @@ def test_layer_intent_pushes_scene_state(monkeypatch) -> None:
     assert meta["server_seq"] == 1
     assert meta["source_client_seq"] is None
     assert meta["layer_id"] == "layer-0"
+    assert meta.get("interaction_id") is None
 
 
 def test_layer_intent_stale_seq_ignored(monkeypatch) -> None:
     server = SimpleNamespace()
     server._scene = create_server_scene_data()
-    server._state_lock = threading.Lock()
+    server._state_lock = threading.RLock()
     server._worker = _CaptureWorker()
     server._log_state_traces = False
     server._allowed_render_modes = {"mip"}
@@ -87,23 +91,27 @@ def test_layer_intent_stale_seq_ignored(monkeypatch) -> None:
     monkeypatch.setattr(state_channel_handler, "broadcast_layer_update", _capture_broadcast)
 
     payload = {
-        "type": "layer.intent.set_gamma",
-        "layer_id": "layer-0",
-        "gamma": 1.3,
+        "type": CONTROL_COMMAND_TYPE,
+        "scope": "layer",
+        "target": "layer-0",
+        "prop": "gamma",
+        "value": 1.3,
         "client_id": "client-a",
         "client_seq": 10,
+        "interaction_id": "drag-1",
+        "phase": "update",
     }
 
-    asyncio.run(state_channel_handler._handle_layer_intent(server, payload, None))
+    asyncio.run(state_channel_handler._handle_control_command(server, payload, None))
     for coro in scheduled:
         asyncio.run(coro)
     scheduled.clear()
 
     stale_payload = dict(payload)
-    stale_payload["gamma"] = 0.8
+    stale_payload["value"] = 0.8
     stale_payload["client_seq"] = 8
 
-    asyncio.run(state_channel_handler._handle_layer_intent(server, stale_payload, None))
+    asyncio.run(state_channel_handler._handle_control_command(server, stale_payload, None))
     for coro in scheduled:
         asyncio.run(coro)
     scheduled.clear()
@@ -111,6 +119,57 @@ def test_layer_intent_stale_seq_ignored(monkeypatch) -> None:
     assert len(server._worker.deltas) == 1
     assert len(captured) == 1
     assert captured[0]["server_seq"] == 1
+    assert captured[0]["interaction_id"] == "drag-1"
+    assert captured[0]["phase"] == "update"
+
+
+def test_control_command_dims_updates(monkeypatch) -> None:
+    server = SimpleNamespace()
+    server._scene = create_server_scene_data()
+    server._state_lock = threading.RLock()
+    server._worker = _CaptureWorker()
+    server._log_state_traces = False
+    server._dims_metadata = lambda: {"ndim": 3, "order": ["z", "y", "x"], "range": [[0, 9], [0, 9], [0, 9]]}
+    scheduled: list[Coroutine[Any, Any, None]] = []
+    server._schedule_coro = lambda coro, _label: scheduled.append(coro)  # type: ignore[arg-type]
+    server.metrics = SimpleNamespace(inc=lambda *a, **k: None)
+
+    captured: list[dict[str, Any]] = []
+
+    async def _capture_dims(_server, step_list, **kwargs) -> None:
+        kwargs = dict(kwargs)
+        kwargs["step_list"] = list(step_list)
+        captured.append(kwargs)
+
+    monkeypatch.setattr(state_channel_handler, "broadcast_dims_update", _capture_dims)
+
+    payload = {
+        "type": CONTROL_COMMAND_TYPE,
+        "scope": "dims",
+        "target": "z",
+        "prop": "step",
+        "value": 5,
+        "client_id": "client-z",
+        "client_seq": 3,
+        "interaction_id": "dims-1",
+        "phase": "commit",
+    }
+
+    asyncio.run(state_channel_handler._handle_control_command(server, payload, None))
+
+    for coro in scheduled:
+        asyncio.run(coro)
+    scheduled.clear()
+
+    assert server._scene.latest_state.current_step[0] == 5
+    assert captured, "expected dims broadcast"
+    entry = captured[0]
+    assert entry["step_list"][0] == 5
+    assert entry["server_seq"] == 0
+    assert entry["source_client_seq"] == 3
+    assert entry["interaction_id"] == "dims-1"
+    assert entry["phase"] == "commit"
+    assert entry["control_prop"] == "step"
 
 async def _noop_level_ready(_timeout: float) -> None:
     return None
@@ -137,7 +196,7 @@ def test_send_state_baseline_pushes_layer_controls(monkeypatch) -> None:
         server = SimpleNamespace()
         server._scene = create_server_scene_data()
         server._scene.use_volume = False
-        server._state_lock = threading.Lock()
+        server._state_lock = threading.RLock()
         result_one = intents.apply_layer_intent(
             server._scene,
             server._state_lock,

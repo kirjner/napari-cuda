@@ -134,7 +134,11 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
     scene = manager.scene_spec()
     assert scene is not None
     assert scene.dims.current_step == [5, 6]
-    assert scene.capabilities == ["layer.update", "layer.remove"]
+    assert scene.capabilities == [
+        "layer.update",
+        "layer.remove",
+        "control.command",
+    ]
 
 
 def test_empty_multiscale_levels(manager: ViewerSceneManager) -> None:

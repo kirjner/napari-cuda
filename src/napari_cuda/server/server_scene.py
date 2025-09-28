@@ -115,11 +115,13 @@ class LayerControlState:
 
 @dataclass
 class LayerControlMeta:
-    """Sequencing metadata for a specific layer control property."""
+    """Sequencing metadata for a specific control property."""
 
     last_server_seq: int = 0
     last_client_id: Optional[str] = None
     last_client_seq: Optional[int] = None
+    last_interaction_id: Optional[str] = None
+    last_phase: Optional[str] = None
     client_seq_by_id: Dict[str, int] = field(default_factory=dict)
 
 
@@ -149,6 +151,7 @@ class ServerSceneData:
     last_scene_spec_json: Optional[str] = None
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     layer_control_meta: Dict[str, Dict[str, LayerControlMeta]] = field(default_factory=dict)
+    dims_control_meta: Dict[str, LayerControlMeta] = field(default_factory=dict)
     next_layer_server_seq: int = 0
 
 

@@ -59,7 +59,11 @@ class ViewerSceneManager:
         self._canvas_size = (int(canvas_size[0]), int(canvas_size[1]))
         self._default_layer_id = default_layer_id
         self._default_layer_name = default_layer_name
-        self._capabilities: List[str] = ["layer.update", "layer.remove"]
+        self._capabilities: List[str] = [
+            "layer.update",
+            "layer.remove",
+            "control.command",
+        ]
         self._scene: Optional[SceneSpec] = None
 
     # ------------------------------------------------------------------
@@ -726,12 +730,10 @@ class ViewerSceneManager:
             return None
 
         shading = volume_state.get("shade")
-        sample_step = volume_state.get("sample_step")
         hints = LayerRenderHints(
             shading=str(shading) if shading else None,
-            sample_step=float(sample_step) if sample_step is not None else None,
         )
-        return hints if any((hints.shading, hints.sample_step)) else None
+        return hints if hints.shading else None
 
     def _apply_to_viewer(
         self,

@@ -377,7 +377,7 @@ class EGLRendererWorker:
 
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._render_mailbox = RenderMailbox()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0

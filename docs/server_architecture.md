@@ -57,7 +57,7 @@ Websocket Clients (state + pixel)
 
 - **ServerSceneData** (`src/napari_cuda/server/server_scene.py`)
   - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, SceneSpec caches, and policy logging state.
-  - Tracks canonical per-layer controls via `LayerControlState`; `layer.intent.*` handlers mutate this bag, which then feeds both the worker (planar updates) and the spec builders.
+  - Tracks canonical per-layer controls via `LayerControlState`; the new `control.command` surface (and, temporarily, the legacy `layer.intent.*` messages) mutate this bag before the worker and spec builders consume it. The intent path will be retired once every client speaks `control.command`.
   - Intent helpers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
   - Lives alongside `render_mailbox.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
   - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
@@ -66,10 +66,10 @@ Websocket Clients (state + pixel)
   reconnects and multi-client interactions can reconcile authoritative state quickly. `extras`
   continues to hold transport metadata only (volume flags, zarr paths, adapter hints).
 - **Control Channel Helpers** (`state_channel_handler.py`)
-  - Orchestrate state-channel websocket flow: connection setup, intent dispatch, dims/spec broadcasting, and policy/metrics logging.
+  - Orchestrate state-channel websocket flow: connection setup, `control.command` dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
-  - Delegate intent mutations to `server_scene_intents.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a lock.
+  - Delegate command mutations to `server_scene_intents.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a re-entrant lock.
   - Worker refresh notifications travel through a dedicated worker→control queue, so the control loop updates the scene manager before emitting dims/spec payloads; no deferred flushes or ad-hoc regeneration needed.
 - **Worker Lifecycle Helpers** (`worker_lifecycle.py`)
   - `WorkerLifecycleState` tracks the render thread, worker instance, and stop event in a single bag controlled by the lifecycle helpers.
@@ -85,11 +85,12 @@ Websocket Clients (state + pixel)
 
 The headless server works as two cooperating loops around a single scene record:
 
-1. **State channel (async loop)** – receives intents from the UI, normalises them, and mutates the
-   authoritative `ServerSceneData`. Each mutation produces a delta that is recorded for
+1. **State channel (async loop)** – receives `control.command` payloads from the UI, normalises them,
+   and mutates the authoritative `ServerSceneData`. Each mutation produces a delta that is recorded for
    acknowledgements and handed to the render worker through its update mailbox. The async loop also
-   broadcasts the canonical scene spec, dims metadata, and the layer `controls` map back to clients,
-   and forwards encoded frames to the pixel broadcaster.
+   broadcasts the canonical scene spec, dims metadata, and the layer `controls` map (including
+   `{server_seq, source_client_seq, interaction_id, phase}` metadata) back to clients, and forwards
+   encoded frames to the pixel broadcaster.
 
 2. **Render worker (dedicated thread)** – maintains the napari `ViewerModel` and the VisPy visual. It
    drains the update mailbox each tick, applies the coalesced deltas via `SceneStateApplier`, renders

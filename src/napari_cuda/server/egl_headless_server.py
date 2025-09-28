@@ -227,7 +227,7 @@ class EGLHeadlessServer:
         self._dump_dir = self._ctx.dump_dir
         self._dump_path: Optional[str] = None
         # State access synchronization for latest-wins camera op coalescing
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops

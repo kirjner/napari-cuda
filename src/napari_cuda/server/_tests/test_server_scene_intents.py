@@ -11,8 +11,8 @@ from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server import server_scene_intents as intents
 
 
-def _lock() -> threading.Lock:
-    return threading.Lock()
+def _lock() -> threading.RLock:
+    return threading.RLock()
 
 
 def test_apply_dims_intent_clamps_to_range():

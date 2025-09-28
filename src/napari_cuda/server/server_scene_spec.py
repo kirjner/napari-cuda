@@ -60,6 +60,12 @@ def build_dims_payload(
     use_volume: bool,
     ack: bool = False,
     intent_seq: Optional[int] = None,
+    server_seq: Optional[int] = None,
+    source_client_id: Optional[str] = None,
+    source_client_seq: Optional[int] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    control_versions: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Construct a dims.update payload and cache it on the scene bag."""
 
@@ -103,7 +109,12 @@ def build_dims_payload(
                     lo, hi = hi, lo
                 full[i] = max(lo, min(hi, full[i]))
 
-    seq_val = increment_dims_sequence(scene, last_client_id)
+    if server_seq is None:
+        seq_val = increment_dims_sequence(scene, last_client_id)
+    else:
+        seq_val = int(server_seq)
+        if last_client_id is not None:
+            scene.last_dims_client_id = last_client_id
     payload: Dict[str, Any] = {
         "type": "dims.update",
         "seq": seq_val,
@@ -165,6 +176,27 @@ def build_dims_payload(
         if intent_seq is not None:
             payload["intent_seq"] = int(intent_seq)
 
+    payload["server_seq"] = seq_val
+    if source_client_id is not None:
+        payload["source_client_id"] = source_client_id
+    if source_client_seq is not None:
+        payload["source_client_seq"] = int(source_client_seq)
+    if interaction_id is not None:
+        payload["interaction_id"] = interaction_id
+    if phase is not None:
+        payload["phase"] = phase
+    if control_versions:
+        sanitized = {
+            str(prop): {
+                key: value
+                for key, value in entry.items()
+                if value is not None
+            }
+            for prop, entry in control_versions.items()
+        }
+        if sanitized:
+            payload["control_versions"] = sanitized
+
     meta_out["normalized"] = not bool(use_volume)
     if meta_out.get("multiscale"):
         levels_meta = meta_out["multiscale"]["levels"]
@@ -191,6 +223,9 @@ def build_layer_update_payload(
     source_client_id: Optional[str] = None,
     source_client_seq: Optional[int] = None,
     control_versions: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    ack: bool = True,
 ) -> Dict[str, Any]:
     """Construct a layer.update payload reflecting *changes* for *layer_id*."""
 
@@ -226,21 +261,9 @@ def build_layer_update_payload(
         base_dict["contrast_limits"] = [float(pair[0]), float(pair[1])]
 
     patch = LayerSpec.from_dict(base_dict)
-    message = LayerUpdateMessage(layer=patch, partial=True)
-    payload = message.to_dict()
-    payload["ack"] = True
-    if intent_seq is not None:
-        payload["intent_seq"] = int(intent_seq)
-    if server_seq is not None:
-        payload["server_seq"] = int(server_seq)
-    if source_client_id is not None:
-        payload["source_client_id"] = str(source_client_id)
-    if source_client_seq is not None:
-        payload["source_client_seq"] = int(source_client_seq)
-    if control_map:
-        payload["controls"] = control_map
+    sanitized_versions: Optional[Dict[str, Dict[str, Any]]] = None
     if control_versions:
-        payload["control_versions"] = {
+        sanitized_versions = {
             str(prop): {
                 key: value
                 for key, value in meta.items()
@@ -248,4 +271,18 @@ def build_layer_update_payload(
             }
             for prop, meta in control_versions.items()
         }
-    return payload
+
+    message = LayerUpdateMessage(
+        layer=patch,
+        partial=True,
+        ack=ack,
+        intent_seq=intent_seq,
+        controls=control_map or None,
+        server_seq=server_seq,
+        source_client_id=source_client_id,
+        source_client_seq=source_client_seq,
+        interaction_id=interaction_id,
+        phase=phase,
+        control_versions=sanitized_versions,
+    )
+    return message.to_dict()

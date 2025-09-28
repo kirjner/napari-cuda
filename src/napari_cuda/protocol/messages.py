@@ -10,6 +10,9 @@ from dataclasses import dataclass, asdict, field, is_dataclass
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 
+CONTROL_COMMAND_TYPE = "control.command"
+
+
 class MessageType(enum.Enum):
     """Types of messages in the legacy protocol (kept for compatibility helpers).
 
@@ -87,6 +90,38 @@ class Response(StateMessage):
     success: bool = True
     payload: dict = None
     error: str = None
+
+
+@dataclass
+class ControlCommand:
+    """Envelope for control mutations sent from the client to the server."""
+
+    scope: str
+    target: str
+    prop: str
+    value: Any
+    client_id: Optional[str] = None
+    client_seq: Optional[int] = None
+    interaction_id: Optional[str] = None
+    phase: Optional[str] = None
+    timestamp: Optional[float] = None
+    extras: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": CONTROL_COMMAND_TYPE,
+            "scope": self.scope,
+            "target": self.target,
+            "prop": self.prop,
+            "value": self.value,
+            "client_id": self.client_id,
+            "client_seq": self.client_seq,
+            "interaction_id": self.interaction_id,
+            "phase": self.phase,
+            "timestamp": self.timestamp,
+            "extras": self.extras,
+        }
+        return _strip_none(payload)
 
 
 @dataclass
@@ -266,7 +301,6 @@ class LayerRenderHints:
     attenuation: Optional[float] = None
     gamma: Optional[float] = None
     shading: Optional[str] = None
-    sample_step: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return _strip_none(asdict(self))
@@ -381,6 +415,7 @@ class LayerSpec:
             render=LayerRenderHints.from_dict(render) if isinstance(render, dict) else render,
             multiscale=MultiscaleSpec.from_dict(multiscale) if isinstance(multiscale, dict) else multiscale,
             extras=data.get("extras"),
+            controls=data.get("controls"),
         )
 
 
@@ -533,6 +568,15 @@ class LayerUpdateMessage(StateMessage):
     version: int = SPEC_VERSION
     layer: Optional[LayerSpec] = None
     partial: bool = False
+    ack: Optional[bool] = None
+    intent_seq: Optional[int] = None
+    controls: Optional[Dict[str, Any]] = None
+    server_seq: Optional[int] = None
+    source_client_id: Optional[str] = None
+    source_client_seq: Optional[int] = None
+    interaction_id: Optional[str] = None
+    phase: Optional[str] = None
+    control_versions: Optional[Dict[str, Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         if self.layer is None:
@@ -543,6 +587,15 @@ class LayerUpdateMessage(StateMessage):
             "timestamp": self.timestamp,
             "layer": self.layer.to_dict(),
             "partial": bool(self.partial),
+            "ack": self.ack,
+            "intent_seq": int(self.intent_seq) if self.intent_seq is not None else None,
+            "controls": self.controls,
+            "server_seq": int(self.server_seq) if self.server_seq is not None else None,
+            "source_client_id": self.source_client_id,
+            "source_client_seq": int(self.source_client_seq) if self.source_client_seq is not None else None,
+            "interaction_id": self.interaction_id,
+            "phase": self.phase,
+            "control_versions": self.control_versions,
         }
         return _strip_none(payload)
 
@@ -553,12 +606,40 @@ class LayerUpdateMessage(StateMessage):
     def from_dict(cls, data: Dict[str, Any]) -> "LayerUpdateMessage":
         layer_data = data.get("layer")
         layer = LayerSpec.from_dict(layer_data) if isinstance(layer_data, dict) else None
+        if "intent_seq" in data and data["intent_seq"] is not None:
+            intent_seq_int = int(data["intent_seq"])
+        else:
+            intent_seq_int = None
+
+        if "ack" in data and data["ack"] is not None:
+            ack_val = data["ack"]
+            if not isinstance(ack_val, bool):
+                raise TypeError("LayerUpdateMessage ack must be a boolean")
+        else:
+            ack_val = None
+        controls_payload = data.get("controls") if isinstance(data.get("controls"), dict) else None
+        control_versions_payload = (
+            data.get("control_versions")
+            if isinstance(data.get("control_versions"), dict)
+            else None
+        )
+        if layer is not None and controls_payload is not None:
+            layer.controls = dict(controls_payload)
         return cls(
             type=data.get("type", LAYER_UPDATE_TYPE),
             version=int(data.get("version", SPEC_VERSION)),
             timestamp=data.get("timestamp"),
             layer=layer,
             partial=bool(data.get("partial", False)),
+            ack=ack_val,
+            intent_seq=intent_seq_int,
+            controls=controls_payload,
+            server_seq=int(data["server_seq"]) if data.get("server_seq") is not None else None,
+            source_client_id=data.get("source_client_id"),
+            source_client_seq=int(data["source_client_seq"]) if data.get("source_client_seq") is not None else None,
+            interaction_id=data.get("interaction_id"),
+            phase=data.get("phase"),
+            control_versions=control_versions_payload,
         )
 
 

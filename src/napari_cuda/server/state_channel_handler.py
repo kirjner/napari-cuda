@@ -7,10 +7,11 @@ import json
 import logging
 import socket
 from collections.abc import Awaitable, Callable
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
 
+from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE
 from napari_cuda.server import server_scene_intents as intents
 from napari_cuda.server.render_mailbox import RenderDelta
 from napari_cuda.server.scene_state import ServerSceneState
@@ -89,89 +90,6 @@ async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> b
 
 async def _handle_legacy_dims(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     logger.debug("state: dims.set ignored (use dims.intent.*)")
-    return True
-
-
-async def _handle_dims_step(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    axis = data.get('axis')
-    delta = int(data.get('delta') or 0)
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if server._log_dims_info:
-        logger.info("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
-    else:
-        logger.debug("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
-    try:
-        meta = server._dims_metadata() or {}
-        new_step = intents.apply_dims_intent(
-            server._scene,
-            server._state_lock,
-            meta,
-            axis=axis,
-            step_delta=delta,
-            set_value=None,
-        )
-        if new_step is not None:
-            try:
-                intent_i = int(client_seq) if client_seq is not None else None
-            except Exception:
-                intent_i = None
-            _enqueue_latest_state_for_worker(server)
-            server._schedule_coro(
-                broadcast_dims_update(
-                    server,
-                    new_step,
-                    last_client_id=client_id,
-                    ack=True,
-                    intent_seq=intent_i,
-                ),
-                'dims_update-step',
-            )
-    except Exception as exc:
-        logger.debug("dims.intent.step handling failed: %s", exc)
-    return True
-
-
-async def _handle_dims_set_index(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    axis = data.get('axis')
-    try:
-        value = int(data.get('value'))
-    except Exception:
-        value = 0
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if server._log_dims_info:
-        logger.info("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
-    else:
-        logger.debug("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
-    try:
-        meta = server._dims_metadata() or {}
-        new_step = intents.apply_dims_intent(
-            server._scene,
-            server._state_lock,
-            meta,
-            axis=axis,
-            step_delta=None,
-            set_value=value,
-        )
-        if new_step is not None:
-            try:
-                intent_i = int(client_seq) if client_seq is not None else None
-            except Exception:
-                intent_i = None
-            _enqueue_latest_state_for_worker(server)
-            server._schedule_coro(
-                broadcast_dims_update(
-                    server,
-                    new_step,
-                    last_client_id=client_id,
-                    ack=True,
-                    intent_seq=intent_i,
-                ),
-                'dims_update-set_index',
-            )
-    except Exception as exc:
-        logger.debug("dims.intent.set_index handling failed: %s", exc)
     return True
 
 
@@ -277,81 +195,212 @@ async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: A
     return True
 
 
-async def _handle_layer_intent(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    msg_type = str(data.get('type') or '')
-    prefix = 'image.intent.' if msg_type.startswith('image.intent.') else 'layer.intent.'
-    prop_token = msg_type[len(prefix):]
-    if prop_token.startswith('set_'):
-        prop_token = prop_token[4:]
-    prop = prop_token.strip().lower()
-    layer_id = str(data.get('layer_id') or 'layer-0')
+async def _handle_control_command(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    scope = str(data.get('scope') or '').strip().lower()
+    prop = str(data.get('prop') or '').strip().lower()
+    if not scope or not prop:
+        logger.debug("control.command missing scope/prop")
+        return True
+
+    target = data.get('target')
     client_id = data.get('client_id') or None
     client_seq = data.get('client_seq')
+    interaction_id = data.get('interaction_id')
+    phase = data.get('phase')
+    if interaction_id is not None:
+        interaction_id = str(interaction_id)
+    if phase is not None:
+        phase = str(phase)
     value = data.get('value')
-    if value is None and prop in data:
-        value = data[prop]
-    if value is None:
-        if prop == 'opacity':
-            value = data.get('alpha')
-        elif prop == 'gamma':
-            value = data.get('gamma')
-        elif prop == 'contrast_limits':
-            value = data.get('contrast_limits') or data.get('limits')
-        elif prop == 'colormap':
-            value = data.get('name')
-        elif prop == 'visible':
-            value = data.get('visible')
-    if value is None:
-        logger.debug("layer intent missing value for prop=%s", prop)
-        return True
-    try:
-        result = intents.apply_layer_intent(
-            server._scene,
-            server._state_lock,
-            layer_id=layer_id,
-            prop=prop,
-            value=value,
-            client_id=client_id,
-            client_seq=client_seq,
-        )
-    except Exception as exc:
-        logger.debug("layer intent failed prop=%s layer=%s error=%s", prop, layer_id, exc)
-        return True
-    if result is None:
-        logger.debug(
-            "intent: layer.%s ignored (stale seq) layer_id=%s client_id=%s seq=%s",
+    extras = data.get('extras') if isinstance(data.get('extras'), Mapping) else {}
+
+    if scope == 'layer':
+        layer_id = str(target or data.get('layer_id') or 'layer-0')
+        if not layer_id:
+            logger.debug("control.command layer scope missing target")
+            return True
+        try:
+            result = intents.apply_layer_intent(
+                server._scene,
+                server._state_lock,
+                layer_id=layer_id,
+                prop=prop,
+                value=value,
+                client_id=client_id,
+                client_seq=client_seq,
+                interaction_id=interaction_id,
+                phase=phase,
+            )
+        except KeyError:
+            logger.debug("control.command unknown layer prop=%s", prop)
+            return True
+        except Exception:
+            logger.debug("control.command failed for layer=%s prop=%s", layer_id, prop, exc_info=True)
+            return True
+        if result is None:
+            logger.debug(
+                "control.command stale layer=%s prop=%s client_id=%s seq=%s",
+                layer_id,
+                prop,
+                client_id,
+                client_seq,
+            )
+            return True
+
+        applied = result.applied
+        versions = _layer_control_versions(server._scene, layer_id, applied.keys())
+        log_fn = logger.info if server._log_state_traces else logger.debug
+        log_fn(
+            "control: layer.%s layer_id=%s value=%s client_id=%s seq=%s server_seq=%s phase=%s",
             prop,
             layer_id,
+            applied.get(prop),
             client_id,
             client_seq,
+            result.server_seq,
+            phase,
+        )
+        _enqueue_latest_state_for_worker(server)
+        server._schedule_coro(
+            broadcast_layer_update(
+                server,
+                layer_id=layer_id,
+                changes=applied,
+                intent_seq=result.client_seq,
+                server_seq=result.server_seq,
+                source_client_id=result.client_id,
+                source_client_seq=result.client_seq,
+                interaction_id=result.interaction_id,
+                phase=result.phase,
+                control_versions=versions,
+            ),
+            f'control-layer-{prop}',
         )
         return True
-    applied = result.applied
-    log_fn = logger.info if server._log_state_traces else logger.debug
-    log_fn(
-        "intent: layer.%s layer_id=%s value=%s client_id=%s seq=%s server_seq=%s",
-        prop,
-        layer_id,
-        applied.get(prop),
-        client_id,
-        client_seq,
-        result.server_seq,
-    )
-    _enqueue_latest_state_for_worker(server)
-    intent_i = result.client_seq
-    server._schedule_coro(
-        broadcast_layer_update(
-            server,
-            layer_id=layer_id,
-            changes=applied,
-            intent_seq=intent_i,
-            server_seq=result.server_seq,
-            source_client_id=result.client_id,
-            source_client_seq=result.client_seq,
-        ),
-        f'layer_update-{prop}',
-    )
+
+    if scope == 'dims':
+        axis = extras.get('axis') if isinstance(extras, Mapping) else None
+        if axis is None:
+            axis = data.get('axis')
+        if axis is None:
+            axis = target
+        meta = server._dims_metadata() or {}
+        step_delta = None
+        set_value = None
+        if isinstance(extras, Mapping):
+            if extras.get('step_delta') is not None:
+                try:
+                    step_delta = int(extras['step_delta'])
+                except Exception:
+                    step_delta = None
+            if extras.get('value') is not None:
+                try:
+                    set_value = int(extras['value'])
+                except Exception:
+                    set_value = None
+        if prop in {'step_delta', 'delta'} and value is not None:
+            try:
+                step_delta = int(value)
+            except Exception:
+                step_delta = None
+            prop_key = 'step'
+        elif prop in {'step', 'index', 'value'}:
+            prop_key = 'step'
+            if value is not None:
+                try:
+                    set_value = int(value)
+                except Exception:
+                    set_value = None
+        else:
+            logger.debug("control.command unknown dims prop=%s", prop)
+            return True
+
+        try:
+            result = intents.apply_dims_command(
+                server._scene,
+                server._state_lock,
+                meta,
+                axis=axis,
+                prop=prop_key,
+                step_delta=step_delta,
+                set_value=set_value,
+                client_id=client_id,
+                client_seq=client_seq,
+                interaction_id=interaction_id,
+                phase=phase,
+            )
+        except Exception:
+            logger.debug("control.command dims failed axis=%s prop=%s", axis, prop, exc_info=True)
+            return True
+        if result is None:
+            logger.debug(
+                "control.command dims stale axis=%s prop=%s client_id=%s seq=%s",
+                axis,
+                prop,
+                client_id,
+                client_seq,
+            )
+            return True
+
+        _enqueue_latest_state_for_worker(server)
+        server._schedule_coro(
+            broadcast_dims_update(
+                server,
+                result.step,
+                last_client_id=client_id,
+                ack=True,
+                intent_seq=result.client_seq,
+                server_seq=result.server_seq,
+                source_client_seq=result.client_seq,
+                source_client_id=client_id,
+                interaction_id=result.interaction_id,
+                phase=result.phase,
+                control_prop=result.prop,
+                control_axis=result.axis_key,
+            ),
+            f'control-dims-{prop}',
+        )
+        return True
+
+    logger.debug("control.command unknown scope=%s", scope)
     return True
+
+
+def _layer_control_versions(
+    scene: Any, layer_id: str, props: Iterable[str]
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    meta_map = scene.layer_control_meta.get(layer_id, {}) if scene is not None else {}
+    versions: Dict[str, Dict[str, Any]] = {}
+    for prop in props:
+        meta = meta_map.get(prop)
+        if meta is None:
+            continue
+        versions[str(prop)] = {
+            "server_seq": meta.last_server_seq or None,
+            "source_client_id": meta.last_client_id,
+            "source_client_seq": meta.last_client_seq,
+            "interaction_id": meta.last_interaction_id,
+            "phase": meta.last_phase,
+        }
+    return versions or None
+
+
+def _dims_control_entry(
+    scene: Any, prop: str, axis_key: str
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    key = f"{prop}:{axis_key}"
+    meta = scene.dims_control_meta.get(key) if scene is not None else None
+    if meta is None:
+        return None
+    return {
+        key: {
+            "server_seq": meta.last_server_seq or None,
+            "source_client_id": meta.last_client_id,
+            "source_client_seq": meta.last_client_seq,
+            "interaction_id": meta.last_interaction_id,
+            "phase": meta.last_phase,
+        }
+    }
 
 
 async def _handle_multiscale_policy(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
@@ -561,8 +610,7 @@ MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     'set_camera': _handle_set_camera,
     'dims.set': _handle_legacy_dims,
     'set_dims': _handle_legacy_dims,
-    'dims.intent.step': _handle_dims_step,
-    'dims.intent.set_index': _handle_dims_set_index,
+    CONTROL_COMMAND_TYPE: _handle_control_command,
     'volume.intent.set_render_mode': _handle_volume_render_mode,
     'volume.intent.set_clim': _handle_volume_clim,
     'volume.intent.set_colormap': _handle_volume_colormap,
@@ -580,11 +628,6 @@ MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     'force_idr': _handle_force_keyframe,
 }
 
-PREFIX_HANDLERS: tuple[tuple[str, StateMessageHandler], ...] = (
-    ('layer.intent.', _handle_layer_intent),
-    ('image.intent.', _handle_layer_intent),
-)
-
 
 async def process_state_message(server: Any, data: dict, ws: Any) -> None:
     msg_type = data.get('type')
@@ -596,11 +639,6 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
         handler: StateMessageHandler | None = None
         if isinstance(msg_type, str):
             handler = MESSAGE_HANDLERS.get(msg_type)
-            if handler is None:
-                for prefix, prefix_handler in PREFIX_HANDLERS:
-                    if msg_type.startswith(prefix):
-                        handler = prefix_handler
-                        break
         if handler is None:
             if server._log_state_traces:
                 logger.info("state message ignored type=%s", msg_type)
@@ -717,7 +755,13 @@ async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
                 source_of_truth, chosen, state_step, w_step, s_step,
             )
 
-        await broadcast_dims_update(server, chosen, last_client_id=client_id, ack=True, intent_seq=None)
+        await broadcast_dims_update(
+            server,
+            chosen,
+            last_client_id=client_id,
+            ack=True,
+            intent_seq=None,
+        )
     except Exception as e:
         logger.debug("rebroadcast meta failed: %s", e)
 
@@ -730,6 +774,13 @@ async def broadcast_dims_update(
     last_client_id: Optional[str],
     ack: bool,
     intent_seq: Optional[int],
+    server_seq: Optional[int] = None,
+    source_client_id: Optional[str] = None,
+    source_client_seq: Optional[int] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    control_prop: Optional[str] = None,
+    control_axis: Optional[str] = None,
 ) -> None:
     """Broadcast a dims update through the state channel."""
 
@@ -740,12 +791,22 @@ async def broadcast_dims_update(
         f"dims_update step length {len(step)} exceeds metadata ndim {ndim}"
     )
 
+    versions = None
+    if control_prop is not None and control_axis is not None:
+        versions = _dims_control_entry(server._scene, control_prop, control_axis)
+
     payload = build_dims_update_message(
         server,
         step_list=step,
         last_client_id=last_client_id,
         ack=ack,
         intent_seq=intent_seq,
+        server_seq=server_seq,
+        source_client_id=source_client_id,
+        source_client_seq=source_client_seq,
+        interaction_id=interaction_id,
+        phase=phase,
+        control_versions=versions,
     )
     await server._broadcast_state_json(payload)
 
@@ -759,21 +820,15 @@ async def broadcast_layer_update(
     server_seq: Optional[int] = None,
     source_client_id: Optional[str] = None,
     source_client_seq: Optional[int] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    control_versions: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """Broadcast a layer.update payload for the given *layer_id*."""
 
     if not changes:
         return
-    versions: Optional[Dict[str, Dict[str, Any]]] = None
-    if server_seq is not None or source_client_seq is not None or source_client_id is not None:
-        versions = {}
-        meta_entry = {
-            "server_seq": server_seq,
-            "source_client_id": source_client_id,
-            "source_client_seq": source_client_seq,
-        }
-        for key in changes.keys():
-            versions[key] = dict(meta_entry)
+    versions = control_versions or _layer_control_versions(server._scene, layer_id, changes.keys())
     payload = build_layer_update_payload(
         server._scene,
         server._scene_manager,
@@ -784,6 +839,8 @@ async def broadcast_layer_update(
         source_client_id=source_client_id,
         source_client_seq=source_client_seq,
         control_versions=versions,
+        interaction_id=interaction_id,
+        phase=phase,
     )
     await server._broadcast_state_json(payload)
 
@@ -967,6 +1024,8 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
         meta_map = scene.layer_control_meta.get(layer_id, {})
         control_versions: Dict[str, Dict[str, Any]] = {}
         max_server_seq: Optional[int] = None
+        latest_interaction: Optional[str] = None
+        latest_phase: Optional[str] = None
         for key in changes.keys():
             meta = meta_map.get(key)
             if meta is None:
@@ -978,8 +1037,13 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
                 "server_seq": meta.last_server_seq or None,
                 "source_client_id": meta.last_client_id,
                 "source_client_seq": meta.last_client_seq,
+                "interaction_id": meta.last_interaction_id,
+                "phase": meta.last_phase,
             }
             control_versions[str(key)] = version_entry
+            if latest_interaction is None and meta.last_interaction_id:
+                latest_interaction = meta.last_interaction_id
+                latest_phase = meta.last_phase
 
         payload = build_layer_update_payload(
             scene,
@@ -991,8 +1055,10 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
             source_client_id=None,
             source_client_seq=None,
             control_versions=control_versions or None,
+            interaction_id=latest_interaction,
+            phase=latest_phase,
+            ack=False,
         )
-        payload["ack"] = False
         payload.pop("intent_seq", None)
         await server._safe_state_send(ws, json.dumps(payload))
 
@@ -1004,6 +1070,12 @@ def build_dims_update_message(
     last_client_id: Optional[str],
     ack: bool,
     intent_seq: Optional[int],
+    server_seq: Optional[int] = None,
+    source_client_id: Optional[str] = None,
+    source_client_seq: Optional[int] = None,
+    interaction_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    control_versions: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> dict:
     """Create a dims.update payload for the current server context."""
 
@@ -1020,6 +1092,12 @@ def build_dims_update_message(
         use_volume=use_volume,
         ack=ack,
         intent_seq=intent_seq,
+        server_seq=server_seq,
+        source_client_id=source_client_id,
+        source_client_seq=source_client_seq,
+        interaction_id=interaction_id,
+        phase=phase,
+        control_versions=control_versions,
     )
 
 

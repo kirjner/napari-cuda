@@ -65,7 +65,7 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     server._log_cam_info = False
     server._log_cam_debug = False
     server._publish_policy_metrics = lambda: None
-    server._state_lock = threading.Lock()
+    server._state_lock = threading.RLock()
     scene = create_server_scene_data(policy_event_path=tmp_path / "policy_events.jsonl")
     scene.latest_state = ServerSceneState(current_step=(0,))
     scene.camera_commands = deque()
