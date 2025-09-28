@@ -7,7 +7,7 @@ import json
 import logging
 import socket
 from collections.abc import Awaitable, Callable
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
 
@@ -305,36 +305,49 @@ async def _handle_layer_intent(server: Any, data: Mapping[str, Any], ws: Any) ->
         logger.debug("layer intent missing value for prop=%s", prop)
         return True
     try:
-        applied = intents.apply_layer_intent(
+        result = intents.apply_layer_intent(
             server._scene,
             server._state_lock,
             layer_id=layer_id,
             prop=prop,
             value=value,
+            client_id=client_id,
+            client_seq=client_seq,
         )
     except Exception as exc:
         logger.debug("layer intent failed prop=%s layer=%s error=%s", prop, layer_id, exc)
         return True
+    if result is None:
+        logger.debug(
+            "intent: layer.%s ignored (stale seq) layer_id=%s client_id=%s seq=%s",
+            prop,
+            layer_id,
+            client_id,
+            client_seq,
+        )
+        return True
+    applied = result.applied
     log_fn = logger.info if server._log_state_traces else logger.debug
     log_fn(
-        "intent: layer.%s layer_id=%s value=%s client_id=%s seq=%s",
+        "intent: layer.%s layer_id=%s value=%s client_id=%s seq=%s server_seq=%s",
         prop,
         layer_id,
         applied.get(prop),
         client_id,
         client_seq,
+        result.server_seq,
     )
     _enqueue_latest_state_for_worker(server)
-    try:
-        intent_i = int(client_seq) if client_seq is not None else None
-    except Exception:
-        intent_i = None
+    intent_i = result.client_seq
     server._schedule_coro(
         broadcast_layer_update(
             server,
             layer_id=layer_id,
             changes=applied,
             intent_seq=intent_i,
+            server_seq=result.server_seq,
+            source_client_id=result.client_id,
+            source_client_seq=result.client_seq,
         ),
         f'layer_update-{prop}',
     )
@@ -743,17 +756,34 @@ async def broadcast_layer_update(
     layer_id: str,
     changes: Mapping[str, Any],
     intent_seq: Optional[int],
+    server_seq: Optional[int] = None,
+    source_client_id: Optional[str] = None,
+    source_client_seq: Optional[int] = None,
 ) -> None:
     """Broadcast a layer.update payload for the given *layer_id*."""
 
     if not changes:
         return
+    versions: Optional[Dict[str, Dict[str, Any]]] = None
+    if server_seq is not None or source_client_seq is not None or source_client_id is not None:
+        versions = {}
+        meta_entry = {
+            "server_seq": server_seq,
+            "source_client_id": source_client_id,
+            "source_client_seq": source_client_seq,
+        }
+        for key in changes.keys():
+            versions[key] = dict(meta_entry)
     payload = build_layer_update_payload(
         server._scene,
         server._scene_manager,
         layer_id=layer_id,
         changes=changes,
         intent_seq=intent_seq,
+        server_seq=server_seq,
+        source_client_id=source_client_id,
+        source_client_seq=source_client_seq,
+        control_versions=versions,
     )
     await server._broadcast_state_json(payload)
 
@@ -934,12 +964,33 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
         if not changes:
             continue
 
+        meta_map = scene.layer_control_meta.get(layer_id, {})
+        control_versions: Dict[str, Dict[str, Any]] = {}
+        max_server_seq: Optional[int] = None
+        for key in changes.keys():
+            meta = meta_map.get(key)
+            if meta is None:
+                continue
+            if meta.last_server_seq:
+                if max_server_seq is None or meta.last_server_seq > max_server_seq:
+                    max_server_seq = meta.last_server_seq
+            version_entry: Dict[str, Any] = {
+                "server_seq": meta.last_server_seq or None,
+                "source_client_id": meta.last_client_id,
+                "source_client_seq": meta.last_client_seq,
+            }
+            control_versions[str(key)] = version_entry
+
         payload = build_layer_update_payload(
             scene,
             manager,
             layer_id=layer_id,
             changes=changes,
             intent_seq=None,
+            server_seq=max_server_seq,
+            source_client_id=None,
+            source_client_seq=None,
+            control_versions=control_versions or None,
         )
         payload["ack"] = False
         payload.pop("intent_seq", None)

@@ -90,22 +90,42 @@ def test_build_dims_payload_invalid(scene: ServerSceneData, bad_step: list[int])
 
 
 def test_build_layer_update_payload(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
-    from napari_cuda.server.server_scene import LayerControlState
+    from napari_cuda.server.server_scene import LayerControlMeta, LayerControlState
 
     scene.layer_controls["layer-0"] = LayerControlState(opacity=0.5)
+    scene.layer_control_meta.setdefault("layer-0", {})["opacity"] = LayerControlMeta(
+        last_server_seq=11,
+        last_client_id="client-a",
+        last_client_seq=4,
+    )
     payload = build_layer_update_payload(
         scene,
         manager,
         layer_id="layer-0",
         changes={"opacity": 0.5},
         intent_seq=7,
+        server_seq=11,
+        source_client_id="client-a",
+        source_client_seq=4,
+        control_versions={
+            "opacity": {
+                "server_seq": 11,
+                "source_client_id": "client-a",
+                "source_client_seq": 4,
+            }
+        },
     )
     assert payload["type"] == "layer.update"
     assert payload["ack"] is True
     assert payload["intent_seq"] == 7
+    assert payload["server_seq"] == 11
+    assert payload["source_client_id"] == "client-a"
+    assert payload["source_client_seq"] == 4
     layer = payload["layer"]
     assert "opacity" not in layer.get("extras", {})
     assert payload["controls"]["opacity"] == 0.5
+    versions = payload.get("control_versions") or {}
+    assert versions.get("opacity", {}).get("server_seq") == 11
 
 
 def test_viewer_scene_manager_prefers_control_state(scene: ServerSceneData) -> None:

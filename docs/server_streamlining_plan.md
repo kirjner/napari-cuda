@@ -37,6 +37,8 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
       `server_scene_intents`.
 - [x] Record deltas in `ServerSceneData` then call `render_worker.enqueue_update(delta)` directly.
 - [x] Ensure acknowledgements/broadcasts are derived from the canonical store (no mirror dicts).
+- [x] Track per-control client sequences + server acknowledgements so reconnect baselines and
+      layer updates echo `{server_seq, source_client_seq, source_client_id}` metadata.
 
 ### 2. Scene Update Mailbox
 - [x] Move the coalescing logic from `server_scene_queue.py` into `render_mailbox.py` owned by

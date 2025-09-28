@@ -187,6 +187,10 @@ def build_layer_update_payload(
     layer_id: str,
     changes: Mapping[str, Any],
     intent_seq: Optional[int] = None,
+    server_seq: Optional[int] = None,
+    source_client_id: Optional[str] = None,
+    source_client_seq: Optional[int] = None,
+    control_versions: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Construct a layer.update payload reflecting *changes* for *layer_id*."""
 
@@ -227,6 +231,21 @@ def build_layer_update_payload(
     payload["ack"] = True
     if intent_seq is not None:
         payload["intent_seq"] = int(intent_seq)
+    if server_seq is not None:
+        payload["server_seq"] = int(server_seq)
+    if source_client_id is not None:
+        payload["source_client_id"] = str(source_client_id)
+    if source_client_seq is not None:
+        payload["source_client_seq"] = int(source_client_seq)
     if control_map:
         payload["controls"] = control_map
+    if control_versions:
+        payload["control_versions"] = {
+            str(prop): {
+                key: value
+                for key, value in meta.items()
+                if value is not None
+            }
+            for prop, meta in control_versions.items()
+        }
     return payload

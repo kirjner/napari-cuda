@@ -87,7 +87,7 @@ def test_apply_layer_intent_updates_state():
     scene = create_server_scene_data()
     lock = _lock()
 
-    applied = intents.apply_layer_intent(
+    result = intents.apply_layer_intent(
         scene,
         lock,
         layer_id="layer-0",
@@ -95,7 +95,9 @@ def test_apply_layer_intent_updates_state():
         value=0.4,
     )
 
-    assert applied == {"opacity": 0.4}
+    assert result is not None
+    assert result.applied == {"opacity": 0.4}
+    assert result.server_seq == 1
     assert scene.layer_controls["layer-0"].opacity == 0.4
     assert scene.latest_state.layer_updates == {"layer-0": {"opacity": 0.4}}
 
@@ -105,7 +107,7 @@ def test_apply_layer_intent_normalizes_colormap(value):
     scene = create_server_scene_data()
     lock = _lock()
 
-    applied = intents.apply_layer_intent(
+    result = intents.apply_layer_intent(
         scene,
         lock,
         layer_id="layer-0",
@@ -113,9 +115,43 @@ def test_apply_layer_intent_normalizes_colormap(value):
         value=value,
     )
 
-    assert applied == {"colormap": "I Blue"}
+    assert result is not None
+    assert result.applied == {"colormap": "I Blue"}
     assert scene.layer_controls["layer-0"].colormap == "I Blue"
     assert scene.latest_state.layer_updates == {"layer-0": {"colormap": "I Blue"}}
+
+
+def test_apply_layer_intent_rejects_stale_sequence():
+    scene = create_server_scene_data()
+    lock = _lock()
+
+    first = intents.apply_layer_intent(
+        scene,
+        lock,
+        layer_id="layer-0",
+        prop="gamma",
+        value=1.2,
+        client_id="client-a",
+        client_seq=5,
+    )
+
+    assert first is not None
+    assert first.server_seq == 1
+
+    stale = intents.apply_layer_intent(
+        scene,
+        lock,
+        layer_id="layer-0",
+        prop="gamma",
+        value=0.9,
+        client_id="client-a",
+        client_seq=4,
+    )
+
+    assert stale is None
+    # Latest state should remain unchanged
+    assert scene.layer_controls["layer-0"].gamma == 1.2
+    assert scene.layer_control_meta["layer-0"]["gamma"].last_server_seq == 1
 
 
 def test_apply_layer_intent_rejects_invalid_property():

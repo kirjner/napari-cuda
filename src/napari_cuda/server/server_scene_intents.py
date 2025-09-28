@@ -9,7 +9,7 @@ without reaching into the ``EGLHeadlessServer`` implementation.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any, Mapping, Optional, Sequence
 
@@ -18,10 +18,23 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 from .scene_state import ServerSceneState
 from .server_scene import (
+    LayerControlMeta,
     LayerControlState,
     ServerSceneData,
     default_layer_controls,
 )
+
+
+@dataclass(frozen=True)
+class LayerIntentResult:
+    """Result of applying a layer control intent."""
+
+    layer_id: str
+    prop: str
+    applied: dict[str, Any]
+    server_seq: int
+    client_seq: Optional[int]
+    client_id: Optional[str]
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -331,13 +344,39 @@ def apply_layer_intent(
     layer_id: str,
     prop: str,
     value: object,
-) -> dict[str, Any]:
-    """Normalize and stash a layer intent, returning applied updates."""
+    client_id: Optional[str] = None,
+    client_seq: Optional[object] = None,
+) -> Optional[LayerIntentResult]:
+    """Normalize, gate, and stash a layer intent.
+
+    Returns a :class:`LayerIntentResult` when the update is accepted, or
+    ``None`` if the payload is stale for the originating client.
+    """
 
     canonical = _normalize_layer_property(prop, value)
 
+    seq_int: Optional[int]
+    try:
+        seq_int = int(client_seq) if client_seq is not None else None
+    except (TypeError, ValueError):
+        seq_int = None
+
+    client_key = client_id if client_id is not None else "__anon__"
+
     with lock:
         control = scene.layer_controls.setdefault(layer_id, default_layer_controls())
+
+        meta_by_prop = scene.layer_control_meta.setdefault(layer_id, {})
+        meta = meta_by_prop.get(prop)
+        if meta is None:
+            meta = LayerControlMeta()
+            meta_by_prop[prop] = meta
+
+        if seq_int is not None:
+            last_seq = meta.client_seq_by_id.get(client_key)
+            if last_seq is not None and seq_int <= last_seq:
+                return None
+
         setattr(control, prop, canonical)
 
         latest = scene.latest_state
@@ -347,4 +386,20 @@ def apply_layer_intent(
         pending[layer_id] = layer_updates
         scene.latest_state = replace(latest, layer_updates=pending)
 
-    return {prop: canonical}
+        scene.next_layer_server_seq = int(scene.next_layer_server_seq) + 1
+        server_seq = scene.next_layer_server_seq
+
+        meta.last_server_seq = server_seq
+        meta.last_client_id = client_id
+        meta.last_client_seq = seq_int
+        if seq_int is not None:
+            meta.client_seq_by_id[client_key] = seq_int
+
+    return LayerIntentResult(
+        layer_id=layer_id,
+        prop=prop,
+        applied={prop: canonical},
+        server_seq=server_seq,
+        client_seq=seq_int,
+        client_id=client_id,
+    )

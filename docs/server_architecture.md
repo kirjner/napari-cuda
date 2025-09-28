@@ -61,7 +61,10 @@ Websocket Clients (state + pixel)
   - Intent helpers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
   - Lives alongside `render_mailbox.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
   - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
-  - Layer controls surface through a dedicated `controls` map on every `scene.spec` / `layer.update`; `extras` now carries transport metadata only (volume flags, zarr paths, adapter hints).
+- Layer controls surface through a dedicated `controls` map on every `scene.spec` / `layer.update` and
+  now carry `control_versions` metadata (`server_seq`, `source_client_seq`, `source_client_id`) so
+  reconnects and multi-client interactions can reconcile authoritative state quickly. `extras`
+  continues to hold transport metadata only (volume flags, zarr paths, adapter hints).
 - **Control Channel Helpers** (`state_channel_handler.py`)
   - Orchestrate state-channel websocket flow: connection setup, intent dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
