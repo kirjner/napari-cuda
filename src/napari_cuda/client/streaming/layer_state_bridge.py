@@ -182,10 +182,11 @@ class LayerStateBridge:
         loop: ClientStreamLoop,
         presenter,
         registry,
-        *,
         intent_state: ClientStateContext,
         loop_state: ClientLoopState,
+        *,
         enabled: Optional[bool] = None,
+        state_store: Optional[StateStore] = None,
     ) -> None:
         self._loop = loop
         self._registry = registry
@@ -193,7 +194,7 @@ class LayerStateBridge:
         self._loop_state = loop_state
         self._enabled = enabled if enabled is not None else _env_bridge_enabled()
         self._bindings: Dict[str, LayerBinding] = {}
-        self._state_store = StateStore(
+        self._state_store = state_store or StateStore(
             client_id=intent_state.client_id,
             next_client_seq=intent_state.next_client_seq,
             clock=time.time,

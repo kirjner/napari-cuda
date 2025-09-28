@@ -224,7 +224,7 @@ class ProxyViewer(ViewerModel):
                     delta = int(val) - int(prev_val)
                     if delta != 0:
                         logger.debug(
-                            "play tick -> control.command dims.step axis=%d delta=%+d",
+                            "play tick -> state.update dims.step axis=%d delta=%+d",
                             int(changed_axis),
                             int(delta),
                         )
@@ -238,12 +238,12 @@ class ProxyViewer(ViewerModel):
                 if int(getattr(self, '_dims_tx_interval_ms', 10) or 0) <= 0:
                     if bool(getattr(self, '_log_dims_info', False)):
                         logger.info(
-                            "slider -> control.command dims.index axis=%d value=%d",
+                            "slider -> state.update dims.index axis=%d value=%d",
                             int(changed_axis),
                             int(val),
                         )
                     logger.debug(
-                        "slider -> control.command dims.index axis=%d value=%d (immediate)",
+                        "slider -> state.update dims.index axis=%d value=%d (immediate)",
                         int(changed_axis),
                         int(val),
                     )
@@ -263,12 +263,12 @@ class ProxyViewer(ViewerModel):
                                 ax, vv = pair
                                 if bool(getattr(self, '_log_dims_info', False)):
                                     logger.info(
-                                        "slider (coalesced) -> control.command dims.index axis=%d value=%d",
+                                        "slider (coalesced) -> state.update dims.index axis=%d value=%d",
                                         int(ax),
                                         int(vv),
                                     )
                                 logger.debug(
-                                    "slider (coalesced) -> control.command dims.index axis=%d value=%d",
+                                    "slider (coalesced) -> state.update dims.index axis=%d value=%d",
                                     int(ax),
                                     int(vv),
                                 )

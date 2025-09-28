@@ -12,9 +12,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 
     from .loop_state import ClientLoopState
+    from napari_cuda.client.streaming.state_store import StateStore
 
-from napari_cuda.client.streaming.control_sessions import ControlSession
-from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE
+from napari_cuda.protocol.messages import StateUpdateMessage
 
 logger = logging.getLogger("napari_cuda.client.streaming.client_stream_loop")
 
@@ -51,7 +51,7 @@ class ClientStateContext:
     dims_z: float | None = None
     dims_z_min: float | None = None
     dims_z_max: float | None = None
-    control_sessions: Dict[str, ControlSession] = field(default_factory=dict)
+    control_runtimes: Dict[str, "ControlRuntime"] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env_cfg: Any) -> "ClientStateContext":
@@ -76,6 +76,14 @@ class ClientStateContext:
         return int(self.client_seq)
 
 
+@dataclass
+class ControlRuntime:
+    interaction_id: Optional[str] = None
+    active: bool = False
+    last_phase: Optional[str] = None
+    last_send_ts: float = 0.0
+
+
 def on_state_connected(state: ClientStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
@@ -87,7 +95,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ClientStateConte
     loop_state.pending_intents.clear()
     loop_state.last_dims_seq = None
     loop_state.last_dims_payload = None
-    state.control_sessions.clear()
+    state.control_runtimes.clear()
 
 
 def handle_dims_update(
@@ -184,91 +192,6 @@ def handle_dims_update(
             displayed=displayed,
         )
 
-    server_seq_val = _int_or_none(data.get('server_seq'))
-    source_client_seq = _int_or_none(data.get('source_client_seq'))
-    phase_meta = str(data.get('phase') or '').lower() or None
-    control_versions = (
-        data.get('control_versions')
-        if isinstance(data.get('control_versions'), dict)
-        else None
-    )
-
-    handled_ack = False
-    if control_versions:
-        for prop, meta_entry in control_versions.items():
-            if not isinstance(meta_entry, dict):
-                continue
-            client_seq_entry = _int_or_none(meta_entry.get('source_client_seq'))
-            if client_seq_entry is None:
-                continue
-            server_seq_entry = _int_or_none(meta_entry.get('server_seq'))
-            phase_entry = str(meta_entry.get('phase') or phase_meta or 'update').lower()
-            pending_info = loop_state.pending_intents.get(client_seq_entry)
-            if _handle_dims_ack_session(
-                state,
-                loop_state,
-                client_seq=client_seq_entry,
-                phase=phase_entry,
-                server_seq=server_seq_entry,
-            ):
-                handled_ack = True
-                if ack_val is False:
-                    logger.warning(
-                        "dims_update ack=false for client_seq=%s prop=%s info=%s",
-                        client_seq_entry,
-                        prop,
-                        pending_info,
-                    )
-                elif log_dims_info:
-                    logger.debug(
-                        "dims_update ack: client_seq=%s prop=%s phase=%s info=%s",
-                        client_seq_entry,
-                        prop,
-                        phase_entry,
-                        pending_info,
-                    )
-    else:
-        client_seq_entry = source_client_seq or intent_seq
-        if client_seq_entry is not None:
-            phase_entry = str(phase_meta or ('commit' if ack_val else 'update')).lower()
-            pending_info = loop_state.pending_intents.get(client_seq_entry)
-            if _handle_dims_ack_session(
-                state,
-                loop_state,
-                client_seq=client_seq_entry,
-                phase=phase_entry,
-                server_seq=server_seq_val,
-            ):
-                handled_ack = True
-                if ack_val is False:
-                    logger.warning(
-                        "dims_update ack=false for client_seq=%s info=%s",
-                        client_seq_entry,
-                        pending_info,
-                    )
-                elif log_dims_info:
-                    logger.debug(
-                        "dims_update ack: client_seq=%s phase=%s info=%s",
-                        client_seq_entry,
-                        phase_entry,
-                        pending_info,
-                    )
-            else:
-                info = loop_state.pending_intents.pop(client_seq_entry, None)
-                if info is not None:
-                    if ack_val is False:
-                        logger.warning(
-                            "dims_update ack=false for client_seq=%s info=%s",
-                            client_seq_entry,
-                            info,
-                        )
-                    elif log_dims_info:
-                        logger.debug(
-                            "dims_update ack (legacy): client_seq=%s info=%s",
-                            client_seq_entry,
-                            info,
-                        )
-
     loop_state.last_dims_payload = {
         'current_step': cur,
         'ndisplay': ndisp,
@@ -282,154 +205,102 @@ def handle_dims_update(
     presenter.apply_dims_update(dict(data))
 
 
-def _dims_session_key(axis_idx: int, prop: str) -> str:
-    return f"dims:{prop}:{int(axis_idx)}"
+def _axis_target_label(state: ClientStateContext, axis_idx: int) -> str:
+    labels = state.dims_meta.get('axis_labels')
+    if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
+        label = labels[axis_idx]
+        if isinstance(label, str) and label.strip():
+            return label
+    return str(axis_idx)
 
 
-def _parse_dims_session_key(key: str) -> tuple[str, int]:
-    parts = key.split(":", 2)
-    if len(parts) != 3 or parts[0] != "dims":
-        return "step", 0
-    prop = parts[1]
+def _axis_index_from_target(state: ClientStateContext, target: str) -> Optional[int]:
+    labels = state.dims_meta.get('axis_labels')
+    if isinstance(labels, Sequence):
+        for idx, label in enumerate(labels):
+            if str(label) == target:
+                return int(idx)
+    if target.startswith('axis-'):
+        target = target.split('-', 1)[1]
     try:
-        axis_idx = int(parts[2])
+        return int(target)
     except Exception:
-        axis_idx = 0
-    return prop, axis_idx
+        return None
 
 
-def _ensure_dims_session(state: ClientStateContext, axis_idx: int, prop: str) -> ControlSession:
-    key = _dims_session_key(axis_idx, prop)
-    session = state.control_sessions.get(key)
-    if session is None:
-        session = ControlSession(key=key)
-        state.control_sessions[key] = session
-    return session
-
-
-def _send_dims_command(
-    state: ClientStateContext,
+def _post_state_update(
     loop_state: "ClientLoopState",
+    payload: StateUpdateMessage,
     *,
-    axis_idx: int,
-    prop: str,
-    value: Any,
-    session: ControlSession,
-    phase: str,
     origin: Optional[str] = None,
-) -> Optional[int]:
+) -> bool:
     channel = loop_state.state_channel
     if channel is None:
-        return None
-
-    session.mark_target(value)
-    interaction_id = session.ensure_interaction_id()
-    seq = state.next_client_seq()
-    payload: Dict[str, Any] = {
-        "type": CONTROL_COMMAND_TYPE,
-        "scope": "dims",
-        "target": f"axis-{int(axis_idx)}",
-        "prop": prop,
-        "value": value,
-        "client_id": state.client_id,
-        "client_seq": seq,
-        "interaction_id": interaction_id,
-        "phase": phase,
-        "timestamp": time.time(),
-    }
-    extras: Dict[str, Any] = {}
-    if origin is not None:
-        extras["origin"] = origin
-    if extras:
-        payload["extras"] = extras
-
-    ok = channel.post(payload)
-    if not ok:
-        session.dirty = True
-        return None
-
-    loop_state.pending_intents[seq] = {
-        "kind": f"dims.{prop}",
-        "axis": int(axis_idx),
-        "phase": phase,
-        "value": value,
-        "interaction_id": interaction_id,
-    }
-    session.push_pending(seq, value, phase=phase)
-    if phase == "commit":
-        session.commit_in_flight = True
-        session.awaiting_commit = False
-        session.last_commit_seq = seq
-    else:
-        session.awaiting_commit = True
-        session.commit_in_flight = False
-    return seq
+        return False
+    ok = channel.post(payload.to_dict())
+    logger.debug(
+        "state.update emit: origin=%s scope=%s target=%s key=%s phase=%s sent=%s",
+        origin,
+        payload.scope,
+        payload.target,
+        payload.key,
+        payload.phase,
+        bool(ok),
+    )
+    return bool(ok)
 
 
-def _send_dims_commit(
+def _runtime_key(scope: str, target: str, key: str) -> str:
+    return f"{scope}:{target}:{key}"
+
+
+def _emit_state_update(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     *,
-    axis_idx: int,
-    prop: str,
-    session: ControlSession,
-) -> None:
-    if session.commit_in_flight or session.pending:
-        return
-    commit_value = session.confirmed_value
-    if commit_value is None:
-        return
-    _send_dims_command(
-        state,
-        loop_state,
-        axis_idx=axis_idx,
-        prop=prop,
-        value=commit_value,
-        session=session,
-        phase="commit",
+    scope: str,
+    target: str,
+    key: str,
+    value: Any,
+    origin: str,
+) -> tuple[bool, Optional[Any]]:
+    runtime_key = _runtime_key(scope, target, key)
+    runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
+    phase = "start" if not runtime.active else "update"
+    interaction_id = runtime.interaction_id or uuid.uuid4().hex
+
+    payload, projection = state_store.apply_local(
+        scope,
+        target,
+        key,
+        value,
+        phase,
+        interaction_id=interaction_id,
     )
 
+    if not _post_state_update(loop_state, payload, origin=origin):
+        return False, None
 
-def _handle_dims_ack_session(
+    runtime.active = True
+    runtime.interaction_id = interaction_id
+    runtime.last_phase = phase
+    runtime.last_send_ts = time.perf_counter()
+    return True, projection
+
+
+def _update_runtime_from_ack(
     state: ClientStateContext,
-    loop_state: "ClientLoopState",
-    *,
-    client_seq: int,
-    phase: str,
-    server_seq: Optional[int],
-) -> bool:
-    handled = False
-    for key, session in state.control_sessions.items():
-        pending = session.pop_pending(client_seq)
-        if pending is None:
-            continue
-        handled = True
-        loop_state.pending_intents.pop(client_seq, None)
-        if (
-            server_seq is not None
-            and session.last_server_seq is not None
-            and server_seq < session.last_server_seq
-        ):
-            return True
-        session.mark_confirmed(
-            pending.value,
-            client_seq if phase != "commit" else None,
-            server_seq=server_seq,
-        )
-        prop, axis_idx = _parse_dims_session_key(key)
-        if phase == "commit":
-            session.reset_interaction()
-        else:
-            if not session.pending and session.awaiting_commit and not session.commit_in_flight:
-                _send_dims_commit(
-                    state,
-                    loop_state,
-                    axis_idx=axis_idx,
-                    prop=prop,
-                    session=session,
-                )
-        break
-    return handled
+    message: StateUpdateMessage,
+    result,
+) -> None:
+    runtime_key = _runtime_key(str(message.scope), str(message.target), str(message.key))
+    runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
+    runtime.last_phase = message.phase or runtime.last_phase
+    runtime.last_send_ts = time.perf_counter()
+    if result.pending_len == 0 or not result.is_self:
+        runtime.active = False
+        runtime.interaction_id = None
 
 
 def mirror_dims_to_viewer(
@@ -491,6 +362,7 @@ def replay_last_dims_payload(state: ClientStateContext, loop_state: "ClientLoopS
 def dims_step(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     axis: int | str,
     delta: int,
     *,
@@ -508,20 +380,21 @@ def dims_step(
         return False
     now = time.perf_counter()
     if (now - float(state.last_dims_send or 0.0)) < state.dims_min_dt:
-        logger.debug("control.command dims.step gated by rate limiter (%s)", origin)
+        logger.debug("state.update dims.step gated by rate limiter (%s)", origin)
         return False
-    session = _ensure_dims_session(state, int(idx), "step")
-    seq = _send_dims_command(
+    axis_idx = int(idx)
+    target_label = _axis_target_label(state, axis_idx)
+    ok, _ = _emit_state_update(
         state,
         loop_state,
-        axis_idx=int(idx),
-        prop="step",
+        state_store,
+        scope="dims",
+        target=target_label,
+        key="step",
         value=int(delta),
-        session=session,
-        phase="update",
-        origin=str(origin),
+        origin=origin,
     )
-    if seq is None:
+    if not ok:
         return False
     state.last_dims_send = now
     return True
@@ -530,6 +403,7 @@ def dims_step(
 def handle_wheel_for_dims(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     data: dict,
     *,
     viewer_ref,
@@ -555,6 +429,7 @@ def handle_wheel_for_dims(
     sent = dims_step(
         state,
         loop_state,
+        state_store,
         'primary',
         int(step),
         origin='wheel',
@@ -562,15 +437,16 @@ def handle_wheel_for_dims(
         ui_call=ui_call,
     )
     if log_dims_info:
-        logger.info("wheel->control.command dims.step d=%+d sent=%s", int(step), bool(sent))
+        logger.info("wheel->state.update dims.step d=%+d sent=%s", int(step), bool(sent))
     else:
-        logger.debug("wheel->control.command dims.step d=%+d sent=%s", int(step), bool(sent))
+        logger.debug("wheel->state.update dims.step d=%+d sent=%s", int(step), bool(sent))
     return sent
 
 
 def dims_set_index(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     axis: int | str,
     value: int,
     *,
@@ -588,35 +464,90 @@ def dims_set_index(
         return False
     now = time.perf_counter()
     if (now - float(state.last_dims_send or 0.0)) < state.dims_min_dt:
-        logger.debug("control.command dims.index gated by rate limiter (%s)", origin)
+        logger.debug("state.update dims.index gated by rate limiter (%s)", origin)
         return False
-    session = _ensure_dims_session(state, int(idx), "index")
-    seq = _send_dims_command(
+    axis_idx = int(idx)
+    target_label = _axis_target_label(state, axis_idx)
+    ok, _ = _emit_state_update(
         state,
         loop_state,
-        axis_idx=int(idx),
-        prop="index",
+        state_store,
+        scope="dims",
+        target=target_label,
+        key="index",
         value=int(value),
-        session=session,
-        phase="update",
-        origin=str(origin),
+        origin=origin,
     )
-    if seq is None:
+    if not ok:
         return False
     state.last_dims_send = now
     return True
+
+
+def handle_dims_state_update(
+    state: ClientStateContext,
+    state_store: "StateStore",
+    message: StateUpdateMessage,
+) -> None:
+    if message.scope != "dims":
+        return
+
+    result = state_store.apply_remote(message)
+    axis_idx = _axis_index_from_target(state, str(message.target))
+    if axis_idx is None:
+        logger.debug(
+            "state.update dims received for unknown target=%s",
+            message.target,
+        )
+
+    _update_runtime_from_ack(state, message, result)
+
+    logger.debug(
+        "state.update dims applied: target=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
+        message.target,
+        message.key,
+        result.projection_value,
+        result.is_self,
+        result.pending_len,
+        result.overridden,
+    )
+
+
+def handle_generic_state_update(
+    state: ClientStateContext,
+    state_store: "StateStore",
+    message: StateUpdateMessage,
+) -> None:
+    result = state_store.apply_remote(message)
+    _update_runtime_from_ack(state, message, result)
+    logger.debug(
+        "state.update applied: scope=%s target=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
+        message.scope,
+        message.target,
+        message.key,
+        result.projection_value,
+        result.is_self,
+        result.pending_len,
+        result.overridden,
+    )
 
 
 def current_ndisplay(state: ClientStateContext) -> Optional[int]:
     return _int_or_none(state.dims_meta.get('ndisplay'))
 
 
-def toggle_ndisplay(state: ClientStateContext, loop_state: "ClientLoopState", *, origin: str) -> bool:
+def toggle_ndisplay(
+    state: ClientStateContext,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    *,
+    origin: str,
+) -> bool:
     if not state.dims_ready:
         return False
     current = current_ndisplay(state)
     target = 2 if current == 3 else 3
-    return view_set_ndisplay(state, loop_state, target, origin=origin)
+    return view_set_ndisplay(state, loop_state, state_store, target, origin=origin)
 
 
 def handle_key_event(
@@ -673,6 +604,7 @@ def handle_key_event(
 def view_set_ndisplay(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     ndisplay: int,
     *,
     origin: str,
@@ -686,12 +618,23 @@ def view_set_ndisplay(
     cur = state.dims_meta.get('ndisplay')
     if cur is not None and int(cur) == nd_target:
         return True
-    return _send_intent(loop_state, state, 'view.intent.set_ndisplay', {'ndisplay': nd_target}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="view",
+        target="main",
+        key="ndisplay",
+        value=int(nd_target),
+        origin=origin,
+    )
+    return ok
 
 
 def volume_set_render_mode(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     mode: str,
     *,
     origin: str,
@@ -700,12 +643,24 @@ def volume_set_render_mode(
         return False
     if _rate_gate_settings(state, origin):
         return False
-    return _send_intent(loop_state, state, 'volume.intent.set_render_mode', {'mode': str(mode)}, origin)
+    mode_value = str(mode)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="volume",
+        target="main",
+        key="render_mode",
+        value=mode_value,
+        origin=origin,
+    )
+    return ok
 
 
 def volume_set_clim(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     lo: float,
     hi: float,
     *,
@@ -716,12 +671,23 @@ def volume_set_clim(
     if _rate_gate_settings(state, origin):
         return False
     lo_f, hi_f = _ensure_lo_hi(lo, hi)
-    return _send_intent(loop_state, state, 'volume.intent.set_clim', {'lo': float(lo_f), 'hi': float(hi_f)}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="volume",
+        target="main",
+        key="contrast_limits",
+        value=(float(lo_f), float(hi_f)),
+        origin=origin,
+    )
+    return ok
 
 
 def volume_set_colormap(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     name: str,
     *,
     origin: str,
@@ -730,12 +696,23 @@ def volume_set_colormap(
         return False
     if _rate_gate_settings(state, origin):
         return False
-    return _send_intent(loop_state, state, 'volume.intent.set_colormap', {'name': str(name)}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="volume",
+        target="main",
+        key="colormap",
+        value=str(name),
+        origin=origin,
+    )
+    return ok
 
 
 def volume_set_opacity(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     alpha: float,
     *,
     origin: str,
@@ -745,12 +722,23 @@ def volume_set_opacity(
     if _rate_gate_settings(state, origin):
         return False
     a = _clamp01(alpha)
-    return _send_intent(loop_state, state, 'volume.intent.set_opacity', {'alpha': float(a)}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="volume",
+        target="main",
+        key="opacity",
+        value=float(a),
+        origin=origin,
+    )
+    return ok
 
 
 def volume_set_sample_step(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     relative: float,
     *,
     origin: str,
@@ -760,12 +748,23 @@ def volume_set_sample_step(
     if _rate_gate_settings(state, origin):
         return False
     r = _clamp_sample_step(relative)
-    return _send_intent(loop_state, state, 'volume.intent.set_sample_step', {'relative': float(r)}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="volume",
+        target="main",
+        key="sample_step",
+        value=float(r),
+        origin=origin,
+    )
+    return ok
 
 
 def multiscale_set_policy(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     policy: str,
     *,
     origin: str,
@@ -778,12 +777,23 @@ def multiscale_set_policy(
     if pol not in {'oversampling', 'thresholds', 'ratio'}:
         logger.debug("multiscale_set_policy rejected: policy=%s", pol)
         return False
-    return _send_intent(loop_state, state, 'multiscale.intent.set_policy', {'policy': pol}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="multiscale",
+        target="main",
+        key="policy",
+        value=pol,
+        origin=origin,
+    )
+    return ok
 
 
 def multiscale_set_level(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
     level: int,
     *,
     origin: str,
@@ -793,7 +803,17 @@ def multiscale_set_level(
     if _rate_gate_settings(state, origin):
         return False
     lv = _clamp_level(state, level)
-    return _send_intent(loop_state, state, 'multiscale.intent.set_level', {'level': int(lv)}, origin)
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        scope="multiscale",
+        target="main",
+        key="level",
+        value=int(lv),
+        origin=origin,
+    )
+    return ok
 
 
 def hud_snapshot(state: ClientStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
@@ -885,27 +905,6 @@ def _rate_gate_settings(state: ClientStateContext, origin: str) -> bool:
     return False
 
 
-def _send_intent(
-    loop_state: "ClientLoopState",
-    state: ClientStateContext,
-    type_str: str,
-    fields: dict[str, object],
-    origin: str,
-) -> bool:
-    ch = loop_state.state_channel
-    if ch is None:
-        return False
-    payload = {'type': type_str}
-    payload.update(fields)
-    payload['client_id'] = state.client_id
-    payload['client_seq'] = state.next_client_seq()
-    payload['origin'] = str(origin)
-    ok = ch.post(payload)
-    fields_to_log = {k: v for k, v in payload.items() if k not in {'type', 'client_id', 'client_seq', 'origin'}}
-    logger.info("%s->%s %s sent=%s", origin, type_str, fields_to_log, bool(ok))
-    return bool(ok)
-
-
 def _is_volume_mode(state: ClientStateContext) -> bool:
     vol = bool(state.dims_meta.get('volume'))
     nd = int(state.dims_meta.get('ndisplay') or 2)
@@ -975,5 +974,3 @@ def _bool_or_none(value: object) -> Optional[bool]:
     if isinstance(value, bool):
         return value
     return bool(value)
-from napari_cuda.client.streaming.control_sessions import ControlSession
-from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE

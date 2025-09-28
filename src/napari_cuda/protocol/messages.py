@@ -32,19 +32,14 @@ class MessageType(enum.Enum):
     ERROR = "error"
 
 
-@dataclass
 class StateMessage:
-    """Base class for state synchronization messages."""
-    type: str
-    timestamp: float = None
-    
+    """Mixin providing JSON helpers for dataclass messages."""
+
     def to_json(self) -> str:
-        """Serialize to JSON string."""
         return json.dumps(asdict(self))
-    
+
     @classmethod
     def from_json(cls, data: str):
-        """Deserialize from JSON string."""
         return cls(**json.loads(data))
 
 
@@ -125,7 +120,7 @@ class ControlCommand:
         return _strip_none(payload)
 
 
-@dataclass(kw_only=True)
+@dataclass
 class StateUpdateMessage(StateMessage):
     """Unified state update message shared between client and server."""
 
@@ -133,13 +128,13 @@ class StateUpdateMessage(StateMessage):
     target: str
     key: str
     value: Any
-    type: str = STATE_UPDATE_TYPE
     client_id: Optional[str] = None
     client_seq: Optional[int] = None
     interaction_id: Optional[str] = None
     phase: Optional[str] = None
     timestamp: Optional[float] = None
     server_seq: Optional[int] = None
+    type: str = STATE_UPDATE_TYPE
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -587,6 +582,7 @@ class SceneSpecMessage(StateMessage):
     version: int = SPEC_VERSION
     scene: SceneSpec = field(default_factory=SceneSpec)
     capabilities: Optional[List[str]] = None
+    timestamp: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = {
@@ -630,6 +626,7 @@ class LayerUpdateMessage(StateMessage):
     interaction_id: Optional[str] = None
     phase: Optional[str] = None
     control_versions: Optional[Dict[str, Dict[str, Any]]] = None
+    timestamp: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         if self.layer is None:
@@ -704,6 +701,7 @@ class LayerRemoveMessage(StateMessage):
     version: int = SPEC_VERSION
     layer_id: str = ""
     reason: Optional[str] = None
+    timestamp: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = {
@@ -747,12 +745,12 @@ class StreamProtocol:
             return DimsUpdate(**msg_dict)
         if msg_type == SCENE_SPEC_TYPE:
             return SceneSpecMessage.from_dict(msg_dict)
+        if msg_type == STATE_UPDATE_TYPE:
+            return StateUpdateMessage.from_dict(msg_dict)
         if msg_type == LAYER_UPDATE_TYPE:
             return LayerUpdateMessage.from_dict(msg_dict)
         if msg_type == LAYER_REMOVE_TYPE:
             return LayerRemoveMessage.from_dict(msg_dict)
-        if msg_type == STATE_UPDATE_TYPE:
-            return StateUpdateMessage.from_dict(msg_dict)
         if msg_type in [t.value for t in MessageType]:
             return StateMessage(**msg_dict)
         return Command(**msg_dict)

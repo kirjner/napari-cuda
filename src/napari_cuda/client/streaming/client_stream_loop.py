@@ -59,6 +59,7 @@ from napari_cuda.protocol.messages import (
     StateUpdateMessage,
 )
 from napari_cuda.client.streaming.layer_state_bridge import LayerStateBridge
+from napari_cuda.client.streaming.state_store import StateStore
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.config import ClientConfig
@@ -182,6 +183,11 @@ class ClientStreamLoop:
         self._latest_scene_spec: Optional[SceneSpecMessage] = None
         self._intent_state = intents.ClientStateContext.from_env(self._env_cfg)
         self._loop_state.intents = self._intent_state
+        self._state_store = StateStore(
+            client_id=self._intent_state.client_id,
+            next_client_seq=self._intent_state.next_client_seq,
+            clock=time.time,
+        )
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
         # Keep-last-frame fallback default enabled for smoother presentation
@@ -207,6 +213,7 @@ class ClientStreamLoop:
             self._layer_registry,
             intent_state=self._intent_state,
             loop_state=self._loop_state,
+            state_store=self._state_store,
         )
 
         # Decoders
@@ -597,7 +604,12 @@ class ClientStreamLoop:
             msg.key,
             msg.phase,
         )
-        self._layer_bridge.handle_state_update(msg)
+        if msg.scope == "layer":
+            self._layer_bridge.handle_state_update(msg)
+        elif msg.scope == "dims":
+            intents.handle_dims_state_update(self._intent_state, self._state_store, msg)
+        else:
+            intents.handle_generic_state_update(self._intent_state, self._state_store, msg)
 
     def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
         self._layer_registry.remove_layer(msg)
@@ -627,15 +639,15 @@ class ClientStreamLoop:
     def _handle_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
 
-    # State channel lifecycle: gate dims control commands safely across reconnects
+    # State channel lifecycle: gate dims state.update traffic safely across reconnects
     def _on_state_connected(self) -> None:
         intents.on_state_connected(self._intent_state)
-        logger.info("StateChannel connected; gating dims control commands until dims.update meta arrives")
+        logger.info("StateChannel connected; gating dims state.update traffic until dims.update meta arrives")
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
         intents.on_state_disconnected(self._loop_state, self._intent_state)
         self._layer_bridge.clear_pending_on_reconnect()
-        logger.info("StateChannel disconnected: %s; dims control commands gated", exc)
+        logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
 
     # --- Input mapping: unified wheel handler -------------------------------------
     def _on_wheel(self, data: dict) -> None:
@@ -655,6 +667,7 @@ class ClientStreamLoop:
         intents.handle_wheel_for_dims(
             self._intent_state,
             self._loop_state,
+            self._state_store,
             data,
             viewer_ref=self._viewer_mirror,
             ui_call=self._ui_call,
@@ -727,6 +740,12 @@ class ClientStreamLoop:
 
         return self._presenter_facade
 
+    @property
+    def state_store(self) -> StateStore:
+        """Expose the shared reducer for auxiliary bridges/tests."""
+
+        return self._state_store
+
     def post(self, obj: dict) -> bool:
         ch = self._loop_state.state_channel
         return bool(ch.post(obj)) if ch is not None else False
@@ -781,6 +800,7 @@ class ClientStreamLoop:
         return intents.dims_step(
             self._intent_state,
             self._loop_state,
+            self._state_store,
             axis,
             delta,
             origin=origin,
@@ -792,6 +812,7 @@ class ClientStreamLoop:
         return intents.dims_set_index(
             self._intent_state,
             self._loop_state,
+            self._state_store,
             axis,
             value,
             origin=origin,
@@ -801,34 +822,88 @@ class ClientStreamLoop:
 
     # --- Volume/multiscale intent senders --------------------------------------
     def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_render_mode(self._intent_state, self._loop_state, mode, origin=origin)
+        return intents.volume_set_render_mode(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            mode,
+            origin=origin,
+        )
 
     def volume_set_clim(self, lo: float, hi: float, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_clim(self._intent_state, self._loop_state, lo, hi, origin=origin)
+        return intents.volume_set_clim(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            lo,
+            hi,
+            origin=origin,
+        )
 
     def volume_set_colormap(self, name: str, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_colormap(self._intent_state, self._loop_state, name, origin=origin)
+        return intents.volume_set_colormap(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            name,
+            origin=origin,
+        )
 
     def volume_set_opacity(self, alpha: float, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_opacity(self._intent_state, self._loop_state, alpha, origin=origin)
+        return intents.volume_set_opacity(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            alpha,
+            origin=origin,
+        )
 
     def volume_set_sample_step(self, relative: float, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_sample_step(self._intent_state, self._loop_state, relative, origin=origin)
+        return intents.volume_set_sample_step(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            relative,
+            origin=origin,
+        )
 
     def multiscale_set_policy(self, policy: str, *, origin: str = 'ui') -> bool:
-        return intents.multiscale_set_policy(self._intent_state, self._loop_state, policy, origin=origin)
+        return intents.multiscale_set_policy(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            policy,
+            origin=origin,
+        )
 
     def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
-        return intents.multiscale_set_level(self._intent_state, self._loop_state, level, origin=origin)
+        return intents.multiscale_set_level(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            level,
+            origin=origin,
+        )
 
     def view_set_ndisplay(self, ndisplay: int, *, origin: str = 'ui') -> bool:
-        return intents.view_set_ndisplay(self._intent_state, self._loop_state, ndisplay, origin=origin)
+        return intents.view_set_ndisplay(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            ndisplay,
+            origin=origin,
+        )
 
     def current_ndisplay(self) -> Optional[int]:
         return intents.current_ndisplay(self._intent_state)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
-        return intents.toggle_ndisplay(self._intent_state, self._loop_state, origin=origin)
+        return intents.toggle_ndisplay(
+            self._intent_state,
+            self._loop_state,
+            self._state_store,
+            origin=origin,
+        )
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         camera.handle_wheel_zoom(
