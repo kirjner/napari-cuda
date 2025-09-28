@@ -223,7 +223,11 @@ class ProxyViewer(ViewerModel):
                 if prev_val is not None:
                     delta = int(val) - int(prev_val)
                     if delta != 0:
-                        logger.debug("play tick -> dims.intent.step axis=%d delta=%+d", int(changed_axis), int(delta))
+                        logger.debug(
+                            "play tick -> control.command dims.step axis=%d delta=%+d",
+                            int(changed_axis),
+                            int(delta),
+                        )
                         _ = self._state_sender.dims_step(int(changed_axis), int(delta), origin='play')
                 # Update last snapshot and stop here (no set_index on play axis)
                 self._last_step_ui = tuple(cur) if isinstance(cur, tuple) else cur
@@ -233,8 +237,16 @@ class ProxyViewer(ViewerModel):
             try:
                 if int(getattr(self, '_dims_tx_interval_ms', 10) or 0) <= 0:
                     if bool(getattr(self, '_log_dims_info', False)):
-                        logger.info("slider -> dims.intent.set_index axis=%d value=%d", int(changed_axis), int(val))
-                    logger.debug("slider -> dims.intent.set_index axis=%d value=%d (immediate)", int(changed_axis), int(val))
+                        logger.info(
+                            "slider -> control.command dims.index axis=%d value=%d",
+                            int(changed_axis),
+                            int(val),
+                        )
+                    logger.debug(
+                        "slider -> control.command dims.index axis=%d value=%d (immediate)",
+                        int(changed_axis),
+                        int(val),
+                    )
                     _ = self._state_sender.dims_set_index(int(changed_axis), int(val), origin='ui')
                 else:
                     self._dims_tx_pending = (int(changed_axis), int(val))
@@ -250,11 +262,19 @@ class ProxyViewer(ViewerModel):
                                     return
                                 ax, vv = pair
                                 if bool(getattr(self, '_log_dims_info', False)):
-                                    logger.info("slider (coalesced) -> dims.intent.set_index axis=%d value=%d", int(ax), int(vv))
-                                logger.debug("slider (coalesced) -> dims.intent.set_index axis=%d value=%d", int(ax), int(vv))
+                                    logger.info(
+                                        "slider (coalesced) -> control.command dims.index axis=%d value=%d",
+                                        int(ax),
+                                        int(vv),
+                                    )
+                                logger.debug(
+                                    "slider (coalesced) -> control.command dims.index axis=%d value=%d",
+                                    int(ax),
+                                    int(vv),
+                                )
                                 _ = self._state_sender.dims_set_index(int(ax), int(vv), origin='ui')
                             except Exception:
-                                logger.debug("ProxyViewer dims intent send failed", exc_info=True)
+                                logger.debug("ProxyViewer dims control send failed", exc_info=True)
                         t.timeout.connect(_fire)
                         self._dims_tx_timer = t
                     # restart timer with configured interval
@@ -265,7 +285,7 @@ class ProxyViewer(ViewerModel):
                 except Exception:
                     self._last_step_ui = cur
             except Exception:
-                logger.debug("ProxyViewer dims send failed", exc_info=True)
+                logger.debug("ProxyViewer dims control send failed", exc_info=True)
             return
         return
 
@@ -305,7 +325,7 @@ class ProxyViewer(ViewerModel):
             return
         fn = getattr(sender, 'view_set_ndisplay', None)
         if callable(fn) and not fn(ndisplay, origin='ui'):
-            logger.debug("ProxyViewer: ndisplay intent send failed")
+            logger.debug("ProxyViewer: ndisplay control send failed")
 
 
     # --- Streaming client bridge -------------------------------------------------

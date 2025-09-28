@@ -147,7 +147,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
                 "input.wheel sent: ay=%d py=%d mods=%d pos=(%.1f,%.1f)",
                 ay, py, mods, float(x), float(y),
             )
-        # Notify optional wheel callback (e.g., for dims intent mapping)
+        # Notify optional wheel callback (e.g., for dims control command mapping)
         if self._on_wheel is not None:
             self._on_wheel(msg)
         if ok:

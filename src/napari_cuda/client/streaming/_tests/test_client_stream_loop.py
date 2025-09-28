@@ -5,6 +5,8 @@ from typing import Any
 from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.streaming.client_loop.intents import IntentState
+from napari_cuda.client.streaming.control_sessions import ControlSession
+from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE
 
 
 def _make_loop() -> ClientStreamLoop:
@@ -79,7 +81,20 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
 
 def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
     loop = _make_loop()
-    loop._loop_state.pending_intents = {41: {'kind': 'dims'}}
+    session = ControlSession(key="dims:step:0")
+    session.interaction_id = "sess-1"
+    session.push_pending(41, value=1, phase="update")
+    session.awaiting_commit = True
+    loop._intent_state.control_sessions[session.key] = session
+    loop._loop_state.pending_intents = {
+        41: {
+            'kind': 'dims.step',
+            'axis': 0,
+            'phase': 'update',
+            'value': 1,
+            'interaction_id': session.interaction_id,
+        }
+    }
 
     payload = {
         'seq': 7,
@@ -92,12 +107,24 @@ def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
         'sizes': [11, 6, 4],
         'displayed': [1, 2],
         'ack': True,
-        'intent_seq': 41,
+        'server_seq': 5,
+        'phase': 'update',
+        'control_versions': {
+            'step': {
+                'server_seq': 5,
+                'source_client_id': loop._intent_state.client_id,
+                'source_client_seq': 41,
+                'interaction_id': session.interaction_id,
+                'phase': 'update',
+            }
+        },
     }
 
     loop._handle_dims_update(payload)
 
-    assert loop._loop_state.pending_intents == {}
+    assert loop._loop_state.pending_intents
+    commit_entry = next(iter(loop._loop_state.pending_intents.values()))
+    assert commit_entry['phase'] == 'commit'
     assert loop._loop_state.last_dims_seq == 7
     assert loop._loop_state.last_dims_payload == {
         'current_step': [1, 2],
@@ -111,6 +138,29 @@ def test_handle_dims_update_clears_ack_and_caches_payload() -> None:
     }
     assert loop._dims_ready is True
     assert loop._intent_state.dims_ready is True
+    # Commit command should be dispatched after ack
+    assert loop._state_channel_stub.posted
+    commit_payload = loop._state_channel_stub.posted[-1]
+    assert commit_payload['type'] == CONTROL_COMMAND_TYPE
+    assert commit_payload['phase'] == 'commit'
+    commit_seq = commit_payload['client_seq']
+
+    commit_ack = dict(payload)
+    commit_ack['server_seq'] = 6
+    commit_ack['phase'] = 'commit'
+    commit_ack['control_versions'] = {
+        'step': {
+            'server_seq': 6,
+            'source_client_id': loop._intent_state.client_id,
+            'source_client_seq': commit_seq,
+            'interaction_id': session.interaction_id,
+            'phase': 'commit',
+        }
+    }
+
+    loop._handle_dims_update(commit_ack)
+
+    assert loop._loop_state.pending_intents == {}
 
 
 def test_replay_last_dims_payload_forwards_to_viewer() -> None:

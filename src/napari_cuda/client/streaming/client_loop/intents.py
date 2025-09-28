@@ -6,12 +6,15 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 
     from .loop_state import ClientLoopState
+
+from napari_cuda.client.streaming.control_sessions import ControlSession
+from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE
 
 logger = logging.getLogger("napari_cuda.client.streaming.client_stream_loop")
 
@@ -48,6 +51,7 @@ class IntentState:
     dims_z: float | None = None
     dims_z_min: float | None = None
     dims_z_max: float | None = None
+    control_sessions: Dict[str, ControlSession] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env_cfg: Any) -> "IntentState":
@@ -83,6 +87,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: IntentState) -> 
     loop_state.pending_intents.clear()
     loop_state.last_dims_seq = None
     loop_state.last_dims_payload = None
+    state.control_sessions.clear()
 
 
 def handle_dims_update(
@@ -179,13 +184,90 @@ def handle_dims_update(
             displayed=displayed,
         )
 
-    if intent_seq is not None:
-        info = loop_state.pending_intents.pop(intent_seq, None)
-        if info is not None:
-            if ack_val is False:
-                logger.warning("dims_update ack=false for intent_seq=%s info=%s", intent_seq, info)
-            elif log_dims_info:
-                logger.debug("dims_update ack: intent_seq=%s info=%s", intent_seq, info)
+    server_seq_val = _int_or_none(data.get('server_seq'))
+    source_client_seq = _int_or_none(data.get('source_client_seq'))
+    phase_meta = str(data.get('phase') or '').lower() or None
+    control_versions = (
+        data.get('control_versions')
+        if isinstance(data.get('control_versions'), dict)
+        else None
+    )
+
+    handled_ack = False
+    if control_versions:
+        for prop, meta_entry in control_versions.items():
+            if not isinstance(meta_entry, dict):
+                continue
+            client_seq_entry = _int_or_none(meta_entry.get('source_client_seq'))
+            if client_seq_entry is None:
+                continue
+            server_seq_entry = _int_or_none(meta_entry.get('server_seq'))
+            phase_entry = str(meta_entry.get('phase') or phase_meta or 'update').lower()
+            pending_info = loop_state.pending_intents.get(client_seq_entry)
+            if _handle_dims_ack_session(
+                state,
+                loop_state,
+                client_seq=client_seq_entry,
+                phase=phase_entry,
+                server_seq=server_seq_entry,
+            ):
+                handled_ack = True
+                if ack_val is False:
+                    logger.warning(
+                        "dims_update ack=false for client_seq=%s prop=%s info=%s",
+                        client_seq_entry,
+                        prop,
+                        pending_info,
+                    )
+                elif log_dims_info:
+                    logger.debug(
+                        "dims_update ack: client_seq=%s prop=%s phase=%s info=%s",
+                        client_seq_entry,
+                        prop,
+                        phase_entry,
+                        pending_info,
+                    )
+    else:
+        client_seq_entry = source_client_seq or intent_seq
+        if client_seq_entry is not None:
+            phase_entry = str(phase_meta or ('commit' if ack_val else 'update')).lower()
+            pending_info = loop_state.pending_intents.get(client_seq_entry)
+            if _handle_dims_ack_session(
+                state,
+                loop_state,
+                client_seq=client_seq_entry,
+                phase=phase_entry,
+                server_seq=server_seq_val,
+            ):
+                handled_ack = True
+                if ack_val is False:
+                    logger.warning(
+                        "dims_update ack=false for client_seq=%s info=%s",
+                        client_seq_entry,
+                        pending_info,
+                    )
+                elif log_dims_info:
+                    logger.debug(
+                        "dims_update ack: client_seq=%s phase=%s info=%s",
+                        client_seq_entry,
+                        phase_entry,
+                        pending_info,
+                    )
+            else:
+                info = loop_state.pending_intents.pop(client_seq_entry, None)
+                if info is not None:
+                    if ack_val is False:
+                        logger.warning(
+                            "dims_update ack=false for client_seq=%s info=%s",
+                            client_seq_entry,
+                            info,
+                        )
+                    elif log_dims_info:
+                        logger.debug(
+                            "dims_update ack (legacy): client_seq=%s info=%s",
+                            client_seq_entry,
+                            info,
+                        )
 
     loop_state.last_dims_payload = {
         'current_step': cur,
@@ -198,6 +280,156 @@ def handle_dims_update(
         'displayed': displayed,
     }
     presenter.apply_dims_update(dict(data))
+
+
+def _dims_session_key(axis_idx: int, prop: str) -> str:
+    return f"dims:{prop}:{int(axis_idx)}"
+
+
+def _parse_dims_session_key(key: str) -> tuple[str, int]:
+    parts = key.split(":", 2)
+    if len(parts) != 3 or parts[0] != "dims":
+        return "step", 0
+    prop = parts[1]
+    try:
+        axis_idx = int(parts[2])
+    except Exception:
+        axis_idx = 0
+    return prop, axis_idx
+
+
+def _ensure_dims_session(state: IntentState, axis_idx: int, prop: str) -> ControlSession:
+    key = _dims_session_key(axis_idx, prop)
+    session = state.control_sessions.get(key)
+    if session is None:
+        session = ControlSession(key=key)
+        state.control_sessions[key] = session
+    return session
+
+
+def _send_dims_command(
+    state: IntentState,
+    loop_state: "ClientLoopState",
+    *,
+    axis_idx: int,
+    prop: str,
+    value: Any,
+    session: ControlSession,
+    phase: str,
+    origin: Optional[str] = None,
+) -> Optional[int]:
+    channel = loop_state.state_channel
+    if channel is None:
+        return None
+
+    session.mark_target(value)
+    interaction_id = session.ensure_interaction_id()
+    seq = state.next_client_seq()
+    payload: Dict[str, Any] = {
+        "type": CONTROL_COMMAND_TYPE,
+        "scope": "dims",
+        "target": f"axis-{int(axis_idx)}",
+        "prop": prop,
+        "value": value,
+        "client_id": state.client_id,
+        "client_seq": seq,
+        "interaction_id": interaction_id,
+        "phase": phase,
+        "timestamp": time.time(),
+    }
+    extras: Dict[str, Any] = {}
+    if origin is not None:
+        extras["origin"] = origin
+    if extras:
+        payload["extras"] = extras
+
+    ok = channel.post(payload)
+    if not ok:
+        session.dirty = True
+        return None
+
+    loop_state.pending_intents[seq] = {
+        "kind": f"dims.{prop}",
+        "axis": int(axis_idx),
+        "phase": phase,
+        "value": value,
+        "interaction_id": interaction_id,
+    }
+    session.push_pending(seq, value, phase=phase)
+    if phase == "commit":
+        session.commit_in_flight = True
+        session.awaiting_commit = False
+        session.last_commit_seq = seq
+    else:
+        session.awaiting_commit = True
+        session.commit_in_flight = False
+    return seq
+
+
+def _send_dims_commit(
+    state: IntentState,
+    loop_state: "ClientLoopState",
+    *,
+    axis_idx: int,
+    prop: str,
+    session: ControlSession,
+) -> None:
+    if session.commit_in_flight or session.pending:
+        return
+    commit_value = session.confirmed_value
+    if commit_value is None:
+        return
+    _send_dims_command(
+        state,
+        loop_state,
+        axis_idx=axis_idx,
+        prop=prop,
+        value=commit_value,
+        session=session,
+        phase="commit",
+    )
+
+
+def _handle_dims_ack_session(
+    state: IntentState,
+    loop_state: "ClientLoopState",
+    *,
+    client_seq: int,
+    phase: str,
+    server_seq: Optional[int],
+) -> bool:
+    handled = False
+    for key, session in state.control_sessions.items():
+        pending = session.pop_pending(client_seq)
+        if pending is None:
+            continue
+        handled = True
+        loop_state.pending_intents.pop(client_seq, None)
+        if (
+            server_seq is not None
+            and session.last_server_seq is not None
+            and server_seq < session.last_server_seq
+        ):
+            return True
+        session.mark_confirmed(
+            pending.value,
+            client_seq if phase != "commit" else None,
+            server_seq=server_seq,
+        )
+        prop, axis_idx = _parse_dims_session_key(key)
+        if phase == "commit":
+            session.reset_interaction()
+        else:
+            if not session.pending and session.awaiting_commit and not session.commit_in_flight:
+                _send_dims_commit(
+                    state,
+                    loop_state,
+                    axis_idx=axis_idx,
+                    prop=prop,
+                    session=session,
+                )
+        break
+    return handled
 
 
 def mirror_dims_to_viewer(
@@ -276,29 +508,23 @@ def dims_step(
         return False
     now = time.perf_counter()
     if (now - float(state.last_dims_send or 0.0)) < state.dims_min_dt:
-        logger.debug("dims.intent.step gated by rate limiter (%s)", origin)
+        logger.debug("control.command dims.step gated by rate limiter (%s)", origin)
         return False
-    ch = loop_state.state_channel
-    if ch is None:
+    session = _ensure_dims_session(state, int(idx), "step")
+    seq = _send_dims_command(
+        state,
+        loop_state,
+        axis_idx=int(idx),
+        prop="step",
+        value=int(delta),
+        session=session,
+        phase="update",
+        origin=str(origin),
+    )
+    if seq is None:
         return False
-    payload = {
-        'type': 'dims.intent.step',
-        'axis': int(idx),
-        'delta': int(delta),
-        'client_id': state.client_id,
-        'client_seq': state.next_client_seq(),
-        'origin': str(origin),
-    }
-    seq_val = int(payload['client_seq'])
-    ok = ch.post(payload)
-    if ok:
-        loop_state.pending_intents[seq_val] = {
-            'kind': 'step',
-            'axis': int(idx),
-            'origin': str(origin),
-        }
     state.last_dims_send = now
-    return bool(ok)
+    return True
 
 
 def handle_wheel_for_dims(
@@ -336,9 +562,9 @@ def handle_wheel_for_dims(
         ui_call=ui_call,
     )
     if log_dims_info:
-        logger.info("wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent))
+        logger.info("wheel->control.command dims.step d=%+d sent=%s", int(step), bool(sent))
     else:
-        logger.debug("wheel->dims.intent.step d=%+d sent=%s", int(step), bool(sent))
+        logger.debug("wheel->control.command dims.step d=%+d sent=%s", int(step), bool(sent))
     return sent
 
 
@@ -362,30 +588,23 @@ def dims_set_index(
         return False
     now = time.perf_counter()
     if (now - float(state.last_dims_send or 0.0)) < state.dims_min_dt:
-        logger.debug("dims.intent.set_index gated by rate limiter (%s)", origin)
+        logger.debug("control.command dims.index gated by rate limiter (%s)", origin)
         return False
-    ch = loop_state.state_channel
-    if ch is None:
+    session = _ensure_dims_session(state, int(idx), "index")
+    seq = _send_dims_command(
+        state,
+        loop_state,
+        axis_idx=int(idx),
+        prop="index",
+        value=int(value),
+        session=session,
+        phase="update",
+        origin=str(origin),
+    )
+    if seq is None:
         return False
-    payload = {
-        'type': 'dims.intent.set_index',
-        'axis': int(idx),
-        'value': int(value),
-        'client_id': state.client_id,
-        'client_seq': state.next_client_seq(),
-        'origin': str(origin),
-    }
-    seq_val = int(payload['client_seq'])
-    ok = ch.post(payload)
-    if ok:
-        loop_state.pending_intents[seq_val] = {
-            'kind': 'set_index',
-            'axis': int(idx),
-            'value': int(value),
-            'origin': str(origin),
-        }
     state.last_dims_send = now
-    return bool(ok)
+    return True
 
 
 def current_ndisplay(state: IntentState) -> Optional[int]:
@@ -756,3 +975,5 @@ def _bool_or_none(value: object) -> Optional[bool]:
     if isinstance(value, bool):
         return value
     return bool(value)
+from napari_cuda.client.streaming.control_sessions import ControlSession
+from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE

@@ -1,11 +1,11 @@
-"""Layer intent bridge wiring Qt layer controls to server intents.
+"""Control bridge wiring Qt layer controls to server control commands.
 
 The bridge observes :class:`RemoteImageLayer` events, converts local UI
-mutations into ``layer.intent.*`` payloads, and defers visible changes until
-the server acknowledges them via ``layer.update`` messages. This keeps the
+mutations into ``control.command`` payloads, and defers visible changes until
+the server acknowledges them via ``layer.update`` metadata. This keeps the
 client UI in lock-step with the authoritative scene state while reusing the
-existing intent rate limiting and acknowledgement tracking built into the
-stream loop.
+existing rate limiting and acknowledgement tracking built into the stream
+loop. Legacy ``layer.intent.*`` payloads are no longer emitted.
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ from napari_cuda.client.layers.registry import LayerRecord, RegistrySnapshot
 from napari_cuda.client.streaming.client_loop.intents import IntentState
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.streaming.presenter_facade import PresenterFacade
-from napari_cuda.protocol.messages import LayerSpec, LayerUpdateMessage
+from napari_cuda.client.streaming.control_sessions import ControlSession, PendingControl
+from napari_cuda.protocol.messages import CONTROL_COMMAND_TYPE, LayerSpec, LayerUpdateMessage
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
@@ -96,62 +97,11 @@ class PropertyConfig:
 
     key: str
     event_name: str
-    intent_type: str
-    payload_builder: Callable[[Any], Dict[str, Any]]
+    encoder: Callable[[Any], Any]
     getter: Callable[[RemoteImageLayer], Any]
     setter: Callable[[RemoteImageLayer, Any], None]
     equals: Callable[[Any, Any], bool]
     spec_getter: Callable[[LayerSpec], Optional[Any]]
-
-
-@dataclass
-class PendingIntent:
-    seq: int
-    value: Any
-    timestamp: float
-
-
-@dataclass
-class InteractionSession:
-    key: str
-    pending: List[PendingIntent] = field(default_factory=list)
-    target_value: Any = None
-    confirmed_value: Any = None
-    last_sent_seq: Optional[int] = None
-    last_confirmed_seq: Optional[int] = None
-    last_send_ts: float = 0.0
-    dirty: bool = False
-
-    def mark_target(self, value: Any) -> None:
-        self.target_value = value
-        self.dirty = True
-
-    def push_pending(self, seq: int, value: Any) -> None:
-        now = time.perf_counter()
-        self.pending.append(PendingIntent(seq=seq, value=value, timestamp=now))
-        self.last_sent_seq = seq
-        self.dirty = False
-        self.last_send_ts = now
-
-    def pop_pending(self, seq: Optional[int]) -> Optional[PendingIntent]:
-        if not self.pending:
-            return None
-        if seq is None:
-            return self.pending.pop(0)
-        for idx, item in enumerate(self.pending):
-            if item.seq == seq:
-                return self.pending.pop(idx)
-        return None
-
-    def clear_pending(self) -> None:
-        self.pending.clear()
-        self.last_sent_seq = None
-
-    def mark_confirmed(self, value: Any, seq: Optional[int]) -> None:
-        self.confirmed_value = value
-        if seq is not None:
-            self.last_confirmed_seq = seq
-        self.dirty = False
 
 
 @dataclass
@@ -161,15 +111,14 @@ class LayerBinding:
     callbacks: list[tuple[EventEmitter, Callable]] = field(default_factory=list)
     handlers: dict[str, tuple[EventEmitter, Callable]] = field(default_factory=dict)
     suspended: set[str] = field(default_factory=set)
-    sessions: dict[str, InteractionSession] = field(default_factory=dict)
+    sessions: dict[str, ControlSession] = field(default_factory=dict)
 
 
 PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="opacity",
         event_name="opacity",
-        intent_type="layer.intent.set_opacity",
-        payload_builder=lambda value: {"opacity": float(value)},
+        encoder=lambda value: float(value),
         getter=lambda layer: float(getattr(layer, "opacity", 0.0)),
         setter=lambda layer, value: setattr(layer, "opacity", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
@@ -178,8 +127,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="visible",
         event_name="visible",
-        intent_type="layer.intent.set_visibility",
-        payload_builder=lambda value: {"visible": bool(value)},
+        encoder=lambda value: bool(value),
         getter=lambda layer: bool(getattr(layer, "visible", False)),
         setter=lambda layer, value: setattr(layer, "visible", bool(value)),
         equals=lambda a, b: bool(a) is bool(b),
@@ -188,8 +136,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="rendering",
         event_name="rendering",
-        intent_type="layer.intent.set_render_mode",
-        payload_builder=lambda value: {"mode": str(value)},
+        encoder=lambda value: str(value),
         getter=lambda layer: str(getattr(layer, "rendering", "")),
         setter=lambda layer, value: setattr(layer, "rendering", str(value)),
         equals=lambda a, b: str(a) == str(b),
@@ -198,8 +145,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="colormap",
         event_name="colormap",
-        intent_type="layer.intent.set_colormap",
-        payload_builder=lambda value: {"name": str(value)},
+        encoder=lambda value: str(value),
         getter=lambda layer: str(_colormap_name(getattr(layer, "colormap", None)) or ""),
         setter=lambda layer, value: setattr(layer, "colormap", str(value)),
         equals=lambda a, b: str(a) == str(b),
@@ -208,8 +154,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="gamma",
         event_name="gamma",
-        intent_type="layer.intent.set_gamma",
-        payload_builder=lambda value: {"gamma": float(value)},
+        encoder=lambda value: float(value),
         getter=lambda layer: float(getattr(layer, "gamma", 1.0)),
         setter=lambda layer, value: setattr(layer, "gamma", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b), tol=1e-4),
@@ -218,8 +163,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="iso_threshold",
         event_name="iso_threshold",
-        intent_type="layer.intent.set_iso_threshold",
-        payload_builder=lambda value: {"iso_threshold": float(value)},
+        encoder=lambda value: float(value),
         getter=lambda layer: float(getattr(layer, "iso_threshold", 0.0)),
         setter=lambda layer, value: setattr(layer, "iso_threshold", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
@@ -228,8 +172,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="attenuation",
         event_name="attenuation",
-        intent_type="layer.intent.set_attenuation",
-        payload_builder=lambda value: {"attenuation": float(value)},
+        encoder=lambda value: float(value),
         getter=lambda layer: float(getattr(layer, "attenuation", 0.0)),
         setter=lambda layer, value: setattr(layer, "attenuation", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
@@ -238,11 +181,9 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
     PropertyConfig(
         key="contrast_limits",
         event_name="contrast_limits",
-        intent_type="layer.intent.set_contrast_limits",
-        payload_builder=lambda value: {
-            "lo": float(value[0]) if value is not None else 0.0,
-            "hi": float(value[1]) if value is not None else 0.0,
-        },
+        encoder=lambda value: None
+        if value is None
+        else (float(value[0]), float(value[1])),
         getter=lambda layer: tuple(float(v) for v in getattr(layer, "contrast_limits", (0.0, 1.0))),
         setter=lambda layer, value: setattr(
             layer, "contrast_limits", (float(value[0]), float(value[1]))
@@ -297,10 +238,10 @@ class LayerIntentBridge:
         config: PropertyConfig,
         *,
         initial_value: Any = None,
-    ) -> InteractionSession:
+    ) -> ControlSession:
         session = binding.sessions.get(config.key)
         if session is None:
-            session = InteractionSession(key=config.key)
+            session = ControlSession(key=config.key)
             binding.sessions[config.key] = session
         if initial_value is not None and session.target_value is None:
             session.target_value = initial_value
@@ -357,17 +298,26 @@ class LayerIntentBridge:
         spec_controls = (
             spec.controls if (spec is not None and isinstance(spec.controls, dict)) else None
         )
+        versions = (
+            message.control_versions
+            if isinstance(getattr(message, "control_versions", None), dict)
+            else None
+        )
 
         for key in keys:
             if controls is not None:
                 controls.pop(key, None)
             if spec_controls is not None:
                 spec_controls.pop(key, None)
+            if versions is not None:
+                versions.pop(key, None)
 
         if controls is not None and not controls:
             message.controls = None
         if spec is not None and spec_controls is not None and not spec_controls:
             spec.controls = None
+        if versions is not None and not versions:
+            message.control_versions = None
 
     # ------------------------------------------------------------------
     def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
@@ -435,38 +385,7 @@ class LayerIntentBridge:
         return _handler
 
     # ------------------------------------------------------------------
-    def _maybe_send_session(
-        self,
-        binding: LayerBinding,
-        config: PropertyConfig,
-        session: InteractionSession,
-        *,
-        force: bool = False,
-    ) -> None:
-        target = session.target_value
-        if target is None:
-            return
-
-        if session.pending and config.equals(session.pending[-1].value, target):
-            session.dirty = False
-            return
-
-        if not force and not self._rate_gate_settings():
-            session.dirty = True
-            return
-
-        seq = self._send_intent(binding, config, target)
-        if seq is None:
-            session.dirty = True
-            fallback = session.confirmed_value
-            if fallback is not None and not config.equals(target, fallback):
-                self._restore_property(binding, config, fallback)
-            return
-
-        session.push_pending(seq, target)
-        # Keep rate limiter in sync with the last successful send.
-        self._intent_state.last_settings_send = session.last_send_ts
-
+    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     def _handle_session_property_change(
         self,
@@ -486,6 +405,8 @@ class LayerIntentBridge:
             return
 
         session.mark_target(current_value)
+        session.ensure_interaction_id()
+        session.awaiting_commit = True
 
         self._maybe_send_session(binding, config, session)
 
@@ -495,100 +416,154 @@ class LayerIntentBridge:
         binding: LayerBinding,
         config: PropertyConfig,
         new_value: Any,
-        intent_seq: Optional[int],
+        meta: Dict[str, Any],
     ) -> bool:
         session = self._ensure_session(binding, config)
+        client_id = meta.get("client_id")
+        client_seq = meta.get("client_seq")
+        server_seq = meta.get("server_seq")
+        phase = str(meta.get("phase") or "update").lower()
+        is_self = client_id is not None and client_id == self._intent_state.client_id
 
-        if intent_seq is not None:
-            removed = session.pop_pending(intent_seq)
-            if removed is None and session.last_confirmed_seq is not None:
-                if intent_seq <= session.last_confirmed_seq:
+        logger.debug(
+            "LayerIntentBridge control ack: id=%s key=%s value=%s meta=%s is_self=%s pending=%d pending_values=%s target=%s confirmed=%s",
+            binding.remote_id,
+            config.key,
+            new_value,
+            {
+                "client_id": client_id,
+                "client_seq": client_seq,
+                "server_seq": server_seq,
+                "phase": phase,
+                "interaction_id": meta.get("interaction_id"),
+            },
+            is_self,
+            len(session.pending),
+            [(item.seq, item.value, item.phase) for item in session.pending],
+            session.target_value,
+            session.confirmed_value,
+        )
+
+        if (
+            server_seq is not None
+            and session.last_server_seq is not None
+            and server_seq < session.last_server_seq
+        ):
+            logger.debug(
+                "LayerIntentBridge stale server seq ignored: id=%s key=%s seq=%s < last=%s",
+                binding.remote_id,
+                config.key,
+                server_seq,
+                session.last_server_seq,
+            )
+            return True
+
+        apply_remote_value = True
+        applied = True
+
+        if is_self and client_seq is not None:
+            apply_remote_value = False
+            removed = session.pop_pending(client_seq)
+            if removed is None:
+                if (
+                    session.last_confirmed_seq is not None
+                    and client_seq <= session.last_confirmed_seq
+                ):
                     logger.debug(
                         "LayerIntentBridge stale ack ignored: id=%s key=%s seq=%s <= confirmed=%s",
                         binding.remote_id,
                         config.key,
-                        intent_seq,
+                        client_seq,
                         session.last_confirmed_seq,
                     )
                     return True
-            elif removed is not None:
+            else:
                 self._loop_state.pending_intents.pop(removed.seq, None)
+                # Drop any older pending entries (should be rare but keeps ordering tight).
+                while session.pending and session.pending[0].seq < client_seq:
+                    stale = session.pop_pending(None)
+                    if stale is None:
+                        break
+                    self._loop_state.pending_intents.pop(stale.seq, None)
+
+                if server_seq is not None:
+                    session.last_server_seq = server_seq
+                session.last_confirmed_seq = client_seq
+
+                if session.pending:
+                    # Newer optimistic commands still in flight; hold target steady.
+                    latest = session.pending[-1]
+                    session.target_value = latest.value
+                    session.dirty = False
+                    return False
+                session.mark_confirmed(new_value, client_seq, server_seq=server_seq)
+                if phase == "commit":
+                    session.target_value = new_value
+                else:
+                    applied = False
         else:
-            # Reset pending when the server pushes an unsolicited update.
             while session.pending:
                 info = session.pop_pending(None)
                 if info is None:
                     break
                 self._loop_state.pending_intents.pop(info.seq, None)
 
-        if session.pending:
-            if intent_seq is not None and session.pending[-1].seq < intent_seq:
-                # Pending intents are older than the confirmed seq; drop them as stale.
-                while session.pending:
-                    stale = session.pop_pending(None)
-                    if stale is None:
-                        break
-                    self._loop_state.pending_intents.pop(stale.seq, None)
-            else:
-                latest = session.pending[-1]
-                session.mark_confirmed(new_value, intent_seq)
-                current_value = None
-                try:
-                    current_value = config.getter(binding.layer)
-                except Exception:
-                    logger.debug(
-                        "LayerIntentBridge getter failed during pending restore: id=%s key=%s",
-                        binding.remote_id,
-                        config.key,
-                        exc_info=True,
-                    )
-                if current_value is None or not config.equals(current_value, latest.value):
-                    self._restore_property(binding, config, latest.value)
-                return False
+            session.mark_confirmed(new_value, None, server_seq=server_seq)
+            session.target_value = new_value
 
-        session.mark_confirmed(new_value, intent_seq)
-
-        try:
-            current_value = config.getter(binding.layer)
-        except Exception:
-            current_value = None
-            logger.debug(
-                "LayerIntentBridge getter failed: id=%s key=%s",
-                binding.remote_id,
-                config.key,
-                exc_info=True,
-            )
-
-        if current_value is None or not config.equals(current_value, new_value):
-            binding.suspended.add(config.key)
+        current_value = new_value
+        if apply_remote_value:
             try:
-                handler = binding.handlers.get(config.key)
-                blocker = nullcontext()
-                if handler is not None:
-                    emitter, callback = handler
-                    if hasattr(emitter, "blocker"):
-                        blocker = emitter.blocker(callback)
-                with blocker:
-                    config.setter(binding.layer, new_value)
+                current_value = config.getter(binding.layer)
             except Exception:
+                current_value = None
                 logger.debug(
-                    "LayerIntentBridge remote apply failed: id=%s key=%s",
+                    "LayerIntentBridge getter failed: id=%s key=%s",
                     binding.remote_id,
                     config.key,
                     exc_info=True,
                 )
-            finally:
-                binding.suspended.discard(config.key)
 
-        # If the confirmed value lags behind the latest target, flush it now.
-        if session.target_value is not None and not config.equals(session.target_value, new_value):
-            session.dirty = True
-            self._maybe_send_session(binding, config, session, force=True)
-            return False
+            if current_value is None or not config.equals(current_value, new_value):
+                binding.suspended.add(config.key)
+                try:
+                    handler = binding.handlers.get(config.key)
+                    blocker = nullcontext()
+                    if handler is not None:
+                        emitter, callback = handler
+                        if hasattr(emitter, "blocker"):
+                            blocker = emitter.blocker(callback)
+                    with blocker:
+                        config.setter(binding.layer, new_value)
+                except Exception:
+                    logger.debug(
+                        "LayerIntentBridge remote apply failed: id=%s key=%s",
+                        binding.remote_id,
+                        config.key,
+                        exc_info=True,
+                    )
+                finally:
+                    binding.suspended.discard(config.key)
 
-        session.target_value = new_value
+        if apply_remote_value and session.target_value is not None and not config.equals(session.target_value, new_value):
+            if is_self:
+                session.dirty = True
+                self._maybe_send_session(binding, config, session, force=True)
+                return False
+            session.target_value = new_value
+
+        if is_self:
+            if phase == "commit":
+                session.reset_interaction()
+            else:
+                if not session.pending and session.awaiting_commit and not session.commit_in_flight:
+                    self._try_send_commit(binding, config, session, session.target_value)
+        else:
+            session.reset_interaction()
+            session.target_value = new_value
+
         session.dirty = False
-        return True
+        return applied
 
     # ------------------------------------------------------------------
     def _on_property_change(self, binding: LayerBinding, config: PropertyConfig) -> None:
@@ -635,45 +610,62 @@ class LayerIntentBridge:
             binding.suspended.discard(config.key)
 
     # ------------------------------------------------------------------
-    def _send_intent(
-        self, binding: LayerBinding, config: PropertyConfig, value: Any
+    def _send_control_command(
+        self,
+        binding: LayerBinding,
+        config: PropertyConfig,
+        value: Any,
+        *,
+        session: ControlSession,
+        phase: str,
     ) -> Optional[int]:
-        payload = {
-            "type": config.intent_type,
-            "layer_id": binding.remote_id,
-            "client_id": self._intent_state.client_id,
-        }
         try:
-            payload.update(config.payload_builder(value))
+            encoded_value = config.encoder(value)
         except Exception:
             logger.debug(
-                "LayerIntentBridge payload build failed: id=%s key=%s",
+                "LayerIntentBridge value encode failed: id=%s key=%s",
                 binding.remote_id,
                 config.key,
                 exc_info=True,
             )
             return None
 
+        interaction_id = session.ensure_interaction_id()
+        payload: Dict[str, Any] = {
+            "type": CONTROL_COMMAND_TYPE,
+            "scope": "layer",
+            "target": binding.remote_id,
+            "prop": config.key,
+            "value": encoded_value,
+            "client_id": self._intent_state.client_id,
+            "interaction_id": interaction_id,
+            "phase": phase,
+            "timestamp": time.time(),
+        }
+
         seq = self._intent_state.next_client_seq()
         payload["client_seq"] = seq
         ok = self._loop.post(payload)
         if ok:
             self._loop_state.pending_intents[seq] = {
-                "kind": f"layer.{config.key}",
+                "kind": f"control.{config.key}",
                 "layer_id": binding.remote_id,
-                "value": payload.get(config.key) or payload,
+                "phase": phase,
+                "value": encoded_value,
+                "interaction_id": interaction_id,
             }
             logger.info(
-                "layer.intent dispatched: id=%s type=%s seq=%s payload=%s",
+                "control.command dispatched: id=%s prop=%s phase=%s seq=%s payload=%s",
                 binding.remote_id,
-                config.intent_type,
+                config.key,
+                phase,
                 seq,
                 payload,
             )
             return seq
 
         logger.warning(
-            "LayerIntentBridge failed to send intent: id=%s payload=%s",
+            "LayerIntentBridge failed to send control command: id=%s payload=%s",
             binding.remote_id,
             payload,
         )
@@ -707,13 +699,43 @@ class LayerIntentBridge:
         intent_seq = _intent_seq_from_message(message)
         if intent_seq is None:
             intent_seq = _extract_intent_seq(spec)
+        base_meta: Dict[str, Any] = {
+            "client_seq": message.source_client_seq
+            if message.source_client_seq is not None
+            else intent_seq,
+            "client_id": message.source_client_id,
+            "server_seq": message.server_seq,
+            "interaction_id": message.interaction_id,
+            "phase": message.phase,
+        }
+        versions = message.control_versions if isinstance(message.control_versions, dict) else {}
         changed_keys: set[str] = set()
         for config in PROPERTY_CONFIGS:
             new_value = config.spec_getter(spec)
             if new_value is None:
                 continue
             changed_keys.add(config.key)
-            applied = self._apply_remote_value(binding, config, new_value, intent_seq)
+            prop_meta = dict(base_meta)
+            version_entry = versions.get(config.key) if isinstance(versions, dict) else None
+            if isinstance(version_entry, dict):
+                if version_entry.get("server_seq") is not None:
+                    try:
+                        prop_meta["server_seq"] = int(version_entry["server_seq"])
+                    except Exception:
+                        prop_meta["server_seq"] = version_entry["server_seq"]
+                if version_entry.get("source_client_seq") is not None:
+                    try:
+                        prop_meta["client_seq"] = int(version_entry["source_client_seq"])
+                    except Exception:
+                        prop_meta["client_seq"] = version_entry["source_client_seq"]
+                if version_entry.get("source_client_id") is not None:
+                    prop_meta["client_id"] = version_entry.get("source_client_id")
+                if version_entry.get("interaction_id") is not None:
+                    prop_meta["interaction_id"] = version_entry.get("interaction_id")
+                if version_entry.get("phase") is not None:
+                    prop_meta["phase"] = version_entry.get("phase")
+
+            applied = self._apply_remote_value(binding, config, new_value, prop_meta)
             if not applied:
                 suppressed.add(config.key)
 
@@ -725,9 +747,9 @@ class LayerIntentBridge:
         binding: LayerBinding,
         config: PropertyConfig,
         new_value: Any,
-        intent_seq: Optional[int],
+        meta: Dict[str, Any],
     ) -> bool:
-        return self._apply_session_remote(binding, config, new_value, intent_seq)
+        return self._apply_session_remote(binding, config, new_value, meta)
 
 def _extract_intent_seq(spec: LayerSpec) -> Optional[int]:
     target_keys = (

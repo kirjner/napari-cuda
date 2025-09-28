@@ -616,14 +616,14 @@ class ClientStreamLoop:
     def _handle_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
 
-    # State channel lifecycle: gate dims intents safely across reconnects
+    # State channel lifecycle: gate dims control commands safely across reconnects
     def _on_state_connected(self) -> None:
         intents.on_state_connected(self._intent_state)
-        logger.info("StateChannel connected; gating dims intents until dims.update meta arrives")
+        logger.info("StateChannel connected; gating dims control commands until dims.update meta arrives")
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
         intents.on_state_disconnected(self._loop_state, self._intent_state)
-        logger.info("StateChannel disconnected: %s; dims intents gated", exc)
+        logger.info("StateChannel disconnected: %s; dims control commands gated", exc)
 
     # --- Input mapping: unified wheel handler -------------------------------------
     def _on_wheel(self, data: dict) -> None:
