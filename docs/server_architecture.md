@@ -32,11 +32,11 @@ Websocket Clients (state + pixel)
             │                          │
             ▼                          ▼
    +------------------+      +----------------------------+
-   | ServerSceneQueue  |      | WorkerSceneNotification   |
-   | (control → worker)|      | Queue (worker → control)  |
+   | RenderMailbox        |      | WorkerSceneNotification   |
+   | (control → worker) |      | Queue (worker → control)  |
    | + CameraController|      +----------------------------+
    | + SceneStateApplier|                 | drain
-   +------------------+                  ▼
+   +-----------------------+             ▼
             │                 +-------------------------+
             ▼                 | CaptureFacade           |
    +------------------+       | + GLCapture             |
@@ -59,10 +59,10 @@ Websocket Clients (state + pixel)
   - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, SceneSpec caches, and policy logging state.
   - Tracks canonical per-layer controls via `LayerControlState`; `layer.intent.*` handlers mutate this bag, which then feeds both the worker (planar updates) and the spec builders.
   - Intent helpers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
-  - Lives alongside `server_scene_queue.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
+  - Lives alongside `render_mailbox.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
   - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
   - Layer controls surface through a dedicated `controls` map on every `scene.spec` / `layer.update`; `extras` now carries transport metadata only (volume flags, zarr paths, adapter hints).
-- **Control Channel Helpers** (`server_scene_control.py`)
+- **Control Channel Helpers** (`state_channel_handler.py`)
   - Orchestrate state-channel websocket flow: connection setup, intent dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
@@ -104,7 +104,7 @@ producing frames.
 ```mermaid
 graph LR
     subgraph AsyncLoop["EGLHeadlessServer (async loop)"]
-        SSC["server_scene_control\\n(handle_state, dims/spec)"]
+        SSC["state_channel_handler\\n(handle_state, dims/spec)"]
         PCH["pixel_channel\\n(client lifecycle, keyframe)"]
         SceneBag["ServerSceneData\\n(mutable state bag)"]
         PixelBag["PixelBroadcastState\\n(frame queue + metrics)"]
@@ -113,7 +113,7 @@ graph LR
 
     subgraph WorkerThread["EGLRendererWorker (render thread)"]
         Worker["Render loop"]
-        SceneQueue["ServerSceneQueue\\n(camera + intents)"]
+        SceneQueue["RenderMailbox\\n(camera + intents)"]
     end
 
     StateClient["State WS client"]
@@ -145,8 +145,8 @@ graph LR
   - Coordinates render ticks, applies pending scene updates, and liaises with ROI/LOD helpers.
   - Delegates capture/encode to `CaptureFacade` and camera/scene logic to extracted helpers.
 
-- **SceneState Helpers** (`scene_state_applier.py`, `server_scene_queue.py`, `server_scene_spec.py`, `camera_controller.py`)
-  - `ServerSceneQueue` coalesces pending updates across threads before the worker drains them.
+- **SceneState Helpers** (`scene_state_applier.py`, `render_mailbox.py`, `server_scene_spec.py`, `camera_controller.py`)
+  - `RenderMailbox` coalesces pending updates across threads before the worker drains them.
   - `WorkerSceneNotificationQueue` carries worker-driven refresh notices back to the control loop so metadata and broadcasts stay aligned.
   - `server_scene_spec.py` builds `scene.spec`, `dims.update`, and now `layer.update` payloads from `ServerSceneData` for WebSocket and MCP callers.
   - `SceneStateApplier` applies dims/camera/volume changes and layer property overrides to viewer + layer objects.
@@ -176,8 +176,8 @@ graph LR
 ## Data Flow Summary
 
 1. Clients connect via websocket; `EGLHeadlessServer` registers them and pushes an initial `SceneSpec`.
-2. Incoming intents mutate `ServerSceneData` (dims sequence, volume/multiscale hints, camera queue) and enqueue work in `ServerSceneQueue` when the worker needs to react.
-3. The worker thread drains updates from `ServerSceneQueue`, applies them through `SceneStateApplier`, and kicks ROI/LOD recalculation as needed.
+2. Incoming intents mutate `ServerSceneData` (dims sequence, volume/multiscale hints, camera queue) and enqueue work in `RenderMailbox` when the worker needs to react.
+3. The worker thread drains updates from `RenderMailbox`, applies them through `SceneStateApplier`, and kicks ROI/LOD recalculation as needed.
 4. When the worker finishes applying a scene update, it enqueues a notification on the worker→control queue; the asyncio control loop drains it, refreshes `ViewerSceneManager`, and broadcasts the authoritative dims/spec payload.
 5. `CaptureFacade` captures rendered frames, hands them to NVENC, and returns packet bytes to the server.
    - The NVENC helper (`rendering/encoder.py`) reads preset/bitrate/RC overrides from

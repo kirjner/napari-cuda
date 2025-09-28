@@ -13,8 +13,8 @@ from typing import Optional, Sequence, List
 from . import pixel_channel
 from .bitstream import build_avcc_config, pack_to_avcc
 from .scene_state import ServerSceneState
-from .server_scene_control import build_dims_update_message
-from .server_scene_queue import WorkerSceneNotification
+from .state_channel_handler import build_dims_update_message
+from .worker_notifications import WorkerSceneNotification
 from .egl_worker import EGLRendererWorker
 
 logger = logging.getLogger(__name__)

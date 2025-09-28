@@ -1,0 +1,910 @@
+"""State-channel orchestration helpers for `EGLHeadlessServer`."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import socket
+from collections.abc import Awaitable, Callable
+from typing import Any, Mapping, Optional, Sequence
+
+from websockets.exceptions import ConnectionClosed
+
+from napari_cuda.server import server_scene_intents as intents
+from napari_cuda.server.scene_state import ServerSceneState
+from napari_cuda.server.server_scene import ServerSceneCommand
+from napari_cuda.server.worker_notifications import WorkerSceneNotification
+from napari_cuda.server.server_scene_spec import (
+    build_dims_payload,
+    build_layer_update_payload,
+    build_scene_spec_json,
+)
+from napari_cuda.server import pixel_channel
+
+logger = logging.getLogger(__name__)
+
+StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
+
+
+async def handle_state(server: Any, ws: Any) -> None:
+    """Handle a state-channel websocket connection."""
+
+    server._state_clients.add(ws)
+    server.metrics.inc('napari_cuda_state_connects')
+    try:
+        server._update_client_gauges()
+        _disable_nagle(ws)
+        await _send_state_baseline(server, ws)
+        remote = getattr(ws, 'remote_address', None)
+        log = logger.info if server._log_state_traces else logger.debug
+        log("state client loop start remote=%s id=%s", remote, id(ws))
+        try:
+            async for msg in ws:
+                try:
+                    data = json.loads(msg)
+                except json.JSONDecodeError:
+                    logger.debug('state client sent invalid JSON; ignoring')
+                    continue
+                await process_state_message(server, data, ws)
+        except ConnectionClosed as exc:
+            logger.info(
+                "state client closed remote=%s id=%s code=%s reason=%s",
+                remote,
+                id(ws),
+                getattr(exc, 'code', None),
+                getattr(exc, 'reason', None),
+            )
+        except Exception:
+            logger.exception("state client error remote=%s id=%s", remote, id(ws))
+    finally:
+        try:
+            await ws.close()
+        except Exception as exc:
+            logger.debug("State WS close error: %s", exc)
+        server._state_clients.discard(ws)
+        server._update_client_gauges()
+
+
+
+async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    center = data.get('center')
+    zoom = data.get('zoom')
+    angles = data.get('angles')
+    if server._log_cam_info:
+        logger.info("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
+    elif server._log_cam_debug:
+        logger.debug("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
+    with server._state_lock:
+        server._scene.latest_state = ServerSceneState(
+            center=tuple(center) if center else None,
+            zoom=float(zoom) if zoom is not None else None,
+            angles=tuple(angles) if angles else None,
+            current_step=server._scene.latest_state.current_step,
+        )
+    return True
+
+
+async def _handle_legacy_dims(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    logger.debug("state: dims.set ignored (use dims.intent.*)")
+    return True
+
+
+async def _handle_dims_step(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    axis = data.get('axis')
+    delta = int(data.get('delta') or 0)
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if server._log_dims_info:
+        logger.info("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
+    else:
+        logger.debug("intent: step axis=%r delta=%d client_id=%s seq=%s", axis, delta, client_id, client_seq)
+    try:
+        meta = server._dims_metadata() or {}
+        new_step = intents.apply_dims_intent(
+            server._scene,
+            server._state_lock,
+            meta,
+            axis=axis,
+            step_delta=delta,
+            set_value=None,
+        )
+        if new_step is not None:
+            try:
+                intent_i = int(client_seq) if client_seq is not None else None
+            except Exception:
+                intent_i = None
+            server._schedule_coro(
+                broadcast_dims_update(
+                    server,
+                    new_step,
+                    last_client_id=client_id,
+                    ack=True,
+                    intent_seq=intent_i,
+                ),
+                'dims_update-step',
+            )
+    except Exception as exc:
+        logger.debug("dims.intent.step handling failed: %s", exc)
+    return True
+
+
+async def _handle_dims_set_index(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    axis = data.get('axis')
+    try:
+        value = int(data.get('value'))
+    except Exception:
+        value = 0
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if server._log_dims_info:
+        logger.info("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
+    else:
+        logger.debug("intent: set_index axis=%r value=%d client_id=%s seq=%s", axis, value, client_id, client_seq)
+    try:
+        meta = server._dims_metadata() or {}
+        new_step = intents.apply_dims_intent(
+            server._scene,
+            server._state_lock,
+            meta,
+            axis=axis,
+            step_delta=None,
+            set_value=value,
+        )
+        if new_step is not None:
+            try:
+                intent_i = int(client_seq) if client_seq is not None else None
+            except Exception:
+                intent_i = None
+            server._schedule_coro(
+                broadcast_dims_update(
+                    server,
+                    new_step,
+                    last_client_id=client_id,
+                    ack=True,
+                    intent_seq=intent_i,
+                ),
+                'dims_update-set_index',
+            )
+    except Exception as exc:
+        logger.debug("dims.intent.set_index handling failed: %s", exc)
+    return True
+
+
+async def _handle_volume_render_mode(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    mode = str(data.get('mode') or '').lower()
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if intents.is_valid_render_mode(mode, server._allowed_render_modes):
+        intents.update_volume_mode(server._scene, server._state_lock, mode)
+        server._log_volume_intent(
+            "intent: volume.set_render_mode mode=%s client_id=%s seq=%s",
+            mode,
+            client_id,
+            client_seq,
+        )
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            'rebroadcast-volume-mode',
+        )
+    return True
+
+
+async def _handle_volume_clim(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    pair = intents.normalize_clim(data.get('lo'), data.get('hi'))
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if pair is not None:
+        lo, hi = pair
+        server._log_volume_intent(
+            "intent: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s",
+            lo,
+            hi,
+            client_id,
+            client_seq,
+        )
+        intents.update_volume_clim(server._scene, server._state_lock, lo, hi)
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            'rebroadcast-volume-clim',
+        )
+    return True
+
+
+async def _handle_volume_colormap(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    name = data.get('name')
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if isinstance(name, str) and name.strip():
+        server._log_volume_intent(
+            "intent: volume.set_colormap name=%s client_id=%s seq=%s",
+            name,
+            client_id,
+            client_seq,
+        )
+        intents.update_volume_colormap(server._scene, server._state_lock, str(name))
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            'rebroadcast-volume-colormap',
+        )
+    return True
+
+
+async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    opacity = intents.clamp_opacity(data.get('alpha'))
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if opacity is not None:
+        server._log_volume_intent(
+            "intent: volume.set_opacity alpha=%.3f client_id=%s seq=%s",
+            opacity,
+            client_id,
+            client_seq,
+        )
+        intents.update_volume_opacity(server._scene, server._state_lock, float(opacity))
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            'rebroadcast-volume-opacity',
+        )
+    return True
+
+
+async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    sample_step = intents.clamp_sample_step(data.get('relative'))
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if sample_step is not None:
+        server._log_volume_intent(
+            "intent: volume.set_sample_step relative=%.3f client_id=%s seq=%s",
+            sample_step,
+            client_id,
+            client_seq,
+        )
+        intents.update_volume_sample_step(server._scene, server._state_lock, float(sample_step))
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            'rebroadcast-volume-sample-step',
+        )
+    return True
+
+
+async def _handle_layer_intent(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    msg_type = str(data.get('type') or '')
+    prefix = 'image.intent.' if msg_type.startswith('image.intent.') else 'layer.intent.'
+    prop_token = msg_type[len(prefix):]
+    if prop_token.startswith('set_'):
+        prop_token = prop_token[4:]
+    prop = prop_token.strip().lower()
+    layer_id = str(data.get('layer_id') or 'layer-0')
+    client_id = data.get('client_id') or None
+    client_seq = data.get('client_seq')
+    value = data.get('value')
+    if value is None and prop in data:
+        value = data[prop]
+    if value is None:
+        if prop == 'opacity':
+            value = data.get('alpha')
+        elif prop == 'gamma':
+            value = data.get('gamma')
+        elif prop == 'contrast_limits':
+            value = data.get('contrast_limits') or data.get('limits')
+        elif prop == 'colormap':
+            value = data.get('name')
+        elif prop == 'visible':
+            value = data.get('visible')
+    if value is None:
+        logger.debug("layer intent missing value for prop=%s", prop)
+        return True
+    try:
+        applied = intents.apply_layer_intent(
+            server._scene,
+            server._state_lock,
+            layer_id=layer_id,
+            prop=prop,
+            value=value,
+        )
+    except Exception as exc:
+        logger.debug("layer intent failed prop=%s layer=%s error=%s", prop, layer_id, exc)
+        return True
+    log_fn = logger.info if server._log_state_traces else logger.debug
+    log_fn(
+        "intent: layer.%s layer_id=%s value=%s client_id=%s seq=%s",
+        prop,
+        layer_id,
+        applied.get(prop),
+        client_id,
+        client_seq,
+    )
+    try:
+        intent_i = int(client_seq) if client_seq is not None else None
+    except Exception:
+        intent_i = None
+    server._schedule_coro(
+        broadcast_layer_update(
+            server,
+            layer_id=layer_id,
+            changes=applied,
+            intent_seq=intent_i,
+        ),
+        f'layer_update-{prop}',
+    )
+    return True
+
+
+async def _handle_multiscale_policy(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    policy = str(data.get('policy') or '').lower()
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    allowed = {'oversampling', 'thresholds', 'ratio'}
+    if policy not in allowed:
+        server._log_volume_intent(
+            "intent: multiscale.set_policy rejected policy=%s client_id=%s seq=%s",
+            policy,
+            client_id,
+            client_seq,
+        )
+        return True
+    server._scene.multiscale_state['policy'] = policy
+    server._log_volume_intent(
+        "intent: multiscale.set_policy policy=%s client_id=%s seq=%s",
+        policy,
+        client_id,
+        client_seq,
+    )
+    if server._worker is not None:
+        try:
+            (logger.info if server._log_state_traces else logger.debug)(
+                "state: set_policy -> worker.set_policy start"
+            )
+            server._worker.set_policy(policy)
+            (logger.info if server._log_state_traces else logger.debug)(
+                "state: set_policy -> worker.set_policy done"
+            )
+        except Exception:
+            logger.exception("worker set_policy failed for %s", policy)
+    server._schedule_coro(
+        rebroadcast_meta(server, client_id),
+        'rebroadcast-policy',
+    )
+    return True
+
+
+async def _handle_multiscale_level(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    levels = server._scene.multiscale_state.get('levels') or []
+    level = intents.clamp_level(data.get('level'), levels)
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    if level is None:
+        return True
+    server._scene.multiscale_state['current_level'] = int(level)
+    server._log_volume_intent(
+        "intent: multiscale.set_level level=%d client_id=%s seq=%s",
+        int(level),
+        client_id,
+        client_seq,
+    )
+    if server._worker is not None:
+        try:
+            levels_meta = server._scene.multiscale_state.get('levels') or []
+            path = None
+            if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
+                entry = levels_meta[int(level)]
+                if isinstance(entry, Mapping):
+                    path = entry.get('path')
+            (logger.info if server._log_state_traces else logger.debug)(
+                "state: set_level -> worker.request level=%s start",
+                level,
+            )
+            server._worker.request_multiscale_level(int(level), path)
+            (logger.info if server._log_state_traces else logger.debug)(
+                "state: set_level -> worker.request done"
+            )
+            (logger.info if server._log_state_traces else logger.debug)(
+                "state: set_level -> worker.force_idr start"
+            )
+            server._worker.force_idr()
+            (logger.info if server._log_state_traces else logger.debug)(
+                "state: set_level -> worker.force_idr done"
+            )
+            server._pixel.bypass_until_key = True
+        except Exception:
+            logger.exception("multiscale level switch request failed")
+    server._schedule_coro(
+        rebroadcast_meta(server, client_id),
+        'rebroadcast-ms-level',
+    )
+    return True
+
+
+async def _handle_set_ndisplay(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    try:
+        raw = data.get('ndisplay')
+        ndisplay = int(raw) if raw is not None else 2
+    except Exception:
+        ndisplay = 2
+    client_seq = data.get('client_seq')
+    client_id = data.get('client_id') or None
+    (logger.info if server._log_state_traces else logger.debug)(
+        "state: set_ndisplay start target=%s",
+        ndisplay,
+    )
+    await server._handle_set_ndisplay(ndisplay, client_id, client_seq)
+    (logger.info if server._log_state_traces else logger.debug)(
+        "state: set_ndisplay done target=%s",
+        ndisplay,
+    )
+    return True
+
+
+async def _handle_camera_zoom(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    try:
+        factor = float(data.get('factor') or 0.0)
+    except Exception:
+        factor = 0.0
+    anchor = data.get('anchor_px')
+    anchor_tuple = (
+        tuple(anchor) if isinstance(anchor, (list, tuple)) and len(anchor) >= 2 else None
+    )
+    if factor > 0.0 and anchor_tuple is not None:
+        server.metrics.inc('napari_cuda_state_camera_intents')
+        if server._log_cam_info:
+            logger.info(
+                "state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)",
+                factor,
+                float(anchor_tuple[0]),
+                float(anchor_tuple[1]),
+            )
+        elif server._log_cam_debug:
+            logger.debug(
+                "state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)",
+                factor,
+                float(anchor_tuple[0]),
+                float(anchor_tuple[1]),
+            )
+        server._enqueue_camera_command(
+            ServerSceneCommand(
+                kind='zoom',
+                factor=float(factor),
+                anchor_px=(float(anchor_tuple[0]), float(anchor_tuple[1])),
+            )
+        )
+    return True
+
+
+async def _handle_camera_pan(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    try:
+        dx = float(data.get('dx_px') or 0.0)
+        dy = float(data.get('dy_px') or 0.0)
+    except Exception:
+        dx = 0.0
+        dy = 0.0
+    if dx != 0.0 or dy != 0.0:
+        if server._log_cam_info:
+            logger.info("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
+        elif server._log_cam_debug:
+            logger.debug("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
+        server.metrics.inc('napari_cuda_state_camera_intents')
+        server._enqueue_camera_command(
+            ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy))
+        )
+    return True
+
+
+async def _handle_camera_orbit(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    try:
+        d_az = float(data.get('d_az_deg') or 0.0)
+        d_el = float(data.get('d_el_deg') or 0.0)
+    except Exception:
+        d_az = 0.0
+        d_el = 0.0
+    if d_az != 0.0 or d_el != 0.0:
+        if server._log_cam_info:
+            logger.info("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
+        elif server._log_cam_debug:
+            logger.debug("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
+        server.metrics.inc('napari_cuda_state_camera_intents')
+        server._enqueue_camera_command(
+            ServerSceneCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el))
+        )
+        server.metrics.inc('napari_cuda_orbit_events')
+    return True
+
+
+async def _handle_camera_reset(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    if server._log_cam_info:
+        logger.info("state: camera.reset")
+    elif server._log_cam_debug:
+        logger.debug("state: camera.reset")
+    server.metrics.inc('napari_cuda_state_camera_intents')
+    server._enqueue_camera_command(ServerSceneCommand(kind='reset'))
+    if server._idr_on_reset and server._worker is not None:
+        logger.info("state: camera.reset -> ensure_keyframe start")
+        await server._ensure_keyframe()
+        logger.info("state: camera.reset -> ensure_keyframe done")
+    return True
+
+
+async def _handle_ping(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    await ws.send(json.dumps({'type': 'pong'}))
+    return True
+
+
+async def _handle_force_keyframe(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    await server._ensure_keyframe()
+    return True
+
+
+MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
+    'set_camera': _handle_set_camera,
+    'dims.set': _handle_legacy_dims,
+    'set_dims': _handle_legacy_dims,
+    'dims.intent.step': _handle_dims_step,
+    'dims.intent.set_index': _handle_dims_set_index,
+    'volume.intent.set_render_mode': _handle_volume_render_mode,
+    'volume.intent.set_clim': _handle_volume_clim,
+    'volume.intent.set_colormap': _handle_volume_colormap,
+    'volume.intent.set_opacity': _handle_volume_opacity,
+    'volume.intent.set_sample_step': _handle_volume_sample_step,
+    'multiscale.intent.set_policy': _handle_multiscale_policy,
+    'multiscale.intent.set_level': _handle_multiscale_level,
+    'view.intent.set_ndisplay': _handle_set_ndisplay,
+    'camera.zoom_at': _handle_camera_zoom,
+    'camera.pan_px': _handle_camera_pan,
+    'camera.orbit': _handle_camera_orbit,
+    'camera.reset': _handle_camera_reset,
+    'ping': _handle_ping,
+    'request_keyframe': _handle_force_keyframe,
+    'force_idr': _handle_force_keyframe,
+}
+
+PREFIX_HANDLERS: tuple[tuple[str, StateMessageHandler], ...] = (
+    ('layer.intent.', _handle_layer_intent),
+    ('image.intent.', _handle_layer_intent),
+)
+
+
+async def process_state_message(server: Any, data: dict, ws: Any) -> None:
+    msg_type = data.get('type')
+    seq = data.get('client_seq')
+    if server._log_state_traces:
+        logger.info("state message start type=%s seq=%s", msg_type, seq)
+    handled = False
+    try:
+        handler: StateMessageHandler | None = None
+        if isinstance(msg_type, str):
+            handler = MESSAGE_HANDLERS.get(msg_type)
+            if handler is None:
+                for prefix, prefix_handler in PREFIX_HANDLERS:
+                    if msg_type.startswith(prefix):
+                        handler = prefix_handler
+                        break
+        if handler is None:
+            if server._log_state_traces:
+                logger.info("state message ignored type=%s", msg_type)
+            return
+        handled = bool(await handler(server, data, ws))
+        return
+    finally:
+        if server._log_state_traces:
+            logger.info("state message end type=%s seq=%s handled=%s", msg_type, seq, handled)
+
+async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
+    """Re-broadcast a dims.update with current_step and updated meta.
+
+    Safe to call after mutating volume/multiscale state. Never raises.
+    """
+    try:
+        # Gather steps from server state, worker viewer, and source
+        state_step: list[int] | None = None
+        with server._state_lock:
+            cur = server._scene.latest_state.current_step
+            state_step = list(cur) if isinstance(cur, (list, tuple)) else None
+
+        w_step = None
+        try:
+            if server._worker is not None:
+                vm = server._worker.viewer_model()
+                if vm is not None:
+                    w_step = tuple(int(x) for x in vm.dims.current_step)  # type: ignore[attr-defined]
+        except Exception:
+            w_step = None
+
+        s_step = None
+        try:
+            src = getattr(server._worker, '_scene_source', None) if server._worker is not None else None
+            if src is not None:
+                s_step = tuple(int(x) for x in (src.current_step or ()))
+        except Exception:
+            s_step = None
+
+        worker_volume = False
+        try:
+            if server._worker is not None:
+                worker_volume = bool(getattr(server._worker, 'use_volume', False))
+        except Exception:
+            worker_volume = False
+
+        # Choose authoritative step: favour worker viewer when volume mode is active
+        chosen: list[int] = []
+        source_of_truth = 'server'
+        if worker_volume and w_step is not None and len(w_step) > 0:
+            chosen = [int(x) for x in w_step]
+            source_of_truth = 'viewer-volume'
+        elif s_step is not None and len(s_step) > 0:
+            chosen = [int(x) for x in s_step]
+            source_of_truth = 'source'
+        elif w_step is not None and len(w_step) > 0:
+            chosen = [int(x) for x in w_step]
+            source_of_truth = 'viewer'
+        elif state_step is not None:
+            chosen = [int(x) for x in state_step]
+            source_of_truth = 'server'
+        else:
+            chosen = [0]
+            source_of_truth = 'default'
+
+        if worker_volume and chosen:
+            while len(chosen) < 3:
+                chosen.append(0)
+        logger.debug('rebroadcast_meta: source=%s step=%s server=%s viewer=%s source_step=%s volume=%s', source_of_truth, chosen, state_step, w_step, s_step, worker_volume)
+
+        # Synchronize server state with chosen step to keep intents consistent
+        try:
+            with server._state_lock:
+                s = server._scene.latest_state
+                server._scene.latest_state = ServerSceneState(
+                    center=s.center,
+                    zoom=s.zoom,
+                    angles=s.angles,
+                    current_step=tuple(chosen),
+                )
+        except Exception:
+            logger.debug('rebroadcast: failed to sync server state step', exc_info=True)
+
+        # Diagnostics: compare and note source of truth
+        if server._log_dims_info:
+            logger.info(
+                "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
+                source_of_truth, chosen, state_step, w_step, s_step,
+            )
+        else:
+            logger.debug(
+                "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
+                source_of_truth, chosen, state_step, w_step, s_step,
+            )
+
+        await broadcast_dims_update(server, chosen, last_client_id=client_id, ack=True, intent_seq=None)
+    except Exception as e:
+        logger.debug("rebroadcast meta failed: %s", e)
+
+
+
+async def broadcast_dims_update(
+    server: Any,
+    step_list: Sequence[int] | list[int],
+    *,
+    last_client_id: Optional[str],
+    ack: bool,
+    intent_seq: Optional[int],
+) -> None:
+    """Broadcast a dims update through the state channel."""
+
+    meta = server._dims_metadata() or {}
+    ndim = _meta_axis_count(meta)
+    step = [int(x) for x in step_list]
+    assert len(step) <= ndim, (
+        f"dims_update step length {len(step)} exceeds metadata ndim {ndim}"
+    )
+
+    payload = build_dims_update_message(
+        server,
+        step_list=step,
+        last_client_id=last_client_id,
+        ack=ack,
+        intent_seq=intent_seq,
+    )
+    await server._broadcast_state_json(payload)
+
+
+async def broadcast_layer_update(
+    server: Any,
+    *,
+    layer_id: str,
+    changes: Mapping[str, Any],
+    intent_seq: Optional[int],
+) -> None:
+    """Broadcast a layer.update payload for the given *layer_id*."""
+
+    if not changes:
+        return
+    payload = build_layer_update_payload(
+        server._scene,
+        server._scene_manager,
+        layer_id=layer_id,
+        changes=changes,
+        intent_seq=intent_seq,
+    )
+    await server._broadcast_state_json(payload)
+
+
+async def broadcast_scene_spec(server: Any, *, reason: str) -> None:
+    payload = build_scene_spec_json(server._scene, server._scene_manager)
+    await broadcast_scene_spec_payload(server, payload, reason=reason)
+
+
+def process_worker_notifications(
+    server: Any, notifications: Sequence[WorkerSceneNotification]
+) -> None:
+    if not notifications:
+        return
+
+    deferred: list[WorkerSceneNotification] = []
+
+    for note in notifications:
+        if note.kind == "dims_update" and note.step is not None:
+            meta = server._dims_metadata() or {}
+            ndim = _meta_axis_count(meta)
+            step_tuple = tuple(int(x) for x in note.step)
+            if len(step_tuple) > ndim:
+                deferred.append(
+                    WorkerSceneNotification(
+                        kind="dims_update",
+                        step=step_tuple,
+                        last_client_id=note.last_client_id,
+                        ack=note.ack,
+                        intent_seq=note.intent_seq,
+                    )
+                )
+                continue
+
+            server._schedule_coro(
+                broadcast_dims_update(
+                    server,
+                    list(step_tuple),
+                    last_client_id=note.last_client_id,
+                    ack=note.ack,
+                    intent_seq=note.intent_seq,
+                ),
+                "dims_update-worker",
+            )
+        elif note.kind == "meta_refresh":
+            server._update_scene_manager()
+            server._schedule_coro(
+                rebroadcast_meta(server, note.last_client_id),
+                "rebroadcast-worker",
+            )
+
+    if deferred:
+        for note in deferred:
+            server._worker_notifications.push(note)
+        asyncio.get_running_loop().call_later(0.05, server._process_worker_notifications)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _disable_nagle(ws: Any) -> None:
+    try:
+        sock = ws.transport.get_extra_info('socket')  # type: ignore[attr-defined]
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
+
+
+async def _send_state_baseline(server: Any, ws: Any) -> None:
+    try:
+        await server._await_adapter_level_ready(0.5)
+        with server._state_lock:
+            current_step = server._scene.latest_state.current_step
+        if current_step is not None:
+            obj = build_dims_update_message(
+                server,
+                step_list=list(current_step),
+                last_client_id=None,
+                ack=False,
+                intent_seq=None,
+            )
+        else:
+            meta = server._dims_metadata() or {}
+            nd = int(meta.get('ndim') or 3)
+            step_list = [0 for _ in range(max(1, nd))]
+            obj = build_dims_update_message(
+                server,
+                step_list=step_list,
+                last_client_id=None,
+                ack=False,
+                intent_seq=None,
+            )
+        await ws.send(json.dumps(obj))
+        if server._log_dims_info:
+            logger.info("connect: dims.update -> current_step=%s", obj.get('current_step'))
+        else:
+            logger.debug("connect: dims.update -> current_step=%s", obj.get('current_step'))
+    except Exception:
+        logger.exception("Initial dims baseline send failed")
+
+    try:
+        await send_scene_spec(server, ws, reason="connect")
+    except Exception:
+        logger.exception("Initial scene.spec send failed")
+
+    try:
+        channel = getattr(server, "_pixel_channel", None)
+        cfg = getattr(server, "_pixel_config", None)
+        assert channel is not None and cfg is not None, "Pixel channel not initialized"
+        avcc = channel.last_avcc
+        if avcc is not None:
+            msg = pixel_channel.build_video_config_payload(cfg, avcc)
+            await ws.send(json.dumps(msg))
+        else:
+            pixel_channel.mark_config_dirty(channel)
+    except Exception:
+        logger.exception("Initial state config send failed")
+
+
+async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
+    payload = build_scene_spec_json(server._scene, server._scene_manager)
+    await server._safe_state_send(ws, payload)
+    if server._log_dims_info:
+        logger.info("%s: scene.spec sent", reason)
+    else:
+        logger.debug("%s: scene.spec sent", reason)
+
+
+async def broadcast_scene_spec_payload(server: Any, payload: str, *, reason: str) -> None:
+    if not payload or not server._state_clients:
+        return
+    coros = [server._safe_state_send(client, payload) for client in list(server._state_clients)]
+    await asyncio.gather(*coros, return_exceptions=True)
+    if server._log_dims_info:
+        logger.info("%s: scene.spec broadcast to %d clients", reason, len(coros))
+    else:
+        logger.debug("%s: scene.spec broadcast to %d clients", reason)
+
+
+def build_dims_update_message(
+    server: Any,
+    *,
+    step_list: Sequence[int],
+    last_client_id: Optional[str],
+    ack: bool,
+    intent_seq: Optional[int],
+) -> dict:
+    """Create a dims.update payload for the current server context."""
+
+    meta = server._dims_metadata() or {}
+    worker = getattr(server, '_worker', None)
+    src = getattr(worker, '_scene_source', None) if worker is not None else None
+    use_volume = bool(getattr(worker, 'use_volume', getattr(server, 'use_volume', False)) if worker is not None else getattr(server, 'use_volume', False))
+    return build_dims_payload(
+        server._scene,
+        step_list=step_list,
+        last_client_id=last_client_id,
+        meta=meta,
+        worker_scene_source=src,
+        use_volume=use_volume,
+        ack=ack,
+        intent_seq=intent_seq,
+    )
+
+
+def _meta_axis_count(meta: Mapping[str, Any]) -> int:
+    ndim = meta.get("ndim")
+    if isinstance(ndim, int) and ndim > 0:
+        return ndim
+    axes = meta.get("axes")
+    if isinstance(axes, Sequence):
+        return len(axes)
+    sizes = meta.get("sizes")
+    if isinstance(sizes, Sequence):
+        return len(sizes)
+    order = meta.get("order")
+    if isinstance(order, Sequence):
+        return len(order)
+    ranges = meta.get("range")
+    if isinstance(ranges, Sequence):
+        return len(ranges)
+    return max(1, len(meta.get("current_step", [])))

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from napari_cuda.server.egl_headless_server import EGLHeadlessServer
 from napari_cuda.server.scene_state import ServerSceneState
+from napari_cuda.server import state_channel_handler
 
 
 class _StubWorker:
@@ -35,17 +36,15 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     worker = _StubWorker()
     server._worker = worker
 
-    recorded_step = {}
+    broadcast_calls: list[tuple] = []
 
-    async def _fake_broadcast(step, *, last_client_id=None, ack=False):  # type: ignore[no-untyped-def]
-        recorded_step['step'] = tuple(step)
-        recorded_step['client'] = last_client_id
-        recorded_step['ack'] = ack
+    async def _fake_broadcast(server_obj, step_list, *, last_client_id=None, ack=False, intent_seq=None):  # type: ignore[no-untyped-def]
+        broadcast_calls.append((tuple(step_list), last_client_id, ack, intent_seq))
 
     async def _noop(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
-    monkeypatch.setattr(server, '_broadcast_dims_update', _fake_broadcast)
+    monkeypatch.setattr(state_channel_handler, 'broadcast_dims_update', _fake_broadcast)
     monkeypatch.setattr(server, '_broadcast_state_json', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 
@@ -55,4 +54,4 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     assert server._scene.latest_state.current_step == (136, 0, 0)
     assert worker.requested == 3
     assert worker.force_idr_called is True
-    assert recorded_step == {}
+    assert broadcast_calls == []

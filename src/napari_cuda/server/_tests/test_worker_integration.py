@@ -9,7 +9,7 @@ import pytest
 from napari_cuda.server.config import LevelPolicySettings, ServerConfig, ServerCtx
 from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.display_mode import apply_ndisplay_switch
-from napari_cuda.server.server_scene_queue import ServerSceneCommand
+from napari_cuda.server.server_scene import ServerSceneCommand
 
 
 class _IdentityTransform:
@@ -390,7 +390,7 @@ def test_zoom_intent_reaches_lod_selector(egl_worker_fixture, monkeypatch):
 
     assert ratios, "select_level was not invoked"
     assert math.isclose(float(ratios[-1]), 0.5, rel_tol=1e-6)
-    assert worker._scene_state_queue.consume_zoom_intent(max_age=0.5) is None
+    assert worker._render_mailbox.consume_zoom_intent(max_age=0.5) is None
 
 
 def test_preserve_view_switch_keeps_camera_range(egl_worker_fixture):
@@ -399,7 +399,7 @@ def test_preserve_view_switch_keeps_camera_range(egl_worker_fixture):
     camera.set_range_calls.clear()
     worker._render_tick_required = False
 
-    worker._scene_state_queue.queue_scene_state(ServerSceneState(current_step=(2, 0, 0)))
+    worker._render_mailbox.enqueue_scene_state(ServerSceneState(current_step=(2, 0, 0)))
     worker.drain_scene_updates()
 
     assert camera.set_range_calls == []
@@ -416,7 +416,7 @@ def test_preserve_view_disabled_resets_camera(egl_worker_fixture):
     camera.set_range_calls.clear()
     worker._render_tick_required = False
 
-    worker._scene_state_queue.queue_scene_state(ServerSceneState(current_step=(1, 0, 0)))
+    worker._render_mailbox.enqueue_scene_state(ServerSceneState(current_step=(1, 0, 0)))
     worker.drain_scene_updates()
 
     assert camera.set_range_calls, "camera.set_range should be invoked when preserve-view is disabled"
@@ -468,7 +468,7 @@ def test_zoom_intent_triggers_level_switch_end_to_end(egl_worker_fixture):
 
     assert worker._active_ms_level == 0
     assert worker._napari_layer.applied, "slice should be applied when level changes"
-    assert worker._scene_state_queue.consume_zoom_intent(max_age=0.5) is None
+    assert worker._render_mailbox.consume_zoom_intent(max_age=0.5) is None
     assert worker._last_level_switch_ts > 0.0
 
 

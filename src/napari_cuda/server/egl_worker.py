@@ -68,10 +68,10 @@ from napari_cuda.server.scene_state_applier import (
 )
 from napari_cuda.server.camera_controller import process_commands
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene_queue import (
-    PendingServerSceneUpdate,
-    ServerSceneCommand,
-    ServerSceneQueue,
+from napari_cuda.server.server_scene import ServerSceneCommand
+from napari_cuda.server.render_mailbox import (
+    PendingRenderUpdate,
+    RenderMailbox,
 )
 from napari_cuda.server.policy_metrics import PolicyMetrics
 from napari_cuda.server.level_logging import LayerAssignmentLogger, LevelSwitchLogger
@@ -309,7 +309,7 @@ class EGLRendererWorker:
                 int(level),
                 str(path) if path else "<default>",
             )
-        self._scene_state_queue.queue_multiscale_level(int(level), str(path) if path else None)
+        self._render_mailbox.enqueue_multiscale(int(level), str(path) if path else None)
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
@@ -372,7 +372,7 @@ class EGLRendererWorker:
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.Lock()
-        self._scene_state_queue = ServerSceneQueue()
+        self._render_mailbox = RenderMailbox()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0
         self._ensure_log_interval_s = 1.0
@@ -784,7 +784,7 @@ class EGLRendererWorker:
             volume_sample_step=float(state.volume_sample_step) if state.volume_sample_step is not None else None,
             layer_updates=layer_updates,
         )
-        self._scene_state_queue.queue_scene_state(normalized)
+        self._render_mailbox.enqueue_scene_state(normalized)
 
     def process_camera_commands(self, commands: Sequence[ServerSceneCommand]) -> None:
         process_commands(self, commands)
@@ -818,7 +818,7 @@ class EGLRendererWorker:
         )
 
     def drain_scene_updates(self) -> None:
-        updates: PendingServerSceneUpdate = self._scene_state_queue.drain_pending_updates()
+        updates: PendingRenderUpdate = self._render_mailbox.drain()
 
         if updates.display_mode is not None:
             apply_ndisplay_switch(self, updates.display_mode)
@@ -840,7 +840,7 @@ class EGLRendererWorker:
         drain_res: SceneDrainResult = SceneStateApplier.drain_updates(
             ctx,
             state=state,
-            queue=self._scene_state_queue,
+            mailbox=self._render_mailbox,
         )
 
         if drain_res.z_index is not None:
@@ -856,7 +856,7 @@ class EGLRendererWorker:
     # --- Public coalesced toggles ------------------------------------------------
     def request_ndisplay(self, ndisplay: int) -> None:
         """Queue a 2D/3D view switch to apply on the render thread."""
-        self._scene_state_queue.queue_display_mode(3 if int(ndisplay) >= 3 else 2)
+        self._render_mailbox.enqueue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return self._capture.pipeline.capture_blit_gpu_ns()
@@ -927,7 +927,7 @@ class EGLRendererWorker:
             return
 
         current = int(self._active_ms_level)
-        zoom_hint = self._scene_state_queue.consume_zoom_intent(max_age=0.5)
+        zoom_hint = self._render_mailbox.consume_zoom_intent(max_age=0.5)
         zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
 
         config = lod.LevelPolicyConfig(

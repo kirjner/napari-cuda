@@ -29,7 +29,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 
 ### Phase B — State/Camera Core (in flight)
 - **Implemented**:
-  - `server_scene_queue.py` now owns scene snapshots, zoom intent tracking, and signature change detection; `_pending_*` fields and state signatures were removed from the worker.
+  - `render_mailbox.py` now owns scene snapshots, zoom intent tracking, and signature change detection; `_pending_*` fields and state signatures were removed from the worker.
   - `camera_controller.py` applies zoom/pan/orbit/reset commands and returns intent metadata so the worker only schedules renders/policy once.
   - `roi_applier.py` handles ROI drift detection + slab placement, with `render_tick` delegating ROI refreshes to `SceneStateApplier` rather than reimplementing translate logic.
   - `SceneStateApplier` extracted from `drain_scene_updates`; dims/Z updates and 3D volume params are now applied through a procedural context. Hot-path `try/except` and `hasattr` guards were removed in favour of assertions, aligning with the “hostility to just-in-case” tenet.
@@ -41,7 +41,7 @@ Refer back to `server_refactor_tenets.md` for the non-negotiable tenets (Degodif
 - `SceneStateApplier` honours `preserve_view_on_switch`; unit coverage now guards against camera resets when panning before a Z change.
 - **Remaining milestones to close Phase B**:
   1. **Capture/CUDA extraction** — hoist render capture + CUDA interop into dedicated helpers so the worker only orchestrates timings/logging (goal: trim ~200 LOC). ✅ `CaptureFacade` now fronts GL capture, CUDA interop, and the frame pipeline.
-  2. **Guard + naming audit** — ✅ renamed to `ServerSceneQueue`/`PendingServerSceneUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
+  2. **Guard + naming audit** — ✅ renamed to `RenderMailbox`/`PendingRenderUpdate`, replaced `_policy_eval_pending` with `_level_policy_refresh_needed`, and removed hot-path `try/except`/`getattr` usage in camera + ROI application. Current counts: 60 `try:` / 33 `getattr` in `egl_worker.py` (boundary-only holds).
   3. **ServerCtx policy surface** — ✅ `ServerCtx.policy` is now authoritative and callers must provide an explicit ctx (`EGLRendererWorker` no longer falls back to `load_server_ctx()`; experiments/headless server wire it through).
   4. **Integration tests** — ✅ added zoom-intent coverage and preserve-view smoke harness in `src/napari_cuda/server/_tests/test_worker_integration.py` to exercise the worker pipeline end-to-end.
 
@@ -104,7 +104,7 @@ Implementation slices:
 - Sequence of work (**work-in-progress**):
   1. **Baseline snapshot** — record current LOC, `try:` counts, and websocket handler responsibilities for `egl_headless_server.py` (targets: trim from 2.2 k LOC toward 1.0 k, keep existing guard counts steady during extraction). *Status 2025-09-27:* 1,394 LOC (`wc -l`), 75 `try:` blocks (`rg -c "try:"`), with the remaining hot spots in `_handle_pixel`, `_broadcast_loop`, and the metrics writers.
   2. **PixelBroadcaster split** — move websocket broadcast/writeback logic into `pixel_broadcaster.py`, exposing pure functions that accept a broadcaster state bag (maps of clients, queue metrics, watchdog timestamps) and emit packets or scheduling decisions. Ensure encode pacing stays untouched; add focused unit tests around queue coalescing and watchdog cooldown. *Status 2025-09-27:* Implemented via `PixelBroadcastState`/`PixelBroadcastConfig`; `_broadcast_loop` delegates to `pixel_broadcaster.broadcast_loop`, LOC trimmed to 2,181 and broadcaster unit tests cover safe-send pruning + bypass keyframe delivery. Server `try:` count dropped to 120 (package total 330).
-  3. **ServerScene split** — relocate the state-channel queue helpers into `server_scene_queue.py` (renaming types to `ServerSceneQueue`, `ServerSceneCommand`, `PendingServerSceneUpdate`) and introduce `server_scene.py` exposing the mutable `ServerSceneData` bag. The bag must carry the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, policy metrics snapshot, SceneSpec caches, and policy log bookkeeping so intent handlers operate on a single data source.
+  3. **ServerScene split** — relocate the state-channel queue helpers into `render_mailbox.py` (renaming types to `RenderMailbox`, `ServerSceneCommand`, `PendingRenderUpdate`) and introduce `server_scene.py` exposing the mutable `ServerSceneData` bag. The bag must carry the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, policy metrics snapshot, SceneSpec caches, and policy log bookkeeping so intent handlers operate on a single data source.
   4. **SceneSpecBuilder extraction** — centralise SceneSpec construction in `server_scene_spec.py`, consuming the viewer snapshot + config databag and returning the serialisable payload. Cover with unit tests for axis/dims permutations.
      - Implement `build_scene_spec(scene: ServerSceneData, manager: ViewerSceneManager, ctx: ServerCtx) -> dict` as a pure function; no new classes.
      - Move existing `_pending_scene_spec` / `_last_scene_spec` bookkeeping in `egl_headless_server` into `ServerSceneData` so broadcasts read/write through the bag.
@@ -114,10 +114,10 @@ Implementation slices:
      - Emit immutable `ServerSceneState` snapshots by copying from the bag before handing off to the worker.
      - Ensure the dims/spec broadcast helpers only read from the bag; no hidden state on the server object.
      - Remaining LOC now sits in `_handle_pixel`, metrics/event plumbing, worker lifecycle glue, and the embedded Dash server; future slices target those clusters with focused helpers.
-     - State-channel orchestration lives in `server_scene_control.py` (`handle_state`, `process_state_message`, `broadcast_dims_update`, `rebroadcast_meta`, metrics writers); `EGLHeadlessServer` now only wires the websocket handlers to these helpers.
+     - State-channel orchestration lives in `state_channel_handler.py` (`handle_state`, `process_state_message`, `broadcast_dims_update`, `rebroadcast_meta`, metrics writers); `EGLHeadlessServer` now only wires the websocket handlers to these helpers.
      - Helpers operate as free functions over the scene bag and server interface, matching the data-oriented style we committed to for Phase E.
   6. **Worker→control queue** — route worker refresh notifications through a dedicated channel so metadata stays ahead of each broadcast:
-     - Introduce a lock-safe worker→control queue (parallel to `ServerSceneQueue`) owned by the asyncio loop; `_on_scene_refresh` enqueues the authoritative step + hints instead of scheduling a broadcast directly.
+     - Introduce a lock-safe worker→control queue (parallel to `RenderMailbox`) owned by the asyncio loop; `_on_scene_refresh` enqueues the authoritative step + hints instead of scheduling a broadcast directly.
      - Teach the control loop to drain that queue before emitting `dims.update` / `scene.spec`, updating `ServerSceneData` and `ViewerSceneManager` inside the same critical section so `build_dims_payload` always sees aligned axes.
      - Delete the `pending_worker_step` scaffolding once the queue is wired, keeping the scene bag free of cross-thread scratch state and eliminating the ad-hoc flush helper.
 
@@ -152,7 +152,7 @@ Implementation slices:
      - ✅ Canonical layer extras now live in `ServerSceneData.layer_state`; `server_scene_intents.apply_layer_intent` normalizes payloads, the worker applies updates through `SceneStateApplier`, and `server_scene_spec.build_layer_update_payload` drives `layer.update` acks (tests: `test_server_scene_intents.py`, `test_server_scene_spec.py`). Remaining work: wire the client bridge + expand coverage for projection/depiction once the schema is finalised.
     - ✅ Layer controls now live in `LayerControlState`; the worker consumes updates via `SceneStateApplier`, and `layer.update`/`scene.spec` expose a dedicated `controls` map while `extras` is reserved for transport metadata.
     - ⬜ Follow-up: add mixed-mode regression coverage (2D↔3D) once the client bridge consumes the new contract.
-  15. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `ServerSceneQueue`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
+  15. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `RenderMailbox`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
 - Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.
 
 ### Phase F — Worker State Extraction (later)
@@ -163,7 +163,7 @@ Implementation slices:
 ### Targets & Metrics
 - Module size goals (track in weekly snapshots):
   - `egl_worker.py` → target 700–900 LOC (never above 900); reductions come from camera/state, ROI/LOD, and capture helpers.
-  - `server_scene_queue.py` (new) → 200–300 LOC covering pending state application and camera command processing.
+  - `render_mailbox.py` (new) → 200–300 LOC covering pending state application and camera command processing.
   - `roi.py` → ≤250 LOC focused purely on ROI math once the remaining helpers move across.
   - `lod.py` → <400 LOC after we delete the legacy `LevelDecision` scaffolding, shift ROI math to `roi.py`, and collapse unused code paths when the napari-gated selector matures.
   - `capture.py` (new) → ≤200 LOC for render→blit glue; `cuda_interop.py` (existing) → ≤150 LOC once trimmed to map/unmap and cleanup.

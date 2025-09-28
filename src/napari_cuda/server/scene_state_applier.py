@@ -18,7 +18,7 @@ import numpy as np
 from napari_cuda.server.scene_types import SliceROI
 from napari_cuda.server.roi_applier import SliceDataApplier
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene_queue import ServerSceneQueue
+from napari_cuda.server.render_mailbox import RenderMailbox
 
 from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.utils.colormaps.colormap_utils import ensure_colormap
@@ -171,6 +171,12 @@ class SceneStateApplier:
         sy, sx = ctx.plane_scale_for_level(source, int(ctx.active_ms_level))
         roi_to_apply = roi or SliceROI(0, int(slab.shape[0]), 0, int(slab.shape[1]))
         SliceDataApplier(layer=layer).apply(slab=slab, roi=roi_to_apply, scale=(sy, sx))
+        if hasattr(layer, "visible"):
+            layer.visible = True  # type: ignore[assignment]
+        if hasattr(layer, "opacity"):
+            layer.opacity = 1.0  # type: ignore[assignment]
+        if hasattr(layer, "blending") and not getattr(layer, "blending", ""):
+            layer.blending = "opaque"  # type: ignore[assignment]
 
         if update_contrast:
             smin = float(np.nanmin(slab)) if hasattr(np, "nanmin") else float(np.min(slab))
@@ -335,7 +341,8 @@ class SceneStateApplier:
         ctx: SceneStateApplyContext,
         *,
         state: ServerSceneState,
-        queue: ServerSceneQueue,
+        mailbox: Optional[RenderMailbox] = None,
+        queue: Optional[RenderMailbox] = None,
     ) -> SceneDrainResult:
         """Apply pending scene state updates and report side effects."""
 
@@ -348,6 +355,10 @@ class SceneStateApplier:
             original_mark()
 
         ctx_for_apply = replace(ctx, mark_render_tick_needed=_mark_render)
+
+        render_mailbox = mailbox or queue
+        if render_mailbox is None:
+            raise ValueError("RenderMailbox instance required")
 
         z_index = ctx.z_index
         data_wh = ctx.data_wh
@@ -381,7 +392,7 @@ class SceneStateApplier:
 
         cam = ctx.camera
         if cam is None:
-            queue.update_state_signature(state)
+            render_mailbox.update_state_signature(state)
             return SceneDrainResult(
                 z_index=int(z_index) if z_index is not None else None,
                 data_wh=(int(data_wh[0]), int(data_wh[1])) if data_wh is not None else None,
@@ -400,7 +411,7 @@ class SceneStateApplier:
             assert hasattr(cam, "angles"), "Camera missing angles property"
             cam.angles = state.angles  # type: ignore[attr-defined]
 
-        policy_refresh = queue.update_state_signature(state)
+        policy_refresh = render_mailbox.update_state_signature(state)
 
         return SceneDrainResult(
             z_index=int(z_index) if z_index is not None else None,

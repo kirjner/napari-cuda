@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene_queue import WorkerSceneNotificationQueue
+from napari_cuda.server.worker_notifications import WorkerSceneNotificationQueue
 from napari_cuda.server.server_scene import create_server_scene_data
 from napari_cuda.server.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker
 

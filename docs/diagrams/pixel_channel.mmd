@@ -1,7 +1,7 @@
 graph LR
     %% Async control loop components
     subgraph AsyncLoop["EGLHeadlessServer (async loop)"]
-        SSC["server_scene_control\n(handle_state, dims/spec)"]
+        SSC["state_channel_handler\n(handle_state, dims/spec)"]
         PCH["pixel_channel\n(client lifecycle, keyframe)"]
         SceneBag["ServerSceneData\n(mutable state bag)"]
         PixelBag["PixelBroadcastState\n(frame queue + metrics)"]
@@ -11,7 +11,7 @@ graph LR
     %% Worker thread + helpers
     subgraph WorkerThread["EGLRendererWorker (render thread)"]
         Worker["Render loop"]
-        SceneQueue["ServerSceneQueue\n(camera + intents)"]
+        SceneQueue["RenderMailbox\n(camera + intents)"]
     end
 
     %% Clients

@@ -6,7 +6,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 
 ## Current Pain Points
 
-- `server_scene_control.py` mixes websocket plumbing, intent routing, and broadcast scheduling.
+- `state_channel_handler.py` mixes websocket plumbing, intent routing, and broadcast scheduling.
 - `server_scene_queue.py` adds an extra layer between the dispatcher and worker just to coalesce
   updates.
 - `egl_worker.py` still owns viewer bootstrapping, mailbox draining, capture orchestration, and
@@ -32,17 +32,17 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 ## Planned Work
 
 ### 1. State Channel Simplification
-- [ ] Rename `server_scene_control.py` → `state_channel_handler.py`; keep module-level docstring.
-- [ ] Replace the open-coded intent branching with a table-driven dispatcher that delegates to
+- [x] Rename `server_scene_control.py` → `state_channel_handler.py`; keep module-level docstring.
+- [x] Replace the open-coded intent branching with a table-driven dispatcher that delegates to
       `server_scene_intents`.
 - [ ] Record deltas in `ServerSceneData` then call `render_worker.enqueue_update(delta)` directly.
 - [ ] Ensure acknowledgements/broadcasts are derived from the canonical store (no mirror dicts).
 
 ### 2. Scene Update Mailbox
-- [ ] Move the coalescing logic from `server_scene_queue.py` into a new `render_mailbox.py` owned by
-      the worker (API: `enqueue(delta)`, `drain()`).
-- [ ] Update unit tests to cover the mailbox in isolation.
-- [ ] Delete the old queue module once callers are updated.
+- [x] Move the coalescing logic from `server_scene_queue.py` into `render_mailbox.py` owned by
+      the worker (API: `enqueue`, `drain`).
+- [x] Update unit tests to cover the mailbox in isolation.
+- [x] Delete the old queue module once callers were updated.
 
 ### 3. Render Worker Refactor
 - [ ] Rename `egl_worker.py` → `render_worker.py`; add a module docstring describing responsibilities.
@@ -87,8 +87,8 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 
 | Task                                          | Owner | Status | Notes |
 |-----------------------------------------------|-------|--------|-------|
-| Rename dispatcher + table-driven routing      |       | To Do  |       |
-| Integrate render mailbox into worker          |       | To Do  |       |
+| Rename dispatcher + table-driven routing      |       | Done   | Completed rename + dispatcher refactor |
+| Integrate render mailbox into worker          |       | Done   | render_mailbox replaces ServerSceneQueue |
 | Worker rename & bootstrap inline              |       | To Do  |       |
 | Viewer builder rename/trim                    |       | To Do  |       |
 | Controls-only payload                         |       | To Do  |       |

@@ -86,10 +86,8 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
 
 from .scene_state import ServerSceneState
 from .server_scene import ServerSceneData, create_server_scene_data
-from .server_scene_queue import (
-    PendingServerSceneUpdate,
-    ServerSceneCommand,
-    ServerSceneQueue,
+from .server_scene import ServerSceneCommand
+from .worker_notifications import (
     WorkerSceneNotification,
     WorkerSceneNotificationQueue,
 )
@@ -107,7 +105,7 @@ from napari_cuda.server.config import (
     load_server_ctx,
 )
 from . import pixel_broadcaster, pixel_channel, metrics_server
-from .server_scene_control import (
+from .state_channel_handler import (
     broadcast_dims_update,
     build_dims_update_message,
     handle_state,
@@ -401,15 +399,6 @@ class EGLHeadlessServer:
         else:
             logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
         self.use_volume = bool(ndisp == 3)
-        print(
-            "_handle_set_ndisplay",
-            {
-                'requested': int(ndisp),
-                'use_volume': self.use_volume,
-                'latest_step': getattr(self._scene.latest_state, 'current_step', None),
-            },
-            flush=True,
-        )
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:

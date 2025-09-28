@@ -10,10 +10,9 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, Literal, Optional
 
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene_queue import ServerSceneCommand
 
 
 CONTROL_KEYS: tuple[str, ...] = (
@@ -49,6 +48,7 @@ def layer_controls_to_dict(control: LayerControlState) -> dict[str, Any]:
 __all__ = [
     "CONTROL_KEYS",
     "LayerControlState",
+    "ServerSceneCommand",
     "ServerSceneData",
     "create_server_scene_data",
     "default_layer_controls",
@@ -80,6 +80,19 @@ def default_multiscale_state() -> Dict[str, Any]:
         "policy": "oversampling",
         "index_space": "base",
     }
+
+
+@dataclass(frozen=True)
+class ServerSceneCommand:
+    """Queued camera command consumed by the render thread."""
+
+    kind: Literal["zoom", "pan", "orbit", "reset"]
+    factor: Optional[float] = None
+    anchor_px: Optional[tuple[float, float]] = None
+    dx_px: float = 0.0
+    dy_px: float = 0.0
+    d_az_deg: float = 0.0
+    d_el_deg: float = 0.0
 
 
 @dataclass

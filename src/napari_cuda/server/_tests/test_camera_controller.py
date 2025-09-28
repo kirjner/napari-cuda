@@ -9,7 +9,7 @@ from napari_cuda.server.camera_controller import (
     CameraDebugFlags,
     apply_camera_commands,
 )
-from napari_cuda.server.server_scene_queue import ServerSceneCommand
+from napari_cuda.server.server_scene import ServerSceneCommand
 
 
 @dataclass

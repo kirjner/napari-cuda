@@ -15,7 +15,7 @@ import time
 from vispy import scene  # type: ignore
 
 from napari_cuda.server import camera_ops as camops
-from napari_cuda.server.server_scene_queue import ServerSceneCommand
+from napari_cuda.server.server_scene import ServerSceneCommand
 
 
 logger = logging.getLogger(__name__)
@@ -197,7 +197,7 @@ def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
         worker._level_policy_refresh_needed = True
 
     def _record_zoom_intent(ratio: float) -> None:
-        worker._scene_state_queue.record_zoom_intent(float(ratio))
+        worker._render_mailbox.record_zoom_intent(float(ratio))
 
     outcome = apply_camera_commands(
         commands,
