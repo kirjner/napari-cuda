@@ -107,7 +107,6 @@ from napari_cuda.server.config import (
 from . import pixel_broadcaster, pixel_channel, metrics_server
 from .state_channel_handler import (
     broadcast_dims_update,
-    build_dims_update_message,
     handle_state,
     process_worker_notifications,
     rebroadcast_meta,

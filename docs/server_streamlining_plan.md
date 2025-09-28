@@ -6,7 +6,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 
 ## Current Pain Points
 
-- `state_channel_handler.py` mixes websocket plumbing, `control.command` handling, and legacy intent
+- `state_channel_handler.py` mixes websocket plumbing, `state.update` handling, and legacy intent
   fallbacks with broadcast scheduling.
 - `server_scene_queue.py` adds an extra layer between the dispatcher and worker just to coalesce
   updates.
@@ -21,8 +21,8 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 
 ## Target Architecture (Summary)
 
-1. The **state channel handler** accepts `control.command` payloads (plus a temporary legacy intent
-   fallback), normalises them, mutates `ServerSceneData`, and
+1. The **state channel handler** accepts `state.update` payloads, normalises them, mutates
+   `ServerSceneData`, and
    hands each delta to the render worker’s update mailbox while broadcasting the canonical scene spec
    (`controls` included).
 2. The **render worker** owns the napari viewer/VisPy visual, drains its mailbox, applies deltas via
@@ -41,8 +41,8 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 - [x] Ensure acknowledgements/broadcasts are derived from the canonical store (no mirror dicts).
 - [x] Track per-control client sequences + server acknowledgements so reconnect baselines and
       layer updates echo `{server_seq, source_client_seq, source_client_id}` metadata.
-- [x] Introduce `control.command` handling alongside the legacy intent path and advertise capability
-      in reconnect payloads.
+- [x] Introduce `state.update` handling alongside the legacy intent path and advertise capability
+      in reconnect payloads (legacy path now scheduled for removal).
 
 ### 2. Scene Update Mailbox
 - [x] Move the coalescing logic from `server_scene_queue.py` into `render_mailbox.py` owned by

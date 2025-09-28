@@ -9,7 +9,7 @@ without reaching into the ``EGLHeadlessServer`` implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from threading import Lock
 from typing import Any, Mapping, Optional, Sequence
 
@@ -18,39 +18,29 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 from .scene_state import ServerSceneState
 from .server_scene import (
-    LayerControlMeta,
     LayerControlState,
     ServerSceneData,
     default_layer_controls,
+    get_control_meta,
+    increment_server_sequence,
 )
 
 
 @dataclass(frozen=True)
-class LayerIntentResult:
-    """Result of applying a layer control intent."""
+class StateUpdateResult:
+    """Authoritative result from applying a state update."""
 
-    layer_id: str
-    prop: str
-    applied: dict[str, Any]
+    scope: str
+    target: str
+    key: str
+    value: Any
     server_seq: int
     client_seq: Optional[int]
     client_id: Optional[str]
     interaction_id: Optional[str]
     phase: Optional[str]
-
-
-@dataclass(frozen=True)
-class DimsCommandResult:
-    """Result of applying a dims control command."""
-
-    step: list[int]
-    prop: str
-    axis_key: str
-    server_seq: int
-    client_seq: Optional[int]
-    client_id: Optional[str]
-    interaction_id: Optional[str]
-    phase: Optional[str]
+    timestamp: Optional[float] = None
+    extras: dict[str, Any] = field(default_factory=dict)
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -353,7 +343,7 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
     raise KeyError(f"unsupported layer property '{prop}'")
 
 
-def apply_layer_intent(
+def apply_layer_state_update(
     scene: ServerSceneData,
     lock: Lock,
     *,
@@ -364,10 +354,10 @@ def apply_layer_intent(
     client_seq: Optional[object] = None,
     interaction_id: Optional[str] = None,
     phase: Optional[str] = None,
-) -> Optional[LayerIntentResult]:
+) -> Optional[StateUpdateResult]:
     """Normalize, gate, and stash a layer intent.
 
-    Returns a :class:`LayerIntentResult` when the update is accepted, or
+    Returns a :class:`StateUpdateResult` when the update is accepted, or
     ``None`` if the payload is stale for the originating client.
     """
 
@@ -393,11 +383,7 @@ def apply_layer_intent(
     with lock:
         control = scene.layer_controls.setdefault(layer_id, default_layer_controls())
 
-        meta_by_prop = scene.layer_control_meta.setdefault(layer_id, {})
-        meta = meta_by_prop.get(prop)
-        if meta is None:
-            meta = LayerControlMeta()
-            meta_by_prop[prop] = meta
+        meta = get_control_meta(scene, "layer", layer_id, prop)
 
         if seq_int is not None:
             last_seq = meta.client_seq_by_id.get(client_key)
@@ -413,8 +399,7 @@ def apply_layer_intent(
         pending[layer_id] = layer_updates
         scene.latest_state = replace(latest, layer_updates=pending)
 
-        scene.next_layer_server_seq = int(scene.next_layer_server_seq) + 1
-        server_seq = scene.next_layer_server_seq
+        server_seq = increment_server_sequence(scene)
 
         meta.last_server_seq = server_seq
         meta.last_client_id = client_id
@@ -424,10 +409,11 @@ def apply_layer_intent(
         if seq_int is not None:
             meta.client_seq_by_id[client_key] = seq_int
 
-    return LayerIntentResult(
-        layer_id=layer_id,
-        prop=prop,
-        applied={prop: canonical},
+    return StateUpdateResult(
+        scope="layer",
+        target=layer_id,
+        key=prop,
+        value=canonical,
         server_seq=server_seq,
         client_seq=seq_int,
         client_id=client_id,
@@ -436,20 +422,21 @@ def apply_layer_intent(
     )
 
 
-def apply_dims_command(
+def apply_dims_state_update(
     scene: ServerSceneData,
     lock: Lock,
     meta: Mapping[str, Any],
     *,
     axis: object,
     prop: str,
-    step_delta: Optional[int],
-    set_value: Optional[int],
+    value: object,
+    step_delta: Optional[int] = None,
+    set_value: Optional[int] = None,
     client_id: Optional[str] = None,
     client_seq: Optional[object] = None,
     interaction_id: Optional[str] = None,
     phase: Optional[str] = None,
-) -> Optional[DimsCommandResult]:
+) -> Optional[StateUpdateResult]:
     """Apply a dims control command returning the updated step list."""
 
     seq_int: Optional[int]
@@ -479,16 +466,23 @@ def apply_dims_command(
     if idx is None:
         return None
 
-    control_key = f"{prop}:{idx}"
+    axis_label = axis_label_from_meta(meta, idx)
+    control_target = axis_label or str(idx)
+    control_key = f"{prop}:{control_target}"
 
     with lock:
-        meta_entry = scene.dims_control_meta.setdefault(control_key, LayerControlMeta())
+        meta_entry = get_control_meta(scene, "dims", control_target, prop)
         if seq_int is not None:
             last_seq = meta_entry.client_seq_by_id.get(client_key)
             if last_seq is not None and seq_int <= last_seq:
                 return None
 
         target = int(step[idx])
+        if value is not None:
+            try:
+                target = int(value)
+            except Exception:
+                pass
         if step_delta is not None:
             try:
                 target = target + int(step_delta)
@@ -517,8 +511,7 @@ def apply_dims_command(
         latest = replace(scene.latest_state, current_step=tuple(step))
         scene.latest_state = latest
 
-        server_seq = int(scene.dims_seq) & 0x7FFFFFFF
-        scene.dims_seq = (int(scene.dims_seq) + 1) & 0x7FFFFFFF
+        server_seq = increment_server_sequence(scene)
         scene.last_dims_client_id = client_id
 
         meta_entry.last_server_seq = server_seq
@@ -529,13 +522,40 @@ def apply_dims_command(
         if seq_int is not None:
             meta_entry.client_seq_by_id[client_key] = seq_int
 
-    return DimsCommandResult(
-        step=step,
-        prop=prop,
-        axis_key=str(idx),
+    extras = {
+        "current_step": step,
+        "axis_index": idx,
+        "meta": dict(meta) if isinstance(meta, Mapping) else {},
+    }
+
+    return StateUpdateResult(
+        scope="dims",
+        target=control_target,
+        key=prop,
+        value=int(step[idx]),
         server_seq=server_seq,
         client_seq=seq_int,
         client_id=client_id,
         interaction_id=interaction_id,
         phase=phase,
+        extras=extras,
     )
+
+
+def axis_label_from_meta(meta: Mapping[str, Any], idx: int) -> Optional[str]:
+    """Resolve the preferred axis label for *idx*, if available."""
+
+    try:
+        order = meta.get("order")
+        if isinstance(order, Sequence) and idx < len(order):
+            label = order[idx]
+            if isinstance(label, str) and label.strip():
+                return str(label)
+        labels = meta.get("axis_labels")
+        if isinstance(labels, Sequence) and idx < len(labels):
+            label = labels[idx]
+            if isinstance(label, str) and label.strip():
+                return str(label)
+    except Exception:
+        return None
+    return None

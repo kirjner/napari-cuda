@@ -56,20 +56,20 @@ Websocket Clients (state + pixel)
   - Maintains config (`ServerCtx`) and async orchestration (broadcasts, keyframe watchdog).
 
 - **ServerSceneData** (`src/napari_cuda/server/server_scene.py`)
-  - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, dims sequencing, volume/multiscale metadata, SceneSpec caches, and policy logging state.
-  - Tracks canonical per-layer controls via `LayerControlState`; the new `control.command` surface (and, temporarily, the legacy `layer.intent.*` messages) mutate this bag before the worker and spec builders consume it. The intent path will be retired once every client speaks `control.command`.
+  - Mutable bag the server mutates for every state-channel request: carries the latest `ServerSceneState`, camera command deque, global sequencing counter, volume/multiscale metadata, SceneSpec caches, and policy logging state.
+  - Tracks canonical per-layer controls via `LayerControlState`; the unified `state.update` surface (which replaces the old `control.command` + intent paths) mutates this bag before the worker and spec builders consume it.
   - Intent helpers, MCP tools, and broadcast helpers operate exclusively on this bag, emitting immutable snapshots for the worker when changes are ready.
   - Lives alongside `render_mailbox.py` and `server_scene_spec.py`; the bag stays free of protocol helpers so the worker can import the queue without dragging in viewer/serialization code.
   - Worker-facing helpers (`scene_state_applier.py`, ROI/LOD modules) remain outside the namespace to keep render-thread code decoupled from headless-server orchestration.
-- Layer controls surface through a dedicated `controls` map on every `scene.spec` / `layer.update` and
+- Layer controls surface through a dedicated `controls` map on every `scene.spec` / `state.update` and
   now carry `control_versions` metadata (`server_seq`, `source_client_seq`, `source_client_id`) so
   reconnects and multi-client interactions can reconcile authoritative state quickly. `extras`
   continues to hold transport metadata only (volume flags, zarr paths, adapter hints).
 - **Control Channel Helpers** (`state_channel_handler.py`)
-  - Orchestrate state-channel websocket flow: connection setup, `control.command` dispatch, dims/spec broadcasting, and policy/metrics logging.
+  - Orchestrate state-channel websocket flow: connection setup, `state.update` dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
-  - Delegate command mutations to `server_scene_intents.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a re-entrant lock.
+  - Delegate state mutations to `server_scene_intents.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a re-entrant lock.
   - Worker refresh notifications travel through a dedicated worker→control queue, so the control loop updates the scene manager before emitting dims/spec payloads; no deferred flushes or ad-hoc regeneration needed.
 - **Worker Lifecycle Helpers** (`worker_lifecycle.py`)
   - `WorkerLifecycleState` tracks the render thread, worker instance, and stop event in a single bag controlled by the lifecycle helpers.
@@ -85,7 +85,7 @@ Websocket Clients (state + pixel)
 
 The headless server works as two cooperating loops around a single scene record:
 
-1. **State channel (async loop)** – receives `control.command` payloads from the UI, normalises them,
+1. **State channel (async loop)** – receives `state.update` payloads from the UI, normalises them,
    and mutates the authoritative `ServerSceneData`. Each mutation produces a delta that is recorded for
    acknowledgements and handed to the render worker through its update mailbox. The async loop also
    broadcasts the canonical scene spec, dims metadata, and the layer `controls` map (including
@@ -125,7 +125,7 @@ graph LR
 
     StateClient -->|intents| SSC
     SSC -->|mutate| SceneBag
-    SSC -->|broadcast dims/spec + controls| StateClient
+    SSC -->|broadcast dims/spec + state updates| StateClient
     SceneBag -->|enqueue updates| SceneQueue
     SceneQueue --> Worker
     Worker -->|scene_refresh| WQueue

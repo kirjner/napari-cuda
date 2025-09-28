@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
 
 from napari_cuda.server.layer_manager import ViewerSceneManager
 from napari_cuda.server.server_scene import ServerSceneData
+from napari_cuda.server.server_scene_intents import (
+    apply_dims_state_update,
+    apply_layer_state_update,
+)
 from napari_cuda.server.server_scene_spec import (
     build_scene_spec_json,
     build_scene_spec_message,
-    build_dims_payload,
-    build_layer_update_payload,
+    build_state_update_payload,
 )
 
 
@@ -46,96 +50,88 @@ def test_build_scene_spec_json_round_trip(scene: ServerSceneData, manager: Viewe
     assert json_payload == scene.last_scene_spec_json
 
 
-@pytest.mark.parametrize("step", ([0, 0], [3], [7, 1, 2]))
-def test_build_dims_payload(scene: ServerSceneData, step: list[int]) -> None:
-    meta = {"ndim": max(1, len(step)), "order": ["z", "y", "x"], "volume": False}
-    scene.use_volume = False
-    scene.multiscale_state = {
-        "levels": [
-            {
-                "shape": [32 for _ in range(max(1, len(step)))],
-                "downsample": [1 for _ in range(max(1, len(step)))],
-                "path": "level_0",
-            }
-        ],
-        "current_level": 0,
-        "policy": "auto",
-        "index_space": "base",
-    }
-    payload = build_dims_payload(
+def test_build_state_update_payload_layer(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
+    lock = threading.RLock()
+    result = apply_layer_state_update(
         scene,
-        step_list=step,
-        last_client_id="client-1",
-        meta=meta,
-        use_volume=False,
-    )
-    assert payload["type"] == "dims.update"
-    assert payload["last_client_id"] == "client-1"
-    assert "meta" in payload
-    # incr dims_seq wrap handled inside helper; ensure cached payload matches
-    assert scene.last_dims_payload is payload
-
-
-@pytest.mark.parametrize("bad_step", ([], [1, 2, 3, 4]))
-def test_build_dims_payload_invalid(scene: ServerSceneData, bad_step: list[int]) -> None:
-    meta = {"ndim": 2, "order": ["y", "x"], "volume": False}
-    with pytest.raises(AssertionError):
-        build_dims_payload(
-            scene,
-            step_list=bad_step,
-            last_client_id=None,
-            meta=meta,
-            use_volume=False,
-        )
-
-
-def test_build_layer_update_payload(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
-    from napari_cuda.server.server_scene import LayerControlMeta, LayerControlState
-
-    scene.layer_controls["layer-0"] = LayerControlState(opacity=0.5)
-    scene.layer_control_meta.setdefault("layer-0", {})["opacity"] = LayerControlMeta(
-        last_server_seq=11,
-        last_client_id="client-a",
-        last_client_seq=4,
-    )
-    payload = build_layer_update_payload(
-        scene,
-        manager,
+        lock,
         layer_id="layer-0",
-        changes={"opacity": 0.5},
-        intent_seq=7,
-        server_seq=11,
-        source_client_id="client-a",
-        source_client_seq=4,
-        control_versions={
-            "opacity": {
-                "server_seq": 11,
-                "source_client_id": "client-a",
-                "source_client_seq": 4,
-            }
-        },
+        prop="opacity",
+        value=0.5,
+        client_id="client-a",
+        client_seq=4,
+        interaction_id="drag-1",
+        phase="update",
     )
-    assert payload["type"] == "layer.update"
-    assert payload["ack"] is True
-    assert payload["intent_seq"] == 7
-    assert payload["server_seq"] == 11
-    assert payload["source_client_id"] == "client-a"
-    assert payload["source_client_seq"] == 4
-    layer = payload["layer"]
-    assert "opacity" not in layer.get("extras", {})
-    assert payload["controls"]["opacity"] == 0.5
+    assert result is not None
+
+    manager.update_from_sources(
+        worker=None,
+        scene_state=None,
+        multiscale_state=None,
+        volume_state=None,
+        current_step=None,
+        ndisplay=2,
+        zarr_path=None,
+        layer_controls=scene.layer_controls,
+    )
+
+    payload = build_state_update_payload(scene, manager, result=result)
+    assert payload["type"] == "state.update"
+    assert payload["scope"] == "layer"
+    assert payload["target"] == "layer-0"
+    assert payload["value"] == 0.5
+    assert payload["server_seq"] == result.server_seq
+    assert payload["client_id"] == "client-a"
     versions = payload.get("control_versions") or {}
-    assert versions.get("opacity", {}).get("server_seq") == 11
+    assert versions.get("opacity", {}).get("server_seq") == result.server_seq
+    assert payload["controls"]["opacity"] == 0.5
+    assert payload.get("interaction_id") == "drag-1"
+    assert payload.get("phase") == "update"
+
+
+def test_build_state_update_payload_dims(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
+    lock = threading.RLock()
+    meta: dict[str, Any] = {
+        "ndim": 3,
+        "order": ["z", "y", "x"],
+        "range": [[0, 9], [0, 9], [0, 9]],
+    }
+    result = apply_dims_state_update(
+        scene,
+        lock,
+        meta,
+        axis="z",
+        prop="step",
+        value=5,
+        client_id="client-z",
+        client_seq=3,
+        interaction_id="dims-1",
+        phase="commit",
+    )
+    assert result is not None
+
+    payload = build_state_update_payload(scene, manager, result=result)
+    assert payload["type"] == "state.update"
+    assert payload["scope"] == "dims"
+    assert payload["target"] == "z"
+    assert payload["value"] == 5
+    assert payload["server_seq"] == result.server_seq
+    assert payload["last_client_id"] == "client-z"
+    assert payload.get("interaction_id") == "dims-1"
+    assert payload.get("phase") == "commit"
+    versions = payload.get("control_versions") or {}
+    assert versions.get("step", {}).get("server_seq") == result.server_seq
+    assert isinstance(payload.get("meta"), dict)
+    assert payload["meta"].get("order") == meta["order"]
 
 
 def test_viewer_scene_manager_prefers_control_state(scene: ServerSceneData) -> None:
     from napari_cuda.server.server_scene import LayerControlState
 
     manager = ViewerSceneManager((640, 480))
-    # Seed canonical state with a non-default opacity
     scene.layer_controls["layer-0"] = LayerControlState(opacity=0.42)
 
-    # Update viewer with adapter extras that disagree (simulate legacy napari layer state)
     manager.update_from_sources(
         worker=None,
         scene_state=None,

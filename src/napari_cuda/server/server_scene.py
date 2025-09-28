@@ -55,7 +55,9 @@ __all__ = [
     "default_layer_controls",
     "default_multiscale_state",
     "default_volume_state",
-    "increment_dims_sequence",
+    "increment_server_sequence",
+    "get_control_meta",
+    "clear_control_meta",
     "layer_controls_to_dict",
 ]
 
@@ -138,7 +140,7 @@ class ServerSceneData:
     latest_state: ServerSceneState = field(default_factory=ServerSceneState)
     use_volume: bool = False
     camera_commands: Deque[ServerSceneCommand] = field(default_factory=deque)
-    dims_seq: int = 0
+    next_server_seq: int = 0
     last_dims_client_id: Optional[str] = None
     volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)
@@ -150,9 +152,7 @@ class ServerSceneData:
     last_dims_payload: Optional[Dict[str, Any]] = None
     last_scene_spec_json: Optional[str] = None
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
-    layer_control_meta: Dict[str, Dict[str, LayerControlMeta]] = field(default_factory=dict)
-    dims_control_meta: Dict[str, LayerControlMeta] = field(default_factory=dict)
-    next_layer_server_seq: int = 0
+    control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
 
 
 def create_server_scene_data(*, policy_event_path: Optional[str | Path] = None) -> ServerSceneData:
@@ -164,10 +164,37 @@ def create_server_scene_data(*, policy_event_path: Optional[str | Path] = None) 
     return data
 
 
-def increment_dims_sequence(scene: ServerSceneData, client_id: Optional[str]) -> int:
-    """Advance the authoritative dims sequence and record the request origin."""
+def _meta_key(scope: str, target: str, key: str) -> tuple[str, str, str]:
+    """Compute the canonical metadata key for a control property."""
 
-    seq = int(scene.dims_seq) & 0x7FFFFFFF
-    scene.dims_seq = (int(scene.dims_seq) + 1) & 0x7FFFFFFF
-    scene.last_dims_client_id = client_id
-    return seq
+    return (str(scope), str(target), str(key))
+
+
+def get_control_meta(
+    scene: ServerSceneData,
+    scope: str,
+    target: str,
+    key: str,
+) -> LayerControlMeta:
+    """Fetch (and create if needed) control metadata for ``scope/target/key``."""
+
+    meta_key = _meta_key(scope, target, key)
+    meta = scene.control_meta.get(meta_key)
+    if meta is None:
+        meta = LayerControlMeta()
+        scene.control_meta[meta_key] = meta
+    return meta
+
+
+def clear_control_meta(scene: ServerSceneData, scope: str, target: str, key: str) -> None:
+    """Remove stored metadata for ``scope/target/key`` if present."""
+
+    meta_key = _meta_key(scope, target, key)
+    scene.control_meta.pop(meta_key, None)
+
+
+def increment_server_sequence(scene: ServerSceneData) -> int:
+    """Advance and return the global server sequence counter."""
+
+    scene.next_server_seq = (int(scene.next_server_seq) + 1) & 0x7FFFFFFF
+    return scene.next_server_seq

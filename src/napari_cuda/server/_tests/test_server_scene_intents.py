@@ -83,11 +83,11 @@ def test_clamp_level_uses_level_count():
     assert intents.clamp_level("bad", levels) is None
 
 
-def test_apply_layer_intent_updates_state():
+def test_apply_layer_state_update_updates_state():
     scene = create_server_scene_data()
     lock = _lock()
 
-    result = intents.apply_layer_intent(
+    result = intents.apply_layer_state_update(
         scene,
         lock,
         layer_id="layer-0",
@@ -96,18 +96,20 @@ def test_apply_layer_intent_updates_state():
     )
 
     assert result is not None
-    assert result.applied == {"opacity": 0.4}
+    assert result.value == 0.4
     assert result.server_seq == 1
     assert scene.layer_controls["layer-0"].opacity == 0.4
     assert scene.latest_state.layer_updates == {"layer-0": {"opacity": 0.4}}
+    meta = scene.control_meta[("layer", "layer-0", "opacity")]
+    assert meta.last_server_seq == 1
 
 
 @pytest.mark.parametrize("value", ["I Blue", "i blue", " I Blue "])
-def test_apply_layer_intent_normalizes_colormap(value):
+def test_apply_layer_state_update_normalizes_colormap(value):
     scene = create_server_scene_data()
     lock = _lock()
 
-    result = intents.apply_layer_intent(
+    result = intents.apply_layer_state_update(
         scene,
         lock,
         layer_id="layer-0",
@@ -116,16 +118,16 @@ def test_apply_layer_intent_normalizes_colormap(value):
     )
 
     assert result is not None
-    assert result.applied == {"colormap": "I Blue"}
+    assert result.value == "I Blue"
     assert scene.layer_controls["layer-0"].colormap == "I Blue"
     assert scene.latest_state.layer_updates == {"layer-0": {"colormap": "I Blue"}}
 
 
-def test_apply_layer_intent_rejects_stale_sequence():
+def test_apply_layer_state_update_rejects_stale_sequence():
     scene = create_server_scene_data()
     lock = _lock()
 
-    first = intents.apply_layer_intent(
+    first = intents.apply_layer_state_update(
         scene,
         lock,
         layer_id="layer-0",
@@ -138,7 +140,7 @@ def test_apply_layer_intent_rejects_stale_sequence():
     assert first is not None
     assert first.server_seq == 1
 
-    stale = intents.apply_layer_intent(
+    stale = intents.apply_layer_state_update(
         scene,
         lock,
         layer_id="layer-0",
@@ -151,12 +153,41 @@ def test_apply_layer_intent_rejects_stale_sequence():
     assert stale is None
     # Latest state should remain unchanged
     assert scene.layer_controls["layer-0"].gamma == 1.2
-    assert scene.layer_control_meta["layer-0"]["gamma"].last_server_seq == 1
+    meta = scene.control_meta[("layer", "layer-0", "gamma")]
+    assert meta.last_server_seq == 1
 
 
-def test_apply_layer_intent_rejects_invalid_property():
+def test_apply_layer_state_update_rejects_invalid_property():
     scene = create_server_scene_data()
     lock = _lock()
 
     with pytest.raises(KeyError):
-        intents.apply_layer_intent(scene, lock, layer_id="layer-0", prop="unknown", value="x")
+        intents.apply_layer_state_update(scene, lock, layer_id="layer-0", prop="unknown", value="x")
+
+
+def test_apply_dims_state_update_tracks_metadata():
+    scene = create_server_scene_data()
+    scene.latest_state = ServerSceneState(current_step=(0, 0, 0))
+    lock = _lock()
+    meta = {"ndim": 3, "order": ["z", "y", "x"], "range": [(0, 9), (0, 9), (0, 9)]}
+
+    result = intents.apply_dims_state_update(
+        scene,
+        lock,
+        meta,
+        axis="z",
+        prop="step",
+        value=5,
+        client_id="client-z",
+        client_seq=3,
+        interaction_id="drag-1",
+        phase="update",
+    )
+
+    assert result is not None
+    assert result.value == 5
+    assert scene.latest_state.current_step[0] == 5
+    meta_entry = scene.control_meta[("dims", "z", "step")]
+    assert meta_entry.last_client_id == "client-z"
+    assert meta_entry.last_client_seq == 3
+    assert meta_entry.last_interaction_id == "drag-1"

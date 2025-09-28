@@ -60,9 +60,8 @@ class ViewerSceneManager:
         self._default_layer_id = default_layer_id
         self._default_layer_name = default_layer_name
         self._capabilities: List[str] = [
-            "layer.update",
             "layer.remove",
-            "control.command",
+            "state.update",
         ]
         self._scene: Optional[SceneSpec] = None
 

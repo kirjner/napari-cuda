@@ -13,7 +13,7 @@ from typing import Optional, Sequence, List
 from . import pixel_channel
 from .bitstream import build_avcc_config, pack_to_avcc
 from .scene_state import ServerSceneState
-from .state_channel_handler import build_dims_update_message
+from .state_channel_handler import broadcast_dims_update
 from .worker_notifications import WorkerSceneNotification
 from .render_worker import EGLRendererWorker
 
@@ -189,43 +189,27 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         angles=latest.angles,
                         current_step=(int(z_index),),
                     )
-                baseline = build_dims_update_message(
-                    server,
-                    step_list=[int(z_index)],
-                    last_client_id=None,
-                    ack=False,
-                    intent_seq=None,
-                )
-                loop.call_soon_threadsafe(
-                    lambda obj=baseline: asyncio.create_task(server._broadcast_state_json(obj))
-                )
-                if server._log_dims_info:
-                    logger.info("init: dims.update current_step=%s", baseline.get("current_step"))
-                else:
-                    logger.debug("init: dims.update current_step=%s", baseline.get("current_step"))
+                step_list = [int(z_index)]
             else:
                 meta = server._dims_metadata() or {}
                 ndim = int(meta.get("ndim") or 3)
-                baseline = build_dims_update_message(
-                    server,
-                    step_list=[0 for _ in range(max(1, ndim))],
-                    last_client_id=None,
-                    ack=False,
-                    intent_seq=None,
-                )
-                loop.call_soon_threadsafe(
-                    lambda obj=baseline: asyncio.create_task(server._broadcast_state_json(obj))
-                )
-                if server._log_dims_info:
-                    logger.info(
-                        "init: dims.update current_step=%s (baseline volume)",
-                        baseline.get("current_step"),
+                step_list = [0 for _ in range(max(1, ndim))]
+
+            loop.call_soon_threadsafe(
+                lambda steps=step_list: asyncio.create_task(
+                    broadcast_dims_update(
+                        server,
+                        steps,
+                        last_client_id=None,
+                        ack=False,
+                        intent_seq=None,
                     )
-                else:
-                    logger.debug(
-                        "init: dims.update current_step=%s (baseline volume)",
-                        baseline.get("current_step"),
-                    )
+                )
+            )
+            if server._log_dims_info:
+                logger.info("init: state.update dims step=%s", step_list)
+            else:
+                logger.debug("init: state.update dims step=%s", step_list)
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
