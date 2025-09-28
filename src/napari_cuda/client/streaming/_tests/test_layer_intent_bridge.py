@@ -49,9 +49,17 @@ def _make_layer(remote_id: str = "layer-1") -> RemoteImageLayer:
         ndim=2,
         shape=[1, 1],
         dtype="float32",
-        contrast_limits=[0.0, 1.0],
+        contrast_limits=None,
         metadata={},
-        render=LayerRenderHints(mode="mip", opacity=0.5, visibility=True, gamma=1.0),
+        render=LayerRenderHints(mode="mip"),
+        controls={
+            "visible": True,
+            "opacity": 0.5,
+            "rendering": "mip",
+            "colormap": "gray",
+            "gamma": 1.0,
+            "contrast_limits": [0.0, 1.0],
+        },
         extras={"data_id": "demo"},
     )
     return RemoteImageLayer(spec)
@@ -99,11 +107,27 @@ def test_opacity_intent_roundtrip(intent_state: IntentState) -> None:
         ndim=2,
         shape=[1, 1],
         dtype="float32",
-        contrast_limits=None,
         metadata={"intent_seq": seq},
-        render=LayerRenderHints(opacity=0.25, visibility=True),
+        render=LayerRenderHints(mode="mip"),
+        controls={
+            "visible": True,
+            "opacity": 0.25,
+            "rendering": "mip",
+            "contrast_limits": [0.0, 1.0],
+        },
     )
-    message = LayerUpdateMessage(layer=ack_spec, partial=True, ack=True, intent_seq=seq)
+    message = LayerUpdateMessage(
+        layer=ack_spec,
+        partial=True,
+        ack=True,
+        intent_seq=seq,
+        controls={
+            "visible": True,
+            "opacity": 0.25,
+            "rendering": "mip",
+            "contrast_limits": [0.0, 1.0],
+        },
+    )
     bridge.handle_layer_update(message)
 
     assert layer.opacity == pytest.approx(0.25)
@@ -139,6 +163,12 @@ def test_contrast_intent(intent_state: IntentState) -> None:
     assert tuple(layer.contrast_limits) == pytest.approx((0.1, 0.9))
 
     seq = payload["client_seq"]
+    ack_controls = {
+        "visible": True,
+        "opacity": 0.5,
+        "rendering": "mip",
+        "contrast_limits": [0.1, 0.9],
+    }
     ack_spec = LayerSpec(
         layer_id=layer.remote_id,
         layer_type="image",
@@ -146,11 +176,17 @@ def test_contrast_intent(intent_state: IntentState) -> None:
         ndim=2,
         shape=[1, 1],
         dtype="float32",
-        contrast_limits=[0.1, 0.9],
         metadata={"intent_seq": seq},
-        render=LayerRenderHints(opacity=0.5, visibility=True),
+        render=LayerRenderHints(mode="mip"),
+        controls=ack_controls,
     )
-    message = LayerUpdateMessage(layer=ack_spec, partial=True, ack=True, intent_seq=seq)
+    message = LayerUpdateMessage(
+        layer=ack_spec,
+        partial=True,
+        ack=True,
+        intent_seq=seq,
+        controls=ack_controls,
+    )
     bridge.handle_layer_update(message)
 
     assert tuple(layer.contrast_limits) == pytest.approx((0.1, 0.9))
@@ -182,6 +218,13 @@ def test_colormap_intent(intent_state: IntentState) -> None:
     assert payload["name"] == "magma"
 
     seq = payload["client_seq"]
+    ack_controls = {
+        "visible": True,
+        "opacity": 0.5,
+        "rendering": "mip",
+        "colormap": "magma",
+        "contrast_limits": [0.0, 1.0],
+    }
     ack_spec = LayerSpec(
         layer_id=layer.remote_id,
         layer_type="image",
@@ -189,11 +232,13 @@ def test_colormap_intent(intent_state: IntentState) -> None:
         ndim=2,
         shape=[1, 1],
         dtype="float32",
-        contrast_limits=[0.0, 1.0],
         metadata={"intent_seq": seq},
-        render=LayerRenderHints(colormap="magma", opacity=0.5, visibility=True),
+        render=LayerRenderHints(mode="mip"),
+        controls=ack_controls,
     )
-    bridge.handle_layer_update(LayerUpdateMessage(layer=ack_spec, partial=True, ack=True, intent_seq=seq))
+    bridge.handle_layer_update(
+        LayerUpdateMessage(layer=ack_spec, partial=True, ack=True, intent_seq=seq, controls=ack_controls)
+    )
 
     # Value committed after ack
     assert getattr(layer.colormap, "name", str(layer.colormap)) == "magma"

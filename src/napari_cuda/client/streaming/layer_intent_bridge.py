@@ -59,26 +59,10 @@ def _colormap_name(value: Any) -> Optional[str]:
     return str(value)
 
 
-def _spec_value(spec: LayerSpec, *paths: tuple[str, ...]) -> Optional[Any]:
-    for path in paths:
-        node: Any = spec
-        missing = False
-        for part in path:
-            if isinstance(node, dict):
-                if part not in node:
-                    missing = True
-                    break
-                node = node[part]
-            else:
-                if not hasattr(node, part):
-                    missing = True
-                    break
-                node = getattr(node, part)
-            if node is None:
-                missing = True
-                break
-        if not missing and node is not None:
-            return node
+def _control_value(spec: LayerSpec, key: str) -> Optional[Any]:
+    controls = getattr(spec, "controls", None)
+    if isinstance(controls, dict):
+        return controls.get(key)
     return None
 
 
@@ -97,7 +81,7 @@ def _coerce_bool(value: Any) -> Optional[bool]:
 
 
 def _coerce_clim(spec: LayerSpec) -> Optional[tuple[float, float]]:
-    value = _spec_value(spec, ("extras", "contrast_limits"), ("contrast_limits",))
+    value = _control_value(spec, "contrast_limits")
     if value is None:
         return None
     if isinstance(value, (list, tuple)) and len(value) >= 2:
@@ -145,29 +129,17 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: float(getattr(layer, "opacity", 0.0)),
         setter=lambda layer, value: setattr(layer, "opacity", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
-        spec_getter=lambda spec: _coerce_float(
-            _spec_value(
-                spec,
-                ("extras", "opacity"),
-                ("render", "opacity"),
-            )
-        ),
+        spec_getter=lambda spec: _coerce_float(_control_value(spec, "opacity")),
     ),
     PropertyConfig(
-        key="visibility",
+        key="visible",
         event_name="visible",
         intent_type="layer.intent.set_visibility",
         payload_builder=lambda value: {"visible": bool(value)},
         getter=lambda layer: bool(getattr(layer, "visible", False)),
         setter=lambda layer, value: setattr(layer, "visible", bool(value)),
         equals=lambda a, b: bool(a) is bool(b),
-        spec_getter=lambda spec: _coerce_bool(
-            _spec_value(
-                spec,
-                ("extras", "visibility"),
-                ("render", "visibility"),
-            )
-        ),
+        spec_getter=lambda spec: _coerce_bool(_control_value(spec, "visible")),
     ),
     PropertyConfig(
         key="rendering",
@@ -177,7 +149,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: str(getattr(layer, "rendering", "")),
         setter=lambda layer, value: setattr(layer, "rendering", str(value)),
         equals=lambda a, b: str(a) == str(b),
-        spec_getter=lambda spec: spec.render.mode if spec.render and spec.render.mode else None,
+        spec_getter=lambda spec: _control_value(spec, "rendering"),
     ),
     PropertyConfig(
         key="colormap",
@@ -187,13 +159,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: str(_colormap_name(getattr(layer, "colormap", None)) or ""),
         setter=lambda layer, value: setattr(layer, "colormap", str(value)),
         equals=lambda a, b: str(a) == str(b),
-        spec_getter=lambda spec: _colormap_name(
-            _spec_value(
-                spec,
-                ("extras", "colormap"),
-                ("render", "colormap"),
-            )
-        ),
+        spec_getter=lambda spec: _colormap_name(_control_value(spec, "colormap")),
     ),
     PropertyConfig(
         key="gamma",
@@ -203,13 +169,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: float(getattr(layer, "gamma", 1.0)),
         setter=lambda layer, value: setattr(layer, "gamma", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b), tol=1e-4),
-        spec_getter=lambda spec: _coerce_float(
-            _spec_value(
-                spec,
-                ("extras", "gamma"),
-                ("render", "gamma"),
-            )
-        ),
+        spec_getter=lambda spec: _coerce_float(_control_value(spec, "gamma")),
     ),
     PropertyConfig(
         key="iso_threshold",
@@ -219,13 +179,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: float(getattr(layer, "iso_threshold", 0.0)),
         setter=lambda layer, value: setattr(layer, "iso_threshold", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
-        spec_getter=lambda spec: _coerce_float(
-            _spec_value(
-                spec,
-                ("extras", "iso_threshold"),
-                ("render", "iso_threshold"),
-            )
-        ),
+        spec_getter=lambda spec: _coerce_float(_control_value(spec, "iso_threshold")),
     ),
     PropertyConfig(
         key="attenuation",
@@ -235,13 +189,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: float(getattr(layer, "attenuation", 0.0)),
         setter=lambda layer, value: setattr(layer, "attenuation", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
-        spec_getter=lambda spec: _coerce_float(
-            _spec_value(
-                spec,
-                ("extras", "attenuation"),
-                ("render", "attenuation"),
-            )
-        ),
+        spec_getter=lambda spec: _coerce_float(_control_value(spec, "attenuation")),
     ),
     PropertyConfig(
         key="contrast_limits",

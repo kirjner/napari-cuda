@@ -35,6 +35,11 @@ def sample_layer_dict():
             "colormap": "gray",
             "opacity": 0.85,
         },
+        "controls": {
+            "visible": True,
+            "opacity": 0.85,
+            "blending": "opaque",
+        },
         "multiscale": {
             "levels": [
                 {"shape": [32, 64, 128], "downsample": [1.0, 1.0, 1.0], "path": "level_0"},
@@ -60,6 +65,7 @@ def test_layer_spec_round_trip(sample_layer_dict):
     assert payload["layer_id"] == "layer-001"
     assert payload["render"]["colormap"] == "gray"
     assert payload["multiscale"]["levels"][1]["downsample"] == [1.0, 2.0, 2.0]
+    assert payload["controls"]["opacity"] == pytest.approx(0.85)
 
 
 def test_scene_spec_message(sample_layer_dict):
@@ -81,7 +87,7 @@ def test_scene_spec_message(sample_layer_dict):
 
 def test_layer_update_message(sample_layer_dict):
     layer = LayerSpec.from_dict(sample_layer_dict)
-    msg = LayerUpdateMessage(layer=layer, partial=True, timestamp=4.56)
+    msg = LayerUpdateMessage(layer=layer, partial=True, timestamp=4.56, controls=layer.controls)
 
     payload = msg.to_dict()
     assert payload["type"] == LAYER_UPDATE_TYPE
@@ -92,6 +98,7 @@ def test_layer_update_message(sample_layer_dict):
     assert isinstance(parsed, LayerUpdateMessage)
     assert parsed.layer is not None
     assert parsed.layer.name == "demo"
+    assert parsed.controls == {"visible": True, "opacity": 0.85, "blending": "opaque"}
 
 
 def test_layer_remove_message():

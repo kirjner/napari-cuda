@@ -584,19 +584,23 @@ def hud_snapshot(state: IntentState, *, video_size: tuple[Optional[int], Optiona
     snap['volume'] = _bool_or_none(meta.get('volume'))
     snap['vol_mode'] = bool(_is_volume_mode(state))
 
-    render = meta.get('render') if isinstance(meta.get('render'), dict) else None
-    if isinstance(render, dict):
-        snap['render_mode'] = render.get('mode')
-        clim = render.get('clim')
+    controls = meta.get('controls') if isinstance(meta.get('controls'), dict) else None
+    if isinstance(controls, dict):
+        snap['render_mode'] = controls.get('rendering')
+        clim = controls.get('contrast_limits')
         if isinstance(clim, Sequence):
             snap['clim_lo'] = _float_or_none(clim[0] if len(clim) > 0 else None)
             snap['clim_hi'] = _float_or_none(clim[1] if len(clim) > 1 else None)
         else:
             snap['clim_lo'] = None
             snap['clim_hi'] = None
-        snap['colormap'] = render.get('colormap')
-        snap['opacity'] = _float_or_none(render.get('opacity'))
-        snap['sample_step'] = _float_or_none(render.get('sample_step'))
+        snap['colormap'] = controls.get('colormap')
+        snap['opacity'] = _float_or_none(controls.get('opacity'))
+    render_meta = meta.get('render') if isinstance(meta.get('render'), dict) else None
+    if isinstance(render_meta, dict):
+        snap['sample_step'] = _float_or_none(render_meta.get('sample_step'))
+    elif 'sample_step' not in snap:
+        snap['sample_step'] = None
 
     multiscale = meta.get('multiscale') if isinstance(meta.get('multiscale'), dict) else None
     if isinstance(multiscale, dict):

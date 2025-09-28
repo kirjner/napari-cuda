@@ -296,6 +296,7 @@ class LayerSpec:
     render: Optional[LayerRenderHints] = None
     multiscale: Optional[MultiscaleSpec] = None
     extras: Optional[Dict[str, Any]] = None
+    controls: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self.layer_id = str(self.layer_id)
@@ -331,6 +332,8 @@ class LayerSpec:
             self.multiscale = MultiscaleSpec.from_dict(self.multiscale)
         if self.extras is not None:
             self.extras = dict(self.extras)
+        if self.controls is not None:
+            self.controls = dict(self.controls)
 
     def to_dict(self) -> Dict[str, Any]:
         payload = {
@@ -351,6 +354,7 @@ class LayerSpec:
             "render": self.render.to_dict() if isinstance(self.render, LayerRenderHints) else self.render,
             "multiscale": self.multiscale.to_dict() if isinstance(self.multiscale, MultiscaleSpec) else self.multiscale,
             "extras": self.extras,
+            "controls": self.controls,
         }
         return _strip_none(payload)
 
@@ -376,6 +380,7 @@ class LayerSpec:
             render=LayerRenderHints.from_dict(render) if isinstance(render, dict) else render,
             multiscale=MultiscaleSpec.from_dict(multiscale) if isinstance(multiscale, dict) else multiscale,
             extras=data.get("extras"),
+            controls=data.get("controls"),
         )
 
 
@@ -530,6 +535,7 @@ class LayerUpdateMessage(StateMessage):
     partial: bool = False
     ack: Optional[bool] = None
     intent_seq: Optional[int] = None
+    controls: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         if self.layer is None:
@@ -542,6 +548,7 @@ class LayerUpdateMessage(StateMessage):
             "partial": bool(self.partial),
             "ack": self.ack,
             "intent_seq": int(self.intent_seq) if self.intent_seq is not None else None,
+            "controls": self.controls,
         }
         return _strip_none(payload)
 
@@ -563,6 +570,9 @@ class LayerUpdateMessage(StateMessage):
                 raise TypeError("LayerUpdateMessage ack must be a boolean")
         else:
             ack_val = None
+        controls_payload = data.get("controls") if isinstance(data.get("controls"), dict) else None
+        if layer is not None and controls_payload is not None:
+            layer.controls = dict(controls_payload)
         return cls(
             type=data.get("type", LAYER_UPDATE_TYPE),
             version=int(data.get("version", SPEC_VERSION)),
@@ -571,6 +581,7 @@ class LayerUpdateMessage(StateMessage):
             partial=bool(data.get("partial", False)),
             ack=ack_val,
             intent_seq=intent_seq_int,
+            controls=controls_payload,
         )
 
 

@@ -461,13 +461,15 @@ class ProxyViewer(ViewerModel):
                             self.layers.pop(current_index)
                             self.layers.insert(idx, layer)
                     try:
-                        layer.visible = False
+                        controls = getattr(record.spec, "controls", None)
+                        target = controls.get("visible") if isinstance(controls, dict) else None
+                        if target is not None and bool(layer.visible) is not bool(target):
+                            emitter = getattr(getattr(layer, "events", None), "visible", None)
+                            blocker = emitter.blocker() if hasattr(emitter, "blocker") else nullcontext()
+                            with blocker:
+                                layer.visible = bool(target)
                     except Exception:
                         pass
-                try:
-                    self.layers.selection.clear()
-                except Exception:
-                    pass
         finally:
             self._suppress_forward = False
 

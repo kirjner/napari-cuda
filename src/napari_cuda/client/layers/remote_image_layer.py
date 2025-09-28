@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import numpy as np
 
@@ -49,10 +49,10 @@ class RemoteImageLayer(Image):
         self._remote_id = spec.layer_id
         self.editable = False
         self._keep_auto_contrast = False
-        self.visible = bool(spec.render.visibility) if spec.render and spec.render.visibility is not None else False
         self._install_empty_slice()
         fallback_preview = self._extract_preview() if preview is None else preview
         self.update_preview(fallback_preview)
+        self._apply_controls(spec.controls)
 
     # ------------------------------------------------------------------
     def _build_init_kwargs(self, spec: LayerSpec, metadata: dict) -> dict:
@@ -72,20 +72,12 @@ class RemoteImageLayer(Image):
 
     def _render_kwargs(self, hints: LayerRenderHints) -> dict:
         mapping: dict = {}
-        if hints.opacity is not None:
-            mapping["opacity"] = float(hints.opacity)
-        if hints.visibility is not None:
-            mapping["visible"] = bool(hints.visibility)
-        if hints.colormap:
-            mapping["colormap"] = hints.colormap
         if hints.mode:
             mapping["rendering"] = hints.mode
-        if hints.gamma is not None:
-            mapping["gamma"] = float(hints.gamma)
-        if hints.iso_threshold is not None:
-            mapping["iso_threshold"] = float(hints.iso_threshold)
-        if hints.attenuation is not None:
-            mapping["attenuation"] = float(hints.attenuation)
+        if hints.colormap:
+            mapping["colormap"] = hints.colormap
+        if hints.shading:
+            mapping["shading"] = hints.shading
         return mapping
 
     def _install_empty_slice(self) -> None:
@@ -124,10 +116,9 @@ class RemoteImageLayer(Image):
             self.scale = tuple(spec.scale)
         if spec.translate:
             self.translate = tuple(spec.translate)
-        if spec.contrast_limits:
-            self.contrast_limits = tuple(spec.contrast_limits)
         self.metadata = metadata
         self._apply_render(spec.render)
+        self._apply_controls(spec.controls)
         self._install_empty_slice()
         fallback_preview = self._extract_preview() if preview is None else preview
         self.update_preview(fallback_preview)
@@ -178,10 +169,6 @@ class RemoteImageLayer(Image):
     def _apply_render(self, hints: Optional[LayerRenderHints]) -> None:
         if hints is None:
             return
-        if hints.visibility is not None:
-            self.visible = bool(hints.visibility)
-        if hints.opacity is not None:
-            self.opacity = float(hints.opacity)
         if hints.mode:
             try:
                 self.rendering = hints.mode
@@ -192,18 +179,85 @@ class RemoteImageLayer(Image):
                 self.colormap = hints.colormap
             except Exception:
                 logger.debug("RemoteImageLayer: colormap %s unsupported", hints.colormap, exc_info=True)
-        if hints.gamma is not None:
-            self.gamma = float(hints.gamma)
-        if hints.iso_threshold is not None:
+        if hints.shading:
             try:
-                self.iso_threshold = float(hints.iso_threshold)
+                setattr(self, "shading", hints.shading)
             except Exception:
-                logger.debug("RemoteImageLayer: iso threshold update failed", exc_info=True)
-        if hints.attenuation is not None:
-            try:
-                self.attenuation = float(hints.attenuation)
-            except Exception:
-                logger.debug("RemoteImageLayer: attenuation update failed", exc_info=True)
+                logger.debug("RemoteImageLayer: shading update failed", exc_info=True)
+
+    def _apply_controls(self, controls: Optional[Mapping[str, Any]]) -> None:
+        if not controls:
+            return
+
+        try:
+            value = controls.get("visible")
+            if value is not None:
+                self.visible = bool(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: visible control failed", exc_info=True)
+
+        try:
+            value = controls.get("opacity")
+            if value is not None:
+                self.opacity = float(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: opacity control failed", exc_info=True)
+
+        try:
+            value = controls.get("blending")
+            if value:
+                self.blending = str(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: blending control failed", exc_info=True)
+
+        try:
+            value = controls.get("interpolation")
+            if value:
+                self.interpolation = str(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: interpolation control failed", exc_info=True)
+
+        try:
+            value = controls.get("colormap")
+            if value:
+                self.colormap = str(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: colormap control failed", exc_info=True)
+
+        try:
+            value = controls.get("rendering")
+            if value:
+                self.rendering = str(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: rendering control failed", exc_info=True)
+
+        try:
+            value = controls.get("gamma")
+            if value is not None:
+                self.gamma = float(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: gamma control failed", exc_info=True)
+
+        try:
+            value = controls.get("contrast_limits")
+            if isinstance(value, (list, tuple)) and len(value) >= 2:
+                self.contrast_limits = (float(value[0]), float(value[1]))
+        except Exception:
+            logger.debug("RemoteImageLayer: contrast_limits control failed", exc_info=True)
+
+        try:
+            value = controls.get("iso_threshold")
+            if value is not None:
+                self.iso_threshold = float(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: iso_threshold control failed", exc_info=True)
+
+        try:
+            value = controls.get("attenuation")
+            if value is not None:
+                self.attenuation = float(value)
+        except Exception:
+            logger.debug("RemoteImageLayer: attenuation control failed", exc_info=True)
 
     # ------------------------------------------------------------------
     @property
