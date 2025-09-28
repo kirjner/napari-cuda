@@ -243,3 +243,182 @@ def test_colormap_intent(intent_state: IntentState) -> None:
     # Value committed after ack
     assert getattr(layer.colormap, "name", str(layer.colormap)) == "magma"
     assert not loop_state.pending_intents
+
+
+def test_gamma_ack_out_of_order(intent_state: IntentState) -> None:
+    presenter = PresenterFacade()
+    registry = DummyRegistry()
+    loop = DummyLoop()
+    loop_state = ClientLoopState()
+
+    bridge = LayerIntentBridge(
+        loop,
+        presenter,
+        registry,
+        intent_state=intent_state,
+        loop_state=loop_state,
+        enabled=True,
+    )
+
+    layer = _make_layer("layer-gamma")
+    record = LayerRecord(layer_id=layer.remote_id, spec=layer._remote_spec, layer=layer)
+    registry.emit(RegistrySnapshot(layers=(record,)))
+
+    first_value = 1.2
+    layer.gamma = first_value
+    payload1 = loop.posted[-1]
+    seq1 = payload1["client_seq"]
+    assert payload1["gamma"] == pytest.approx(first_value)
+
+    # Allow immediate second update despite default 60 Hz gating fallback
+    bridge._intent_state.last_settings_send = 0.0
+
+    second_value = 1.6
+    layer.gamma = second_value
+
+    assert len(loop.posted) == 2
+    payload2 = loop.posted[-1]
+    seq2 = payload2["client_seq"]
+    assert payload2["gamma"] == pytest.approx(second_value)
+
+    binding = bridge._bindings[layer.remote_id]
+    session = binding.sessions["gamma"]
+    assert len(session.pending) == 2
+    assert session.pending[0].value == pytest.approx(first_value)
+    assert session.pending[1].value == pytest.approx(second_value)
+
+    controls1 = {
+        "visible": True,
+        "opacity": 0.5,
+        "rendering": "mip",
+        "gamma": payload1["gamma"],
+        "contrast_limits": [0.0, 1.0],
+    }
+    ack1 = LayerUpdateMessage(
+        layer=LayerSpec(
+            layer_id=layer.remote_id,
+            layer_type="image",
+            name="demo",
+            ndim=2,
+            shape=[1, 1],
+            dtype="float32",
+            controls=dict(controls1),
+        ),
+        partial=True,
+        ack=True,
+        intent_seq=seq1,
+        controls=dict(controls1),
+    )
+    bridge.handle_layer_update(ack1)
+
+    # First ack should drop from session.pending but keep latest optimistic value
+    assert len(session.pending) == 1
+    assert session.pending[0].seq == seq2
+    assert layer.gamma == pytest.approx(second_value)
+    assert seq1 not in loop_state.pending_intents
+    assert seq2 in loop_state.pending_intents
+
+    controls2 = dict(controls1)
+    controls2["gamma"] = payload2["gamma"]
+    ack2 = LayerUpdateMessage(
+        layer=LayerSpec(
+            layer_id=layer.remote_id,
+            layer_type="image",
+            name="demo",
+            ndim=2,
+            shape=[1, 1],
+            dtype="float32",
+            controls=dict(controls2),
+        ),
+        partial=True,
+        ack=True,
+        intent_seq=seq2,
+        controls=dict(controls2),
+    )
+    bridge.handle_layer_update(ack2)
+
+    assert not session.pending
+    assert layer.gamma == pytest.approx(second_value)
+    assert seq2 not in loop_state.pending_intents
+
+
+def test_gamma_latest_ack_clears_stale_pending(intent_state: IntentState) -> None:
+    presenter = PresenterFacade()
+    registry = DummyRegistry()
+    loop = DummyLoop()
+    loop_state = ClientLoopState()
+
+    bridge = LayerIntentBridge(
+        loop,
+        presenter,
+        registry,
+        intent_state=intent_state,
+        loop_state=loop_state,
+        enabled=True,
+    )
+
+    layer = _make_layer("layer-gamma-latest")
+    registry.emit(RegistrySnapshot(layers=(LayerRecord(layer_id=layer.remote_id, spec=layer._remote_spec, layer=layer),)))
+
+    values = [1.1, 1.3, 1.5]
+    seqs: list[int] = []
+    for idx, value in enumerate(values):
+        if idx:
+            bridge._intent_state.last_settings_send = 0.0
+        layer.gamma = value
+        seqs.append(loop.posted[-1]["client_seq"])
+
+    binding = bridge._bindings[layer.remote_id]
+    session = binding.sessions["gamma"]
+    assert len(session.pending) == 3
+
+    controls_latest = {
+        "visible": True,
+        "opacity": 0.5,
+        "rendering": "mip",
+        "gamma": loop.posted[-1]["gamma"],
+        "contrast_limits": [0.0, 1.0],
+    }
+    ack_latest = LayerUpdateMessage(
+        layer=LayerSpec(
+            layer_id=layer.remote_id,
+            layer_type="image",
+            name="demo",
+            ndim=2,
+            shape=[1, 1],
+            dtype="float32",
+            controls=dict(controls_latest),
+        ),
+        partial=True,
+        ack=True,
+        intent_seq=seqs[-1],
+        controls=dict(controls_latest),
+    )
+    bridge.handle_layer_update(ack_latest)
+
+    assert not session.pending
+    assert layer.gamma == pytest.approx(values[-1])
+    assert seqs[-1] not in loop_state.pending_intents
+
+    for stale_seq, gamma_value in zip(seqs[:-1], values[:-1]):
+        controls = dict(controls_latest)
+        controls["gamma"] = gamma_value
+        bridge.handle_layer_update(
+            LayerUpdateMessage(
+                layer=LayerSpec(
+                    layer_id=layer.remote_id,
+                    layer_type="image",
+                    name="demo",
+                    ndim=2,
+                    shape=[1, 1],
+                    dtype="float32",
+                    controls=dict(controls),
+                ),
+                partial=True,
+                ack=True,
+                intent_seq=stale_seq,
+                controls=dict(controls),
+            )
+        )
+        assert layer.gamma == pytest.approx(values[-1])
+        assert stale_seq not in loop_state.pending_intents
