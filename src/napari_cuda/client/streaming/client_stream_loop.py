@@ -552,6 +552,7 @@ class ClientStreamLoop:
             ui_call=self._ui_call,
             notify_first_dims_ready=self._notify_first_dims_ready,
             log_dims_info=self._log_dims_info,
+            state_store=self._state_store,
         )
 
     def _notify_first_dims_ready(self) -> None:
@@ -607,9 +608,24 @@ class ClientStreamLoop:
         if msg.scope == "layer":
             self._layer_bridge.handle_state_update(msg)
         elif msg.scope == "dims":
-            intents.handle_dims_state_update(self._intent_state, self._state_store, msg)
+            intents.handle_dims_state_update(
+                self._intent_state,
+                self._loop_state,
+                self._state_store,
+                msg,
+                presenter=self._presenter_facade,
+                viewer_ref=self._viewer_mirror,
+                ui_call=self._ui_call,
+                log_dims_info=self._log_dims_info,
+            )
         else:
-            intents.handle_generic_state_update(self._intent_state, self._state_store, msg)
+            intents.handle_generic_state_update(
+                self._intent_state,
+                self._loop_state,
+                self._state_store,
+                msg,
+                presenter=self._presenter_facade,
+            )
 
     def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
         self._layer_registry.remove_layer(msg)
@@ -649,6 +665,22 @@ class ClientStreamLoop:
         self._layer_bridge.clear_pending_on_reconnect()
         logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
 
+    def _dispatch_state_update(self, message: StateUpdateMessage, origin: str) -> bool:
+        channel = self._loop_state.state_channel
+        if channel is None:
+            return False
+        ok = channel.post(message.to_dict())
+        logger.debug(
+            "state.update emit: origin=%s scope=%s target=%s key=%s phase=%s sent=%s",
+            origin,
+            message.scope,
+            message.target,
+            message.key,
+            message.phase,
+            bool(ok),
+        )
+        return bool(ok)
+
     # --- Input mapping: unified wheel handler -------------------------------------
     def _on_wheel(self, data: dict) -> None:
         # Decide between dims.set (plain) and zoom (modifier)
@@ -668,6 +700,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             data,
             viewer_ref=self._viewer_mirror,
             ui_call=self._ui_call,
@@ -801,6 +834,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             axis,
             delta,
             origin=origin,
@@ -813,6 +847,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             axis,
             value,
             origin=origin,
@@ -826,6 +861,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             mode,
             origin=origin,
         )
@@ -835,6 +871,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             lo,
             hi,
             origin=origin,
@@ -845,6 +882,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             name,
             origin=origin,
         )
@@ -854,6 +892,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             alpha,
             origin=origin,
         )
@@ -863,6 +902,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             relative,
             origin=origin,
         )
@@ -872,6 +912,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             policy,
             origin=origin,
         )
@@ -881,6 +922,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             level,
             origin=origin,
         )
@@ -890,6 +932,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             ndisplay,
             origin=origin,
         )
@@ -902,6 +945,7 @@ class ClientStreamLoop:
             self._intent_state,
             self._loop_state,
             self._state_store,
+            self._dispatch_state_update,
             origin=origin,
         )
 

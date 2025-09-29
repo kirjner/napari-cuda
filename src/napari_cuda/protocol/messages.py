@@ -134,6 +134,7 @@ class StateUpdateMessage(StateMessage):
     phase: Optional[str] = None
     timestamp: Optional[float] = None
     server_seq: Optional[int] = None
+    extras: Optional[Dict[str, Any]] = None
     type: str = STATE_UPDATE_TYPE
 
     def to_dict(self) -> Dict[str, Any]:
@@ -149,6 +150,7 @@ class StateUpdateMessage(StateMessage):
             "phase": self.phase,
             "timestamp": self.timestamp,
             "server_seq": self.server_seq,
+            "extras": self.extras,
         }
         return _strip_none(payload)
 
@@ -169,6 +171,7 @@ class StateUpdateMessage(StateMessage):
             phase=data.get("phase"),
             timestamp=data.get("timestamp"),
             server_seq=data.get("server_seq"),
+            extras=data.get("extras"),
         )
 
 

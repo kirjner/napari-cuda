@@ -33,6 +33,7 @@ def _make_state() -> tuple[
     ClientLoopState,
     FakeChannel,
     StateStore,
+    Callable[[StateUpdateMessage, str], bool],
 ]:
     env = SimpleNamespace(
         dims_rate_hz=60.0,
@@ -50,24 +51,30 @@ def _make_state() -> tuple[
         client_id=state.client_id,
         next_client_seq=state.next_client_seq,
     )
-    return state, loop_state, channel, store
+
+    def dispatcher(message: StateUpdateMessage, origin: str) -> bool:
+        payload = message.to_dict()
+        payload['origin'] = origin
+        return channel.post(payload)
+
+    return state, loop_state, channel, store, dispatcher
 
 
 def test_toggle_ndisplay_requires_ready() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
 
-    sent = intents.toggle_ndisplay(state, loop_state, store, origin='ui')
+    sent = intents.toggle_ndisplay(state, loop_state, store, dispatch, origin='ui')
 
     assert sent is False
     assert channel.payloads == []
 
 
 def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
     state.dims_ready = True
 
     # Initial call toggles to 3D when no cached value exists
-    assert intents.toggle_ndisplay(state, loop_state, store, origin='ui') is True
+    assert intents.toggle_ndisplay(state, loop_state, store, dispatch, origin='ui') is True
     payload = channel.payloads[-1]
     assert payload['type'] == 'state.update'
     assert payload['scope'] == 'view'
@@ -78,20 +85,20 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
     # 2D -> 3D
     state.dims_meta['ndisplay'] = 2
     state.last_settings_send = 0.0
-    assert intents.toggle_ndisplay(state, loop_state, store, origin='ui') is True
+    assert intents.toggle_ndisplay(state, loop_state, store, dispatch, origin='ui') is True
     payload = channel.payloads[-1]
     assert payload['value'] == 3
 
     # 3D -> 2D
     state.dims_meta['ndisplay'] = 3
     state.last_settings_send = 0.0
-    assert intents.toggle_ndisplay(state, loop_state, store, origin='ui') is True
+    assert intents.toggle_ndisplay(state, loop_state, store, dispatch, origin='ui') is True
     payload = channel.payloads[-1]
     assert payload['value'] == 2
 
 
 def test_handle_dims_update_seeds_metadata() -> None:
-    state, loop_state, channel, _store = _make_state()
+    state, loop_state, channel, _store, dispatch = _make_state()
 
     ready_calls: list[None] = []
     presenter_calls: list[dict[str, Any]] = []
@@ -141,13 +148,14 @@ def test_handle_dims_update_seeds_metadata() -> None:
 
 
 def test_dims_step_emits_state_update() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
     state.dims_ready = True
 
     sent = intents.dims_step(
         state,
         loop_state,
         store,
+        dispatch,
         axis=0,
         delta=1,
         origin='ui',
@@ -169,13 +177,14 @@ def test_dims_step_emits_state_update() -> None:
 
 
 def test_handle_dims_state_update_clears_runtime() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
     state.dims_ready = True
 
     intents.dims_step(
         state,
         loop_state,
         store,
+        dispatch,
         axis=0,
         delta=2,
         origin='ui',
@@ -195,7 +204,16 @@ def test_handle_dims_state_update_clears_runtime() -> None:
         server_seq=10,
     )
 
-    intents.handle_dims_state_update(state, store, msg)
+    intents.handle_dims_state_update(
+        state,
+        loop_state,
+        store,
+        msg,
+        presenter=None,
+        viewer_ref=lambda: None,
+        ui_call=None,
+        log_dims_info=False,
+    )
 
     runtime = state.control_runtimes['dims:0:step']
     assert runtime.active is False
@@ -206,10 +224,10 @@ def test_handle_dims_state_update_clears_runtime() -> None:
 
 
 def test_view_set_ndisplay_emits_state_update() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
     state.dims_ready = True
 
-    ok = intents.view_set_ndisplay(state, loop_state, store, 3, origin='ui')
+    ok = intents.view_set_ndisplay(state, loop_state, store, dispatch, 3, origin='ui')
 
     assert ok is True
     payload = channel.payloads[-1]
@@ -221,12 +239,12 @@ def test_view_set_ndisplay_emits_state_update() -> None:
 
 
 def test_volume_set_clim_emits_state_update() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta['volume'] = True
     state.dims_meta['ndisplay'] = 3
 
-    ok = intents.volume_set_clim(state, loop_state, store, 0.1, 0.9, origin='ui')
+    ok = intents.volume_set_clim(state, loop_state, store, dispatch, 0.1, 0.9, origin='ui')
 
     assert ok is True
     payload = channel.payloads[-1]
@@ -238,10 +256,10 @@ def test_volume_set_clim_emits_state_update() -> None:
 
 
 def test_generic_state_update_clears_runtime() -> None:
-    state, loop_state, channel, store = _make_state()
+    state, loop_state, channel, store, dispatch = _make_state()
     state.dims_ready = True
 
-    intents.view_set_ndisplay(state, loop_state, store, 3, origin='ui')
+    intents.view_set_ndisplay(state, loop_state, store, dispatch, 3, origin='ui')
     payload = channel.payloads[-1]
 
     msg = StateUpdateMessage(
@@ -255,7 +273,7 @@ def test_generic_state_update_clears_runtime() -> None:
         server_seq=5,
     )
 
-    intents.handle_generic_state_update(state, store, msg)
+    intents.handle_generic_state_update(state, loop_state, store, msg, presenter=None)
 
     runtime = state.control_runtimes['view:main:ndisplay']
     assert runtime.active is False
@@ -263,7 +281,7 @@ def test_generic_state_update_clears_runtime() -> None:
 
 
 def test_replay_last_dims_payload_invokes_viewer() -> None:
-    state, loop_state, _, _ = _make_state()
+    state, loop_state, _, _, _ = _make_state()
     calls: list[tuple] = []
 
     class Viewer:

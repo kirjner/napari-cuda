@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.streaming.presenter_facade import PresenterFacade
@@ -52,6 +52,10 @@ class ClientStateContext:
     dims_z_min: float | None = None
     dims_z_max: float | None = None
     control_runtimes: Dict[str, "ControlRuntime"] = field(default_factory=dict)
+    dims_state: Dict[tuple[str, str], Any] = field(default_factory=dict)
+    view_state: Dict[str, Any] = field(default_factory=dict)
+    volume_state: Dict[str, Any] = field(default_factory=dict)
+    multiscale_state: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env_cfg: Any) -> "ClientStateContext":
@@ -108,12 +112,14 @@ def handle_dims_update(
     ui_call,
     notify_first_dims_ready: Callable[[], None],
     log_dims_info: bool,
+    state_store: Optional["StateStore"] = None,
 ) -> None:
     seq_val = _int_or_none(data.get('seq'))
     if seq_val is not None:
         loop_state.last_dims_seq = seq_val
 
     meta = state.dims_meta
+    was_ready = bool(state.dims_ready)
     cur = data.get('current_step')
     ndisp = data.get('ndisplay')
     ndim = data.get('ndim')
@@ -132,6 +138,11 @@ def handle_dims_update(
     intent_seq = _int_or_none(data.get('intent_seq'))
     ack_val = data.get('ack') if isinstance(data.get('ack'), bool) else None
 
+    if cur is not None:
+        try:
+            meta['current_step'] = [int(x) for x in cur]
+        except Exception:
+            meta['current_step'] = list(cur)
     if ndim is not None:
         meta['ndim'] = int(ndim)
     if order is not None:
@@ -160,6 +171,11 @@ def handle_dims_update(
         meta['multiscale'] = multiscale
     if ndisp is not None:
         meta['ndisplay'] = int(ndisp)
+
+    payload = _sync_dims_payload_from_meta(state, loop_state)
+
+    if not was_ready and state_store is not None:
+        _seed_dims_baseline(state, state_store, payload)
 
     if not state.dims_ready and (ndim is not None or order is not None):
         state.dims_ready = True
@@ -192,17 +208,10 @@ def handle_dims_update(
             displayed=displayed,
         )
 
-    loop_state.last_dims_payload = {
-        'current_step': cur,
-        'ndisplay': ndisp,
-        'ndim': ndim,
-        'dims_range': dims_range,
-        'order': order,
-        'axis_labels': axis_labels,
-        'sizes': sizes,
-        'displayed': displayed,
-    }
-    presenter.apply_dims_update(dict(data))
+    presenter_payload = dict(payload)
+    if seq_val is not None:
+        presenter_payload['seq'] = seq_val
+    presenter.apply_dims_update(presenter_payload)
 
 
 def _axis_target_label(state: ClientStateContext, axis_idx: int) -> str:
@@ -215,10 +224,12 @@ def _axis_target_label(state: ClientStateContext, axis_idx: int) -> str:
 
 
 def _axis_index_from_target(state: ClientStateContext, target: str) -> Optional[int]:
+    target_lower = target.lower()
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         for idx, label in enumerate(labels):
-            if str(label) == target:
+            text = str(label)
+            if text == target or text.lower() == target_lower:
                 return int(idx)
     if target.startswith('axis-'):
         target = target.split('-', 1)[1]
@@ -226,28 +237,6 @@ def _axis_index_from_target(state: ClientStateContext, target: str) -> Optional[
         return int(target)
     except Exception:
         return None
-
-
-def _post_state_update(
-    loop_state: "ClientLoopState",
-    payload: StateUpdateMessage,
-    *,
-    origin: Optional[str] = None,
-) -> bool:
-    channel = loop_state.state_channel
-    if channel is None:
-        return False
-    ok = channel.post(payload.to_dict())
-    logger.debug(
-        "state.update emit: origin=%s scope=%s target=%s key=%s phase=%s sent=%s",
-        origin,
-        payload.scope,
-        payload.target,
-        payload.key,
-        payload.phase,
-        bool(ok),
-    )
-    return bool(ok)
 
 
 def _runtime_key(scope: str, target: str, key: str) -> str:
@@ -258,6 +247,7 @@ def _emit_state_update(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     *,
     scope: str,
     target: str,
@@ -279,7 +269,7 @@ def _emit_state_update(
         interaction_id=interaction_id,
     )
 
-    if not _post_state_update(loop_state, payload, origin=origin):
+    if not dispatch_state_update(payload, origin):
         return False, None
 
     runtime.active = True
@@ -303,6 +293,160 @@ def _update_runtime_from_ack(
         runtime.interaction_id = None
 
 
+def _sync_dims_payload_from_meta(
+    state: ClientStateContext,
+    loop_state: "ClientLoopState",
+) -> dict[str, Any]:
+    meta = state.dims_meta
+
+    current_step = meta.get('current_step')
+    if current_step is not None:
+        assert isinstance(current_step, Sequence)
+        payload_current_step = list(current_step)
+    else:
+        payload_current_step = None
+
+    dims_range = meta.get('range')
+    if dims_range is not None:
+        assert isinstance(dims_range, Sequence)
+        payload_range = list(dims_range)
+    else:
+        payload_range = None
+
+    order = meta.get('order')
+    if order is not None:
+        assert isinstance(order, Sequence)
+        payload_order = list(order)
+    else:
+        payload_order = None
+
+    axis_labels = meta.get('axis_labels')
+    if axis_labels is not None:
+        assert isinstance(axis_labels, Sequence)
+        payload_axis_labels = list(axis_labels)
+    else:
+        payload_axis_labels = None
+
+    sizes = meta.get('sizes')
+    if sizes is not None:
+        assert isinstance(sizes, Sequence)
+        payload_sizes = list(sizes)
+    else:
+        payload_sizes = None
+
+    displayed = meta.get('displayed')
+    if displayed is not None:
+        assert isinstance(displayed, Sequence)
+        payload_displayed = list(displayed)
+    else:
+        payload_displayed = None
+
+    payload = {
+        'current_step': payload_current_step,
+        'ndisplay': meta.get('ndisplay'),
+        'ndim': meta.get('ndim'),
+        'dims_range': payload_range,
+        'order': payload_order,
+        'axis_labels': payload_axis_labels,
+        'sizes': payload_sizes,
+        'displayed': payload_displayed,
+    }
+
+    loop_state.last_dims_payload = payload
+    return payload
+
+
+def _seed_dims_baseline(
+    state: ClientStateContext,
+    state_store: "StateStore",
+    payload: dict[str, Any],
+) -> None:
+    current_step = payload.get('current_step') or []
+    if isinstance(current_step, list):
+        for idx, value in enumerate(current_step):
+            if value is None:
+                continue
+            target_label = _axis_target_label(state, idx)
+            state_store.seed_confirmed(
+                'dims',
+                target_label,
+                'index',
+                int(value),
+            )
+
+    ndisplay = payload.get('ndisplay')
+    if ndisplay is not None:
+        state_store.seed_confirmed('view', 'main', 'ndisplay', int(ndisplay))
+
+    multiscale_meta = state.dims_meta.get('multiscale')
+    if isinstance(multiscale_meta, dict):
+        level_val = multiscale_meta.get('level')
+        if level_val is not None:
+            state_store.seed_confirmed('multiscale', 'main', 'level', int(level_val))
+        policy_val = multiscale_meta.get('policy')
+        if policy_val is not None:
+            state_store.seed_confirmed('multiscale', 'main', 'policy', str(policy_val))
+
+    render_meta = state.dims_meta.get('render')
+    if isinstance(render_meta, dict):
+        mode_val = render_meta.get('mode') or render_meta.get('render_mode')
+        if mode_val is not None:
+            state_store.seed_confirmed('volume', 'main', 'render_mode', str(mode_val))
+        clim_val = render_meta.get('contrast_limits')
+        if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
+            lo = float(clim_val[0])
+            hi = float(clim_val[1])
+            state_store.seed_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
+        cmap_val = render_meta.get('colormap')
+        if cmap_val is not None:
+            state_store.seed_confirmed('volume', 'main', 'colormap', str(cmap_val))
+        opacity_val = render_meta.get('opacity')
+        if opacity_val is not None:
+            state_store.seed_confirmed('volume', 'main', 'opacity', float(opacity_val))
+        sample_val = render_meta.get('sample_step')
+        if sample_val is not None:
+            state_store.seed_confirmed('volume', 'main', 'sample_step', float(sample_val))
+
+
+def _apply_dims_meta_snapshot(
+    meta: dict[str, object | None],
+    snapshot: Mapping[str, Any],
+) -> None:
+    assert isinstance(snapshot, Mapping)
+
+    if 'ndim' in snapshot:
+        value = snapshot['ndim']
+        assert isinstance(value, int)
+        meta['ndim'] = value
+
+    if 'ndisplay' in snapshot:
+        value = snapshot['ndisplay']
+        assert isinstance(value, int)
+        meta['ndisplay'] = value
+
+    for key in ('order', 'axis_labels', 'range', 'sizes', 'displayed', 'current_step'):
+        if key in snapshot:
+            value = snapshot[key]
+            assert isinstance(value, Sequence)
+            meta[key] = list(value)
+
+    if 'volume' in snapshot:
+        meta['volume'] = bool(snapshot['volume'])
+
+    if 'render' in snapshot:
+        render = snapshot['render']
+        assert isinstance(render, Mapping)
+        meta['render'] = dict(render)
+
+    if 'multiscale' in snapshot:
+        multiscale = snapshot['multiscale']
+        assert isinstance(multiscale, Mapping)
+        meta['multiscale'] = dict(multiscale)
+
+    if 'controls' in snapshot:
+        controls = snapshot['controls']
+        assert isinstance(controls, Mapping)
+        meta['controls'] = dict(controls)
 def mirror_dims_to_viewer(
     viewer_obj,
     ui_call,
@@ -363,6 +507,7 @@ def dims_step(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     axis: int | str,
     delta: int,
     *,
@@ -379,7 +524,11 @@ def dims_step(
     if _is_axis_playing(viewer_obj, idx) and origin != 'play':
         return False
     now = time.perf_counter()
-    if (now - float(state.last_dims_send or 0.0)) < state.dims_min_dt:
+    if origin == 'keys':
+        min_dt = 0.0
+    else:
+        min_dt = float(state.dims_min_dt)
+    if (now - float(state.last_dims_send or 0.0)) < min_dt:
         logger.debug("state.update dims.step gated by rate limiter (%s)", origin)
         return False
     axis_idx = int(idx)
@@ -388,6 +537,7 @@ def dims_step(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="dims",
         target=target_label,
         key="step",
@@ -404,6 +554,7 @@ def handle_wheel_for_dims(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     data: dict,
     *,
     viewer_ref,
@@ -430,6 +581,7 @@ def handle_wheel_for_dims(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         'primary',
         int(step),
         origin='wheel',
@@ -447,6 +599,7 @@ def dims_set_index(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     axis: int | str,
     value: int,
     *,
@@ -463,7 +616,11 @@ def dims_set_index(
     if _is_axis_playing(viewer_obj, idx) and origin != 'play':
         return False
     now = time.perf_counter()
-    if (now - float(state.last_dims_send or 0.0)) < state.dims_min_dt:
+    if origin == 'keys':
+        min_dt = 0.0
+    else:
+        min_dt = float(state.dims_min_dt)
+    if (now - float(state.last_dims_send or 0.0)) < min_dt:
         logger.debug("state.update dims.index gated by rate limiter (%s)", origin)
         return False
     axis_idx = int(idx)
@@ -472,6 +629,7 @@ def dims_set_index(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="dims",
         target=target_label,
         key="index",
@@ -486,21 +644,96 @@ def dims_set_index(
 
 def handle_dims_state_update(
     state: ClientStateContext,
+    loop_state: "ClientLoopState",
     state_store: "StateStore",
     message: StateUpdateMessage,
+    *,
+    presenter: Optional["PresenterFacade"] = None,
+    viewer_ref=None,
+    ui_call=None,
+    log_dims_info: bool = False,
 ) -> None:
     if message.scope != "dims":
         return
 
     result = state_store.apply_remote(message)
-    axis_idx = _axis_index_from_target(state, str(message.target))
-    if axis_idx is None:
+    _update_runtime_from_ack(state, message, result)
+
+    meta = state.dims_meta
+
+    extras = message.extras if isinstance(message.extras, Mapping) else {}
+    meta_snapshot = extras.get('meta')
+    if isinstance(meta_snapshot, Mapping):
+        _apply_dims_meta_snapshot(meta, meta_snapshot)
+
+    axis_idx = extras.get('axis_index')
+    if axis_idx is not None:
+        assert isinstance(axis_idx, int)
+    else:
+        axis_idx = _axis_index_from_target(state, str(message.target))
+
+    if axis_idx is None and message.key in {'index', 'step'}:
         logger.debug(
-            "state.update dims received for unknown target=%s",
+            "handle_dims_state_update: unknown axis target=%s; applying fallback index=0",
             message.target,
         )
+        axis_idx = 0
 
-    _update_runtime_from_ack(state, message, result)
+    current_step_override = extras.get('current_step')
+    if current_step_override is not None:
+        assert isinstance(current_step_override, Sequence)
+        meta['current_step'] = list(current_step_override)
+    elif message.key in {'index', 'step'}:
+        assert axis_idx is not None, f"unknown dims target {message.target!r}"
+        current = list(meta.get('current_step') or [])
+        while len(current) <= axis_idx:
+            current.append(0)
+        if message.key == 'step':
+            assert isinstance(result.projection_value, (int, float)), "dims.step expects numeric value"
+            current[axis_idx] = current[axis_idx] + int(result.projection_value)
+        else:
+            current[axis_idx] = int(result.projection_value)
+        meta['current_step'] = current
+
+    if 'ndisplay' in extras:
+        value = extras['ndisplay']
+        assert value is None or isinstance(value, int)
+        meta['ndisplay'] = value
+
+    state.dims_ready = True
+    state.primary_axis_index = _compute_primary_axis_index(meta)
+
+    state.dims_state[(str(message.target), str(message.key))] = result.projection_value
+
+    payload = _sync_dims_payload_from_meta(state, loop_state)
+
+    if presenter is not None:
+        try:
+            presenter.apply_dims_update(dict(payload))
+        except Exception:
+            logger.debug("presenter dims update failed", exc_info=True)
+
+    viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
+    if viewer_obj is not None:
+        mirror_dims_to_viewer(
+            viewer_obj,
+            ui_call,
+            current_step=payload.get('current_step'),
+            ndisplay=payload.get('ndisplay'),
+            ndim=payload.get('ndim'),
+            dims_range=payload.get('dims_range'),
+            order=payload.get('order'),
+            axis_labels=payload.get('axis_labels'),
+            sizes=payload.get('sizes'),
+            displayed=payload.get('displayed'),
+        )
+        if log_dims_info:
+            logger.info(
+                "state.update dims mirrored: target=%s key=%s value=%s",
+                message.target,
+                message.key,
+                result.projection_value,
+            )
 
     logger.debug(
         "state.update dims applied: target=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
@@ -515,11 +748,41 @@ def handle_dims_state_update(
 
 def handle_generic_state_update(
     state: ClientStateContext,
+    loop_state: "ClientLoopState",
     state_store: "StateStore",
     message: StateUpdateMessage,
+    *,
+    presenter: Optional["PresenterFacade"] = None,
 ) -> None:
     result = state_store.apply_remote(message)
     _update_runtime_from_ack(state, message, result)
+
+    scope = str(message.scope)
+    key = str(message.key)
+    value = result.projection_value
+
+    if scope == 'view':
+        state.view_state[key] = value
+        if key == 'ndisplay':
+            assert value is None or isinstance(value, int)
+            state.dims_meta['ndisplay'] = value
+            payload = _sync_dims_payload_from_meta(state, loop_state)
+            if presenter is not None:
+                try:
+                    presenter.apply_dims_update(dict(payload))
+                except Exception:
+                    logger.debug("presenter dims update failed", exc_info=True)
+    elif scope == 'volume':
+        state.volume_state[key] = value
+        render_meta = state.dims_meta.setdefault('render', {})
+        assert isinstance(render_meta, dict)
+        render_meta[key] = value
+    elif scope == 'multiscale':
+        state.multiscale_state[key] = value
+        ms_meta = state.dims_meta.setdefault('multiscale', {})
+        assert isinstance(ms_meta, dict)
+        ms_meta[key] = value
+
     logger.debug(
         "state.update applied: scope=%s target=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
         message.scope,
@@ -540,6 +803,7 @@ def toggle_ndisplay(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     *,
     origin: str,
 ) -> bool:
@@ -547,7 +811,14 @@ def toggle_ndisplay(
         return False
     current = current_ndisplay(state)
     target = 2 if current == 3 else 3
-    return view_set_ndisplay(state, loop_state, state_store, target, origin=origin)
+    return view_set_ndisplay(
+        state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        target,
+        origin=origin,
+    )
 
 
 def handle_key_event(
@@ -605,6 +876,7 @@ def view_set_ndisplay(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     ndisplay: int,
     *,
     origin: str,
@@ -622,6 +894,7 @@ def view_set_ndisplay(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="view",
         target="main",
         key="ndisplay",
@@ -635,6 +908,7 @@ def volume_set_render_mode(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     mode: str,
     *,
     origin: str,
@@ -648,6 +922,7 @@ def volume_set_render_mode(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="volume",
         target="main",
         key="render_mode",
@@ -661,6 +936,7 @@ def volume_set_clim(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     lo: float,
     hi: float,
     *,
@@ -675,6 +951,7 @@ def volume_set_clim(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="volume",
         target="main",
         key="contrast_limits",
@@ -688,6 +965,7 @@ def volume_set_colormap(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     name: str,
     *,
     origin: str,
@@ -700,6 +978,7 @@ def volume_set_colormap(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="volume",
         target="main",
         key="colormap",
@@ -713,6 +992,7 @@ def volume_set_opacity(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     alpha: float,
     *,
     origin: str,
@@ -726,6 +1006,7 @@ def volume_set_opacity(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="volume",
         target="main",
         key="opacity",
@@ -739,6 +1020,7 @@ def volume_set_sample_step(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     relative: float,
     *,
     origin: str,
@@ -752,6 +1034,7 @@ def volume_set_sample_step(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="volume",
         target="main",
         key="sample_step",
@@ -765,6 +1048,7 @@ def multiscale_set_policy(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     policy: str,
     *,
     origin: str,
@@ -781,6 +1065,7 @@ def multiscale_set_policy(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="multiscale",
         target="main",
         key="policy",
@@ -794,6 +1079,7 @@ def multiscale_set_level(
     state: ClientStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
+    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
     level: int,
     *,
     origin: str,
@@ -807,6 +1093,7 @@ def multiscale_set_level(
         state,
         loop_state,
         state_store,
+        dispatch_state_update,
         scope="multiscale",
         target="main",
         key="level",
