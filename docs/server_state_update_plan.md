@@ -69,6 +69,15 @@
 - **Dims naming mismatch**: If axis identifiers diverge, dims sliders will stop moving; mitigate by validating constants with client team before merge.
 - **Baseline omissions**: Failing to emit `state.update` during reconnect would leave the client reducer without confirmed state; cover with reconnect tests.
 
+## Security audit checklist (pre-production)
+- **Transport**: terminate WebSocket traffic over TLS and prefer mutual auth (client certs or signed tokens) when exposing outside trusted networks.
+- **Authentication**: require a handshake token before accepting `state.update` traffic; reject or rate-limit unauthenticated sockets.
+- **Authorisation**: scope control access per client/session so untrusted endpoints cannot mutate layer state or dims indiscriminately.
+- **Rate limiting**: throttle high-frequency control updates per client to protect the render loop from flooding; drop or back-pressure connections that exceed negotiated quotas.
+- **Input validation**: treat all payloads as untrusted—normalise types, clamp numeric ranges, and log rejects to aid forensic review.
+- **Audit logging**: persist structured logs for inbound commands (client_id, interaction_id, scope/target/key, ack status) and retain them per policy.
+- **Operational hardening**: run the control plane under a restricted user, isolate GPU worker permissions, and monitor the channel for anomalous traffic patterns.
+
 ## High-Level Timeline
 1. **Day 0** – Finalise plan, align constants with client, prep branch.
 2. **Day 1** – Implement protocol/dataclass adjustments, global `server_seq`, metadata map.
