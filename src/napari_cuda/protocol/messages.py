@@ -7,7 +7,7 @@ Uses dataclasses for type safety and easy serialization.
 import enum
 import json
 from dataclasses import dataclass, asdict, field, is_dataclass
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 STATE_UPDATE_TYPE = "state.update"
 
@@ -86,21 +86,28 @@ class Response(StateMessage):
     error: str = None
 
 
-@dataclass
-class StateUpdateMessage(StateMessage):
-    """Unified state update message shared between client and server."""
+@dataclass(slots=True)
+class StateUpdateMessage:
+    """Unified state.update envelope exchanged between client and server."""
 
     scope: str
     target: str
     key: str
     value: Any
+    type: str = STATE_UPDATE_TYPE
+    phase: Optional[str] = None
+    timestamp: Optional[float] = None
     client_id: Optional[str] = None
     client_seq: Optional[int] = None
     interaction_id: Optional[str] = None
-    phase: Optional[str] = None
-    timestamp: Optional[float] = None
     server_seq: Optional[int] = None
-    type: str = STATE_UPDATE_TYPE
+    axis_index: Optional[int] = None
+    current_step: Optional[list[int]] = None
+    meta: Optional[Dict[str, Any]] = None
+    ack: Optional[bool] = None
+    intent_seq: Optional[int] = None
+    last_client_id: Optional[str] = None
+    last_client_seq: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -108,34 +115,96 @@ class StateUpdateMessage(StateMessage):
             "scope": self.scope,
             "target": self.target,
             "key": self.key,
-            "value": self.value,
-            "client_id": self.client_id,
-            "client_seq": self.client_seq,
-            "interaction_id": self.interaction_id,
+            "value": self._normalise_value(self.value),
             "phase": self.phase,
             "timestamp": self.timestamp,
-            "server_seq": self.server_seq,
+            "client_id": self.client_id,
+            "client_seq": self._int_or_none(self.client_seq),
+            "interaction_id": self.interaction_id,
+            "server_seq": self._int_or_none(self.server_seq),
+            "axis_index": self._int_or_none(self.axis_index),
+            "current_step": self._normalise_step(self.current_step),
+            "meta": dict(self.meta) if isinstance(self.meta, Mapping) else self.meta,
+            "ack": self.ack,
+            "intent_seq": self._int_or_none(self.intent_seq),
+            "last_client_id": self.last_client_id,
+            "last_client_seq": self._int_or_none(self.last_client_seq),
         }
-        return _strip_none(payload)
+        return {key: value for key, value in payload.items() if value is not None}
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StateUpdateMessage":
+        current_step = data.get("current_step")
+        meta_payload = data.get("meta")
         return cls(
-            type=data.get("type", STATE_UPDATE_TYPE),
+            type=str(data.get("type", STATE_UPDATE_TYPE)),
             scope=str(data["scope"]),
             target=str(data["target"]),
             key=str(data["key"]),
             value=data.get("value"),
-            client_id=data.get("client_id"),
-            client_seq=data.get("client_seq"),
-            interaction_id=data.get("interaction_id"),
             phase=data.get("phase"),
             timestamp=data.get("timestamp"),
-            server_seq=data.get("server_seq"),
+            client_id=data.get("client_id"),
+            client_seq=cls._parse_optional_int(data.get("client_seq")),
+            interaction_id=data.get("interaction_id"),
+            server_seq=cls._parse_optional_int(data.get("server_seq")),
+            axis_index=cls._parse_optional_int(data.get("axis_index")),
+            current_step=cls._parse_step(current_step),
+            meta=dict(meta_payload) if isinstance(meta_payload, Mapping) else meta_payload,
+            ack=data.get("ack"),
+            intent_seq=cls._parse_optional_int(data.get("intent_seq")),
+            last_client_id=data.get("last_client_id"),
+            last_client_seq=cls._parse_optional_int(data.get("last_client_seq")),
         )
+
+    @staticmethod
+    def _normalise_value(value: Any) -> Any:
+        if isinstance(value, tuple):
+            return [StateUpdateMessage._normalise_value(v) for v in value]
+        if isinstance(value, list):
+            return [StateUpdateMessage._normalise_value(v) for v in value]
+        return value
+
+    @staticmethod
+    def _normalise_step(step: Optional[Sequence[object]]) -> Optional[list[int]]:
+        if step is None:
+            return None
+        return [int(x) for x in step]
+
+    @staticmethod
+    def _int_or_none(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_optional_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_step(value: Any) -> Optional[list[int]]:
+        if value is None:
+            return None
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            parsed: list[int] = []
+            for entry in value:
+                try:
+                    parsed.append(int(entry))
+                except (TypeError, ValueError):
+                    parsed.append(int(float(entry)))
+            return parsed
+        return None
 
 
 @dataclass
@@ -697,7 +766,7 @@ class StreamProtocol:
     """Helper utilities for napari-cuda protocol messages."""
 
     @staticmethod
-    def parse_message(data: Union[str, bytes]) -> Union[StateMessage, FrameMessage]:
+    def parse_message(data: Union[str, bytes]) -> Union[StateMessage, StateUpdateMessage, FrameMessage]:
         """Parse incoming data into a protocol object."""
         if isinstance(data, bytes):
             return FrameMessage.from_bytes(data)

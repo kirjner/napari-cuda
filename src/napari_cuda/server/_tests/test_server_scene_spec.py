@@ -120,6 +120,9 @@ def test_build_state_update_payload_dims(scene: ServerSceneData, manager: Viewer
     assert payload["last_client_id"] == "client-z"
     assert payload.get("interaction_id") == "dims-1"
     assert payload.get("phase") == "commit"
+    assert payload.get("ack") is True
+    assert payload.get("axis_index") == 0
+    assert payload.get("current_step") == [5, 0, 0]
     versions = payload.get("control_versions") or {}
     assert versions.get("step", {}).get("server_seq") == result.server_seq
     assert isinstance(payload.get("meta"), dict)

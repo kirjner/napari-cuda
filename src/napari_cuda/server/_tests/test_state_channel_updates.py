@@ -155,6 +155,9 @@ def test_state_update_dims_broadcasts() -> None:
     assert event["interaction_id"] == "dims-1"
     assert event["phase"] == "commit"
     assert isinstance(event.get("meta"), dict)
+    assert event.get("ack") is True
+    assert event.get("axis_index") == 0
+    assert event.get("current_step")[:1] == [5]
 
 
 def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:

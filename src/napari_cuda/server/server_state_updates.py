@@ -9,9 +9,10 @@ without reaching into the ``EGLHeadlessServer`` implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace, field
+from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any, Mapping, Optional, Sequence
+import time
 
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
@@ -40,7 +41,13 @@ class StateUpdateResult:
     interaction_id: Optional[str]
     phase: Optional[str]
     timestamp: Optional[float] = None
-    extras: dict[str, Any] = field(default_factory=dict)
+    axis_index: Optional[int] = None
+    current_step: Optional[list[int]] = None
+    meta: Optional[Mapping[str, Any]] = None
+    ack: Optional[bool] = None
+    intent_seq: Optional[int] = None
+    last_client_id: Optional[str] = None
+    last_client_seq: Optional[int] = None
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -409,6 +416,8 @@ def apply_layer_state_update(
         if seq_int is not None:
             meta.client_seq_by_id[client_key] = seq_int
 
+    timestamp = time.time()
+
     return StateUpdateResult(
         scope="layer",
         target=layer_id,
@@ -419,6 +428,10 @@ def apply_layer_state_update(
         client_id=client_id,
         interaction_id=interaction_id,
         phase=phase,
+        timestamp=timestamp,
+        ack=True,
+        last_client_id=meta.last_client_id,
+        last_client_seq=meta.last_client_seq,
     )
 
 
@@ -522,11 +535,7 @@ def apply_dims_state_update(
         if seq_int is not None:
             meta_entry.client_seq_by_id[client_key] = seq_int
 
-    extras = {
-        "current_step": step,
-        "axis_index": idx,
-        "meta": dict(meta) if isinstance(meta, Mapping) else {},
-    }
+    timestamp = time.time()
 
     return StateUpdateResult(
         scope="dims",
@@ -538,7 +547,13 @@ def apply_dims_state_update(
         client_id=client_id,
         interaction_id=interaction_id,
         phase=phase,
-        extras=extras,
+        timestamp=timestamp,
+        axis_index=idx,
+        current_step=list(step),
+        meta=dict(meta) if isinstance(meta, Mapping) else None,
+        ack=True,
+        last_client_id=meta_entry.last_client_id,
+        last_client_seq=meta_entry.last_client_seq,
     )
 
 

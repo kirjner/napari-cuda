@@ -23,6 +23,36 @@
 - Comprehensive unit/integration tests covering state application, sequencing, and broadcast behaviour.
 - Documentation describing the new control flow and deployment expectations.
 
+### `state.update` Envelope (server canonical form)
+
+```
+{
+  "type": "state.update",
+  "scope": "layer" | "dims" | ...,
+  "target": "layer-0" | "z" | ...,
+  "key": "gamma" | "step" | ...,
+  "value": <JSON-serialisable>,
+  "phase": "start" | "update" | "commit" | null,
+  "timestamp": <unix-seconds>,
+  "client_id": <uuid?>,
+  "client_seq": <int?>,
+  "interaction_id": <uuid?>,
+  "server_seq": <int>,
+  "axis_index": <int?>,                 # dims scope only
+  "current_step": [<int>...],           # dims scope only
+  "meta": { ... },                      # ndim/order/axis_labels/sizes/range/... bundle
+  "ack": true | false | null,
+  "intent_seq": <int?>,
+  "last_client_id": <uuid?>,
+  "last_client_seq": <int?>
+}
+```
+
+- The server uses the same dataclass for inbound parsing and outbound serialisation so no fields are implicitly added or dropped.
+- Dims updates always carry `axis_index`, `current_step`, and the latest metadata snapshot (`meta`). For layer updates only the core envelope plus control_versions and observer extras are present.
+- `ack=True` marks an explicit acknowledgement of a client-sourced optimistic update; baselines and worker-driven broadcasts set `ack` to `False` or omit it.
+
+
 ## Scope
 - In scope: state channel control messages, layer/dims sequencing metadata, scene spec capabilities, docs/tests for the server.
 - Out of scope: client reducer implementation (already in flight), worker rendering semantics, CUDA capture, and unrelated refactors flagged in the broader server plan.

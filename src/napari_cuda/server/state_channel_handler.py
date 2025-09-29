@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import socket
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -656,12 +657,14 @@ def _baseline_state_result(
     target: str,
     key: str,
     value: Any,
-    extras: Optional[Dict[str, Any]] = None,
     server_seq_override: Optional[int] = None,
     client_id: Optional[str] = None,
     client_seq: Optional[int] = None,
     interaction_id: Optional[str] = None,
     phase: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    ack: Optional[bool] = None,
+    intent_seq: Optional[int] = None,
 ) -> StateUpdateResult:
     meta = get_control_meta(server._scene, scope, target, key)
     server_seq = int(server_seq_override or meta.last_server_seq or 0)
@@ -684,7 +687,11 @@ def _baseline_state_result(
         client_id=client_id,
         interaction_id=interaction_id,
         phase=phase,
-        extras=extras or {},
+        timestamp=timestamp,
+        ack=ack,
+        intent_seq=intent_seq,
+        last_client_id=meta.last_client_id,
+        last_client_seq=meta.last_client_seq,
     )
 
 
@@ -694,16 +701,16 @@ def _dims_results_from_step(
     *,
     meta: Mapping[str, Any],
     client_id: Optional[str],
+    ack: Optional[bool] = None,
+    intent_seq: Optional[int] = None,
+    timestamp: Optional[float] = None,
 ) -> list[StateUpdateResult]:
     results: list[StateUpdateResult] = []
     current = list(int(x) for x in step_list)
+    meta_dict = dict(meta)
+    ts = timestamp if timestamp is not None else time.time()
     for idx, value in enumerate(current):
         axis_label = axis_label_from_meta(meta, idx) or str(idx)
-        extras = {
-            "current_step": current,
-            "axis_index": idx,
-            "meta": dict(meta),
-        }
         meta_entry = get_control_meta(server._scene, "dims", axis_label, "step")
         server_seq = int(meta_entry.last_server_seq or 0)
         if server_seq <= 0:
@@ -724,7 +731,14 @@ def _dims_results_from_step(
                 client_id=client_id,
                 interaction_id=None,
                 phase=None,
-                extras=extras,
+                timestamp=ts,
+                axis_index=idx,
+                current_step=list(current),
+                meta=meta_dict,
+                ack=ack,
+                intent_seq=intent_seq,
+                last_client_id=meta_entry.last_client_id,
+                last_client_seq=meta_entry.last_client_seq,
             )
         )
     return results
@@ -737,7 +751,6 @@ def _layer_results_from_controls(
 ) -> list[StateUpdateResult]:
     results: list[StateUpdateResult] = []
     for key, value in controls.items():
-        extras: Dict[str, Any] = {}
         results.append(
             _baseline_state_result(
                 server,
@@ -745,7 +758,6 @@ def _layer_results_from_controls(
                 target=layer_id,
                 key=str(key),
                 value=value,
-                extras=extras,
             )
         )
     return results
@@ -841,6 +853,7 @@ async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
             chosen,
             meta=server._dims_metadata() or {},
             client_id=client_id,
+            timestamp=time.time(),
         )
         await _broadcast_state_updates(server, dims_results)
     except Exception as e:
@@ -871,6 +884,9 @@ async def broadcast_dims_update(
         list(int(x) for x in step_list),
         meta=meta,
         client_id=last_client_id,
+        ack=ack,
+        intent_seq=intent_seq,
+        timestamp=time.time(),
     )
 
     await _broadcast_state_updates(server, results)
@@ -894,6 +910,7 @@ async def broadcast_layer_update(
     if not changes:
         return
 
+    ts = time.time()
     results: list[StateUpdateResult] = []
     for key, value in changes.items():
         results.append(
@@ -908,6 +925,8 @@ async def broadcast_layer_update(
                 client_seq=source_client_seq,
                 interaction_id=interaction_id,
                 phase=phase,
+                timestamp=ts,
+                intent_seq=intent_seq,
             )
         )
 
@@ -1003,6 +1022,8 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             step_list,
             meta=meta,
             client_id=None,
+            ack=False,
+            timestamp=time.time(),
         )
         for result in dim_results:
             payload = build_state_update_payload(

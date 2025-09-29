@@ -186,6 +186,8 @@ class ViewerSceneManager:
             "sizes": dims_dict.get("sizes"),
             "range": dims_dict.get("range"),
             "axis_labels": dims_dict.get("axis_labels"),
+            "displayed": dims_dict.get("displayed"),
+            "ndisplay": dims_dict.get("ndisplay"),
         }
         layer = scene.layers[0] if scene.layers else None
         if layer is not None:

@@ -69,12 +69,19 @@ def build_state_update_payload(
         target=result.target,
         key=result.key,
         value=value,
+        phase=result.phase,
+        timestamp=result.timestamp,
         client_id=result.client_id,
         client_seq=result.client_seq,
         interaction_id=result.interaction_id,
-        phase=result.phase,
-        timestamp=result.timestamp,
         server_seq=result.server_seq,
+        axis_index=result.axis_index,
+        current_step=list(result.current_step) if result.current_step is not None else None,
+        meta=dict(result.meta) if result.meta is not None else None,
+        ack=result.ack,
+        intent_seq=result.intent_seq,
+        last_client_id=result.last_client_id or result.client_id,
+        last_client_seq=result.last_client_seq,
     )
     payload = message.to_dict()
 
@@ -87,11 +94,6 @@ def build_state_update_payload(
         _inject_layer_context(scene, manager, payload, result)
     elif result.scope == "dims":
         _inject_dims_context(result, payload)
-
-    for extra_key, extra_value in (result.extras or {}).items():
-        if extra_key in payload:
-            continue
-        payload[extra_key] = extra_value
 
     return payload
 
@@ -149,5 +151,17 @@ def _inject_layer_context(
 def _inject_dims_context(result: StateUpdateResult, payload: Dict[str, Any]) -> None:
     """Attach dims extras to the payload if supplied."""
 
-    if result.client_id is not None:
-        payload.setdefault("last_client_id", result.client_id)
+    if result.axis_index is not None:
+        payload.setdefault("axis_index", int(result.axis_index))
+    if result.current_step is not None:
+        payload.setdefault("current_step", [int(x) for x in result.current_step])
+    if result.meta is not None:
+        payload.setdefault("meta", dict(result.meta))
+    if result.last_client_id is not None:
+        payload.setdefault("last_client_id", result.last_client_id)
+    if result.last_client_seq is not None:
+        payload.setdefault("last_client_seq", int(result.last_client_seq))
+    if result.ack is not None:
+        payload.setdefault("ack", bool(result.ack))
+    if result.intent_seq is not None:
+        payload.setdefault("intent_seq", int(result.intent_seq))
