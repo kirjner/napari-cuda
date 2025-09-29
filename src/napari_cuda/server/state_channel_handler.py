@@ -7,6 +7,7 @@ import json
 import logging
 import socket
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -14,6 +15,16 @@ from websockets.exceptions import ConnectionClosed
 
 from numbers import Integral
 
+from napari_cuda.protocol import (
+    EnvelopeParser,
+    PROTO_VERSION,
+    SESSION_HELLO_TYPE,
+    SessionHello,
+    SessionReject,
+    SessionRejectPayload,
+    SessionWelcome,
+    SessionWelcomePayload,
+)
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE, StateUpdateMessage
 from napari_cuda.server import server_state_updates as state_updates
 from napari_cuda.server.server_state_updates import (
@@ -40,6 +51,10 @@ from napari_cuda.server.protocol_bridge import encode_envelope_json
 
 logger = logging.getLogger(__name__)
 
+_HANDSHAKE_TIMEOUT_S = 5.0
+_REQUIRED_NOTIFY_FEATURES = ("notify_state", "notify_scene", "notify_stream")
+_ENVELOPE_PARSER = EnvelopeParser()
+
 StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
 
 
@@ -51,6 +66,9 @@ async def handle_state(server: Any, ws: Any) -> None:
     try:
         server._update_client_gauges()
         _disable_nagle(ws)
+        handshake_ok = await _perform_state_handshake(server, ws)
+        if not handshake_ok:
+            return
         await _send_state_baseline(server, ws)
         remote = getattr(ws, 'remote_address', None)
         log = logger.info if server._log_state_traces else logger.debug
@@ -500,6 +518,10 @@ async def _handle_set_ndisplay(server: Any, data: Mapping[str, Any], ws: Any) ->
         ndisplay,
     )
     await server._handle_set_ndisplay(ndisplay, client_id, client_seq)
+    server._schedule_coro(
+        rebroadcast_meta(server, client_id),
+        'rebroadcast-ndisplay',
+    )
     (logger.info if server._log_state_traces else logger.debug)(
         "state: set_ndisplay done target=%s",
         ndisplay,
@@ -1048,17 +1070,188 @@ def _disable_nagle(ws: Any) -> None:
         logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
 
 
-def _dual_emit_enabled(server: Any) -> bool:
-    return bool(getattr(server, "_protocol_dual_emit", False))
+async def _perform_state_handshake(server: Any, ws: Any) -> bool:
+    """Negotiate the notify-only protocol handshake with the client."""
+
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=_HANDSHAKE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        await _send_handshake_reject(
+            server,
+            ws,
+            code="timeout",
+            message="session.hello not received",
+        )
+        return False
+    except ConnectionClosed:
+        logger.debug("state client closed during handshake")
+        return False
+    except Exception:
+        logger.debug("state client handshake recv failed", exc_info=True)
+        return False
+
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except Exception:
+            await _send_handshake_reject(
+                server,
+                ws,
+                code="invalid_payload",
+                message="session.hello must be UTF-8 text",
+            )
+            return False
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        await _send_handshake_reject(
+            server,
+            ws,
+            code="invalid_json",
+            message="session.hello must be valid JSON",
+        )
+        return False
+
+    msg_type = str(data.get("type") or "").lower()
+    if msg_type != SESSION_HELLO_TYPE:
+        await _send_handshake_reject(
+            server,
+            ws,
+            code="unexpected_message",
+            message="expected session.hello",
+            details={"received": msg_type},
+        )
+        return False
+
+    try:
+        hello = _ENVELOPE_PARSER.parse_hello(data)
+    except Exception as exc:
+        await _send_handshake_reject(
+            server,
+            ws,
+            code="invalid_payload",
+            message="session.hello payload rejected",
+            details={"error": str(exc)},
+        )
+        return False
+
+    protocol = int(hello.payload.protocol)
+    if protocol != PROTO_VERSION:
+        await _send_handshake_reject(
+            server,
+            ws,
+            code="protocol_mismatch",
+            message=f"server requires protocol {PROTO_VERSION}",
+            details={"client_protocol": protocol},
+        )
+        return False
+
+    features = _resolve_handshake_features(hello)
+    missing = [name for name in _REQUIRED_NOTIFY_FEATURES if not features.get(name)]
+    if missing:
+        await _send_handshake_reject(
+            server,
+            ws,
+            code="unsupported_client",
+            message="client missing notify features",
+            details={"missing": missing},
+        )
+        return False
+
+    session_id = str(uuid.uuid4())
+    welcome = SessionWelcome(
+        payload=SessionWelcomePayload(
+            protocol=PROTO_VERSION,
+            session={
+                "id": session_id,
+                "features": features,
+            },
+        ),
+        timestamp=time.time(),
+    )
+
+    try:
+        await _send_handshake_envelope(server, ws, welcome)
+    except Exception:
+        logger.debug("session.welcome send failed", exc_info=True)
+        return False
+
+    setattr(ws, "_napari_cuda_session", session_id)
+    setattr(ws, "_napari_cuda_features", features)
+
+    client_info = hello.payload.client or {}
+    client_name = str(client_info.get("name") or "client")
+    client_version = client_info.get("version")
+    logger.info(
+        "state handshake accepted name=%s version=%s features=%s",
+        client_name,
+        client_version,
+        sorted(key for key, enabled in features.items() if enabled),
+    )
+
+    return True
+
+
+def _resolve_handshake_features(hello: SessionHello) -> Dict[str, bool]:
+    features: Dict[str, bool] = {name: True for name in _REQUIRED_NOTIFY_FEATURES}
+    extras = hello.payload.extras or {}
+    extras_features = extras.get("features") if isinstance(extras, Mapping) else None
+    if isinstance(extras_features, Mapping):
+        for key, value in extras_features.items():
+            features[str(key)] = bool(value)
+    return features
+
+
+async def _send_handshake_envelope(server: Any, ws: Any, envelope: SessionWelcome | SessionReject) -> None:
+    text = json.dumps(envelope.to_dict(), separators=(",", ":"))
+    await _await_state_send(server, ws, text)
+
+
+async def _send_handshake_reject(
+    server: Any,
+    ws: Any,
+    *,
+    code: str,
+    message: str,
+    details: Optional[Mapping[str, Any]] = None,
+) -> None:
+    reject = SessionReject(
+        payload=SessionRejectPayload(
+            code=str(code),
+            message=str(message),
+            details=dict(details) if details else None,
+        ),
+        timestamp=time.time(),
+    )
+    try:
+        await _send_handshake_envelope(server, ws, reject)
+    except Exception:
+        logger.debug("session.reject send failed", exc_info=True)
+    try:
+        await ws.close()
+    except Exception:
+        logger.debug("state ws close after reject failed", exc_info=True)
+
+
+async def _await_state_send(server: Any, ws: Any, text: str) -> None:
+    try:
+        result = server._state_send(ws, text)
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception:
+        logger.debug("state send helper failed", exc_info=True)
 
 
 async def _send_payload(server: Any, ws: Any, payload: dict[str, Any]) -> None:
-    text = json.dumps(payload)
-    await server._state_send(ws, text)
-    if _dual_emit_enabled(server):
-        envelope = encode_envelope_json(payload)
-        if envelope:
-            await server._state_send(ws, envelope)
+    envelope = encode_envelope_json(payload)
+    if not envelope:
+        logger.debug(
+            "Dropping state payload without notify envelope: type=%s",
+            payload.get("type"),
+        )
+        return
+    await _await_state_send(server, ws, envelope)
 
 
 async def _send_state_baseline(server: Any, ws: Any) -> None:
@@ -1126,16 +1319,19 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
 
 async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
     payload = build_scene_spec_json(server._scene, server._scene_manager)
-    await server._state_send(ws, payload)
-    if _dual_emit_enabled(server):
-        try:
-            parsed = json.loads(payload)
-        except Exception:
-            logger.debug("scene.spec dual emit payload decode failed", exc_info=True)
-        else:
-            envelope = encode_envelope_json(parsed) if isinstance(parsed, dict) else None
-            if envelope:
-                await server._state_send(ws, envelope)
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        logger.debug("scene.spec payload decode failed", exc_info=True)
+        return
+    if not isinstance(parsed, dict):
+        logger.debug("scene.spec payload must decode to mapping")
+        return
+    envelope = encode_envelope_json(parsed)
+    if not envelope:
+        logger.debug("scene.spec notify envelope encode failed")
+        return
+    await _await_state_send(server, ws, envelope)
     if server._log_dims_info:
         logger.info("%s: scene.spec sent", reason)
     else:
@@ -1145,26 +1341,28 @@ async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
 async def broadcast_scene_spec_payload(server: Any, payload: str, *, reason: str) -> None:
     if not payload or not server._state_clients:
         return
-    envelope: Optional[str] = None
-    if _dual_emit_enabled(server):
-        try:
-            parsed = json.loads(payload)
-        except Exception:
-            logger.debug("scene.spec dual emit payload decode failed", exc_info=True)
-        else:
-            if isinstance(parsed, dict):
-                envelope = encode_envelope_json(parsed)
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        logger.debug("scene.spec payload decode failed", exc_info=True)
+        return
+    if not isinstance(parsed, dict):
+        logger.debug("scene.spec payload must decode to mapping")
+        return
+    envelope = encode_envelope_json(parsed)
+    if not envelope:
+        logger.debug("scene.spec notify envelope encode failed")
+        return
     coros: list[Awaitable[None]] = []
     clients = list(server._state_clients)
     for client in clients:
-        coros.append(server._state_send(client, payload))
-        if envelope:
-            coros.append(server._state_send(client, envelope))
+        coros.append(_await_state_send(server, client, envelope))
     await asyncio.gather(*coros, return_exceptions=True)
+    client_count = len(clients)
     if server._log_dims_info:
-        logger.info("%s: scene.spec broadcast to %d clients", reason, len(coros))
+        logger.info("%s: scene.spec broadcast to %d clients", reason, client_count)
     else:
-        logger.debug("%s: scene.spec broadcast to %d clients", reason)
+        logger.debug("%s: scene.spec broadcast to %d clients", reason, client_count)
 
 
 async def _send_layer_baseline(server: Any, ws: Any) -> None:

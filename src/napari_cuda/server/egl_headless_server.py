@@ -232,9 +232,6 @@ class EGLHeadlessServer:
         self._dump_path: Optional[str] = None
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
-        self._protocol_dual_emit = env_bool("NAPARI_CUDA_PROTOCOL_DUAL_EMIT", False)
-        if self._protocol_dual_emit:
-            logger.info("Greenfield protocol dual emission enabled")
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops
@@ -725,20 +722,20 @@ class EGLHeadlessServer:
         return json_payload
 
     async def _broadcast_state_json(self, obj: dict) -> None:
-        data = json.dumps(obj)
-        envelope = None
-        if getattr(self, "_protocol_dual_emit", False):
-            try:
-                envelope = encode_envelope_json(obj)
-            except Exception:
-                logger.debug("Dual emission encode failed", exc_info=True)
         if not self._state_clients:
             return
-        coros = []
-        for c in list(self._state_clients):
-            coros.append(self._state_send(c, data))
-            if envelope:
-                coros.append(self._state_send(c, envelope))
+        try:
+            envelope = encode_envelope_json(obj)
+        except Exception:
+            logger.debug("notify envelope encode failed", exc_info=True)
+            return
+        if not envelope:
+            logger.debug(
+                "Dropping state payload without notify envelope: type=%s",
+                obj.get("type"),
+            )
+            return
+        coros = [self._state_send(client, envelope) for client in list(self._state_clients)]
         try:
             await asyncio.gather(*coros, return_exceptions=True)
         except Exception as e:

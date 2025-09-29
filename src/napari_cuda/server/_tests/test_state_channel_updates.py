@@ -76,6 +76,15 @@ def _drain_scheduled(scheduled: list[Coroutine[Any, Any, None]]) -> None:
         asyncio.run(coro)
 
 
+def _unwrap_notify(payload: dict[str, Any]) -> dict[str, Any]:
+    msg_type = payload.get("type") if isinstance(payload, dict) else None
+    if msg_type in {"notify.state", "notify.scene", "notify.stream"}:
+        inner = payload.get("payload") if isinstance(payload, dict) else None
+        if isinstance(inner, dict):
+            return inner
+    return payload
+
+
 def test_state_update_layer_applies_scene_state() -> None:
     server, scheduled, captured = _make_server()
 
@@ -262,7 +271,8 @@ def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:
         _drain_scheduled(scheduled)
 
         payloads = captured + [json.loads(data) for data in ws.sent]
-        updates = [p for p in payloads if p.get("type") == "state.update" and p.get("scope") == "layer"]
+        decoded = [_unwrap_notify(p) for p in payloads]
+        updates = [p for p in decoded if p.get("type") == "state.update" and p.get("scope") == "layer"]
         assert updates, "expected at least one layer state.update payload"
         merged = {}
         for entry in updates:
