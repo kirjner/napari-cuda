@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import time
@@ -11,6 +12,11 @@ from dataclasses import dataclass
 
 import websockets
 
+try:
+    from napari_cuda import __version__ as _NAPARI_CUDA_VERSION
+except Exception:  # pragma: no cover - fallback for unusual import issues
+    _NAPARI_CUDA_VERSION = "dev"
+
 from napari_cuda.client.streaming.dims_payload import inflate_current_step, normalize_meta
 
 from napari_cuda.protocol import (
@@ -18,6 +24,13 @@ from napari_cuda.protocol import (
     NOTIFY_STATE_TYPE,
     NOTIFY_STREAM_TYPE,
     EnvelopeParser,
+    PROTO_VERSION,
+    SESSION_REJECT_TYPE,
+    SESSION_WELCOME_TYPE,
+    SessionHello,
+    SessionHelloPayload,
+    SessionReject,
+    SessionWelcome,
 )
 from napari_cuda.protocol.messages import (
     LAYER_REMOVE_TYPE,
@@ -63,6 +76,13 @@ _STATE_DEBUG = _maybe_enable_debug_logger()
 
 
 _ENVELOPE_PARSER = EnvelopeParser()
+
+_HANDSHAKE_TIMEOUT_S = 5.0
+_REQUIRED_FEATURES = {
+    "notify_state": True,
+    "notify_scene": True,
+    "notify_stream": True,
+}
 
 
 class StateChannel:
@@ -138,6 +158,8 @@ class StateChannel:
                         except Exception:
                             logger.debug("handle_connected callback failed (state)", exc_info=True)
                     loop_state.outbox = asyncio.Queue()
+
+                    await self._perform_handshake(ws)
 
                     async def _pinger() -> None:
                         while True:
@@ -270,6 +292,10 @@ class StateChannel:
             self._handle_notify_stream(data)
             return
 
+        if msg_type in (SESSION_WELCOME_TYPE, SESSION_REJECT_TYPE):
+            logger.debug("Ignoring post-handshake control message: %s", msg_type)
+            return
+
         if msg_type == 'video_config':
             if self.handle_video_config:
                 try:
@@ -392,6 +418,67 @@ class StateChannel:
             self.handle_state_update(update)
         except Exception:
             logger.debug("notify.state dispatch failed", exc_info=True)
+
+    async def _perform_handshake(self, ws: websockets.WebSocketClientProtocol) -> None:
+        """Exchange the session handshake with the state server before use."""
+
+        hello_payload = SessionHelloPayload(
+            protocol=PROTO_VERSION,
+            client={
+                "name": "napari-cuda-client",
+                "version": _NAPARI_CUDA_VERSION,
+            },
+            extras={"features": dict(_REQUIRED_FEATURES)},
+        )
+        hello = SessionHello(
+            payload=hello_payload,
+            timestamp=time.time(),
+        )
+        text = json.dumps(hello.to_dict(), separators=(",", ":"))
+        if _STATE_DEBUG:
+            logger.debug("StateChannel handshake -> %s", text)
+        await ws.send(text)
+
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=_HANDSHAKE_TIMEOUT_S)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("state handshake timed out waiting for session.welcome") from exc
+        except Exception as exc:  # pragma: no cover - transport errors bubble up
+            raise RuntimeError(f"state handshake failed: {exc}") from exc
+
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8")
+            except Exception as exc:  # pragma: no cover - unexpected encoding
+                raise RuntimeError("state handshake payload was not UTF-8") from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("state handshake payload was not valid JSON") from exc
+
+        msg_type = str(data.get("type") or "").lower()
+        if msg_type == SESSION_WELCOME_TYPE:
+            welcome = SessionWelcome.from_dict(data)
+            session_info = welcome.payload.session or {}
+            features = session_info.get("features") if isinstance(session_info, dict) else None
+            if isinstance(features, dict):
+                enabled = sorted(name for name, value in features.items() if value)
+            else:
+                enabled = None
+            logger.info("State handshake accepted; features=%s", enabled or "unknown")
+            return
+
+        if msg_type == SESSION_REJECT_TYPE:
+            reject = SessionReject.from_dict(data)
+            details = reject.payload.details or {}
+            code = reject.payload.code
+            message = reject.payload.message
+            raise RuntimeError(
+                f"state handshake rejected: {code}: {message} ({details})" if details else f"state handshake rejected: {code}: {message}"
+            )
+
+        raise RuntimeError(f"unexpected handshake response type: {msg_type or 'unknown'}")
 
     def _handle_notify_scene(self, data: dict) -> None:
         if not self.handle_scene_spec:
