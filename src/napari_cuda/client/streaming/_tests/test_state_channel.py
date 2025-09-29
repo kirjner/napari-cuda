@@ -5,12 +5,20 @@ import pytest
 pytest.importorskip("websockets")
 
 from napari_cuda.client.streaming.state import StateChannel
+from napari_cuda.protocol import (
+    NotifyScene,
+    NotifyScenePayload,
+    NotifyState,
+    NotifyStream,
+    NotifyStreamPayload,
+)
 from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerSpec,
     LayerUpdateMessage,
     SceneSpec,
     SceneSpecMessage,
+    StateUpdateMessage,
 )
 
 
@@ -105,3 +113,60 @@ def test_state_channel_dims_update_normalisation():
     assert dims['intent_seq'] == 41
     assert dims['seq'] == 99
     assert dims['last_client_id'] == 'client-a'
+
+
+def test_state_channel_notify_state_dispatch() -> None:
+    captured: list[StateUpdateMessage] = []
+    sc = StateChannel('localhost', 8081, handle_state_update=captured.append)
+
+    envelope = NotifyState(
+        payload=StateUpdateMessage(scope='dims', target='z', key='step', value=3),
+        timestamp=1.23,
+    )
+
+    sc._handle_message(envelope.to_dict())
+
+    assert captured and captured[0].key == 'step'
+    assert captured[0].value == 3
+
+
+def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> None:
+    received: list[SceneSpecMessage] = []
+    state_channel.handle_scene_spec = received.append
+
+    layer = LayerSpec(layer_id='layer-10', layer_type='image', name='demo', ndim=2, shape=[8, 8])
+    envelope = NotifyScene(
+        payload=NotifyScenePayload(
+            version=1,
+            scene=SceneSpec(layers=[layer]),
+            state={'capabilities': ['notify.state']},
+        ),
+        timestamp=2.0,
+    )
+
+    state_channel._handle_message(envelope.to_dict())  # type: ignore[arg-type]
+
+    assert received and isinstance(received[0], SceneSpecMessage)
+    assert received[0].scene.layers[0].layer_id == 'layer-10'
+
+
+def test_state_channel_notify_stream_dispatch() -> None:
+    configs: list[dict] = []
+    sc = StateChannel('localhost', 8081, handle_video_config=configs.append)
+
+    envelope = NotifyStream(
+        payload=NotifyStreamPayload(
+            codec='h264',
+            fps=30.0,
+            width=1920,
+            height=1080,
+            extras={'format': 'avcc', 'data': 'AAA='},
+        ),
+        timestamp=3.14,
+    )
+
+    sc._handle_message(envelope.to_dict())
+
+    assert configs and configs[0]['type'] == 'video_config'
+    assert configs[0]['codec'] == 'h264'
+    assert configs[0]['format'] == 'avcc'

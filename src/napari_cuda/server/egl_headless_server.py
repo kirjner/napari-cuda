@@ -120,6 +120,7 @@ from .worker_lifecycle import (
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
+from .protocol_bridge import encode_envelope_json
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,9 @@ class EGLHeadlessServer:
         self._dump_path: Optional[str] = None
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
+        self._protocol_dual_emit = env_bool("NAPARI_CUDA_PROTOCOL_DUAL_EMIT", False)
+        if self._protocol_dual_emit:
+            logger.info("Greenfield protocol dual emission enabled")
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops
@@ -722,11 +726,19 @@ class EGLHeadlessServer:
 
     async def _broadcast_state_json(self, obj: dict) -> None:
         data = json.dumps(obj)
+        envelope = None
+        if getattr(self, "_protocol_dual_emit", False):
+            try:
+                envelope = encode_envelope_json(obj)
+            except Exception:
+                logger.debug("Dual emission encode failed", exc_info=True)
         if not self._state_clients:
             return
         coros = []
         for c in list(self._state_clients):
             coros.append(self._safe_state_send(c, data))
+            if envelope:
+                coros.append(self._safe_state_send(c, envelope))
         try:
             await asyncio.gather(*coros, return_exceptions=True)
         except Exception as e:

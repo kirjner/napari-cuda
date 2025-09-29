@@ -36,6 +36,7 @@ from napari_cuda.server.server_scene_spec import (
     build_state_update_payload,
 )
 from napari_cuda.server import pixel_channel
+from napari_cuda.server.protocol_bridge import encode_envelope_json
 
 logger = logging.getLogger(__name__)
 
@@ -1000,6 +1001,19 @@ def _disable_nagle(ws: Any) -> None:
         logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
 
 
+def _dual_emit_enabled(server: Any) -> bool:
+    return bool(getattr(server, "_protocol_dual_emit", False))
+
+
+async def _send_payload(server: Any, ws: Any, payload: dict[str, Any]) -> None:
+    text = json.dumps(payload)
+    await server._safe_state_send(ws, text)
+    if _dual_emit_enabled(server):
+        envelope = encode_envelope_json(payload)
+        if envelope:
+            await server._safe_state_send(ws, envelope)
+
+
 async def _send_state_baseline(server: Any, ws: Any) -> None:
     try:
         await server._await_adapter_level_ready(0.5)
@@ -1031,7 +1045,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
                 server._scene_manager,
                 result=result,
             )
-            await ws.send(json.dumps(payload))
+            await _send_payload(server, ws, payload)
         if server._log_dims_info:
             logger.info("connect: state.update dims -> step=%s", step_list)
         else:
@@ -1056,7 +1070,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         avcc = channel.last_avcc
         if avcc is not None:
             msg = pixel_channel.build_video_config_payload(cfg, avcc)
-            await ws.send(json.dumps(msg))
+            await _send_payload(server, ws, msg)
         else:
             pixel_channel.mark_config_dirty(channel)
     except Exception:
@@ -1066,6 +1080,15 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
 async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
     payload = build_scene_spec_json(server._scene, server._scene_manager)
     await server._safe_state_send(ws, payload)
+    if _dual_emit_enabled(server):
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            logger.debug("scene.spec dual emit payload decode failed", exc_info=True)
+        else:
+            envelope = encode_envelope_json(parsed) if isinstance(parsed, dict) else None
+            if envelope:
+                await server._safe_state_send(ws, envelope)
     if server._log_dims_info:
         logger.info("%s: scene.spec sent", reason)
     else:
@@ -1075,7 +1098,21 @@ async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
 async def broadcast_scene_spec_payload(server: Any, payload: str, *, reason: str) -> None:
     if not payload or not server._state_clients:
         return
-    coros = [server._safe_state_send(client, payload) for client in list(server._state_clients)]
+    envelope: Optional[str] = None
+    if _dual_emit_enabled(server):
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            logger.debug("scene.spec dual emit payload decode failed", exc_info=True)
+        else:
+            if isinstance(parsed, dict):
+                envelope = encode_envelope_json(parsed)
+    coros: list[Awaitable[None]] = []
+    clients = list(server._state_clients)
+    for client in clients:
+        coros.append(server._safe_state_send(client, payload))
+        if envelope:
+            coros.append(server._safe_state_send(client, envelope))
     await asyncio.gather(*coros, return_exceptions=True)
     if server._log_dims_info:
         logger.info("%s: scene.spec broadcast to %d clients", reason, len(coros))
@@ -1119,4 +1156,4 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
                 server._scene_manager,
                 result=result,
             )
-            await server._safe_state_send(ws, json.dumps(payload))
+            await _send_payload(server, ws, payload)

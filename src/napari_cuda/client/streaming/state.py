@@ -13,6 +13,12 @@ import websockets
 
 from napari_cuda.client.streaming.dims_payload import inflate_current_step, normalize_meta
 
+from napari_cuda.protocol import (
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_STATE_TYPE,
+    NOTIFY_STREAM_TYPE,
+    EnvelopeParser,
+)
 from napari_cuda.protocol.messages import (
     LAYER_REMOVE_TYPE,
     LAYER_UPDATE_TYPE,
@@ -54,6 +60,9 @@ def _maybe_enable_debug_logger() -> bool:
 
 
 _STATE_DEBUG = _maybe_enable_debug_logger()
+
+
+_ENVELOPE_PARSER = EnvelopeParser()
 
 
 class StateChannel:
@@ -249,6 +258,18 @@ class StateChannel:
         raw_type = data.get('type')
         msg_type = (raw_type or '').lower()
 
+        if msg_type == NOTIFY_STATE_TYPE:
+            self._handle_notify_state(data)
+            return
+
+        if msg_type == NOTIFY_SCENE_TYPE:
+            self._handle_notify_scene(data)
+            return
+
+        if msg_type == NOTIFY_STREAM_TYPE:
+            self._handle_notify_stream(data)
+            return
+
         if msg_type == 'video_config':
             if self.handle_video_config:
                 try:
@@ -353,6 +374,79 @@ class StateChannel:
                 except Exception:
                     logger.debug("handle_state_update callback failed", exc_info=True)
             return
+
+    def _handle_notify_state(self, data: dict) -> None:
+        if not self.handle_state_update:
+            return
+        try:
+            envelope = _ENVELOPE_PARSER.parse_notify_state(data)
+            update = envelope.payload
+            if _STATE_DEBUG:
+                logger.debug(
+                    "received notify.state: scope=%s target=%s key=%s phase=%s",
+                    update.scope,
+                    update.target,
+                    update.key,
+                    update.phase,
+                )
+            self.handle_state_update(update)
+        except Exception:
+            logger.debug("notify.state dispatch failed", exc_info=True)
+
+    def _handle_notify_scene(self, data: dict) -> None:
+        if not self.handle_scene_spec:
+            return
+        try:
+            envelope = _ENVELOPE_PARSER.parse_notify_scene(data)
+            state_block = envelope.payload.state or {}
+            capabilities = None
+            if isinstance(state_block, dict) and state_block.get('capabilities') is not None:
+                try:
+                    capabilities = [str(entry) for entry in state_block.get('capabilities', [])]
+                except Exception:
+                    capabilities = None
+            spec = SceneSpecMessage(
+                type=SCENE_SPEC_TYPE,
+                version=envelope.payload.version,
+                scene=envelope.payload.scene,
+                capabilities=capabilities,
+                timestamp=envelope.timestamp,
+            )
+            if _STATE_DEBUG:
+                logger.debug(
+                    "received notify.scene: layers=%s capabilities=%s",
+                    [layer.layer_id for layer in spec.scene.layers],
+                    spec.scene.capabilities,
+                )
+            self.handle_scene_spec(spec)
+        except Exception:
+            logger.debug("notify.scene dispatch failed", exc_info=True)
+
+    def _handle_notify_stream(self, data: dict) -> None:
+        if not self.handle_video_config:
+            return
+        try:
+            envelope = _ENVELOPE_PARSER.parse_notify_stream(data)
+            payload = envelope.payload
+            config: dict[str, object] = {
+                'type': 'video_config',
+                'codec': payload.codec,
+            }
+            if payload.fps is not None:
+                config['fps'] = payload.fps
+            if payload.width is not None:
+                config['width'] = payload.width
+            if payload.height is not None:
+                config['height'] = payload.height
+            if payload.bitrate is not None:
+                config['bitrate'] = payload.bitrate
+            if payload.idr_interval is not None:
+                config['idr_interval'] = payload.idr_interval
+            if payload.extras:
+                config.update(dict(payload.extras))
+            self.handle_video_config(config)  # type: ignore[arg-type]
+        except Exception:
+            logger.debug("notify.stream dispatch failed", exc_info=True)
 
     def request_keyframe_once(self) -> None:
         """Best-effort request for a keyframe via state channel (throttled)."""

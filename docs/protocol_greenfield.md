@@ -8,6 +8,12 @@ about contract that works for desktop and mobile clients alike.
 
 ## Transport & Session
 
+- Implementation scaffolding now lives alongside the legacy protocol but is not
+  yet active on the wire:
+  - `src/napari_cuda/protocol/envelopes.py` holds the new dataclasses.
+  - `src/napari_cuda/protocol/parser.py` provides envelope parsing helpers.
+  - Runtime still emits legacy payloads; the new shapes are test-covered only.
+
 - **Wire**: single WebSocket connection (`wss://…/state`) per client.
 - **Encoding**: UTF-8 JSON messages, each representing one envelope.
 - **Handshake**: client sends `session.hello`, server replies with
@@ -293,6 +299,10 @@ unchanged.
      `session.hello` so upgraded clients can opt in (`supports_notify_state`).
    - Ensure the worker baseline/orchestration emits `notify.scene` and
      `notify.stream` alongside the existing payloads.
+   - For development/staging the dual emission is currently driven by the
+     `NAPARI_CUDA_PROTOCOL_DUAL_EMIT=1` toggle, which causes the server to
+     broadcast `notify.state`/`notify.scene`/`notify.stream` in addition to the
+     legacy payloads.
 
 3. **Client opt-in**
    - Extend the desktop client reducer to recognise the new envelope names
