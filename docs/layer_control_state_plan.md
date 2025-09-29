@@ -15,7 +15,7 @@ This document captures the ongoing work to make layer intents (opacity, visibili
    - `ServerSceneData` stores `layer_controls: dict[layer_id, LayerControlState]`.
 
 2. **Intent helpers** ✅
-   - `server_scene_intents.apply_layer_intent` mutates `layer_controls` (instead of raw dicts) and records deltas in `ServerSceneState.layer_updates`.
+   - `server_scene_intents.apply_layer_state_update` mutates `layer_controls` (instead of raw dicts) and records deltas in `ServerSceneState.layer_updates`.
 
 3. **Worker application** ✅
    - `SceneStateApplier` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.

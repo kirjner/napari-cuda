@@ -437,7 +437,7 @@ def apply_dims_state_update(
     interaction_id: Optional[str] = None,
     phase: Optional[str] = None,
 ) -> Optional[StateUpdateResult]:
-    """Apply a dims control command returning the updated step list."""
+    """Apply a dims state update returning the updated step list."""
 
     seq_int: Optional[int]
     try:

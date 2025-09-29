@@ -9,8 +9,6 @@ import json
 from dataclasses import dataclass, asdict, field, is_dataclass
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-
-CONTROL_COMMAND_TYPE = "control.command"
 STATE_UPDATE_TYPE = "state.update"
 
 
@@ -86,38 +84,6 @@ class Response(StateMessage):
     success: bool = True
     payload: dict = None
     error: str = None
-
-
-@dataclass
-class ControlCommand:
-    """Envelope for control mutations sent from the client to the server."""
-
-    scope: str
-    target: str
-    prop: str
-    value: Any
-    client_id: Optional[str] = None
-    client_seq: Optional[int] = None
-    interaction_id: Optional[str] = None
-    phase: Optional[str] = None
-    timestamp: Optional[float] = None
-    extras: Optional[Dict[str, Any]] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "type": CONTROL_COMMAND_TYPE,
-            "scope": self.scope,
-            "target": self.target,
-            "prop": self.prop,
-            "value": self.value,
-            "client_id": self.client_id,
-            "client_seq": self.client_seq,
-            "interaction_id": self.interaction_id,
-            "phase": self.phase,
-            "timestamp": self.timestamp,
-            "extras": self.extras,
-        }
-        return _strip_none(payload)
 
 
 @dataclass

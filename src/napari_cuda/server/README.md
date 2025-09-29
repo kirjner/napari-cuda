@@ -14,10 +14,10 @@ connects:
      multiscale description, extras such as `zarr_path`)
    - `dims`: ndim/order/sizes/ranges/current step/ndisplay
    - `camera`: optional snapshot of the viewer camera
-   - `capabilities`: currently `layer.update`, `layer.remove`
-3. Subsequent changes (e.g. dataset swap, level switch) will resend
-   `scene.spec`, while fine‑grained updates will move to `layer.update` or
-   `layer.remove` as those RPCs are implemented.
+   - `capabilities`: currently `state.update`, `layer.remove`
+3. Subsequent changes (e.g. dataset swap, level switch) resend
+   `scene.spec`, while fine‑grained updates flow through `state.update` or
+   `layer.remove` as those envelopes are emitted.
 
 `ViewerSceneManager.dims_metadata()` now underpins `dims.update` payloads, so the
 legacy HUD continues to work alongside the richer scene spec.
@@ -63,7 +63,7 @@ legacy HUD continues to work alongside the richer scene spec.
       "zoom": 2.5,
       "ndisplay": 3
     },
-    "capabilities": ["layer.update", "layer.remove"]
+    "capabilities": ["state.update", "layer.remove"]
   }
 }
 ```

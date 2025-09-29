@@ -148,9 +148,9 @@ Implementation slices:
      - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap via `name`, projection, interpolation, depiction) alongside validation helpers.
      - Extend `ServerSceneData` with render-property fields so handlers mutate data snapshots instead of `self`.
      - Add procedural helpers to apply each mutation, enqueue worker commands, and trigger authoritative rebroadcasts.
-     - Cover with focused tests asserting state updates and outgoing `layer.update` mirrors.
-     - ✅ Canonical layer extras now live in `ServerSceneData.layer_state`; `server_scene_intents.apply_layer_intent` normalizes payloads, the worker applies updates through `SceneStateApplier`, and `server_scene_spec.build_layer_update_payload` drives `layer.update` acks (tests: `test_server_scene_intents.py`, `test_server_scene_spec.py`). Remaining work: wire the client bridge + expand coverage for projection/depiction once the schema is finalised.
-    - ✅ Layer controls now live in `LayerControlState`; the worker consumes updates via `SceneStateApplier`, and `layer.update`/`scene.spec` expose a dedicated `controls` map while `extras` is reserved for transport metadata.
+    - Cover with focused tests asserting state updates and outgoing `state.update` mirrors.
+    - ✅ Canonical layer extras now live in `ServerSceneData.layer_state`; `server_scene_intents.apply_layer_state_update` normalizes payloads, the worker applies updates through `SceneStateApplier`, and `server_scene_spec.build_state_update_payload` drives `state.update` broadcasts (tests: `test_server_scene_intents.py`, `test_server_scene_spec.py`). Remaining work: wire the client bridge + expand coverage for projection/depiction once the schema is finalised.
+    - ✅ Layer controls now live in `LayerControlState`; the worker consumes updates via `SceneStateApplier`, and `state.update`/`scene.spec` expose a dedicated `controls` map while `extras` is reserved for transport metadata.
     - ⬜ Follow-up: add mixed-mode regression coverage (2D↔3D) once the client bridge consumes the new contract.
   15. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `RenderMailbox`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
 - Apply the same hostility to `try/except` & `getattr` counts as on the worker: helpers should assert on invariants and reserve broad guards strictly for websocket/NVENC boundary failures.

@@ -26,9 +26,9 @@ Client
 
 Scene + Layer Handshake (client focus)
 
-- The state channel now emits structured messages in addition to the legacy `video_config` + `dims.update` flow.
+- The state channel now emits structured messages in addition to the legacy `video_config` flow.
   - `scene.spec`: full snapshot of the server scene (layer specs, dims, camera, capability hints).
-  - `layer.update`: incremental metadata change for a single layer (name, shape, multiscale state, etc.).
+  - `state.update`: authoritative property change for a single `(scope, target, key)` (layer controls, dims step, etc.).
   - `layer.remove`: notification that a layer was removed on the server.
 - Client responsibilities (current phase):
   - `StateChannel` dispatches these payloads to optional callbacks; `StreamCoordinator` caches the latest scene/layer specs under a mutex for consumers.

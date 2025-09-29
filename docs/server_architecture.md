@@ -123,7 +123,7 @@ graph LR
     StateClient["State WS client"]
     PixelClient["Pixel WS client"]
 
-    StateClient -->|intents| SSC
+    StateClient -->|state.update| SSC
     SSC -->|mutate| SceneBag
     SSC -->|broadcast dims/spec + state updates| StateClient
     SceneBag -->|enqueue updates| SceneQueue
@@ -152,7 +152,7 @@ graph LR
 - **SceneState Helpers** (`scene_state_applier.py`, `render_mailbox.py`, `server_scene_spec.py`, `camera_controller.py`)
   - `RenderMailbox` coalesces pending updates across threads before the worker drains them.
   - `WorkerSceneNotificationQueue` carries worker-driven refresh notices back to the control loop so metadata and broadcasts stay aligned.
-  - `server_scene_spec.py` builds `scene.spec`, `dims.update`, and now `layer.update` payloads from `ServerSceneData` for WebSocket and MCP callers.
+  - `server_scene_spec.py` builds `scene.spec`, `dims.update`, and `state.update` payloads from `ServerSceneData` for WebSocket and MCP callers.
   - `SceneStateApplier` applies dims/camera/volume changes and layer property overrides to viewer + layer objects.
   - `CameraController` executes queued camera commands and reports policy triggers.
 
@@ -180,7 +180,7 @@ graph LR
 ## Data Flow Summary
 
 1. Clients connect via websocket; `EGLHeadlessServer` registers them and pushes an initial `SceneSpec`.
-2. Incoming intents mutate `ServerSceneData` (dims sequence, volume/multiscale hints, camera queue) and enqueue work in `RenderMailbox` when the worker needs to react.
+2. Incoming state updates mutate `ServerSceneData` (dims sequence, volume/multiscale hints, camera queue) and enqueue work in `RenderMailbox` when the worker needs to react.
 3. The worker thread drains updates from `RenderMailbox`, applies them through `SceneStateApplier`, and kicks ROI/LOD recalculation as needed.
 4. When the worker finishes applying a scene update, it enqueues a notification on the worker→control queue; the asyncio control loop drains it, refreshes `ViewerSceneManager`, and broadcasts the authoritative dims/spec payload.
 5. `CaptureFacade` captures rendered frames, hands them to NVENC, and returns packet bytes to the server.

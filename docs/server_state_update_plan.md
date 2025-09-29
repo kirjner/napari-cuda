@@ -2,12 +2,12 @@
 
 ## Purpose
 - Establish the server side of the unified `state.update` protocol that the new client reducer consumes.
-- Replace legacy `control.command` / intent plumbing with a single authoritative envelope that carries sequencing, interaction, and scope metadata.
+- Replace legacy `control.command` / intent plumbing with a single authoritative envelope that carries sequencing, interaction, and scope metadata. ✅
 - Guarantee deterministic reconciliation between server and client so sliders and other controls stay stable during collaborative sessions.
 
 ## Context
 - Client has already implemented `StateUpdateMessage` and is rebuilding around a reducer that owns optimistic + confirmed registers per `(scope, target, key)`.
-- Server currently processes `control.command` and maintains per-layer metadata; it still emits heterogeneous payloads for layers, dims, and baselines.
+- Prior to this effort the server processed `control.command` messages and emitted heterogeneous payloads for layers, dims, and baselines; the new implementation replaces those paths with the unified `state.update` message shape.
 - There is no backward-compatible path once both sides ship—mixed deployments will fail—so we must land this work in lockstep with the client branch.
 
 ## Objectives
@@ -31,7 +31,7 @@
 - Client reducer relies on a global monotonically increasing `server_seq` (32-bit wrap acceptable) and will drop any message lacking that field.
 - Dims scope uses `{scope: "dims", target: <axis label>, key: "step"}` naming; any deviation must be negotiated with the client team before coding.
 - Legacy clients will not connect once the flag flips; we coordinate deployment so only new clients speak to the updated server.
-- Existing tests for intents/control commands can be repurposed to verify the new flow; we have adequate fixtures to simulate state channel traffic.
+- Existing tests for intents/control commands were repurposed to verify the new flow; we have adequate fixtures to simulate state channel traffic.
 
 ## Risks
 - **Mixed-version deployments**: A legacy client connecting to the new server will fail; mitigation is coordinated rollout and capability gating in ops.
@@ -81,7 +81,7 @@
 - `docs/server_architecture.md`: Describe the unified state.update pipeline and metadata semantics.
 - `docs/server_streamlining_plan.md`: Mark the control-channel rewrite milestone complete and adjust future tasks.
 - New doc (`docs/server_state_update_plan.md` – this file) maintained until rollout is finished.
-- Update any developer onboarding or README references to intent/control command terminology.
+- Update any developer onboarding or README references to intent/control command terminology. ✅
 
 ## Open Questions
 - Do we need to persist `next_server_seq` across process restarts for audit trails, or is per-session sequencing sufficient?
