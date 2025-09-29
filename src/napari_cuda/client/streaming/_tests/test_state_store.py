@@ -4,7 +4,7 @@ from itertools import count
 
 import pytest
 
-from napari_cuda.client.streaming.state_store import StateStore
+from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.protocol.messages import StateUpdateMessage
 
 

@@ -27,7 +27,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
   longer required.
 - Make the code layout reflect the protocol structure (control vs pixel vs
   command), reducing ambiguity for future maintenance.
-- Validate reconnect, optimistic intent, and command flows end-to-end with the
+- Validate reconnect, optimistic state-update, and command flows end-to-end with the
   new ack contracts and resumability rules.
 
 ## 2. Current Message Flow Inventory
@@ -38,9 +38,12 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
   `client/streaming/state.py`) maintains the WebSocket, issues a
   `SessionHello` built around `PROTO_VERSION = 1`, and still expects legacy
   payloads alongside `notify.*` envelopes.
-- `client/control/intent_store.py` (archive: `state_store.py`) tracks
+- `client/control/pending_update_store.py` (archive: `state_store.py`) tracks
   optimistic state via `PendingEntry` queues keyed by `(scope, target, key)`,
   reconciling on inbound `state.update` echoes.
+- `client/control/state_update_actions.py` (archive:
+  `client/streaming/client_loop/intents.py`) centralises outgoing state-update
+  helpers and local projection logic without the legacy "intent" terminology.
 - `client/control/viewer_layer_adapter.py` (archive:
   `layer_state_bridge.py`) translates incoming layer/dims payloads into viewer
   mutations; today it still listens for legacy formats like `dims.update`.
@@ -96,12 +99,13 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 |----------------|--------------|-----------|
 | `protocol/envelopes.py` | `protocol/greenfield/envelopes.py` | Separate greenfield from legacy helpers. |
 | `protocol/parser.py` | `protocol/greenfield/parser.py` | Explicitly names the parser domain. |
-| `protocol/messages.py` | Split into `protocol/legacy/messages.py` and `protocol/greenfield/messages.py` | Remove mixed concerns and mirror schema ownership; see transition note below. |
+| `protocol/messages.py` | Split into `protocol/legacy/messages.py` and `protocol/greenfield/messages.py` (temporary) | Remove mixed concerns during migration; legacy module deleted once dual emission sunsets. |
 | `client/streaming/state.py` | `client/control/control_channel_client.py` | Matches the control-lane responsibility. |
-| `client/streaming/state_store.py` | `client/control/intent_store.py` | Highlights the optimistic intent focus. |
+| `client/streaming/state_store.py` | `client/control/pending_update_store.py` | Tracks pending `state.update` emissions and ack reconciliation without legacy "intent" terminology. |
 | `client/streaming/layer_state_bridge.py` | `client/control/viewer_layer_adapter.py` | Clarifies its bridging role. |
 | `client/streaming/controllers.py` | `client/runtime/channel_threads.py` | Emphasizes thread orchestration. |
 | `client/streaming/client_stream_loop.py` | `client/runtime/stream_runtime.py` | Marks the orchestrator that binds control + pixel paths. |
+| `client/streaming/client_loop/intents.py` | `client/control/state_update_actions.py` | Emits state-update payloads and projection helpers, dropping "intent" naming. |
 | `server/state_channel_handler.py` | `server/control/control_channel_server.py` | Symmetric naming with the client. |
 | `server/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
 | `server/server_scene_spec.py` | `server/control/scene_snapshot_builder.py` | Communicates “baseline snapshot” job. |
@@ -180,8 +184,8 @@ translating to legacy formats.
 2. Replace the legacy JSON switchboard with typed handlers driven by the
    parser (`parse_notify_scene`, `parse_notify_dims`, etc.), wiring validation
    against `docs/protocol_greenfield/schemas/notify.*.v1.schema.json`.
-3. Teach `intent_store.py` to track outstanding `frame_id` → intent entries and
-   reconcile on `ack.state`, verifying envelopes with
+3. Teach `pending_update_store.py` to track outstanding `frame_id` → state
+   update entries and reconcile on `ack.state`, verifying envelopes with
    `state.update.v1.schema.json` and `ack.state.v1.schema.json` (removing the
    old phase juggling).
 4. Drop the `dims.update`/`video_config` fallback branches.
@@ -216,7 +220,7 @@ translating to legacy formats.
 1. Extend the integration harness to:
    - Spin up server + client in greenfield-only mode.
    - Exercise reconnect with stale/valid tokens.
-   - Drive optimistic intents at 60 Hz (orbit/pan), verifying `ack.state`
+   - Drive optimistic state-updates at 60 Hz (orbit/pan), verifying `ack.state`
      timing and `notify.*` echo semantics.
    - Execute command lane RPCs and assert replies.
 2. Capture metrics on `ack.state` latency, `notify.*` payload sizes, and
@@ -230,8 +234,8 @@ translating to legacy formats.
   - `control_channel_client._handle_message` branches for `'video_config'` and
     `'dims.update'`.
   - Fire-and-forget keyframe connection in `request_keyframe_once`.
-  - Phase juggling in `intent_store.apply_local` and
-    `intent_store.apply_remote` tied to legacy ack semantics.
+  - Phase juggling in `pending_update_store.apply_local` and
+    `pending_update_store.apply_remote` tied to legacy ack semantics.
 - Server:
   - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`,
     `ping`, `request_keyframe`).
@@ -279,7 +283,7 @@ stack to validate SLAs from the spec.
 - [ ] Module rename PRs merged and docs updated.
 - [ ] Schema split + validation landed with greenfield flag (CI runs `tox -e schema-validate` to lint `docs/protocol_greenfield/schemas/*.json` against representative payload fixtures and fails on deviation).
 - [ ] New server control channel with ack semantics and command registry.
-- [ ] Client control channel rewritten; optimistic intents mapped to
+- [ ] Client control channel rewritten; optimistic state updates mapped to
       `ack.state`.
 - [ ] Command lane MVP live (fit_to_view, features_table, toggle_measures,
       request_keyframe).

@@ -125,7 +125,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.metrics import ClientMetrics
     from napari_cuda.client.streaming.presenter import FixedLatencyPresenter
     from napari_cuda.client.streaming.receiver import PixelReceiver
-    from napari_cuda.client.streaming.state import StateChannel
+    from napari_cuda.client.control.control_channel_client import StateChannel
     from .warmup import WarmupPolicy
     from .intents import ClientStateContext
     from .camera import CameraState

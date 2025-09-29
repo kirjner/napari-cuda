@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from napari_cuda.protocol.messages import SceneSpec, SceneSpecMessage, StateUpdateMessage
-from napari_cuda.server.protocol_bridge import encode_envelope, encode_envelope_json
+from napari_cuda.server.control.legacy_dual_emitter import encode_envelope, encode_envelope_json
 
 
 def test_encode_envelope_state_update() -> None:

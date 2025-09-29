@@ -4,8 +4,8 @@ from typing import Any
 
 from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.streaming.client_loop.intents import ClientStateContext
-from napari_cuda.client.streaming.state_store import StateStore
+from napari_cuda.client.control.state_update_actions import ClientStateContext
+from napari_cuda.client.control.pending_update_store import StateStore
 
 
 def _make_loop() -> ClientStreamLoop:

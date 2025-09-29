@@ -6,9 +6,9 @@ import pytest
 
 from napari_cuda.client.layers.registry import LayerRecord, RegistrySnapshot
 from napari_cuda.client.layers.remote_image_layer import RemoteImageLayer
-from napari_cuda.client.streaming.client_loop.intents import ClientStateContext
+from napari_cuda.client.control.state_update_actions import ClientStateContext
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.streaming.layer_state_bridge import LayerStateBridge
+from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 from napari_cuda.protocol.messages import LayerRenderHints, LayerSpec, StateUpdateMessage
 

@@ -7,11 +7,11 @@ import pytest
 
 from napari_cuda.server.layer_manager import ViewerSceneManager
 from napari_cuda.server.server_scene import ServerSceneData
-from napari_cuda.server.server_state_updates import (
+from napari_cuda.server.control.state_update_engine import (
     apply_dims_state_update,
     apply_layer_state_update,
 )
-from napari_cuda.server.server_scene_spec import (
+from napari_cuda.server.control.scene_snapshot_builder import (
     build_scene_spec_json,
     build_scene_spec_message,
     build_state_update_payload,

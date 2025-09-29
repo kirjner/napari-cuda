@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from napari_cuda.client.streaming.client_loop import intents
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.streaming.state_store import StateStore
+from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.protocol.messages import StateUpdateMessage
 
 

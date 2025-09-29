@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("websockets")
 
-from napari_cuda.client.streaming.state import StateChannel
+from napari_cuda.client.control.control_channel_client import StateChannel
 from napari_cuda.protocol import (
     NotifyScene,
     NotifyScenePayload,
