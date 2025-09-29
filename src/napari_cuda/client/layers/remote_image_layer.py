@@ -49,6 +49,7 @@ class RemoteImageLayer(Image):
         self._remote_id = spec.layer_id
         self.editable = False
         self._keep_auto_contrast = False
+        self._apply_render(spec.render)
         self._install_empty_slice()
         fallback_preview = self._extract_preview() if preview is None else preview
         self.update_preview(fallback_preview)
@@ -117,6 +118,8 @@ class RemoteImageLayer(Image):
         if spec.translate:
             self.translate = tuple(spec.translate)
         self.metadata = metadata
+        if spec.contrast_limits:
+            self.contrast_limits = tuple(spec.contrast_limits)  # type: ignore[arg-type]
         self._apply_render(spec.render)
         self._apply_controls(spec.controls)
         self._install_empty_slice()
@@ -184,6 +187,12 @@ class RemoteImageLayer(Image):
                 setattr(self, "shading", hints.shading)
             except Exception:
                 logger.debug("RemoteImageLayer: shading update failed", exc_info=True)
+        if hints.opacity is not None:
+            self.opacity = float(hints.opacity)
+        if hints.visibility is not None:
+            self.visible = bool(hints.visibility)
+        if hints.gamma is not None:
+            self.gamma = float(hints.gamma)
 
     def _apply_controls(self, controls: Optional[Mapping[str, Any]]) -> None:
         if not controls:
@@ -314,7 +323,15 @@ class RemoteImageLayer(Image):
             if not hasattr(self, "_slice"):
                 return
             thumb_shape = getattr(self, "_thumbnail_shape", (16, 16))
-            preview = self._remote_preview.as_thumbnail(self.rgb, (thumb_shape[0], thumb_shape[1]))
+            preview = self._remote_preview.as_thumbnail(
+                self.rgb, (thumb_shape[0], thumb_shape[1])
+            )
+            if (
+                self._slice_input.ndisplay == 3
+                and self.ndim > 2
+                and preview.ndim >= 2
+            ):
+                preview = preview[np.newaxis, ...]
             thumbnail_view = _ScalarFieldView.from_view(preview)
             self._slice = replace(self._slice, thumbnail=thumbnail_view, empty=False)
             try:

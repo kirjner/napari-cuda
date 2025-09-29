@@ -240,6 +240,8 @@ class RemotePreview:
         arr = np.asarray(src)
         if arr.ndim == 0:
             arr = arr.reshape((1, 1))
+        elif arr.ndim == 1:
+            arr = arr[np.newaxis, :]
 
         # Collapse leading dimensions until we have <= 3 dims (assuming final dims are spatial/color)
         while arr.ndim > 3:

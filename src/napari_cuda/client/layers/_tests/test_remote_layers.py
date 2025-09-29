@@ -1,3 +1,4 @@
+from dataclasses import replace
 import os
 
 import numpy as np
@@ -97,6 +98,14 @@ def test_remote_preview_handles_none_and_arrays():
     assert np.isclose(thumb_scalar[0, 0], 0.0)
     assert np.isclose(thumb_scalar.max(), 1.0)
 
+    line = np.linspace(0.0, 1.0, 32, dtype=np.float32)
+    preview.update(line)
+    thumb_line = preview.as_thumbnail(False, (4, 16))
+    assert thumb_line.shape == (4, 16)
+    expected = np.zeros((4, 16), dtype=np.float32)
+    expected[0, :16] = line[:16]
+    np.testing.assert_allclose(thumb_line, expected, atol=1e-6)
+
 
 def test_remote_image_layer_uses_metadata_thumbnail():
     preview = np.linspace(0.0, 1.0, 48, dtype=np.float32).reshape(4, 4, 3)
@@ -153,7 +162,7 @@ def test_proxy_viewer_sync_layers():
     viewer._sync_remote_layers(snapshot)
     assert len(viewer.layers) == 1
     assert viewer.layers[0] is layer
-    assert layer.visible is False
+    assert layer.visible is True
     empty_snapshot = RegistrySnapshot(layers=tuple())
     viewer._sync_remote_layers(empty_snapshot)
     assert len(viewer.layers) == 0
@@ -211,3 +220,15 @@ def test_remote_image_layer_updates_thumbnail_from_preview():
         np.testing.assert_allclose(region_float, expected_rgba, atol=1.0 / 255 + 1e-6)
     else:
         np.testing.assert_array_almost_equal(region, expected_rgba)
+
+
+def test_remote_image_layer_gamma_handles_1d_preview():
+    spec = make_layer_spec()
+    layer = RemoteImageLayer(spec)
+    preview = np.linspace(0.0, 1.0, 32, dtype=np.float32)
+    layer.update_preview(preview)
+
+    layer._slice_input = replace(layer._slice_input, ndisplay=3)
+    layer.gamma = 0.5
+
+    assert layer.thumbnail.shape == layer._thumbnail_shape
