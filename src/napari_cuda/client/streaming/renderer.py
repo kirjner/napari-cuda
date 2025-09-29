@@ -402,12 +402,12 @@ class GLRenderer:
             payload, release_cb = frame  # type: ignore[assignment]
 
         lease = payload if isinstance(payload, FrameLease) else None
-        vt_resource = lease.capsule if lease is not None else payload
+        vt_capsule = lease.capsule if lease is not None else None
 
         # Try VT zero-copy path if payload looks like a CVPixelBuffer and OpenGL is available
         drew_vt = False
         vt_attempted = False
-        if vt_resource is not None:
+        if vt_capsule is not None:
             if self._vt is None:
                 vt_module = _safe_call(
                     importlib.import_module,
@@ -420,7 +420,7 @@ class GLRenderer:
             if self._vt is not None:
                 pf = _safe_call(
                     self._vt.pixel_format,  # type: ignore[misc]
-                    vt_resource,
+                    vt_capsule,
                     default=None,
                     log_message="VT zero-copy draw: pixel_format failed",
                 )
@@ -437,7 +437,7 @@ class GLRenderer:
                             _safe_call(
                                 self._draw_vt_texture,
                                 self._vt_cache,
-                                vt_resource,
+                                vt_capsule,
                                 default=False,
                                 log_message="VT zero-copy draw: _draw_vt_texture failed",
                             )
@@ -446,8 +446,8 @@ class GLRenderer:
                             release_after_draw_cb = release_cb
                             release_after_draw_payload = payload
                             release_cb = None
-        else:
-            logger.debug("draw: payload=%s vt_attempted=%s", type(payload).__name__, vt_attempted)
+        elif payload is None:
+            logger.debug("draw: payload=None vt_attempted=%s", vt_attempted)
 
         did_draw = False
         if not drew_vt:
@@ -468,19 +468,19 @@ class GLRenderer:
             # Fallback: upload numpy RGB
             if self._video_program is None or self._video_texture is None:
                 self._init_resources()
-            if vt_resource is not None:
-                arr: Optional[np.ndarray]
+            arr: Optional[np.ndarray] = None
+            if lease is not None and vt_capsule is not None:
                 if self._vt is not None:
                     pf = _safe_call(
                         self._vt.pixel_format,  # type: ignore[misc]
-                        vt_resource,
+                        vt_capsule,
                         default=None,
                         log_message="Frame normalization: pixel_format failed",
                     )
                     if pf is not None and self._vt_force_cpu:
                         data = _safe_call(
                             self._vt.map_to_rgb,  # type: ignore[attr-defined]
-                            vt_resource,
+                            vt_capsule,
                             default=None,
                             log_message="Frame normalization: map_to_rgb failed",
                         )
@@ -490,34 +490,37 @@ class GLRenderer:
                             arr = np.frombuffer(data[0], dtype=np.uint8).reshape(
                                 (int(data[2]), int(data[1]), 3)
                             )
-                    else:
-                        arr = np.asarray(vt_resource)
+            elif payload is not None:
+                try:
+                    arr = np.asarray(payload)
+                except Exception:
+                    arr = None
+                if arr is not None and arr.ndim == 3:
+                    arr = np.flipud(arr)
+            if arr is not None and (arr.dtype != np.uint8 or not arr.flags.c_contiguous):
+                arr = np.ascontiguousarray(arr, dtype=np.uint8)
+            if arr is None:
+                logger.debug("Frame normalization failed; skipping draw")
+            if arr is not None:
+                # Recreate texture only if size changed to avoid realloc churn
+                h, w = int(arr.shape[0]), int(arr.shape[1])
+                if self._vid_shape != (h, w):
+                    texture = _safe_call(
+                        Texture2D,
+                        arr,
+                        internalformat='rgb8',
+                        log_message="Texture resize rgb8 init failed",
+                        default=None,
+                    )
+                    if texture is None:
+                        texture = Texture2D(arr)
+                    self._video_texture = texture
+                    assert self._video_texture is not None
+                    self._video_texture.interpolation = 'nearest'
+                    self._video_texture.wrapping = 'clamp_to_edge'
+                    self._video_program['texture'] = self._video_texture
+                    self._vid_shape = (h, w)
                 else:
-                    arr = np.asarray(vt_resource)
-                if arr is not None and (arr.dtype != np.uint8 or not arr.flags.c_contiguous):
-                    arr = np.ascontiguousarray(arr, dtype=np.uint8)
-                if arr is None:
-                    logger.debug("Frame normalization failed; skipping draw")
-                if arr is not None:
-                    # Recreate texture only if size changed to avoid realloc churn
-                    h, w = int(arr.shape[0]), int(arr.shape[1])
-                    if self._vid_shape != (h, w):
-                        texture = _safe_call(
-                            Texture2D,
-                            arr,
-                            internalformat='rgb8',
-                            log_message="Texture resize rgb8 init failed",
-                            default=None,
-                        )
-                        if texture is None:
-                            texture = Texture2D(arr)
-                        self._video_texture = texture
-                        assert self._video_texture is not None
-                        self._video_texture.interpolation = 'nearest'
-                        self._video_texture.wrapping = 'clamp_to_edge'
-                        self._video_program['texture'] = self._video_texture
-                        self._vid_shape = (h, w)
-                    else:
                         assert self._video_texture is not None
                         _safe_call(
                             self._video_texture.set_data,

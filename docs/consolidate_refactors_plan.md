@@ -4,14 +4,14 @@
 Server work on `server-refactor` rebuilt the headless EGL worker, state channel, and protocol surface around the enriched `state.update` envelope. The `client-refactor` branch (tip `b068480c`) introduces a reducer-driven streaming loop, new state store, and removes the old intent bridge. We need a clean integration branch that preserves the server architecture while adopting the client changes and keeps the protocol aligned with the upcoming greenfield contract in `docs/protocol_greenfield.md`.
 
 ## Goals
-- Merge `origin/client-refactor` into `server-refactor` without regressing the refactored server stack or the new client reducer pipeline.
-- Keep protocol definitions backwards-compatible while preparing for the greenfield handshake/notify envelopes.
-- Ensure the integrated branch builds, runs, and passes both client and server unit suites.
+- Merge `origin/client-refactor` into `server-refactor` without regressing the refactored server stack or the new client reducer pipeline. ✅
+- Align protocol definitions with the greenfield handshake/notify envelopes while maintaining stability across clients. ✅
+- Ensure the integrated branch builds, runs, and passes both client and server unit suites. ✅
 
 ## Deliverable Branch
 - Branch name: `consolidate-refactors` (created from `server-refactor`).
-- Single merge commit that brings in `origin/client-refactor` and resolves conflicts as described below.
-- No experimental protocol rewrites yet; dual-emission/handshake work remains follow-up.
+- Integration complete; branch now carries the reducer-driven client, refactored server, and the enforced handshake/notify protocol.
+- Experimental work outstanding: command-channel scaffolding and naming cleanups (tracked below).
 
 ## Prerequisites
 1. `git fetch origin client-refactor` to ensure tip `b068480c` is present.
@@ -61,10 +61,11 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 4. Manual smoke: `uv run napari-cuda-server --state-port ...` and `uv run napari-cuda-client` to verify pan/zoom/dims adjust correctly.
 
 ## Post-Merge Follow-Ups
-- Implement handshake + capability negotiation (`session.hello`/`session.welcome`) per `docs/protocol_greenfield.md`.
-- Introduce dual emission of `notify.*` envelopes alongside legacy payloads.
-- Replace `control.command` scaffolding with finalized `call.command` / `reply.command` flows.
-- Update CI to include new client reducer suites.
+- Finalise the command channel (`call.command` / `reply.command`) and update docs/tests once handlers exist.
+- Sweep client code to remove remaining “intent” terminology and rename modules (`client_loop/intents.py`, etc.) to match the reducer architecture.
+- Rename `state_channel_handler.py` and related helpers to notify-centric terminology per `docs/server_streamlining_plan.md`.
+- Refresh onboarding/docs to drop references to dual emission and legacy command paths.
+- Expand CI to include the reducer suites and any new command-channel coverage once available.
 
 ## Notes on command envelopes
 - The integration drops the legacy `control.command` scaffolding. When we tackle the command lane, add the greenfield `call.command`/`reply.command` helpers directly instead of refactoring an intermediate type.

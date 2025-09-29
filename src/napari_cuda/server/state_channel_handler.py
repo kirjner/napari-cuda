@@ -62,14 +62,14 @@ StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
 async def handle_state(server: Any, ws: Any) -> None:
     """Handle a state-channel websocket connection."""
 
-    server._state_clients.add(ws)
-    server.metrics.inc('napari_cuda_state_connects')
     try:
-        server._update_client_gauges()
         _disable_nagle(ws)
         handshake_ok = await _perform_state_handshake(server, ws)
         if not handshake_ok:
             return
+        server._state_clients.add(ws)
+        server.metrics.inc('napari_cuda_state_connects')
+        server._update_client_gauges()
         await _send_state_baseline(server, ws)
         remote = getattr(ws, 'remote_address', None)
         log = logger.info if server._log_state_traces else logger.debug
