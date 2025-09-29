@@ -27,9 +27,37 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 
+def _maybe_enable_debug_logger() -> bool:
+    """Enable DEBUG logging when the layer debug flag is set."""
+
+    flag = (os.getenv("NAPARI_CUDA_LAYER_DEBUG") or "").strip().lower()
+    if flag not in {"1", "true", "yes", "on", "dbg", "debug"}:
+        return False
+    has_local = any(getattr(h, "_napari_cuda_local", False) for h in logger.handlers)
+    if not has_local:
+        handler = logging.StreamHandler()
+        fmt = "[%(asctime)s] %(name)s - %(levelname)s - %(message)s"
+        handler.setFormatter(logging.Formatter(fmt))
+        handler.setLevel(logging.DEBUG)
+        setattr(handler, "_napari_cuda_local", True)
+        logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    return True
+
+
+_BRIDGE_DEBUG = _maybe_enable_debug_logger()
+
+
 def _env_bridge_enabled() -> bool:
-    flag = (os.getenv("NAPARI_CUDA_LAYER_BRIDGE") or "").lower()
-    return flag in {"1", "true", "yes", "on"}
+    """Return whether the layer bridge should be active."""
+
+    flag = (os.getenv("NAPARI_CUDA_LAYER_BRIDGE") or "").strip().lower()
+    if not flag:
+        return True
+    if flag in {"0", "false", "no", "off", "disable", "disabled"}:
+        return False
+    return True
 
 
 def _isclose(a: float, b: float, *, tol: float = 1e-5) -> bool:
