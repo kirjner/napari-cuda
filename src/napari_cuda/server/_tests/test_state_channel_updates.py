@@ -57,6 +57,16 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._broadcast_state_json = _broadcast_state_json
 
+    server._ndisplay_calls: list[tuple[int, Any, Any]] = []
+
+    async def _handle_set_ndisplay(ndisplay: int, client_id: object, client_seq: object) -> None:
+        value = 3 if int(ndisplay) >= 3 else 2
+        server._ndisplay_calls.append((value, client_id, client_seq))
+        server.use_volume = bool(value == 3)
+        server._scene.use_volume = bool(value == 3)
+
+    server._handle_set_ndisplay = _handle_set_ndisplay
+
     return server, scheduled, captured
 
 
@@ -158,6 +168,38 @@ def test_state_update_dims_broadcasts() -> None:
     assert event.get("ack") is True
     assert event.get("axis_index") == 0
     assert event.get("current_step")[:1] == [5]
+
+
+def test_state_update_view_ndisplay_broadcasts() -> None:
+    server, scheduled, captured = _make_server()
+
+    payload = {
+        "type": "state.update",
+        "scope": "view",
+        "target": "main",
+        "key": "ndisplay",
+        "value": 3,
+        "client_id": "client-view",
+        "client_seq": 6,
+        "interaction_id": "toggle-1",
+        "phase": "commit",
+        "intent_seq": 42,
+    }
+
+    asyncio.run(state_channel_handler._handle_state_update(server, payload, None))
+    _drain_scheduled(scheduled)
+
+    assert server._ndisplay_calls == [(3, "client-view", 6)]
+    assert server.use_volume is True
+    assert captured, "expected view broadcast"
+    event = [p for p in captured if p["scope"] == "view"][0]
+    assert event["target"] == "main"
+    assert event["key"] == "ndisplay"
+    assert event["value"] == 3
+    assert event.get("ack") is True
+    assert event.get("intent_seq") == 42
+    versions = event.get("control_versions") or {}
+    assert versions.get("ndisplay", {}).get("server_seq") == event["server_seq"]
 
 
 def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:

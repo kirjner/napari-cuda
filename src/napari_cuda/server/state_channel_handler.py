@@ -228,6 +228,53 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     client_seq = message.client_seq
     interaction_id = message.interaction_id
     phase = message.phase
+    intent_seq = message.intent_seq
+
+    if scope == 'view':
+        if key != 'ndisplay':
+            logger.debug("state.update view ignored key=%s", key)
+            return True
+        try:
+            raw_value = int(message.value) if message.value is not None else 2
+        except Exception:
+            logger.debug(
+                "state.update view ignored (non-integer ndisplay) value=%r",
+                message.value,
+            )
+            return True
+        ndisplay = 3 if int(raw_value) >= 3 else 2
+        try:
+            await server._handle_set_ndisplay(ndisplay, client_id, client_seq)
+        except Exception:
+            logger.debug("state.update view.set_ndisplay failed", exc_info=True)
+            return True
+
+        client_seq_int: Optional[int]
+        try:
+            client_seq_int = int(client_seq) if client_seq is not None else None
+        except (TypeError, ValueError):
+            client_seq_int = None
+
+        result = _baseline_state_result(
+            server,
+            scope='view',
+            target=target,
+            key='ndisplay',
+            value=int(ndisplay),
+            client_id=client_id,
+            client_seq=client_seq_int,
+            interaction_id=interaction_id,
+            phase=phase,
+            timestamp=time.time(),
+            ack=True,
+            intent_seq=intent_seq,
+        )
+
+        server._schedule_coro(
+            _broadcast_state_update(server, result),
+            'state-view-ndisplay',
+        )
+        return True
 
     if scope == 'layer':
         layer_id = target
