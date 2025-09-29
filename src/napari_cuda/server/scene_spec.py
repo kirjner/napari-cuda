@@ -205,13 +205,97 @@ def dims_metadata(scene: Optional[Union[SceneSpec, Dict[str, Any]]]) -> Dict[str
         dims = dict(scene_dict.get("dims") or {})
     except Exception:
         dims = {}
+    current_step_raw = dims.get("current_step")
+    if isinstance(current_step_raw, (list, tuple)):
+        current_step = [int(x) for x in current_step_raw]
+    elif current_step_raw is None:
+        current_step = None
+    else:
+        try:
+            current_step = [int(current_step_raw)]
+        except Exception:
+            current_step = None
+
+    def _ensure_list(value: object) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        if value is None:
+            return []
+        return [value]
+
+    order_list = _ensure_list(dims.get("order"))
+    axis_labels_list = _ensure_list(dims.get("axis_labels"))
+    sizes_list = _ensure_list(dims.get("sizes"))
+    range_list = _ensure_list(dims.get("range"))
+
+    axis_count_candidates = [
+        len(order_list),
+        len(axis_labels_list),
+        len(sizes_list),
+        len(range_list),
+        len(current_step) if current_step is not None else 0,
+    ]
+    ndim = dims.get("ndim")
+    try:
+        axis_count_candidates.append(int(ndim))
+    except Exception:
+        ndim = None
+
+    axis_count = max(axis_count_candidates) if axis_count_candidates else 0
+    if ndim is None:
+        ndim = axis_count
+    else:
+        axis_count = max(axis_count, int(ndim))
+
+    if not order_list and axis_count:
+        order_list = [str(i) for i in range(axis_count)]
+    if not axis_labels_list and axis_count:
+        axis_labels_list = list(order_list)
+
+    if len(order_list) < axis_count:
+        order_list.extend(str(len(order_list) + i) for i in range(axis_count - len(order_list)))
+    if len(axis_labels_list) < axis_count:
+        axis_labels_list.extend(order_list[len(axis_labels_list):axis_count])
+
+    # Sizes fallback: try dims sizes, else infer from range, else default ones
+    if len(sizes_list) < axis_count:
+        if range_list and len(range_list) >= axis_count:
+            for idx in range(len(sizes_list), axis_count):
+                rng = range_list[idx]
+                if isinstance(rng, (list, tuple)) and len(rng) >= 2:
+                    lo, hi = int(rng[0]), int(rng[1])
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    sizes_list.append(max(1, hi - lo + 1))
+                else:
+                    sizes_list.append(1)
+        else:
+            sizes_list.extend([1] * (axis_count - len(sizes_list)))
+
+    # Range fallback: clamp based on sizes
+    if len(range_list) < axis_count:
+        for idx in range(len(range_list), axis_count):
+            size = int(sizes_list[idx]) if idx < len(sizes_list) else 1
+            hi = max(0, size - 1)
+            range_list.append([0, hi])
+
     meta: Dict[str, Any] = {
-        "ndim": dims.get("ndim"),
-        "order": dims.get("order"),
-        "sizes": dims.get("sizes"),
-        "range": dims.get("range"),
-        "axis_labels": dims.get("axis_labels"),
+        "ndim": int(ndim),
+        "order": [str(x) for x in order_list[:axis_count]],
+        "sizes": [int(x) for x in sizes_list[:axis_count]],
+        "range": [
+            [int(pair[0]), int(pair[1])] if isinstance(pair, (list, tuple)) and len(pair) >= 2 else [0, 0]
+            for pair in range_list[:axis_count]
+        ],
+        "axis_labels": [str(x) for x in axis_labels_list[:axis_count]],
     }
+    if current_step is not None:
+        step_list = current_step[:axis_count]
+        while len(step_list) < axis_count:
+            step_list.append(0)
+        meta["current_step"] = step_list
 
     layers = scene_dict.get("layers") or []
     layer0 = layers[0] if layers else None

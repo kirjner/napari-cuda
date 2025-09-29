@@ -172,7 +172,13 @@ def test_apply_dims_state_update_tracks_metadata_for_index():
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0, 0))
     lock = _lock()
-    meta = {"ndim": 3, "order": ["z", "y", "x"], "range": [(0, 9), (0, 9), (0, 9)]}
+    meta = {
+        "ndim": 3,
+        "order": ["z", "y", "x"],
+        "axis_labels": ["z", "y", "x"],
+        "sizes": [10, 10, 10],
+        "range": [(0, 9), (0, 9), (0, 9)],
+    }
 
     result = updates.apply_dims_state_update(
         scene,
@@ -196,13 +202,25 @@ def test_apply_dims_state_update_tracks_metadata_for_index():
     assert meta_entry.last_client_seq == 3
     assert meta_entry.last_interaction_id == "drag-1"
     assert meta_entry.last_phase == "update"
+    payload_meta = result.extras["meta"]
+    assert payload_meta["ndim"] == 3
+    assert payload_meta["order"] == ["z", "y", "x"]
+    assert payload_meta["axis_labels"] == ["z", "y", "x"]
+    assert payload_meta["sizes"] == [10, 10, 10]
+    assert tuple(payload_meta["range"][0]) == (0, 9)
 
 
 def test_apply_dims_state_update_handles_step_delta():
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(10, 0, 0))
     lock = _lock()
-    meta = {"ndim": 3, "order": ["z", "y", "x"], "range": [(0, 20), (0, 9), (0, 9)]}
+    meta = {
+        "ndim": 3,
+        "order": ["z", "y", "x"],
+        "axis_labels": ["z", "y", "x"],
+        "sizes": [21, 10, 10],
+        "range": [(0, 20), (0, 9), (0, 9)],
+    }
 
     result = updates.apply_dims_state_update(
         scene,
