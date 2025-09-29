@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
 
+from numbers import Integral
+
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE, StateUpdateMessage
 from napari_cuda.server import server_state_updates as state_updates
 from napari_cuda.server.server_state_updates import (
@@ -99,7 +101,7 @@ async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> b
 
 
 async def _handle_legacy_dims(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    logger.debug("state: dims.set ignored (use dims.intent.*)")
+    logger.debug("state: dims.set ignored (use dims.update.*)")
     return True
 
 
@@ -109,8 +111,8 @@ async def _handle_volume_render_mode(server: Any, data: Mapping[str, Any], ws: A
     client_id = data.get('client_id') or None
     if state_updates.is_valid_render_mode(mode, server._allowed_render_modes):
         state_updates.update_volume_mode(server._scene, server._state_lock, mode)
-        server._log_volume_intent(
-            "intent: volume.set_render_mode mode=%s client_id=%s seq=%s",
+        server._log_volume_update(
+            "update: volume.set_render_mode mode=%s client_id=%s seq=%s",
             mode,
             client_id,
             client_seq,
@@ -129,8 +131,8 @@ async def _handle_volume_clim(server: Any, data: Mapping[str, Any], ws: Any) -> 
     client_id = data.get('client_id') or None
     if pair is not None:
         lo, hi = pair
-        server._log_volume_intent(
-            "intent: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s",
+        server._log_volume_update(
+            "update: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s",
             lo,
             hi,
             client_id,
@@ -150,8 +152,8 @@ async def _handle_volume_colormap(server: Any, data: Mapping[str, Any], ws: Any)
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if isinstance(name, str) and name.strip():
-        server._log_volume_intent(
-            "intent: volume.set_colormap name=%s client_id=%s seq=%s",
+        server._log_volume_update(
+            "update: volume.set_colormap name=%s client_id=%s seq=%s",
             name,
             client_id,
             client_seq,
@@ -170,8 +172,8 @@ async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) 
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if opacity is not None:
-        server._log_volume_intent(
-            "intent: volume.set_opacity alpha=%.3f client_id=%s seq=%s",
+        server._log_volume_update(
+            "update: volume.set_opacity alpha=%.3f client_id=%s seq=%s",
             opacity,
             client_id,
             client_seq,
@@ -190,8 +192,8 @@ async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: A
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if sample_step is not None:
-        server._log_volume_intent(
-            "intent: volume.set_sample_step relative=%.3f client_id=%s seq=%s",
+        server._log_volume_update(
+            "update: volume.set_sample_step relative=%.3f client_id=%s seq=%s",
             sample_step,
             client_id,
             client_seq,
@@ -274,6 +276,41 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         return True
 
     if scope == 'dims':
+        step_delta: Optional[int] = None
+        set_value: Optional[int] = None
+        norm_key = key
+        value_obj = message.value
+        if key == 'index':
+            norm_key = 'index'
+            if isinstance(value_obj, Integral):
+                set_value = int(value_obj)
+                value_obj = None
+            else:
+                logger.debug(
+                    "state.update dims ignored (non-integer index) axis=%s value=%r",
+                    target,
+                    value_obj,
+                )
+                return True
+        elif key == 'step':
+            norm_key = 'step'
+            if isinstance(value_obj, Integral):
+                step_delta = int(value_obj)
+                value_obj = None
+            else:
+                logger.debug(
+                    "state.update dims ignored (non-integer step delta) axis=%s value=%r",
+                    target,
+                    value_obj,
+                )
+                return True
+        else:
+            logger.debug(
+                "state.update dims ignored (unsupported key) axis=%s key=%s",
+                target,
+                key,
+            )
+            return True
         meta = server._dims_metadata() or {}
         try:
             result = apply_dims_state_update(
@@ -281,8 +318,10 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 server._state_lock,
                 meta,
                 axis=target,
-                prop=key,
-                value=message.value,
+                prop=norm_key,
+                value=value_obj,
+                step_delta=step_delta,
+                set_value=set_value,
                 client_id=client_id,
                 client_seq=client_seq,
                 interaction_id=interaction_id,
@@ -320,16 +359,16 @@ async def _handle_multiscale_policy(server: Any, data: Mapping[str, Any], ws: An
     client_id = data.get('client_id') or None
     allowed = {'oversampling', 'thresholds', 'ratio'}
     if policy not in allowed:
-        server._log_volume_intent(
-            "intent: multiscale.set_policy rejected policy=%s client_id=%s seq=%s",
+        server._log_volume_update(
+            "update: multiscale.set_policy rejected policy=%s client_id=%s seq=%s",
             policy,
             client_id,
             client_seq,
         )
         return True
     server._scene.multiscale_state['policy'] = policy
-    server._log_volume_intent(
-        "intent: multiscale.set_policy policy=%s client_id=%s seq=%s",
+    server._log_volume_update(
+        "update: multiscale.set_policy policy=%s client_id=%s seq=%s",
         policy,
         client_id,
         client_seq,
@@ -360,8 +399,8 @@ async def _handle_multiscale_level(server: Any, data: Mapping[str, Any], ws: Any
     if level is None:
         return True
     server._scene.multiscale_state['current_level'] = int(level)
-    server._log_volume_intent(
-        "intent: multiscale.set_level level=%d client_id=%s seq=%s",
+    server._log_volume_update(
+        "update: multiscale.set_level level=%d client_id=%s seq=%s",
         int(level),
         client_id,
         client_seq,
@@ -429,7 +468,7 @@ async def _handle_camera_zoom(server: Any, data: Mapping[str, Any], ws: Any) -> 
         tuple(anchor) if isinstance(anchor, (list, tuple)) and len(anchor) >= 2 else None
     )
     if factor > 0.0 and anchor_tuple is not None:
-        server.metrics.inc('napari_cuda_state_camera_intents')
+        server.metrics.inc('napari_cuda_state_camera_updates')
         if server._log_cam_info:
             logger.info(
                 "state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)",
@@ -466,7 +505,7 @@ async def _handle_camera_pan(server: Any, data: Mapping[str, Any], ws: Any) -> b
             logger.info("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
         elif server._log_cam_debug:
             logger.debug("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
-        server.metrics.inc('napari_cuda_state_camera_intents')
+        server.metrics.inc('napari_cuda_state_camera_updates')
         server._enqueue_camera_command(
             ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy))
         )
@@ -485,7 +524,7 @@ async def _handle_camera_orbit(server: Any, data: Mapping[str, Any], ws: Any) ->
             logger.info("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
         elif server._log_cam_debug:
             logger.debug("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
-        server.metrics.inc('napari_cuda_state_camera_intents')
+        server.metrics.inc('napari_cuda_state_camera_updates')
         server._enqueue_camera_command(
             ServerSceneCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el))
         )
@@ -498,7 +537,7 @@ async def _handle_camera_reset(server: Any, data: Mapping[str, Any], ws: Any) ->
         logger.info("state: camera.reset")
     elif server._log_cam_debug:
         logger.debug("state: camera.reset")
-    server.metrics.inc('napari_cuda_state_camera_intents')
+    server.metrics.inc('napari_cuda_state_camera_updates')
     server._enqueue_camera_command(ServerSceneCommand(kind='reset'))
     if server._idr_on_reset and server._worker is not None:
         logger.info("state: camera.reset -> ensure_keyframe start")
@@ -522,14 +561,14 @@ MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     'dims.set': _handle_legacy_dims,
     'set_dims': _handle_legacy_dims,
     STATE_UPDATE_TYPE: _handle_state_update,
-    'volume.intent.set_render_mode': _handle_volume_render_mode,
-    'volume.intent.set_clim': _handle_volume_clim,
-    'volume.intent.set_colormap': _handle_volume_colormap,
-    'volume.intent.set_opacity': _handle_volume_opacity,
-    'volume.intent.set_sample_step': _handle_volume_sample_step,
-    'multiscale.intent.set_policy': _handle_multiscale_policy,
-    'multiscale.intent.set_level': _handle_multiscale_level,
-    'view.intent.set_ndisplay': _handle_set_ndisplay,
+    'volume.update.set_render_mode': _handle_volume_render_mode,
+    'volume.update.set_clim': _handle_volume_clim,
+    'volume.update.set_colormap': _handle_volume_colormap,
+    'volume.update.set_opacity': _handle_volume_opacity,
+    'volume.update.set_sample_step': _handle_volume_sample_step,
+    'multiscale.update.set_policy': _handle_multiscale_policy,
+    'multiscale.update.set_level': _handle_multiscale_level,
+    'view.update.set_ndisplay': _handle_set_ndisplay,
     'camera.zoom_at': _handle_camera_zoom,
     'camera.pan_px': _handle_camera_pan,
     'camera.orbit': _handle_camera_orbit,

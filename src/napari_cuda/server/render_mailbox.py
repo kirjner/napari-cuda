@@ -38,7 +38,7 @@ class PendingRenderUpdate:
 
 
 @dataclass(frozen=True)
-class RenderZoomIntent:
+class RenderZoomHint:
     """Latest zoom hint emitted by the control loop."""
 
     ratio: float
@@ -53,7 +53,7 @@ class RenderMailbox:
         self._display_mode: Optional[int] = None
         self._multiscale: Optional[RenderLevelRequest] = None
         self._scene_state: Optional[ServerSceneState] = None
-        self._zoom_intent: Optional[RenderZoomIntent] = None
+        self._zoom_hint: Optional[RenderZoomHint] = None
         self._last_signature: Optional[tuple] = None
         self._lock = threading.Lock()
 
@@ -90,24 +90,24 @@ class RenderMailbox:
             self._scene_state = None
         return drained
 
-    def record_zoom_intent(self, ratio: float, *, timestamp: Optional[float] = None) -> None:
+    def record_zoom_hint(self, ratio: float, *, timestamp: Optional[float] = None) -> None:
         if ratio <= 0.0:
             raise ValueError("zoom ratio must be positive")
         ts = self._time_fn() if timestamp is None else float(timestamp)
         with self._lock:
-            self._zoom_intent = RenderZoomIntent(float(ratio), ts)
+            self._zoom_hint = RenderZoomHint(float(ratio), ts)
 
-    def consume_zoom_intent(self, max_age: float) -> Optional[RenderZoomIntent]:
+    def consume_zoom_hint(self, max_age: float) -> Optional[RenderZoomHint]:
         now = self._time_fn()
         with self._lock:
-            zoom = self._zoom_intent
+            zoom = self._zoom_hint
             if zoom is None:
                 return None
             age = now - float(zoom.timestamp)
             if age > float(max_age):
-                self._zoom_intent = None
+                self._zoom_hint = None
                 return None
-            self._zoom_intent = None
+            self._zoom_hint = None
             return zoom
 
     def update_state_signature(self, state: ServerSceneState) -> bool:
@@ -135,6 +135,6 @@ __all__ = [
     "RenderDelta",
     "RenderLevelRequest",
     "RenderMailbox",
-    "RenderZoomIntent",
+    "RenderZoomHint",
     "PendingRenderUpdate",
 ]

@@ -544,7 +544,7 @@ class EGLRendererWorker:
         self,
         source: ZarrSceneSource,
         *,
-        intent_level: Optional[int],
+        requested_level: Optional[int],
     ) -> level_policy.LevelSelectionContext:
         levels = tuple(source.level_descriptors)
         overs_map: Dict[int, float] = {}
@@ -560,7 +560,7 @@ class EGLRendererWorker:
         return level_policy.LevelSelectionContext(
             levels=levels,
             current_level=int(self._active_ms_level),
-            intent_level=int(intent_level) if intent_level is not None else None,
+            requested_level=int(requested_level) if requested_level is not None else None,
             level_oversampling=overs_map,
             thresholds=self._oversampling_thresholds,
             hysteresis=self._oversampling_hysteresis,
@@ -662,7 +662,7 @@ class EGLRendererWorker:
             self,
             target_level=int(target),
             reason="intent",
-            intent_level=int(target),
+            requested_level=int(target),
             selected_level=int(target),
             source=source,
             budget_error=self._budget_error_cls,
@@ -980,7 +980,7 @@ class EGLRendererWorker:
             return
 
         current = int(self._active_ms_level)
-        zoom_hint = self._render_mailbox.consume_zoom_intent(max_age=0.5)
+        zoom_hint = self._render_mailbox.consume_zoom_hint(max_age=0.5)
         zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
 
         config = lod.LevelPolicyConfig(

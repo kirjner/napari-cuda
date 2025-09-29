@@ -45,25 +45,25 @@ def test_drain_pending_updates_returns_last_values() -> None:
     assert updates_empty.scene_state is None
 
 
-def test_zoom_intent_recent_then_stale() -> None:
+def test_zoom_hint_recent_then_stale() -> None:
     clock = _FakeClock()
     mailbox = RenderMailbox(time_fn=clock)
 
-    mailbox.record_zoom_intent(1.2)
-    zoom = mailbox.consume_zoom_intent(max_age=0.5)
+    mailbox.record_zoom_hint(1.2)
+    zoom = mailbox.consume_zoom_hint(max_age=0.5)
     assert zoom is not None
     assert math.isclose(zoom.ratio, 1.2)
 
     # No intent left after consumption
-    assert mailbox.consume_zoom_intent(max_age=0.5) is None
+    assert mailbox.consume_zoom_hint(max_age=0.5) is None
 
     with pytest.raises(ValueError):
-        mailbox.record_zoom_intent(0.0)
+        mailbox.record_zoom_hint(0.0)
 
-    mailbox.record_zoom_intent(0.8)
+    mailbox.record_zoom_hint(0.8)
     clock.advance(1.0)
-    # Intent is now stale
-    assert mailbox.consume_zoom_intent(max_age=0.5) is None
+    # Hint is now stale
+    assert mailbox.consume_zoom_hint(max_age=0.5) is None
 
 
 def test_update_state_signature_detects_changes() -> None:

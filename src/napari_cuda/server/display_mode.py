@@ -30,7 +30,7 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
             worker,
             target_level=int(level),
             reason="ndisplay-3d",
-            intent_level=int(level),
+            requested_level=int(level),
             selected_level=int(level),
             source=source,
             budget_error=getattr(worker, "_budget_error_cls", RuntimeError),

@@ -443,7 +443,7 @@ def perform_level_switch(
     *,
     target_level: int,
     reason: str,
-    intent_level: Optional[int],
+    requested_level: Optional[int],
     selected_level: Optional[int],
     source: Optional[ZarrSceneSource] = None,
     budget_error: type[Exception],
@@ -457,7 +457,7 @@ def perform_level_switch(
     if source is None:
         source = worker._ensure_scene_source()  # type: ignore[attr-defined]
     target_level = int(target_level)
-    ctx = worker._build_policy_context(source, intent_level=target_level)  # type: ignore[attr-defined]
+    ctx = worker._build_policy_context(source, requested_level=target_level)  # type: ignore[attr-defined]
     prev = int(getattr(worker, "_active_ms_level", 0))
     set_level_with_budget(worker, target_level, reason=reason, budget_error=budget_error)
     if reason in {"zoom-in", "zoom-out"}:
@@ -465,7 +465,7 @@ def perform_level_switch(
     idle_ms = max(0.0, (time.perf_counter() - getattr(worker, "_last_interaction_ts", time.perf_counter())) * 1000.0)
     worker._policy_metrics.record(  # type: ignore[attr-defined]
         policy=getattr(worker, "_policy_name", "oversampling"),
-        intent_level=intent_level if intent_level is not None else ctx.intent_level,
+        requested_level=requested_level if requested_level is not None else ctx.requested_level,
         selected_level=selected_level if selected_level is not None else target_level,
         desired_level=target_level,
         applied_level=int(getattr(worker, "_active_ms_level", target_level)),

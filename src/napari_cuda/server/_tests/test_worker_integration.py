@@ -364,7 +364,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
     return worker
 
 
-def test_zoom_intent_reaches_lod_selector(render_worker_fixture, monkeypatch):
+def test_zoom_hint_reaches_lod_selector(render_worker_fixture, monkeypatch):
     from napari_cuda.server import render_worker as rw
 
     worker = render_worker_fixture
@@ -390,7 +390,7 @@ def test_zoom_intent_reaches_lod_selector(render_worker_fixture, monkeypatch):
 
     assert ratios, "select_level was not invoked"
     assert math.isclose(float(ratios[-1]), 0.5, rel_tol=1e-6)
-    assert worker._render_mailbox.consume_zoom_intent(max_age=0.5) is None
+    assert worker._render_mailbox.consume_zoom_hint(max_age=0.5) is None
 
 
 def test_preserve_view_switch_keeps_camera_range(render_worker_fixture):
@@ -454,7 +454,7 @@ def test_layer_updates_drive_napari_layer(render_worker_fixture):
     assert worker._render_tick_required is True
 
 
-def test_zoom_intent_triggers_level_switch_end_to_end(render_worker_fixture):
+def test_zoom_hint_triggers_level_switch_end_to_end(render_worker_fixture):
     worker = render_worker_fixture
 
     def _oversampling(self, source, level):  # type: ignore[no-untyped-def]
@@ -468,7 +468,7 @@ def test_zoom_intent_triggers_level_switch_end_to_end(render_worker_fixture):
 
     assert worker._active_ms_level == 0
     assert worker._napari_layer.applied, "slice should be applied when level changes"
-    assert worker._render_mailbox.consume_zoom_intent(max_age=0.5) is None
+    assert worker._render_mailbox.consume_zoom_hint(max_age=0.5) is None
     assert worker._last_level_switch_ts > 0.0
 
 
@@ -492,11 +492,11 @@ def test_ndisplay_switch_to_volume_pins_coarsest_level(render_worker_fixture, mo
 
     recorded: dict[str, object] = {}
 
-    def _capture_switch(worker_param, *, target_level, reason, intent_level, selected_level, source=None, budget_error=None):  # type: ignore[no-untyped-def]
+    def _capture_switch(worker_param, *, target_level, reason, requested_level, selected_level, source=None, budget_error=None):  # type: ignore[no-untyped-def]
         recorded.update(
             target_level=int(target_level),
             reason=reason,
-            intent_level=int(intent_level) if intent_level is not None else None,
+            requested_level=int(requested_level) if requested_level is not None else None,
             selected_level=int(selected_level) if selected_level is not None else None,
         )
         worker_param._active_ms_level = int(target_level)  # type: ignore[attr-defined]

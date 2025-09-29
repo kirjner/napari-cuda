@@ -22,7 +22,7 @@ def make_ctx(
     return policy.LevelSelectionContext(
         levels=levels,
         current_level=current,
-        intent_level=intent,
+        requested_level=intent,
         level_oversampling=overs,
         thresholds=thresholds,
         hysteresis=hysteresis,

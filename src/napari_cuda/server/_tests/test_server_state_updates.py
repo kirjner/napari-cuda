@@ -168,7 +168,7 @@ def test_apply_layer_state_update_rejects_invalid_property():
         updates.apply_layer_state_update(scene, lock, layer_id="layer-0", prop="unknown", value="x")
 
 
-def test_apply_dims_state_update_tracks_metadata():
+def test_apply_dims_state_update_tracks_metadata_for_index():
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0, 0))
     lock = _lock()
@@ -179,8 +179,9 @@ def test_apply_dims_state_update_tracks_metadata():
         lock,
         meta,
         axis="z",
-        prop="step",
-        value=5,
+        prop="index",
+        value=None,
+        set_value=5,
         client_id="client-z",
         client_seq=3,
         interaction_id="drag-1",
@@ -190,11 +191,38 @@ def test_apply_dims_state_update_tracks_metadata():
     assert result is not None
     assert result.value == 5
     assert scene.latest_state.current_step[0] == 5
-    meta_entry = scene.control_meta[("dims", "z", "step")]
+    meta_entry = scene.control_meta[("dims", "z", "index")]
     assert meta_entry.last_client_id == "client-z"
     assert meta_entry.last_client_seq == 3
     assert meta_entry.last_interaction_id == "drag-1"
     assert meta_entry.last_phase == "update"
+
+
+def test_apply_dims_state_update_handles_step_delta():
+    scene = create_server_scene_data()
+    scene.latest_state = ServerSceneState(current_step=(10, 0, 0))
+    lock = _lock()
+    meta = {"ndim": 3, "order": ["z", "y", "x"], "range": [(0, 20), (0, 9), (0, 9)]}
+
+    result = updates.apply_dims_state_update(
+        scene,
+        lock,
+        meta,
+        axis="z",
+        prop="step",
+        value=None,
+        step_delta=3,
+        client_id="client-z",
+        client_seq=4,
+        interaction_id="drag-2",
+        phase="update",
+    )
+
+    assert result is not None
+    assert result.value == 13
+    assert scene.latest_state.current_step[0] == 13
+    meta_entry = scene.control_meta[("dims", "z", "step")]
+    assert meta_entry.last_client_seq == 4
 
 
 def test_prune_control_metadata_removes_stale_layer_entries() -> None:

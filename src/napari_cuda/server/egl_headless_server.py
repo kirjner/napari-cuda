@@ -293,14 +293,14 @@ class EGLHeadlessServer:
             return
         process_worker_notifications(self, notifications)
 
-    def _log_volume_intent(self, fmt: str, *args) -> None:
+    def _log_volume_update(self, fmt: str, *args) -> None:
         try:
             if self._log_volume_info:
                 logger.info(fmt, *args)
             else:
                 logger.debug(fmt, *args)
         except Exception:
-            logger.debug("volume intent log failed", exc_info=True)
+            logger.debug("volume update log failed", exc_info=True)
 
     def _try_reset_encoder(self) -> bool:
         worker = self._worker

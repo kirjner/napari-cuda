@@ -73,7 +73,7 @@ def update_policy_metrics(
 
     decision = snapshot.get("last_decision")
     if isinstance(decision, Mapping) and decision:
-        metrics.set("napari_cuda_policy_intent_level", float(decision.get("intent_level", -1.0)))
+        metrics.set("napari_cuda_policy_requested_level", float(decision.get("requested_level", -1.0)))
         metrics.set("napari_cuda_policy_desired_level", float(decision.get("desired_level", -1.0)))
         metrics.set("napari_cuda_policy_applied_level", float(decision.get("applied_level", -1.0)))
         metrics.set("napari_cuda_policy_idle_ms", float(decision.get("idle_ms", 0.0)))

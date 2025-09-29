@@ -1,8 +1,8 @@
 """Camera command execution helpers.
 
 These helpers transform high-level camera commands into concrete VisPy camera
-operations, returning intent metadata so the worker can orchestrate policy
-triggers and zoom hints.
+operations, returning metadata so the worker can orchestrate policy triggers
+and zoom hints.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class CameraDebugFlags:
 class CameraCommandOutcome:
     camera_changed: bool
     policy_triggered: bool
-    zoom_intent: Optional[float]
+    zoom_hint: Optional[float]
     last_zoom_hint_ts: Optional[float]
     interaction_ts: Optional[float]
 
@@ -48,7 +48,7 @@ def apply_camera_commands(
     debug_flags: CameraDebugFlags,
     mark_render_tick_needed: Optional[Callable[[], None]] = None,
     trigger_policy_refresh: Optional[Callable[[], None]] = None,
-    record_zoom_intent: Optional[Callable[[float], None]] = None,
+    record_zoom_hint: Optional[Callable[[float], None]] = None,
     last_zoom_hint_ts: Optional[float] = None,
     zoom_hint_hold_s: float = 0.0,
     now_fn: Callable[[], float] = time.perf_counter,
@@ -56,28 +56,28 @@ def apply_camera_commands(
     """Apply camera commands and report whether policy evaluation is needed."""
 
     if camera is None:
-        # Camera not ready yet: record zoom intents for policy but skip execution.
-        zoom_intent: Optional[float] = None
+        # Camera not ready yet: record zoom hints for policy but skip execution.
+        zoom_hint: Optional[float] = None
         now_val = now_fn() if commands else None
-        if record_zoom_intent is not None:
+        if record_zoom_hint is not None:
             for command in commands:
                 if command.kind == "zoom" and command.factor is not None and command.factor > 0.0:
                     ratio = float(command.factor)
-                    record_zoom_intent(ratio)
-                    zoom_intent = ratio
+                    record_zoom_hint(ratio)
+                    zoom_hint = ratio
         interaction_ts = now_val
         return CameraCommandOutcome(
             camera_changed=False,
             policy_triggered=False,
-            zoom_intent=zoom_intent,
-            last_zoom_hint_ts=now_val if zoom_intent is not None else last_zoom_hint_ts,
+            zoom_hint=zoom_hint,
+            last_zoom_hint_ts=now_val if zoom_hint is not None else last_zoom_hint_ts,
             interaction_ts=interaction_ts,
         )
 
     cw, ch = canvas_size
     camera_changed = False
     policy_touch = False
-    zoom_intent: Optional[float] = None
+    zoom_hint_ratio: Optional[float] = None
     zoom_hint_ts = last_zoom_hint_ts
     interaction_ts: Optional[float] = None
 
@@ -99,18 +99,18 @@ def apply_camera_commands(
             policy_touch = True
             recorded = False
             ratio_recorded: Optional[float] = None
-            if record_zoom_intent is not None:
+            if record_zoom_hint is not None:
                 prev_ts = float(zoom_hint_ts) if zoom_hint_ts is not None else float('-inf')
                 if (interaction_ts - prev_ts) >= float(zoom_hint_hold_s):
                     ratio = float(factor)
                     if ratio > 1.0:
                         ratio = 1.0 / ratio
-                    record_zoom_intent(ratio)
+                    record_zoom_hint(ratio)
                     ratio_recorded = ratio
                     zoom_hint_ts = interaction_ts
                     recorded = True
             if recorded:
-                zoom_intent = ratio_recorded
+                zoom_hint_ratio = ratio_recorded
             if debug_flags.zoom and logger.isEnabledFor(logging.INFO):
                 logger.info(
                     "command zoom factor=%.4f anchor=(%.1f,%.1f)",
@@ -159,8 +159,8 @@ def apply_camera_commands(
     return CameraCommandOutcome(
         camera_changed=camera_changed,
         policy_triggered=policy_touch,
-        zoom_intent=zoom_intent,
-        last_zoom_hint_ts=zoom_hint_ts if zoom_intent is not None else last_zoom_hint_ts,
+        zoom_hint=zoom_hint_ratio,
+        last_zoom_hint_ts=zoom_hint_ts if zoom_hint_ratio is not None else last_zoom_hint_ts,
         interaction_ts=interaction_ts,
     )
 
@@ -196,8 +196,8 @@ def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
     def _trigger_policy() -> None:
         worker._level_policy_refresh_needed = True
 
-    def _record_zoom_intent(ratio: float) -> None:
-        worker._render_mailbox.record_zoom_intent(float(ratio))
+    def _record_zoom_hint(ratio: float) -> None:
+        worker._render_mailbox.record_zoom_hint(float(ratio))
 
     outcome = apply_camera_commands(
         commands,
@@ -208,7 +208,7 @@ def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
         debug_flags=debug_flags,
         mark_render_tick_needed=_mark_render,
         trigger_policy_refresh=_trigger_policy,
-        record_zoom_intent=_record_zoom_intent,
+        record_zoom_hint=_record_zoom_hint,
         last_zoom_hint_ts=worker._last_zoom_hint_ts,
         zoom_hint_hold_s=worker._zoom_hint_hold_s,
     )

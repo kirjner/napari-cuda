@@ -43,7 +43,7 @@ def _patch_camops(monkeypatch):
     yield
 
 
-def test_apply_camera_commands_zoom_records_intent_and_callbacks() -> None:
+def test_apply_camera_commands_zoom_records_hint_and_callbacks() -> None:
     cam = _StubCamera([], [])
     cmd = ServerSceneCommand(kind="zoom", factor=1.5)
     zooms: list[float] = []
@@ -59,7 +59,7 @@ def test_apply_camera_commands_zoom_records_intent_and_callbacks() -> None:
         debug_flags=CameraDebugFlags(),
         mark_render_tick_needed=lambda: render_marks.append(True),
         trigger_policy_refresh=lambda: policy_marks.append(True),
-        record_zoom_intent=lambda ratio: zooms.append(ratio),
+        record_zoom_hint=lambda ratio: zooms.append(ratio),
         last_zoom_hint_ts=None,
         zoom_hint_hold_s=0.0,
         now_fn=lambda: 50.0,
@@ -71,7 +71,7 @@ def test_apply_camera_commands_zoom_records_intent_and_callbacks() -> None:
     assert outcome.camera_changed is True
     assert outcome.policy_triggered is True
     assert zooms == [pytest.approx(1 / 1.5)]
-    assert outcome.zoom_intent == pytest.approx(1 / 1.5)
+    assert outcome.zoom_hint == pytest.approx(1 / 1.5)
     assert outcome.last_zoom_hint_ts == pytest.approx(50.0)
     assert outcome.interaction_ts == pytest.approx(50.0)
     assert cam.zoom_calls == [pytest.approx(1.5)]
@@ -89,14 +89,14 @@ def test_apply_camera_commands_zoom_honours_hold_window() -> None:
         canvas_size=(120, 90),
         reset_camera=lambda c: None,
         debug_flags=CameraDebugFlags(),
-        record_zoom_intent=lambda ratio: recorded.append(ratio),
+        record_zoom_hint=lambda ratio: recorded.append(ratio),
         last_zoom_hint_ts=10.0,
         zoom_hint_hold_s=5.0,
         now_fn=lambda: 12.0,
     )
 
     assert recorded == []
-    assert outcome.zoom_intent is None
+    assert outcome.zoom_hint is None
     assert outcome.last_zoom_hint_ts == 10.0
 
 
@@ -113,7 +113,7 @@ def test_apply_camera_commands_pan_without_zoom_passthrough() -> None:
     )
     assert outcome.camera_changed is True
     assert outcome.policy_triggered is True
-    assert outcome.zoom_intent is None
+    assert outcome.zoom_hint is None
     assert outcome.last_zoom_hint_ts is None
     assert outcome.interaction_ts is not None
     assert cam.pan_calls == [(3.0, -2.0)]
