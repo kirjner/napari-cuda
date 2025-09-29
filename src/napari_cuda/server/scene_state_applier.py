@@ -300,6 +300,9 @@ class SceneStateApplier:
                 if not gamma > 0.0:
                     raise ValueError("gamma must be positive")
                 layer.gamma = gamma  # type: ignore[assignment]
+                visual = ctx.visual
+                if visual is not None and hasattr(visual, "gamma"):
+                    visual.gamma = gamma  # type: ignore[assignment]
             elif prop == "contrast_limits":
                 if not isinstance(value, (list, tuple)) or len(value) < 2:
                     raise ValueError("contrast_limits must be a length-2 sequence")

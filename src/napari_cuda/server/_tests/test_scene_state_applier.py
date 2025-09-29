@@ -28,6 +28,7 @@ class _StubLayer:
         self.opacity = 0.0
         self.blending = ""
         self.contrast_limits = [0.0, 1.0]
+        self.gamma = 1.0
 
 
 class _StubVisual:
@@ -248,6 +249,47 @@ def test_apply_volume_params_sets_visual_fields() -> None:
     assert visual.clim == (1.0, 2.0)
     assert visual.opacity == 0.7
     assert visual.relative_step_size == 0.2
+
+
+def test_apply_layer_updates_sets_gamma_on_visual() -> None:
+    viewer = _StubViewer()
+    layer = _StubLayer()
+    visual = SimpleNamespace(gamma=1.0)
+
+    ctx = SceneStateApplyContext(
+        use_volume=True,
+        viewer=viewer,
+        camera=None,
+        visual=visual,
+        layer=layer,
+        scene_source=None,
+        active_ms_level=0,
+        z_index=None,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=True,
+        idr_on_z=False,
+        data_wh=(0, 0),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: None,
+        plane_scale_for_level=lambda *_: (1.0, 1.0),
+        load_slice=lambda *_: None,
+        notify_scene_refresh=lambda: None,
+        mark_render_tick_needed=lambda: None,
+        request_encoder_idr=None,
+    )
+
+    SceneStateApplier.apply_layer_updates(
+        ctx,
+        updates={
+            "layer-0": {
+                "gamma": 0.5,
+            }
+        },
+    )
+
+    assert layer.gamma == 0.5
+    assert visual.gamma == 0.5
 
 
 def test_apply_volume_layer_resets_translate() -> None:
