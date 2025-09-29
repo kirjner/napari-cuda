@@ -9,6 +9,7 @@ import socket
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
@@ -117,113 +118,6 @@ async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> b
             current_step=server._scene.latest_state.current_step,
         )
     _enqueue_latest_state_for_worker(server)
-    return True
-
-
-async def _handle_legacy_dims(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    logger.debug("state: dims.set ignored (use dims.update.*)")
-    return True
-
-
-async def _handle_volume_render_mode(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    mode = str(data.get('mode') or '').lower()
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if state_updates.is_valid_render_mode(mode, server._allowed_render_modes):
-        state_updates.update_volume_mode(server._scene, server._state_lock, mode)
-        server._log_volume_update(
-            "update: volume.set_render_mode mode=%s client_id=%s seq=%s",
-            mode,
-            client_id,
-            client_seq,
-        )
-        _enqueue_latest_state_for_worker(server)
-        server._schedule_coro(
-            rebroadcast_meta(server, client_id),
-            'rebroadcast-volume-mode',
-        )
-    return True
-
-
-async def _handle_volume_clim(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    pair = state_updates.normalize_clim(data.get('lo'), data.get('hi'))
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if pair is not None:
-        lo, hi = pair
-        server._log_volume_update(
-            "update: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s",
-            lo,
-            hi,
-            client_id,
-            client_seq,
-        )
-        state_updates.update_volume_clim(server._scene, server._state_lock, lo, hi)
-        _enqueue_latest_state_for_worker(server)
-        server._schedule_coro(
-            rebroadcast_meta(server, client_id),
-            'rebroadcast-volume-clim',
-        )
-    return True
-
-
-async def _handle_volume_colormap(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    name = data.get('name')
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if isinstance(name, str) and name.strip():
-        server._log_volume_update(
-            "update: volume.set_colormap name=%s client_id=%s seq=%s",
-            name,
-            client_id,
-            client_seq,
-        )
-        state_updates.update_volume_colormap(server._scene, server._state_lock, str(name))
-        _enqueue_latest_state_for_worker(server)
-        server._schedule_coro(
-            rebroadcast_meta(server, client_id),
-            'rebroadcast-volume-colormap',
-        )
-    return True
-
-
-async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    opacity = state_updates.clamp_opacity(data.get('alpha'))
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if opacity is not None:
-        server._log_volume_update(
-            "update: volume.set_opacity alpha=%.3f client_id=%s seq=%s",
-            opacity,
-            client_id,
-            client_seq,
-        )
-        state_updates.update_volume_opacity(server._scene, server._state_lock, float(opacity))
-        _enqueue_latest_state_for_worker(server)
-        server._schedule_coro(
-            rebroadcast_meta(server, client_id),
-            'rebroadcast-volume-opacity',
-        )
-    return True
-
-
-async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    sample_step = state_updates.clamp_sample_step(data.get('relative'))
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if sample_step is not None:
-        server._log_volume_update(
-            "update: volume.set_sample_step relative=%.3f client_id=%s seq=%s",
-            sample_step,
-            client_id,
-            client_seq,
-        )
-        state_updates.update_volume_sample_step(server._scene, server._state_lock, float(sample_step))
-        server._schedule_coro(
-            rebroadcast_meta(server, client_id),
-            'rebroadcast-volume-sample-step',
-        )
-        _enqueue_latest_state_for_worker(server)
     return True
 
 
@@ -342,6 +236,213 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
         return True
 
+    if scope == 'volume':
+        client_seq_int: Optional[int]
+        try:
+            client_seq_int = int(client_seq) if client_seq is not None else None
+        except (TypeError, ValueError):
+            client_seq_int = None
+
+        ts = time.time()
+
+        if key == 'render_mode':
+            mode = str(message.value or '').lower()
+            if not state_updates.is_valid_render_mode(mode, server._allowed_render_modes):
+                logger.debug("state.update volume ignored invalid render_mode=%r", message.value)
+                return True
+            state_updates.update_volume_mode(server._scene, server._state_lock, mode)
+            _log_volume_event(
+                "update: volume.set_render_mode mode=%s client_id=%s seq=%s",
+                mode,
+                client_id,
+                client_seq,
+            )
+            normalized_value: Any = mode
+            rebroadcast_tag = 'rebroadcast-volume-mode'
+        elif key == 'contrast_limits':
+            pair = message.value
+            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                logger.debug("state.update volume ignored invalid contrast_limits=%r", pair)
+                return True
+            norm = state_updates.normalize_clim(pair[0], pair[1])
+            if norm is None:
+                logger.debug("state.update volume ignored invalid clim=%r", pair)
+                return True
+            lo, hi = norm
+            state_updates.update_volume_clim(server._scene, server._state_lock, lo, hi)
+            _log_volume_event(
+                "update: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s",
+                lo,
+                hi,
+                client_id,
+                client_seq,
+            )
+            normalized_value = (float(lo), float(hi))
+            rebroadcast_tag = 'rebroadcast-volume-clim'
+        elif key == 'colormap':
+            name = message.value
+            if not isinstance(name, str) or not name.strip():
+                logger.debug("state.update volume ignored invalid colormap=%r", name)
+                return True
+            cmap = str(name)
+            state_updates.update_volume_colormap(server._scene, server._state_lock, cmap)
+            _log_volume_event(
+                "update: volume.set_colormap name=%s client_id=%s seq=%s",
+                cmap,
+                client_id,
+                client_seq,
+            )
+            normalized_value = cmap
+            rebroadcast_tag = 'rebroadcast-volume-colormap'
+        elif key == 'opacity':
+            opacity = state_updates.clamp_opacity(message.value)
+            if opacity is None:
+                logger.debug("state.update volume ignored invalid opacity=%r", message.value)
+                return True
+            state_updates.update_volume_opacity(server._scene, server._state_lock, float(opacity))
+            _log_volume_event(
+                "update: volume.set_opacity alpha=%.3f client_id=%s seq=%s",
+                opacity,
+                client_id,
+                client_seq,
+            )
+            normalized_value = float(opacity)
+            rebroadcast_tag = 'rebroadcast-volume-opacity'
+        elif key == 'sample_step':
+            sample = state_updates.clamp_sample_step(message.value)
+            if sample is None:
+                logger.debug("state.update volume ignored invalid sample_step=%r", message.value)
+                return True
+            state_updates.update_volume_sample_step(server._scene, server._state_lock, float(sample))
+            _log_volume_event(
+                "update: volume.set_sample_step relative=%.3f client_id=%s seq=%s",
+                sample,
+                client_id,
+                client_seq,
+            )
+            normalized_value = float(sample)
+            rebroadcast_tag = 'rebroadcast-volume-sample-step'
+        else:
+            logger.debug("state.update volume ignored key=%s", key)
+            return True
+
+        _enqueue_latest_state_for_worker(server)
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            rebroadcast_tag,
+        )
+        result = _baseline_state_result(
+            server,
+            scope='volume',
+            target=target,
+            key=key,
+            value=normalized_value,
+            client_id=client_id,
+            client_seq=client_seq_int,
+            interaction_id=interaction_id,
+            phase=phase,
+            timestamp=ts,
+            ack=True,
+            intent_seq=intent_seq,
+        )
+        server._schedule_coro(
+            _broadcast_state_update(server, result),
+            f'state-volume-{key}',
+        )
+        return True
+
+    if scope == 'multiscale':
+        client_seq_int: Optional[int]
+        try:
+            client_seq_int = int(client_seq) if client_seq is not None else None
+        except (TypeError, ValueError):
+            client_seq_int = None
+
+        ts = time.time()
+        log_fn = logger.info if server._log_state_traces else logger.debug
+
+        if key == 'policy':
+            policy = str(message.value or '').lower().strip()
+            allowed = {'oversampling', 'thresholds', 'ratio'}
+            if policy not in allowed:
+                logger.debug("state.update multiscale ignored invalid policy=%r", message.value)
+                return True
+            server._scene.multiscale_state['policy'] = policy
+            _log_volume_event(
+                "update: multiscale.set_policy policy=%s client_id=%s seq=%s",
+                policy,
+                client_id,
+                client_seq,
+            )
+            normalized_value = policy
+            rebroadcast_tag = 'rebroadcast-policy'
+            if server._worker is not None:
+                try:
+                    log_fn("state: multiscale policy -> worker.set_policy start")
+                    server._worker.set_policy(policy)
+                    log_fn("state: multiscale policy -> worker.set_policy done")
+                except Exception:
+                    logger.exception("worker set_policy failed for %s", policy)
+        elif key == 'level':
+            levels = server._scene.multiscale_state.get('levels') or []
+            level = state_updates.clamp_level(message.value, levels)
+            if level is None:
+                logger.debug("state.update multiscale ignored invalid level=%r", message.value)
+                return True
+            server._scene.multiscale_state['current_level'] = int(level)
+            _log_volume_event(
+                "update: multiscale.set_level level=%d client_id=%s seq=%s",
+                int(level),
+                client_id,
+                client_seq,
+            )
+            normalized_value = int(level)
+            rebroadcast_tag = 'rebroadcast-ms-level'
+            if server._worker is not None:
+                try:
+                    levels_meta = server._scene.multiscale_state.get('levels') or []
+                    path = None
+                    if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
+                        entry = levels_meta[int(level)]
+                        if isinstance(entry, Mapping):
+                            path = entry.get('path')
+                    log_fn("state: multiscale level -> worker.request start level=%s", level)
+                    server._worker.request_multiscale_level(int(level), path)
+                    log_fn("state: multiscale level -> worker.request done")
+                    log_fn("state: multiscale level -> worker.force_idr start")
+                    server._worker.force_idr()
+                    log_fn("state: multiscale level -> worker.force_idr done")
+                    server._pixel.bypass_until_key = True
+                except Exception:
+                    logger.exception("multiscale level switch request failed")
+        else:
+            logger.debug("state.update multiscale ignored key=%s", key)
+            return True
+
+        server._schedule_coro(
+            rebroadcast_meta(server, client_id),
+            rebroadcast_tag,
+        )
+        result = _baseline_state_result(
+            server,
+            scope='multiscale',
+            target=target,
+            key=key,
+            value=normalized_value,
+            client_id=client_id,
+            client_seq=client_seq_int,
+            interaction_id=interaction_id,
+            phase=phase,
+            timestamp=ts,
+            ack=True,
+            intent_seq=intent_seq,
+        )
+        server._schedule_coro(
+            _broadcast_state_update(server, result),
+            f'state-multiscale-{key}',
+        )
+        return True
+
     if scope == 'dims':
         step_delta: Optional[int] = None
         set_value: Optional[int] = None
@@ -418,115 +519,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     return True
 
 
-
-
-async def _handle_multiscale_policy(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    policy = str(data.get('policy') or '').lower()
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    allowed = {'oversampling', 'thresholds', 'ratio'}
-    if policy not in allowed:
-        server._log_volume_update(
-            "update: multiscale.set_policy rejected policy=%s client_id=%s seq=%s",
-            policy,
-            client_id,
-            client_seq,
-        )
-        return True
-    server._scene.multiscale_state['policy'] = policy
-    server._log_volume_update(
-        "update: multiscale.set_policy policy=%s client_id=%s seq=%s",
-        policy,
-        client_id,
-        client_seq,
-    )
-    if server._worker is not None:
-        try:
-            (logger.info if server._log_state_traces else logger.debug)(
-                "state: set_policy -> worker.set_policy start"
-            )
-            server._worker.set_policy(policy)
-            (logger.info if server._log_state_traces else logger.debug)(
-                "state: set_policy -> worker.set_policy done"
-            )
-        except Exception:
-            logger.exception("worker set_policy failed for %s", policy)
-    server._schedule_coro(
-        rebroadcast_meta(server, client_id),
-        'rebroadcast-policy',
-    )
-    return True
-
-
-async def _handle_multiscale_level(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    levels = server._scene.multiscale_state.get('levels') or []
-    level = state_updates.clamp_level(data.get('level'), levels)
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    if level is None:
-        return True
-    server._scene.multiscale_state['current_level'] = int(level)
-    server._log_volume_update(
-        "update: multiscale.set_level level=%d client_id=%s seq=%s",
-        int(level),
-        client_id,
-        client_seq,
-    )
-    if server._worker is not None:
-        try:
-            levels_meta = server._scene.multiscale_state.get('levels') or []
-            path = None
-            if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
-                entry = levels_meta[int(level)]
-                if isinstance(entry, Mapping):
-                    path = entry.get('path')
-            (logger.info if server._log_state_traces else logger.debug)(
-                "state: set_level -> worker.request level=%s start",
-                level,
-            )
-            server._worker.request_multiscale_level(int(level), path)
-            (logger.info if server._log_state_traces else logger.debug)(
-                "state: set_level -> worker.request done"
-            )
-            (logger.info if server._log_state_traces else logger.debug)(
-                "state: set_level -> worker.force_idr start"
-            )
-            server._worker.force_idr()
-            (logger.info if server._log_state_traces else logger.debug)(
-                "state: set_level -> worker.force_idr done"
-            )
-            server._pixel.bypass_until_key = True
-        except Exception:
-            logger.exception("multiscale level switch request failed")
-    server._schedule_coro(
-        rebroadcast_meta(server, client_id),
-        'rebroadcast-ms-level',
-    )
-    return True
-
-
-async def _handle_set_ndisplay(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    try:
-        raw = data.get('ndisplay')
-        ndisplay = int(raw) if raw is not None else 2
-    except Exception:
-        ndisplay = 2
-    client_seq = data.get('client_seq')
-    client_id = data.get('client_id') or None
-    (logger.info if server._log_state_traces else logger.debug)(
-        "state: set_ndisplay start target=%s",
-        ndisplay,
-    )
-    await server._handle_set_ndisplay(ndisplay, client_id, client_seq)
-    server._schedule_coro(
-        rebroadcast_meta(server, client_id),
-        'rebroadcast-ndisplay',
-    )
-    (logger.info if server._log_state_traces else logger.debug)(
-        "state: set_ndisplay done target=%s",
-        ndisplay,
-    )
-    return True
 
 
 async def _handle_camera_zoom(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
@@ -629,17 +621,7 @@ async def _handle_force_keyframe(server: Any, data: Mapping[str, Any], ws: Any) 
 
 MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     'set_camera': _handle_set_camera,
-    'dims.set': _handle_legacy_dims,
-    'set_dims': _handle_legacy_dims,
     STATE_UPDATE_TYPE: _handle_state_update,
-    'volume.update.set_render_mode': _handle_volume_render_mode,
-    'volume.update.set_clim': _handle_volume_clim,
-    'volume.update.set_colormap': _handle_volume_colormap,
-    'volume.update.set_opacity': _handle_volume_opacity,
-    'volume.update.set_sample_step': _handle_volume_sample_step,
-    'multiscale.update.set_policy': _handle_multiscale_policy,
-    'multiscale.update.set_level': _handle_multiscale_level,
-    'view.update.set_ndisplay': _handle_set_ndisplay,
     'camera.zoom_at': _handle_camera_zoom,
     'camera.pan_px': _handle_camera_pan,
     'camera.orbit': _handle_camera_orbit,
@@ -689,6 +671,20 @@ def _enqueue_latest_state_for_worker(server: Any) -> None:
         worker.enqueue_update(RenderDelta(scene_state=snapshot))
     except Exception:
         logger.debug("state: worker enqueue_update failed", exc_info=True)
+
+
+def _log_volume_event(server: Any, fmt: str, *args: Any) -> None:
+    handler = getattr(server, "_log_volume_update", None)
+    if callable(handler):
+        try:
+            handler(fmt, *args)
+            return
+        except Exception:
+            logger.debug("volume update log failed", exc_info=True)
+    try:
+        logger.debug(fmt, *args)
+    except Exception:
+        logger.debug("volume fallback log failed", exc_info=True)
 
 
 async def _broadcast_state_update(
@@ -896,10 +892,8 @@ async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
         try:
             with server._state_lock:
                 s = server._scene.latest_state
-                server._scene.latest_state = ServerSceneState(
-                    center=s.center,
-                    zoom=s.zoom,
-                    angles=s.angles,
+                server._scene.latest_state = replace(
+                    s,
                     current_step=tuple(chosen),
                 )
             _enqueue_latest_state_for_worker(server)

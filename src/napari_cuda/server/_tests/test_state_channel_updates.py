@@ -16,9 +16,24 @@ from napari_cuda.server.server_state_updates import apply_layer_state_update
 class _CaptureWorker:
     def __init__(self) -> None:
         self.deltas: list[RenderDelta] = []
+        self.policy_calls: list[str] = []
+        self.level_requests: list[tuple[int, Any]] = []
+        self.force_idr_calls = 0
 
     def enqueue_update(self, delta: RenderDelta) -> None:
         self.deltas.append(delta)
+
+    def set_policy(self, policy: str) -> None:
+        self.policy_calls.append(str(policy))
+
+    def request_multiscale_level(self, level: int, path: Any) -> None:
+        self.level_requests.append((int(level), path))
+
+    def force_idr(self) -> None:
+        self.force_idr_calls += 1
+
+    def viewer_model(self) -> None:
+        return None
 
 
 def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
@@ -46,6 +61,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server.metrics = SimpleNamespace(inc=lambda *a, **k: None)
     server._state_clients = set()
     server._dims_metadata = lambda: {"ndim": 3, "order": ["z", "y", "x"], "range": [[0, 9], [0, 9], [0, 9]]}
+    server._pixel = SimpleNamespace(bypass_until_key=False)
 
     scheduled: list[Coroutine[Any, Any, None]] = []
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)  # type: ignore[arg-type]
@@ -209,6 +225,63 @@ def test_state_update_view_ndisplay_broadcasts() -> None:
     assert event.get("intent_seq") == 42
     versions = event.get("control_versions") or {}
     assert versions.get("ndisplay", {}).get("server_seq") == event["server_seq"]
+
+
+def test_state_update_volume_render_mode_broadcasts() -> None:
+    server, scheduled, captured = _make_server()
+    server._allowed_render_modes = {"mip", "iso"}
+
+    payload = {
+        "type": "state.update",
+        "scope": "volume",
+        "target": "main",
+        "key": "render_mode",
+        "value": "iso",
+    }
+
+    asyncio.run(state_channel_handler._handle_state_update(server, payload, None))
+    _drain_scheduled(scheduled)
+
+    assert server._scene.volume_state.get("mode") == "iso"
+    assert server._worker.deltas, "expected worker delta for volume update"
+    latest_delta = server._worker.deltas[-1].scene_state
+    assert latest_delta is not None
+    assert latest_delta.volume_mode == "iso"
+
+    notifications = [_unwrap_notify(evt) for evt in captured]
+    volume_events = [evt for evt in notifications if evt.get("scope") == "volume"]
+    assert volume_events, "expected volume state update broadcast"
+    event = volume_events[-1]
+    assert event["key"] == "render_mode"
+    assert event["value"] == "iso"
+
+
+def test_state_update_multiscale_level_updates_state() -> None:
+    server, scheduled, captured = _make_server()
+
+    payload = {
+        "type": "state.update",
+        "scope": "multiscale",
+        "target": "main",
+        "key": "level",
+        "value": 1,
+    }
+
+    asyncio.run(state_channel_handler._handle_state_update(server, payload, None))
+    _drain_scheduled(scheduled)
+
+    assert server._scene.multiscale_state.get("current_level") == 1
+    assert server._pixel.bypass_until_key is True
+    assert server._worker.level_requests, "expected multiscale level request"
+    last_level, _ = server._worker.level_requests[-1]
+    assert last_level == 1
+
+    notifications = [_unwrap_notify(evt) for evt in captured]
+    ms_events = [evt for evt in notifications if evt.get("scope") == "multiscale"]
+    assert ms_events, "expected multiscale state update broadcast"
+    event = ms_events[-1]
+    assert event["key"] == "level"
+    assert event["value"] == 1
 
 
 def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:
