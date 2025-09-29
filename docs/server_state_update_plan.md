@@ -18,7 +18,7 @@
 
 ## Deliverables
 - Updated protocol handling in `state_channel_handler.py` exposing `_handle_state_update` as the only control entry point.
-- Refactored scene helpers (`server_scene.py`, `server_scene_intents.py`) producing `StateUpdateResult` objects with deterministic sequencing metadata.
+- Refactored scene helpers (`server_scene.py`, `server_state_updates.py`) producing `StateUpdateResult` objects with deterministic sequencing metadata.
 - Payload builders (`build_state_update_payload`, baseline emitters) that emit the unified message for layers, dims, and reconnects.
 - Comprehensive unit/integration tests covering state application, sequencing, and broadcast behaviour.
 - Documentation describing the new control flow and deployment expectations.

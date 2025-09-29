@@ -13,7 +13,7 @@ from napari_cuda.server.server_scene import (
     ServerSceneData,
     layer_controls_to_dict,
 )
-from napari_cuda.server.server_scene_intents import StateUpdateResult
+from napari_cuda.server.server_state_updates import StateUpdateResult
 
 
 # ---------------------------------------------------------------------------

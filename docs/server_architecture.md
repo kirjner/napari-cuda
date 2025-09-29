@@ -69,7 +69,7 @@ Websocket Clients (state + pixel)
   - Orchestrate state-channel websocket flow: connection setup, `state.update` dispatch, dims/spec broadcasting, and policy/metrics logging.
   - Operate on `ServerSceneData` bags directly while delegating worker hops back through the server object; `EGLHeadlessServer` now simply forwards events into these helpers.
   - Expose procedural APIs (`handle_state`, `broadcast_dims_update`, `rebroadcast_meta`, etc.) so other agents (CLI tools, MCP servers) can reuse the control surface without touching app globals.
-  - Delegate state mutations to `server_scene_intents.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a re-entrant lock.
+  - Delegate state mutations to `server_state_updates.py`, keeping dims/volume *and layer* updates as pure helpers that operate on `ServerSceneData` and a re-entrant lock.
   - Worker refresh notifications travel through a dedicated worker→control queue, so the control loop updates the scene manager before emitting dims/spec payloads; no deferred flushes or ad-hoc regeneration needed.
 - **Worker Lifecycle Helpers** (`worker_lifecycle.py`)
   - `WorkerLifecycleState` tracks the render thread, worker instance, and stop event in a single bag controlled by the lifecycle helpers.

@@ -36,7 +36,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 ### 1. State Channel Simplification
 - [x] Rename `server_scene_control.py` → `state_channel_handler.py`; keep module-level docstring.
 - [x] Replace the open-coded intent branching with a table-driven dispatcher that delegates to
-      `server_scene_intents`.
+      `server_state_updates`.
 - [x] Record deltas in `ServerSceneData` then call `render_worker.enqueue_update(delta)` directly.
 - [x] Ensure acknowledgements/broadcasts are derived from the canonical store (no mirror dicts).
 - [x] Track per-control client sequences + server acknowledgements so reconnect baselines and
@@ -71,7 +71,7 @@ plan captures the remaining work so we can execute the refactor in deliberate, t
 - [ ] Expand `docs/server_architecture.md` with the new module names once refactors land.
 - [ ] Update mermaid diagram arrows and node labels to reflect renamed modules.
 - [ ] Add regression tests:
-  - `test_server_scene_intents` already covers colormap normalisation (keep).
+  - `test_server_state_updates` already covers colormap normalisation (keep).
   - Add state/worker integration test verifying mailbox coalesces multiple intents before render tick.
   - Add failure-path test ensuring invalid colormap is logged but does not crash worker.
 

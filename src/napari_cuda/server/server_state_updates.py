@@ -1,8 +1,8 @@
-"""Shared helpers for server-side intent handling.
+"""Shared helpers for server-side state update handling.
 
 These utilities keep the state-channel dispatcher and future MCP surfaces
 consistent by encapsulating all mutations of ``ServerSceneData`` associated
-with user intents.  They operate purely on the data bag plus simple
+with control updates. They operate purely on the data bag plus simple
 parameters so the websocket loop, worker bridge, or tests can invoke them
 without reaching into the ``EGLHeadlessServer`` implementation.
 """
@@ -81,7 +81,7 @@ def resolve_axis_index(axis: object, meta: Mapping[str, Any], cur_len: int) -> O
     return None
 
 
-def apply_dims_intent(
+def apply_dims_delta(
     scene: ServerSceneData,
     lock: Lock,
     meta: Mapping[str, Any],
@@ -90,7 +90,7 @@ def apply_dims_intent(
     step_delta: Optional[int],
     set_value: Optional[int],
 ) -> Optional[list[int]]:
-    """Apply a dims intent and return the updated step list (or ``None``)."""
+    """Apply a dims step delta and return the updated step list (or ``None``)."""
 
     with lock:
         current = scene.latest_state.current_step
@@ -276,7 +276,7 @@ def _normalize_string(value: object, *, allowed: Optional[set[str]] = None) -> s
     else:
         lowered = str(value).strip()
     if lowered == "":
-        raise ValueError("string intent value may not be empty")
+        raise ValueError("string update value may not be empty")
     normalized = lowered.lower()
     if allowed is not None and normalized not in allowed:
         raise ValueError(f"value '{normalized}' not in allowed set {sorted(allowed)}")
@@ -355,7 +355,7 @@ def apply_layer_state_update(
     interaction_id: Optional[str] = None,
     phase: Optional[str] = None,
 ) -> Optional[StateUpdateResult]:
-    """Normalize, gate, and stash a layer intent.
+    """Normalize, gate, and stash a layer update.
 
     Returns a :class:`StateUpdateResult` when the update is accepted, or
     ``None`` if the payload is stale for the originating client.

@@ -12,7 +12,8 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE, StateUpdateMessage
-from napari_cuda.server.server_scene_intents import (
+from napari_cuda.server import server_state_updates as state_updates
+from napari_cuda.server.server_state_updates import (
     StateUpdateResult,
     apply_dims_state_update,
     apply_layer_state_update,
@@ -106,8 +107,8 @@ async def _handle_volume_render_mode(server: Any, data: Mapping[str, Any], ws: A
     mode = str(data.get('mode') or '').lower()
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
-    if intents.is_valid_render_mode(mode, server._allowed_render_modes):
-        intents.update_volume_mode(server._scene, server._state_lock, mode)
+    if state_updates.is_valid_render_mode(mode, server._allowed_render_modes):
+        state_updates.update_volume_mode(server._scene, server._state_lock, mode)
         server._log_volume_intent(
             "intent: volume.set_render_mode mode=%s client_id=%s seq=%s",
             mode,
@@ -123,7 +124,7 @@ async def _handle_volume_render_mode(server: Any, data: Mapping[str, Any], ws: A
 
 
 async def _handle_volume_clim(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    pair = intents.normalize_clim(data.get('lo'), data.get('hi'))
+    pair = state_updates.normalize_clim(data.get('lo'), data.get('hi'))
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if pair is not None:
@@ -135,7 +136,7 @@ async def _handle_volume_clim(server: Any, data: Mapping[str, Any], ws: Any) -> 
             client_id,
             client_seq,
         )
-        intents.update_volume_clim(server._scene, server._state_lock, lo, hi)
+        state_updates.update_volume_clim(server._scene, server._state_lock, lo, hi)
         _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
@@ -155,7 +156,7 @@ async def _handle_volume_colormap(server: Any, data: Mapping[str, Any], ws: Any)
             client_id,
             client_seq,
         )
-        intents.update_volume_colormap(server._scene, server._state_lock, str(name))
+        state_updates.update_volume_colormap(server._scene, server._state_lock, str(name))
         _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
@@ -165,7 +166,7 @@ async def _handle_volume_colormap(server: Any, data: Mapping[str, Any], ws: Any)
 
 
 async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    opacity = intents.clamp_opacity(data.get('alpha'))
+    opacity = state_updates.clamp_opacity(data.get('alpha'))
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if opacity is not None:
@@ -175,7 +176,7 @@ async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) 
             client_id,
             client_seq,
         )
-        intents.update_volume_opacity(server._scene, server._state_lock, float(opacity))
+        state_updates.update_volume_opacity(server._scene, server._state_lock, float(opacity))
         _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
@@ -185,7 +186,7 @@ async def _handle_volume_opacity(server: Any, data: Mapping[str, Any], ws: Any) 
 
 
 async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    sample_step = intents.clamp_sample_step(data.get('relative'))
+    sample_step = state_updates.clamp_sample_step(data.get('relative'))
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if sample_step is not None:
@@ -195,7 +196,7 @@ async def _handle_volume_sample_step(server: Any, data: Mapping[str, Any], ws: A
             client_id,
             client_seq,
         )
-        intents.update_volume_sample_step(server._scene, server._state_lock, float(sample_step))
+        state_updates.update_volume_sample_step(server._scene, server._state_lock, float(sample_step))
         server._schedule_coro(
             rebroadcast_meta(server, client_id),
             'rebroadcast-volume-sample-step',
@@ -353,7 +354,7 @@ async def _handle_multiscale_policy(server: Any, data: Mapping[str, Any], ws: An
 
 async def _handle_multiscale_level(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     levels = server._scene.multiscale_state.get('levels') or []
-    level = intents.clamp_level(data.get('level'), levels)
+    level = state_updates.clamp_level(data.get('level'), levels)
     client_seq = data.get('client_seq')
     client_id = data.get('client_id') or None
     if level is None:

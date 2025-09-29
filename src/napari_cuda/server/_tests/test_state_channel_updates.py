@@ -10,7 +10,7 @@ from napari_cuda.server import state_channel_handler
 from napari_cuda.server.layer_manager import ViewerSceneManager
 from napari_cuda.server.render_mailbox import RenderDelta
 from napari_cuda.server.server_scene import create_server_scene_data
-from napari_cuda.server.server_scene_intents import apply_layer_state_update
+from napari_cuda.server.server_state_updates import apply_layer_state_update
 
 
 class _CaptureWorker:

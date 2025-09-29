@@ -131,10 +131,10 @@ Implementation slices:
   9. **Worker lifecycle module (in progress)** — `worker_lifecycle.py` now owns worker start/stop + scene refresh wiring:
      - `WorkerLifecycleState` tracks the thread, worker instance, and stop event; `start_worker(server, loop, state)`/`stop_worker(state)` encapsulate bootstrap and teardown.
      - Follow-ups: tighten remaining defensive guards in the helpers and remove any lingering direct lifecycle code from `egl_headless_server`; coverage now includes focussed tests (`test_worker_lifecycle.py`) for notification draining and keyframe scheduling.
-  10. **Intent helper extraction ✅** — state intents now funnel through `server_scene_intents.py`:
+  10. **Update helper extraction ✅** — state updates now funnel through `server_state_updates.py`:
      - Dims and volume mutations operate on `ServerSceneData` via pure helpers that take a lock + metadata, keeping the websocket dispatcher thin.
-     - Legacy `_apply_dims_intent` and volume clamp utilities were dropped from `EGLHeadlessServer`; new unit tests (`test_server_scene_intents.py`) cover range clamping, axis resolution, and volume updates.
-     - Upcoming MCP/bridge work can reuse these helpers directly, ensuring a single authoritative path for all intent surfaces.
+     - Legacy `_apply_dims_intent` and volume clamp utilities were dropped from `EGLHeadlessServer`; new unit tests (`test_server_state_updates.py`) cover range clamping, axis resolution, and volume updates via `apply_dims_delta`.
+     - Upcoming MCP/bridge work can reuse these helpers directly, ensuring a single authoritative path for all state-update surfaces.
   11. **Preset registry ✅** — profile/env toggles now flow through a dedicated registry:
      - `server/presets.py` maps preset tokens to structured overrides across `ServerConfig`, `EncodeCfg`, `EncoderRuntime`, and `BitstreamRuntime`.
      - Streaming profiles (`latency`, `quality`) now override encode bitrate, NVENC runtime tuning, and the `ServerConfig.profile` flag alongside the NVENC preset tiers (`P1`–`P7`).
@@ -144,12 +144,12 @@ Implementation slices:
      - Add a focused pytest (`test_server_scene_data.py`) to cover the new helper functions and dim-sequence wraparound once they land.
   13. **Docs + metrics refresh** — update this plan with new LOC/guard totals, and augment `docs/server_architecture.md` with module responsibilities once the decomposition lands.
      - Document the `server_scene` helpers inline (docstrings) and add a `ServerScene` section to the architecture doc once the spec builder is in place.
-  14. **Layer intent bridge alignment** — prep the server for client layer control intents by keeping logic data-oriented:
-     - Specify the `image.intent.*` payload schema (opacity, blending, contrast, gamma, colormap via `name`, projection, interpolation, depiction) alongside validation helpers.
+  14. **Layer state bridge alignment** — prep the server for client layer control updates by keeping logic data-oriented:
+     - Specify the layer `state.update` payload schema (opacity, blending, contrast, gamma, colormap via `name`, projection, interpolation, depiction) alongside validation helpers.
      - Extend `ServerSceneData` with render-property fields so handlers mutate data snapshots instead of `self`.
      - Add procedural helpers to apply each mutation, enqueue worker commands, and trigger authoritative rebroadcasts.
     - Cover with focused tests asserting state updates and outgoing `state.update` mirrors.
-    - ✅ Canonical layer extras now live in `ServerSceneData.layer_state`; `server_scene_intents.apply_layer_state_update` normalizes payloads, the worker applies updates through `SceneStateApplier`, and `server_scene_spec.build_state_update_payload` drives `state.update` broadcasts (tests: `test_server_scene_intents.py`, `test_server_scene_spec.py`). Remaining work: wire the client bridge + expand coverage for projection/depiction once the schema is finalised.
+    - ✅ Canonical layer extras now live in `ServerSceneData.layer_state`; `server_state_updates.apply_layer_state_update` normalizes payloads, the worker applies updates through `SceneStateApplier`, and `server_scene_spec.build_state_update_payload` drives `state.update` broadcasts (tests: `test_server_state_updates.py`, `test_server_scene_spec.py`). Remaining work: wire the client bridge + expand coverage for projection/depiction once the schema is finalised.
     - ✅ Layer controls now live in `LayerControlState`; the worker consumes updates via `SceneStateApplier`, and `state.update`/`scene.spec` expose a dedicated `controls` map while `extras` is reserved for transport metadata.
     - ⬜ Follow-up: add mixed-mode regression coverage (2D↔3D) once the client bridge consumes the new contract.
   15. **ServerScene documentation** — update `docs/server_architecture.md` to describe `ServerSceneData`, `RenderMailbox`, and related helpers so downstream consumers understand the mutable vs. immutable scene boundaries.
