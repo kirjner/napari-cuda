@@ -8,19 +8,31 @@ from qtpy import QtCore, QtWidgets  # type: ignore
 
 logger = logging.getLogger(__name__)
 
+def _pointer_xy(event) -> tuple[float, float]:  # type: ignore[no-untyped-def]
+    """Return pointer coordinates, asserting the Qt event exposes them."""
+
+    if hasattr(event, 'position'):
+        pos = event.position()
+        assert pos is not None, "pointer event returned None from position()"
+        return float(pos.x()), float(pos.y())
+    assert hasattr(event, 'pos'), "pointer event missing position()/pos()"
+    pos = event.pos()
+    assert pos is not None, "pointer event returned None from pos()"
+    return float(pos.x()), float(pos.y())
+
 
 class _EventFilter(QtCore.QObject):  # type: ignore[misc]
     """Qt event filter to capture wheel and resize events and forward them.
 
     - Coalesces high-rate wheel events to a target max rate.
     - Debounces resize events to avoid thrash while the user drags.
-    - Sends messages via the provided send_json callable.
+    - Sends messages via the provided `post` callable.
     """
 
     def __init__(
         self,
         widget: QtWidgets.QWidget,  # type: ignore[valid-type]
-        send_json: Callable[[dict], bool],
+        post: Callable[[dict], bool],
         *,
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
@@ -31,7 +43,7 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
     ) -> None:
         super().__init__(widget)
         self._widget = widget
-        self._send_json = send_json
+        self._post = post
         self._max_rate_hz = float(max(1.0, max_rate_hz))
         self._min_dt = 1.0 / self._max_rate_hz
         self._last_wheel_send: float = 0.0
@@ -44,174 +56,116 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         self._on_key = on_key
         self._log_info = bool(log_info)
         # Cache top-level window for gating app-level events
-        try:
-            self._top_window = widget.window()  # type: ignore[attr-defined]
-        except Exception:
-            self._top_window = None
+        assert hasattr(widget, 'window'), "widget must expose window()"
+        self._top_window = widget.window()
 
     def eventFilter(self, obj, event):  # type: ignore[no-untyped-def]
-        try:
-            et = event.type()
-            # Only handle wheel/resize/mouse for the canvas widget itself.
-            try:
-                target_is_canvas = (obj is self._widget)
-            except Exception:
-                target_is_canvas = False
-            if et == QtCore.QEvent.Wheel and target_is_canvas:  # type: ignore[attr-defined]
-                return self._handle_wheel(event)
-            elif et == QtCore.QEvent.KeyPress:  # type: ignore[attr-defined]
-                # Gate to our top-level window to avoid cross-window noise
-                try:
-                    if obj is not None and hasattr(obj, 'window') and self._top_window is not None:
-                        if obj.window() is not self._top_window:  # type: ignore[attr-defined]
-                            return False
-                except Exception:
-                    pass
-                try:
-                    key = int(event.key())
-                except Exception:
-                    key = -1
-                try:
-                    mods = int(event.modifiers())
-                except Exception:
-                    mods = 0
-                try:
-                    txt = event.text()
-                except Exception:
-                    txt = ""
-                if self._log_info:
-                    logger.info("key press: key=%s mods=%s text=%r", key, mods, txt)
-                # Notify optional key callback and allow it to consume
-                try:
-                    if self._on_key is not None:
-                        consumed = bool(self._on_key({'type': 'input.key', 'key': int(key), 'mods': int(mods), 'text': str(txt)}))
-                        if consumed:
-                            try:
-                                ev.accept()
-                            except Exception:
-                                pass
-                            return True
-                except Exception:
-                    logger.debug("on_key callback failed", exc_info=True)
-                return False
-            elif et == QtCore.QEvent.Resize and target_is_canvas:  # type: ignore[attr-defined]
-                return self._handle_resize(event)
-            elif et == QtCore.QEvent.MouseButtonPress and target_is_canvas:  # type: ignore[attr-defined]
-                return self._handle_mouse_down(event)
-            elif et == QtCore.QEvent.MouseMove and target_is_canvas:  # type: ignore[attr-defined]
-                return self._handle_mouse_move(event)
-            elif et == QtCore.QEvent.MouseButtonRelease and target_is_canvas:  # type: ignore[attr-defined]
-                return self._handle_mouse_up(event)
-        except Exception:
-            logger.debug("InputSender eventFilter error", exc_info=True)
+        event_type = event.type()
+        target_is_canvas = obj is self._widget
+
+        if event_type == QtCore.QEvent.Wheel and target_is_canvas:  # type: ignore[attr-defined]
+            return self._handle_wheel(event)
+
+        if event_type == QtCore.QEvent.KeyPress:  # type: ignore[attr-defined]
+            if self._top_window is not None:
+                if not hasattr(obj, 'window'):
+                    logger.debug("key event target missing window(): %r", obj)
+                    return False
+                other_window = obj.window()
+                if other_window is not None and other_window is not self._top_window:
+                    return False
+            key = int(event.key())
+            mods = int(event.modifiers())
+            text = str(event.text())
+            if self._log_info:
+                logger.info("key press: key=%s mods=%s text=%r", key, mods, text)
+            if self._on_key is not None:
+                consumed = bool(self._on_key({'type': 'input.key', 'key': key, 'mods': mods, 'text': text}))
+                if consumed:
+                    event.accept()
+                    return True
+            return False
+
+        if event_type == QtCore.QEvent.Resize and target_is_canvas:  # type: ignore[attr-defined]
+            return self._handle_resize(event)
+
+        if event_type == QtCore.QEvent.MouseButtonPress and target_is_canvas:  # type: ignore[attr-defined]
+            return self._handle_mouse_down(event)
+
+        if event_type == QtCore.QEvent.MouseMove and target_is_canvas:  # type: ignore[attr-defined]
+            return self._handle_mouse_move(event)
+
+        if event_type == QtCore.QEvent.MouseButtonRelease and target_is_canvas:  # type: ignore[attr-defined]
+            return self._handle_mouse_up(event)
+
         return False
 
     # --- Wheel ---------------------------------------------------------------------
     def _handle_wheel(self, ev) -> bool:  # type: ignore[no-untyped-def]
         now = time.perf_counter()
-        if (now - float(self._last_wheel_send or 0.0)) < self._min_dt:
+        if (now - self._last_wheel_send) < self._min_dt:
             # Coalesce: consume event to avoid parent handling/focus highlight,
             # but skip sending to server when over rate limit
-            try:
-                ev.accept()
-            except Exception:
-                pass
-            try:
-                # Ensure canvas doesn't get/keep focus
-                self._widget.clearFocus()
-            except Exception:
-                pass
+            ev.accept()
+            self._widget.clearFocus()
             return True
-        try:
-            # angleDelta is in 1/8 deg units, typical step is 120 per notch
-            a = ev.angleDelta()
-            ax = int(getattr(a, 'x')()) if hasattr(a, 'x') else int(a.x())
-            ay = int(getattr(a, 'y')()) if hasattr(a, 'y') else int(a.y())
-        except Exception:
-            ax = 0
-            ay = 0
-        try:
-            p = ev.pixelDelta()
-            px = int(getattr(p, 'x')()) if hasattr(p, 'x') else int(p.x())
-            py = int(getattr(p, 'y')()) if hasattr(p, 'y') else int(p.y())
-        except Exception:
-            px = 0
-            py = 0
-        # Position in widget-local pixels
-        try:
-            # Qt6: position() returns QPointF; Qt5: pos() returns QPoint
-            if hasattr(ev, 'position'):
-                pos = ev.position()
-                x = float(pos.x())
-                y = float(pos.y())
-            else:
-                pos = ev.pos()
-                x = float(pos.x())
-                y = float(pos.y())
-        except Exception:
-            x = y = 0.0
-        try:
-            mods = int(ev.modifiers())
-        except Exception:
-            mods = 0
-        try:
-            dpr = float(self._widget.devicePixelRatioF())
-        except Exception:
-            dpr = 1.0
+        # angleDelta is in 1/8 deg units, typical step is 120 per notch
+        angle_delta = ev.angleDelta()
+        assert angle_delta is not None, "wheel event missing angleDelta()"
+        ax_val = angle_delta.x()
+        ay_val = angle_delta.y()
+        pixel_delta = ev.pixelDelta()
+        px_val = pixel_delta.x()
+        py_val = pixel_delta.y()
+        x, y = _pointer_xy(ev)
+        mods = int(ev.modifiers())
+        dpr = float(self._widget.devicePixelRatioF())
+        width_px = int(self._widget.width())
+        height_px = int(self._widget.height())
+        ax = int(ax_val)
+        ay = int(ay_val)
+        px = int(px_val)
+        py = int(py_val)
         msg = {
             'type': 'input.wheel',
-            'angle_x': int(ax),
-            'angle_y': int(ay),
-            'pixel_x': int(px),
-            'pixel_y': int(py),
+            'angle_x': ax,
+            'angle_y': ay,
+            'pixel_x': px,
+            'pixel_y': py,
             'x_px': float(x),
             'y_px': float(y),
-            'mods': int(mods),
-            'width_px': int(self._widget.width()),
-            'height_px': int(self._widget.height()),
-            'dpr': float(dpr),
+            'mods': mods,
+            'width_px': width_px,
+            'height_px': height_px,
+            'dpr': dpr,
             'ts': float(time.time()),
         }
-        ok = self._send_json(msg)
+        ok = self._post(msg)
+        assert isinstance(ok, bool), "post must return bool"
         if self._log_info:
             logger.info(
                 "input.wheel sent: ay=%d py=%d mods=%d pos=(%.1f,%.1f)",
-                int(ay), int(py), int(mods), float(x), float(y),
+                ay, py, mods, float(x), float(y),
             )
-        # Notify optional wheel callback (e.g., for dims intent mapping)
-        try:
-            if self._on_wheel is not None:
-                self._on_wheel(msg)
-        except Exception:
-            logger.debug("on_wheel callback failed", exc_info=True)
+        # Notify optional wheel callback (e.g., for dims state.update mapping)
+        if self._on_wheel is not None:
+            self._on_wheel(msg)
         if ok:
             self._last_wheel_send = now
         # Consume to avoid selection highlighting in parent widgets
-        try:
-            ev.accept()
-        except Exception:
-            pass
+        ev.accept()
         return True
 
     # --- Resize --------------------------------------------------------------------
     def _handle_resize(self, ev) -> bool:  # type: ignore[no-untyped-def]
-        try:
-            w = int(self._widget.width())
-            h = int(self._widget.height())
-            try:
-                dpr = float(self._widget.devicePixelRatioF())
-            except Exception:
-                dpr = 1.0
-            self._pending_resize = (w, h, dpr)
-            # Debounce (restart timer)
-            try:
-                # Default 80 ms unless overridden by property on timer (set by wrapper)
-                interval = int(self._resize_timer.interval()) or 80
-            except Exception:
-                interval = 80
-            self._resize_timer.start(interval)
-        except Exception:
-            logger.debug("Resize handling failed", exc_info=True)
+        w = int(self._widget.width())
+        h = int(self._widget.height())
+        dpr = float(self._widget.devicePixelRatioF())
+        self._pending_resize = (w, h, dpr)
+        # Debounce (restart timer)
+        interval = int(self._resize_timer.interval())
+        assert interval >= 0, "QTimer returned negative interval"
+        self._resize_timer.start(interval)
         return False
 
     def _flush_resize(self) -> None:
@@ -222,116 +176,81 @@ class _EventFilter(QtCore.QObject):  # type: ignore[misc]
         self._pending_resize = None
         msg = {
             'type': 'view.resize',
-            'width_px': int(w),
-            'height_px': int(h),
-            'dpr': float(dpr),
+            'width_px': w,
+            'height_px': h,
+            'dpr': dpr,
             'ts': float(time.time()),
         }
-        _ = self._send_json(msg)
+        ok = self._post(msg)
+        assert isinstance(ok, bool), "post must return bool"
         if self._log_info:
-            logger.info("view.resize sent: %dx%d dpr=%.2f", int(w), int(h), float(dpr))
+            logger.info("view.resize sent: %dx%d dpr=%.2f", w, h, dpr)
 
     # (no key handling)
 
     # --- Mouse handling (forward to on_pointer) ----------------------------------
     def _handle_mouse_down(self, ev) -> bool:  # type: ignore[no-untyped-def]
-        try:
-            if self._on_pointer is not None:
-                try:
-                    pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                    x = float(pos.x()); y = float(pos.y())
-                except Exception:
-                    x = y = 0.0
-                try:
-                    btn = int(ev.button())
-                    btns = int(ev.buttons())
-                    mods = int(ev.modifiers())
-                except Exception:
-                    btn = 0; btns = 0; mods = 0
-                self._on_pointer({
-                    'type': 'input.pointer',
-                    'phase': 'down',
-                    'x_px': float(x),
-                    'y_px': float(y),
-                    'button': int(btn),
-                    'buttons': int(btns),
-                    'mods': int(mods),
-                    'width_px': int(self._widget.width()),
-                    'height_px': int(self._widget.height()),
-                    'ts': float(time.time()),
-                })
-        except Exception:
-            logger.debug("on_pointer (down) failed", exc_info=True)
-        try:
-            ev.accept()
-        except Exception:
-            pass
+        if self._on_pointer is not None:
+            x, y = _pointer_xy(ev)
+            btn_val = int(ev.button())
+            btns_val = int(ev.buttons())
+            mods_val = int(ev.modifiers())
+            payload = {
+                'type': 'input.pointer',
+                'phase': 'down',
+                'x_px': float(x),
+                'y_px': float(y),
+                'button': btn_val,
+                'buttons': btns_val,
+                'mods': mods_val,
+                'width_px': int(self._widget.width()),
+                'height_px': int(self._widget.height()),
+                'ts': float(time.time()),
+            }
+            self._on_pointer(payload)
+        ev.accept()
         return True
 
     def _handle_mouse_move(self, ev) -> bool:  # type: ignore[no-untyped-def]
-        try:
-            if self._on_pointer is not None:
-                try:
-                    pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                    x = float(pos.x()); y = float(pos.y())
-                except Exception:
-                    x = y = 0.0
-                try:
-                    btns = int(ev.buttons())
-                    mods = int(ev.modifiers())
-                except Exception:
-                    btns = 0; mods = 0
-                self._on_pointer({
-                    'type': 'input.pointer',
-                    'phase': 'move',
-                    'x_px': float(x),
-                    'y_px': float(y),
-                    'buttons': int(btns),
-                    'mods': int(mods),
-                    'width_px': int(self._widget.width()),
-                    'height_px': int(self._widget.height()),
-                    'ts': float(time.time()),
-                })
-        except Exception:
-            logger.debug("on_pointer (move) failed", exc_info=True)
-        try:
-            ev.accept()
-        except Exception:
-            pass
+        if self._on_pointer is not None:
+            x, y = _pointer_xy(ev)
+            btns_val = int(ev.buttons())
+            mods_val = int(ev.modifiers())
+            payload = {
+                'type': 'input.pointer',
+                'phase': 'move',
+                'x_px': float(x),
+                'y_px': float(y),
+                'buttons': btns_val,
+                'mods': mods_val,
+                'width_px': int(self._widget.width()),
+                'height_px': int(self._widget.height()),
+                'ts': float(time.time()),
+            }
+            self._on_pointer(payload)
+        ev.accept()
         return True
 
     def _handle_mouse_up(self, ev) -> bool:  # type: ignore[no-untyped-def]
-        try:
-            if self._on_pointer is not None:
-                try:
-                    pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                    x = float(pos.x()); y = float(pos.y())
-                except Exception:
-                    x = y = 0.0
-                try:
-                    btn = int(ev.button())
-                    btns = int(ev.buttons())
-                    mods = int(ev.modifiers())
-                except Exception:
-                    btn = 0; btns = 0; mods = 0
-                self._on_pointer({
-                    'type': 'input.pointer',
-                    'phase': 'up',
-                    'x_px': float(x),
-                    'y_px': float(y),
-                    'button': int(btn),
-                    'buttons': int(btns),
-                    'mods': int(mods),
-                    'width_px': int(self._widget.width()),
-                    'height_px': int(self._widget.height()),
-                    'ts': float(time.time()),
-                })
-        except Exception:
-            logger.debug("on_pointer (up) failed", exc_info=True)
-        try:
-            ev.accept()
-        except Exception:
-            pass
+        if self._on_pointer is not None:
+            x, y = _pointer_xy(ev)
+            btn_val = int(ev.button())
+            btns_val = int(ev.buttons())
+            mods_val = int(ev.modifiers())
+            payload = {
+                'type': 'input.pointer',
+                'phase': 'up',
+                'x_px': float(x),
+                'y_px': float(y),
+                'button': btn_val,
+                'buttons': btns_val,
+                'mods': mods_val,
+                'width_px': int(self._widget.width()),
+                'height_px': int(self._widget.height()),
+                'ts': float(time.time()),
+            }
+            self._on_pointer(payload)
+        ev.accept()
         return True
 
 
@@ -344,7 +263,7 @@ class InputSender:
     def __init__(
         self,
         widget: QtWidgets.QWidget,  # type: ignore[valid-type]
-        send_json: Callable[[dict], bool],
+        post: Callable[[dict], bool],
         *,
         max_rate_hz: float = 120.0,
         resize_debounce_ms: int = 80,
@@ -356,7 +275,7 @@ class InputSender:
         self._widget = widget
         self._filter = _EventFilter(
             widget,
-            send_json,
+            post,
             max_rate_hz=max_rate_hz,
             resize_debounce_ms=resize_debounce_ms,
             on_wheel=on_wheel,
@@ -364,40 +283,24 @@ class InputSender:
             on_key=on_key,
             log_info=log_info,
         )
-        # Pointer callback wiring
-        self._on_pointer = on_pointer
-        self._on_key = on_key
         # Set debounce interval explicitly on the timer
-        try:
-            self._filter._resize_timer.setInterval(int(max(0, resize_debounce_ms)))  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        interval = int(max(0, resize_debounce_ms))
+        self._filter._resize_timer.setInterval(interval)
 
     def start(self) -> None:
         # Install event filter
-        try:
-            self._widget.installEventFilter(self._filter)
-        except Exception:
-            logger.debug("Failed to install input event filter", exc_info=True)
+        self._widget.installEventFilter(self._filter)
         # Install at the application level when input logging or on_key observation is enabled
-        try:
-            app = QtWidgets.QApplication.instance()
-            if app is not None and (bool(getattr(self._filter, '_log_info', False)) or self._on_key is not None):
-                app.installEventFilter(self._filter)
-        except Exception:
-            logger.debug("Failed to install app-level event filter", exc_info=True)
+        app = QtWidgets.QApplication.instance()
+        if app is not None and (self._filter._log_info or self._filter._on_key is not None):  # type: ignore[attr-defined]
+            app.installEventFilter(self._filter)
         # Send initial resize snapshot so server knows canvas size at start
-        try:
-            w = int(self._widget.width())
-            h = int(self._widget.height())
-            try:
-                dpr = float(self._widget.devicePixelRatioF())
-            except Exception:
-                dpr = 1.0
-            msg = {'type': 'view.resize', 'width_px': w, 'height_px': h, 'dpr': dpr, 'ts': float(time.time())}
-            _ = self._filter._send_json(msg)  # type: ignore[attr-defined]
-        except Exception:
-            logger.debug("Initial resize send failed", exc_info=True)
+        w = int(self._widget.width())
+        h = int(self._widget.height())
+        dpr = float(self._widget.devicePixelRatioF())
+        msg = {'type': 'view.resize', 'width_px': w, 'height_px': h, 'dpr': dpr, 'ts': float(time.time())}
+        ok = self._filter._post(msg)
+        assert isinstance(ok, bool), "post must return bool"
 
     # --- Mouse/Pan ---------------------------------------------------------------
     

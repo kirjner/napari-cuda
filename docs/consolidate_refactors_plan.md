@@ -1,0 +1,75 @@
+# Consolidate Refactors Integration Plan
+
+## Context
+Server work on `server-refactor` rebuilt the headless EGL worker, state channel, and protocol surface around the enriched `state.update` envelope. The `client-refactor` branch (tip `b068480c`) introduces a reducer-driven streaming loop, new state store, and removes the old intent bridge. We need a clean integration branch that preserves the server architecture while adopting the client changes and keeps the protocol aligned with the upcoming greenfield contract in `docs/protocol_greenfield.md`.
+
+## Goals
+- Merge `origin/client-refactor` into `server-refactor` without regressing the refactored server stack or the new client reducer pipeline.
+- Keep protocol definitions backwards-compatible while preparing for the greenfield handshake/notify envelopes.
+- Ensure the integrated branch builds, runs, and passes both client and server unit suites.
+
+## Deliverable Branch
+- Branch name: `consolidate-refactors` (created from `server-refactor`).
+- Single merge commit that brings in `origin/client-refactor` and resolves conflicts as described below.
+- No experimental protocol rewrites yet; dual-emission/handshake work remains follow-up.
+
+## Prerequisites
+1. `git fetch origin client-refactor` to ensure tip `b068480c` is present.
+2. Record merge base: `036a76ef9e52d9b46f6665d52def186c25ad560d` (useful for selective diffs).
+3. Confirm clean worktree except for `docs/protocol_greenfield.md` (keep staged if needed).
+4. Run `uv run pytest -q -k "napari_cuda and not slow"` on `server-refactor` and capture results for comparison.
+
+## High-Level Sequence
+1. `git switch server-refactor`
+2. `git pull --ff-only origin server-refactor`
+3. `git switch -c consolidate-refactors`
+4. Optional: re-stage `docs/protocol_greenfield.md` if we want it in the integration commit.
+5. `git merge --no-ff origin/client-refactor`
+6. Resolve conflicts following the per-area guidance below.
+7. Run formatting/ruff if merge markers touched linted code (e.g., `uv run ruff format <files>` as needed).
+8. Execute validation commands (see Testing section).
+9. Commit with message `Merge client-refactor into server-refactor`.
+
+## Conflict Resolution Playbook
+
+### Protocol (`src/napari_cuda/protocol`)
+- **messages.py**: retain the enriched `StateUpdateMessage` from `server-refactor` (fields like `meta`, `axis_index`, `current_step`, `ack`) and introduce an optional `extras` mapping so the new client reducer can consume additional context without breaking existing payload shapes.
+- Drop the obsolete `ControlCommand` helper—future command traffic will use the greenfield `call.command` envelopes.
+- Ensure `StreamProtocol.parse_message` continues to hydrate `StateUpdateMessage` instances; no other message categories need to change yet.
+
+### Server (`src/napari_cuda/server/**`)
+- Keep the `server-refactor` modules (`render_worker.py`, `worker_lifecycle.py`, `server_scene/*.py`, `state_channel_handler.py`, etc.). When resolving conflicts with `client-refactor`, favor the refactored architecture and delete references to the old `egl_worker` in client code.
+- Restore deleted test suites from `server-refactor` (state updates, worker lifecycle). If client branch removed them, bring them back unless they rely on removed components.
+- In `egl_headless_server.py`, ensure imports match retained modules (no `egl_worker`). Wire any new client-introduced hooks (e.g., metrics toggles) to the refactored API.
+- Keep server config docs (`docs/server_*`). Merge client docs by adding, not replacing.
+
+### Client (`src/napari_cuda/client/**`)
+- Accept the new reducer pipeline: files like `client_stream_loop.py`, `state_store.py`, `layer_state_bridge.py`, and client-loop utilities should come from `origin/client-refactor`.
+- Update any imports that expect removed server helpers (e.g., `control_sessions`) to the merged protocol API.
+- Review `launcher.py`, `proxy_viewer.py`, and `streaming_canvas.py` for references to the old intent bridge; ensure they now instantiate `ClientStreamLoop` and `LayerStateBridge` correctly.
+- Align `StateStore` with the merged `StateUpdateMessage`: handle optional `meta`/`current_step` fields that the server still sends.
+
+### Shared Docs & Tooling
+- Keep `.gitignore` entries from both branches (ensure `docs/archive_local/` remains ignored).
+- Merge `pyproject.toml`: keep `napari_cuda` under `[tool.pytest.ini_options] testpaths` so server tests still run and avoid adding `pytest` to the base dependency set (existing extras already cover it).
+- Add `docs/client_state_update_plan.md` alongside server plans; update `docs/streaming_readme.md` by merging content rather than replacing.
+
+## Testing Checklist
+1. `uv run pytest -q -m "not slow" src/napari_cuda/server/_tests` (server suite).
+2. `uv run pytest -q src/napari_cuda/client/streaming/_tests` (client reducer suite).
+3. `uv run pytest -q src/napari_cuda/protocol/_tests` (protocol serialization).
+4. Manual smoke: `uv run napari-cuda-server --state-port ...` and `uv run napari-cuda-client` to verify pan/zoom/dims adjust correctly.
+
+## Post-Merge Follow-Ups
+- Implement handshake + capability negotiation (`session.hello`/`session.welcome`) per `docs/protocol_greenfield.md`.
+- Introduce dual emission of `notify.*` envelopes alongside legacy payloads.
+- Replace `control.command` scaffolding with finalized `call.command` / `reply.command` flows.
+- Update CI to include new client reducer suites.
+
+## Notes on command envelopes
+- The integration drops the legacy `control.command` scaffolding. When we tackle the command lane, add the greenfield `call.command`/`reply.command` helpers directly instead of refactoring an intermediate type.
+
+## Sign-off Criteria
+- Branch `consolidate-refactors` builds, tests, and manually validates streaming interactions.
+- All documentation from both branches present and cross-linked.
+- Known follow-up tickets filed for handshake implementation and notify envelope migration.

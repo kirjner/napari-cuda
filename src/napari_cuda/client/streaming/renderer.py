@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import logging
+import os
 from collections import deque
 from contextlib import contextmanager
 from typing import Optional, Tuple, Any, Callable
@@ -10,9 +12,32 @@ from vispy.gloo import Texture2D, Program
 
 from OpenGL import GL as GL  # type: ignore
 
+from napari_cuda.client.streaming.vt_frame import FrameLease
+
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
 
+
+def _safe_call(
+    func: Callable[..., Any],
+    *args: Any,
+    log_message: Optional[str] = None,
+    default: Any = _MISSING,
+    **kwargs: Any,
+) -> Any:
+    """Invoke ``func`` and log boundary failures when a fallback is acceptable."""
+
+    try:
+        return func(*args, **kwargs)
+    except Exception:  # pragma: no cover - subsystem boundary guard
+        if log_message:
+            logger.exception(log_message)
+        else:
+            logger.exception("boundary call failed: %r", func)
+        if default is _MISSING:
+            raise
+        return default
 VERTEX_SHADER = """
 attribute vec2 position;
 attribute vec2 texcoord;
@@ -42,10 +67,13 @@ class VTReleaseQueue:
         self._entries: deque[Tuple[object, object]] = deque()
 
     def enqueue(self, tex_cap: object) -> bool:
-        try:
-            sync = GL.glFenceSync(GL.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
-        except Exception:
-            sync = None
+        sync = _safe_call(
+            GL.glFenceSync,
+            GL.GL_SYNC_GPU_COMMANDS_COMPLETE,
+            0,
+            log_message="VT release queue: glFenceSync failed",
+            default=None,
+        )
         if sync is None:
             return False
         self._entries.append((sync, tex_cap))
@@ -61,37 +89,49 @@ class VTReleaseQueue:
             if sync is None:
                 finished = True
             else:
-                try:
-                    res = GL.glClientWaitSync(sync, 0, 0)
-                    if res in (GL.GL_ALREADY_SIGNALED, GL.GL_CONDITION_SATISFIED):
-                        finished = True
-                except Exception:
+                res = _safe_call(
+                    GL.glClientWaitSync,
+                    sync,
+                    0,
+                    0,
+                    log_message="VT release queue: glClientWaitSync failed",
+                    default=GL.GL_WAIT_FAILED,
+                )
+                if res in (GL.GL_ALREADY_SIGNALED, GL.GL_CONDITION_SATISFIED, GL.GL_WAIT_FAILED):
                     finished = True
             if not finished:
                 break
-            try:
-                if sync is not None:
-                    GL.glDeleteSync(sync)
-            except Exception:
-                logger.debug("VT release queue: glDeleteSync failed", exc_info=True)
+            if sync is not None:
+                _safe_call(
+                    GL.glDeleteSync,
+                    sync,
+                    log_message="VT release queue: glDeleteSync failed",
+                    default=None,
+                )
             self._entries.popleft()
-            try:
-                vt_module.gl_release_tex(tex_cap)
-            except Exception:
-                logger.debug("VT release queue: gl_release_tex failed", exc_info=True)
+            _safe_call(
+                vt_module.gl_release_tex,
+                tex_cap,
+                log_message="VT release queue: gl_release_tex failed",
+                default=None,
+            )
 
     def reset(self, vt_module) -> None:
         while self._entries:
             sync, tex_cap = self._entries.popleft()
-            try:
-                if sync is not None:
-                    GL.glDeleteSync(sync)
-            except Exception:
-                logger.debug("VT release queue reset: glDeleteSync failed", exc_info=True)
-            try:
-                vt_module.gl_release_tex(tex_cap)
-            except Exception:
-                logger.debug("VT release queue reset: gl_release_tex failed", exc_info=True)
+            if sync is not None:
+                _safe_call(
+                    GL.glDeleteSync,
+                    sync,
+                    log_message="VT release queue reset: glDeleteSync failed",
+                    default=None,
+                )
+            _safe_call(
+                vt_module.gl_release_tex,
+                tex_cap,
+                log_message="VT release queue reset: gl_release_tex failed",
+                default=None,
+            )
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -110,17 +150,28 @@ class GLRenderer:
         # VT zero-copy state (initialized lazily inside draw when needed)
         self._vt = None  # type: ignore
         self._vt_cache = None  # GLCache capsule
-        self._gl_dbg_last_log: float = 0.0
         self._gl_frame_counter: int = 0
         # Debug safety: force CPU mapping instead of zero-copy
-        try:
-            import os as _os
-            self._vt_force_cpu = (_os.getenv('NAPARI_CUDA_VT_FORCE_CPU', '0') or '0') in ('1','true','yes','on')
-            self._vt_gl_safe = (_os.getenv('NAPARI_CUDA_VT_GL_SAFE', '0') or '0') in ('1','true','yes','on')
-            self._vt_gl_flush_every = int(_os.getenv('NAPARI_CUDA_VT_GL_FLUSH_EVERY', '30') or '30')
-        except Exception:
-            self._vt_force_cpu = False
-            self._vt_gl_safe = False
+        self._vt_force_cpu = (os.getenv('NAPARI_CUDA_VT_FORCE_CPU', '0') or '0').lower() in (
+            '1',
+            'true',
+            'yes',
+            'on',
+        )
+        self._vt_gl_safe = (os.getenv('NAPARI_CUDA_VT_GL_SAFE', '0') or '0').lower() in (
+            '1',
+            'true',
+            'yes',
+            'on',
+        )
+        flush_env = (os.getenv('NAPARI_CUDA_VT_GL_FLUSH_EVERY', '').strip() or '30')
+        if flush_env.lstrip('-').isdigit():
+            self._vt_gl_flush_every = int(flush_env)
+        else:
+            if flush_env and flush_env != '30':
+                logger.debug(
+                    "Invalid NAPARI_CUDA_VT_GL_FLUSH_EVERY=%s; defaulting to 30", flush_env
+                )
             self._vt_gl_flush_every = 30
         # Raw-GL programs/VBO for rectangle/2D textures
         self._gl_prog_rect: Optional[int] = None
@@ -138,31 +189,62 @@ class GLRenderer:
         # Track current video texture shape for resize detection
         self._vid_shape: Optional[tuple[int, int]] = None
         # Set swap/pacing preferences once to reduce compositor jitter
-        try:
-            from qtpy.QtGui import QSurfaceFormat
-            fmt = QSurfaceFormat()
-            fmt.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
-            fmt.setSwapInterval(1)
-            QSurfaceFormat.setDefaultFormat(fmt)
-        except Exception:
-            logger.debug("QSurfaceFormat default config failed", exc_info=True)
+        qt_gui = _safe_call(
+            importlib.import_module,
+            'qtpy.QtGui',
+            log_message="QSurfaceFormat module import failed",
+            default=None,
+        )
+        if qt_gui is not None:
+            QSurfaceFormat = getattr(qt_gui, 'QSurfaceFormat', None)
+            if QSurfaceFormat is None:
+                logger.debug("QSurfaceFormat symbol missing in qtpy.QtGui")
+            else:
+                fmt = QSurfaceFormat()
+                _safe_call(
+                    fmt.setSwapBehavior,
+                    QSurfaceFormat.DoubleBuffer,
+                    log_message="QSurfaceFormat.setSwapBehavior failed",
+                    default=None,
+                )
+                _safe_call(
+                    fmt.setSwapInterval,
+                    1,
+                    log_message="QSurfaceFormat.setSwapInterval failed",
+                    default=None,
+                )
+                _safe_call(
+                    QSurfaceFormat.setDefaultFormat,
+                    fmt,
+                    log_message="QSurfaceFormat.setDefaultFormat failed",
+                    default=None,
+                )
         self._init_resources()
 
     def _init_resources(self) -> None:
         # Ensure unpack alignment for tight RGB rows
-        try:
-            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        except Exception:
-            logger.debug("glPixelStorei UNPACK_ALIGNMENT failed", exc_info=True)
+        _safe_call(
+            GL.glPixelStorei,
+            GL.GL_UNPACK_ALIGNMENT,
+            1,
+            log_message="glPixelStorei UNPACK_ALIGNMENT failed",
+            default=None,
+        )
         dummy_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        try:
-            self._video_texture = Texture2D(dummy_frame, internalformat='rgb8')
-            # Minimize filtering artifacts and edge sampling
-            self._video_texture.interpolation = 'nearest'  # type: ignore[attr-defined]
-            self._video_texture.wrapping = 'clamp_to_edge'  # type: ignore[attr-defined]
-        except Exception:
-            # Fallback without internalformat if not supported
-            self._video_texture = Texture2D(dummy_frame)
+        texture = _safe_call(
+            Texture2D,
+            dummy_frame,
+            internalformat='rgb8',
+            log_message="Texture2D rgb8 initialization failed",
+            default=None,
+        )
+        if texture is None:
+            texture = Texture2D(dummy_frame)
+        self._video_texture = texture
+        # Minimize filtering artifacts and edge sampling
+        assert self._video_texture is not None
+        self._video_texture.interpolation = 'nearest'
+        self._video_texture.wrapping = 'clamp_to_edge'
         self._vid_shape = (dummy_frame.shape[0], dummy_frame.shape[1])
         self._video_program = Program(VERTEX_SHADER, FRAGMENT_SHADER)
         vertices = np.array([
@@ -177,13 +259,11 @@ class GLRenderer:
         logger.debug("GLRenderer resources initialized")
 
     def _current_context_id(self) -> Optional[int]:
-        try:
-            ctx = getattr(self._scene_canvas.context, 'context', None)
-            if ctx is None:
-                return None
-            return id(ctx)
-        except Exception:
+        canvas_ctx = getattr(self._scene_canvas, 'context', None)
+        if canvas_ctx is None:
             return None
+        ctx = getattr(canvas_ctx, 'context', None)
+        return None if ctx is None else id(ctx)
 
     def _drain_vt_release_queue(self) -> None:
         if not self._vt_gl_safe or self._vt is None:
@@ -191,21 +271,28 @@ class GLRenderer:
         self._vt_release_queue.drain(self._vt)
 
     def _destroy_raw_gl_resources(self) -> None:
-        try:
-            if self._gl_prog_rect is not None:
-                GL.glDeleteProgram(int(self._gl_prog_rect))
-        except Exception:
-            logger.debug("delete rect program failed", exc_info=True)
-        try:
-            if self._gl_prog_2d is not None:
-                GL.glDeleteProgram(int(self._gl_prog_2d))
-        except Exception:
-            logger.debug("delete 2d program failed", exc_info=True)
-        try:
-            if self._gl_vbo is not None:
-                GL.glDeleteBuffers(1, [int(self._gl_vbo)])
-        except Exception:
-            logger.debug("delete VBO failed", exc_info=True)
+        if self._gl_prog_rect is not None:
+            _safe_call(
+                GL.glDeleteProgram,
+                int(self._gl_prog_rect),
+                log_message="delete rect program failed",
+                default=None,
+            )
+        if self._gl_prog_2d is not None:
+            _safe_call(
+                GL.glDeleteProgram,
+                int(self._gl_prog_2d),
+                log_message="delete 2d program failed",
+                default=None,
+            )
+        if self._gl_vbo is not None:
+            _safe_call(
+                GL.glDeleteBuffers,
+                1,
+                [int(self._gl_vbo)],
+                log_message="delete VBO failed",
+                default=None,
+            )
         self._gl_prog_rect = None
         self._gl_prog_2d = None
         self._gl_pos_loc_rect = None
@@ -222,12 +309,7 @@ class GLRenderer:
         self._vt_cache = None
         self._vt_first_draw_logged = False
         self._gl_frame_counter = 0
-        try:
-            import os as _os
-            if (_os.getenv('NAPARI_CUDA_VT_GL_DEBUG', '0') or '0') in ('1', 'true', 'yes', 'on'):
-                logger.info("GLRenderer: GL context change detected; resources rebuilt")
-        except Exception:
-            logger.debug("GLRenderer: context-change debug log failed", exc_info=True)
+        logger.debug("GLRenderer: GL context change detected; resources rebuilt")
 
     def _maybe_handle_context_change(self) -> None:
         ctx_id = self._current_context_id()
@@ -242,57 +324,70 @@ class GLRenderer:
 
     @contextmanager
     def _vt_draw_state(self, pos_loc: Optional[int], tex_loc: Optional[int], target: int):
-        try:
-            prev_program = GL.glGetIntegerv(GL.GL_CURRENT_PROGRAM)
-        except Exception:
-            prev_program = None
-            logger.debug("VT draw: query current program failed", exc_info=True)
-        try:
-            prev_buffer = GL.glGetIntegerv(GL.GL_ARRAY_BUFFER_BINDING)
-        except Exception:
-            prev_buffer = None
-            logger.debug("VT draw: query array buffer binding failed", exc_info=True)
-        try:
-            prev_active_tex = GL.glGetIntegerv(GL.GL_ACTIVE_TEXTURE)
-        except Exception:
-            prev_active_tex = None
-            logger.debug("VT draw: query active texture failed", exc_info=True)
+        prev_program = _safe_call(
+            GL.glGetIntegerv,
+            GL.GL_CURRENT_PROGRAM,
+            default=None,
+            log_message="VT draw: query current program failed",
+        )
+        prev_buffer = _safe_call(
+            GL.glGetIntegerv,
+            GL.GL_ARRAY_BUFFER_BINDING,
+            default=None,
+            log_message="VT draw: query array buffer binding failed",
+        )
+        prev_active_tex = _safe_call(
+            GL.glGetIntegerv,
+            GL.GL_ACTIVE_TEXTURE,
+            default=None,
+            log_message="VT draw: query active texture failed",
+        )
         try:
             yield
         finally:
             if prev_active_tex is not None:
-                try:
-                    GL.glActiveTexture(int(prev_active_tex))
-                except Exception:
-                    logger.debug("VT draw: restore active texture failed", exc_info=True)
-            try:
-                GL.glBindTexture(int(target), 0)
-            except Exception:
-                logger.debug("VT draw: unbind texture failed", exc_info=True)
-            try:
-                if tex_loc is not None and int(tex_loc) != -1:
-                    GL.glDisableVertexAttribArray(int(tex_loc))
-            except Exception:
-                logger.debug("VT draw: disable tex attrib failed", exc_info=True)
-            try:
-                if pos_loc is not None and int(pos_loc) != -1:
-                    GL.glDisableVertexAttribArray(int(pos_loc))
-            except Exception:
-                logger.debug("VT draw: disable pos attrib failed", exc_info=True)
-            try:
-                if prev_buffer is not None:
-                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(prev_buffer))
-                else:
-                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-            except Exception:
-                logger.debug("VT draw: restore array buffer failed", exc_info=True)
-            try:
-                if prev_program is not None:
-                    GL.glUseProgram(int(prev_program))
-                else:
-                    GL.glUseProgram(0)
-            except Exception:
-                logger.debug("VT draw: restore program failed", exc_info=True)
+                _safe_call(
+                    GL.glActiveTexture,
+                    int(prev_active_tex),
+                    log_message="VT draw: restore active texture failed",
+                    default=None,
+                )
+            _safe_call(
+                GL.glBindTexture,
+                int(target),
+                0,
+                log_message="VT draw: unbind texture failed",
+                default=None,
+            )
+            if tex_loc is not None and int(tex_loc) != -1:
+                _safe_call(
+                    GL.glDisableVertexAttribArray,
+                    int(tex_loc),
+                    log_message="VT draw: disable tex attrib failed",
+                    default=None,
+                )
+            if pos_loc is not None and int(pos_loc) != -1:
+                _safe_call(
+                    GL.glDisableVertexAttribArray,
+                    int(pos_loc),
+                    log_message="VT draw: disable pos attrib failed",
+                    default=None,
+                )
+            target_buffer = int(prev_buffer) if prev_buffer is not None else 0
+            _safe_call(
+                GL.glBindBuffer,
+                GL.GL_ARRAY_BUFFER,
+                target_buffer,
+                log_message="VT draw: restore array buffer failed",
+                default=None,
+            )
+            program_target = int(prev_program) if prev_program is not None else 0
+            _safe_call(
+                GL.glUseProgram,
+                program_target,
+                log_message="VT draw: restore program failed",
+                default=None,
+            )
 
     def draw(self, frame: Optional[Any]) -> None:
         ctx = self._scene_canvas.context
@@ -306,30 +401,51 @@ class GLRenderer:
         if isinstance(frame, tuple) and len(frame) == 2:
             payload, release_cb = frame  # type: ignore[assignment]
 
+        lease = payload if isinstance(payload, FrameLease) else None
+        vt_resource = lease.capsule if lease is not None else payload
+
         # Try VT zero-copy path if payload looks like a CVPixelBuffer and OpenGL is available
         drew_vt = False
         vt_attempted = False
-        if payload is not None:
-            try:
-                # Lazy import to detect VT capsule
-                if self._vt is None:
-                    from napari_cuda import _vt as vt  # type: ignore
-                    self._vt = vt
-                pf = self._vt.pixel_format(payload)  # type: ignore[misc]
+        if vt_resource is not None:
+            if self._vt is None:
+                vt_module = _safe_call(
+                    importlib.import_module,
+                    'napari_cuda._vt',
+                    log_message="VT zero-copy draw: import failed",
+                    default=None,
+                )
+                if vt_module is not None:
+                    self._vt = vt_module
+            if self._vt is not None:
+                pf = _safe_call(
+                    self._vt.pixel_format,  # type: ignore[misc]
+                    vt_resource,
+                    default=None,
+                    log_message="VT zero-copy draw: pixel_format failed",
+                )
                 if pf is not None and not self._vt_force_cpu:
                     if self._vt_cache is None:
-                        self._vt_cache = self._vt.gl_cache_init_for_current_context()
+                        self._vt_cache = _safe_call(
+                            self._vt.gl_cache_init_for_current_context,  # type: ignore[attr-defined]
+                            log_message="VT zero-copy draw: cache init failed",
+                            default=None,
+                        )
                     if self._vt_cache:
                         vt_attempted = True
-                        drew_vt = self._draw_vt_texture(self._vt_cache, payload)
+                        drew_vt = bool(
+                            _safe_call(
+                                self._draw_vt_texture,
+                                self._vt_cache,
+                                vt_resource,
+                                default=False,
+                                log_message="VT zero-copy draw: _draw_vt_texture failed",
+                            )
+                        )
                         if drew_vt and release_cb is not None:
                             release_after_draw_cb = release_cb
                             release_after_draw_payload = payload
                             release_cb = None
-            except Exception:
-                # Not a CVPixelBuffer or VT path failed; fall back below
-                logger.debug("VT zero-copy draw attempt failed; falling back", exc_info=True)
-                drew_vt = False
         else:
             logger.debug("draw: payload=%s vt_attempted=%s", type(payload).__name__, vt_attempted)
 
@@ -338,10 +454,12 @@ class GLRenderer:
             # If VT was attempted but failed, preserve last frame to avoid flicker
             if vt_attempted and self._has_drawn:
                 if release_cb is not None and payload is not None:
-                    try:
-                        release_cb(payload)  # type: ignore[misc]
-                    except Exception:
-                        logger.debug("VT drop-frame release failed", exc_info=True)
+                    _safe_call(
+                        release_cb,
+                        payload,
+                        log_message="VT drop-frame release failed",
+                        default=None,
+                    )
                     release_cb = None
                 return
             # If no new frame, keep last drawn content to avoid flicker
@@ -350,46 +468,70 @@ class GLRenderer:
             # Fallback: upload numpy RGB
             if self._video_program is None or self._video_texture is None:
                 self._init_resources()
-            if payload is not None:
-                try:
-                    # If payload is a CVPixelBuffer and force_cpu is on, map to RGB bytes
-                    if self._vt is not None:
-                        try:
-                            pf = self._vt.pixel_format(payload)  # type: ignore[misc]
-                        except Exception:
-                            pf = None
-                        if pf is not None and self._vt_force_cpu:
-                            data = self._vt.map_to_rgb(payload)
-                            arr = np.frombuffer(data[0], dtype=np.uint8).reshape((int(data[2]), int(data[1]), 3))
+            if vt_resource is not None:
+                arr: Optional[np.ndarray]
+                if self._vt is not None:
+                    pf = _safe_call(
+                        self._vt.pixel_format,  # type: ignore[misc]
+                        vt_resource,
+                        default=None,
+                        log_message="Frame normalization: pixel_format failed",
+                    )
+                    if pf is not None and self._vt_force_cpu:
+                        data = _safe_call(
+                            self._vt.map_to_rgb,  # type: ignore[attr-defined]
+                            vt_resource,
+                            default=None,
+                            log_message="Frame normalization: map_to_rgb failed",
+                        )
+                        if data is None:
+                            arr = None
                         else:
-                            arr = np.asarray(payload)
+                            arr = np.frombuffer(data[0], dtype=np.uint8).reshape(
+                                (int(data[2]), int(data[1]), 3)
+                            )
                     else:
-                        arr = np.asarray(payload)
-                    if arr.dtype != np.uint8 or not arr.flags.c_contiguous:
-                        arr = np.ascontiguousarray(arr, dtype=np.uint8)
-                except Exception:
-                    logger.debug("Frame normalization failed", exc_info=True)
-                    arr = None
+                        arr = np.asarray(vt_resource)
+                else:
+                    arr = np.asarray(vt_resource)
+                if arr is not None and (arr.dtype != np.uint8 or not arr.flags.c_contiguous):
+                    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+                if arr is None:
+                    logger.debug("Frame normalization failed; skipping draw")
                 if arr is not None:
                     # Recreate texture only if size changed to avoid realloc churn
                     h, w = int(arr.shape[0]), int(arr.shape[1])
                     if self._vid_shape != (h, w):
-                        try:
-                            self._video_texture = Texture2D(arr, internalformat='rgb8')
-                            self._video_texture.interpolation = 'nearest'  # type: ignore[attr-defined]
-                            self._video_texture.wrapping = 'clamp_to_edge'  # type: ignore[attr-defined]
-                            self._video_program['texture'] = self._video_texture
-                        except Exception:
-                            self._video_texture = Texture2D(arr)
-                            self._video_program['texture'] = self._video_texture
+                        texture = _safe_call(
+                            Texture2D,
+                            arr,
+                            internalformat='rgb8',
+                            log_message="Texture resize rgb8 init failed",
+                            default=None,
+                        )
+                        if texture is None:
+                            texture = Texture2D(arr)
+                        self._video_texture = texture
+                        assert self._video_texture is not None
+                        self._video_texture.interpolation = 'nearest'
+                        self._video_texture.wrapping = 'clamp_to_edge'
+                        self._video_program['texture'] = self._video_texture
                         self._vid_shape = (h, w)
                     else:
-                        self._video_texture.set_data(arr)
+                        assert self._video_texture is not None
+                        _safe_call(
+                            self._video_texture.set_data,
+                            arr,
+                            log_message="Texture2D set_data failed",
+                            default=None,
+                        )
                 if release_cb is not None and payload is not None:
-                    try:
-                        release_cb(payload)  # type: ignore[misc]
-                    except Exception:
-                        logger.debug("VT fallback release failed", exc_info=True)
+                    _safe_call(
+                        release_cb,
+                        payload,
+                        log_message="VT fallback release failed",
+                        default=None,
+                    )
                     release_cb = None
                     payload = None
             # Avoid clearing every frame to prevent visible flashes on some drivers
@@ -401,10 +543,12 @@ class GLRenderer:
 
         # Invoke release callback (if provided) after submission
         if release_after_draw_cb is not None and release_after_draw_payload is not None:
-            try:
-                release_after_draw_cb(release_after_draw_payload)  # type: ignore[misc]
-            except Exception:
-                logger.debug("release_cb failed after VT draw", exc_info=True)
+            _safe_call(
+                release_after_draw_cb,
+                release_after_draw_payload,
+                log_message="release_cb failed after VT draw",
+                default=None,
+            )
 
     # --- VT helpers ---
     def _compile_glsl(self, vert_src: str, frag_src: str) -> Optional[int]:
@@ -522,11 +666,18 @@ class GLRenderer:
         if self._vt is None:
             return False
         # Ensure sane GL state; avoid clearing so previous image persists on errors
-        try:
-            GL.glDisable(GL.GL_DEPTH_TEST)
-            GL.glDisable(GL.GL_BLEND)
-        except Exception:
-            logger.debug("GL state setup failed", exc_info=True)
+        _safe_call(
+            GL.glDisable,
+            GL.GL_DEPTH_TEST,
+            log_message="GL state setup (DEPTH_TEST) failed",
+            default=None,
+        )
+        _safe_call(
+            GL.glDisable,
+            GL.GL_BLEND,
+            log_message="GL state setup (BLEND) failed",
+            default=None,
+        )
         res = self._vt.gl_tex_from_cvpixelbuffer(cache_cap, cvpixelbuffer_cap)
         if not res:
             return False
@@ -588,47 +739,45 @@ class GLRenderer:
                         GL.glEnableVertexAttribArray(int(self._gl_tex_loc_2d))
                         GL.glVertexAttribPointer(int(self._gl_tex_loc_2d), 2, GL.GL_FLOAT, GL.GL_FALSE, stride, _ctypes.c_void_p(8))
                     GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
-            try:
-                GL.glFlush()
-            except Exception:
-                logger.debug("VT draw: glFlush failed", exc_info=True)
+            _safe_call(GL.glFlush, log_message="VT draw: glFlush failed", default=None)
             # Release the GL texture object created by VT (immediately or deferred)
             logger.debug("VT release tex=%s", hex(name_i))
             if self._vt_gl_safe:
                 enqueued = self._vt_release_queue.enqueue(tex_cap)
                 if not enqueued:
                     logger.debug("VT release queue: enqueue failed; releasing immediately")
-                    self._vt.gl_release_tex(tex_cap)
+                    _safe_call(
+                        self._vt.gl_release_tex,
+                        tex_cap,
+                        log_message="VT draw: immediate gl_release_tex failed",
+                        default=None,
+                    )
             else:
-                self._vt.gl_release_tex(tex_cap)
+                _safe_call(
+                    self._vt.gl_release_tex,
+                    tex_cap,
+                    log_message="VT draw: gl_release_tex failed",
+                    default=None,
+                )
             # Optionally flush the texture cache periodically to release internal resources
-            try:
-                self._gl_frame_counter += 1
-                if self._vt_gl_flush_every > 0 and (self._gl_frame_counter % int(max(1, self._vt_gl_flush_every))) == 0:
-                    self._vt.gl_cache_flush(cache_cap)
-            except Exception:
-                logger.debug("gl_cache_flush failed", exc_info=True)
-            # Optional GL cache debug
-            try:
-                import os as _os, time as _time
-                if (_os.getenv('NAPARI_CUDA_VT_GL_DEBUG', '0') or '0') in ('1','true','yes','on'):
-                    now = _time.time()
-                    if now - float(self._gl_dbg_last_log or 0.0) >= 1.0:
-                        try:
-                            creates, releases = self._vt.gl_cache_counts(cache_cap)  # type: ignore[misc]
-                            queue_depth = len(self._vt_release_queue) if self._vt_gl_safe else 0
-                            logger.info("VT GL dbg: cache creates=%d releases=%d queue=%d", int(creates), int(releases), int(queue_depth))
-                        except Exception:
-                            logger.debug("VT draw: cache counts failed", exc_info=True)
-                        self._gl_dbg_last_log = now
-            except Exception:
-                logger.debug("VT draw: debug logging failed", exc_info=True)
+            self._gl_frame_counter += 1
+            if self._vt_gl_flush_every > 0 and (
+                self._gl_frame_counter % int(max(1, self._vt_gl_flush_every))
+            ) == 0:
+                _safe_call(
+                    self._vt.gl_cache_flush,
+                    cache_cap,
+                    log_message="gl_cache_flush failed",
+                    default=None,
+                )
             return True
         except Exception:
             logger.debug("VT draw failed", exc_info=True)
             if not enqueued:
-                try:
-                    self._vt.gl_release_tex(tex_cap)
-                except Exception:
-                    logger.debug("gl_release_tex (cleanup) failed", exc_info=True)
+                _safe_call(
+                    self._vt.gl_release_tex,
+                    tex_cap,
+                    log_message="gl_release_tex (cleanup) failed",
+                    default=None,
+                )
             return False

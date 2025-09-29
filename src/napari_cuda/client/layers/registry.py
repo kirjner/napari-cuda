@@ -107,6 +107,11 @@ def _merge_specs(base: LayerSpec | None, update: LayerSpec, partial: bool) -> La
             merged_extras.update(value)
             overrides[name] = merged_extras
             continue
+        if name == "controls" and isinstance(value, dict):
+            merged_controls = dict(getattr(base, name) or {})
+            merged_controls.update(value)
+            overrides[name] = merged_controls
+            continue
         if _has_value(value):
             overrides[name] = value
     return replace(base, **overrides)
@@ -144,6 +149,14 @@ class RemoteLayerRegistry:
                 desired_order.append(layer_id)
                 self._specs[layer_id] = spec
                 existing = self._layers.get(layer_id)
+                if _LAYER_DEBUG:
+                    logger.debug(
+                        "scene layer spec: id=%s type=%s controls=%s extras=%s",
+                        spec.layer_id,
+                        getattr(spec, "layer_type", None),
+                        getattr(spec, "controls", None),
+                        getattr(spec, "extras", None),
+                    )
                 if existing is None:
                     layer = self._create_layer(spec)
                     if layer is None:
@@ -255,6 +268,8 @@ class RemoteLayerRegistry:
     def _create_layer(self, spec: LayerSpec) -> RemoteImageLayer | None:
         layer_type = spec.layer_type.lower()
         if layer_type not in ("image", "volume"):
+            if _LAYER_DEBUG:
+                logger.debug("unsupported layer type: id=%s type=%s", spec.layer_id, spec.layer_type)
             return None
         if _LAYER_DEBUG:
             logger.debug("instantiating RemoteImageLayer: id=%s type=%s", spec.layer_id, spec.layer_type)

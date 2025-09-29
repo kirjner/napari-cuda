@@ -151,12 +151,25 @@ def _inject_layer_context(
 def _inject_dims_context(result: StateUpdateResult, payload: Dict[str, Any]) -> None:
     """Attach dims extras to the payload if supplied."""
 
+    extras = payload.get("extras")
+    if not isinstance(extras, dict):
+        extras = {}
+        payload["extras"] = extras
+
     if result.axis_index is not None:
-        payload.setdefault("axis_index", int(result.axis_index))
+        axis_idx = int(result.axis_index)
+        payload.setdefault("axis_index", axis_idx)
+        extras.setdefault("axis_index", axis_idx)
     if result.current_step is not None:
-        payload.setdefault("current_step", [int(x) for x in result.current_step])
+        current_step = [int(x) for x in result.current_step]
+        payload.setdefault("current_step", current_step)
+        extras.setdefault("current_step", current_step)
     if result.meta is not None:
-        payload.setdefault("meta", dict(result.meta))
+        meta = dict(result.meta)
+        payload.setdefault("meta", meta)
+        extras.setdefault("meta", dict(meta))
+        if "ndisplay" in meta:
+            extras.setdefault("ndisplay", meta.get("ndisplay"))
     if result.last_client_id is not None:
         payload.setdefault("last_client_id", result.last_client_id)
     if result.last_client_seq is not None:

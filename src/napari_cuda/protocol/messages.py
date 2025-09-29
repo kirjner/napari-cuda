@@ -108,6 +108,7 @@ class StateUpdateMessage:
     intent_seq: Optional[int] = None
     last_client_id: Optional[str] = None
     last_client_seq: Optional[int] = None
+    extras: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -129,6 +130,7 @@ class StateUpdateMessage:
             "intent_seq": self._int_or_none(self.intent_seq),
             "last_client_id": self.last_client_id,
             "last_client_seq": self._int_or_none(self.last_client_seq),
+            "extras": dict(self.extras) if isinstance(self.extras, Mapping) else self.extras,
         }
         return {key: value for key, value in payload.items() if value is not None}
 
@@ -158,6 +160,7 @@ class StateUpdateMessage:
             intent_seq=cls._parse_optional_int(data.get("intent_seq")),
             last_client_id=data.get("last_client_id"),
             last_client_seq=cls._parse_optional_int(data.get("last_client_seq")),
+            extras=dict(data.get("extras", {})) if isinstance(data.get("extras"), Mapping) else data.get("extras"),
         )
 
     @staticmethod

@@ -10,8 +10,10 @@ import logging
 import argparse
 
 import napari
-from napari._qt.qt_viewer import QtViewer
 from napari._qt.qt_main_window import Window
+from napari.components.viewer_model import ViewerModel
+from napari.utils.action_manager import action_manager
+from napari.utils.translations import trans
 
 from .proxy_viewer import ProxyViewer
 from .streaming_canvas import StreamingCanvas
@@ -22,8 +24,7 @@ logger = logging.getLogger(__name__)
 def launch_streaming_client(server_host='localhost', 
                           state_port=8081,
                           pixel_port=8082,
-                          debug=False,
-                          vt_smoke: bool = False):
+                          debug=False):
     """
     Launch napari client connected to remote server.
     
@@ -63,7 +64,7 @@ def launch_streaming_client(server_host='localhost',
     
     # Create ProxyViewer (inherits from ViewerModel, no Window created)
     # In the streaming client, keep ProxyViewer offline and forward state
-    # via the StreamCoordinator to avoid dual sockets/drift.
+    # via the ClientStreamLoop to avoid dual sockets/drift.
     proxy_viewer = ProxyViewer(
         server_host=server_host,
         server_port=state_port,
@@ -85,7 +86,6 @@ def launch_streaming_client(server_host='localhost',
         proxy_viewer,
         server_host=server_host,
         server_port=pixel_port,
-        vt_smoke=vt_smoke,
         key_map_handler=getattr(qt_viewer, '_key_map_handler', None),
         parent=qt_viewer
     )
@@ -142,25 +142,84 @@ def launch_streaming_client(server_host='localhost',
         except Exception:
             logger.debug("launcher: cleanup old canvas native failed", exc_info=True)
     
-    # Now show the window
-    window.show()
-
-    # Wire the Home button to remote camera.reset via coordinator
+    # Delay showing the window until the first authoritative dims.update arrives.
     try:
-        mgr = getattr(streaming_canvas, '_manager', None)
-        if mgr is not None:
+        streaming_canvas.defer_window_show(window)
+    except Exception:
+        logger.debug("launcher: deferred window show failed; showing immediately", exc_info=True)
+        window.show()
+
+    # Wire the Home button to remote camera.reset via coordinator and
+    # override the 2D/3D toggle to send intents rather than mutate locally.
+    mgr = getattr(streaming_canvas, '_manager', None)
+    if mgr is not None:
+        try:
             rvb = window._qt_viewer.viewerButtons.resetViewButton
             # Avoid duplicate connections by lambdas with default arg
             rvb.clicked.connect(lambda _=False, m=mgr: m.reset_camera(origin='ui'))
-    except Exception:
-        logger.debug("launcher: failed to bind Home button to coordinator.reset_camera", exc_info=True)
+        except Exception:
+            logger.debug(
+                "launcher: failed to bind Home button to loop.reset_camera",
+                exc_info=True,
+            )
+
+        try:
+            ndb = window._qt_viewer.viewerButtons.ndisplayButton
+
+            def _remote_toggle_ndisplay(viewer: ViewerModel) -> None:
+                """Toggle 2D/3D mode by forwarding an intent to the server."""
+
+                current = mgr.current_ndisplay()
+                if current is None:
+                    try:
+                        current = viewer.dims.ndisplay
+                    except Exception:
+                        current = 2
+                target = 2 if current == 3 else 3
+                if not mgr.view_set_ndisplay(target, origin='ui'):
+                    logger.info(
+                        "toggle_ndisplay: remote intent rejected (dims not ready or rate limited)"
+                    )
+                    return
+
+                suppress_token = None
+                if hasattr(viewer, '_suppress_forward'):
+                    suppress_token = getattr(viewer, '_suppress_forward')
+                    setattr(viewer, '_suppress_forward', True)
+                try:
+                    viewer.dims.ndisplay = target
+                except Exception:
+                    logger.debug(
+                        "toggle_ndisplay: local mirror update failed", exc_info=True
+                    )
+                finally:
+                    if suppress_token is not None:
+                        setattr(viewer, '_suppress_forward', suppress_token)
+
+                try:
+                    ndb.setChecked(target == 3)
+                except Exception:
+                    pass
+
+            action_manager.register_action(
+                name='napari:toggle_ndisplay',
+                command=_remote_toggle_ndisplay,
+                description=trans._('Toggle 2D/3D view'),
+                keymapprovider=ViewerModel,
+            )
+        except Exception:
+            logger.debug(
+                "launcher: failed to override toggle_ndisplay action", exc_info=True
+            )
 
     logger.info("Client launched successfully")
     
     # Run Qt event loop
     napari.run()
-    
+
     # Cleanup
+    if mgr is not None:
+        mgr.stop()
     proxy_viewer.close()
     logger.info("Client closed")
 
@@ -195,33 +254,6 @@ def main():
         '--debug',
         action='store_true',
         help='Enable debug logging'
-    )
-    # Unified smoke flag (offline; no server)
-    parser.add_argument(
-        '--smoke',
-        action='store_true',
-        help='Run client-side smoke test (offline)'
-    )
-    parser.add_argument(
-        '--preset',
-        default=None,
-        help='Smoke preset (e.g., 4k60)'
-    )
-    parser.add_argument(
-        '--preencode',
-        action='store_true',
-        help='Enable preencode smoke mode (encode once, then replay)'
-    )
-    parser.add_argument(
-        '--pre-mb',
-        type=int,
-        default=None,
-        help='Preencode memory cap in MB (0 = unlimited)'
-    )
-    parser.add_argument(
-        '--pre-path',
-        default=None,
-        help='Directory path for disk-backed preencode cache'
     )
     parser.add_argument(
         '--metrics',
@@ -281,17 +313,6 @@ def main():
         print("\nThen run client with: --host localhost")
         sys.exit(0)
     
-    # Apply smoke-related CLI envs before launch
-    if args.smoke:
-        os.environ.setdefault('NAPARI_CUDA_SMOKE', '1')
-    if args.preset:
-        os.environ['NAPARI_CUDA_SMOKE_PRESET'] = str(args.preset)
-    if args.preencode:
-        os.environ['NAPARI_CUDA_SMOKE_PREENCODE'] = '1'
-    if args.pre_mb is not None:
-        os.environ['NAPARI_CUDA_SMOKE_PRE_MB'] = str(int(args.pre_mb))
-    if args.pre_path:
-        os.environ['NAPARI_CUDA_SMOKE_PRE_PATH'] = str(args.pre_path)
     # Client metrics envs
     if args.metrics:
         os.environ['NAPARI_CUDA_CLIENT_METRICS'] = '1'
@@ -326,13 +347,11 @@ def main():
         logger.exception('launcher: jitter preset handling failed')
 
     # Launch client
-    smoke = bool(args.smoke)
     launch_streaming_client(
         server_host=args.host,
         state_port=args.state_port,
         pixel_port=args.pixel_port,
         debug=args.debug,
-        vt_smoke=smoke
     )
 
 

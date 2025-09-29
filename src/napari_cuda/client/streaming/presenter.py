@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 from collections import deque
 import threading
 import math
 
 from napari_cuda.client.streaming.types import ReadyFrame, Source, SubmittedFrame
+from napari_cuda.client.streaming.vt_frame import FrameLease
 
 logger = logging.getLogger(__name__)
 
@@ -200,12 +201,7 @@ class FixedLatencyPresenter:
         except Exception:
             logger.debug("submit: PLL update failed", exc_info=True)
         for it in to_release:
-            cb = it.release_cb
-            if cb is not None:
-                try:
-                    cb(it.payload)  # type: ignore[misc]
-                except Exception:
-                    logger.debug("release_cb failed during buffer trim", exc_info=True)
+            self._release_payload(it.payload, it.release_cb)
 
     def clear(self, source: Optional[Source] = None) -> None:
         if source is None:
@@ -223,14 +219,21 @@ class FixedLatencyPresenter:
 
     def _release_many(self, items: List[_BufItem]) -> None:
         for it in items:
-            cb = it.release_cb
-            if cb is not None:
-                try:
-                    # Stored as object to avoid type checker on Optional[Callable]
-                    cb = cb  # type: ignore[assignment]
-                    cb(it.payload)  # type: ignore[misc]
-                except Exception:
-                    logger.debug("release_cb failed during buffer clear", exc_info=True)
+            self._release_payload(it.payload, it.release_cb)
+
+    def _release_payload(self, payload: object, release_cb: Optional[object]) -> None:
+        if isinstance(payload, FrameLease):
+            try:
+                payload.release_presenter()
+            except Exception:
+                logger.debug("FrameLease presenter release failed", exc_info=True)
+            return
+        if release_cb is not None:
+            try:
+                release_cb = release_cb  # type: ignore[assignment]
+                release_cb(payload)  # type: ignore[misc]
+            except Exception:
+                logger.debug("release_cb failed", exc_info=True)
 
     def pop_due(self, now: Optional[float], active: Source) -> Optional[ReadyFrame]:
         # Use monotonic clock for scheduling decisions
@@ -268,6 +271,22 @@ class FixedLatencyPresenter:
             self._release_many(to_release)
         if sel is None:
             return None
+        payload = sel.payload
+        release_cb = sel.release_cb
+        lease = payload if isinstance(payload, FrameLease) else None
+        if lease is not None:
+            try:
+                lease.acquire_renderer()
+            except Exception:
+                logger.debug("FrameLease renderer acquire failed", exc_info=True)
+                self._release_payload(payload, release_cb)
+                return None
+            if not is_preview:
+                try:
+                    lease.release_presenter()
+                except Exception:
+                    logger.debug("FrameLease presenter release failed", exc_info=True)
+            release_cb = self._renderer_release_cb(lease)
         try:
             lateness_ms = (n - float(sel.due_ts)) * 1000.0
             logger.debug(
@@ -278,7 +297,13 @@ class FixedLatencyPresenter:
             )
         except Exception:
             pass
-        return ReadyFrame(source=active, due_ts=sel.due_ts, payload=sel.payload, release_cb=sel.release_cb, preview=is_preview)
+        return ReadyFrame(source=active, due_ts=sel.due_ts, payload=payload, release_cb=release_cb, preview=is_preview)
+
+    def _renderer_release_cb(self, lease: FrameLease) -> Callable[[object], None]:
+        def _release(_: object) -> None:
+            lease.release_renderer()
+
+        return _release
 
     def stats(self) -> Dict[str, object]:
         # Use monotonic clock to compare against due_ts values

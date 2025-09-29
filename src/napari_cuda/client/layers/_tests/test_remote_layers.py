@@ -177,6 +177,11 @@ def test_proxy_viewer_applies_displayed_axes():
     )
     assert viewer.dims.ndisplay == 3
     assert viewer.dims.displayed == (0, 1, 2)
+    ranges = tuple(tuple(r) for r in viewer.dims.range)
+    assert ranges[0] == (0.0, 3.0, 1.0)
+    assert viewer.dims.ndim == 3
+    assert tuple(float(x) for x in viewer.dims.point) == (0.0, 0.0, 0.0)
+    assert viewer._suppress_forward is False
 
 
 def test_remote_image_layer_updates_thumbnail_from_preview():

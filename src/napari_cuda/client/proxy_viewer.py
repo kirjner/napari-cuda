@@ -1,7 +1,7 @@
 """
 ProxyViewer - Thin client viewer that mirrors server state via the coordinator.
 
-All authoritative state is routed through the StreamCoordinator over a single
+All authoritative state is routed through the ClientStreamLoop over a single
 state channel. No direct sockets or legacy dims.set paths remain here.
 """
 
@@ -223,7 +223,11 @@ class ProxyViewer(ViewerModel):
                 if prev_val is not None:
                     delta = int(val) - int(prev_val)
                     if delta != 0:
-                        logger.debug("play tick -> dims.intent.step axis=%d delta=%+d", int(changed_axis), int(delta))
+                        logger.debug(
+                            "play tick -> state.update dims.step axis=%d delta=%+d",
+                            int(changed_axis),
+                            int(delta),
+                        )
                         _ = self._state_sender.dims_step(int(changed_axis), int(delta), origin='play')
                 # Update last snapshot and stop here (no set_index on play axis)
                 self._last_step_ui = tuple(cur) if isinstance(cur, tuple) else cur
@@ -232,7 +236,17 @@ class ProxyViewer(ViewerModel):
             # Send immediately when coalescing is disabled, otherwise coalesce
             try:
                 if int(getattr(self, '_dims_tx_interval_ms', 10) or 0) <= 0:
-                    logger.debug("slider -> dims.intent.set_index axis=%d value=%d (immediate)", int(changed_axis), int(val))
+                    if bool(getattr(self, '_log_dims_info', False)):
+                        logger.info(
+                            "slider -> state.update dims.index axis=%d value=%d",
+                            int(changed_axis),
+                            int(val),
+                        )
+                    logger.debug(
+                        "slider -> state.update dims.index axis=%d value=%d (immediate)",
+                        int(changed_axis),
+                        int(val),
+                    )
                     _ = self._state_sender.dims_set_index(int(changed_axis), int(val), origin='ui')
                 else:
                     self._dims_tx_pending = (int(changed_axis), int(val))
@@ -247,16 +261,31 @@ class ProxyViewer(ViewerModel):
                                 if pair is None:
                                     return
                                 ax, vv = pair
-                                logger.debug("slider (coalesced) -> dims.intent.set_index axis=%d value=%d", int(ax), int(vv))
+                                if bool(getattr(self, '_log_dims_info', False)):
+                                    logger.info(
+                                        "slider (coalesced) -> state.update dims.index axis=%d value=%d",
+                                        int(ax),
+                                        int(vv),
+                                    )
+                                logger.debug(
+                                    "slider (coalesced) -> state.update dims.index axis=%d value=%d",
+                                    int(ax),
+                                    int(vv),
+                                )
                                 _ = self._state_sender.dims_set_index(int(ax), int(vv), origin='ui')
                             except Exception:
-                                logger.debug("ProxyViewer dims intent send failed", exc_info=True)
+                                logger.debug("ProxyViewer dims control send failed", exc_info=True)
                         t.timeout.connect(_fire)
                         self._dims_tx_timer = t
                     # restart timer with configured interval
                     self._dims_tx_timer.start(max(1, int(self._dims_tx_interval_ms)))
+                # Update local snapshot so subsequent deltas reflect the UI state
+                try:
+                    self._last_step_ui = tuple(cur) if isinstance(cur, tuple) else cur
+                except Exception:
+                    self._last_step_ui = cur
             except Exception:
-                logger.debug("ProxyViewer dims send failed", exc_info=True)
+                logger.debug("ProxyViewer dims control send failed", exc_info=True)
             return
         return
 
@@ -296,7 +325,7 @@ class ProxyViewer(ViewerModel):
             return
         fn = getattr(sender, 'view_set_ndisplay', None)
         if callable(fn) and not fn(ndisplay, origin='ui'):
-            logger.debug("ProxyViewer: ndisplay intent send failed")
+            logger.debug("ProxyViewer: ndisplay control send failed")
 
 
     # --- Streaming client bridge -------------------------------------------------
@@ -320,6 +349,7 @@ class ProxyViewer(ViewerModel):
 
         Accepts optional fields piggybacked on dims_update: ndim, range, order, axis_labels, sizes.
         """
+        prev_suppress = self._suppress_forward
         self._suppress_forward = True
         try:
             # Apply metadata first so sliders exist before setting current_step
@@ -396,23 +426,30 @@ class ProxyViewer(ViewerModel):
             if current_step is not None:
                 # Do not block events here: allow napari UI (sliders) to update.
                 # Loopback is prevented by _suppress_forward above.
-                self.dims.current_step = tuple(int(x) for x in current_step)
-            # Cache the latest step for diffing future UI changes
-            try:
-                if current_step is not None:
-                    self._last_step_ui = tuple(int(x) for x in current_step)
-            except Exception:
-                self._last_step_ui = current_step
+                step_tuple = tuple(int(x) for x in current_step)
+                self.dims.current_step = step_tuple
+                try:
+                    self.dims.point = tuple(float(x) for x in current_step)
+                except Exception:
+                    logger.debug("apply dims.point failed", exc_info=True)
+                try:
+                    self._last_step_ui = step_tuple
+                except Exception:
+                    self._last_step_ui = current_step
             if bool(getattr(self, '_log_dims_info', False)):
                 logger.info(
-                    "ProxyViewer dims applied: ndim=%s ndisplay=%s displayed=%s order=%s",
+                    "ProxyViewer dims applied: ndim=%s ndisplay=%s displayed=%s order=%s step=%s range=%s",
                     self.dims.ndim,
                     self.dims.ndisplay,
                     self.dims.displayed,
                     self.dims.order,
+                    getattr(self.dims, 'current_step', None),
+                    getattr(self.dims, 'range', None),
                 )
         except Exception:
             logger.debug("ProxyViewer mirror dims apply failed", exc_info=True)
+        finally:
+            self._suppress_forward = prev_suppress
 
     def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
         """Synchronize remote layer mirrors with the latest registry snapshot."""
@@ -444,13 +481,15 @@ class ProxyViewer(ViewerModel):
                             self.layers.pop(current_index)
                             self.layers.insert(idx, layer)
                     try:
-                        layer.visible = False
+                        controls = getattr(record.spec, "controls", None)
+                        target = controls.get("visible") if isinstance(controls, dict) else None
+                        if target is not None and bool(layer.visible) is not bool(target):
+                            emitter = getattr(getattr(layer, "events", None), "visible", None)
+                            blocker = emitter.blocker() if hasattr(emitter, "blocker") else nullcontext()
+                            with blocker:
+                                layer.visible = bool(target)
                     except Exception:
                         pass
-                try:
-                    self.layers.selection.clear()
-                except Exception:
-                    pass
         finally:
             self._suppress_forward = False
 

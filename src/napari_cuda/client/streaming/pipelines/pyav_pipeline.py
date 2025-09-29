@@ -8,19 +8,19 @@ PyAVPipeline - handles PyAV decode path decoupled from the coordinator.
 - Exposes simple enqueue() for the coordinator to feed bytes+timestamps.
 """
 
+import logging
 import queue
+import threading
 import time
 from dataclasses import dataclass
 from threading import Thread
-from typing import Optional, Callable
+from typing import Callable, Optional
 
 from qtpy import QtCore
 
 from napari_cuda.client.streaming.types import Source, SubmittedFrame
-import logging
 
 logger = logging.getLogger(__name__)
-
 
 DecodeFn = Callable[[bytes | memoryview], Optional[object]]
 
@@ -40,6 +40,8 @@ class PyAVPipeline:
         self._enqueued: int = 0
         self._decoder: Optional[DecodeFn] = None
         self._worker_started: bool = False
+        self._stop = threading.Event()
+        self._thread: Optional[Thread] = None
         # Gate per-decode GUI updates; now disabled by default since presenter wake drives draws
         import os as _os
         try:
@@ -53,14 +55,21 @@ class PyAVPipeline:
     def start(self) -> None:
         if self._worker_started:
             return
+        self._stop.clear()
 
         def _worker() -> None:
-            while True:
+            while not self._stop.is_set():
                 try:
-                    b, ts = self._in_q.get()
+                    b, ts = self._in_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
                 except Exception:
+                    if self._stop.is_set():
+                        break
                     logger.debug("PyAVPipeline: queue.get failed", exc_info=True)
                     continue
+                if self._stop.is_set():
+                    break
                 arr = None
                 try:
                     t0 = time.perf_counter()
@@ -99,8 +108,11 @@ class PyAVPipeline:
                         self.schedule_next_wake()
                 except Exception:
                     logger.debug("PyAVPipeline: schedule GUI update failed", exc_info=True)
+            logger.debug("PyAVPipeline: worker exiting")
 
-        Thread(target=_worker, daemon=True).start()
+        t = Thread(target=_worker, daemon=True)
+        t.start()
+        self._thread = t
         self._worker_started = True
 
     def enqueue(self, b: bytes | memoryview, ts: Optional[float]) -> None:
@@ -147,3 +159,24 @@ class PyAVPipeline:
                     break
         except Exception:
             logger.debug("PyAVPipeline: clear failed", exc_info=True)
+
+    def stop(self) -> None:
+        if not self._worker_started:
+            return
+        self._stop.set()
+        t = self._thread
+        if t is not None:
+            try:
+                t.join(timeout=0.5)
+            except Exception:
+                logger.debug("PyAVPipeline: join failed", exc_info=True)
+        self._thread = None
+        try:
+            while True:
+                self._in_q.get_nowait()
+        except queue.Empty:
+            pass
+        except Exception:
+            logger.debug("PyAVPipeline: queue drain during stop failed", exc_info=True)
+        self._decoder = None
+        self._worker_started = False

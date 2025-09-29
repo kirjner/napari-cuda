@@ -14,8 +14,8 @@ __all__ = [
     "state",
     "decoders",
     "renderer",
-    "coordinator",
+    "client_stream_loop",
+    "ClientStreamLoop",
 ]
 
-# Friendly re-export for cleaner imports
-from .coordinator import StreamCoordinator  # noqa: E402,F401
+from .client_stream_loop import ClientStreamLoop  # noqa: E402,F401
