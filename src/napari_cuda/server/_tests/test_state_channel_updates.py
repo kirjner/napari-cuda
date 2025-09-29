@@ -240,7 +240,7 @@ def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:
         )
 
         server._await_adapter_level_ready = lambda _timeout: asyncio.sleep(0)
-        server._safe_state_send = lambda _ws, text: captured.append(json.loads(text))
+        server._state_send = lambda _ws, text: captured.append(json.loads(text))
         server._update_scene_manager = lambda: None
         server._schedule_coro = lambda coro, _label: scheduled.append(coro)  # type: ignore[arg-type]
         server._pixel_channel = SimpleNamespace(last_avcc=None)

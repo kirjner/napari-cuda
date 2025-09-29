@@ -1054,11 +1054,11 @@ def _dual_emit_enabled(server: Any) -> bool:
 
 async def _send_payload(server: Any, ws: Any, payload: dict[str, Any]) -> None:
     text = json.dumps(payload)
-    await server._safe_state_send(ws, text)
+    await server._state_send(ws, text)
     if _dual_emit_enabled(server):
         envelope = encode_envelope_json(payload)
         if envelope:
-            await server._safe_state_send(ws, envelope)
+            await server._state_send(ws, envelope)
 
 
 async def _send_state_baseline(server: Any, ws: Any) -> None:
@@ -1126,7 +1126,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
 
 async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
     payload = build_scene_spec_json(server._scene, server._scene_manager)
-    await server._safe_state_send(ws, payload)
+    await server._state_send(ws, payload)
     if _dual_emit_enabled(server):
         try:
             parsed = json.loads(payload)
@@ -1135,7 +1135,7 @@ async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
         else:
             envelope = encode_envelope_json(parsed) if isinstance(parsed, dict) else None
             if envelope:
-                await server._safe_state_send(ws, envelope)
+                await server._state_send(ws, envelope)
     if server._log_dims_info:
         logger.info("%s: scene.spec sent", reason)
     else:
@@ -1157,9 +1157,9 @@ async def broadcast_scene_spec_payload(server: Any, payload: str, *, reason: str
     coros: list[Awaitable[None]] = []
     clients = list(server._state_clients)
     for client in clients:
-        coros.append(server._safe_state_send(client, payload))
+        coros.append(server._state_send(client, payload))
         if envelope:
-            coros.append(server._safe_state_send(client, envelope))
+            coros.append(server._state_send(client, envelope))
     await asyncio.gather(*coros, return_exceptions=True)
     if server._log_dims_info:
         logger.info("%s: scene.spec broadcast to %d clients", reason, len(coros))

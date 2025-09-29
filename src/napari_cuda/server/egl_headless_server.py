@@ -736,17 +736,17 @@ class EGLHeadlessServer:
             return
         coros = []
         for c in list(self._state_clients):
-            coros.append(self._safe_state_send(c, data))
+            coros.append(self._state_send(c, data))
             if envelope:
-                coros.append(self._safe_state_send(c, envelope))
+                coros.append(self._state_send(c, envelope))
         try:
             await asyncio.gather(*coros, return_exceptions=True)
         except Exception as e:
             logger.debug("State broadcast error: %s", e)
 
-    
 
-    async def _safe_state_send(self, ws: websockets.WebSocketServerProtocol, text: str) -> None:
+
+    async def _state_send(self, ws: websockets.WebSocketServerProtocol, text: str) -> None:
         try:
             await ws.send(text)
         except Exception as e:
