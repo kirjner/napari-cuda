@@ -85,8 +85,12 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
     return settings
 
 from .scene_state import ServerSceneState
-from .server_scene import ServerSceneData, create_server_scene_data
-from .server_scene import ServerSceneCommand
+from .server_scene import (
+    ServerSceneCommand,
+    ServerSceneData,
+    create_server_scene_data,
+    prune_control_metadata,
+)
 from .worker_notifications import (
     WorkerSceneNotification,
     WorkerSceneNotificationQueue,
@@ -563,6 +567,28 @@ class EGLHeadlessServer:
             viewer_model=viewer_model,
             extras=extras,
             layer_controls=dict(self._scene.layer_controls),
+        )
+
+        try:
+            spec = self._scene_manager.scene_spec()
+            layer_ids = [
+                str(layer.layer_id)
+                for layer in (spec.layers or [])
+                if getattr(layer, "layer_id", None)
+            ] if spec is not None else []
+        except Exception:
+            layer_ids = []
+
+        try:
+            dims_meta = self._scene_manager.dims_metadata()
+        except Exception:
+            dims_meta = {}
+
+        prune_control_metadata(
+            self._scene,
+            layer_ids=layer_ids,
+            dims_meta=dims_meta,
+            current_step=current_step,
         )
 
     def _current_ndisplay(self) -> int:

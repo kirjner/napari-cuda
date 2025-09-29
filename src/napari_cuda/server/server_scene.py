@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, Literal, Optional
+from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari_cuda.server.scene_state import ServerSceneState
 
@@ -58,6 +58,7 @@ __all__ = [
     "increment_server_sequence",
     "get_control_meta",
     "clear_control_meta",
+    "prune_control_metadata",
     "layer_controls_to_dict",
 ]
 
@@ -198,3 +199,103 @@ def increment_server_sequence(scene: ServerSceneData) -> int:
 
     scene.next_server_seq = (int(scene.next_server_seq) + 1) & 0x7FFFFFFF
     return scene.next_server_seq
+
+
+def prune_control_metadata(
+    scene: ServerSceneData,
+    *,
+    layer_ids: Iterable[str] | None = None,
+    dims_meta: Optional[Mapping[str, Any]] = None,
+    current_step: Optional[Sequence[int]] = None,
+) -> None:
+    """Drop metadata for layers/axes that no longer exist.
+
+    ``layer_ids`` should contain the canonical identifiers for active layers.
+    ``dims_meta`` is the latest dims metadata snapshot (matching
+    :func:`napari_cuda.server.scene_spec.dims_metadata`).  ``current_step``
+    provides a fallback axis count if metadata is incomplete.
+    """
+
+    layer_ids_specified = layer_ids is not None
+
+    active_layers: set[str] = set()
+    if layer_ids is not None:
+        for layer_id in layer_ids:
+            if layer_id is None:
+                continue
+            text = str(layer_id).strip()
+            if text:
+                active_layers.add(text)
+    else:
+        active_layers.update(str(key) for key in scene.layer_controls.keys())
+
+    dims_known = dims_meta is not None
+    dims_targets: set[str] = set()
+    if dims_meta is not None:
+        dims_targets = _dims_targets_from_meta(dims_meta, current_step=current_step)
+
+    for meta_key in list(scene.control_meta.keys()):
+        scope, target, prop_key = meta_key
+        if scope == "layer" and layer_ids_specified and target not in active_layers:
+            clear_control_meta(scene, scope, target, prop_key)
+        elif scope == "dims" and dims_known and target not in dims_targets:
+            clear_control_meta(scene, scope, target, prop_key)
+
+    if layer_ids_specified:
+        for stored_layer in list(scene.layer_controls.keys()):
+            if stored_layer not in active_layers:
+                scene.layer_controls.pop(stored_layer, None)
+
+
+def _dims_targets_from_meta(
+    meta: Optional[Mapping[str, Any]],
+    *,
+    current_step: Optional[Sequence[int]] = None,
+) -> set[str]:
+    if not meta:
+        if current_step is None:
+            return set()
+        axis_count = len(list(current_step))
+        return {str(idx) for idx in range(axis_count)}
+
+    targets: set[str] = set()
+
+    def _ensure_sequence(value: object) -> list[Any]:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return list(value)
+        if isinstance(value, str):
+            return list(value)
+        return []
+
+    order_seq = _ensure_sequence(meta.get("order"))
+    axis_seq = _ensure_sequence(meta.get("axis_labels"))
+    sizes_seq = _ensure_sequence(meta.get("sizes"))
+    range_seq = _ensure_sequence(meta.get("range"))
+
+    axis_count = 0
+    try:
+        axis_count = int(meta.get("ndim") or 0)
+    except Exception:
+        axis_count = 0
+    axis_count = max(axis_count, len(order_seq), len(axis_seq), len(sizes_seq), len(range_seq))
+    if axis_count <= 0 and current_step is not None:
+        axis_count = len(list(current_step))
+
+    for idx in range(max(0, axis_count)):
+        targets.add(str(idx))
+
+        label: Optional[str] = None
+        if idx < len(order_seq):
+            candidate = order_seq[idx]
+            text = str(candidate).strip()
+            if text:
+                label = text
+        if label is None and idx < len(axis_seq):
+            candidate = axis_seq[idx]
+            text = str(candidate).strip()
+            if text:
+                label = text
+        if label:
+            targets.add(label)
+
+    return targets
