@@ -52,7 +52,7 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 ### Shared Docs & Tooling
 - Keep `.gitignore` entries from both branches (ensure `docs/archive_local/` remains ignored).
 - Merge `pyproject.toml`: keep `napari_cuda` under `[tool.pytest.ini_options] testpaths` so server tests still run and avoid adding `pytest` to the base dependency set (existing extras already cover it).
-- Add `docs/client_state_update_plan.md` alongside server plans; update `docs/streaming_readme.md` by merging content rather than replacing.
+- Defer to `docs/protocol_greenfield.md` for the canonical control-plane contract; legacy protocol/doc plans now live under `docs/archive_local/`.
 
 ## Testing Checklist
 1. `uv run pytest -q -m "not slow" src/napari_cuda/server/_tests` (server suite).

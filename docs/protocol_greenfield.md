@@ -1,329 +1,436 @@
-# Greenfield Control Protocol
+# Greenfield Control Protocol Specification
 
-This document describes the control protocol that is now live on the CUDA
-streaming stack. It provides a minimal, explicit contract that covers every
-message the server emits while leaving room for future command/response flows
-(layer creation, exports, etc.). The intent remains a single, easy-to-reason
-about contract that works for desktop and mobile clients alike.
+This document is the authoritative reference for the next-generation control
+protocol used by the CUDA streaming stack. The current implementation is
+considered legacy; the naming, flow, and guarantees captured here define the
+clean-room wire format we are building toward.
 
-## Transport & Session
+## 1. Purpose & Guiding Principles
 
-- Runtime now speaks this protocol exclusively:
-  - `src/napari_cuda/protocol/envelopes.py` holds the active dataclasses.
-  - `src/napari_cuda/protocol/parser.py` provides envelope parsing helpers used
-    by both client and server.
-  - Server emits only notify envelopes; legacy payloads are no longer sent on
-    the wire.
+**Purpose**
 
-- **Wire**: single WebSocket connection (`wss://…/state`) per client.
-- **Encoding**: UTF-8 JSON messages, each representing one envelope.
-- **Handshake**: clients must open with `session.hello`; the server responds
-  with `session.welcome` before any notifications flow. Messages received before
-  the welcome (or lacking the required notify feature flags) are rejected.
+- Deliver a deterministic, resumable control channel while keeping the server as
+  the single source of truth.
+- Separate high-frequency view/state mutations from authenticated request/response
+  commands.
+- Provide a versioned, schema-backed wire format that remains evolvable and
+  testable.
+
+**Guiding Principles**
+
+- **Single Source of Truth** – The server emits canonical state; clients cache
+  and render but never become authoritative.
+- **Deterministic Reconnects** – Every session starts with a full `notify.scene`
+  snapshot; resumable topics expose monotonic sequences and resume tokens.
+- **Lane Separation** –
+  - `state.update` / `notify.*` handle low-latency, loss-tolerant updates.
+  - `call.command` / `reply.command` handle discrete actions requiring
+    confirmation or payloads.
+- **Explicit Schema** – Every frame type has a JSON Schema definition in
+  `docs/protocol_greenfield/schemas/`. CI validates both server and client
+  payloads against these schemas.
+- **Minimal Latency** – Orbit, zoom, dims sliders stay off the
+  request/response path.
+- **Observability** – Sequence numbers, tokens, and identifiers are first-class
+  fields.
+
+## 2. Vocabulary & Frame Grammar
+
+All frames are UTF-8 JSON objects that follow the envelope contract below.
+
+| Field       | Type   | Required                 | Notes                                                                    |
+|-------------|--------|--------------------------|---------------------------------------------------------------------------|
+| `type`      | string | ✓                        | Names the frame (e.g. `session.hello`, `notify.scene`, `state.update`).   |
+| `version`   | int    | ✓                        | Schema version for the `type`.                                            |
+| `session`   | str    | ✓ after welcome          | Session UUID returned in `session.welcome`.                               |
+| `frame_id`  | str    | acked lanes¹             | UUID for observability; server/client emit by default (see note).         |
+| `timestamp` | float  | ✓                        | Seconds since epoch (UTC), microsecond precision.                         |
+| `seq`       | int    | resumable topics         | Monotonic per resumable topic; absent elsewhere.                          |
+| `delta_token` | str  | resumable topics         | Resume token; opaque string updated with each frame.                      |
+| `intent_id` | str    | optional                 | Client-specified correlation id (`state.*` + matching notifies).          |
+| `payload`   | object | ✓                        | Type-specific schema.                                                     |
+
+¹ Frames that require acknowledgements—`state.update`, `call.command`, and any
+future acked lanes—MUST populate `frame_id` so servers can mirror it from
+`payload.in_reply_to`. **Hot-path notify identifiers** – `notify.dims` and
+`notify.camera` may omit `seq` for size but MUST include either `intent_id`
+(when they originate from a local intent) or a short `frame_id` (8-character
+UUID prefix emitted by the server) for duplicate detection and telemetry
+correlation.
+
+### 2.1 Naming Conventions
+
+- Notify lanes: `notify.scene`, `notify.layers`, `notify.dims`, `notify.camera`,
+  `notify.stream`, `notify.telemetry`, `notify.error`.
+- State lane: `state.update`, `ack.state`.
+- Command lane: `call.command`, `reply.command`, `error.command`.
+- Session control: `session.hello`, `session.welcome`, `session.reject`,
+  `session.heartbeat`, `session.ack`, `session.goodbye`.
+
+Schemas for each `type` live under
+`docs/protocol_greenfield/schemas/<type>.schema.json`.
+
+## 3. Handshake
+
+### 3.1 Client → Server `session.hello`
 
 ```json
-// client → server
 {
   "type": "session.hello",
-  "id": "0f6f…",
-  "timestamp": 1759120000.123,
+  "version": 1,
+  "frame_id": "hello-6d5c...",
+  "timestamp": 1759179000.123,
   "payload": {
-    "protocol": 1,
+    "protocols": [1],
     "client": {
-      "name": "napari-ios",
-      "version": "0.1.0"
+      "name": "napari-cuda-desktop",
+      "version": "0.7.0",
+      "platform": "macOS-14.5-arm64"
+    },
+    "features": {
+      "notify.scene": true,
+      "notify.stream": true,
+      "notify.telemetry": false,
+      "call.command": true
+    },
+    "resume_tokens": {
+      "notify.scene": "tok_scene_8fd2",
+      "notify.layers": "tok_layers_17aa",
+      "notify.stream": null
     },
     "auth": {
-      "token": "…"    // optional, application specific
+      "type": "bearer",
+      "token": "eyJhbGciOi..."
+    }
+  }
+}
+```
+
+### 3.2 Server Responses
+
+- On failure, the server emits `session.reject` (with `code`/`message`) and
+  closes the socket.
+- On success, it emits `session.welcome`:
+
+```json
+{
+  "type": "session.welcome",
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "welcome-bf5...",
+  "timestamp": 1759179000.200,
+  "payload": {
+    "protocol_version": 1,
+    "session": {
+      "id": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+      "heartbeat_s": 15.0,
+      "ack_timeout_ms": 250
     },
-    "extras": {
-      "features": {
-        "notify_state": true,
-        "notify_scene": true,
-        "notify_stream": true
+    "features": {
+      "notify.scene": { "enabled": true, "version": 1, "resume": true },
+      "notify.layers": { "enabled": true, "version": 1, "resume": true },
+      "notify.dims": { "enabled": true, "version": 1, "resume": false },
+      "notify.camera": { "enabled": true, "version": 1, "resume": false },
+      "notify.stream": { "enabled": true, "version": 1, "resume": true },
+      "notify.telemetry": { "enabled": false },
+      "call.command": {
+        "enabled": true,
+        "version": 1,
+        "commands": [
+          "napari.viewer.fit_to_view",
+          "napari.widgets.features_table",
+          "napari.toggle_shape_measures"
+        ]
       }
     }
   }
 }
+```
 
-// server → client
+**Feature downgrade** – If the client requests resume for a topic that is
+advertised as `enabled: false`, the handshake still succeeds. The server ignores
+submitted tokens for that topic and the client MUST drop local caches and treat
+it as disabled.
+
+### 3.3 Post-Welcome Baseline
+
+Immediately after `session.welcome`, the server emits:
+
+1. `notify.scene` (full snapshot, resumable; `seq = 0` and fresh `delta_token`).
+2. `notify.layers` (if the snapshot references split layer state).
+3. `notify.stream` (codec metadata).
+4. Any optional channels enabled for the session (e.g. `notify.telemetry`).
+
+Heartbeats begin once the baseline is sent.
+
+## 4. Topics & Resumability
+
+| Type             | Resume | Retention                             | Fallback if token stale                 | Typical Rate |
+|------------------|--------|---------------------------------------|-----------------------------------------|--------------|
+| `notify.scene`   | yes    | Current snapshot only                 | Resend full snapshot (seq reset to 0)   | bursts       |
+| `notify.layers`  | yes    | Ring buffer: min(512 deltas, 5 min)   | Send fresh snapshot + current deltas    | low          |
+| `notify.dims`    | no     | n/a                                   | Server emits fresh `notify.scene`; client waits for baseline | ≤ 60 Hz      |
+| `notify.camera`  | no     | n/a                                   | Server emits fresh `notify.scene`; client waits for baseline | ≤ 60 Hz      |
+| `notify.stream`  | yes    | Latest config only                    | Reissue full config                     | rare         |
+| `notify.telemetry` | no  | n/a                                   | Drop                                    | high         |
+| `notify.error`   | no     | n/a                                   | Drop                                    | sparse       |
+
+- Resumable topics include both `seq` and `delta_token`. When `notify.scene`
+  emits a new snapshot, every resumable topic resets its own `seq` counter to 0
+  and receives a fresh token. Clients must treat this as a new epoch and discard
+  cached sequence/tokens.
+- Once the `notify.layers` buffer wraps, the next resume request with an expired
+  token triggers a snapshot replay (no rejection).
+- For non-resumable lanes (`notify.dims`, `notify.camera`), reconnecting clients
+  wait for the server to emit a fresh `notify.scene` baseline. Servers SHOULD
+  send that snapshot immediately after `session.welcome` and whenever they
+  detect a client missing current view/camera state.
+
+## 5. State Update Lane
+
+### 5.1 Request (`state.update`, version 1)
+
+```json
 {
-  "type": "session.welcome",
-  "id": "0f6f…",              // echoes request id for correlation
-  "timestamp": 1759120000.456,
+  "type": "state.update",
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "state-88b4",
+  "timestamp": 1759179010.314,
+  "intent_id": "intent-88b4",
   "payload": {
-    "protocol": 1,
-    "session": {
-      "id": "srv-aa9d…",
-      "capabilities": [
-        "notify.state",
-        "notify.scene",
-        "notify.stream",
-        "call.command"
-      ]
+    "scope": "view",
+    "target": "main",
+    "key": "ndisplay",
+    "value": 3
+  }
+}
+```
+
+Payload schemas are scope-specific (e.g. `view/main`, `dims/<axis>`,
+`camera/main`). All schemas live alongside the envelope definitions.
+
+### 5.2 Acknowledgement (`ack.state`, version 1)
+
+- The server should respond within 50 ms on LAN; the hard client timeout is
+  `ack_timeout_ms` from `session.welcome` (default 250 ms).
+- Accepted example:
+
+```json
+{
+  "type": "ack.state",
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "ack-88b4",
+  "timestamp": 1759179010.330,
+  "payload": {
+    "intent_id": "intent-88b4",
+    "in_reply_to": "state-88b4",
+    "status": "accepted",
+    "applied_value": 3
+  }
+}
+```
+
+- Rejected example:
+
+```json
+{
+  "type": "ack.state",
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "ack-88b4",
+  "timestamp": 1759179010.335,
+  "payload": {
+    "intent_id": "intent-88b4",
+    "in_reply_to": "state-88b4",
+    "status": "rejected",
+    "error": {
+      "code": "state.forbidden",
+      "message": "Viewer is read-only",
+      "details": {"scope": "view", "key": "ndisplay"}
     }
   }
 }
 ```
 
-If the server rejects a handshake it responds with `session.reject` describing
-why (unsupported protocol, missing notify feature flags, auth failure, etc.) and
-closes the socket.
+Clients treat missing acks after `ack_timeout_ms` as failures and MAY retry only
+when the operation is documented as idempotent.
 
-## Envelope
+### 5.3 Resulting Notifies
 
-Every subsequent message—whether it is a notification, a command, or a
-response—uses the same top-level shape:
+- The server applies the mutation atomically and then broadcasts the resulting
+  `notify.*` frame. When the notify is a direct consequence of the acknowledged
+  intent, it includes the `intent_id` so the client reducer can reconcile.
+- For externally sourced updates (other clients, automation), the notify omits
+  `intent_id` and clients treat it as authoritative state.
 
-| Field       | Type   | Notes                                                     |
-|-------------|--------|-----------------------------------------------------------|
-| `type`      | string | Message topic (`notify.state`, `call.command`, …).        |
-| `id`        | string | Optional UUID. Required for pairs of `call.*`/`reply.*`.  |
-| `timestamp` | number | Seconds since epoch; allows ordering/diagnostics.         |
-| `payload`   | object | Type-specific body.                                       |
+## 6. Command Lane
 
-All new message kinds should follow the `<category>.<name>` convention with
-these reserved categories:
-
-- `notify.*` – fire-and-forget broadcasts.
-- `call.*` – client-issued commands that expect a response.
-- `reply.*` – authoritative response to a `call.*` message (shares `id`).
-- `error.*` – fatal errors. Can appear in response to either `call.*` or
-  unexpected conditions detected by the server.
-
-## Notifications (current capabilities)
-
-### `notify.scene`
-
-Full baseline describing the current viewer state. Supersedes today’s
-`scene.spec` message.
-
-```json
-{
-  "type": "notify.scene",
-  "timestamp": 1759120012.0,
-  "payload": {
-    "version": 1,
-    "scene": { … },          // same shape as SceneSpec.to_dict()
-    "state": {
-      "current_step": [206, 0, 0],
-      "ndisplay": 2,
-      "volume_mode": "slice"
-    }
-  }
-}
-```
-
-### `notify.state`
-
-Single property mutation (dims step, layer gamma, view zoom). This is a direct
-evolution of the existing `state.update` payload; the notify envelope now
-guarantees consistent framing across server and clients.
-
-```json
-{
-  "type": "notify.state",
-  "timestamp": 1759120012.5,
-  "payload": {
-    "scope": "dims",            // "dims" | "layer" | "view" | …
-    "target": "z",              // axis label, layer id, etc.
-    "key": "step",              // property key
-    "value": 206,
-    "server_seq": 862,
-    "axis_index": 0,
-    "current_step": [206, 0, 0],
-    "meta": {                    // dims metadata snapshot
-      "ndim": 3,
-      "order": ["z", "y", "x"],
-      "axis_labels": ["z", "y", "x"],
-      "displayed": [2, 1],
-      "ndisplay": 2,
-      "range": [[0, 679], [0, 1539], [0, 1156]],
-      "controls": { "gamma": 1.3 }
-    },
-    "interaction_id": "drag-1",
-    "phase": "update",
-    "client": {
-      "id": "ios-123",
-      "seq": 14
-    },
-    "ack": true
-  }
-}
-```
-
-For layer and view scopes the same metadata fields remain optional—they are
-omitted when not applicable.
-
-### `notify.stream`
-
-Configuration for the pixel/video channel (replacement for `video.config`).
-
-```json
-{
-  "type": "notify.stream",
-  "timestamp": 1759120015.2,
-  "payload": {
-    "codec": "h264",
-    "fps": 60,
-    "width": 1920,
-    "height": 1080,
-    "bitrate": 10000000,
-    "idr_interval": 120
-  }
-}
-```
-
-## Commands & Responses (extensible surface)
-
-The new protocol reserves a command channel but does not force current
-clients to use it yet. When we migrate discrete operations (layer create,
-remove, export, etc.) they will use this pattern.
-
-### Command request: `call.command`
+### 6.1 Request (`call.command`, version 1)
 
 ```json
 {
   "type": "call.command",
-  "id": "cmd-77f5…",
-  "timestamp": 1759120020.0,
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "cmd-02f9",
+  "timestamp": 1759179020.14,
   "payload": {
-    "name": "layer.create",
-    "args": {
-      "uri": "s3://…/image.zarr",
-      "layer_type": "image",
-      "display_name": "Sample"
-    }
+    "command": "napari.viewer.fit_to_view",
+    "args": [],
+    "kwargs": {},
+    "origin": "ui.menu"
   }
 }
 ```
 
-### Command success: `reply.command`
+### 6.2 Success (`reply.command`)
 
 ```json
 {
   "type": "reply.command",
-  "id": "cmd-77f5…",
-  "timestamp": 1759120020.3,
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "reply-cmd-02f9",
+  "timestamp": 1759179020.15,
   "payload": {
+    "in_reply_to": "cmd-02f9",
     "status": "ok",
-    "result": {
-      "layer_id": "layer-7",
-      "server_seq": 912
-    }
+    "result": null
   }
 }
 ```
 
-### Command failure: `error.command`
+### 6.3 Failure (`error.command`)
 
 ```json
 {
   "type": "error.command",
-  "id": "cmd-77f5…",
-  "timestamp": 1759120020.3,
+  "version": 1,
+  "session": "bf52c9c6-4875-4280-9f00-6022cb5106d6",
+  "frame_id": "err-cmd-02f9",
+  "timestamp": 1759179020.16,
   "payload": {
-    "status": "failed",
-    "code": "LayerExists",
-    "message": "Layer name already in use",
-    "details": { "layer_id": "layer-7" }
+    "in_reply_to": "cmd-02f9",
+    "status": "error",
+    "code": "command.forbidden",
+    "message": "Fit to view unavailable",
+    "details": { "reason": "viewer locked" }
   }
 }
 ```
 
-The `id` field allows the caller to match responses with in-flight commands.
-Clients that only care about notifications can ignore this category entirely.
+### 6.4 Idempotency & Permissions
 
-## Error Notifications
+- Commands are non-idempotent unless documented otherwise. If a command returns
+  an `idempotency_key`, clients MAY retry when they receive
+  `error.command.code = "command.retryable"`.
+- `session.welcome.payload.features.call.command.commands` lists the commands
+  enabled for the session. Clients should reflect this in the UI.
+- The server rejects unknown/forbidden commands with `command.forbidden`.
 
-For transport-level or unrecoverable errors the server emits
-`error.session` (missing auth, protocol mismatch) or `error.state`
-(malformed payload). After sending an error the server decides whether to
-close the connection based on severity.
+## 7. Heartbeats & Shutdown
 
-```json
-{
-  "type": "error.state",
-  "timestamp": 1759120025.4,
-  "payload": {
-    "code": "InvalidValue",
-    "message": "gamma must be positive",
-    "offending": {
-      "scope": "layer",
-      "target": "layer-0",
-      "key": "gamma",
-      "value": -2.0
-    }
-  }
-}
-```
+- The server emits `session.heartbeat` every `heartbeat_s` seconds.
+- The client must respond with `session.ack` within the same window unless it
+  sent a `state.update` or `call.command` during the interval (recent activity
+  counts as liveness).
+- Missing two consecutive heartbeats triggers `session.goodbye` and coordinated
+  closure of state + pixel channels.
+- Clients may send `session.goodbye` before closing voluntarily.
 
-## Mapping from Today’s Protocol
+## 8. Error Handling
 
-| Legacy message | Current message | Notes                                                     |
-|----------------|-----------------|-----------------------------------------------------------|
-| `scene.spec`   | `notify.scene`  | Scene payload unchanged; envelope now mandatory.          |
-| `state.update` | `notify.state`  | Same underlying delta, encapsulated in notify envelope.   |
-| `video.config` | `notify.stream` | Unified naming for stream metadata.                       |
-| *(none)*       | `call.command`  | Future extension for discrete actions.                    |
-| *(none)*       | `reply.command` |                                                           |
-| *(none)*       | `error.*`       | Structured error reporting.                               |
+- Handshake failures: `session.reject` with `code`/`message`.
+- State validation failures: `ack.state` with `status = "rejected"` and an
+  `error` payload.
+- Transport/runtime warnings: `notify.error` with `severity = "warning"` or
+  `"info"`.
+- Fatal faults: `notify.error` with `severity = "critical"` followed by
+  `session.goodbye`. Before closing, the server flushes any pending
+  `ack.state`, `reply.command`, or `error.command` frames. Both state and pixel
+  sockets close together; the pixel channel uses close code `1011` (Internal
+  Error).
 
-Server-initiated legacy commands (`view.update.set_ndisplay`, `layer.update.*`,
-`camera_update`, `dims.update`, etc.) are being removed alongside dual emission;
-new development should target the notify-based reducer path exclusively.
+## 9. Size & Performance Targets
 
-## Extensibility Guidelines
+- `notify.dims` and `notify.camera` payloads target ≤ 200 B at ≤ 60 Hz and
+  should keep JSON shallow. Enable `permessage-deflate` on the WebSocket for
+  additional compression as needed.
+- `notify.scene` snapshots may be large; rely on transport compression (TLS
+  compression or WebSocket deflate) for delivery.
+- Encoding overhead for hot-path frames should remain below 0.1 ms.
 
-- **Namespacing**: new functionality should pick a clear namespace
-  (`notify.telemetry`, `call.export`, etc.) so message intent is obvious.
-- **Versioning**: bump the handshake `protocol` number when changing semantics
-  or removing fields. Minor additions to payloads can use optional keys that
-  default sensibly.
-- **Streaming**: high-frequency interactions (sliders, camera drags) stay on
-  `notify.state`. Commands must never be required for the hot path.
-- **Auth**: the handshake gives us a single place to inject authentication and
-  capability negotiation; future work can extend the `payload.auth` block.
-- **Binary payloads**: leave the pixel/video stream on its dedicated channel.
-  If another binary stream is needed we can add `notify.<name>` with out-of-band
-  references (e.g., presigned URLs).
+## 10. Resume Tokens & Sequence Semantics
 
-## Security Considerations
+- Clients persist the latest `seq` and `delta_token` per resumable topic.
+- On reconnect, they include these tokens in `session.hello`. The server either
+  replays deltas within the retention window or sends a fresh snapshot and new
+  token.
+- When a new snapshot is issued, clients must treat it as a new epoch and reset
+  stored sequences/tokens.
 
-Refer to the security checklist in `docs/server_state_update_plan.md`. The new
-handshake envelope introduces a natural anchor for bearer tokens, mutual TLS
-proofs, or other auth mechanisms while keeping the data channel itself
-unchanged.
+## 11. Security & Auth (Framework Placeholder)
 
-## Migration Plan
+- `session.hello.auth` supports bearer tokens today and leaves space for MTLS in
+  the future (`{"type": "mtls"}` via out-of-band cert validation).
+- Per-topic ACLs gate `state.update`; forbidden requests yield
+  `ack.state.status = "rejected"` with `error.code = "state.forbidden"`.
+- Command execution uses AppModel permissions. Authorization failures return
+  `error.command` with `code = "command.forbidden"`.
 
-1. **Author shared types** *(complete)*
-   - Dataclasses/TypedDicts for the envelopes live in `napari_cuda.protocol` and
-     are used by both runtime and tests.
+## 12. Client Responsibilities
 
-2. **Handshake enforcement** *(complete)*
-   - Server requires `session.hello` with notify feature flags and replies with
-     `session.welcome` before any notifications flow.
-   - Clients abort if the server returns `session.reject` or an unexpected
-     handshake response.
+- Issue `session.hello` with supported protocol versions, features, and resume
+  tokens.
+- Maintain a single `ClientState` keyed by topic; selectors feed renderer/input
+  layers (no reliance on legacy extras).
+- Track outstanding intents with timeouts based on `ack_timeout_ms`.
+- Persist resume tokens and cleanly close with `session.goodbye` when exiting.
+- Respect the advertised command catalogue and disabled features.
+- Handle `notify.error` gracefully (e.g. downgrade to PyAV on decode warnings).
 
-3. **Notify-only transport** *(complete)*
-   - Server now emits only `notify.scene`, `notify.state`, and `notify.stream`
-     envelopes; dual emission has been removed.
-   - Clients ingest only the notify envelopes and ignore bare legacy names.
+## 13. Server Responsibilities
 
-4. **Legacy command removal** *(in progress)*
-   - Retire remaining server handlers that accept legacy `*.update.*` command
-     names and update docs/tests accordingly.
-   - Ensure client paths no longer send those commands on the wire.
+- Validate every inbound frame against the relevant schema.
+- Apply state mutations atomically; emit `ack.state` before broadcasting
+  resulting `notify.*` frames.
+- Maintain per-topic `seq`/`delta_token` to honour resumability SLAs.
+- Execute commands via AppModel under session permissions.
+- Emit heartbeats, detect silent clients, and flush outstanding responses before
+  teardown.
+- Provide structured logging for handshake, notify, state, command, and error
+  flows.
 
-5. **Command channel scaffolding**
-   - Add stubs on the server (`call.command` handler returning
-     `error.command`/`reply.command` with `NotImplemented`) so clients can
-     exercise the request/response flow without changing behaviour.
+## 14. Migration Plan
 
-6. **Post-migration**
-   - Move discrete operations (layer create/remove, exports) onto
-     `call.command` / `reply.command`.
-   - Tighten the security posture by enforcing authenticated handshakes and
-     per-capability authorisation.
+1. Implement schemas and validators for the new envelope/types.
+2. Add feature-flagged dual emission (legacy + greenfield) on the server.
+3. Update the thin client to hydrate the new `ClientState` from `notify.*`.
+4. Wire `state.update` + `ack.state` end-to-end with optimistic reducer support.
+5. Bring up the command lane starting with
+   `napari.viewer.fit_to_view`, `napari.widgets.features_table`,
+   `napari.toggle_shape_measures`.
+6. Persist resume tokens and validate reconnect flows (stale vs fresh snapshots).
+7. Decommission legacy notify/state messages once all clients speak the new
+   protocol.
+8. Refresh documentation, examples, and monitoring tooling.
+
+## 15. Testing Matrix
+
+| Scenario                    | Expected Frames / Assertions                                                |
+|-----------------------------|-----------------------------------------------------------------------------|
+| Initial connect             | `session.welcome` → `notify.scene(seq=0)` → `notify.layers` → `notify.stream`. |
+| Alt-drag orbit              | `state.update(camera.orbit)` → `ack.state(applied_value)` → `notify.camera(intent_id)`. |
+| Toggle 2D/3D                | `state.update(view.ndisplay)` → `ack.state` → `notify.dims(intent_id)`.       |
+| Command success             | `call.command` → `reply.command` → follow-up `notify.*` reflecting state.     |
+| Command forbidden           | `call.command` → `error.command(code=command.forbidden)`.                     |
+| Reconnect with valid token  | `notify.layers` deltas replayed (`seq` increments).                           |
+| Reconnect with stale token  | `notify.scene` snapshot with `seq=0` then current deltas.                     |
+| Missing heartbeat           | `session.heartbeat` ×2 without reply → `session.goodbye` + socket close.      |
+| Critical server fault       | `notify.error(severity=critical)` → flushed outstanding replies → `session.goodbye`. |
+
+Integration harnesses should replay golden snapshots, inject packet loss, and
+assert that the client’s `ClientState` matches the server’s authoritative scene
+throughout reconnects and command flows.
