@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from napari_cuda.protocol.envelopes import (
     NotifyScene,
@@ -13,10 +13,11 @@ from napari_cuda.protocol.envelopes import (
     NotifyStream,
     NotifyStreamPayload,
 )
-from napari_cuda.protocol.messages import (
+from napari_cuda.protocol.greenfield.messages import (
     SCENE_SPEC_TYPE,
+    SPEC_VERSION,
     STATE_UPDATE_TYPE,
-    SceneSpecMessage,
+    SceneSpec,
     StateUpdateMessage,
 )
 
@@ -42,18 +43,24 @@ def encode_envelope(payload: Mapping[str, Any]) -> Optional[dict[str, Any]]:
         return envelope.to_dict()
 
     if msg_type == SCENE_SPEC_TYPE:
+        scene_payload = payload.get("scene")
+        if not isinstance(scene_payload, Mapping):
+            logger.debug("Failed to coerce scene.spec payload for dual emission; scene missing")
+            return None
         try:
-            message = SceneSpecMessage.from_dict(dict(payload))
+            scene = SceneSpec.from_dict(scene_payload)
         except Exception:
             logger.debug("Failed to coerce scene.spec payload for dual emission", exc_info=True)
             return None
         state_block: Optional[dict[str, Any]] = None
-        if message.capabilities:
-            state_block = {"capabilities": list(message.capabilities)}
+        capabilities = payload.get("capabilities")
+        if isinstance(capabilities, Iterable):
+            state_block = {"capabilities": [str(x) for x in capabilities]}
+        version_val = payload.get("version")
         envelope = NotifyScene(
             payload=NotifyScenePayload(
-                version=message.version,
-                scene=message.scene,
+                version=int(version_val) if version_val is not None else SPEC_VERSION,
+                scene=scene,
                 state=state_block,
             ),
             id=str(payload.get("id")) if payload.get("id") is not None else None,
