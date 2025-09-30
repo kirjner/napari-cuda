@@ -28,10 +28,13 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 - ✅ **Hot-path notify lanes** – Control channel emits `notify.scene`/`notify.layers`/`notify.dims`, and the pixel channel now issues `notify.stream` snapshots via `build_notify_stream`, advertising the stream sequencer cursor in `session.welcome`.
 - ⏳ **Spec round-trip tests** – Initial handshake + notify scene/state round-trips live in `src/napari_cuda/protocol/_tests/test_envelopes.py`; expand to the remaining lanes and sequencing edge cases next.
 - ✅ **Dual emission cleanup** – Legacy dual-emission shims (`legacy_dual_emitter`, `_broadcast_state_json`, `protocol_bridge`) removed; the server emits greenfield frames exclusively.
+- ✅ **Server ack lane** – `control_channel_server._handle_state_update` now parses greenfield envelopes, emits `ack.state` via `build_ack_state`, and no longer fabricates legacy `client_id`/`client_seq` metadata.
+- ✅ **Client ack lane** – `control_channel_client`, `pending_update_store`, and the streaming loop now trade exclusively in greenfield `AckState`/`state.update` envelopes. `ControlStateContext` replaces the old "intent" shims, and tests under `client/streaming/_tests/` cover accepted/rejected ack flows end-to-end.
 
 Pending follow-up:
 
-1. Convert the ack/reply/error lanes to `build_ack_state`/`build_reply_command`/`build_error_command`, wiring `in_reply_to`/`intent_id` per Appendix A.
+1. Enable the command lane (`call.command` / `reply.command` / `error.command`) once both endpoints share the builder-backed handlers.
+2. Expand the protocol round-trip tests to cover command envelopes and resume-token negotiation after reconnect.
 
 ## 1. Scope & Objectives
 
@@ -57,7 +60,7 @@ Pending follow-up:
   optimistic state via `PendingEntry` queues keyed by `(scope, target, key)`,
   reconciling on inbound `state.update` echoes.
 - `client/control/state_update_actions.py` (archive:
-  `client/streaming/client_loop/intents.py`) centralises outgoing state-update
+  `client/streaming/client_loop/control.py`) centralises outgoing state-update
   helpers and local projection logic without the legacy "intent" terminology.
 - `client/control/viewer_layer_adapter.py` (archive:
   `layer_state_bridge.py`) translates incoming layer/dims payloads into viewer
@@ -122,7 +125,7 @@ Pending follow-up:
 | `client/streaming/layer_state_bridge.py` | `client/control/viewer_layer_adapter.py` | Clarifies its bridging role. |
 | `client/streaming/controllers.py` | `client/runtime/channel_threads.py` | Emphasizes thread orchestration. |
 | `client/streaming/client_stream_loop.py` | `client/runtime/stream_runtime.py` | Marks the orchestrator that binds control + pixel paths. |
-| `client/streaming/client_loop/intents.py` | `client/control/state_update_actions.py` | Emits state-update payloads and projection helpers, dropping "intent" naming. |
+| `client/streaming/client_loop/control.py` | `client/control/state_update_actions.py` | Emits state-update payloads and projection helpers, now surfaced via `ControlStateContext`. |
 | `server/state_channel_handler.py` | `server/control/control_channel_server.py` | Symmetric naming with the client. |
 | `server/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
 | `server/server_scene_spec.py` | `server/control/scene_snapshot_builder.py` | Communicates “baseline snapshot” job. |
@@ -184,7 +187,8 @@ translating to legacy formats.
      `StateUpdateResult`).
    - `call.command` handler → new command registry that calls into AppModel.
 3. Emit `ack.state` after successful mutations (populate `applied_value` or
-   rejection payloads).
+   rejection payloads). **Status: complete — server now emits builder-backed `ack.state`
+   responses and rejects invalid payloads per Appendix 5.2.**
 4. Broadcast notified state strictly through `notify.scene` / `notify.dims` /
    `notify.camera` / `notify.layers`, validating payloads against
    `docs/protocol_greenfield/schemas/notify.scene.v1.schema.json`,
@@ -196,23 +200,25 @@ translating to legacy formats.
 
 ### Phase 3 – Client Control Channel Rewrite
 
-1. Update `control_channel_client.py` to emit `session.hello` envelopes with
-   `frame_id` and per-topic `resume_tokens` (persisted via the state store).
-2. Replace the legacy JSON switchboard with typed handlers driven by the
-   parser (`parse_notify_scene`, `parse_notify_dims`, etc.), wiring validation
-   against `docs/protocol_greenfield/schemas/notify.*.v1.schema.json`.
-3. Teach `pending_update_store.py` to track outstanding `frame_id` → state
-   update entries and reconcile on `ack.state`, verifying envelopes with
-   `state.update.v1.schema.json` and `ack.state.v1.schema.json` (removing the
-   old phase juggling).
-4. Drop the `dims.update`/`video_config` fallback branches.
-5. Replace the keyframe request helper with either:
+**Completed**
+
+- `control_channel_client.py` emits builder-backed `session.hello`, parses
+  greenfield notify/ack envelopes, and exposes callbacks for
+  `ack.state`/`reply.command`/`error.command`.
+- `pending_update_store.py` now reconciles optimistic updates on
+  `AckOutcome`, keyed by `frame_id`/`intent_id`, without legacy phase juggling.
+- Streaming loop + viewer bridge consume the new `ControlStateContext` and
+  have unit coverage in `client/streaming/_tests/` for accepted/rejected ack paths.
+
+**Remaining**
+
+1. Retire the final legacy fallbacks (`video_config`, raw `dims.update` diffs)
+   once downstream consumers rely solely on notify envelopes.
+2. Replace the keyframe request helper with either:
    - A `call.command` to `napari.pixel.request_keyframe`, or
    - A `state.update` on a dedicated command scope.
-6. Integrate viewer updates through the new notify payloads (ensure 3D toggle
-   arises from `notify.scene`+`notify.dims` metadata).
-7. Keep a temporary compatibility mode (`LEGACY_CONTROL_CLIENT`) that routes to
-   the old logic for incremental rollout.
+3. Keep a temporary compatibility mode (`LEGACY_CONTROL_CLIENT`) until the UI
+   no longer references the archived handlers.
 
 ### Phase 4 – Command Lane Enablement
 
@@ -251,13 +257,15 @@ translating to legacy formats.
 - Client:
   - `control_channel_client._handle_message` branches for `'video_config'` and
     `'dims.update'`.
-  - Fire-and-forget keyframe connection in `request_keyframe_once`.
-  - Phase juggling in `pending_update_store.apply_local` and
-    `pending_update_store.apply_remote` tied to legacy ack semantics.
+ - Fire-and-forget keyframe connection in `request_keyframe_once`.
+ - Phase juggling in `pending_update_store.apply_local` and
+   `pending_update_store.apply_remote` tied to legacy ack semantics.
 - Server:
-  - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`,
-    `ping`, `request_keyframe`).
-  - Rename residual `_handler` modules (e.g., `state_channel_handler`) to match greenfield ownership once legacy paths are gone.
+ - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`,
+   `ping`, `request_keyframe`).
+ - Rename residual `_handler` modules (e.g., `state_channel_handler`) to match greenfield ownership once legacy paths are gone.
+  - Delete the legacy `StateUpdateMessage` module and re-export once both client
+    and tests consume the greenfield dataclasses exclusively.
 - Remaining references to
     `scene_snapshot_builder.build_scene_spec_json` once no callers require the
     cached legacy JSON representation.

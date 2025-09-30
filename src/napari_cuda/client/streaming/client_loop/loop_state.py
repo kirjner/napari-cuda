@@ -86,8 +86,8 @@ class ClientLoopState:
     input_sender: "InputSender | None" = None
     shortcuts: list[object] = field(default_factory=list)
 
-    # Intent handling
-    intents: "ClientStateContext | None" = None
+    # Control channel handling
+    control_state: "ControlStateContext | None" = None
 
     # Camera handling
     camera: "CameraState | None" = None
@@ -127,5 +127,5 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.receiver import PixelReceiver
     from napari_cuda.client.control.control_channel_client import StateChannel
     from .warmup import WarmupPolicy
-    from .intents import ClientStateContext
+    from .control import ControlStateContext
     from .camera import CameraState

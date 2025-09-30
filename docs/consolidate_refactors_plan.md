@@ -62,7 +62,7 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 
 ## Post-Merge Follow-Ups
 - Finalise the command channel (`call.command` / `reply.command`) and update docs/tests once handlers exist.
-- Sweep client code to remove remaining “intent” terminology and rename modules (`client_loop/intents.py`, etc.) to match the reducer architecture.
+- Sweep client code to remove remaining “intent” terminology and keep modules (`client_loop/control.py`, etc.) aligned with the reducer architecture.
 - Rename `state_channel_handler.py` and related helpers to notify-centric terminology per `docs/server_streamlining_plan.md`.
 - Refresh onboarding/docs to drop references to dual emission and legacy command paths.
 - Expand CI to include the reducer suites and any new command-channel coverage once available.

@@ -40,7 +40,7 @@ from napari_cuda.client.streaming.client_loop.pipelines import (
 from napari_cuda.client.streaming.client_loop.renderer_fallbacks import RendererFallbacks
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.streaming.client_loop import warmup, camera, loop_lifecycle
-from napari_cuda.client.control import state_update_actions as intents
+from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.streaming.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
@@ -56,14 +56,16 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     SceneSpecMessage,
-    StateUpdateMessage,
 )
+from napari_cuda.protocol import AckState, build_state_update
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
-    from napari_cuda.client.control.control_channel_client import StateChannel
+    from napari_cuda.client.control.control_channel_client import StateChannel, SessionMetadata
+    from napari_cuda.client.control.pending_update_store import PendingUpdate, AckOutcome
     from napari_cuda.client.streaming.config import ClientConfig
+    from napari_cuda.protocol import ReplyCommand, ErrorCommand
 
 logger = logging.getLogger(__name__)
 
@@ -182,17 +184,14 @@ class ClientStreamLoop:
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
         self._latest_scene_spec: Optional[SceneSpecMessage] = None
-        self._intent_state = intents.ClientStateContext.from_env(self._env_cfg)
-        self._loop_state.intents = self._intent_state
-        self._state_store = StateStore(
-            client_id=self._intent_state.client_id,
-            next_client_seq=self._intent_state.next_client_seq,
-            clock=time.time,
-        )
+        self._control_state = control_actions.ControlStateContext.from_env(self._env_cfg)
+        self._loop_state.control_state = self._control_state
+        self._state_store = StateStore(clock=time.time)
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
+        self._state_session_metadata: "SessionMetadata | None" = None
         # Monotonic scheduling marker for next due
         # Startup warmup policy: temporarily boost VT latency and ramp down
         self._warmup_policy = warmup.WarmupPolicy(
@@ -212,7 +211,7 @@ class ClientStreamLoop:
             self,
             self._presenter_facade,
             self._layer_registry,
-            intent_state=self._intent_state,
+            control_state=self._control_state,
             loop_state=self._loop_state,
             state_store=self._state_store,
         )
@@ -544,8 +543,8 @@ class ClientStreamLoop:
             self._init_vt_from_avcc(avcc_b64, w, h)
 
     def _handle_dims_update(self, data: dict) -> None:
-        intents.handle_dims_update(
-            self._intent_state,
+        control_actions.handle_dims_update(
+            self._control_state,
             self._loop_state,
             data,
             presenter=self._presenter_facade,
@@ -574,8 +573,8 @@ class ClientStreamLoop:
         _invoke()
 
     def _replay_last_dims_payload(self) -> None:
-        intents.replay_last_dims_payload(
-            self._intent_state,
+        control_actions.replay_last_dims_payload(
+            self._control_state,
             self._loop_state,
             self._viewer_mirror,
             self._ui_call,
@@ -598,39 +597,66 @@ class ClientStreamLoop:
         logger.debug("layer.update: id=%s partial=%s", layer_id, msg.partial)
         self._presenter_facade.apply_layer_update(msg)
 
-    def _handle_state_update(self, msg: StateUpdateMessage) -> None:
-        logger.debug(
-            "state.update: scope=%s target=%s key=%s phase=%s",
-            msg.scope,
-            msg.target,
-            msg.key,
-            msg.phase,
+    def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
+        self._layer_registry.remove_layer(msg)
+        logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
+
+    def _handle_session_ready(self, metadata: "SessionMetadata") -> None:
+        self._state_session_metadata = metadata
+        self._control_state.session_id = metadata.session_id
+        self._control_state.ack_timeout_ms = metadata.ack_timeout_ms
+        self._control_state.intent_counter = 0
+        logger.info(
+            "State session ready: session_id=%s ack_timeout_ms=%s",
+            metadata.session_id,
+            metadata.ack_timeout_ms,
         )
-        if msg.scope == "layer":
-            self._layer_bridge.handle_state_update(msg)
-        elif msg.scope == "dims":
-            intents.handle_dims_state_update(
-                self._intent_state,
+
+    def _handle_ack_state(self, frame: AckState) -> None:
+        outcome = self._state_store.apply_ack(frame)
+        logger.debug(
+            "ack.state outcome: status=%s intent=%s in_reply_to=%s pending=%d was_pending=%s",
+            outcome.status,
+            outcome.intent_id,
+            outcome.in_reply_to,
+            outcome.pending_len,
+            outcome.was_pending,
+        )
+        scope = outcome.scope
+        if scope == "layer":
+            self._layer_bridge.handle_ack(outcome)
+            return
+        if scope == "dims":
+            control_actions.handle_dims_ack(
+                self._control_state,
                 self._loop_state,
-                self._state_store,
-                msg,
+                outcome,
                 presenter=self._presenter_facade,
                 viewer_ref=self._viewer_mirror,
                 ui_call=self._ui_call,
                 log_dims_info=self._log_dims_info,
             )
-        else:
-            intents.handle_generic_state_update(
-                self._intent_state,
-                self._loop_state,
-                self._state_store,
-                msg,
-                presenter=self._presenter_facade,
-            )
+            return
+        control_actions.handle_generic_ack(self._control_state, self._loop_state, outcome)
 
-    def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
-        self._layer_registry.remove_layer(msg)
-        logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
+    def _handle_reply_command(self, frame: "ReplyCommand") -> None:
+        payload = frame.payload
+        logger.info(
+            "reply.command received intent=%s in_reply_to=%s",
+            payload.intent_id,
+            payload.in_reply_to,
+        )
+
+    def _handle_error_command(self, frame: "ErrorCommand") -> None:
+        payload = frame.payload
+        error = payload.error
+        logger.warning(
+            "error.command received intent=%s in_reply_to=%s code=%s message=%s",
+            payload.intent_id,
+            payload.in_reply_to,
+            error.code,
+            error.message,
+        )
 
     def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
         def _apply() -> None:
@@ -658,29 +684,56 @@ class ClientStreamLoop:
 
     # State channel lifecycle: gate dims state.update traffic safely across reconnects
     def _on_state_connected(self) -> None:
-        intents.on_state_connected(self._intent_state)
+        control_actions.on_state_connected(self._control_state)
         logger.info("StateChannel connected; gating dims state.update traffic until dims.update meta arrives")
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
-        intents.on_state_disconnected(self._loop_state, self._intent_state)
+        control_actions.on_state_disconnected(self._loop_state, self._control_state)
         self._layer_bridge.clear_pending_on_reconnect()
+        self._state_store.clear_pending_on_reconnect()
         logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
 
-    def _dispatch_state_update(self, message: StateUpdateMessage, origin: str) -> bool:
+    def _dispatch_state_update(self, pending_update: "PendingUpdate", origin: str) -> bool:
         channel = self._loop_state.state_channel
         if channel is None:
+            logger.debug("state.update emit skipped: channel unavailable")
+            self._state_store.discard_pending(pending_update.frame_id)
             return False
-        ok = channel.post(message.to_dict())
-        logger.debug(
-            "state.update emit: origin=%s scope=%s target=%s key=%s phase=%s sent=%s",
-            origin,
-            message.scope,
-            message.target,
-            message.key,
-            message.phase,
-            bool(ok),
+
+        session_id = self._control_state.session_id
+        if not session_id:
+            logger.warning(
+                "state.update emit blocked: session_id missing for intent=%s frame=%s",
+                pending_update.intent_id,
+                pending_update.frame_id,
+            )
+            self._state_store.discard_pending(pending_update.frame_id)
+            return False
+
+        frame = build_state_update(
+            session_id=session_id,
+            intent_id=pending_update.intent_id,
+            frame_id=pending_update.frame_id,
+            payload=pending_update.payload_dict(),
         )
-        return bool(ok)
+        frame_id = frame.envelope.frame_id
+
+        ok = channel.send_frame(frame)
+        logger.debug(
+            "state.update emit: origin=%s scope=%s target=%s key=%s intent=%s frame=%s sent=%s metadata=%s",
+            origin,
+            pending_update.scope,
+            pending_update.target,
+            pending_update.key,
+            pending_update.intent_id,
+            frame_id,
+            bool(ok),
+            pending_update.metadata,
+        )
+        if not ok:
+            self._state_store.discard_pending(pending_update.frame_id)
+            return False
+        return True
 
     # --- Input mapping: unified wheel handler -------------------------------------
     def _on_wheel(self, data: dict) -> None:
@@ -697,8 +750,8 @@ class ClientStreamLoop:
 
     # --- Input mapping: wheel -> dims.intent.step (primary axis) ---------------------
     def _on_wheel_for_dims(self, data: dict) -> None:
-        intents.handle_wheel_for_dims(
-            self._intent_state,
+        control_actions.handle_wheel_for_dims(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -752,7 +805,7 @@ class ClientStreamLoop:
         camera.reset_camera(self._loop_state, origin='keys')
 
     def _on_key_event(self, data: dict) -> bool:
-        return intents.handle_key_event(
+        return control_actions.handle_key_event(
             data,
             reset_camera=self._reset_camera,
             step_primary=lambda delta: self.dims_step('primary', delta, origin='keys'),
@@ -805,7 +858,7 @@ class ClientStreamLoop:
     # --- Intents API --------------------------------------------------------------
     # --- Mode helpers -----------------------------------------------------------
     def _is_volume_mode(self) -> bool:
-        return intents._is_volume_mode(self._intent_state)  # type: ignore[attr-defined]
+        return control_actions._is_volume_mode(self._control_state)  # type: ignore[attr-defined]
 
     # --- Small utilities (no behavior change) ----------------------------------
     # --- View HUD snapshot (for overlay) ----------------------------------------
@@ -824,15 +877,15 @@ class ClientStreamLoop:
             'last_pan_dy': cam_state.last_pan_dy_sent,
             'zoom_base': float(cam_state.zoom_base),
         }
-        return intents.hud_snapshot(
-            self._intent_state,
+        return control_actions.hud_snapshot(
+            self._control_state,
             video_size=(self._vid_w, self._vid_h),
             zoom_state=zoom_state,
         )
 
     def dims_step(self, axis: int | str, delta: int, *, origin: str = 'ui') -> bool:
-        return intents.dims_step(
-            self._intent_state,
+        return control_actions.dims_step(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -844,8 +897,8 @@ class ClientStreamLoop:
         )
 
     def dims_set_index(self, axis: int | str, value: int, *, origin: str = 'ui') -> bool:
-        return intents.dims_set_index(
-            self._intent_state,
+        return control_actions.dims_set_index(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -858,8 +911,8 @@ class ClientStreamLoop:
 
     # --- Volume/multiscale intent senders --------------------------------------
     def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_render_mode(
-            self._intent_state,
+        return control_actions.volume_set_render_mode(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -868,8 +921,8 @@ class ClientStreamLoop:
         )
 
     def volume_set_clim(self, lo: float, hi: float, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_clim(
-            self._intent_state,
+        return control_actions.volume_set_clim(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -879,8 +932,8 @@ class ClientStreamLoop:
         )
 
     def volume_set_colormap(self, name: str, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_colormap(
-            self._intent_state,
+        return control_actions.volume_set_colormap(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -889,8 +942,8 @@ class ClientStreamLoop:
         )
 
     def volume_set_opacity(self, alpha: float, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_opacity(
-            self._intent_state,
+        return control_actions.volume_set_opacity(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -899,8 +952,8 @@ class ClientStreamLoop:
         )
 
     def volume_set_sample_step(self, relative: float, *, origin: str = 'ui') -> bool:
-        return intents.volume_set_sample_step(
-            self._intent_state,
+        return control_actions.volume_set_sample_step(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -909,8 +962,8 @@ class ClientStreamLoop:
         )
 
     def multiscale_set_policy(self, policy: str, *, origin: str = 'ui') -> bool:
-        return intents.multiscale_set_policy(
-            self._intent_state,
+        return control_actions.multiscale_set_policy(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -919,8 +972,8 @@ class ClientStreamLoop:
         )
 
     def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
-        return intents.multiscale_set_level(
-            self._intent_state,
+        return control_actions.multiscale_set_level(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -929,8 +982,8 @@ class ClientStreamLoop:
         )
 
     def view_set_ndisplay(self, ndisplay: int, *, origin: str = 'ui') -> bool:
-        return intents.view_set_ndisplay(
-            self._intent_state,
+        return control_actions.view_set_ndisplay(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -939,11 +992,11 @@ class ClientStreamLoop:
         )
 
     def current_ndisplay(self) -> Optional[int]:
-        return intents.current_ndisplay(self._intent_state)
+        return control_actions.current_ndisplay(self._control_state)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
-        return intents.toggle_ndisplay(
-            self._intent_state,
+        return control_actions.toggle_ndisplay(
+            self._control_state,
             self._loop_state,
             self._state_store,
             self._dispatch_state_update,
@@ -961,7 +1014,7 @@ class ClientStreamLoop:
         )
 
     def _on_pointer(self, data: dict) -> None:
-        dims_meta = self._intent_state.dims_meta
+        dims_meta = self._control_state.dims_meta
         in_vol3d = self._is_volume_mode() and int(dims_meta.get('ndisplay') or 2) == 3
         camera.handle_pointer(
             self._camera_state,

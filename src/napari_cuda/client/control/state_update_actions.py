@@ -12,9 +12,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 
     from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-    from napari_cuda.client.control.pending_update_store import StateStore
+    from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate, AckOutcome
 
-from napari_cuda.protocol.messages import StateUpdateMessage
 
 logger = logging.getLogger("napari_cuda.client.streaming.client_stream_loop")
 
@@ -34,14 +33,15 @@ def _default_dims_meta() -> dict[str, object | None]:
 
 
 @dataclass
-class ClientStateContext:
+class ControlStateContext:
     """Mutable control state hoisted out of the loop object."""
 
     dims_ready: bool = False
     dims_meta: dict[str, object | None] = field(default_factory=_default_dims_meta)
     primary_axis_index: int | None = None
-    client_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    client_seq: int = 0
+    session_id: Optional[str] = None
+    ack_timeout_ms: Optional[int] = None
+    intent_counter: int = 0
     dims_min_dt: float = 0.0
     last_dims_send: float = 0.0
     wheel_px_accum: float = 0.0
@@ -58,7 +58,7 @@ class ClientStateContext:
     multiscale_state: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, env_cfg: Any) -> "ClientStateContext":
+    def from_env(cls, env_cfg: Any) -> "ControlStateContext":
         state = cls()
         dims_rate = getattr(env_cfg, 'dims_rate_hz', 1.0) or 1.0
         state.dims_min_dt = 1.0 / max(1.0, float(dims_rate))
@@ -75,25 +75,29 @@ class ClientStateContext:
                 state.dims_z = state.dims_z_max
         return state
 
-    def next_client_seq(self) -> int:
-        self.client_seq = (int(self.client_seq) + 1) & 0x7FFFFFFF
-        return int(self.client_seq)
+    def next_intent_ids(self) -> tuple[str, str]:
+        self.intent_counter = (int(self.intent_counter) + 1) & 0xFFFFFFFF
+        base = f"{self.intent_counter:08x}"
+        intent_id = f"intent-{base}"
+        frame_id = f"state-{base}"
+        return intent_id, frame_id
 
 
 @dataclass
 class ControlRuntime:
-    interaction_id: Optional[str] = None
     active: bool = False
     last_phase: Optional[str] = None
     last_send_ts: float = 0.0
+    active_intent_id: Optional[str] = None
+    active_frame_id: Optional[str] = None
 
 
-def on_state_connected(state: ClientStateContext) -> None:
+def on_state_connected(state: ControlStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
 
 
-def on_state_disconnected(loop_state: "ClientLoopState", state: ClientStateContext) -> None:
+def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
@@ -103,7 +107,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ClientStateConte
 
 
 def handle_dims_update(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     data: dict[str, object],
     *,
@@ -214,7 +218,7 @@ def handle_dims_update(
     presenter.apply_dims_update(presenter_payload)
 
 
-def _axis_target_label(state: ClientStateContext, axis_idx: int) -> str:
+def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
         label = labels[axis_idx]
@@ -223,7 +227,7 @@ def _axis_target_label(state: ClientStateContext, axis_idx: int) -> str:
     return str(axis_idx)
 
 
-def _axis_index_from_target(state: ClientStateContext, target: str) -> Optional[int]:
+def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
@@ -244,57 +248,67 @@ def _runtime_key(scope: str, target: str, key: str) -> str:
 
 
 def _emit_state_update(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     *,
     scope: str,
     target: str,
     key: str,
     value: Any,
     origin: str,
+    metadata: Optional[Mapping[str, Any]] = None,
 ) -> tuple[bool, Optional[Any]]:
     runtime_key = _runtime_key(scope, target, key)
     runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
     phase = "start" if not runtime.active else "update"
-    interaction_id = runtime.interaction_id or uuid.uuid4().hex
-
-    payload, projection = state_store.apply_local(
+    intent_id, frame_id = state.next_intent_ids()
+    pending = state_store.apply_local(
         scope,
         target,
         key,
         value,
         phase,
-        interaction_id=interaction_id,
+        intent_id=intent_id,
+        frame_id=frame_id,
+        metadata=metadata,
     )
 
-    if not dispatch_state_update(payload, origin):
+    if not dispatch_state_update(pending, origin):
+        state_store.discard_pending(frame_id)
         return False, None
 
     runtime.active = True
-    runtime.interaction_id = interaction_id
     runtime.last_phase = phase
     runtime.last_send_ts = time.perf_counter()
-    return True, projection
+    runtime.active_intent_id = intent_id
+    runtime.active_frame_id = frame_id
+    return True, pending.projection_value
 
-
-def _update_runtime_from_ack(
-    state: ClientStateContext,
-    message: StateUpdateMessage,
-    result,
-) -> None:
-    runtime_key = _runtime_key(str(message.scope), str(message.target), str(message.key))
+def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: "AckOutcome") -> None:
+    if outcome.scope is None or outcome.target is None or outcome.key is None:
+        return
+    runtime_key = _runtime_key(outcome.scope, outcome.target, outcome.key)
     runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
-    runtime.last_phase = message.phase or runtime.last_phase
+    runtime.last_phase = outcome.update_phase or runtime.last_phase
     runtime.last_send_ts = time.perf_counter()
-    if result.pending_len == 0 or not result.is_self:
+    matched = outcome.in_reply_to == runtime.active_frame_id
+    if matched:
+        runtime.active_frame_id = None
+        runtime.active_intent_id = None
+
+    if matched and outcome.pending_len == 0:
         runtime.active = False
-        runtime.interaction_id = None
+        runtime.last_phase = None
+    else:
+        runtime.active = outcome.pending_len > 0
+        if not runtime.active:
+            runtime.last_phase = None
 
 
 def _sync_dims_payload_from_meta(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
 ) -> dict[str, Any]:
     meta = state.dims_meta
@@ -357,7 +371,7 @@ def _sync_dims_payload_from_meta(
 
 
 def _seed_dims_baseline(
-    state: ClientStateContext,
+    state: ControlStateContext,
     state_store: "StateStore",
     payload: dict[str, Any],
 ) -> None:
@@ -482,7 +496,7 @@ def mirror_dims_to_viewer(
     _apply()
 
 
-def replay_last_dims_payload(state: ClientStateContext, loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
+def replay_last_dims_payload(state: ControlStateContext, loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
     payload = loop_state.last_dims_payload
     if not payload:
         return
@@ -504,10 +518,10 @@ def replay_last_dims_payload(state: ClientStateContext, loop_state: "ClientLoopS
 
 
 def dims_step(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     axis: int | str,
     delta: int,
     *,
@@ -543,6 +557,11 @@ def dims_step(
         key="step",
         value=int(delta),
         origin=origin,
+        metadata={
+            "axis_index": axis_idx,
+            "axis_target": target_label,
+            "update_kind": "step",
+        },
     )
     if not ok:
         return False
@@ -551,10 +570,10 @@ def dims_step(
 
 
 def handle_wheel_for_dims(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     data: dict,
     *,
     viewer_ref,
@@ -596,10 +615,10 @@ def handle_wheel_for_dims(
 
 
 def dims_set_index(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     axis: int | str,
     value: int,
     *,
@@ -635,6 +654,11 @@ def dims_set_index(
         key="index",
         value=int(value),
         origin=origin,
+        metadata={
+            "axis_index": axis_idx,
+            "axis_target": target_label,
+            "update_kind": "index",
+        },
     )
     if not ok:
         return False
@@ -642,168 +666,263 @@ def dims_set_index(
     return True
 
 
-def handle_dims_state_update(
-    state: ClientStateContext,
+def handle_dims_ack(
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    message: StateUpdateMessage,
+    outcome: "AckOutcome",
     *,
     presenter: Optional["PresenterFacade"] = None,
     viewer_ref=None,
     ui_call=None,
     log_dims_info: bool = False,
 ) -> None:
-    if message.scope != "dims":
+    if outcome.scope != "dims":
         return
 
-    result = state_store.apply_remote(message)
-    _update_runtime_from_ack(state, message, result)
+    _update_runtime_from_ack_outcome(state, outcome)
 
-    meta = state.dims_meta
+    axis_idx: Optional[int] = None
+    metadata = outcome.metadata or {}
+    if "axis_index" in metadata:
+        try:
+            axis_idx = int(metadata["axis_index"])
+        except Exception:
+            axis_idx = None
+    if axis_idx is None and outcome.target is not None:
+        axis_idx = _axis_index_from_target(state, str(outcome.target))
 
-    extras = message.extras if isinstance(message.extras, Mapping) else {}
-    meta_snapshot = extras.get('meta')
-    if isinstance(meta_snapshot, Mapping):
-        _apply_dims_meta_snapshot(meta, meta_snapshot)
-
-    axis_idx = extras.get('axis_index')
-    if axis_idx is not None:
-        assert isinstance(axis_idx, int)
-    else:
-        axis_idx = _axis_index_from_target(state, str(message.target))
-
-    if axis_idx is None and message.key in {'index', 'step'}:
+    if outcome.status == "accepted":
         logger.debug(
-            "handle_dims_state_update: unknown axis target=%s; applying fallback index=0",
-            message.target,
+            "ack.state dims accepted: target=%s key=%s pending=%d",
+            outcome.target,
+            outcome.key,
+            outcome.pending_len,
         )
-        axis_idx = 0
+        return
 
-    current_step_override = extras.get('current_step')
-    if current_step_override is not None:
-        assert isinstance(current_step_override, Sequence)
-        meta['current_step'] = list(current_step_override)
-    elif message.key in {'index', 'step'}:
-        assert axis_idx is not None, f"unknown dims target {message.target!r}"
+    error = outcome.error or {}
+    axis_label = metadata.get("axis_target") if isinstance(metadata, dict) else None
+    logger.warning(
+        "ack.state dims rejected: axis=%s label=%s target=%s key=%s code=%s message=%s details=%s",
+        axis_idx,
+        axis_label,
+        outcome.target,
+        outcome.key,
+        error.get("code"),
+        error.get("message"),
+        error.get("details"),
+    )
+
+    confirmed_value = outcome.confirmed_value
+    if confirmed_value is None:
+        confirmed_value = state.dims_state.get((str(outcome.target or ""), str(outcome.key or "")))
+
+    if axis_idx is not None and confirmed_value is not None:
+        meta = state.dims_meta
         current = list(meta.get('current_step') or [])
         while len(current) <= axis_idx:
             current.append(0)
-        if message.key == 'step':
-            assert isinstance(result.projection_value, (int, float)), "dims.step expects numeric value"
-            current[axis_idx] = current[axis_idx] + int(result.projection_value)
-        else:
-            current[axis_idx] = int(result.projection_value)
-        meta['current_step'] = current
-
-    if 'ndisplay' in extras:
-        value = extras['ndisplay']
-        assert value is None or isinstance(value, int)
-        meta['ndisplay'] = value
-
-    state.dims_ready = True
-    state.primary_axis_index = _compute_primary_axis_index(meta)
-
-    state.dims_state[(str(message.target), str(message.key))] = result.projection_value
-
-    payload = _sync_dims_payload_from_meta(state, loop_state)
-
-    if presenter is not None:
         try:
-            presenter.apply_dims_update(dict(payload))
+            current[axis_idx] = int(confirmed_value)
         except Exception:
-            logger.debug("presenter dims update failed", exc_info=True)
+            current[axis_idx] = 0
+        meta['current_step'] = current
+        state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or "index"))] = confirmed_value
 
-    viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-    if viewer_obj is not None:
-        mirror_dims_to_viewer(
-            viewer_obj,
-            ui_call,
-            current_step=payload.get('current_step'),
-            ndisplay=payload.get('ndisplay'),
-            ndim=payload.get('ndim'),
-            dims_range=payload.get('dims_range'),
-            order=payload.get('order'),
-            axis_labels=payload.get('axis_labels'),
-            sizes=payload.get('sizes'),
-            displayed=payload.get('displayed'),
-        )
-        if log_dims_info:
-            logger.info(
-                "state.update dims mirrored: target=%s key=%s value=%s",
-                message.target,
-                message.key,
-                result.projection_value,
+        payload = _sync_dims_payload_from_meta(state, loop_state)
+        state.dims_ready = True
+        state.primary_axis_index = _compute_primary_axis_index(meta)
+
+        if presenter is not None:
+            try:
+                presenter.apply_dims_update(dict(payload))
+            except Exception:
+                logger.debug("presenter dims update failed", exc_info=True)
+
+        viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
+        if viewer_obj is not None:
+            mirror_dims_to_viewer(
+                viewer_obj,
+                ui_call,
+                current_step=payload.get('current_step'),
+                ndisplay=payload.get('ndisplay'),
+                ndim=payload.get('ndim'),
+                dims_range=payload.get('dims_range'),
+                order=payload.get('order'),
+                axis_labels=payload.get('axis_labels'),
+                sizes=payload.get('sizes'),
+                displayed=payload.get('displayed'),
             )
-
-    logger.debug(
-        "state.update dims applied: target=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
-        message.target,
-        message.key,
-        result.projection_value,
-        result.is_self,
-        result.pending_len,
-        result.overridden,
-    )
+            if log_dims_info:
+                logger.info(
+                    "dims intent reverted: axis=%s target=%s value=%s",
+                    axis_idx,
+                    outcome.target,
+                    confirmed_value,
+                )
 
 
-def handle_generic_state_update(
-    state: ClientStateContext,
+def handle_generic_ack(
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    message: StateUpdateMessage,
+    outcome: "AckOutcome",
     *,
     presenter: Optional["PresenterFacade"] = None,
 ) -> None:
-    result = state_store.apply_remote(message)
-    _update_runtime_from_ack(state, message, result)
+    if outcome.scope is None:
+        return
 
-    scope = str(message.scope)
-    key = str(message.key)
-    value = result.projection_value
+    _update_runtime_from_ack_outcome(state, outcome)
 
-    if scope == 'view':
-        state.view_state[key] = value
-        if key == 'ndisplay':
-            assert value is None or isinstance(value, int)
-            state.dims_meta['ndisplay'] = value
-            payload = _sync_dims_payload_from_meta(state, loop_state)
-            if presenter is not None:
+    if outcome.status != "accepted":
+        error = outcome.error or {}
+        logger.warning(
+            "ack.state rejected: scope=%s target=%s key=%s code=%s message=%s details=%s",
+            outcome.scope,
+            outcome.target,
+            outcome.key,
+            error.get("code"),
+            error.get("message"),
+            error.get("details"),
+        )
+
+        confirmed_value = outcome.confirmed_value
+        scope = outcome.scope
+        key = outcome.key or ""
+
+        if scope == 'view':
+            if confirmed_value is None:
+                confirmed_value = state.view_state.get(key)
+        if scope == 'dims':
+            axis_idx: Optional[int] = None
+            metadata = outcome.metadata or {}
+            if "axis_index" in metadata:
                 try:
-                    presenter.apply_dims_update(dict(payload))
+                    axis_idx = int(metadata["axis_index"])
                 except Exception:
-                    logger.debug("presenter dims update failed", exc_info=True)
-    elif scope == 'volume':
-        state.volume_state[key] = value
-        render_meta = state.dims_meta.setdefault('render', {})
-        assert isinstance(render_meta, dict)
-        render_meta[key] = value
-    elif scope == 'multiscale':
-        state.multiscale_state[key] = value
-        ms_meta = state.dims_meta.setdefault('multiscale', {})
-        assert isinstance(ms_meta, dict)
-        ms_meta[key] = value
+                    axis_idx = None
+            if axis_idx is None and outcome.target is not None:
+                axis_idx = _axis_index_from_target(state, str(outcome.target))
+
+        if scope == 'dims':
+            axis_idx: Optional[int] = None
+            metadata = outcome.metadata or {}
+            if "axis_index" in metadata:
+                try:
+                    axis_idx = int(metadata["axis_index"])
+                except Exception:
+                    axis_idx = None
+            if axis_idx is None and outcome.target is not None:
+                axis_idx = _axis_index_from_target(state, str(outcome.target))
+
+            if axis_idx is not None and confirmed_value is not None:
+                axis_label = metadata.get("axis_target") if isinstance(metadata, dict) else None
+                logger.warning(
+                    "ack.state dims rejected: axis=%s label=%s target=%s key=%s code=%s message=%s details=%s",
+                    axis_idx,
+                    axis_label,
+                    outcome.target,
+                    outcome.key,
+                    error.get("code"),
+                    error.get("message"),
+                    error.get("details"),
+                )
+
+                meta = state.dims_meta
+                current = list(meta.get('current_step') or [])
+                while len(current) <= axis_idx:
+                    current.append(0)
+                try:
+                    current[axis_idx] = int(confirmed_value)
+                except Exception:
+                    current[axis_idx] = 0
+                meta['current_step'] = current
+                state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or "index"))] = confirmed_value
+
+                payload = _sync_dims_payload_from_meta(state, loop_state)
+                state.dims_ready = True
+                state.primary_axis_index = _compute_primary_axis_index(meta)
+
+                if presenter is not None:
+                    try:
+                        presenter.apply_dims_update(dict(payload))
+                    except Exception:
+                        logger.debug("presenter dims update failed", exc_info=True)
+
+                viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
+                if viewer_obj is not None:
+                    mirror_dims_to_viewer(
+                        viewer_obj,
+                        ui_call,
+                        current_step=payload.get('current_step'),
+                        ndisplay=payload.get('ndisplay'),
+                        ndim=payload.get('ndim'),
+                        dims_range=payload.get('dims_range'),
+                        order=payload.get('order'),
+                        axis_labels=payload.get('axis_labels'),
+                        sizes=payload.get('sizes'),
+                        displayed=payload.get('displayed'),
+                    )
+            return
+
+        logger.warning(
+            "ack.state rejected: scope=%s target=%s key=%s code=%s message=%s details=%s",
+            outcome.scope,
+            outcome.target,
+            outcome.key,
+            error.get("code"),
+            error.get("message"),
+            error.get("details"),
+        )
+        return
 
     logger.debug(
-        "state.update applied: scope=%s target=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
-        message.scope,
-        message.target,
-        message.key,
-        result.projection_value,
-        result.is_self,
-        result.pending_len,
-        result.overridden,
+        "ack.state accepted: scope=%s target=%s key=%s pending=%d",
+        outcome.scope,
+        outcome.target,
+        outcome.key,
+        outcome.pending_len,
     )
 
+    confirmed_value = outcome.confirmed_value
+    scope = outcome.scope
+    key = outcome.key or ""
 
-def current_ndisplay(state: ClientStateContext) -> Optional[int]:
+    if scope == 'view':
+        if confirmed_value is not None:
+            state.view_state[key] = confirmed_value
+            if key == 'ndisplay':
+                try:
+                    state.dims_meta['ndisplay'] = int(confirmed_value)
+                except Exception:
+                    state.dims_meta['ndisplay'] = None
+                payload = _sync_dims_payload_from_meta(state, loop_state)
+                if presenter is not None:
+                    try:
+                        presenter.apply_dims_update(dict(payload))
+                    except Exception:
+                        logger.debug("presenter dims update failed", exc_info=True)
+    elif scope == 'volume' and confirmed_value is not None:
+        state.volume_state[key] = confirmed_value
+        render_meta = state.dims_meta.setdefault('render', {})
+        if isinstance(render_meta, dict):
+            render_meta[key] = confirmed_value
+    elif scope == 'multiscale' and confirmed_value is not None:
+        state.multiscale_state[key] = confirmed_value
+        ms_meta = state.dims_meta.setdefault('multiscale', {})
+        if isinstance(ms_meta, dict):
+            ms_meta[key] = confirmed_value
+
+
+def current_ndisplay(state: ControlStateContext) -> Optional[int]:
     return _int_or_none(state.dims_meta.get('ndisplay'))
 
 
 def toggle_ndisplay(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     *,
     origin: str,
 ) -> bool:
@@ -873,10 +992,10 @@ def handle_key_event(
 
 
 def view_set_ndisplay(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     ndisplay: int,
     *,
     origin: str,
@@ -905,10 +1024,10 @@ def view_set_ndisplay(
 
 
 def volume_set_render_mode(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     mode: str,
     *,
     origin: str,
@@ -933,10 +1052,10 @@ def volume_set_render_mode(
 
 
 def volume_set_clim(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     lo: float,
     hi: float,
     *,
@@ -962,10 +1081,10 @@ def volume_set_clim(
 
 
 def volume_set_colormap(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     name: str,
     *,
     origin: str,
@@ -989,10 +1108,10 @@ def volume_set_colormap(
 
 
 def volume_set_opacity(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     alpha: float,
     *,
     origin: str,
@@ -1017,10 +1136,10 @@ def volume_set_opacity(
 
 
 def volume_set_sample_step(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     relative: float,
     *,
     origin: str,
@@ -1045,10 +1164,10 @@ def volume_set_sample_step(
 
 
 def multiscale_set_policy(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     policy: str,
     *,
     origin: str,
@@ -1076,10 +1195,10 @@ def multiscale_set_policy(
 
 
 def multiscale_set_level(
-    state: ClientStateContext,
+    state: ControlStateContext,
     loop_state: "ClientLoopState",
     state_store: "StateStore",
-    dispatch_state_update: Callable[[StateUpdateMessage, str], bool],
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     level: int,
     *,
     origin: str,
@@ -1103,7 +1222,7 @@ def multiscale_set_level(
     return ok
 
 
-def hud_snapshot(state: ClientStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
+def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
     meta = state.dims_meta
     snap: dict[str, object] = {}
     snap['ndisplay'] = _int_or_none(meta.get('ndisplay'))
@@ -1153,7 +1272,7 @@ def hud_snapshot(state: ClientStateContext, *, video_size: tuple[Optional[int], 
     return snap
 
 
-def _axis_to_index(state: ClientStateContext, axis: int | str) -> Optional[int]:
+def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]:
     if axis == 'primary':
         return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
     if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
@@ -1183,7 +1302,7 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
     return 0
 
 
-def _rate_gate_settings(state: ClientStateContext, origin: str) -> bool:
+def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
     now = time.perf_counter()
     if (now - float(state.last_settings_send or 0.0)) < state.settings_min_dt:
         logger.debug("settings intent gated by rate limiter (%s)", origin)
@@ -1192,7 +1311,7 @@ def _rate_gate_settings(state: ClientStateContext, origin: str) -> bool:
     return False
 
 
-def _is_volume_mode(state: ClientStateContext) -> bool:
+def _is_volume_mode(state: ControlStateContext) -> bool:
     vol = bool(state.dims_meta.get('volume'))
     nd = int(state.dims_meta.get('ndisplay') or 2)
     return bool(vol) and int(nd) == 3
@@ -1232,7 +1351,7 @@ def _ensure_lo_hi(lo: float, hi: float) -> tuple[float, float]:
     return lo_f, hi_f
 
 
-def _clamp_level(state: ClientStateContext, level: int) -> int:
+def _clamp_level(state: ControlStateContext, level: int) -> int:
     multiscale = state.dims_meta.get('multiscale')
     if isinstance(multiscale, dict):
         levels = multiscale.get('levels')

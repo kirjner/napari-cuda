@@ -1,24 +1,23 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from napari_cuda.client.layers.registry import LayerRecord, RegistrySnapshot
 from napari_cuda.client.layers.remote_image_layer import RemoteImageLayer
-from napari_cuda.client.control.state_update_actions import ClientStateContext
+from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.streaming.presenter_facade import PresenterFacade
-from napari_cuda.protocol.messages import LayerRenderHints, LayerSpec, StateUpdateMessage
+from napari_cuda.protocol.messages import LayerRenderHints, LayerSpec
+from napari_cuda.protocol import build_ack_state
 
 
 class DummyLoop:
     def __init__(self) -> None:
-        self.posted: list[dict] = []
+        self.pending: list[tuple] = []
 
-    def post(self, payload: dict) -> bool:
-        self.posted.append(payload)
+    def _dispatch_state_update(self, pending, origin: str) -> bool:
+        self.pending.append((pending, origin))
         return True
 
 
@@ -39,34 +38,40 @@ class DummyRegistry:
 
 
 @pytest.fixture
-def intent_state() -> ClientStateContext:
-    state = ClientStateContext()
-    state.client_id = "client-test"
-    state.settings_min_dt = 0.0
-    state.last_settings_send = 0.0
+def control_state() -> ControlStateContext:
+    env = type('Env', (), {
+        'dims_rate_hz': 60.0,
+        'wheel_step': 1,
+        'settings_rate_hz': 30.0,
+        'dims_z': None,
+        'dims_z_min': None,
+        'dims_z_max': None,
+    })
+    state = ControlStateContext.from_env(env)
+    state.session_id = 'session-test'
     return state
 
 
-def _make_layer(remote_id: str = "layer-1") -> RemoteImageLayer:
+def _make_layer(remote_id: str = 'layer-1') -> RemoteImageLayer:
     spec = LayerSpec(
         layer_id=remote_id,
-        layer_type="image",
-        name="demo",
+        layer_type='image',
+        name='demo',
         ndim=2,
         shape=[1, 1],
-        dtype="float32",
+        dtype='float32',
         contrast_limits=None,
         metadata={},
-        render=LayerRenderHints(mode="mip"),
+        render=LayerRenderHints(mode='mip'),
         controls={
-            "visible": True,
-            "opacity": 0.5,
-            "rendering": "mip",
-            "colormap": "gray",
-            "gamma": 1.0,
-            "contrast_limits": [0.0, 1.0],
+            'visible': True,
+            'opacity': 0.5,
+            'rendering': 'mip',
+            'colormap': 'gray',
+            'gamma': 1.0,
+            'contrast_limits': [0.0, 1.0],
         },
-        extras={"data_id": "demo"},
+        extras={'data_id': 'demo'},
     )
     return RemoteImageLayer(spec)
 
@@ -76,7 +81,7 @@ def _bind_layer(bridge: LayerStateBridge, registry: DummyRegistry, layer: Remote
     registry.emit(RegistrySnapshot(layers=(record,)))
 
 
-def test_local_opacity_dispatches_state_update(intent_state: ClientStateContext) -> None:
+def test_local_opacity_dispatches_pending_update(control_state: ControlStateContext) -> None:
     presenter = PresenterFacade()
     registry = DummyRegistry()
     loop = DummyLoop()
@@ -86,7 +91,7 @@ def test_local_opacity_dispatches_state_update(intent_state: ClientStateContext)
         loop,
         presenter,
         registry,
-        intent_state=intent_state,
+        control_state=control_state,
         loop_state=loop_state,
         enabled=True,
     )
@@ -96,85 +101,78 @@ def test_local_opacity_dispatches_state_update(intent_state: ClientStateContext)
 
     layer.opacity = 0.25
 
-    assert loop.posted, "state.update not dispatched"
-    payload = loop.posted[-1]
-    assert payload["type"] == "state.update"
-    assert payload["scope"] == "layer"
-    assert payload["target"] == layer.remote_id
-    assert payload["key"] == "opacity"
-    assert payload["value"] == pytest.approx(0.25)
-    assert payload["phase"] == "start"
+    pending, origin = loop.pending[-1]
+    assert origin == 'layer:opacity'
+    assert pending.scope == 'layer'
+    assert pending.target == layer.remote_id
+    assert pending.key == 'opacity'
+    assert pending.value == pytest.approx(0.25)
+    assert pending.metadata == {'layer_id': layer.remote_id, 'property': 'opacity'}
     assert layer.opacity == pytest.approx(0.25)
 
 
-def test_remote_ack_clears_pending(intent_state: ClientStateContext) -> None:
+def test_handle_ack_accept_clears_runtime(control_state: ControlStateContext) -> None:
     presenter = PresenterFacade()
     registry = DummyRegistry()
     loop = DummyLoop()
     loop_state = ClientLoopState()
 
-    bridge = LayerStateBridge(
-        loop,
-        presenter,
-        registry,
-        intent_state=intent_state,
-        loop_state=loop_state,
-        enabled=True,
-    )
+    bridge = LayerStateBridge(loop, presenter, registry, control_state=control_state, loop_state=loop_state, enabled=True)
 
     layer = _make_layer()
     _bind_layer(bridge, registry, layer)
 
-    layer.opacity = 0.25
-    payload = loop.posted[-1]
+    layer.opacity = 0.3
+    pending, _ = loop.pending[-1]
 
-    ack = StateUpdateMessage(
-        scope="layer",
-        target=layer.remote_id,
-        key="opacity",
-        value=payload["value"],
-        client_id=payload["client_id"],
-        client_seq=payload["client_seq"],
-        interaction_id=payload.get("interaction_id"),
-        phase="update",
-        timestamp=payload.get("timestamp"),
-        server_seq=42,
+    ack = build_ack_state(
+        session_id='session-test',
+        frame_id='ack-1',
+        payload={
+            'intent_id': pending.intent_id,
+            'in_reply_to': pending.frame_id,
+            'status': 'accepted',
+            'applied_value': 0.3,
+        },
+        timestamp=10.0,
     )
-    bridge.handle_state_update(ack)
+    outcome = bridge._state_store.apply_ack(ack)
+    bridge.handle_ack(outcome)
 
-    assert layer.opacity == pytest.approx(0.25)
+    binding = bridge._bindings[layer.remote_id]
+    runtime = binding.properties['opacity']
+    assert runtime.active is False
+    assert runtime.active_frame_id is None
+    assert runtime.active_intent_id is None
 
 
-def test_foreign_update_overrides_projection(intent_state: ClientStateContext) -> None:
+def test_handle_ack_rejected_reverts_property(control_state: ControlStateContext) -> None:
     presenter = PresenterFacade()
     registry = DummyRegistry()
     loop = DummyLoop()
     loop_state = ClientLoopState()
 
-    bridge = LayerStateBridge(
-        loop,
-        presenter,
-        registry,
-        intent_state=intent_state,
-        loop_state=loop_state,
-        enabled=True,
-    )
+    bridge = LayerStateBridge(loop, presenter, registry, control_state=control_state, loop_state=loop_state, enabled=True)
 
     layer = _make_layer()
     _bind_layer(bridge, registry, layer)
 
-    message = StateUpdateMessage(
-        scope="layer",
-        target=layer.remote_id,
-        key="gamma",
-        value=1.75,
-        client_id="foreign",
-        client_seq=5,
-        interaction_id="abc",
-        phase="update",
-        timestamp=time.time(),
-        server_seq=9,
-    )
-    bridge.handle_state_update(message)
+    original_opacity = layer.opacity
+    layer.opacity = 0.1
+    pending, _ = loop.pending[-1]
 
-    assert layer.gamma == pytest.approx(1.75)
+    ack = build_ack_state(
+        session_id='session-test',
+        frame_id='ack-2',
+        payload={
+            'intent_id': pending.intent_id,
+            'in_reply_to': pending.frame_id,
+            'status': 'rejected',
+            'error': {'code': 'state.rejected', 'message': 'not allowed'},
+        },
+        timestamp=11.0,
+    )
+    outcome = bridge._state_store.apply_ack(ack)
+    bridge.handle_ack(outcome)
+
+    assert layer.opacity == pytest.approx(original_opacity)

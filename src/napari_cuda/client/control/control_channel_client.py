@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -9,7 +8,7 @@ import platform
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 import websockets
 
@@ -18,15 +17,20 @@ try:
 except Exception:  # pragma: no cover - fallback for unusual import issues
     _NAPARI_CUDA_VERSION = "dev"
 
-from napari_cuda.client.streaming.dims_payload import inflate_current_step, normalize_meta
-
 from napari_cuda.protocol import (
+    ACK_STATE_TYPE,
+    ERROR_COMMAND_TYPE,
+    NOTIFY_DIMS_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
+    REPLY_COMMAND_TYPE,
     EnvelopeParser,
     SESSION_REJECT_TYPE,
     SESSION_WELCOME_TYPE,
+    AckState,
+    ErrorCommand,
     HelloClientInfo,
+    ReplyCommand,
     SessionReject,
     SessionWelcome,
     build_session_hello,
@@ -35,11 +39,9 @@ from napari_cuda.protocol.messages import (
     LAYER_REMOVE_TYPE,
     LAYER_UPDATE_TYPE,
     SCENE_SPEC_TYPE,
-    STATE_UPDATE_TYPE,
     LayerRemoveMessage,
     LayerUpdateMessage,
     SceneSpecMessage,
-    StateUpdateMessage,
 )
 
 
@@ -85,7 +87,20 @@ _REQUIRED_FEATURES = {
     "notify.dims": True,
     "notify.camera": True,
 }
-_LEGACY_NOTIFY_STATE_TYPE = "notify.state"
+
+
+@dataclass(frozen=True)
+class ResumeCursor:
+    seq: int
+    delta_token: str
+
+
+@dataclass(frozen=True)
+class SessionMetadata:
+    session_id: str
+    heartbeat_s: float
+    ack_timeout_ms: int | None
+    resume_tokens: Dict[str, ResumeCursor | None]
 
 
 class StateChannel:
@@ -105,7 +120,10 @@ class StateChannel:
         handle_scene_spec: Optional[Callable[[SceneSpecMessage], None]] = None,
         handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
         handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
-        handle_state_update: Optional[Callable[[StateUpdateMessage], None]] = None,
+        handle_ack_state: Optional[Callable[[AckState], None]] = None,
+        handle_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
+        handle_error_command: Optional[Callable[[ErrorCommand], None]] = None,
+        handle_session_ready: Optional[Callable[[SessionMetadata], None]] = None,
         handle_connected: Optional[Callable[[], None]] = None,
         handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
     ) -> None:
@@ -116,11 +134,29 @@ class StateChannel:
         self.handle_scene_spec = handle_scene_spec
         self.handle_layer_update = handle_layer_update
         self.handle_layer_remove = handle_layer_remove
-        self.handle_state_update = handle_state_update
+        self.handle_ack_state = handle_ack_state
+        self.handle_reply_command = handle_reply_command
+        self.handle_error_command = handle_error_command
+        self.handle_session_ready = handle_session_ready
         self.handle_connected = handle_connected
         self.handle_disconnect = handle_disconnect
         self._last_key_req: Optional[float] = None
         self._loop_state = StateChannelLoop()
+        self._session_metadata: SessionMetadata | None = None
+
+    @property
+    def session_metadata(self) -> SessionMetadata | None:
+        return self._session_metadata
+
+    @property
+    def session_id(self) -> str | None:
+        metadata = self._session_metadata
+        return metadata.session_id if metadata is not None else None
+
+    @property
+    def ack_timeout_ms(self) -> int | None:
+        metadata = self._session_metadata
+        return metadata.ack_timeout_ms if metadata is not None else None
 
     def run(self) -> None:
         """Start the state channel event loop and keep reconnecting."""
@@ -277,18 +313,22 @@ class StateChannel:
             loop.call_soon_threadsafe(_schedule_shutdown)
         except Exception:
             logger.debug("StateChannel.stop: loop notify failed", exc_info=True)
-    def _handle_message(self, data: dict) -> None:
+    def _handle_message(self, data: Mapping[str, object]) -> None:
         """Dispatch a single decoded message to registered callbacks."""
 
-        raw_type = data.get('type')
-        msg_type = (raw_type or '').lower()
+        raw_type = data.get("type")
+        msg_type = (raw_type or "").lower()
 
-        if msg_type == _LEGACY_NOTIFY_STATE_TYPE:
-            self._handle_legacy_notify_state(data)
+        if msg_type == ACK_STATE_TYPE:
+            self._handle_ack_state(data)
             return
 
-        if msg_type == STATE_UPDATE_TYPE:
-            self._handle_state_update_frame(data)
+        if msg_type == REPLY_COMMAND_TYPE:
+            self._handle_reply_command(data)
+            return
+
+        if msg_type == ERROR_COMMAND_TYPE:
+            self._handle_error_command(data)
             return
 
         if msg_type == NOTIFY_SCENE_TYPE:
@@ -299,55 +339,12 @@ class StateChannel:
             self._handle_notify_stream(data)
             return
 
+        if msg_type == NOTIFY_DIMS_TYPE:
+            self._handle_notify_dims(data)
+            return
+
         if msg_type in (SESSION_WELCOME_TYPE, SESSION_REJECT_TYPE):
             logger.debug("Ignoring post-handshake control message: %s", msg_type)
-            return
-
-        if msg_type == 'video_config':
-            if self.handle_video_config:
-                try:
-                    self.handle_video_config(data)
-                except Exception:
-                    logger.debug("handle_video_config callback failed", exc_info=True)
-            return
-
-        if msg_type == 'dims.update':
-            if self.handle_dims_update:
-                try:
-                    meta_raw = data.get('meta') or {}
-                    logger.debug(
-                        "dims.update raw meta: level=%s level_shape=%s range=%s",
-                        meta_raw.get('level'),
-                        meta_raw.get('level_shape') or meta_raw.get('sizes'),
-                        meta_raw.get('range') or meta_raw.get('ranges'),
-                    )
-                    meta = normalize_meta(data.get('meta') or {})
-                    cur = inflate_current_step(data.get('current_step'), meta)
-                    ack_val = data.get('ack') if isinstance(data.get('ack'), bool) else None
-                    fwd = {
-                        'current_step': cur,
-                        'ndim': meta.get('ndim'),
-                        'order': meta.get('order'),
-                        'axis_labels': meta.get('axis_labels'),
-                        'sizes': meta.get('sizes'),
-                        'range': meta.get('range'),
-                        'ndisplay': meta.get('ndisplay'),
-                        'displayed': meta.get('displayed'),
-                        'volume': bool(meta.get('volume')) if 'volume' in meta else None,
-                        'render': meta.get('render') or None,
-                        'multiscale': meta.get('multiscale') or None,
-                        'level': meta.get('level'),
-                        'level_shape': meta.get('level_shape'),
-                        'dtype': meta.get('dtype'),
-                        'normalized': meta.get('normalized'),
-                        'ack': ack_val,
-                        'intent_seq': data.get('intent_seq'),
-                        'seq': data.get('seq'),
-                        'last_client_id': data.get('last_client_id'),
-                    }
-                    self.handle_dims_update(fwd)
-                except Exception:
-                    logger.debug("handle_dims_update callback failed", exc_info=True)
             return
 
         if msg_type == SCENE_SPEC_TYPE:
@@ -391,72 +388,10 @@ class StateChannel:
                     logger.debug("handle_layer_remove callback failed", exc_info=True)
             return
 
-        if msg_type == STATE_UPDATE_TYPE:
-            if self.handle_state_update:
-                try:
-                    update = StateUpdateMessage.from_dict(data)
-                    if _STATE_DEBUG:
-                        logger.debug(
-                            "received state.update: scope=%s target=%s key=%s phase=%s",
-                            update.scope,
-                            update.target,
-                            update.key,
-                            update.phase,
-                        )
-                    self.handle_state_update(update)
-                except Exception:
-                    logger.debug("handle_state_update callback failed", exc_info=True)
-            return
-
-    def _handle_legacy_notify_state(self, data: dict) -> None:
-        if not self.handle_state_update:
-            return
-        try:
-            payload_block = data.get('payload')
-            if isinstance(payload_block, dict):
-                update = StateUpdateMessage.from_dict(dict(payload_block))
-            else:
-                update = StateUpdateMessage.from_dict(dict(data))
-            if _STATE_DEBUG:
-                logger.debug(
-                    "received notify.state: scope=%s target=%s key=%s phase=%s",
-                    update.scope,
-                    update.target,
-                    update.key,
-                    update.phase,
-                )
-            self.handle_state_update(update)
-        except Exception:
-            logger.debug("notify.state dispatch failed", exc_info=True)
-
-    def _handle_state_update_frame(self, data: Mapping[str, Any]) -> None:
-        if not self.handle_state_update:
-            return
-        try:
-            frame = _ENVELOPE_PARSER.parse_state_update(data)
-            payload = frame.payload
-            update = StateUpdateMessage.from_dict(
-                {
-                    'scope': payload.scope,
-                    'target': payload.target,
-                    'key': payload.key,
-                    'value': payload.value,
-                }
-            )
-            if _STATE_DEBUG:
-                logger.debug(
-                    "received state.update frame: scope=%s target=%s key=%s",
-                    update.scope,
-                    update.target,
-                    update.key,
-                )
-            self.handle_state_update(update)
-        except Exception:
-            logger.debug("state.update dispatch failed", exc_info=True)
-
     async def _perform_handshake(self, ws: websockets.WebSocketClientProtocol) -> None:
         """Exchange the session handshake with the state server before use."""
 
+        self._session_metadata = None
         client_info = HelloClientInfo(
             name="napari-cuda-client",
             version=_NAPARI_CUDA_VERSION,
@@ -495,11 +430,15 @@ class StateChannel:
         msg_type = str(data.get("type") or "").lower()
         if msg_type == SESSION_WELCOME_TYPE:
             welcome = SessionWelcome.from_dict(data)
+            metadata = self._record_session_metadata(welcome)
             feature_toggles = welcome.payload.features
-            enabled = sorted(
-                name for name, toggle in feature_toggles.items() if getattr(toggle, "enabled", False)
+            enabled = sorted(name for name, toggle in feature_toggles.items() if getattr(toggle, "enabled", False))
+            logger.info(
+                "State handshake accepted; session=%s ack_timeout_ms=%s features=%s",
+                metadata.session_id,
+                metadata.ack_timeout_ms,
+                enabled or "unknown",
             )
-            logger.info("State handshake accepted; features=%s", enabled or "unknown")
             return
 
         if msg_type == SESSION_REJECT_TYPE:
@@ -565,6 +504,125 @@ class StateChannel:
         except Exception:
             logger.debug("notify.stream dispatch failed", exc_info=True)
 
+    def _handle_notify_dims(self, data: Mapping[str, object]) -> None:
+        if not self.handle_dims_update:
+            return
+        try:
+            frame = _ENVELOPE_PARSER.parse_notify_dims(data)
+            envelope = frame.envelope
+            payload = frame.payload
+            message = {
+                'frame_id': envelope.frame_id,
+                'session': envelope.session,
+                'timestamp': envelope.timestamp,
+                'current_step': tuple(payload.current_step),
+                'ndisplay': payload.ndisplay,
+                'mode': payload.mode,
+                'source': payload.source,
+            }
+            if _STATE_DEBUG:
+                logger.debug(
+                    "received notify.dims: frame=%s step=%s ndisplay=%s mode=%s",
+                    envelope.frame_id,
+                    payload.current_step,
+                    payload.ndisplay,
+                    payload.mode,
+                )
+            self.handle_dims_update(message)
+        except Exception:
+            logger.debug("notify.dims dispatch failed", exc_info=True)
+
+    def _record_session_metadata(self, welcome: SessionWelcome) -> SessionMetadata:
+        session_info = welcome.payload.session
+        resume_tokens: Dict[str, ResumeCursor | None] = {}
+        for name, toggle in welcome.payload.features.items():
+            resume_state = getattr(toggle, "resume_state", None)
+            if resume_state is not None:
+                resume_tokens[name] = ResumeCursor(seq=int(resume_state.seq), delta_token=str(resume_state.delta_token))
+            else:
+                resume_tokens[name] = None
+        metadata = SessionMetadata(
+            session_id=session_info.id,
+            heartbeat_s=float(session_info.heartbeat_s),
+            ack_timeout_ms=int(session_info.ack_timeout_ms) if session_info.ack_timeout_ms is not None else None,
+            resume_tokens=resume_tokens,
+        )
+        self._session_metadata = metadata
+        if self.handle_session_ready:
+            try:
+                self.handle_session_ready(metadata)
+            except Exception:
+                logger.debug("handle_session_ready callback failed", exc_info=True)
+        return metadata
+
+    def _handle_ack_state(self, data: Mapping[str, object]) -> None:
+        try:
+            frame = _ENVELOPE_PARSER.parse_ack_state(data)
+        except Exception:
+            logger.debug("ack.state dispatch failed", exc_info=True)
+            return
+
+        payload = frame.payload
+        logger.info(
+            "ack.state received intent=%s in_reply_to=%s status=%s",
+            payload.intent_id,
+            payload.in_reply_to,
+            payload.status,
+        )
+        if _STATE_DEBUG and payload.applied_value is not None:
+            logger.debug(
+                "ack.state applied_value intent=%s in_reply_to=%s value=%s",
+                payload.intent_id,
+                payload.in_reply_to,
+                payload.applied_value,
+            )
+        if self.handle_ack_state:
+            try:
+                self.handle_ack_state(frame)
+            except Exception:
+                logger.debug("handle_ack_state callback failed", exc_info=True)
+
+    def _handle_reply_command(self, data: Mapping[str, object]) -> None:
+        try:
+            frame = _ENVELOPE_PARSER.parse_reply_command(data)
+        except Exception:
+            logger.debug("reply.command dispatch failed", exc_info=True)
+            return
+
+        payload = frame.payload
+        logger.info(
+            "reply.command received intent=%s in_reply_to=%s",
+            payload.intent_id,
+            payload.in_reply_to,
+        )
+        if self.handle_reply_command:
+            try:
+                self.handle_reply_command(frame)
+            except Exception:
+                logger.debug("handle_reply_command callback failed", exc_info=True)
+
+    def _handle_error_command(self, data: Mapping[str, object]) -> None:
+        try:
+            frame = _ENVELOPE_PARSER.parse_error_command(data)
+        except Exception:
+            logger.debug("error.command dispatch failed", exc_info=True)
+            return
+
+        payload = frame.payload
+        error = payload.error
+        logger.info(
+            "error.command received intent=%s in_reply_to=%s code=%s message=%s",
+            payload.intent_id,
+            payload.in_reply_to,
+            error.code,
+            error.message,
+        )
+        if self.handle_error_command:
+            try:
+                self.handle_error_command(frame)
+            except Exception:
+                logger.debug("handle_error_command callback failed", exc_info=True)
+
     def request_keyframe_once(self) -> None:
         """Best-effort request for a keyframe via state channel (throttled)."""
         now = time.time()
@@ -573,10 +631,7 @@ class StateChannel:
         self._last_key_req = now
         # Prefer sending on the persistent connection via the sender task
         try:
-            loop = self._loop_state.loop
-            outbox = self._loop_state.outbox
-            if loop is not None and outbox is not None:
-                loop.call_soon_threadsafe(outbox.put_nowait, '{"type":"request_keyframe"}')
+            if self._enqueue_text('{"type":"request_keyframe"}'):
                 return
         except Exception:
             logger.debug("Keyframe request enqueue failed; falling back", exc_info=True)
@@ -607,7 +662,7 @@ class StateChannel:
             logger.debug("Keyframe request (fallback) failed", exc_info=True)
 
     # --- Generic outbound messaging -------------------------------------------------
-    def post(self, obj: dict) -> bool:
+    def post(self, obj: Mapping[str, Any]) -> bool:
         """Enqueue a JSON message for the state channel sender.
 
         Returns True if enqueued, False if the channel is not ready.
@@ -615,19 +670,37 @@ class StateChannel:
         Thread-safe: uses loop.call_soon_threadsafe to put_nowait on the
         sender queue when available.
         """
+        return self._enqueue_mapping(obj)
+
+    def send_frame(self, frame: Any) -> bool:
+        """Serialize a builder-backed frame and enqueue it for delivery."""
+
         try:
-            import json as _json
-            msg = _json.dumps(obj, separators=(",", ":"))
+            payload = frame.to_dict()  # type: ignore[attr-defined]
         except Exception:
-            logger.debug("post: JSON encode failed", exc_info=True)
+            logger.debug("send_frame: to_dict failed", exc_info=True)
             return False
+        if not isinstance(payload, Mapping):
+            logger.debug("send_frame: payload must be a mapping")
+            return False
+        return self._enqueue_mapping(payload)
+
+    def _enqueue_mapping(self, payload: Mapping[str, Any]) -> bool:
+        try:
+            msg = json.dumps(payload, separators=(",", ":"))
+        except Exception:
+            logger.debug("enqueue_mapping: JSON encode failed", exc_info=True)
+            return False
+        return self._enqueue_text(msg)
+
+    def _enqueue_text(self, text: str) -> bool:
         try:
             loop = self._loop_state.loop
             outbox = self._loop_state.outbox
             if loop is None or outbox is None:
                 return False
-            loop.call_soon_threadsafe(outbox.put_nowait, msg)
+            loop.call_soon_threadsafe(outbox.put_nowait, text)
             return True
         except Exception:
-            logger.debug("post: enqueue failed", exc_info=True)
+            logger.debug("enqueue_text: enqueue failed", exc_info=True)
             return False

@@ -39,7 +39,10 @@ def start_loop(loop: "ClientStreamLoop") -> None:
         handle_scene_spec=loop._handle_scene_spec,  # noqa: SLF001
         handle_layer_update=loop._handle_layer_update,  # noqa: SLF001
         handle_layer_remove=loop._handle_layer_remove,  # noqa: SLF001
-        handle_state_update=loop._handle_state_update,  # noqa: SLF001
+        handle_ack_state=loop._handle_ack_state,  # noqa: SLF001
+        handle_reply_command=loop._handle_reply_command,  # noqa: SLF001
+        handle_error_command=loop._handle_error_command,  # noqa: SLF001
+        handle_session_ready=loop._handle_session_ready,  # noqa: SLF001
         handle_connected=loop._on_state_connected,  # noqa: SLF001
         handle_disconnect=loop._on_state_disconnect,  # noqa: SLF001
     )

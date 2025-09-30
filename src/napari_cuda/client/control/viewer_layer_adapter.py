@@ -8,17 +8,16 @@ import logging
 import math
 import os
 import time
-import uuid
 from typing import Any, Callable, Dict, Iterable, Optional, TYPE_CHECKING
 
 from napari.utils.events import EventEmitter
 
 from napari_cuda.client.layers.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.layers.registry import LayerRecord, RegistrySnapshot
-from napari_cuda.client.control.state_update_actions import ClientStateContext
+from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.control.pending_update_store import StateStore
-from napari_cuda.protocol.messages import LayerSpec, StateUpdateMessage
+from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate, AckOutcome
+from napari_cuda.protocol.messages import LayerSpec
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
@@ -126,10 +125,11 @@ class PropertyConfig:
 
 @dataclass
 class PropertyRuntime:
-    interaction_id: Optional[str] = None
     active: bool = False
     last_phase: Optional[str] = None
     last_send_ts: float = 0.0
+    active_intent_id: Optional[str] = None
+    active_frame_id: Optional[str] = None
 
 
 @dataclass
@@ -210,7 +210,7 @@ class LayerStateBridge:
         loop: ClientStreamLoop,
         presenter,
         registry,
-        intent_state: ClientStateContext,
+        control_state: ControlStateContext,
         loop_state: ClientLoopState,
         *,
         enabled: Optional[bool] = None,
@@ -218,15 +218,11 @@ class LayerStateBridge:
     ) -> None:
         self._loop = loop
         self._registry = registry
-        self._intent_state = intent_state
+        self._control_state = control_state
         self._loop_state = loop_state
         self._enabled = enabled if enabled is not None else _env_bridge_enabled()
         self._bindings: Dict[str, LayerBinding] = {}
-        self._state_store = state_store or StateStore(
-            client_id=intent_state.client_id,
-            next_client_seq=intent_state.next_client_seq,
-            clock=time.time,
-        )
+        self._state_store = state_store or StateStore(clock=time.time)
 
         if not self._enabled:
             logger.debug("LayerStateBridge disabled via environment")
@@ -255,45 +251,61 @@ class LayerStateBridge:
         for binding in self._bindings.values():
             for runtime in binding.properties.values():
                 runtime.active = False
-                runtime.interaction_id = None
+                runtime.active_intent_id = None
+                runtime.active_frame_id = None
 
     # ------------------------------------------------------------------
-    def handle_state_update(self, message: StateUpdateMessage) -> None:
+    def handle_ack(self, outcome: AckOutcome) -> None:
         if not self._enabled:
             return
-        if message.scope != "layer":
+        if outcome.scope != "layer" or outcome.target is None or outcome.key is None:
             return
-        binding = self._bindings.get(message.target)
+
+        binding = self._bindings.get(outcome.target)
         if binding is None:
             return
-        config = PROPERTY_BY_KEY.get(message.key)
+
+        config = PROPERTY_BY_KEY.get(outcome.key)
         if config is None:
             return
 
         runtime = binding.properties.setdefault(config.key, PropertyRuntime())
-        result = self._state_store.apply_remote(message)
-        projection = result.projection_value
-        self._apply_projection(binding, config, projection)
+        runtime.last_phase = outcome.update_phase or runtime.last_phase
+        runtime.last_send_ts = time.perf_counter()
 
-        runtime.last_phase = message.phase or runtime.last_phase
-        if result.is_self:
-            if result.pending_len == 0:
-                runtime.active = False
-                runtime.interaction_id = None
-        else:
-            runtime.active = False
-            runtime.interaction_id = None
-            runtime.last_send_ts = 0.0
+        if outcome.in_reply_to == runtime.active_frame_id:
+            runtime.active_frame_id = None
+            runtime.active_intent_id = None
 
-        logger.debug(
-            "state.update applied: id=%s key=%s value=%s is_self=%s pending=%d overridden=%s",
+        runtime.active = outcome.pending_len > 0
+        if not runtime.active:
+            runtime.last_phase = None
+
+        if outcome.status == "accepted":
+            logger.debug(
+                "layer ack accepted: id=%s key=%s pending=%d",
+                binding.remote_id,
+                config.key,
+                outcome.pending_len,
+            )
+            return
+
+        error = outcome.error or {}
+        logger.warning(
+            "layer intent rejected: id=%s key=%s code=%s message=%s details=%s",
             binding.remote_id,
             config.key,
-            projection,
-            result.is_self,
-            result.pending_len,
-            result.overridden,
+            error.get("code"),
+            error.get("message"),
+            error.get("details"),
         )
+
+        revert_value = outcome.confirmed_value
+        if revert_value is None:
+            revert_value = outcome.pending_value
+
+        if revert_value is not None:
+            self._apply_projection(binding, config, revert_value, suppress_blocker=True)
 
     # ------------------------------------------------------------------
     def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
@@ -392,30 +404,40 @@ class LayerStateBridge:
             return
         runtime = binding.properties.setdefault(config.key, PropertyRuntime())
         phase = "start" if not runtime.active else "update"
-        interaction_id = runtime.interaction_id or uuid.uuid4().hex
 
-        payload, projection = self._state_store.apply_local(
+        intent_id, frame_id = self._control_state.next_intent_ids()
+
+        pending = self._state_store.apply_local(
             "layer",
             binding.remote_id,
             config.key,
             encoded,
             phase,
-            interaction_id=interaction_id,
+            intent_id=intent_id,
+            frame_id=frame_id,
+            metadata={
+                "layer_id": binding.remote_id,
+                "property": config.key,
+            },
         )
-        self._apply_projection(binding, config, projection)
+        self._apply_projection(binding, config, pending.projection_value)
 
         runtime.active = True
-        runtime.interaction_id = interaction_id
         runtime.last_phase = phase
         runtime.last_send_ts = time.perf_counter()
+        runtime.active_intent_id = pending.intent_id
+        runtime.active_frame_id = pending.frame_id
 
-        ok = self._loop.post(payload.to_dict())
+        ok = self._loop._dispatch_state_update(pending, origin=f"layer:{config.key}")
         if not ok:
             logger.warning(
                 "LayerStateBridge failed to enqueue state.update: id=%s key=%s",
                 binding.remote_id,
                 config.key,
             )
+            runtime.active = False
+            runtime.active_intent_id = None
+            runtime.active_frame_id = None
 
     # ------------------------------------------------------------------
     def _apply_projection(

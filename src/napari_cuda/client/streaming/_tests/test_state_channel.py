@@ -5,14 +5,13 @@ import pytest
 pytest.importorskip("websockets")
 
 from napari_cuda.client.control.control_channel_client import StateChannel
-from napari_cuda.protocol import build_notify_stream, build_state_update
+from napari_cuda.protocol import build_ack_state, build_notify_dims, build_notify_stream
 from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerSpec,
     LayerUpdateMessage,
     SceneSpec,
     SceneSpecMessage,
-    StateUpdateMessage,
 )
 
 
@@ -62,69 +61,53 @@ def test_state_channel_layer_remove_callback(state_channel):
     assert received[0].layer_id == 'layer-2'
 
 
-def test_state_channel_dims_update_normalisation():
+def test_state_channel_dims_update_dispatch() -> None:
     captured: list[dict] = []
     sc = StateChannel('localhost', 8081, handle_dims_update=captured.append)
 
-    payload = {
-        'type': 'dims.update',
-        'current_step': [12, 3, 4],
-        'meta': {
-            'ndim': 3,
-            'axes': [
-                {'label': 'z', 'index': 0},
-                {'label': 'y', 'index': 1},
-                {'label': 'x', 'index': 2},
-            ],
-            'ranges': [(0, 270, 1), (0, 615, 1), (0, 462, 1)],
-            'displayed_axes': [1, 2],
-            'level': 2,
-            'level_shape': [272, 616, 463],
-            'dtype': 'uint16',
-            'normalized': True,
-        },
-        'ack': True,
-        'intent_seq': 41,
-        'seq': 99,
-        'last_client_id': 'client-a',
-    }
+    frame = build_notify_dims(
+        session_id='session-42',
+        payload={'current_step': (12, 3, 4), 'ndisplay': 2, 'mode': 'slice', 'source': 'test'},
+        timestamp=9.5,
+        frame_id='dims-007',
+    )
 
-    sc._handle_message(payload)
+    sc._handle_message(frame.to_dict())
 
     assert len(captured) == 1
     dims = captured[0]
-    assert dims['current_step'] == [12, 3, 4]
-    assert dims['ndim'] == 3
-    assert dims['axis_labels'] == ['z', 'y', 'x']
-    assert dims['order'] == [0, 1, 2]
-    assert dims['range'] == [(0, 270, 1), (0, 615, 1), (0, 462, 1)]
-    assert dims['displayed'] == [1, 2]
-    assert dims['level'] == 2
-    assert dims['level_shape'] == [272, 616, 463]
-    assert dims['dtype'] == 'uint16'
-    assert dims['normalized'] is True
-    assert dims['ack'] is True
-    assert dims['intent_seq'] == 41
-    assert dims['seq'] == 99
-    assert dims['last_client_id'] == 'client-a'
+    assert dims['frame_id'] == 'dims-007'
+    assert dims['session'] == 'session-42'
+    assert dims['timestamp'] == pytest.approx(frame.envelope.timestamp)
+    assert dims['current_step'] == (12, 3, 4)
+    assert dims['ndisplay'] == 2
+    assert dims['mode'] == 'slice'
+    assert dims['source'] == 'test'
 
 
-def test_state_channel_notify_state_dispatch() -> None:
-    captured: list[StateUpdateMessage] = []
-    sc = StateChannel('localhost', 8081, handle_state_update=captured.append)
+def test_state_channel_ack_dispatch() -> None:
+    received = []
+    sc = StateChannel('localhost', 8081, handle_ack_state=received.append)
 
-    frame = build_state_update(
-        session_id='session-1',
-        intent_id='intent-1',
-        frame_id='state-1',
-        payload={'scope': 'dims', 'target': 'z', 'key': 'step', 'value': 3},
-        timestamp=1.23,
+    frame = build_ack_state(
+        session_id='session-5',
+        frame_id='ack-123',
+        payload={
+            'intent_id': 'intent-55',
+            'in_reply_to': 'state-88',
+            'status': 'accepted',
+            'applied_value': {'value': 1},
+        },
+        timestamp=2.5,
     )
 
-    sc._handle_message(frame.to_dict())  # type: ignore[arg-type]
+    sc._handle_message(frame.to_dict())
 
-    assert captured and captured[0].key == 'step'
-    assert captured[0].value == 3
+    assert len(received) == 1
+    ack = received[0]
+    assert ack.payload.intent_id == 'intent-55'
+    assert ack.payload.in_reply_to == 'state-88'
+    assert ack.payload.status == 'accepted'
 
 
 def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> None:
