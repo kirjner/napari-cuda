@@ -349,45 +349,15 @@ def apply_layer_state_update(
     layer_id: str,
     prop: str,
     value: object,
-    client_id: Optional[str] = None,
-    client_seq: Optional[object] = None,
-    interaction_id: Optional[str] = None,
-    phase: Optional[str] = None,
-) -> Optional[StateUpdateResult]:
-    """Normalize, gate, and stash a layer update.
-
-    Returns a :class:`StateUpdateResult` when the update is accepted, or
-    ``None`` if the payload is stale for the originating client.
-    """
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> StateUpdateResult:
+    """Normalize a layer update and persist it in the scene snapshot."""
 
     canonical = _normalize_layer_property(prop, value)
 
-    seq_int: Optional[int]
-    try:
-        seq_int = int(client_seq) if client_seq is not None else None
-    except (TypeError, ValueError):
-        seq_int = None
-
-    client_key = client_id if client_id is not None else "__anon__"
-    if interaction_id is not None:
-        interaction_id = str(interaction_id)
-    if phase is not None:
-        phase = str(phase)
-
-    if interaction_id is not None:
-        interaction_id = str(interaction_id)
-    if phase is not None:
-        phase = str(phase)
-
     with lock:
         control = scene.layer_controls.setdefault(layer_id, default_layer_controls())
-
-        meta = get_control_meta(scene, "layer", layer_id, prop)
-
-        if seq_int is not None:
-            last_seq = meta.client_seq_by_id.get(client_key)
-            if last_seq is not None and seq_int <= last_seq:
-                return None
 
         setattr(control, prop, canonical)
 
@@ -400,16 +370,11 @@ def apply_layer_state_update(
 
         server_seq = increment_server_sequence(scene)
 
+        meta = get_control_meta(scene, "layer", layer_id, prop)
         meta.last_server_seq = server_seq
-        meta.last_client_id = client_id
-        meta.last_client_seq = seq_int
-        meta.last_interaction_id = interaction_id
-        meta.last_phase = phase
-        if seq_int is not None:
-            meta.client_seq_by_id[client_key] = seq_int
+        meta.last_timestamp = float(timestamp) if timestamp is not None else time.time()
 
-    timestamp = time.time()
-    intent_token = str(interaction_id) if interaction_id is not None else None
+    ts = float(timestamp) if timestamp is not None else time.time()
 
     return StateUpdateResult(
         scope="layer",
@@ -417,8 +382,8 @@ def apply_layer_state_update(
         key=prop,
         value=canonical,
         server_seq=server_seq,
-        intent_id=intent_token,
-        timestamp=timestamp,
+        intent_id=intent_id,
+        timestamp=ts,
     )
 
 
@@ -432,20 +397,10 @@ def apply_dims_state_update(
     value: object,
     step_delta: Optional[int] = None,
     set_value: Optional[int] = None,
-    client_id: Optional[str] = None,
-    client_seq: Optional[object] = None,
-    interaction_id: Optional[str] = None,
-    phase: Optional[str] = None,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
 ) -> Optional[StateUpdateResult]:
     """Apply a dims state update returning the updated step list."""
-
-    seq_int: Optional[int]
-    try:
-        seq_int = int(client_seq) if client_seq is not None else None
-    except (TypeError, ValueError):
-        seq_int = None
-
-    client_key = client_id if client_id is not None else "__anon__"
 
     with lock:
         current = scene.latest_state.current_step
@@ -468,14 +423,9 @@ def apply_dims_state_update(
 
     axis_label = axis_label_from_meta(meta, idx)
     control_target = axis_label or str(idx)
-    control_key = f"{prop}:{control_target}"
 
     with lock:
         meta_entry = get_control_meta(scene, "dims", control_target, prop)
-        if seq_int is not None:
-            last_seq = meta_entry.client_seq_by_id.get(client_key)
-            if last_seq is not None and seq_int <= last_seq:
-                return None
 
         target = int(step[idx])
         if value is not None:
@@ -512,19 +462,10 @@ def apply_dims_state_update(
         scene.latest_state = latest
 
         server_seq = increment_server_sequence(scene)
-        scene.last_dims_client_id = client_id
-
         meta_entry.last_server_seq = server_seq
-        meta_entry.last_client_id = client_id
-        meta_entry.last_client_seq = seq_int
-        meta_entry.last_interaction_id = interaction_id
-        meta_entry.last_phase = phase
-        if seq_int is not None:
-            meta_entry.client_seq_by_id[client_key] = seq_int
+        meta_entry.last_timestamp = float(timestamp) if timestamp is not None else time.time()
 
-    timestamp = time.time()
-
-    intent_token = str(interaction_id) if interaction_id is not None else None
+    ts = float(timestamp) if timestamp is not None else time.time()
 
     return StateUpdateResult(
         scope="dims",
@@ -532,8 +473,8 @@ def apply_dims_state_update(
         key=prop,
         value=int(step[idx]),
         server_seq=server_seq,
-        intent_id=intent_token,
-        timestamp=timestamp,
+        intent_id=intent_id,
+        timestamp=ts,
         axis_index=idx,
         current_step=tuple(step),
     )

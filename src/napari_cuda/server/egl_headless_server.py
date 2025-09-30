@@ -387,7 +387,7 @@ class EGLHeadlessServer:
             send_stream=self._broadcast_stream_config,
         )
 
-    async def _handle_set_ndisplay(self, ndisplay: int, client_id: Optional[str], client_seq: Optional[int]) -> None:
+    async def _handle_set_ndisplay(self, ndisplay: int) -> None:
         """Apply a 2D/3D view toggle request.
 
         - Normalizes `ndisplay` to 2 or 3.
@@ -400,9 +400,9 @@ class EGLHeadlessServer:
         except Exception:
             ndisp = 2
         if self._log_dims_info:
-            logger.info("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
+            logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
         else:
-            logger.debug("intent: view.set_ndisplay ndisplay=%d client_id=%s seq=%s", int(ndisp), client_id, client_seq)
+            logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
         self.use_volume = bool(ndisp == 3)
         self._scene.use_volume = self.use_volume
         # Ask worker to apply the mode switch on the render thread

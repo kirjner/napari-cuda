@@ -38,8 +38,8 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
 
     broadcast_calls: list[tuple] = []
 
-    async def _fake_broadcast(server_obj, step_list, *, last_client_id=None, ack=False, intent_seq=None):  # type: ignore[no-untyped-def]
-        broadcast_calls.append((tuple(step_list), last_client_id, ack, intent_seq))
+    async def _fake_broadcast(server_obj, step_list, *, timestamp=None):  # type: ignore[no-untyped-def]
+        broadcast_calls.append((tuple(step_list), timestamp))
 
     async def _noop(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
@@ -48,7 +48,7 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 
-    asyncio.run(server._handle_set_ndisplay(3, client_id='c1', client_seq=1))
+    asyncio.run(server._handle_set_ndisplay(3))
 
     assert server.use_volume is True
     assert server._scene.latest_state.current_step == (136, 0, 0)

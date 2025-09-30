@@ -121,11 +121,7 @@ class LayerControlMeta:
     """Sequencing metadata for a specific control property."""
 
     last_server_seq: int = 0
-    last_client_id: Optional[str] = None
-    last_client_seq: Optional[int] = None
-    last_interaction_id: Optional[str] = None
-    last_phase: Optional[str] = None
-    client_seq_by_id: Dict[str, int] = field(default_factory=dict)
+    last_timestamp: Optional[float] = None
 
 
 def default_layer_controls() -> LayerControlState:
@@ -142,7 +138,6 @@ class ServerSceneData:
     use_volume: bool = False
     camera_commands: Deque[ServerSceneCommand] = field(default_factory=deque)
     next_server_seq: int = 0
-    last_dims_client_id: Optional[str] = None
     volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)
     policy_metrics_snapshot: Dict[str, Any] = field(default_factory=dict)

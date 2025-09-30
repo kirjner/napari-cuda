@@ -231,6 +231,7 @@ translating to legacy formats.
    translation layer in `control_channel_client.py`.
 2. Drop the compatibility feature flags and clean out re-export shims.
 3. Remove log noise/artifacts tied to old payloads (e.g., `dims.update raw meta`).
+4. Align terminology: treat protocol messages as `control envelopes` (or `notify envelopes`) and reserve `video frame` / `packet` for the encoder stream; update docs/code accordingly.
 
 ### Phase 6 – Validation & Rollout
 
@@ -256,6 +257,7 @@ translating to legacy formats.
 - Server:
   - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`,
     `ping`, `request_keyframe`).
+  - Rename residual `_handler` modules (e.g., `state_channel_handler`) to match greenfield ownership once legacy paths are gone.
 - Remaining references to
     `scene_snapshot_builder.build_scene_spec_json` once no callers require the
     cached legacy JSON representation.

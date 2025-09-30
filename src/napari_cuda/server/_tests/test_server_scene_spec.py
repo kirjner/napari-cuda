@@ -98,10 +98,6 @@ def test_build_notify_layers_delta_payload(scene: ServerSceneData, manager: View
         layer_id="layer-0",
         prop="opacity",
         value=0.5,
-        client_id="client-a",
-        client_seq=4,
-        interaction_id="drag-1",
-        phase="update",
     )
     assert result is not None
 
@@ -140,10 +136,6 @@ def test_build_notify_dims_from_result(scene: ServerSceneData, manager: ViewerSc
         axis="z",
         prop="step",
         value=5,
-        client_id="client-z",
-        client_seq=3,
-        interaction_id="dims-1",
-        phase="commit",
     )
     assert result is not None
 

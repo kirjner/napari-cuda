@@ -147,16 +147,12 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         WorkerSceneNotification(
                             kind="dims_update",
                             step=chosen,
-                            last_client_id=None,
-                            ack=True,
-                            intent_seq=None,
                         )
                     )
                 else:
                     server._worker_notifications.push(
                         WorkerSceneNotification(
                             kind="meta_refresh",
-                            last_client_id=None,
                         )
                     )
                 loop.call_soon_threadsafe(server._process_worker_notifications)
@@ -200,7 +196,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     broadcast_dims_update(
                         server,
                         steps,
-                        last_client_id=None,
                     )
                 )
             )

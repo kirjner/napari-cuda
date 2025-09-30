@@ -14,9 +14,6 @@ class WorkerSceneNotification:
 
     kind: Literal["dims_update", "meta_refresh"]
     step: Optional[tuple[int, ...]] = None
-    last_client_id: Optional[str] = None
-    ack: bool = False
-    intent_seq: Optional[int] = None
 
 
 class WorkerSceneNotificationQueue:

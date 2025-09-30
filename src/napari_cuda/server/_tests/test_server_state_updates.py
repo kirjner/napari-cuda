@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -18,7 +19,7 @@ def _lock() -> threading.RLock:
     return threading.RLock()
 
 
-def test_apply_dims_delta_clamps_to_range():
+def test_apply_dims_delta_clamps_to_range() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(1, 2, 3))
     meta = {"ndim": 3, "range": [(0, 5), (0, 10), (0, 4)]}
@@ -27,7 +28,7 @@ def test_apply_dims_delta_clamps_to_range():
     assert scene.latest_state.current_step == (1, 10, 3)
 
 
-def test_apply_dims_delta_with_label_axis():
+def test_apply_dims_delta_with_label_axis() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0, 0))
     meta = {"ndim": 3, "order": ["t", "z", "y"]}
@@ -36,7 +37,7 @@ def test_apply_dims_delta_with_label_axis():
     assert scene.latest_state.current_step == (0, 7, 0)
 
 
-def test_volume_helpers_update_scene_state():
+def test_volume_helpers_update_scene_state() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0,), volume_mode=None)
     lock = _lock()
@@ -66,7 +67,7 @@ def test_volume_helpers_update_scene_state():
     "alpha,expected",
     [(0.5, 0.5), (-1.0, 0.0), (5.0, 1.0), ("0.2", 0.2)],
 )
-def test_clamp_opacity(alpha, expected):
+def test_clamp_opacity(alpha, expected) -> None:
     assert updates.clamp_opacity(alpha) == pytest.approx(expected)
 
 
@@ -74,11 +75,11 @@ def test_clamp_opacity(alpha, expected):
     "value,expected",
     [(0.5, 0.5), (0.05, 0.1), (8.0, 4.0), ("1.5", 1.5)],
 )
-def test_clamp_sample_step(value, expected):
+def test_clamp_sample_step(value, expected) -> None:
     assert updates.clamp_sample_step(value) == pytest.approx(expected)
 
 
-def test_clamp_level_uses_level_count():
+def test_clamp_level_uses_level_count() -> None:
     levels = [{"path": "a"}, {"path": "b"}]
     assert updates.clamp_level(5, levels) == 1
     assert updates.clamp_level(-2, levels) == 0
@@ -86,7 +87,7 @@ def test_clamp_level_uses_level_count():
     assert updates.clamp_level("bad", levels) is None
 
 
-def test_apply_layer_state_update_updates_state():
+def test_apply_layer_state_update_updates_state() -> None:
     scene = create_server_scene_data()
     lock = _lock()
 
@@ -98,7 +99,6 @@ def test_apply_layer_state_update_updates_state():
         value=0.4,
     )
 
-    assert result is not None
     assert result.value == 0.4
     assert result.server_seq == 1
     assert result.timestamp is not None
@@ -106,10 +106,38 @@ def test_apply_layer_state_update_updates_state():
     assert scene.latest_state.layer_updates == {"layer-0": {"opacity": 0.4}}
     meta = scene.control_meta[("layer", "layer-0", "opacity")]
     assert meta.last_server_seq == 1
+    assert meta.last_timestamp is not None
+
+
+def test_apply_layer_state_update_overwrites_previous_value() -> None:
+    scene = create_server_scene_data()
+    lock = _lock()
+
+    first = updates.apply_layer_state_update(
+        scene,
+        lock,
+        layer_id="layer-0",
+        prop="gamma",
+        value=1.2,
+    )
+    second = updates.apply_layer_state_update(
+        scene,
+        lock,
+        layer_id="layer-0",
+        prop="gamma",
+        value=0.9,
+    )
+
+    assert first.server_seq == 1
+    assert second.server_seq == 2
+    assert scene.layer_controls["layer-0"].gamma == 0.9
+    meta = scene.control_meta[("layer", "layer-0", "gamma")]
+    assert meta.last_server_seq == 2
+    assert meta.last_timestamp is not None
 
 
 @pytest.mark.parametrize("value", ["I Blue", "i blue", " I Blue "])
-def test_apply_layer_state_update_normalizes_colormap(value):
+def test_apply_layer_state_update_normalizes_colormap(value) -> None:
     scene = create_server_scene_data()
     lock = _lock()
 
@@ -121,47 +149,12 @@ def test_apply_layer_state_update_normalizes_colormap(value):
         value=value,
     )
 
-    assert result is not None
     assert result.value == "I Blue"
     assert scene.layer_controls["layer-0"].colormap == "I Blue"
     assert scene.latest_state.layer_updates == {"layer-0": {"colormap": "I Blue"}}
 
 
-def test_apply_layer_state_update_rejects_stale_sequence():
-    scene = create_server_scene_data()
-    lock = _lock()
-
-    first = updates.apply_layer_state_update(
-        scene,
-        lock,
-        layer_id="layer-0",
-        prop="gamma",
-        value=1.2,
-        client_id="client-a",
-        client_seq=5,
-    )
-
-    assert first is not None
-    assert first.server_seq == 1
-
-    stale = updates.apply_layer_state_update(
-        scene,
-        lock,
-        layer_id="layer-0",
-        prop="gamma",
-        value=0.9,
-        client_id="client-a",
-        client_seq=4,
-    )
-
-    assert stale is None
-    # Latest state should remain unchanged
-    assert scene.layer_controls["layer-0"].gamma == 1.2
-    meta = scene.control_meta[("layer", "layer-0", "gamma")]
-    assert meta.last_server_seq == 1
-
-
-def test_apply_layer_state_update_rejects_invalid_property():
+def test_apply_layer_state_update_rejects_invalid_property() -> None:
     scene = create_server_scene_data()
     lock = _lock()
 
@@ -169,7 +162,7 @@ def test_apply_layer_state_update_rejects_invalid_property():
         updates.apply_layer_state_update(scene, lock, layer_id="layer-0", prop="unknown", value="x")
 
 
-def test_apply_dims_state_update_tracks_metadata_for_index():
+def test_apply_dims_state_update_tracks_metadata_for_index() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0, 0))
     lock = _lock()
@@ -189,24 +182,19 @@ def test_apply_dims_state_update_tracks_metadata_for_index():
         prop="index",
         value=None,
         set_value=5,
-        client_id="client-z",
-        client_seq=3,
-        interaction_id="drag-1",
-        phase="update",
     )
 
     assert result is not None
     assert result.value == 5
-    assert scene.latest_state.current_step[0] == 5
-    meta_entry = scene.control_meta[("dims", "z", "index")]
-    assert meta_entry.last_client_id == "client-z"
-    assert meta_entry.last_client_seq == 3
-    assert meta_entry.last_interaction_id == "drag-1"
-    assert meta_entry.last_phase == "update"
+    assert result.axis_index == 0
     assert result.current_step == (5, 0, 0)
+    assert scene.latest_state.current_step == (5, 0, 0)
+    meta_entry = scene.control_meta[("dims", "z", "index")]
+    assert meta_entry.last_server_seq == result.server_seq
+    assert meta_entry.last_timestamp is not None
 
 
-def test_apply_dims_state_update_handles_step_delta():
+def test_apply_dims_state_update_handles_step_delta() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(10, 0, 0))
     lock = _lock()
@@ -218,6 +206,7 @@ def test_apply_dims_state_update_handles_step_delta():
         "range": [(0, 20), (0, 9), (0, 9)],
     }
 
+    before = time.time()
     result = updates.apply_dims_state_update(
         scene,
         lock,
@@ -226,17 +215,15 @@ def test_apply_dims_state_update_handles_step_delta():
         prop="step",
         value=None,
         step_delta=3,
-        client_id="client-z",
-        client_seq=4,
-        interaction_id="drag-2",
-        phase="update",
     )
 
     assert result is not None
     assert result.value == 13
     assert scene.latest_state.current_step[0] == 13
     meta_entry = scene.control_meta[("dims", "z", "step")]
-    assert meta_entry.last_client_seq == 4
+    assert meta_entry.last_server_seq == result.server_seq
+    assert meta_entry.last_timestamp is not None
+    assert meta_entry.last_timestamp >= before
 
 
 def test_prune_control_metadata_removes_stale_layer_entries() -> None:

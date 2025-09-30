@@ -49,7 +49,7 @@ from napari_cuda.protocol import (
     build_session_welcome,
 )
 from napari_cuda.protocol import NotifyStreamPayload
-from napari_cuda.protocol.messages import STATE_UPDATE_TYPE, StateUpdateMessage
+from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
 from napari_cuda.server.control import state_update_engine as state_updates
 from napari_cuda.server.control.state_update_engine import (
     StateUpdateResult,
@@ -401,49 +401,77 @@ async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> b
 
 async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     try:
-        message = StateUpdateMessage.from_dict(dict(data))
+        frame = _ENVELOPE_PARSER.parse_state_update(data)
     except Exception:
-        logger.debug("state.update payload invalid", exc_info=True)
+        logger.debug("state.update payload rejected by parser", exc_info=True)
+        frame_id = data.get("frame_id")
+        intent_id = data.get("intent_id")
+        session_id = data.get("session") or _state_session(ws)
+        if frame_id and intent_id and session_id:
+            await _send_state_ack(
+                server,
+                ws,
+                session_id=str(session_id),
+                intent_id=str(intent_id),
+                in_reply_to=str(frame_id),
+                status="rejected",
+                error={"code": "state.invalid", "message": "state.update payload invalid"},
+            )
         return True
 
-    scope = str(message.scope or '').strip().lower()
-    key = str(message.key or '').strip().lower()
-    target = str(message.target or '').strip()
+    envelope = frame.envelope
+    payload = frame.payload
+
+    session_id = envelope.session or _state_session(ws)
+    frame_id = envelope.frame_id
+    intent_id = envelope.intent_id
+    timestamp = envelope.timestamp
+
+    if session_id is None or frame_id is None or intent_id is None:
+        raise ValueError("state.update envelope missing session/frame/intent identifiers")
+
+    scope = str(payload.scope or "").strip().lower()
+    key = str(payload.key or "").strip().lower()
+    target = str(payload.target or "").strip()
+    value = payload.value
+
+    async def _reject(code: str, message_text: str, *, details: Mapping[str, Any] | None = None) -> None:
+        error_payload: Dict[str, Any] = {"code": code, "message": message_text}
+        if details:
+            error_payload["details"] = dict(details)
+        await _send_state_ack(
+            server,
+            ws,
+            session_id=str(session_id),
+            intent_id=intent_id,
+            in_reply_to=frame_id,
+            status="rejected",
+            error=error_payload,
+        )
 
     if not scope or not key or not target:
-        logger.debug("state.update missing scope/key/target")
+        await _reject("state.invalid", "scope/key/target required", details={"scope": scope, "key": key, "target": target})
         return True
 
-    client_id = message.client_id or None
-    client_seq = message.client_seq
-    interaction_id = message.interaction_id
-    phase = message.phase
-    intent_seq = message.intent_seq
-
+    # ----- view scope ---------------------------------------------------
     if scope == 'view':
         if key != 'ndisplay':
             logger.debug("state.update view ignored key=%s", key)
+            await _reject("state.invalid", f"unsupported view key {key}", details={"scope": scope, "key": key})
             return True
         try:
-            raw_value = int(message.value) if message.value is not None else 2
+            raw_value = int(value) if value is not None else 2
         except Exception:
-            logger.debug(
-                "state.update view ignored (non-integer ndisplay) value=%r",
-                message.value,
-            )
+            logger.debug("state.update view ignored (non-integer ndisplay) value=%r", value)
+            await _reject("state.invalid", "ndisplay must be integer", details={"scope": scope, "key": key})
             return True
         ndisplay = 3 if int(raw_value) >= 3 else 2
         try:
-            await server._handle_set_ndisplay(ndisplay, client_id, client_seq)
+            await server._handle_set_ndisplay(ndisplay)
         except Exception:
             logger.debug("state.update view.set_ndisplay failed", exc_info=True)
+            await _reject("state.error", "failed to apply ndisplay")
             return True
-
-        client_seq_int: Optional[int]
-        try:
-            client_seq_int = int(client_seq) if client_seq is not None else None
-        except (TypeError, ValueError):
-            client_seq_int = None
 
         result = _baseline_state_result(
             server,
@@ -451,13 +479,25 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             target=target,
             key='ndisplay',
             value=int(ndisplay),
-            client_id=client_id,
-            client_seq=client_seq_int,
-            interaction_id=interaction_id,
-            phase=phase,
-            timestamp=time.time(),
-            ack=True,
-            intent_seq=intent_seq,
+            intent_id=intent_id,
+        )
+
+        await _send_state_ack(
+            server,
+            ws,
+            session_id=str(session_id),
+            intent_id=intent_id,
+            in_reply_to=frame_id,
+            status="accepted",
+            applied_value=result.value,
+        )
+
+        logger.debug(
+            "state.update view intent=%s frame=%s ndisplay=%s server_seq=%s",
+            intent_id,
+            frame_id,
+            result.value,
+            result.server_seq,
         )
 
         server._schedule_coro(
@@ -466,6 +506,7 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
         return True
 
+    # ----- layer scope --------------------------------------------------
     if scope == 'layer':
         layer_id = target
         try:
@@ -474,39 +515,39 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 server._state_lock,
                 layer_id=layer_id,
                 prop=key,
-                value=message.value,
-                client_id=client_id,
-                client_seq=client_seq,
-                interaction_id=interaction_id,
-                phase=phase,
+                value=value,
+                intent_id=intent_id,
+                timestamp=timestamp,
             )
         except KeyError:
             logger.debug("state.update unknown layer prop=%s", key)
+            await _reject("state.invalid", f"unsupported layer key {key}", details={"scope": scope, "key": key, "target": layer_id})
             return True
         except Exception:
             logger.debug("state.update failed for layer=%s key=%s", layer_id, key, exc_info=True)
-            return True
-        if result is None:
-            logger.debug(
-                "state.update stale layer=%s key=%s client_id=%s seq=%s",
-                layer_id,
-                key,
-                client_id,
-                client_seq,
-            )
+            await _reject("state.error", "layer update failed", details={"scope": scope, "key": key, "target": layer_id})
             return True
 
-        log_fn = logger.info if server._log_state_traces else logger.debug
-        log_fn(
-            "state.update layer key=%s layer_id=%s value=%s client_id=%s seq=%s server_seq=%s phase=%s",
-            key,
-            layer_id,
-            result.value,
-            client_id,
-            client_seq,
-            result.server_seq,
-            phase,
+        await _send_state_ack(
+            server,
+            ws,
+            session_id=str(session_id),
+            intent_id=intent_id,
+            in_reply_to=frame_id,
+            status="accepted",
+            applied_value=result.value,
         )
+
+        logger.debug(
+            "state.update layer intent=%s frame=%s layer_id=%s key=%s value=%s server_seq=%s",
+            intent_id,
+            frame_id,
+            layer_id,
+            key,
+            result.value,
+            result.server_seq,
+        )
+
         _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             _broadcast_state_update(server, result),
@@ -514,99 +555,91 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
         return True
 
+    # ----- volume scope -------------------------------------------------
     if scope == 'volume':
-        client_seq_int: Optional[int]
-        try:
-            client_seq_int = int(client_seq) if client_seq is not None else None
-        except (TypeError, ValueError):
-            client_seq_int = None
-
         ts = time.time()
-
         if key == 'render_mode':
-            mode = str(message.value or '').lower()
+            mode = str(value or '').lower().strip()
             if not state_updates.is_valid_render_mode(mode, server._allowed_render_modes):
-                logger.debug("state.update volume ignored invalid render_mode=%r", message.value)
+                logger.debug("state.update volume ignored invalid render_mode=%r", value)
+                await _reject("state.invalid", "unknown render_mode", details={"scope": scope, "key": key, "value": value})
                 return True
             state_updates.update_volume_mode(server._scene, server._state_lock, mode)
-            _log_volume_event(
-                "update: volume.set_render_mode mode=%s client_id=%s seq=%s",
-                mode,
-                client_id,
-                client_seq,
-            )
             normalized_value: Any = mode
             rebroadcast_tag = 'rebroadcast-volume-mode'
         elif key == 'contrast_limits':
-            pair = message.value
+            pair = value
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
                 logger.debug("state.update volume ignored invalid contrast_limits=%r", pair)
+                await _reject("state.invalid", "contrast_limits requires [lo, hi]", details={"scope": scope, "key": key})
                 return True
             norm = state_updates.normalize_clim(pair[0], pair[1])
             if norm is None:
                 logger.debug("state.update volume ignored invalid clim=%r", pair)
+                await _reject("state.invalid", "contrast_limits invalid", details={"scope": scope, "key": key})
                 return True
             lo, hi = norm
             state_updates.update_volume_clim(server._scene, server._state_lock, lo, hi)
-            _log_volume_event(
-                "update: volume.set_clim lo=%.4f hi=%.4f client_id=%s seq=%s",
-                lo,
-                hi,
-                client_id,
-                client_seq,
-            )
             normalized_value = (float(lo), float(hi))
             rebroadcast_tag = 'rebroadcast-volume-clim'
         elif key == 'colormap':
-            name = message.value
+            name = value
             if not isinstance(name, str) or not name.strip():
                 logger.debug("state.update volume ignored invalid colormap=%r", name)
+                await _reject("state.invalid", "colormap must be non-empty", details={"scope": scope, "key": key})
                 return True
             cmap = str(name)
             state_updates.update_volume_colormap(server._scene, server._state_lock, cmap)
-            _log_volume_event(
-                "update: volume.set_colormap name=%s client_id=%s seq=%s",
-                cmap,
-                client_id,
-                client_seq,
-            )
             normalized_value = cmap
             rebroadcast_tag = 'rebroadcast-volume-colormap'
         elif key == 'opacity':
-            opacity = state_updates.clamp_opacity(message.value)
-            if opacity is None:
-                logger.debug("state.update volume ignored invalid opacity=%r", message.value)
+            alpha = value
+            try:
+                norm_alpha = state_updates.clamp_opacity(alpha)
+            except Exception:
+                logger.debug("state.update volume ignored invalid opacity=%r", alpha)
+                await _reject("state.invalid", "opacity must be float", details={"scope": scope, "key": key})
                 return True
-            state_updates.update_volume_opacity(server._scene, server._state_lock, float(opacity))
-            _log_volume_event(
-                "update: volume.set_opacity alpha=%.3f client_id=%s seq=%s",
-                opacity,
-                client_id,
-                client_seq,
-            )
-            normalized_value = float(opacity)
+            state_updates.update_volume_opacity(server._scene, server._state_lock, norm_alpha)
+            normalized_value = float(norm_alpha)
             rebroadcast_tag = 'rebroadcast-volume-opacity'
         elif key == 'sample_step':
-            sample = state_updates.clamp_sample_step(message.value)
-            if sample is None:
-                logger.debug("state.update volume ignored invalid sample_step=%r", message.value)
+            rel = value
+            try:
+                norm_step = state_updates.clamp_sample_step(rel)
+            except Exception:
+                logger.debug("state.update volume ignored invalid sample_step=%r", rel)
+                await _reject("state.invalid", "sample_step must be float", details={"scope": scope, "key": key})
                 return True
-            state_updates.update_volume_sample_step(server._scene, server._state_lock, float(sample))
-            _log_volume_event(
-                "update: volume.set_sample_step relative=%.3f client_id=%s seq=%s",
-                sample,
-                client_id,
-                client_seq,
-            )
-            normalized_value = float(sample)
+            state_updates.update_volume_sample_step(server._scene, server._state_lock, norm_step)
+            normalized_value = float(norm_step)
             rebroadcast_tag = 'rebroadcast-volume-sample-step'
         else:
             logger.debug("state.update volume ignored key=%s", key)
+            await _reject("state.invalid", f"unsupported volume key {key}", details={"scope": scope, "key": key})
             return True
+
+        await _send_state_ack(
+            server,
+            ws,
+            session_id=str(session_id),
+            intent_id=intent_id,
+            in_reply_to=frame_id,
+            status="accepted",
+            applied_value=normalized_value,
+        )
+
+        logger.debug(
+            "state.update volume intent=%s frame=%s key=%s value=%s",
+            intent_id,
+            frame_id,
+            key,
+            normalized_value,
+        )
 
         _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
-            rebroadcast_meta(server, client_id),
+            rebroadcast_meta(server),
             rebroadcast_tag,
         )
         result = _baseline_state_result(
@@ -615,13 +648,8 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             target=target,
             key=key,
             value=normalized_value,
-            client_id=client_id,
-            client_seq=client_seq_int,
-            interaction_id=interaction_id,
-            phase=phase,
+            intent_id=intent_id,
             timestamp=ts,
-            ack=True,
-            intent_seq=intent_seq,
         )
         server._schedule_coro(
             _broadcast_state_update(server, result),
@@ -629,29 +657,19 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
         return True
 
+    # ----- multiscale scope ---------------------------------------------
     if scope == 'multiscale':
-        client_seq_int: Optional[int]
-        try:
-            client_seq_int = int(client_seq) if client_seq is not None else None
-        except (TypeError, ValueError):
-            client_seq_int = None
-
         ts = time.time()
         log_fn = logger.info if server._log_state_traces else logger.debug
 
         if key == 'policy':
-            policy = str(message.value or '').lower().strip()
+            policy = str(value or '').lower().strip()
             allowed = {'oversampling', 'thresholds', 'ratio'}
             if policy not in allowed:
-                logger.debug("state.update multiscale ignored invalid policy=%r", message.value)
+                logger.debug("state.update multiscale ignored invalid policy=%r", value)
+                await _reject("state.invalid", "unknown multiscale policy", details={"scope": scope, "key": key})
                 return True
             server._scene.multiscale_state['policy'] = policy
-            _log_volume_event(
-                "update: multiscale.set_policy policy=%s client_id=%s seq=%s",
-                policy,
-                client_id,
-                client_seq,
-            )
             normalized_value = policy
             rebroadcast_tag = 'rebroadcast-policy'
             if server._worker is not None:
@@ -663,17 +681,12 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     logger.exception("worker set_policy failed for %s", policy)
         elif key == 'level':
             levels = server._scene.multiscale_state.get('levels') or []
-            level = state_updates.clamp_level(message.value, levels)
+            level = state_updates.clamp_level(value, levels)
             if level is None:
-                logger.debug("state.update multiscale ignored invalid level=%r", message.value)
+                logger.debug("state.update multiscale ignored invalid level=%r", value)
+                await _reject("state.invalid", "level out of range", details={"scope": scope, "key": key})
                 return True
             server._scene.multiscale_state['current_level'] = int(level)
-            _log_volume_event(
-                "update: multiscale.set_level level=%d client_id=%s seq=%s",
-                int(level),
-                client_id,
-                client_seq,
-            )
             normalized_value = int(level)
             rebroadcast_tag = 'rebroadcast-ms-level'
             if server._worker is not None:
@@ -695,10 +708,21 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     logger.exception("multiscale level switch request failed")
         else:
             logger.debug("state.update multiscale ignored key=%s", key)
+            await _reject("state.invalid", f"unsupported multiscale key {key}", details={"scope": scope, "key": key})
             return True
 
+        await _send_state_ack(
+            server,
+            ws,
+            session_id=str(session_id),
+            intent_id=intent_id,
+            in_reply_to=frame_id,
+            status="accepted",
+            applied_value=normalized_value,
+        )
+
         server._schedule_coro(
-            rebroadcast_meta(server, client_id),
+            rebroadcast_meta(server),
             rebroadcast_tag,
         )
         result = _baseline_state_result(
@@ -707,13 +731,8 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             target=target,
             key=key,
             value=normalized_value,
-            client_id=client_id,
-            client_seq=client_seq_int,
-            interaction_id=interaction_id,
-            phase=phase,
-            timestamp=ts,
-            ack=True,
-            intent_seq=intent_seq,
+            intent_id=intent_id,
+            timestamp=timestamp or ts,
         )
         server._schedule_coro(
             _broadcast_state_update(server, result),
@@ -721,22 +740,20 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
         return True
 
+    # ----- dims scope ---------------------------------------------------
     if scope == 'dims':
         step_delta: Optional[int] = None
         set_value: Optional[int] = None
         norm_key = key
-        value_obj = message.value
+        value_obj = value
         if key == 'index':
             norm_key = 'index'
             if isinstance(value_obj, Integral):
                 set_value = int(value_obj)
                 value_obj = None
             else:
-                logger.debug(
-                    "state.update dims ignored (non-integer index) axis=%s value=%r",
-                    target,
-                    value_obj,
-                )
+                logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, value_obj)
+                await _reject("state.invalid", "index must be integer", details={"scope": scope, "key": key, "target": target})
                 return True
         elif key == 'step':
             norm_key = 'step'
@@ -744,19 +761,14 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 step_delta = int(value_obj)
                 value_obj = None
             else:
-                logger.debug(
-                    "state.update dims ignored (non-integer step delta) axis=%s value=%r",
-                    target,
-                    value_obj,
-                )
+                logger.debug("state.update dims ignored (non-integer step delta) axis=%s value=%r", target, value_obj)
+                await _reject("state.invalid", "step delta must be integer", details={"scope": scope, "key": key, "target": target})
                 return True
         else:
-            logger.debug(
-                "state.update dims ignored (unsupported key) axis=%s key=%s",
-                target,
-                key,
-            )
+            logger.debug("state.update dims ignored (unsupported key) axis=%s key=%s", target, key)
+            await _reject("state.invalid", f"unsupported dims key {key}", details={"scope": scope, "key": key, "target": target})
             return True
+
         meta = server._dims_metadata() or {}
         try:
             result = apply_dims_state_update(
@@ -768,25 +780,30 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 value=value_obj,
                 step_delta=step_delta,
                 set_value=set_value,
-                client_id=client_id,
-                client_seq=client_seq,
-                interaction_id=interaction_id,
-                phase=phase,
+                intent_id=intent_id,
+                timestamp=timestamp,
             )
         except Exception:
             logger.debug("state.update dims failed axis=%s key=%s", target, key, exc_info=True)
+            await _reject("state.error", "dims update failed", details={"scope": scope, "key": key, "target": target})
             return True
         if result is None:
-            logger.debug(
-                "state.update dims stale axis=%s key=%s client_id=%s seq=%s",
-                target,
-                key,
-                client_id,
-                client_seq,
-            )
+            logger.debug("state.update dims invalid axis=%s key=%s", target, key)
+            await _reject("state.invalid", "dims update invalid", details={"scope": scope, "key": key, "target": target})
             return True
 
+        await _send_state_ack(
+            server,
+            ws,
+            session_id=str(session_id),
+            intent_id=intent_id,
+            in_reply_to=frame_id,
+            status="accepted",
+            applied_value=result.value,
+        )
+
         _enqueue_latest_state_for_worker(server)
+
         server._schedule_coro(
             _broadcast_state_update(server, result),
             f'state-dims-{key}',
@@ -794,8 +811,8 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         return True
 
     logger.debug("state.update unknown scope=%s", scope)
+    await _reject("state.invalid", f"unknown scope {scope}", details={"scope": scope})
     return True
-
 
 
 
@@ -912,9 +929,9 @@ MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
 
 async def process_state_message(server: Any, data: dict, ws: Any) -> None:
     msg_type = data.get('type')
-    seq = data.get('client_seq')
+    frame_id = data.get('frame_id')
     if server._log_state_traces:
-        logger.info("state message start type=%s seq=%s", msg_type, seq)
+        logger.info("state message start type=%s frame=%s", msg_type, frame_id)
     handled = False
     try:
         handler: StateMessageHandler | None = None
@@ -928,7 +945,7 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
         return
     finally:
         if server._log_state_traces:
-            logger.info("state message end type=%s seq=%s handled=%s", msg_type, seq, handled)
+            logger.info("state message end type=%s frame=%s handled=%s", msg_type, frame_id, handled)
 
 
 def _enqueue_latest_state_for_worker(server: Any) -> None:
@@ -1044,26 +1061,16 @@ def _baseline_state_result(
     key: str,
     value: Any,
     server_seq_override: Optional[int] = None,
-    client_id: Optional[str] = None,
-    client_seq: Optional[int] = None,
-    interaction_id: Optional[str] = None,
-    phase: Optional[str] = None,
+    intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
-    **_legacy: Any,
 ) -> StateUpdateResult:
     meta = get_control_meta(server._scene, scope, target, key)
     server_seq = int(server_seq_override or meta.last_server_seq or 0)
     if server_seq <= 0:
         server_seq = increment_server_sequence(server._scene)
-        meta.last_server_seq = server_seq
-    else:
-        meta.last_server_seq = server_seq
-    meta.last_client_id = client_id
-    meta.last_client_seq = client_seq
-    meta.last_interaction_id = interaction_id
-    meta.last_phase = phase
-    timestamp_val = timestamp if timestamp is not None else time.time()
-    intent_token = str(interaction_id) if interaction_id is not None else None
+    meta.last_server_seq = server_seq
+    ts = float(timestamp) if timestamp is not None else time.time()
+    meta.last_timestamp = ts
 
     return StateUpdateResult(
         scope=scope,
@@ -1071,8 +1078,8 @@ def _baseline_state_result(
         key=key,
         value=value,
         server_seq=server_seq,
-        intent_id=intent_token,
-        timestamp=timestamp_val,
+        intent_id=intent_id,
+        timestamp=ts,
     )
 
 
@@ -1081,12 +1088,11 @@ def _dims_results_from_step(
     step_list: Sequence[int],
     *,
     meta: Mapping[str, Any],
-    client_id: Optional[str],
     timestamp: Optional[float] = None,
 ) -> list[StateUpdateResult]:
     results: list[StateUpdateResult] = []
     current = [int(x) for x in step_list]
-    ts = timestamp if timestamp is not None else time.time()
+    ts = float(timestamp) if timestamp is not None else time.time()
     for idx, value in enumerate(current):
         axis_label = axis_label_from_meta(meta, idx) or str(idx)
         meta_entry = get_control_meta(server._scene, "dims", axis_label, "step")
@@ -1094,10 +1100,7 @@ def _dims_results_from_step(
         if server_seq <= 0:
             server_seq = increment_server_sequence(server._scene)
             meta_entry.last_server_seq = server_seq
-        meta_entry.last_client_id = client_id
-        meta_entry.last_client_seq = None
-        meta_entry.last_interaction_id = None
-        meta_entry.last_phase = None
+        meta_entry.last_timestamp = ts
         results.append(
             StateUpdateResult(
                 scope="dims",
@@ -1131,7 +1134,7 @@ def _layer_results_from_controls(
         )
     return results
 
-async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
+async def rebroadcast_meta(server: Any) -> None:
     """Re-broadcast a dims.update with current_step and updated meta.
 
     Safe to call after mutating volume/multiscale state. Never raises.
@@ -1219,7 +1222,6 @@ async def rebroadcast_meta(server: Any, client_id: Optional[str]) -> None:
             server,
             chosen,
             meta=server._dims_metadata() or {},
-            client_id=client_id,
             timestamp=time.time(),
         )
         await _broadcast_state_updates(server, dims_results)
@@ -1232,14 +1234,7 @@ async def broadcast_dims_update(
     server: Any,
     step_list: Sequence[int] | list[int],
     *,
-    last_client_id: Optional[str],
-    server_seq: Optional[int] = None,
-    source_client_id: Optional[str] = None,
-    source_client_seq: Optional[int] = None,
-    interaction_id: Optional[str] = None,
-    phase: Optional[str] = None,
-    control_prop: Optional[str] = None,
-    control_axis: Optional[str] = None,
+    timestamp: Optional[float] = None,
 ) -> None:
     """Broadcast dims state.update messages through the state channel."""
 
@@ -1248,8 +1243,7 @@ async def broadcast_dims_update(
         server,
         list(int(x) for x in step_list),
         meta=meta,
-        client_id=last_client_id,
-        timestamp=time.time(),
+        timestamp=timestamp,
     )
 
     await _broadcast_state_updates(server, results)
@@ -1261,18 +1255,14 @@ async def broadcast_layer_update(
     layer_id: str,
     changes: Mapping[str, Any],
     server_seq: Optional[int] = None,
-    source_client_id: Optional[str] = None,
-    source_client_seq: Optional[int] = None,
-    interaction_id: Optional[str] = None,
-    phase: Optional[str] = None,
-    control_versions: Optional[Dict[str, Dict[str, Any]]] = None,
+    timestamp: Optional[float] = None,
 ) -> None:
     """Broadcast state.update payloads for the given *layer_id*."""
 
     if not changes:
         return
 
-    ts = time.time()
+    ts = float(timestamp) if timestamp is not None else time.time()
     results: list[StateUpdateResult] = []
     for key, value in changes.items():
         results.append(
@@ -1283,10 +1273,6 @@ async def broadcast_layer_update(
                 key=str(key),
                 value=value,
                 server_seq_override=server_seq,
-                client_id=source_client_id,
-                client_seq=source_client_seq,
-                interaction_id=interaction_id,
-                phase=phase,
                 timestamp=ts,
             )
         )
@@ -1312,9 +1298,6 @@ def process_worker_notifications(
                     WorkerSceneNotification(
                         kind="dims_update",
                         step=step_tuple,
-                        last_client_id=note.last_client_id,
-                        ack=note.ack,
-                        intent_seq=note.intent_seq,
                     )
                 )
                 continue
@@ -1323,14 +1306,13 @@ def process_worker_notifications(
                 broadcast_dims_update(
                     server,
                     list(step_tuple),
-                    last_client_id=note.last_client_id,
                 ),
                 "dims_update-worker",
             )
         elif note.kind == "meta_refresh":
             server._update_scene_manager()
             server._schedule_coro(
-                rebroadcast_meta(server, note.last_client_id),
+                rebroadcast_meta(server),
                 "rebroadcast-worker",
             )
 
@@ -1546,6 +1528,54 @@ async def _await_state_send(server: Any, ws: Any, text: str) -> None:
             await result
     except Exception:
         logger.debug("state send helper failed", exc_info=True)
+
+
+async def _send_state_ack(
+    server: Any,
+    ws: Any,
+    *,
+    session_id: str,
+    intent_id: str,
+    in_reply_to: str,
+    status: str,
+    applied_value: Any | None = None,
+    error: Mapping[str, Any] | Any | None = None,
+) -> None:
+    """Build and emit an ``ack.state`` frame that mirrors the incoming update."""
+
+    if not intent_id or not in_reply_to:
+        raise ValueError("ack.state requires intent_id and in_reply_to identifiers")
+
+    normalized_status = str(status).lower()
+    if normalized_status not in {"accepted", "rejected"}:
+        raise ValueError("ack.state status must be 'accepted' or 'rejected'")
+
+    payload: Dict[str, Any] = {
+        "intent_id": str(intent_id),
+        "in_reply_to": str(in_reply_to),
+        "status": normalized_status,
+    }
+
+    if normalized_status == "accepted":
+        if error is not None:
+            raise ValueError("accepted ack.state payload cannot include error details")
+        if applied_value is not None:
+            payload["applied_value"] = applied_value
+    else:
+        if not isinstance(error, Mapping):
+            raise ValueError("rejected ack.state payload requires {code, message}")
+        if "code" not in error or "message" not in error:
+            raise ValueError("ack.state error payload must include 'code' and 'message'")
+        payload["error"] = dict(error)
+
+    frame = build_ack_state(
+        session_id=str(session_id),
+        frame_id=None,
+        payload=payload,
+        timestamp=time.time(),
+    )
+
+    await _send_frame(server, ws, frame)
 
 
 async def _send_frame(server: Any, ws: Any, frame: Any) -> None:
