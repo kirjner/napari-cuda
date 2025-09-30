@@ -131,7 +131,12 @@ Schemas for each `type` live under
       "notify.layers": { "enabled": true, "version": 1, "resume": true },
       "notify.dims": { "enabled": true, "version": 1, "resume": false },
       "notify.camera": { "enabled": true, "version": 1, "resume": false },
-      "notify.stream": { "enabled": true, "version": 1, "resume": true },
+      "notify.stream": {
+        "enabled": true,
+        "version": 1,
+        "resume": true,
+        "resume_state": { "seq": 0, "delta_token": "stream_tok_1a2b" }
+      },
       "notify.telemetry": { "enabled": false },
       "call.command": {
         "enabled": true,
@@ -151,6 +156,11 @@ Schemas for each `type` live under
 advertised as `enabled: false`, the handshake still succeeds. The server ignores
 submitted tokens for that topic and the client MUST drop local caches and treat
 it as disabled.
+
+**Sequencer advertisement** – Resumable topics MAY include a `resume_state`
+object exposing the server’s current `(seq, delta_token)` pair. When present,
+the following notify snapshot uses the advertised token so clients can seed
+their resume caches immediately after `session.welcome`.
 
 ### 3.3 Post-Welcome Baseline
 
@@ -181,6 +191,12 @@ Heartbeats begin once the baseline is sent.
   cached sequence/tokens.
 - Once the `notify.layers` buffer wraps, the next resume request with an expired
   token triggers a snapshot replay (no rejection).
+- Volume and multiscale mutations are layer-scoped; the server normalizes them into
+  `notify.layers` deltas using namespaced keys (e.g. `volume.mode`, `multiscale.level`).
+  This keeps all layer-affecting changes on the resumable layer topic.
+- `notify.dims` mirrors the authoritative `viewer.dims.ndisplay` flag so UI elements
+  (slider counts, orbit toggles) remain responsive; reconnects still rely on the
+  snapshot’s viewer block for the canonical value.
 - For non-resumable lanes (`notify.dims`, `notify.camera`), reconnecting clients
   wait for the server to emit a fresh `notify.scene` baseline. Servers SHOULD
   send that snapshot immediately after `session.welcome` and whenever they
@@ -209,6 +225,15 @@ Heartbeats begin once the baseline is sent.
 
 Payload schemas are scope-specific (e.g. `view/main`, `dims/<axis>`,
 `camera/main`). All schemas live alongside the envelope definitions.
+
+The server broadcasts view `ndisplay` transitions by echoing the resulting
+`notify.dims` frame (for responsiveness) and updating the next
+`notify.scene.viewer.dims.ndisplay` snapshot so reconnects remain deterministic.
+
+Canonical layer scopes: `layer` covers direct controls (opacity, colormap, etc.),
+while historic `volume` and `multiscale` intents are treated as aliases that update
+layer-affecting state. Servers publish the resulting values through `notify.layers`
+by emitting namespaced keys such as `volume.mode` or `multiscale.level`.
 
 ### 5.2 Acknowledgement (`ack.state`, version 1)
 
@@ -368,6 +393,9 @@ when the operation is documented as idempotent.
 - On reconnect, they include these tokens in `session.hello`. The server either
   replays deltas within the retention window or sends a fresh snapshot and new
   token.
+- The server advertises its current cursor for resumable topics in
+  `session.welcome` via the optional `resume_state` field when the state is
+  already known (e.g., `notify.stream`).
 - When a new snapshot is issued, clients must treat it as a new epoch and reset
   stored sequences/tokens.
 
@@ -423,7 +451,7 @@ when the operation is documented as idempotent.
 |-----------------------------|-----------------------------------------------------------------------------|
 | Initial connect             | `session.welcome` → `notify.scene(seq=0)` → `notify.layers` → `notify.stream`. |
 | Alt-drag orbit              | `state.update(camera.orbit)` → `ack.state(applied_value)` → `notify.camera(intent_id)`. |
-| Toggle 2D/3D                | `state.update(view.ndisplay)` → `ack.state` → `notify.dims(intent_id)`.       |
+| Toggle 2D/3D                | `state.update(view.ndisplay)` → `ack.state` → next `notify.scene` (viewer.dims.ndisplay updated).       |
 | Command success             | `call.command` → `reply.command` → follow-up `notify.*` reflecting state.     |
 | Command forbidden           | `call.command` → `error.command(code=command.forbidden)`.                     |
 | Reconnect with valid token  | `notify.layers` deltas replayed (`seq` increments).                           |
@@ -457,9 +485,9 @@ re-parsing the prose.
 | Frame | Envelope fields | Payload schema | Notes |
 |-------|-----------------|----------------|-------|
 | `notify.scene` | `type`, `version`, `session`, `frame_id` optional, **requires** `seq`, `delta_token`, `timestamp` | Full snapshot: `viewer` (dims/camera/settings), `layers[]` (id/type/name + metadata/render/multiscale), `policies`, optional ancillary sections | Snapshot baseline always uses `seq = 0`; issuing a snapshot resets seq/token for every resumable topic. |
-| `notify.layers` | `type`, `version`, `session`, optional `frame_id`, **requires** `seq`, `delta_token`, `timestamp` | `layer_id`; `changes` dict describing delta fields | Ring buffer retention: min(512 deltas, 5 minutes). If token stale, server sends fresh snapshot + new deltas. |
+| `notify.layers` | `type`, `version`, `session`, optional `frame_id`, **requires** `seq`, `delta_token`, `timestamp` | `layer_id`; `changes` dict describing layer controls (namespaced for `volume.*` / `multiscale.*` deltas) | Ring buffer retention: min(512 deltas, 5 minutes). If token stale, server sends fresh snapshot + new deltas. |
 | `notify.stream` | `type`, `version`, `session`, optional `frame_id`, **requires** `seq`, `delta_token`, `timestamp` | `codec`, `format`, `fps`, `frame_size`, `nal_length_size`, `avcc`, `latency_policy`, `vt_hint` | Latest config supersedes prior tokens; seq resets with every new snapshot epoch. |
-| `notify.dims` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | `current_step`; `ndisplay`; `mode`; `source`; optional `intent_id` | If triggered by local intent, server echoes the `intent_id`; otherwise include an 8-char `frame_id` for observability. |
+| `notify.dims` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | `current_step`; `ndisplay`; `mode`; `source`; optional `intent_id` | `ndisplay` mirrors the snapshot’s viewer block; local intents carry `intent_id`, otherwise emit an 8-char `frame_id`. |
 | `notify.camera` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | `mode`; `delta` (orbit/pan/zoom deltas); `origin`; optional `intent_id` | Hot-path frames target ≤ 200 B payloads. |
 | `notify.telemetry` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | Rolling stats: `presenter`, `decode`, `queue_depth` numeric fields | High-rate diagnostics; clients may drop if disabled. |
 | `notify.error` | `type`, `version`, `session`, `timestamp`; optional `frame_id` | `domain`; `code`; `message`; `severity` (`info`, `warning`, `critical`); optional `context` map | Severity `critical` must be followed by `session.goodbye` and coordinated channel teardown. |
@@ -565,3 +593,6 @@ When rebuilding `protocol.greenfield.envelopes`:
 Treat this appendix as the final word on envelope structure; if runtime pressure
 suggests a different optimisation, update the table and accompanying prose so the
 contract remains unambiguous.
+
+
+_Naming note:_ temporary helpers (e.g. `maybe_send_*`) should be renamed once the legacy emission path is removed to better describe their final behaviour.

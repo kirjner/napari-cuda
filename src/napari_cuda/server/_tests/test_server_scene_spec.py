@@ -12,9 +12,18 @@ from napari_cuda.server.control.state_update_engine import (
     apply_layer_state_update,
 )
 from napari_cuda.server.control.scene_snapshot_builder import (
+    build_layer_controls_payload,
+    build_notify_dims_from_result,
+    build_notify_layers_delta_payload,
+    build_notify_scene_payload,
     build_scene_spec_json,
     build_scene_spec_message,
-    build_state_update_payload,
+)
+from napari_cuda.protocol import (
+    EnvelopeParser,
+    NOTIFY_SCENE_TYPE,
+    ResumableTopicSequencer,
+    build_notify_scene_snapshot,
 )
 
 
@@ -50,7 +59,38 @@ def test_build_scene_spec_json_round_trip(scene: ServerSceneData, manager: Viewe
     assert json_payload == scene.last_scene_spec_json
 
 
-def test_build_state_update_payload_layer(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
+def test_build_notify_scene_payload_round_trip(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
+    viewer_settings = {"fps_target": 60.0, "canvas_size": [640, 480]}
+    payload = build_notify_scene_payload(
+        scene,
+        manager,
+        viewer_settings=viewer_settings,
+    )
+
+    sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_TYPE)
+    frame = build_notify_scene_snapshot(
+        session_id="sess-1234",
+        viewer=payload.viewer,
+        layers=payload.layers,
+        policies=payload.policies,
+        ancillary=payload.ancillary,
+        timestamp=0.0,
+        sequencer=sequencer,
+    )
+
+    parser = EnvelopeParser()
+    parsed = parser.parse_notify_scene(frame.to_dict())
+
+    assert parsed.envelope.seq == 0
+    assert parsed.envelope.delta_token is not None
+    viewer_block = parsed.payload.viewer
+    assert viewer_block["settings"]["fps_target"] == 60.0
+    dims_block = viewer_block["dims"]
+    assert int(dims_block.get("ndisplay", 0)) == 2
+    assert len(parsed.payload.layers) == 1
+
+
+def test_build_notify_layers_delta_payload(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
     lock = threading.RLock()
     result = apply_layer_state_update(
         scene,
@@ -76,21 +116,17 @@ def test_build_state_update_payload_layer(scene: ServerSceneData, manager: Viewe
         layer_controls=scene.layer_controls,
     )
 
-    payload = build_state_update_payload(scene, manager, result=result)
-    assert payload["type"] == "state.update"
-    assert payload["scope"] == "layer"
-    assert payload["target"] == "layer-0"
-    assert payload["value"] == 0.5
-    assert payload["server_seq"] == result.server_seq
-    assert payload["client_id"] == "client-a"
-    versions = payload.get("control_versions") or {}
-    assert versions.get("opacity", {}).get("server_seq") == result.server_seq
-    assert payload["controls"]["opacity"] == 0.5
-    assert payload.get("interaction_id") == "drag-1"
-    assert payload.get("phase") == "update"
+    payload = build_notify_layers_delta_payload(result)
+    assert payload.layer_id == "layer-0"
+    assert payload.changes == {"opacity": 0.5}
+
+    baseline = build_layer_controls_payload("layer-0", scene)
+    assert baseline is not None
+    assert baseline.layer_id == "layer-0"
+    assert baseline.changes.get("opacity") == 0.5
 
 
-def test_build_state_update_payload_dims(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
+def test_build_notify_dims_from_result(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
     lock = threading.RLock()
     meta: dict[str, Any] = {
         "ndim": 3,
@@ -111,22 +147,16 @@ def test_build_state_update_payload_dims(scene: ServerSceneData, manager: Viewer
     )
     assert result is not None
 
-    payload = build_state_update_payload(scene, manager, result=result)
-    assert payload["type"] == "state.update"
-    assert payload["scope"] == "dims"
-    assert payload["target"] == "z"
-    assert payload["value"] == 5
-    assert payload["server_seq"] == result.server_seq
-    assert payload["last_client_id"] == "client-z"
-    assert payload.get("interaction_id") == "dims-1"
-    assert payload.get("phase") == "commit"
-    assert payload.get("ack") is True
-    assert payload.get("axis_index") == 0
-    assert payload.get("current_step") == [5, 0, 0]
-    versions = payload.get("control_versions") or {}
-    assert versions.get("step", {}).get("server_seq") == result.server_seq
-    assert isinstance(payload.get("meta"), dict)
-    assert payload["meta"].get("order") == meta["order"]
+    payload = build_notify_dims_from_result(
+        result,
+        ndisplay=2,
+        mode="volume",
+        source="server",
+    )
+    assert payload.current_step == (5, 0, 0)
+    assert payload.ndisplay == 2
+    assert payload.mode == "volume"
+    assert payload.source == "server"
 
 
 def test_viewer_scene_manager_prefers_control_state(scene: ServerSceneData) -> None:

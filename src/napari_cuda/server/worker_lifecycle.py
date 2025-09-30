@@ -86,14 +86,14 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         if avcc_cfg is not None:
             def _send_config(avcc_bytes: bytes) -> None:
                 server._schedule_coro(
-                    pixel_channel.maybe_send_video_config(
+                    pixel_channel.maybe_send_stream_config(
                         server._pixel_channel,
                         config=server._pixel_config,
                         metrics=server.metrics,
                         avcc=avcc_bytes,
-                        send_state_json=server._broadcast_state_json,
+                        send_stream=server._broadcast_stream_config,
                     ),
-                    "video_config",
+                    "notify_stream",
                 )
 
             loop.call_soon_threadsafe(_send_config, avcc_cfg)
@@ -201,8 +201,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         server,
                         steps,
                         last_client_id=None,
-                        ack=False,
-                        intent_seq=None,
                     )
                 )
             )

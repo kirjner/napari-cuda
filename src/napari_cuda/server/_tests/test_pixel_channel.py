@@ -4,6 +4,7 @@ from collections import Counter
 
 import pytest
 
+from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.server import pixel_broadcaster, pixel_channel
 
 
@@ -47,7 +48,7 @@ def test_enqueue_frame_drops_oldest() -> None:
     asyncio.run(runner())
 
 
-def test_maybe_send_video_config_tracks_cache() -> None:
+def test_maybe_send_stream_config_tracks_cache() -> None:
     async def runner() -> None:
         queue: asyncio.Queue[pixel_broadcaster.FramePacket] = asyncio.Queue()
         broadcast = pixel_broadcaster.PixelBroadcastState(
@@ -66,33 +67,33 @@ def test_maybe_send_video_config_tracks_cache() -> None:
             kf_watchdog_cooldown_s=0.3,
         )
 
-        sent: list[dict] = []
+        sent: list[NotifyStreamPayload] = []
 
-        async def sender(payload: dict) -> None:
+        async def sender(payload: NotifyStreamPayload) -> None:
             sent.append(payload)
 
         avcc_blob = b"test-avcc"
 
-        await pixel_channel.maybe_send_video_config(
+        await pixel_channel.maybe_send_stream_config(
             state,
             config=config,
             metrics=metrics,
             avcc=avcc_blob,
-            send_state_json=sender,
+            send_stream=sender,
         )
         assert sent, "expected config broadcast"
         assert state.last_avcc == avcc_blob
-        assert not state.needs_config
-        assert metrics.counts["napari_cuda_video_config_sends"] == 1
+        assert not state.needs_stream_config
+        assert metrics.counts["napari_cuda_stream_config_sends"] == 1
 
         # Second call with unchanged avcC should be a no-op
         sent.clear()
-        await pixel_channel.maybe_send_video_config(
+        await pixel_channel.maybe_send_stream_config(
             state,
             config=config,
             metrics=metrics,
             avcc=avcc_blob,
-            send_state_json=sender,
+            send_stream=sender,
         )
         assert sent == []
 

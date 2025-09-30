@@ -30,7 +30,7 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     notifications = WorkerSceneNotificationQueue()
     processed: list = []
 
-    async def broadcast_state_json(payload):
+    async def broadcast_stream_config(payload):
         broadcasts.append(payload)
 
     broadcasts: list = []
@@ -44,7 +44,7 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     server._param_cache = {}
     server._pixel_channel = object()
     server._pixel_config = object()
-    server._broadcast_state_json = broadcast_state_json
+    server._broadcast_stream_config = broadcast_stream_config
     server._schedule_coro = lambda coro, label: loop.create_task(coro)
     server._dump_remaining = 0
     server._dump_dir = str(tmp_path)
@@ -128,7 +128,7 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
-        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_video_config",
+        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: dummy_send(*a, **k),
     )
 
@@ -186,7 +186,7 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
-        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_video_config",
+        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: dummy_send(*a, **k),
     )
 
@@ -208,7 +208,7 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     asyncio.set_event_loop(None)
 
 
-def test_on_frame_schedules_video_config(monkeypatch, tmp_path):
+def test_on_frame_schedules_stream_config(monkeypatch, tmp_path):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     server = make_fake_server(loop, tmp_path)
@@ -256,7 +256,7 @@ def test_on_frame_schedules_video_config(monkeypatch, tmp_path):
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"avcc", True))
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: b"cfg")
     monkeypatch.setattr(
-        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_video_config",
+        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: fake_send(*a, **k),
     )
 

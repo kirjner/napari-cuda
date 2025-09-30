@@ -291,11 +291,33 @@ class WelcomeSessionInfo:
 
 
 @dataclass(slots=True)
+class FeatureResumeState:
+    """Sequencer cursor advertised during ``session.welcome``."""
+
+    seq: int
+    delta_token: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"seq": int(self.seq), "delta_token": str(self.delta_token)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "FeatureResumeState":
+        mapping = _as_mapping(data, "session.welcome payload.features.<topic>.resume_state")
+        _ensure_keyset(
+            mapping,
+            required=("seq", "delta_token"),
+            context="session.welcome feature resume_state",
+        )
+        return cls(seq=int(mapping["seq"]), delta_token=str(mapping["delta_token"]))
+
+
+@dataclass(slots=True)
 class FeatureToggle:
     enabled: bool
     version: int | None = None
     resume: bool | None = None
     commands: Tuple[str, ...] | None = None
+    resume_state: FeatureResumeState | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return _strip_none(
@@ -304,6 +326,7 @@ class FeatureToggle:
                 "version": int(self.version) if self.version is not None else None,
                 "resume": self.resume,
                 "commands": list(self.commands) if self.commands is not None else None,
+                "resume_state": self.resume_state.to_dict() if self.resume_state is not None else None,
             }
         )
 
@@ -313,7 +336,7 @@ class FeatureToggle:
         _ensure_keyset(
             mapping,
             required=("enabled",),
-            optional=("version", "resume", "commands"),
+            optional=("version", "resume", "commands", "resume_state"),
             context="session.welcome feature",
         )
         commands_payload = mapping.get("commands")
@@ -328,11 +351,18 @@ class FeatureToggle:
             resume = None
         else:
             resume = bool(resume_value)
+        resume_state_payload = mapping.get("resume_state")
+        resume_state: FeatureResumeState | None
+        if resume_state_payload is None:
+            resume_state = None
+        else:
+            resume_state = FeatureResumeState.from_dict(resume_state_payload)
         return cls(
             enabled=bool(mapping["enabled"]),
             version=int(mapping["version"]) if mapping.get("version") is not None else None,
             resume=resume,
             commands=commands,
+            resume_state=resume_state,
         )
 
 
@@ -1507,6 +1537,7 @@ __all__ = [
     "HelloAuthInfo",
     "SessionHelloPayload",
     "WelcomeSessionInfo",
+    "FeatureResumeState",
     "FeatureToggle",
     "SessionWelcomePayload",
     "SessionRejectPayload",

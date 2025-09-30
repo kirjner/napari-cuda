@@ -36,18 +36,10 @@ class StateUpdateResult:
     key: str
     value: Any
     server_seq: int
-    client_seq: Optional[int]
-    client_id: Optional[str]
-    interaction_id: Optional[str]
-    phase: Optional[str]
+    intent_id: Optional[str] = None
     timestamp: Optional[float] = None
     axis_index: Optional[int] = None
-    current_step: Optional[list[int]] = None
-    meta: Optional[Mapping[str, Any]] = None
-    ack: Optional[bool] = None
-    intent_seq: Optional[int] = None
-    last_client_id: Optional[str] = None
-    last_client_seq: Optional[int] = None
+    current_step: Optional[tuple[int, ...]] = None
 
 
 def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
@@ -417,6 +409,7 @@ def apply_layer_state_update(
             meta.client_seq_by_id[client_key] = seq_int
 
     timestamp = time.time()
+    intent_token = str(interaction_id) if interaction_id is not None else None
 
     return StateUpdateResult(
         scope="layer",
@@ -424,14 +417,8 @@ def apply_layer_state_update(
         key=prop,
         value=canonical,
         server_seq=server_seq,
-        client_seq=seq_int,
-        client_id=client_id,
-        interaction_id=interaction_id,
-        phase=phase,
+        intent_id=intent_token,
         timestamp=timestamp,
-        ack=True,
-        last_client_id=meta.last_client_id,
-        last_client_seq=meta.last_client_seq,
     )
 
 
@@ -537,23 +524,18 @@ def apply_dims_state_update(
 
     timestamp = time.time()
 
+    intent_token = str(interaction_id) if interaction_id is not None else None
+
     return StateUpdateResult(
         scope="dims",
         target=control_target,
         key=prop,
         value=int(step[idx]),
         server_seq=server_seq,
-        client_seq=seq_int,
-        client_id=client_id,
-        interaction_id=interaction_id,
-        phase=phase,
+        intent_id=intent_token,
         timestamp=timestamp,
         axis_index=idx,
-        current_step=list(step),
-        meta=dict(meta) if isinstance(meta, Mapping) else None,
-        ack=True,
-        last_client_id=meta_entry.last_client_id,
-        last_client_seq=meta_entry.last_client_seq,
+        current_step=tuple(step),
     )
 
 

@@ -101,14 +101,11 @@ def test_apply_layer_state_update_updates_state():
     assert result is not None
     assert result.value == 0.4
     assert result.server_seq == 1
-    assert result.ack is True
     assert result.timestamp is not None
     assert scene.layer_controls["layer-0"].opacity == 0.4
     assert scene.latest_state.layer_updates == {"layer-0": {"opacity": 0.4}}
     meta = scene.control_meta[("layer", "layer-0", "opacity")]
     assert meta.last_server_seq == 1
-    assert result.last_client_id == meta.last_client_id
-    assert result.last_client_seq == meta.last_client_seq
 
 
 @pytest.mark.parametrize("value", ["I Blue", "i blue", " I Blue "])
@@ -126,7 +123,6 @@ def test_apply_layer_state_update_normalizes_colormap(value):
 
     assert result is not None
     assert result.value == "I Blue"
-    assert result.ack is True
     assert scene.layer_controls["layer-0"].colormap == "I Blue"
     assert scene.latest_state.layer_updates == {"layer-0": {"colormap": "I Blue"}}
 
@@ -207,12 +203,7 @@ def test_apply_dims_state_update_tracks_metadata_for_index():
     assert meta_entry.last_client_seq == 3
     assert meta_entry.last_interaction_id == "drag-1"
     assert meta_entry.last_phase == "update"
-    payload_meta = result.meta
-    assert payload_meta["ndim"] == 3
-    assert payload_meta["order"] == ["z", "y", "x"]
-    assert payload_meta["axis_labels"] == ["z", "y", "x"]
-    assert payload_meta["sizes"] == [10, 10, 10]
-    assert tuple(payload_meta["range"][0]) == (0, 9)
+    assert result.current_step == (5, 0, 0)
 
 
 def test_apply_dims_state_update_handles_step_delta():
@@ -243,7 +234,6 @@ def test_apply_dims_state_update_handles_step_delta():
 
     assert result is not None
     assert result.value == 13
-    assert result.ack is True
     assert scene.latest_state.current_step[0] == 13
     meta_entry = scene.control_meta[("dims", "z", "step")]
     assert meta_entry.last_client_seq == 4

@@ -24,13 +24,14 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 - ✅ **Dataclass scaffolding** – `src/napari_cuda/protocol/greenfield/messages.py` now hosts spec-compliant envelopes/payloads with version guards.
 - ✅ **Helper coverage & sequencing** – `protocol/greenfield/envelopes.py` now supplies builders for every session/notify lane plus shared `ResumableTopicSequencer`; parser helpers mirror the full matrix.
 - ✅ **Schema tightening** – All greenfield payloads drop legacy `extras` bags; `from_dict` guards now reject unknown fields to match Appendix A.
+- ✅ **Scene snapshot emission** – Server baselines now flow through `build_notify_scene_payload` → `build_notify_scene_snapshot`, replacing legacy `scene.spec` JSON broadcasts and wiring resumable sequencing.
+- ✅ **Hot-path notify lanes** – Control channel emits `notify.scene`/`notify.layers`/`notify.dims`, and the pixel channel now issues `notify.stream` snapshots via `build_notify_stream`, advertising the stream sequencer cursor in `session.welcome`.
 - ⏳ **Spec round-trip tests** – Initial handshake + notify scene/state round-trips live in `src/napari_cuda/protocol/_tests/test_envelopes.py`; expand to the remaining lanes and sequencing edge cases next.
-- ⏳ **Dual emission & shim removal** – Legacy dual emitter still disabled; keep the shims until the new tests land and dual emission is re-enabled.
+- ✅ **Dual emission cleanup** – Legacy dual-emission shims (`legacy_dual_emitter`, `_broadcast_state_json`, `protocol_bridge`) removed; the server emits greenfield frames exclusively.
 
 Pending follow-up:
 
-1. Wire the server/client emitters (e.g. `server/control/legacy_dual_emitter.py`, `server/control/control_channel_server.py`) to the new builders, then re-enable dual emission once resumable sequencing is integrated end-to-end.
-2. After dual emission proves stable, remove the remaining greenfield/legacy shims and update callers to import the explicit modules.
+1. Convert the ack/reply/error lanes to `build_ack_state`/`build_reply_command`/`build_error_command`, wiring `in_reply_to`/`intent_id` per Appendix A.
 
 ## 1. Scope & Objectives
 
@@ -74,11 +75,13 @@ Pending follow-up:
   `server/control/scene_snapshot_builder.py` (archive:
   `server/server_state_updates.py` and `server/server_scene_spec.py`) serialize
   authoritative `state.update` payloads before they reach the bridge.
-- `server/control/legacy_dual_emitter.py` (archive: `server/protocol_bridge.py`)
-  dual-emits greenfield envelopes by coercing the legacy payloads.
-- Baseline snapshots still originate from the legacy scene JSON in
-  `scene_snapshot_builder.build_scene_spec_json`, then optionally mirrored
-  through `NotifyScene`.
+- Legacy dual-emission bridge (`server/control/legacy_dual_emitter.py`,
+  `server/protocol_bridge.py`) removed; only greenfield helpers remain on the
+  server path.
+- Baseline snapshots now emit through
+  `scene_snapshot_builder.build_notify_scene_payload` →
+  `build_notify_scene_snapshot`, so the state channel no longer broadcasts the
+  legacy `scene.spec` JSON.
 
 ### 2.3 Pixel Channel
 
@@ -86,8 +89,8 @@ Pending follow-up:
   `client/pixel/renderer.py` (archived under `client/streaming/`) handle pixel
   frames without protocol coupling.
 - `server/pixel/pixel_channel_server.py` (archive: `server/pixel_channel.py`)
-  still builds `video_config` payloads and pushes them onto the state channel
-  when encoders reset or watchdogs fire.
+  now emits `notify.stream` payloads via `build_notify_stream`, feeding the
+  control-channel sequencer instead of the legacy `video_config` JSON helper.
 
 ### 2.4 Command Lane
 
@@ -113,7 +116,7 @@ Pending follow-up:
 |----------------|--------------|-----------|
 | `protocol/envelopes.py` | `protocol/greenfield/envelopes.py` | Separate greenfield from legacy helpers. |
 | `protocol/parser.py` | `protocol/greenfield/parser.py` | Explicitly names the parser domain. |
-| `protocol/messages.py` | Split into `protocol/legacy/messages.py` and `protocol/greenfield/messages.py` (temporary) | Remove mixed concerns during migration; legacy module deleted once dual emission sunsets. |
+| `protocol/messages.py` | Split into `protocol/legacy/messages.py` and `protocol/greenfield/messages.py` (temporary) | Remove mixed concerns during migration; legacy module deleted once the legacy bridge is removed. |
 | `client/streaming/state.py` | `client/control/control_channel_client.py` | Matches the control-lane responsibility. |
 | `client/streaming/state_store.py` | `client/control/pending_update_store.py` | Tracks pending `state.update` emissions and ack reconciliation without legacy "intent" terminology. |
 | `client/streaming/layer_state_bridge.py` | `client/control/viewer_layer_adapter.py` | Clarifies its bridging role. |
@@ -123,7 +126,7 @@ Pending follow-up:
 | `server/state_channel_handler.py` | `server/control/control_channel_server.py` | Symmetric naming with the client. |
 | `server/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
 | `server/server_scene_spec.py` | `server/control/scene_snapshot_builder.py` | Communicates “baseline snapshot” job. |
-| `server/protocol_bridge.py` | `server/control/legacy_dual_emitter.py` | Isolates legacy-only code for future deletion. |
+| — *(removed)* | — *(removed)* | Legacy dual-emission bridge deleted once stream lane went greenfield-only. |
 | `server/pixel_channel.py` | `server/pixel/pixel_channel_server.py` | Aligns with the pixel-lane nomenclature. |
 
 Renames happen early so the new directory tree mirrors the future ownership
@@ -220,14 +223,14 @@ translating to legacy formats.
    await `reply.command` / `error.command`, and surface status/error to the UI.
 4. Derive viewer menu actions from the advertised command catalog.
 
-### Phase 5 – Legacy Removal & Dual-Emission Sunset
+### Phase 5 – Legacy Cleanup
 
-1. Delete `server/control/legacy_dual_emitter.py` and the associated callsites
-   once all clients run the new code path.
-2. Remove `notify_state`/`notify_scene` legacy extras and the capability
+*Dual emission is removed during Phase 2 close-out; this phase sweeps any remaining compatibility artifacts.*
+
+1. Remove `notify_state`/`notify_scene` legacy extras and the capability
    translation layer in `control_channel_client.py`.
-3. Drop the compatibility feature flags and clean out re-export shims.
-4. Remove log noise/artifacts tied to old payloads (e.g., `dims.update raw meta`).
+2. Drop the compatibility feature flags and clean out re-export shims.
+3. Remove log noise/artifacts tied to old payloads (e.g., `dims.update raw meta`).
 
 ### Phase 6 – Validation & Rollout
 
@@ -253,11 +256,9 @@ translating to legacy formats.
 - Server:
   - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`,
     `ping`, `request_keyframe`).
-  - `scene_snapshot_builder.build_scene_spec_json` legacy JSON path once
-    `NotifyScene` is authoritative.
-  - `pixel_channel_server.build_video_config_payload` after `notify.stream`
-    becomes the sole source of truth.
-  - `legacy_dual_emitter.encode_envelope(_json)` when dual emission is retired.
+- Remaining references to
+    `scene_snapshot_builder.build_scene_spec_json` once no callers require the
+    cached legacy JSON representation.
 
 ## 7. Testing Matrix & Instrumentation
 

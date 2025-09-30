@@ -19,14 +19,36 @@ from numbers import Integral
 from napari_cuda.protocol import (
     EnvelopeParser,
     FeatureToggle,
+    FeatureResumeState,
     PROTO_VERSION,
+    NOTIFY_CAMERA_TYPE,
+    NOTIFY_DIMS_TYPE,
+    NOTIFY_ERROR_TYPE,
+    NOTIFY_LAYERS_TYPE,
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_STREAM_TYPE,
+    NOTIFY_TELEMETRY_TYPE,
     SESSION_HELLO_TYPE,
     SessionHello,
     SessionReject,
     SessionWelcome,
+    ResumableTopicSequencer,
+    build_ack_state,
+    build_notify_camera,
+    build_notify_dims,
+    build_notify_error,
+    build_notify_layers_delta,
+    build_notify_scene_snapshot,
+    build_notify_stream,
+    build_notify_telemetry,
+    build_reply_command,
+    build_session_ack,
+    build_session_goodbye,
+    build_session_heartbeat,
     build_session_reject,
     build_session_welcome,
 )
+from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE, StateUpdateMessage
 from napari_cuda.server.control import state_update_engine as state_updates
 from napari_cuda.server.control.state_update_engine import (
@@ -45,11 +67,13 @@ from napari_cuda.server.server_scene import (
 )
 from napari_cuda.server.worker_notifications import WorkerSceneNotification
 from napari_cuda.server.control.scene_snapshot_builder import (
-    build_scene_spec_json,
-    build_state_update_payload,
+    build_notify_dims_from_result,
+    build_notify_dims_payload,
+    build_notify_layers_delta_payload,
+    build_notify_layers_payload,
+    build_notify_scene_payload,
 )
 from napari_cuda.server.pixel import pixel_channel_server as pixel_channel
-from napari_cuda.server.control.legacy_dual_emitter import encode_envelope_json
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +91,250 @@ _SERVER_FEATURES: dict[str, FeatureToggle] = {
 _ENVELOPE_PARSER = EnvelopeParser()
 
 StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
+
+
+def _state_session(ws: Any) -> Optional[str]:
+    return getattr(ws, "_napari_cuda_session", None)
+
+
+def _state_features(ws: Any) -> Mapping[str, FeatureToggle]:
+    features = getattr(ws, "_napari_cuda_features", None)
+    if isinstance(features, Mapping):
+        return features
+    return {}
+
+
+def _feature_enabled(ws: Any, name: str) -> bool:
+    toggle = _state_features(ws).get(name)
+    return bool(getattr(toggle, "enabled", False))
+
+
+def _state_sequencer(ws: Any, topic: str) -> ResumableTopicSequencer:
+    sequencers = getattr(ws, "_napari_cuda_sequencers", None)
+    if not isinstance(sequencers, dict):
+        sequencers = {}
+        setattr(ws, "_napari_cuda_sequencers", sequencers)
+    sequencer = sequencers.get(topic)
+    if not isinstance(sequencer, ResumableTopicSequencer):
+        sequencer = ResumableTopicSequencer(topic=topic)
+        sequencers[topic] = sequencer
+    return sequencer
+
+
+def _viewer_settings(server: Any) -> Dict[str, Any]:
+    width = int(server.width)
+    height = int(server.height)
+    fps = float(server.cfg.fps)
+    use_volume = bool(server.use_volume)
+
+    return {
+        "fps_target": fps,
+        "canvas_size": [width, height],
+        "volume_enabled": use_volume,
+    }
+
+
+def _default_layer_id(server: Any) -> Optional[str]:
+    try:
+        spec = server._scene_manager.scene_spec()
+        if spec is None or not spec.layers:
+            return None
+        first = spec.layers[0]
+        layer_id = getattr(first, "layer_id", None)
+        if layer_id:
+            return str(layer_id)
+        layer_dict = first.to_dict() if hasattr(first, "to_dict") else None  # type: ignore[attr-defined]
+        if isinstance(layer_dict, Mapping):
+            candidate = layer_dict.get("layer_id")
+            if candidate:
+                return str(candidate)
+    except Exception:
+        logger.debug("default layer id resolution failed", exc_info=True)
+    return None
+
+
+def _layer_changes_from_result(server: Any, result: StateUpdateResult) -> tuple[str | None, Dict[str, Any]]:
+    key = str(result.key)
+    if result.scope == "layer":
+        return str(result.target), {key: result.value}
+    if result.scope in {"volume", "multiscale"}:
+        namespaced = f"{result.scope}.{key}"
+        target = str(result.target) if result.target else None
+        if not target or not target.startswith("layer"):
+            target = _default_layer_id(server)
+        return target, {namespaced: result.value}
+    return None, {}
+
+
+def _resolve_ndisplay(server: Any) -> int:
+    try:
+        return 3 if bool(server._scene.use_volume) else 2
+    except Exception:
+        return 2
+
+
+def _resolve_dims_mode(ndisplay: int) -> str:
+    return "volume" if int(ndisplay) >= 3 else "plane"
+
+
+async def _broadcast_layers_delta(
+    server: Any,
+    *,
+    layer_id: Optional[str],
+    changes: Mapping[str, Any],
+    intent_id: Optional[str],
+    timestamp: Optional[float],
+    targets: Optional[Sequence[Any]] = None,
+) -> None:
+    if not changes:
+        return
+
+    payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", changes=changes)
+    clients = list(targets) if targets is not None else list(server._state_clients)
+    if not clients:
+        return
+
+    tasks: list[Awaitable[None]] = []
+    now = time.time() if timestamp is None else float(timestamp)
+
+    for ws in clients:
+        if not _feature_enabled(ws, "notify.layers"):
+            continue
+        session_id = _state_session(ws)
+        if not session_id:
+            continue
+        kwargs: Dict[str, Any] = {
+            "session_id": session_id,
+            "payload": payload,
+            "timestamp": now,
+            "intent_id": intent_id,
+        }
+        sequencer = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
+        if sequencer.seq is None:
+            cursor = sequencer.snapshot()
+            kwargs["seq"] = cursor.seq
+            kwargs["delta_token"] = cursor.delta_token
+        else:
+            kwargs["sequencer"] = sequencer
+        frame = build_notify_layers_delta(**kwargs)
+        tasks.append(_send_frame(server, ws, frame))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _broadcast_dims_state(
+    server: Any,
+    *,
+    current_step: Sequence[int],
+    source: str,
+    intent_id: Optional[str],
+    timestamp: Optional[float],
+    targets: Optional[Sequence[Any]] = None,
+) -> None:
+    clients = list(targets) if targets is not None else list(server._state_clients)
+    if not clients:
+        return
+
+    ndisplay = _resolve_ndisplay(server)
+    payload = build_notify_dims_payload(
+        current_step=current_step,
+        ndisplay=ndisplay,
+        mode=_resolve_dims_mode(ndisplay),
+        source=str(source),
+    )
+
+    tasks: list[Awaitable[None]] = []
+    now = time.time() if timestamp is None else float(timestamp)
+
+    for ws in clients:
+        if not _feature_enabled(ws, "notify.dims"):
+            continue
+        session_id = _state_session(ws)
+        if not session_id:
+            continue
+        frame = build_notify_dims(
+            session_id=session_id,
+            payload=payload,
+            timestamp=now,
+            intent_id=intent_id,
+        )
+        tasks.append(_send_frame(server, ws, frame))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _send_stream_frame(
+    server: Any,
+    ws: Any,
+    *,
+    payload: NotifyStreamPayload | Mapping[str, Any],
+    timestamp: Optional[float],
+    snapshot_cursor: FeatureResumeState | None = None,
+) -> None:
+    session_id = _state_session(ws)
+    if not session_id:
+        return
+    if not isinstance(payload, NotifyStreamPayload):
+        payload = NotifyStreamPayload.from_dict(payload)
+    kwargs: Dict[str, Any] = {
+        "session_id": session_id,
+        "payload": payload,
+        "timestamp": time.time() if timestamp is None else float(timestamp),
+    }
+    sequencer = _state_sequencer(ws, NOTIFY_STREAM_TYPE)
+    if snapshot_cursor is not None:
+        sequencer.snapshot(token=snapshot_cursor.delta_token)
+        kwargs["seq"] = snapshot_cursor.seq
+        kwargs["delta_token"] = snapshot_cursor.delta_token
+    elif sequencer.seq is None:
+        cursor = sequencer.snapshot()
+        kwargs["seq"] = cursor.seq
+        kwargs["delta_token"] = cursor.delta_token
+    else:
+        kwargs["sequencer"] = sequencer
+    frame = build_notify_stream(**kwargs)
+    await _send_frame(server, ws, frame)
+
+
+async def broadcast_stream_config(
+    server: Any,
+    *,
+    payload: NotifyStreamPayload,
+    timestamp: Optional[float] = None,
+) -> None:
+    clients = list(server._state_clients)
+    if not clients:
+        return
+
+    now = time.time() if timestamp is None else float(timestamp)
+    tasks: list[Awaitable[None]] = []
+
+    for ws in clients:
+        if not _feature_enabled(ws, "notify.stream"):
+            continue
+        session_id = _state_session(ws)
+        if not session_id:
+            continue
+        pending_resume = getattr(ws, "_napari_cuda_pending_resume", None)
+        snapshot_cursor = None
+        if pending_resume:
+            snapshot_cursor = pending_resume.pop(NOTIFY_STREAM_TYPE, None)
+        tasks.append(
+            _send_stream_frame(
+                server,
+                ws,
+                payload=payload,
+                timestamp=now,
+                snapshot_cursor=snapshot_cursor,
+            )
+        )
+        if pending_resume is not None:
+            setattr(ws, "_napari_cuda_pending_resume", pending_resume)
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def handle_state(server: Any, ws: Any) -> None:
@@ -703,13 +971,55 @@ async def _broadcast_state_update(
     *,
     include_control_versions: bool = True,
 ) -> None:
-    payload = build_state_update_payload(
-        server._scene,
-        server._scene_manager,
-        result=result,
-        include_control_versions=include_control_versions,
+    if result.scope in {"layer", "volume", "multiscale"}:
+        layer_id, changes = _layer_changes_from_result(server, result)
+        if not layer_id:
+            logger.debug(
+                "layer delta ignored: unable to resolve layer id for scope=%s target=%s",
+                result.scope,
+                result.target,
+            )
+            return
+        await _broadcast_layers_delta(
+            server,
+            layer_id=layer_id,
+            changes=changes,
+            intent_id=result.intent_id,
+            timestamp=result.timestamp,
+        )
+        return
+
+    if result.scope == "dims":
+        step = result.current_step or ()
+        await _broadcast_dims_state(
+            server,
+            current_step=step,
+            source="state.update",
+            intent_id=result.intent_id,
+            timestamp=result.timestamp,
+        )
+        return
+
+    if result.scope == "view" and result.key == "ndisplay":
+        step = ()
+        with server._state_lock:
+            latest = server._scene.latest_state.current_step
+            if latest is not None:
+                step = tuple(int(x) for x in latest)
+        await _broadcast_dims_state(
+            server,
+            current_step=step,
+            source="state.update",
+            intent_id=result.intent_id,
+            timestamp=result.timestamp,
+        )
+        return
+
+    logger.debug(
+        "state update scope ignored by greenfield broadcaster scope=%s target=%s",
+        result.scope,
+        result.target,
     )
-    await server._broadcast_state_json(payload)
 
 
 async def _broadcast_state_updates(
@@ -739,8 +1049,7 @@ def _baseline_state_result(
     interaction_id: Optional[str] = None,
     phase: Optional[str] = None,
     timestamp: Optional[float] = None,
-    ack: Optional[bool] = None,
-    intent_seq: Optional[int] = None,
+    **_legacy: Any,
 ) -> StateUpdateResult:
     meta = get_control_meta(server._scene, scope, target, key)
     server_seq = int(server_seq_override or meta.last_server_seq or 0)
@@ -753,21 +1062,17 @@ def _baseline_state_result(
     meta.last_client_seq = client_seq
     meta.last_interaction_id = interaction_id
     meta.last_phase = phase
+    timestamp_val = timestamp if timestamp is not None else time.time()
+    intent_token = str(interaction_id) if interaction_id is not None else None
+
     return StateUpdateResult(
         scope=scope,
         target=target,
         key=key,
         value=value,
         server_seq=server_seq,
-        client_seq=client_seq,
-        client_id=client_id,
-        interaction_id=interaction_id,
-        phase=phase,
-        timestamp=timestamp,
-        ack=ack,
-        intent_seq=intent_seq,
-        last_client_id=meta.last_client_id,
-        last_client_seq=meta.last_client_seq,
+        intent_id=intent_token,
+        timestamp=timestamp_val,
     )
 
 
@@ -777,13 +1082,10 @@ def _dims_results_from_step(
     *,
     meta: Mapping[str, Any],
     client_id: Optional[str],
-    ack: Optional[bool] = None,
-    intent_seq: Optional[int] = None,
     timestamp: Optional[float] = None,
 ) -> list[StateUpdateResult]:
     results: list[StateUpdateResult] = []
-    current = list(int(x) for x in step_list)
-    meta_dict = dict(meta)
+    current = [int(x) for x in step_list]
     ts = timestamp if timestamp is not None else time.time()
     for idx, value in enumerate(current):
         axis_label = axis_label_from_meta(meta, idx) or str(idx)
@@ -803,18 +1105,9 @@ def _dims_results_from_step(
                 key="step",
                 value=int(value),
                 server_seq=server_seq,
-                client_seq=None,
-                client_id=client_id,
-                interaction_id=None,
-                phase=None,
                 timestamp=ts,
                 axis_index=idx,
-                current_step=list(current),
-                meta=meta_dict,
-                ack=ack,
-                intent_seq=intent_seq,
-                last_client_id=meta_entry.last_client_id,
-                last_client_seq=meta_entry.last_client_seq,
+                current_step=tuple(current),
             )
         )
     return results
@@ -940,8 +1233,6 @@ async def broadcast_dims_update(
     step_list: Sequence[int] | list[int],
     *,
     last_client_id: Optional[str],
-    ack: bool,
-    intent_seq: Optional[int],
     server_seq: Optional[int] = None,
     source_client_id: Optional[str] = None,
     source_client_seq: Optional[int] = None,
@@ -958,8 +1249,6 @@ async def broadcast_dims_update(
         list(int(x) for x in step_list),
         meta=meta,
         client_id=last_client_id,
-        ack=ack,
-        intent_seq=intent_seq,
         timestamp=time.time(),
     )
 
@@ -971,7 +1260,6 @@ async def broadcast_layer_update(
     *,
     layer_id: str,
     changes: Mapping[str, Any],
-    intent_seq: Optional[int],
     server_seq: Optional[int] = None,
     source_client_id: Optional[str] = None,
     source_client_seq: Optional[int] = None,
@@ -1000,16 +1288,10 @@ async def broadcast_layer_update(
                 interaction_id=interaction_id,
                 phase=phase,
                 timestamp=ts,
-                intent_seq=intent_seq,
             )
         )
 
     await _broadcast_state_updates(server, results)
-
-
-async def broadcast_scene_spec(server: Any, *, reason: str) -> None:
-    payload = build_scene_spec_json(server._scene, server._scene_manager)
-    await broadcast_scene_spec_payload(server, payload, reason=reason)
 
 
 def process_worker_notifications(
@@ -1042,8 +1324,6 @@ def process_worker_notifications(
                     server,
                     list(step_tuple),
                     last_client_id=note.last_client_id,
-                    ack=note.ack,
-                    intent_seq=note.intent_seq,
                 ),
                 "dims_update-worker",
             )
@@ -1163,6 +1443,18 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         )
         return False
 
+    pending_resume: Dict[str, FeatureResumeState] = {}
+    pixel_state = getattr(server, "_pixel_channel", None)
+    if pixel_state is not None and getattr(pixel_state, "last_avcc", None) is not None:
+        stream_toggle = negotiated_features.get(NOTIFY_STREAM_TYPE)
+        if stream_toggle is not None and stream_toggle.resume:
+            stream_resume = FeatureResumeState(seq=0, delta_token=uuid.uuid4().hex)
+            negotiated_features[NOTIFY_STREAM_TYPE] = replace(
+                stream_toggle,
+                resume_state=stream_resume,
+            )
+            pending_resume[NOTIFY_STREAM_TYPE] = stream_resume
+
     session_id = str(uuid.uuid4())
     heartbeat_s = getattr(server, "state_heartbeat_s", 15.0)
     ack_timeout_ms = getattr(server, "state_ack_timeout_ms", 250)
@@ -1183,6 +1475,16 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
     setattr(ws, "_napari_cuda_session", session_id)
     setattr(ws, "_napari_cuda_features", negotiated_features)
     setattr(ws, "_napari_cuda_resume_tokens", hello.payload.resume_tokens)
+    setattr(ws, "_napari_cuda_pending_resume", pending_resume)
+    setattr(
+        ws,
+        "_napari_cuda_sequencers",
+        {
+            NOTIFY_SCENE_TYPE: ResumableTopicSequencer(topic=NOTIFY_SCENE_TYPE),
+            NOTIFY_LAYERS_TYPE: ResumableTopicSequencer(topic=NOTIFY_LAYERS_TYPE),
+            NOTIFY_STREAM_TYPE: ResumableTopicSequencer(topic=NOTIFY_STREAM_TYPE),
+        },
+    )
 
     client_info = hello.payload.client
     client_name = client_info.name
@@ -1246,15 +1548,13 @@ async def _await_state_send(server: Any, ws: Any, text: str) -> None:
         logger.debug("state send helper failed", exc_info=True)
 
 
-async def _send_payload(server: Any, ws: Any, payload: dict[str, Any]) -> None:
-    envelope = encode_envelope_json(payload)
-    if not envelope:
-        logger.debug(
-            "Dropping state payload without notify envelope: type=%s",
-            payload.get("type"),
-        )
-        return
-    await _await_state_send(server, ws, envelope)
+async def _send_frame(server: Any, ws: Any, frame: Any) -> None:
+    try:
+        payload = frame.to_dict()
+    except AttributeError as exc:  # pragma: no cover - defensive
+        raise TypeError("frame must provide to_dict()") from exc
+    text = json.dumps(payload, separators=(",", ":"))
+    await _await_state_send(server, ws, text)
 
 
 async def _send_state_baseline(server: Any, ws: Any) -> None:
@@ -1265,41 +1565,49 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
                 server._update_scene_manager()
         except Exception:
             logger.debug("Initial scene manager sync failed", exc_info=True)
+
         with server._state_lock:
             current_step = server._scene.latest_state.current_step
-        if current_step is not None:
-            step_list = list(current_step)
-        else:
-            meta = server._dims_metadata() or {}
-            nd = int(meta.get('ndim') or 3)
-            step_list = [0 for _ in range(max(1, nd))]
-        meta = server._dims_metadata() or {}
-        dim_results = _dims_results_from_step(
+
+        pending_resume: Dict[str, FeatureResumeState] = getattr(ws, "_napari_cuda_pending_resume", {})
+
+        step_list = list(current_step) if current_step is not None else []
+        spec = server._scene_manager.scene_spec()
+        ndim = 0
+        if spec is not None and spec.dims is not None:
+            try:
+                ndim = int(spec.dims.ndim or 0)
+            except Exception:
+                ndim = 0
+            if ndim <= 0:
+                try:
+                    ndim = len(spec.dims.sizes or [])
+                except Exception:
+                    ndim = 0
+        if ndim <= 0:
+            ndim = len(step_list) if step_list else 3
+        while len(step_list) < ndim:
+            step_list.append(0)
+
+        await _broadcast_dims_state(
             server,
-            step_list,
-            meta=meta,
-            client_id=None,
-            ack=False,
+            current_step=step_list,
+            source="server.bootstrap",
+            intent_id=None,
             timestamp=time.time(),
+            targets=[ws],
         )
-        for result in dim_results:
-            payload = build_state_update_payload(
-                server._scene,
-                server._scene_manager,
-                result=result,
-            )
-            await _send_payload(server, ws, payload)
         if server._log_dims_info:
-            logger.info("connect: state.update dims -> step=%s", step_list)
+            logger.info("connect: notify.dims baseline -> step=%s", step_list)
         else:
-            logger.debug("connect: state.update dims -> step=%s", step_list)
+            logger.debug("connect: notify.dims baseline -> step=%s", step_list)
     except Exception:
         logger.exception("Initial dims baseline send failed")
 
     try:
-        await send_scene_spec(server, ws, reason="connect")
+        await _send_scene_snapshot(server, ws, reason="connect")
     except Exception:
-        logger.exception("Initial scene.spec send failed")
+        logger.exception("Initial notify.scene send failed")
 
     try:
         await _send_layer_baseline(server, ws)
@@ -1312,60 +1620,81 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         assert channel is not None and cfg is not None, "Pixel channel not initialized"
         avcc = channel.last_avcc
         if avcc is not None:
-            msg = pixel_channel.build_video_config_payload(cfg, avcc)
-            await _send_payload(server, ws, msg)
+            stream_payload = pixel_channel.build_notify_stream_payload(cfg, avcc)
+            resume_state = pending_resume.pop(NOTIFY_STREAM_TYPE, None)
+            await _send_stream_frame(
+                server,
+                ws,
+                payload=stream_payload,
+                timestamp=time.time(),
+                snapshot_cursor=resume_state,
+            )
         else:
-            pixel_channel.mark_config_dirty(channel)
+            pixel_channel.mark_stream_config_dirty(channel)
+        setattr(ws, "_napari_cuda_pending_resume", pending_resume)
     except Exception:
         logger.exception("Initial state config send failed")
 
 
-async def send_scene_spec(server: Any, ws: Any, *, reason: str) -> None:
-    payload = build_scene_spec_json(server._scene, server._scene_manager)
-    try:
-        parsed = json.loads(payload)
-    except Exception:
-        logger.debug("scene.spec payload decode failed", exc_info=True)
+async def _send_scene_snapshot(server: Any, ws: Any, *, reason: str) -> None:
+    session_id = _state_session(ws)
+    if not session_id:
+        logger.debug("Skipping notify.scene send without session id")
         return
-    if not isinstance(parsed, dict):
-        logger.debug("scene.spec payload must decode to mapping")
-        return
-    envelope = encode_envelope_json(parsed)
-    if not envelope:
-        logger.debug("scene.spec notify envelope encode failed")
-        return
-    await _await_state_send(server, ws, envelope)
+
+    payload = build_notify_scene_payload(
+        server._scene,
+        server._scene_manager,
+        viewer_settings=_viewer_settings(server),
+    )
+    frame = build_notify_scene_snapshot(
+        session_id=session_id,
+        viewer=payload.viewer,
+        layers=payload.layers,
+        policies=payload.policies,
+        ancillary=payload.ancillary,
+        timestamp=time.time(),
+        sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
+    )
+    await _send_frame(server, ws, frame)
     if server._log_dims_info:
-        logger.info("%s: scene.spec sent", reason)
+        logger.info("%s: notify.scene sent", reason)
     else:
-        logger.debug("%s: scene.spec sent", reason)
+        logger.debug("%s: notify.scene sent", reason)
 
 
-async def broadcast_scene_spec_payload(server: Any, payload: str, *, reason: str) -> None:
-    if not payload or not server._state_clients:
-        return
-    try:
-        parsed = json.loads(payload)
-    except Exception:
-        logger.debug("scene.spec payload decode failed", exc_info=True)
-        return
-    if not isinstance(parsed, dict):
-        logger.debug("scene.spec payload must decode to mapping")
-        return
-    envelope = encode_envelope_json(parsed)
-    if not envelope:
-        logger.debug("scene.spec notify envelope encode failed")
-        return
-    coros: list[Awaitable[None]] = []
+async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
     clients = list(server._state_clients)
-    for client in clients:
-        coros.append(_await_state_send(server, client, envelope))
-    await asyncio.gather(*coros, return_exceptions=True)
-    client_count = len(clients)
+    if not clients:
+        return
+    payload = build_notify_scene_payload(
+        server._scene,
+        server._scene_manager,
+        viewer_settings=_viewer_settings(server),
+    )
+    timestamp = time.time()
+    tasks: list[Awaitable[None]] = []
+    for ws in clients:
+        session_id = _state_session(ws)
+        if not session_id:
+            continue
+        frame = build_notify_scene_snapshot(
+            session_id=session_id,
+            viewer=payload.viewer,
+            layers=payload.layers,
+            policies=payload.policies,
+            ancillary=payload.ancillary,
+            timestamp=timestamp,
+            sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
+        )
+        tasks.append(_send_frame(server, ws, frame))
+    if not tasks:
+        return
+    await asyncio.gather(*tasks, return_exceptions=True)
     if server._log_dims_info:
-        logger.info("%s: scene.spec broadcast to %d clients", reason, client_count)
+        logger.info("%s: notify.scene broadcast to %d clients", reason, len(tasks))
     else:
-        logger.debug("%s: scene.spec broadcast to %d clients", reason, client_count)
+        logger.debug("%s: notify.scene broadcast to %d clients", reason, len(tasks))
 
 
 async def _send_layer_baseline(server: Any, ws: Any) -> None:
@@ -1397,11 +1726,11 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
         if not controls:
             continue
 
-        results = _layer_results_from_controls(server, layer_id, controls)
-        for result in results:
-            payload = build_state_update_payload(
-                server._scene,
-                server._scene_manager,
-                result=result,
-            )
-            await _send_payload(server, ws, payload)
+        await _broadcast_layers_delta(
+            server,
+            layer_id=layer_id,
+            changes=controls,
+            intent_id=None,
+            timestamp=time.time(),
+            targets=[ws],
+        )

@@ -5,6 +5,9 @@ import json
 import threading
 from types import SimpleNamespace
 from typing import Any, Coroutine, List
+import json
+
+from napari_cuda.protocol import FeatureToggle
 
 from napari_cuda.server import state_channel_handler
 from napari_cuda.server.layer_manager import ViewerSceneManager
@@ -36,6 +39,10 @@ class _CaptureWorker:
         return None
 
 
+class _FakeWS(SimpleNamespace):
+    __hash__ = object.__hash__
+
+
 def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
     scene = create_server_scene_data()
     manager = ViewerSceneManager((640, 480))
@@ -59,19 +66,37 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._log_dims_info = False
     server._allowed_render_modes = {"mip"}
     server.metrics = SimpleNamespace(inc=lambda *a, **k: None)
-    server._state_clients = set()
+    server.width = 640
+    server.height = 480
+    server.cfg = SimpleNamespace(fps=60.0)
+    server.use_volume = False
+    captured: list[dict[str, Any]] = []
+
+    async def _state_send(_ws: Any, text: str) -> None:
+        captured.append(json.loads(text))
+
+    server._state_send = _state_send
+
+    features = {
+        "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+        "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
+        "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
+        "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+        "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
+    }
+
+    fake_ws = _FakeWS(
+        _napari_cuda_session="test-session",
+        _napari_cuda_features=features,
+        _napari_cuda_sequencers={},
+    )
+
+    server._state_clients = {fake_ws}
     server._dims_metadata = lambda: {"ndim": 3, "order": ["z", "y", "x"], "range": [[0, 9], [0, 9], [0, 9]]}
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
     scheduled: list[Coroutine[Any, Any, None]] = []
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)  # type: ignore[arg-type]
-
-    captured: list[dict[str, Any]] = []
-
-    async def _broadcast_state_json(payload: dict[str, Any]) -> None:
-        captured.append(payload)
-
-    server._broadcast_state_json = _broadcast_state_json
 
     server._ndisplay_calls: list[tuple[int, Any, Any]] = []
 
@@ -92,13 +117,8 @@ def _drain_scheduled(scheduled: list[Coroutine[Any, Any, None]]) -> None:
         asyncio.run(coro)
 
 
-def _unwrap_notify(payload: dict[str, Any]) -> dict[str, Any]:
-    msg_type = payload.get("type") if isinstance(payload, dict) else None
-    if msg_type in {"notify.state", "notify.scene", "notify.stream"}:
-        inner = payload.get("payload") if isinstance(payload, dict) else None
-        if isinstance(inner, dict):
-            return inner
-    return payload
+def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
+    return [frame for frame in frames if frame.get("type") == frame_type]
 
 
 def test_state_update_layer_applies_scene_state() -> None:
@@ -119,13 +139,12 @@ def test_state_update_layer_applies_scene_state() -> None:
     snapshot = server._worker.deltas[-1].scene_state
     assert snapshot is not None
     assert snapshot.layer_updates == {"layer-0": {"colormap": "red"}}
-    assert captured, "expected broadcast invocation"
-    event = captured[0]
-    assert event["type"] == "state.update"
-    assert event["scope"] == "layer"
-    assert event["target"] == "layer-0"
-    versions = event.get("control_versions") or {}
-    assert versions.get("colormap", {}).get("server_seq") == event["server_seq"]
+    frames = _frames_of_type(captured, "notify.layers")
+    assert frames, "expected notify.layers frame"
+    frame = frames[-1]
+    payload = frame["payload"]
+    assert payload["layer_id"] == "layer-0"
+    assert payload["changes"]["colormap"] == "red"
 
 
 def test_state_update_layer_stale_seq_ignored() -> None:
@@ -154,13 +173,12 @@ def test_state_update_layer_stale_seq_ignored() -> None:
     _drain_scheduled(scheduled)
 
     assert len(server._worker.deltas) == 1
-    assert len(captured) == 1
-    event = captured[0]
-    assert event["interaction_id"] == "drag-1"
-    assert event["phase"] == "update"
-    # metadata should remain linked to first payload
-    versions = event.get("control_versions") or {}
-    assert versions.get("gamma", {}).get("source_client_seq") == 10
+    frames = _frames_of_type(captured, "notify.layers")
+    assert len(frames) == 1
+    frame = frames[0]
+    payload = frame["payload"]
+    assert payload["changes"]["gamma"] == 1.3
+    assert frame.get("intent_id") == "drag-1"
 
 
 def test_state_update_dims_broadcasts() -> None:
@@ -182,17 +200,13 @@ def test_state_update_dims_broadcasts() -> None:
     _drain_scheduled(scheduled)
 
     assert server._scene.latest_state.current_step[0] == 5
-    assert captured, "expected dims broadcast"
-    event = [p for p in captured if p["scope"] == "dims"][0]
-    assert event["value"] == 5
-    versions = event.get("control_versions") or {}
-    assert versions.get("step", {}).get("source_client_seq") == 3
-    assert event["interaction_id"] == "dims-1"
-    assert event["phase"] == "commit"
-    assert isinstance(event.get("meta"), dict)
-    assert event.get("ack") is True
-    assert event.get("axis_index") == 0
-    assert event.get("current_step")[:1] == [5]
+    frames = _frames_of_type(captured, "notify.dims")
+    assert frames, "expected notify.dims frame"
+    frame = frames[-1]
+    payload = frame["payload"]
+    assert payload["current_step"][0] == 5
+    assert payload["source"] == "state.update"
+    assert frame.get("intent_id") == "dims-1"
 
 
 def test_state_update_view_ndisplay_broadcasts() -> None:
@@ -216,15 +230,13 @@ def test_state_update_view_ndisplay_broadcasts() -> None:
 
     assert server._ndisplay_calls == [(3, "client-view", 6)]
     assert server.use_volume is True
-    assert captured, "expected view broadcast"
-    event = [p for p in captured if p["scope"] == "view"][0]
-    assert event["target"] == "main"
-    assert event["key"] == "ndisplay"
-    assert event["value"] == 3
-    assert event.get("ack") is True
-    assert event.get("intent_seq") == 42
-    versions = event.get("control_versions") or {}
-    assert versions.get("ndisplay", {}).get("server_seq") == event["server_seq"]
+    frames = _frames_of_type(captured, "notify.dims")
+    assert frames, "expected notify.dims frame"
+    frame = frames[-1]
+    payload = frame["payload"]
+    assert payload["ndisplay"] == 3
+    assert payload["mode"] == "volume"
+    assert frame.get("intent_id") == "toggle-1"
 
 
 def test_state_update_volume_render_mode_broadcasts() -> None:
@@ -248,12 +260,11 @@ def test_state_update_volume_render_mode_broadcasts() -> None:
     assert latest_delta is not None
     assert latest_delta.volume_mode == "iso"
 
-    notifications = [_unwrap_notify(evt) for evt in captured]
-    volume_events = [evt for evt in notifications if evt.get("scope") == "volume"]
-    assert volume_events, "expected volume state update broadcast"
-    event = volume_events[-1]
-    assert event["key"] == "render_mode"
-    assert event["value"] == "iso"
+    frames = _frames_of_type(captured, "notify.layers")
+    assert frames, "expected notify.layers frame"
+    frame = frames[-1]
+    payload = frame["payload"]
+    assert payload["changes"].get("volume.render_mode") == "iso"
 
 
 def test_state_update_multiscale_level_updates_state() -> None:
@@ -276,12 +287,11 @@ def test_state_update_multiscale_level_updates_state() -> None:
     last_level, _ = server._worker.level_requests[-1]
     assert last_level == 1
 
-    notifications = [_unwrap_notify(evt) for evt in captured]
-    ms_events = [evt for evt in notifications if evt.get("scope") == "multiscale"]
-    assert ms_events, "expected multiscale state update broadcast"
-    event = ms_events[-1]
-    assert event["key"] == "level"
-    assert event["value"] == 1
+    frames = _frames_of_type(captured, "notify.layers")
+    assert frames, "expected notify.layers frame"
+    frame = frames[-1]
+    payload = frame["payload"]
+    assert payload["changes"].get("multiscale.level") == 1
 
 
 def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:
@@ -328,8 +338,7 @@ def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:
         server._pixel_channel = SimpleNamespace(last_avcc=None)
         server._pixel_config = SimpleNamespace()
 
-        monkeypatch.setattr(state_channel_handler.pixel_channel, 'build_video_config_payload', lambda *a, **k: {'type': 'video.config'})
-        monkeypatch.setattr(state_channel_handler.pixel_channel, 'mark_config_dirty', lambda *a, **k: None)
+        monkeypatch.setattr(state_channel_handler.pixel_channel, 'mark_stream_config_dirty', lambda *a, **k: None)
 
         class _CaptureWS:
             def __init__(self) -> None:
@@ -339,19 +348,30 @@ def test_send_state_baseline_emits_state_updates(monkeypatch) -> None:
                 self.sent.append(payload)
 
         ws = _CaptureWS()
+        ws._napari_cuda_session = "baseline-session"
+        ws._napari_cuda_features = {
+            "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+        }
+        ws._napari_cuda_sequencers = {}
 
         loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
         _drain_scheduled(scheduled)
 
-        payloads = captured + [json.loads(data) for data in ws.sent]
-        decoded = [_unwrap_notify(p) for p in payloads]
-        updates = [p for p in decoded if p.get("type") == "state.update" and p.get("scope") == "layer"]
-        assert updates, "expected at least one layer state.update payload"
-        merged = {}
-        for entry in updates:
-            merged.update(entry.get("controls") or {})
-        assert merged.get("opacity") == 0.25
-        assert merged.get("colormap") == "viridis"
+        frames = _frames_of_type(captured, "notify.scene")
+        assert frames, "expected notify.scene snapshot"
+
+        layer_frames = _frames_of_type(captured, "notify.layers")
+        assert layer_frames, "expected notify.layers baseline"
+        changes = layer_frames[-1]["payload"]["changes"]
+        assert changes["opacity"] == 0.25
+        assert changes["colormap"] == "viridis"
+
+        dims_frames = _frames_of_type(captured, "notify.dims")
+        assert dims_frames, "expected notify.dims baseline"
+        assert dims_frames[-1]["payload"]["source"] == "server.bootstrap"
     finally:
         asyncio.set_event_loop(None)
         loop.close()

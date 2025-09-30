@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 import websockets
 
 from napari_cuda.server import pixel_broadcaster
+from napari_cuda.protocol import NotifyStreamPayload
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.server.metrics import Metrics  # circular guard at runtime
@@ -44,23 +45,29 @@ class PixelChannelState:
     """Mutable state for the pixel channel."""
 
     broadcast: pixel_broadcaster.PixelBroadcastState
-    needs_config: bool = True
+    needs_stream_config: bool = True
     last_avcc: Optional[bytes] = None
     kf_watchdog_cooldown_s: float = 0.30
 
 
-def build_video_config_payload(config: PixelChannelConfig, avcc: bytes) -> dict:
-    """Return a ``video_config`` payload for the state channel."""
+def build_notify_stream_payload(config: PixelChannelConfig, avcc: bytes) -> NotifyStreamPayload:
+    """Build a ``notify.stream`` payload from the pixel channel config."""
 
-    return {
-        "type": "video_config",
-        "codec": config.codec_name,
-        "format": "avcc",
-        "data": base64.b64encode(avcc).decode("ascii"),
-        "width": config.width,
-        "height": config.height,
-        "fps": config.fps,
+    latency_policy = {
+        "max_buffer_ms": float(getattr(config, "max_buffer_ms", 120.0)),
+        "grace_keyframe_ms": float(config.kf_watchdog_cooldown_s * 1000.0),
     }
+
+    return NotifyStreamPayload(
+        codec=str(config.codec_name),
+        format="avcc",
+        fps=float(config.fps),
+        frame_size=(int(config.width), int(config.height)),
+        nal_length_size=4,
+        avcc=base64.b64encode(avcc).decode("ascii"),
+        latency_policy=latency_policy,
+        vt_hint=None,
+    )
 
 
 async def handle_client(
@@ -70,7 +77,7 @@ async def handle_client(
     config: PixelChannelConfig,
     metrics: "Metrics",
     reset_encoder: Callable[[], bool],
-    send_state_json: Callable[[dict], Awaitable[None]],
+    send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
     on_clients_change: Callable[[], None],
 ) -> None:
     """Handle a pixel-channel websocket connection."""
@@ -78,7 +85,7 @@ async def handle_client(
     state.broadcast.clients.add(ws)
     on_clients_change()
     pixel_broadcaster.configure_socket(ws, label="pixel ws")
-    state.needs_config = True
+    state.needs_stream_config = True
 
     try:
         if reset_encoder():
@@ -91,10 +98,10 @@ async def handle_client(
                 logger.debug("metrics inc encoder_resets failed", exc_info=True)
             if state.last_avcc is not None:
                 try:
-                    await send_state_json(build_video_config_payload(config, state.last_avcc))
-                    state.needs_config = False
+                    await send_stream(build_notify_stream_payload(config, state.last_avcc))
+                    state.needs_stream_config = False
                 except Exception:
-                    logger.debug("Proactive video_config broadcast failed", exc_info=True)
+                    logger.debug("Proactive notify.stream broadcast failed", exc_info=True)
         else:
             logger.debug("Pixel client connected but encoder reset unavailable")
     except Exception:
@@ -114,7 +121,7 @@ async def ensure_keyframe(
     metrics: "Metrics",
     try_force_idr: Callable[[], bool],
     reset_encoder: Callable[[], bool],
-    send_state_json: Callable[[dict], Awaitable[None]],
+    send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
 ) -> None:
     """Force the next frame to be a keyframe and schedule a watchdog."""
 
@@ -135,7 +142,7 @@ async def ensure_keyframe(
         state.broadcast.kf_last_reset_ts = time.time()
 
     state.broadcast.bypass_until_key = True
-    state.needs_config = True
+    state.needs_stream_config = True
 
     try:
         metrics.inc("napari_cuda_encoder_resets")
@@ -146,10 +153,10 @@ async def ensure_keyframe(
 
     if state.last_avcc is not None:
         try:
-            await send_state_json(build_video_config_payload(config, state.last_avcc))
-            state.needs_config = False
+            await send_stream(build_notify_stream_payload(config, state.last_avcc))
+            state.needs_stream_config = False
         except Exception:
-            logger.debug("ensure_keyframe video_config broadcast failed", exc_info=True)
+            logger.debug("ensure_keyframe notify.stream broadcast failed", exc_info=True)
 
 
 def start_watchdog(
@@ -198,42 +205,42 @@ def start_watchdog(
         logger.debug("start watchdog failed", exc_info=True)
 
 
-def mark_config_dirty(state: PixelChannelState) -> None:
+def mark_stream_config_dirty(state: PixelChannelState) -> None:
     """Flag that the next encoder configuration must be broadcast."""
 
-    state.needs_config = True
+    state.needs_stream_config = True
 
 
-async def maybe_send_video_config(
+async def maybe_send_stream_config(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
     metrics: "Metrics",
     avcc: Optional[bytes],
-    send_state_json: Callable[[dict], Awaitable[None]],
+    send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
 ) -> None:
-    """Send the latest avcC block if it changed or the channel requested it."""
+    """Send a ``notify.stream`` snapshot when the avcC block changes."""
 
     if avcc is None:
-        state.needs_config = True
+        state.needs_stream_config = True
         return
 
-    if not state.needs_config and state.last_avcc == avcc:
+    if not state.needs_stream_config and state.last_avcc == avcc:
         return
 
-    payload = build_video_config_payload(config, avcc)
+    payload = build_notify_stream_payload(config, avcc)
     try:
-        await send_state_json(payload)
+        await send_stream(payload)
     except Exception:
-        logger.debug("video_config broadcast failed", exc_info=True)
+        logger.debug("notify.stream broadcast failed", exc_info=True)
         return
 
     state.last_avcc = avcc
-    state.needs_config = False
+    state.needs_stream_config = False
     try:
-        metrics.inc("napari_cuda_video_config_sends")
+        metrics.inc("napari_cuda_stream_config_sends")
     except Exception:  # pragma: no cover - defensive metrics guard
-        logger.debug("metrics inc napari_cuda_video_config_sends failed", exc_info=True)
+        logger.debug("metrics inc napari_cuda_stream_config_sends failed", exc_info=True)
 
 
 def enqueue_frame(

@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
-from dataclasses import asdict
-
-from napari_cuda.protocol.messages import SceneSpecMessage, StateUpdateMessage
-from napari_cuda.server.layer_manager import ViewerSceneManager
-from napari_cuda.server.server_scene import (
-    CONTROL_KEYS,
-    ServerSceneData,
-    layer_controls_to_dict,
+from napari_cuda.protocol.greenfield.messages import (
+    NotifyScenePayload,
+    NotifyDimsPayload,
+    NotifyLayersPayload,
 )
+from napari_cuda.protocol.messages import SceneSpecMessage
+from napari_cuda.server.layer_manager import ViewerSceneManager
+from napari_cuda.server.server_scene import ServerSceneData, layer_controls_to_dict
 from napari_cuda.server.control.state_update_engine import StateUpdateResult
 
 
@@ -48,133 +47,193 @@ def build_scene_spec_json(
 
 
 # ---------------------------------------------------------------------------
-# Unified state.update payload helper
+# Greenfield payload adapters
 
 
-def build_state_update_payload(
+def build_notify_scene_payload(
     scene: ServerSceneData,
     manager: ViewerSceneManager,
     *,
-    result: StateUpdateResult,
-    include_control_versions: bool = True,
-) -> Dict[str, Any]:
-    """Serialise a :class:`StateUpdateResult` into a transport payload."""
+    timestamp: Optional[float] = None,
+    viewer_settings: Optional[Mapping[str, Any]] = None,
+    ancillary: Optional[Mapping[str, Any]] = None,
+) -> NotifyScenePayload:
+    """Build a ``notify.scene`` payload aligned with the greenfield schema."""
 
-    value = result.value
-    if isinstance(value, tuple):
-        value = list(value)
+    message = build_scene_spec_message(scene, manager, timestamp=timestamp)
+    spec = message.scene
 
-    message = StateUpdateMessage(
-        scope=result.scope,
-        target=result.target,
-        key=result.key,
-        value=value,
-        phase=result.phase,
-        timestamp=result.timestamp,
-        client_id=result.client_id,
-        client_seq=result.client_seq,
-        interaction_id=result.interaction_id,
-        server_seq=result.server_seq,
-        axis_index=result.axis_index,
-        current_step=list(result.current_step) if result.current_step is not None else None,
-        meta=dict(result.meta) if result.meta is not None else None,
-        ack=result.ack,
-        intent_seq=result.intent_seq,
-        last_client_id=result.last_client_id or result.client_id,
-        last_client_seq=result.last_client_seq,
+    scene_dict = spec.to_dict()
+
+    viewer_block = _build_viewer_block(scene_dict, viewer_settings)
+    layers_block = tuple(layer.to_dict() for layer in spec.layers)
+    policies_block = _build_policies_block(scene)
+    ancillary_block = _build_ancillary_block(scene_dict, scene, ancillary)
+
+    return NotifyScenePayload(
+        viewer=viewer_block,
+        layers=layers_block,
+        policies=policies_block,
+        ancillary=ancillary_block,
     )
-    payload = message.to_dict()
-
-    if include_control_versions:
-        versions = _control_versions(scene, result.scope, result.target, result.key)
-        if versions:
-            payload["control_versions"] = versions
-
-    if result.scope == "layer":
-        _inject_layer_context(scene, manager, payload, result)
-    elif result.scope == "dims":
-        _inject_dims_context(result, payload)
-
-    return payload
 
 
-def _control_versions(
-    scene: ServerSceneData, scope: str, target: str, key: str
-) -> Optional[Dict[str, Dict[str, Any]]]:
-    meta = scene.control_meta.get((str(scope), str(target), str(key)))
-    if meta is None:
-        return None
-    entry = {
-        "server_seq": meta.last_server_seq or None,
-        "source_client_id": meta.last_client_id,
-        "source_client_seq": meta.last_client_seq,
-        "interaction_id": meta.last_interaction_id,
-        "phase": meta.last_phase,
-    }
-    return {str(key): entry}
+def build_notify_layers_delta_payload(result: StateUpdateResult) -> NotifyLayersPayload:
+    """Convert a single layer result into a `notify.layers` payload."""
+
+    return build_notify_layers_payload(
+        layer_id=result.target,
+        changes={result.key: _normalize_value(result.value)},
+    )
 
 
-def _inject_layer_context(
-    scene: ServerSceneData,
-    manager: ViewerSceneManager,
-    payload: Dict[str, Any],
-    result: StateUpdateResult,
-) -> None:
-    """Attach layer metadata to the payload for observability."""
+def build_notify_layers_payload(
+    *, layer_id: str, changes: Mapping[str, Any]
+) -> NotifyLayersPayload:
+    return NotifyLayersPayload(
+        layer_id=str(layer_id),
+        changes={key: _normalize_value(value) for key, value in changes.items()},
+    )
 
-    layer_id = result.target
-    control_state = scene.layer_controls.get(layer_id)
+
+def build_layer_controls_payload(layer_id: str, state: ServerSceneData) -> NotifyLayersPayload | None:
+    control_state = state.layer_controls.get(layer_id)
     if control_state is None:
-        return
-
+        return None
     controls = layer_controls_to_dict(control_state)
-    if controls:
-        payload.setdefault("controls", controls)
-
-    spec = manager.scene_spec()
-    if spec is None:
-        return
-    match = next((layer for layer in spec.layers or [] if layer.layer_id == layer_id), None)
-    if match is None:
-        return
-    patch_dict = match.to_dict()
-    extras = patch_dict.get("extras") or {}
-    extras = {
-        key: value
-        for key, value in extras.items()
-        if key not in CONTROL_KEYS
-    }
-    if extras:
-        payload.setdefault("extras", extras)
+    if not controls:
+        return None
+    return build_notify_layers_payload(layer_id=layer_id, changes=controls)
 
 
-def _inject_dims_context(result: StateUpdateResult, payload: Dict[str, Any]) -> None:
-    """Attach dims extras to the payload if supplied."""
+def build_notify_dims_payload(
+    *,
+    current_step: Sequence[int],
+    ndisplay: int,
+    mode: str,
+    source: str,
+) -> NotifyDimsPayload:
+    return NotifyDimsPayload(
+        current_step=tuple(int(x) for x in current_step),
+        ndisplay=int(ndisplay),
+        mode=str(mode),
+        source=str(source),
+    )
 
-    extras = payload.get("extras")
-    if not isinstance(extras, dict):
-        extras = {}
-        payload["extras"] = extras
 
-    if result.axis_index is not None:
-        axis_idx = int(result.axis_index)
-        payload.setdefault("axis_index", axis_idx)
-        extras.setdefault("axis_index", axis_idx)
-    if result.current_step is not None:
-        current_step = [int(x) for x in result.current_step]
-        payload.setdefault("current_step", current_step)
-        extras.setdefault("current_step", current_step)
-    if result.meta is not None:
-        meta = dict(result.meta)
-        payload.setdefault("meta", meta)
-        extras.setdefault("meta", dict(meta))
-        if "ndisplay" in meta:
-            extras.setdefault("ndisplay", meta.get("ndisplay"))
-    if result.last_client_id is not None:
-        payload.setdefault("last_client_id", result.last_client_id)
-    if result.last_client_seq is not None:
-        payload.setdefault("last_client_seq", int(result.last_client_seq))
-    if result.ack is not None:
-        payload.setdefault("ack", bool(result.ack))
-    if result.intent_seq is not None:
-        payload.setdefault("intent_seq", int(result.intent_seq))
+def build_notify_dims_from_result(
+    result: StateUpdateResult,
+    *,
+    ndisplay: int,
+    mode: str,
+    source: str,
+) -> NotifyDimsPayload:
+    step = result.current_step or tuple()
+    return build_notify_dims_payload(
+        current_step=step,
+        ndisplay=ndisplay,
+        mode=mode,
+        source=source,
+    )
+
+
+def _normalize_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_normalize_value(v) for v in value]
+    if isinstance(value, list):
+        return [_normalize_value(v) for v in value]
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_value(v) for k, v in value.items()}
+    return value
+
+
+def _build_viewer_block(
+    scene_dict: Mapping[str, Any],
+    viewer_settings: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    viewer: Dict[str, Any] = {}
+
+    dims_block = scene_dict.get("dims")
+    viewer["dims"] = dict(dims_block) if isinstance(dims_block, Mapping) else {}
+
+    camera_block = scene_dict.get("camera")
+    viewer["camera"] = dict(camera_block) if isinstance(camera_block, Mapping) else {}
+
+    settings: Dict[str, Any] = {}
+    if isinstance(viewer_settings, Mapping):
+        for key, value in viewer_settings.items():
+            normalized = _normalize_value(value)
+            if normalized is not None:
+                settings[str(key)] = normalized
+    if not settings:
+        settings = {}
+    viewer["settings"] = settings
+    return viewer
+
+
+def _build_policies_block(scene: ServerSceneData) -> Optional[Dict[str, Any]]:
+    policies: Dict[str, Any] = {}
+    multiscale = scene.multiscale_state or {}
+    if isinstance(multiscale, Mapping):
+        policy_payload: Dict[str, Any] = {}
+        policy = multiscale.get("policy")
+        if policy is not None:
+            policy_payload["policy"] = str(policy)
+        current_level = multiscale.get("current_level")
+        if current_level is not None:
+            try:
+                policy_payload["active_level"] = int(current_level)
+            except Exception:
+                policy_payload["active_level"] = current_level
+        downgraded = multiscale.get("downgraded")
+        if downgraded is not None:
+            policy_payload["downgraded"] = bool(downgraded)
+        index_space = multiscale.get("index_space")
+        if index_space is not None:
+            policy_payload["index_space"] = str(index_space)
+        levels = multiscale.get("levels")
+        if isinstance(levels, Sequence):
+            level_payload = []
+            for entry in levels:
+                if isinstance(entry, Mapping):
+                    level_payload.append({str(k): _normalize_value(v) for k, v in entry.items()})
+            if level_payload:
+                policy_payload["levels"] = level_payload
+        if policy_payload:
+            policies["multiscale"] = policy_payload
+
+    return policies or None
+
+
+def _build_ancillary_block(
+    scene_dict: Mapping[str, Any],
+    scene: ServerSceneData,
+    ancillary: Optional[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    payload: Dict[str, Any] = {}
+
+    metadata = scene_dict.get("metadata")
+    if isinstance(metadata, Mapping) and metadata:
+        payload["metadata"] = {str(k): _normalize_value(v) for k, v in metadata.items() if v is not None}
+
+    capabilities = scene_dict.get("capabilities")
+    if isinstance(capabilities, Sequence):
+        caps = [str(item) for item in capabilities if item is not None]
+        if caps:
+            payload["capabilities"] = caps
+
+    if scene.volume_state:
+        payload["volume_state"] = {str(k): _normalize_value(v) for k, v in scene.volume_state.items() if v is not None}
+
+    if scene.policy_metrics_snapshot:
+        payload["policy_metrics"] = {
+            str(k): _normalize_value(v)
+            for k, v in scene.policy_metrics_snapshot.items()
+            if v is not None
+        }
+
+    if isinstance(ancillary, Mapping):
+        for key, value in ancillary.items():
+            payload[str(key)] = _normalize_value(value)
+
+    return payload or None

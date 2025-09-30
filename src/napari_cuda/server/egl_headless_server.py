@@ -108,9 +108,11 @@ from napari_cuda.server.config import (
     ServerCtx,
     load_server_ctx,
 )
+from napari_cuda.protocol import NotifyStreamPayload
 from . import pixel_broadcaster, pixel_channel, metrics_server
 from .state_channel_handler import (
     broadcast_dims_update,
+    broadcast_stream_config,
     handle_state,
     process_worker_notifications,
     rebroadcast_meta,
@@ -120,8 +122,6 @@ from .worker_lifecycle import (
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
-from .protocol_bridge import encode_envelope_json
-
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
@@ -212,7 +212,7 @@ class EGLHeadlessServer:
         )
         self._pixel_channel = pixel_channel.PixelChannelState(
             broadcast=broadcast_state,
-            needs_config=True,
+            needs_stream_config=True,
             last_avcc=None,
             kf_watchdog_cooldown_s=self._pixel_config.kf_watchdog_cooldown_s,
         )
@@ -384,7 +384,7 @@ class EGLHeadlessServer:
             metrics=self.metrics,
             try_force_idr=self._try_force_idr,
             reset_encoder=self._try_reset_encoder,
-            send_state_json=self._broadcast_state_json,
+            send_stream=self._broadcast_stream_config,
         )
 
     async def _handle_set_ndisplay(self, ndisplay: int, client_id: Optional[str], client_seq: Optional[int]) -> None:
@@ -413,7 +413,7 @@ class EGLHeadlessServer:
                 try:
                     if self._try_force_idr():
                         self._pixel_channel.broadcast.bypass_until_key = True
-                        pixel_channel.mark_config_dirty(self._pixel_channel)
+                        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
                 except Exception:
                     logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
             except Exception:
@@ -677,7 +677,7 @@ class EGLHeadlessServer:
             config=self._pixel_config,
             metrics=self.metrics,
             reset_encoder=self._try_reset_encoder,
-            send_state_json=self._broadcast_state_json,
+            send_stream=self._broadcast_stream_config,
             on_clients_change=self._update_client_gauges,
         )
 
@@ -721,27 +721,8 @@ class EGLHeadlessServer:
 
         return json_payload
 
-    async def _broadcast_state_json(self, obj: dict) -> None:
-        if not self._state_clients:
-            return
-        try:
-            envelope = encode_envelope_json(obj)
-        except Exception:
-            logger.debug("notify envelope encode failed", exc_info=True)
-            return
-        if not envelope:
-            logger.debug(
-                "Dropping state payload without notify envelope: type=%s",
-                obj.get("type"),
-            )
-            return
-        coros = [self._state_send(client, envelope) for client in list(self._state_clients)]
-        try:
-            await asyncio.gather(*coros, return_exceptions=True)
-        except Exception as e:
-            logger.debug("State broadcast error: %s", e)
-
-
+    async def _broadcast_stream_config(self, payload: NotifyStreamPayload) -> None:
+        await broadcast_stream_config(self, payload=payload)
 
     async def _state_send(self, ws: websockets.WebSocketServerProtocol, text: str) -> None:
         try:

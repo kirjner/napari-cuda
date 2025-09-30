@@ -45,7 +45,7 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(state_channel_handler, 'broadcast_dims_update', _fake_broadcast)
-    monkeypatch.setattr(server, '_broadcast_state_json', _noop)
+    monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 
     asyncio.run(server._handle_set_ndisplay(3, client_id='c1', client_seq=1))
