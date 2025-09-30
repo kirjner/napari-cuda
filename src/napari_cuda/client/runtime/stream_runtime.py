@@ -17,7 +17,6 @@ from qtpy import QtCore
 from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, SourceMux
 from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
-from napari_cuda.client.control.control_channel_client import StateChannel
 from napari_cuda.client.streaming.types import Source, SubmittedFrame
 from napari_cuda.client.streaming.renderer import GLRenderer
 from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
@@ -63,6 +62,7 @@ from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from napari_cuda.client.control.control_channel_client import StateChannel
     from napari_cuda.client.streaming.config import ClientConfig
 
 logger = logging.getLogger(__name__)

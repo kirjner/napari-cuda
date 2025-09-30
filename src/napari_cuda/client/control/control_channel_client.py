@@ -5,10 +5,11 @@ import base64
 import json
 import logging
 import os
-import time
-from typing import Callable, Optional
+import platform
 import threading
+import time
 from dataclasses import dataclass
+from typing import Callable, Mapping, Optional
 
 import websockets
 
@@ -21,16 +22,14 @@ from napari_cuda.client.streaming.dims_payload import inflate_current_step, norm
 
 from napari_cuda.protocol import (
     NOTIFY_SCENE_TYPE,
-    NOTIFY_STATE_TYPE,
     NOTIFY_STREAM_TYPE,
     EnvelopeParser,
-    PROTO_VERSION,
     SESSION_REJECT_TYPE,
     SESSION_WELCOME_TYPE,
-    SessionHello,
-    SessionHelloPayload,
+    HelloClientInfo,
     SessionReject,
     SessionWelcome,
+    build_session_hello,
 )
 from napari_cuda.protocol.messages import (
     LAYER_REMOVE_TYPE,
@@ -78,11 +77,15 @@ _STATE_DEBUG = _maybe_enable_debug_logger()
 _ENVELOPE_PARSER = EnvelopeParser()
 
 _HANDSHAKE_TIMEOUT_S = 5.0
+_RESUMABLE_TOPICS = ("notify.scene", "notify.layers", "notify.stream")
 _REQUIRED_FEATURES = {
-    "notify_state": True,
-    "notify_scene": True,
-    "notify_stream": True,
+    "notify.scene": True,
+    "notify.layers": True,
+    "notify.stream": True,
+    "notify.dims": True,
+    "notify.camera": True,
 }
+_LEGACY_NOTIFY_STATE_TYPE = "notify.state"
 
 
 class StateChannel:
@@ -280,8 +283,12 @@ class StateChannel:
         raw_type = data.get('type')
         msg_type = (raw_type or '').lower()
 
-        if msg_type == NOTIFY_STATE_TYPE:
-            self._handle_notify_state(data)
+        if msg_type == _LEGACY_NOTIFY_STATE_TYPE:
+            self._handle_legacy_notify_state(data)
+            return
+
+        if msg_type == STATE_UPDATE_TYPE:
+            self._handle_state_update_frame(data)
             return
 
         if msg_type == NOTIFY_SCENE_TYPE:
@@ -401,12 +408,15 @@ class StateChannel:
                     logger.debug("handle_state_update callback failed", exc_info=True)
             return
 
-    def _handle_notify_state(self, data: dict) -> None:
+    def _handle_legacy_notify_state(self, data: dict) -> None:
         if not self.handle_state_update:
             return
         try:
-            envelope = _ENVELOPE_PARSER.parse_notify_state(data)
-            update = envelope.payload
+            payload_block = data.get('payload')
+            if isinstance(payload_block, dict):
+                update = StateUpdateMessage.from_dict(dict(payload_block))
+            else:
+                update = StateUpdateMessage.from_dict(dict(data))
             if _STATE_DEBUG:
                 logger.debug(
                     "received notify.state: scope=%s target=%s key=%s phase=%s",
@@ -419,19 +429,44 @@ class StateChannel:
         except Exception:
             logger.debug("notify.state dispatch failed", exc_info=True)
 
+    def _handle_state_update_frame(self, data: Mapping[str, Any]) -> None:
+        if not self.handle_state_update:
+            return
+        try:
+            frame = _ENVELOPE_PARSER.parse_state_update(data)
+            payload = frame.payload
+            update = StateUpdateMessage.from_dict(
+                {
+                    'scope': payload.scope,
+                    'target': payload.target,
+                    'key': payload.key,
+                    'value': payload.value,
+                }
+            )
+            if _STATE_DEBUG:
+                logger.debug(
+                    "received state.update frame: scope=%s target=%s key=%s",
+                    update.scope,
+                    update.target,
+                    update.key,
+                )
+            self.handle_state_update(update)
+        except Exception:
+            logger.debug("state.update dispatch failed", exc_info=True)
+
     async def _perform_handshake(self, ws: websockets.WebSocketClientProtocol) -> None:
         """Exchange the session handshake with the state server before use."""
 
-        hello_payload = SessionHelloPayload(
-            protocol=PROTO_VERSION,
-            client={
-                "name": "napari-cuda-client",
-                "version": _NAPARI_CUDA_VERSION,
-            },
-            extras={"features": dict(_REQUIRED_FEATURES)},
+        client_info = HelloClientInfo(
+            name="napari-cuda-client",
+            version=_NAPARI_CUDA_VERSION,
+            platform=platform.platform(),
         )
-        hello = SessionHello(
-            payload=hello_payload,
+        resume_tokens = {topic: None for topic in _RESUMABLE_TOPICS}
+        hello = build_session_hello(
+            client=client_info,
+            features=_REQUIRED_FEATURES,
+            resume_tokens=resume_tokens,
             timestamp=time.time(),
         )
         text = json.dumps(hello.to_dict(), separators=(",", ":"))
@@ -460,12 +495,10 @@ class StateChannel:
         msg_type = str(data.get("type") or "").lower()
         if msg_type == SESSION_WELCOME_TYPE:
             welcome = SessionWelcome.from_dict(data)
-            session_info = welcome.payload.session or {}
-            features = session_info.get("features") if isinstance(session_info, dict) else None
-            if isinstance(features, dict):
-                enabled = sorted(name for name, value in features.items() if value)
-            else:
-                enabled = None
+            feature_toggles = welcome.payload.features
+            enabled = sorted(
+                name for name, toggle in feature_toggles.items() if getattr(toggle, "enabled", False)
+            )
             logger.info("State handshake accepted; features=%s", enabled or "unknown")
             return
 
@@ -518,19 +551,16 @@ class StateChannel:
             config: dict[str, object] = {
                 'type': 'video_config',
                 'codec': payload.codec,
+                'format': payload.format,
+                'fps': payload.fps,
+                'width': payload.frame_size[0],
+                'height': payload.frame_size[1],
+                'nal_length_size': payload.nal_length_size,
+                'avcc': payload.avcc,
+                'latency_policy': dict(payload.latency_policy),
             }
-            if payload.fps is not None:
-                config['fps'] = payload.fps
-            if payload.width is not None:
-                config['width'] = payload.width
-            if payload.height is not None:
-                config['height'] = payload.height
-            if payload.bitrate is not None:
-                config['bitrate'] = payload.bitrate
-            if payload.idr_interval is not None:
-                config['idr_interval'] = payload.idr_interval
-            if payload.extras:
-                config.update(dict(payload.extras))
+            if payload.vt_hint is not None:
+                config['vt_hint'] = dict(payload.vt_hint)
             self.handle_video_config(config)  # type: ignore[arg-type]
         except Exception:
             logger.debug("notify.stream dispatch failed", exc_info=True)

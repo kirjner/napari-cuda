@@ -18,13 +18,14 @@ from numbers import Integral
 
 from napari_cuda.protocol import (
     EnvelopeParser,
+    FeatureToggle,
     PROTO_VERSION,
     SESSION_HELLO_TYPE,
     SessionHello,
     SessionReject,
-    SessionRejectPayload,
     SessionWelcome,
-    SessionWelcomePayload,
+    build_session_reject,
+    build_session_welcome,
 )
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE, StateUpdateMessage
 from napari_cuda.server.control import state_update_engine as state_updates
@@ -53,7 +54,16 @@ from napari_cuda.server.control.legacy_dual_emitter import encode_envelope_json
 logger = logging.getLogger(__name__)
 
 _HANDSHAKE_TIMEOUT_S = 5.0
-_REQUIRED_NOTIFY_FEATURES = ("notify_state", "notify_scene", "notify_stream")
+_REQUIRED_NOTIFY_FEATURES = ("notify.scene", "notify.layers", "notify.stream")
+_SERVER_FEATURES: dict[str, FeatureToggle] = {
+    "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+    "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
+    "notify.telemetry": FeatureToggle(enabled=False),
+    "call.command": FeatureToggle(enabled=False),
+}
 _ENVELOPE_PARSER = EnvelopeParser()
 
 StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
@@ -1130,19 +1140,19 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         )
         return False
 
-    protocol = int(hello.payload.protocol)
-    if protocol != PROTO_VERSION:
+    client_protocols = hello.payload.protocols
+    if PROTO_VERSION not in client_protocols:
         await _send_handshake_reject(
             server,
             ws,
             code="protocol_mismatch",
             message=f"server requires protocol {PROTO_VERSION}",
-            details={"client_protocol": protocol},
+            details={"client_protocols": list(client_protocols)},
         )
         return False
 
-    features = _resolve_handshake_features(hello)
-    missing = [name for name in _REQUIRED_NOTIFY_FEATURES if not features.get(name)]
+    negotiated_features = _resolve_handshake_features(hello)
+    missing = [name for name in _REQUIRED_NOTIFY_FEATURES if not negotiated_features[name].enabled]
     if missing:
         await _send_handshake_reject(
             server,
@@ -1154,14 +1164,13 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         return False
 
     session_id = str(uuid.uuid4())
-    welcome = SessionWelcome(
-        payload=SessionWelcomePayload(
-            protocol=PROTO_VERSION,
-            session={
-                "id": session_id,
-                "features": features,
-            },
-        ),
+    heartbeat_s = getattr(server, "state_heartbeat_s", 15.0)
+    ack_timeout_ms = getattr(server, "state_ack_timeout_ms", 250)
+    welcome = build_session_welcome(
+        session_id=session_id,
+        heartbeat_s=heartbeat_s,
+        ack_timeout_ms=ack_timeout_ms,
+        features=negotiated_features,
         timestamp=time.time(),
     )
 
@@ -1172,29 +1181,31 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         return False
 
     setattr(ws, "_napari_cuda_session", session_id)
-    setattr(ws, "_napari_cuda_features", features)
+    setattr(ws, "_napari_cuda_features", negotiated_features)
+    setattr(ws, "_napari_cuda_resume_tokens", hello.payload.resume_tokens)
 
-    client_info = hello.payload.client or {}
-    client_name = str(client_info.get("name") or "client")
-    client_version = client_info.get("version")
+    client_info = hello.payload.client
+    client_name = client_info.name
+    client_version = client_info.version
     logger.info(
         "state handshake accepted name=%s version=%s features=%s",
         client_name,
         client_version,
-        sorted(key for key, enabled in features.items() if enabled),
+        sorted(name for name, toggle in negotiated_features.items() if toggle.enabled),
     )
 
     return True
 
 
-def _resolve_handshake_features(hello: SessionHello) -> Dict[str, bool]:
-    features: Dict[str, bool] = {name: True for name in _REQUIRED_NOTIFY_FEATURES}
-    extras = hello.payload.extras or {}
-    extras_features = extras.get("features") if isinstance(extras, Mapping) else None
-    if isinstance(extras_features, Mapping):
-        for key, value in extras_features.items():
-            features[str(key)] = bool(value)
-    return features
+def _resolve_handshake_features(hello: SessionHello) -> Dict[str, FeatureToggle]:
+    client_features = hello.payload.features
+    negotiated: Dict[str, FeatureToggle] = {}
+    for name, server_toggle in _SERVER_FEATURES.items():
+        client_enabled = client_features.get(name, False)
+        # Required features must be explicitly true; optional ones inherit server toggle.
+        enabled = server_toggle.enabled and (client_enabled or name not in _REQUIRED_NOTIFY_FEATURES)
+        negotiated[name] = replace(server_toggle, enabled=enabled)
+    return negotiated
 
 
 async def _send_handshake_envelope(server: Any, ws: Any, envelope: SessionWelcome | SessionReject) -> None:
@@ -1210,12 +1221,10 @@ async def _send_handshake_reject(
     message: str,
     details: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    reject = SessionReject(
-        payload=SessionRejectPayload(
-            code=str(code),
-            message=str(message),
-            details=dict(details) if details else None,
-        ),
+    reject = build_session_reject(
+        code=str(code),
+        message=str(message),
+        details=dict(details) if details else None,
         timestamp=time.time(),
     )
     try:

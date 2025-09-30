@@ -11,6 +11,7 @@ from threading import Thread
 from typing import Callable, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    from napari_cuda.client.control.control_channel_client import StateChannel
     from napari_cuda.protocol.messages import (
         LayerRemoveMessage,
         LayerUpdateMessage,
@@ -19,7 +20,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing aid only
     )
 
 from napari_cuda.client.streaming.receiver import PixelReceiver
-from napari_cuda.client.control.control_channel_client import StateChannel
 
 
 @dataclass
@@ -35,7 +35,9 @@ class StateController:
     handle_connected: Optional[Callable[[], None]] = None
     handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None
 
-    def start(self) -> Tuple[StateChannel, Thread]:
+    def start(self) -> Tuple["StateChannel", Thread]:
+        from napari_cuda.client.control.control_channel_client import StateChannel
+
         ch = StateChannel(
             self.host,
             int(self.port),
@@ -52,7 +54,7 @@ class StateController:
         t.start()
         return ch, t
 
-    def stop(self, channel: StateChannel, thread: Thread, timeout: float = 2.0) -> None:
+    def stop(self, channel: "StateChannel", thread: Thread, timeout: float = 2.0) -> None:
         try:
             channel.stop()
         except Exception:

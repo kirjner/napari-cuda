@@ -5,13 +5,7 @@ import pytest
 pytest.importorskip("websockets")
 
 from napari_cuda.client.control.control_channel_client import StateChannel
-from napari_cuda.protocol import (
-    NotifyScene,
-    NotifyScenePayload,
-    NotifyState,
-    NotifyStream,
-    NotifyStreamPayload,
-)
+from napari_cuda.protocol import build_notify_stream, build_state_update
 from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerSpec,
@@ -119,12 +113,15 @@ def test_state_channel_notify_state_dispatch() -> None:
     captured: list[StateUpdateMessage] = []
     sc = StateChannel('localhost', 8081, handle_state_update=captured.append)
 
-    envelope = NotifyState(
-        payload=StateUpdateMessage(scope='dims', target='z', key='step', value=3),
+    frame = build_state_update(
+        session_id='session-1',
+        intent_id='intent-1',
+        frame_id='state-1',
+        payload={'scope': 'dims', 'target': 'z', 'key': 'step', 'value': 3},
         timestamp=1.23,
     )
 
-    sc._handle_message(envelope.to_dict())
+    sc._handle_message(frame.to_dict())  # type: ignore[arg-type]
 
     assert captured and captured[0].key == 'step'
     assert captured[0].value == 3
@@ -135,12 +132,8 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
     state_channel.handle_scene_spec = received.append
 
     layer = LayerSpec(layer_id='layer-10', layer_type='image', name='demo', ndim=2, shape=[8, 8])
-    envelope = NotifyScene(
-        payload=NotifyScenePayload(
-            version=1,
-            scene=SceneSpec(layers=[layer]),
-            state={'capabilities': ['notify.state']},
-        ),
+    envelope = SceneSpecMessage(
+        scene=SceneSpec(layers=[layer]),
         timestamp=2.0,
     )
 
@@ -154,18 +147,24 @@ def test_state_channel_notify_stream_dispatch() -> None:
     configs: list[dict] = []
     sc = StateChannel('localhost', 8081, handle_video_config=configs.append)
 
-    envelope = NotifyStream(
-        payload=NotifyStreamPayload(
-            codec='h264',
-            fps=30.0,
-            width=1920,
-            height=1080,
-            extras={'format': 'avcc', 'data': 'AAA='},
-        ),
+    stream_payload = {
+        'codec': 'h264',
+        'format': 'avcc',
+        'fps': 30.0,
+        'frame_size': [1920, 1080],
+        'nal_length_size': 4,
+        'avcc': 'AAA=',
+        'latency_policy': {'max_buffer_ms': 120, 'grace_keyframe_ms': 500},
+    }
+    frame = build_notify_stream(
+        session_id='sess',
+        seq=1,
+        delta_token='tok-stream',
+        payload=stream_payload,
         timestamp=3.14,
     )
 
-    sc._handle_message(envelope.to_dict())
+    sc._handle_message(frame.to_dict())
 
     assert configs and configs[0]['type'] == 'video_config'
     assert configs[0]['codec'] == 'h264'

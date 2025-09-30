@@ -434,3 +434,134 @@ when the operation is documented as idempotent.
 Integration harnesses should replay golden snapshots, inject packet loss, and
 assert that the client’s `ClientState` matches the server’s authoritative scene
 throughout reconnects and command flows.
+
+## Appendix A. Frame & Payload Reference
+
+The tables below restate the envelope and payload requirements from §§2–14 so
+implementations can translate code directly from these checklists without
+re-parsing the prose.
+
+### A.1 Session Frames
+
+| Frame | Envelope fields | Payload schema | Notes |
+|-------|-----------------|----------------|-------|
+| `session.hello` | `type`, `version`, `frame_id`, `timestamp`; **no** `session` yet | `protocols` (list[int]); `client` (`name`, `version`, `platform`); `features` (topic→bool); `resume_tokens` (topic→str or null); optional `auth` (`type`, `token` or MTLS placeholder) | `frame_id` required for observability; clients may omit features they do not support. |
+| `session.welcome` | `type`, `version`, `session`, `frame_id`, `timestamp` | `protocol_version`; `session` (`id`, `heartbeat_s`, optional `ack_timeout_ms`); `features` per topic (`enabled`, `version`, `resume`, optional `commands` list) | Server echoes negotiated capabilities; snapshot seq resets follow immediately after welcome. |
+| `session.reject` | `type`, `version`, `frame_id`, `timestamp` | `code`, `message`, optional `details` object | Socket closes after reject; no `session` field because handshake failed. |
+| `session.heartbeat` | `type`, `version`, `session`, `frame_id`, `timestamp` | *(empty object)* | Server emits every `heartbeat_s`. |
+| `session.ack` | `type`, `version`, `session`, `frame_id`, `timestamp` | *(empty object)* | Client replies unless it sent another frame within the window. |
+| `session.goodbye` | `type`, `version`, `session`, `frame_id`, `timestamp` | Optional `code`, `message`, `reason` | Emitted on graceful shutdown or after critical errors. |
+
+### A.2 Notify Frames
+
+| Frame | Envelope fields | Payload schema | Notes |
+|-------|-----------------|----------------|-------|
+| `notify.scene` | `type`, `version`, `session`, `frame_id` optional, **requires** `seq`, `delta_token`, `timestamp` | Full snapshot: `viewer` (dims/camera/settings), `layers[]` (id/type/name + metadata/render/multiscale), `policies`, optional ancillary sections | Snapshot baseline always uses `seq = 0`; issuing a snapshot resets seq/token for every resumable topic. |
+| `notify.layers` | `type`, `version`, `session`, optional `frame_id`, **requires** `seq`, `delta_token`, `timestamp` | `layer_id`; `changes` dict describing delta fields | Ring buffer retention: min(512 deltas, 5 minutes). If token stale, server sends fresh snapshot + new deltas. |
+| `notify.stream` | `type`, `version`, `session`, optional `frame_id`, **requires** `seq`, `delta_token`, `timestamp` | `codec`, `format`, `fps`, `frame_size`, `nal_length_size`, `avcc`, `latency_policy`, `vt_hint` | Latest config supersedes prior tokens; seq resets with every new snapshot epoch. |
+| `notify.dims` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | `current_step`; `ndisplay`; `mode`; `source`; optional `intent_id` | If triggered by local intent, server echoes the `intent_id`; otherwise include an 8-char `frame_id` for observability. |
+| `notify.camera` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | `mode`; `delta` (orbit/pan/zoom deltas); `origin`; optional `intent_id` | Hot-path frames target ≤ 200 B payloads. |
+| `notify.telemetry` | `type`, `version`, `session`, `timestamp`; omit `seq`/`delta_token` | Rolling stats: `presenter`, `decode`, `queue_depth` numeric fields | High-rate diagnostics; clients may drop if disabled. |
+| `notify.error` | `type`, `version`, `session`, `timestamp`; optional `frame_id` | `domain`; `code`; `message`; `severity` (`info`, `warning`, `critical`); optional `context` map | Severity `critical` must be followed by `session.goodbye` and coordinated channel teardown. |
+
+### A.3 State Lane
+
+| Frame | Envelope fields | Payload schema | Notes |
+|-------|-----------------|----------------|-------|
+| `state.update` | `type`, `version`, `session`, `frame_id`, `timestamp`, `intent_id` | `scope`; `target`; `key`; `value` (schema varies by scope) | No legacy `extras`/`controls`; clients obey `ack_timeout_ms` from welcome. |
+| `ack.state` | `type`, `version`, `session`, `frame_id`, `timestamp` | `intent_id`; `in_reply_to`; `status` (`accepted`, `rejected`); optional `applied_value`; on rejection `error` (`code`, `message`, optional `details`) | Servers aim for 50 ms response; hard timeout is `ack_timeout_ms` (default 250 ms). |
+
+### A.4 Command Lane
+
+| Frame | Envelope fields | Payload schema | Notes |
+|-------|-----------------|----------------|-------|
+| `call.command` | `type`, `version`, `session`, `frame_id`, `timestamp` | `command` string; `args` list; `kwargs` dict; optional `origin` | Non-idempotent unless server returns explicit `idempotency_key`. |
+| `reply.command` | `type`, `version`, `session`, `frame_id`, `timestamp` | `in_reply_to`; `status = "ok"`; optional `result`; optional `idempotency_key` | Positive acknowledgement; resulting state still flows via notify lanes. |
+| `error.command` | `type`, `version`, `session`, `frame_id`, `timestamp` | `in_reply_to`; `status = "error"`; `code`; `message`; optional `details` map | Codes include `command.forbidden`, `command.not_found`, `command.retryable`. |
+
+### A.5 Sequencing, Resumability, and Identifiers
+
+- Resumable topics (`notify.scene`, `notify.layers`, `notify.stream`) require both
+  `seq` and `delta_token`. `notify.scene` snapshots reset their own `seq` to 0 and
+  start a new epoch for the other resumable topics (they must also reset `seq` and
+  issue fresh tokens).
+- Non-resumable topics (`notify.dims`, `notify.camera`, `notify.telemetry`,
+  `notify.error`) omit `seq`/`delta_token`. `notify.dims` and `notify.camera` must
+  include either the triggering `intent_id` or a short `frame_id` for duplicate
+  detection.
+- `frame_id` is mandatory for every lane that expects acknowledgements
+  (`state.update`, `ack.state`, `call.command`, `reply.command`, `error.command`).
+- Clients persist the latest `seq`/`delta_token` per resumable topic and send them
+  in `session.hello.resume_tokens`. Servers either replay deltas or emit a new
+  snapshot and tokens.
+- `notify.error` with `severity = "critical"` obligates the server to flush any
+  outstanding `ack.state` / `reply.command` / `error.command` frames before sending
+  `session.goodbye` and closing both state and pixel sockets (pixel closes with
+  code `1011`).
+
+## Appendix B. Envelope Construction Checklist
+
+Use this checklist when emitting or parsing frames so envelope fields never drift
+from the spec. Think of it as the builder/parsing contract that the helpers in
+`napari_cuda.protocol.greenfield.envelopes` must enforce.
+
+### B.1 Core Rules (apply to every frame)
+
+- Set `version = 1` everywhere. There is no shortcut even for legacy shim traffic.
+- Always populate `timestamp` with `time.time()` (float seconds, microsecond
+  precision). Helpers should never allow a missing timestamp.
+- Only include `session` after the server emits `session.welcome`. Handshake
+  frames prior to welcome (`session.hello`, `session.reject`) must omit it.
+- `frame_id` is mandatory for every acked lane (`state.update`, `ack.state`,
+  `call.command`, `reply.command`, `error.command`) and for heartbeat frames. For
+  hot-path notify lanes (`notify.dims`, `notify.camera`) emit either the triggering
+  `intent_id` or a short 8-char `frame_id`.
+- `seq` and `delta_token` appear **only** on resumable topics: `notify.scene`,
+  `notify.layers`, `notify.stream`. All other lanes must omit them.
+- `intent_id` is permitted on notify lanes only when the frame is a direct echo of
+  a client intent. Never invent an `intent_id` for server-originated deltas.
+- Snapshots (`notify.scene`) reset their own `seq` to `0` and invalidate every
+  cached resume token. Emit fresh tokens for the next frames.
+
+### B.2 Envelope Field Matrix
+
+| Lane / Type | Requires `session`? | Requires `frame_id`? | Requires `seq`/`delta_token`? | Allows `intent_id`? | Extra Notes |
+|-------------|---------------------|-----------------------|-------------------------------|---------------------|-------------|
+| `session.hello` | ✗ | ✓ | ✗ | ✗ | Pre-session handshake; only `frame_id` + `timestamp`.
+| `session.welcome` | ✓ | ✓ | ✗ | ✗ | Sets the session id and advertises resume support per topic.
+| `session.reject` | ✗ | ✓ | ✗ | ✗ | Last frame before closing on handshake failure.
+| `session.heartbeat` | ✓ | ✓ | ✗ | ✗ | Server cadence = `heartbeat_s`.
+| `session.ack` | ✓ | ✓ | ✗ | ✗ | Client replies when no other traffic proves liveness.
+| `session.goodbye` | ✓ | ✓ | ✗ | ✗ | May include optional `code`/`message`.
+| `notify.scene` | ✓ | optional (snapshot or echo) | ✓ | optional | Snapshot baseline; `seq = 0` on new epoch.
+| `notify.layers` | ✓ | optional | ✓ | optional | Ring buffer (≥512 deltas or 5 min retention).
+| `notify.stream` | ✓ | optional | ✓ | ✗ | Latest stream config replaces prior token.
+| `notify.dims` | ✓ | optional* | ✗ | optional* | *Must send either `intent_id` or short `frame_id` (<=8 chars).
+| `notify.camera` | ✓ | optional* | ✗ | optional* | Same rule as dims for identifiers.
+| `notify.telemetry` | ✓ | optional | ✗ | ✗ | High-rate diagnostics; drop when disabled.
+| `notify.error` | ✓ | optional | ✗ | ✗ | `severity="critical"` → send `session.goodbye` after flushing replies.
+| `state.update` | ✓ | ✓ | ✗ | ✓ (required) | Payload drives authoritative state changes.
+| `ack.state` | ✓ | ✓ | ✗ | ✗ (lives in payload) | Payload echoes `intent_id` + `in_reply_to`.
+| `call.command` | ✓ | ✓ | ✗ | ✗ | `frame_id` correlates to reply/error.
+| `reply.command` | ✓ | ✓ | ✗ | ✗ | Include optional `idempotency_key` when safe to retry.
+| `error.command` | ✓ | ✓ | ✗ | ✗ | Provide `error.details` when the client can remediate.
+
+### B.3 Helper Expectations
+
+When rebuilding `protocol.greenfield.envelopes`:
+
+1. **Builder functions** must inject the correct envelope defaults (version,
+   timestamp, identifier strategy) and call the `validate()` methods on the new
+   dataclasses before returning.
+2. **Parser helpers** should fail fast with actionable errors (`ValueError`
+   listing the missing or unexpected envelope fields) before attempting payload
+   hydration.
+3. **Resumable utilities** must centralise `seq` and `delta_token` bookkeeping so
+   every emitter obeys the reset semantics listed above.
+4. **Glue layers** (dual emitters / parser shims) should never mutate the
+   envelopes by hand—call the helpers and trust them to enforce the matrices
+   laid out here.
+
+Treat this appendix as the final word on envelope structure; if runtime pressure
+suggests a different optimisation, update the table and accompanying prose so the
+contract remains unambiguous.

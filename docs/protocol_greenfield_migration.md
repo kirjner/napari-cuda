@@ -18,6 +18,20 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
   behind feature flags or archived modules so the greenfield path stays clear
   and easy to reason about.
 
+## Migration Status (2024-09-29)
+
+- ✅ **Field inventory** – Spec §§2–8 captured in `docs/protocol_greenfield_field_inventory.md` for quick reference.
+- ✅ **Dataclass scaffolding** – `src/napari_cuda/protocol/greenfield/messages.py` now hosts spec-compliant envelopes/payloads with version guards.
+- ✅ **Helper coverage & sequencing** – `protocol/greenfield/envelopes.py` now supplies builders for every session/notify lane plus shared `ResumableTopicSequencer`; parser helpers mirror the full matrix.
+- ✅ **Schema tightening** – All greenfield payloads drop legacy `extras` bags; `from_dict` guards now reject unknown fields to match Appendix A.
+- ⏳ **Spec round-trip tests** – Initial handshake + notify scene/state round-trips live in `src/napari_cuda/protocol/_tests/test_envelopes.py`; expand to the remaining lanes and sequencing edge cases next.
+- ⏳ **Dual emission & shim removal** – Legacy dual emitter still disabled; keep the shims until the new tests land and dual emission is re-enabled.
+
+Pending follow-up:
+
+1. Wire the server/client emitters (e.g. `server/control/legacy_dual_emitter.py`, `server/control/control_channel_server.py`) to the new builders, then re-enable dual emission once resumable sequencing is integrated end-to-end.
+2. After dual emission proves stable, remove the remaining greenfield/legacy shims and update callers to import the explicit modules.
+
 ## 1. Scope & Objectives
 
 - Re-platform the control channel so every client/server exchange uses the
