@@ -49,17 +49,19 @@ from napari_cuda.client.streaming.client_loop.telemetry import (
     create_metrics,
 )
 from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
-from napari_cuda.client.streaming.config import extract_video_config
 from napari_cuda.client.layers import RemoteLayerRegistry, RegistrySnapshot
 from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerSpec,
     LayerUpdateMessage,
+    NotifyDimsFrame,
+    NotifyStreamFrame,
     SceneSpecMessage,
 )
 from napari_cuda.protocol import AckState, build_state_update
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
+from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.control.control_channel_client import StateChannel, SessionMetadata
@@ -272,13 +274,14 @@ class ClientStreamLoop:
 
         # Receiver/state flags
         self._stream_seen_keyframe = False
+        self._keyframe_skip_log_ts: float = 0.0
 
         # Stats/logging and diagnostics
         self._stats_level = self._telemetry_cfg.stats_level
         self._last_stats_time: float = 0.0
         self._relearn_logged: bool = False
         self._last_relearn_log_ts: float = 0.0
-        # Debounce duplicate video_config
+        # Debounce duplicate notify.stream payloads
         self._last_vcfg_key = None
         # Stream continuity and gate tracking
         # Draw pacing diagnostics
@@ -290,7 +293,7 @@ class ClientStreamLoop:
         self._evloop_sample_ms = self._env_cfg.evloop_sample_ms
         self._quit_hook_connected = False
         self._stopped = False
-        # Video dimensions (from video_config)
+        # Video dimensions (from notify.stream)
         self._vid_w: Optional[int] = None
         self._vid_h: Optional[int] = None
         # View HUD diagnostics (for tuning 3D volume controls)
@@ -489,10 +492,10 @@ class ClientStreamLoop:
         cfg_key = (int(width), int(height), avcc)
         # Ignore exact duplicate configs
         if self._last_vcfg_key == cfg_key:
-            logger.debug("Duplicate video_config ignored (%dx%d)", width, height)
+            logger.debug("Duplicate notify.stream payload ignored (%dx%d)", width, height)
             return
         if self._vt_decoder is not None and self._vt_cfg_key == cfg_key:
-            logger.debug("VT already initialized; ignoring duplicate video_config")
+            logger.debug("VT already initialized; ignoring duplicate notify.stream payload")
             return
         # Respect NAPARI_CUDA_VT_BACKEND env: off/0/false disables VT
         backend_env = (os.getenv('NAPARI_CUDA_VT_BACKEND', 'shim') or 'shim').lower()
@@ -524,29 +527,30 @@ class ClientStreamLoop:
         self._loop_state.vt_pipeline.update_nal_length_size(self._nal_length_size)
         logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
 
-    def _request_keyframe_once(self) -> None:
-        ch = self._loop_state.state_channel
-        if ch is not None:
-            ch.request_keyframe_once()
-
     # Extracted helpers
-    def _handle_video_config(self, data: dict) -> None:
-        w, h, fps, fmt, avcc_b64 = extract_video_config(data)
+    def _handle_notify_stream(self, frame: NotifyStreamFrame) -> None:
+        payload = frame.payload
+        fps = float(payload.fps)
         if fps > 0:
             self._fps = fps
+        fmt = str(payload.format)
         self._stream_format = fmt
         self._stream_format_set = True
-        if w > 0 and h > 0 and avcc_b64:
-            # cache video dimensions for input mapping
-            self._vid_w = int(w)
-            self._vid_h = int(h)
-            self._init_vt_from_avcc(avcc_b64, w, h)
+        self._nal_length_size = int(payload.nal_length_size)
+        width, height = payload.frame_size
+        if width > 0 and height > 0:
+            self._vid_w = int(width)
+            self._vid_h = int(height)
+        avcc_b64 = payload.avcc
+        if width > 0 and height > 0 and avcc_b64:
+            # Cache video dimensions for input mapping and prime VT decode
+            self._init_vt_from_avcc(avcc_b64, int(width), int(height))
 
-    def _handle_dims_update(self, data: dict) -> None:
+    def _handle_dims_update(self, frame: NotifyDimsFrame) -> None:
         control_actions.handle_dims_update(
             self._control_state,
             self._loop_state,
-            data,
+            frame,
             presenter=self._presenter_facade,
             viewer_ref=self._viewer_mirror,
             ui_call=self._ui_call,
@@ -554,6 +558,12 @@ class ClientStreamLoop:
             log_dims_info=self._log_dims_info,
             state_store=self._state_store,
         )
+
+    def _log_keyframe_skip(self, reason: str) -> None:
+        now = time.time()
+        if (now - self._keyframe_skip_log_ts) >= 1.0:
+            logger.info("Keyframe request skipped (%s); awaiting server keyframe", reason)
+            self._keyframe_skip_log_ts = now
 
     def _notify_first_dims_ready(self) -> None:
         if self._first_dims_notified:
@@ -606,6 +616,7 @@ class ClientStreamLoop:
         self._control_state.session_id = metadata.session_id
         self._control_state.ack_timeout_ms = metadata.ack_timeout_ms
         self._control_state.intent_counter = 0
+        self._loop_state.state_session_metadata = metadata
         logger.info(
             "State session ready: session_id=%s ack_timeout_ms=%s",
             metadata.session_id,
@@ -685,13 +696,17 @@ class ClientStreamLoop:
     # State channel lifecycle: gate dims state.update traffic safely across reconnects
     def _on_state_connected(self) -> None:
         control_actions.on_state_connected(self._control_state)
-        logger.info("StateChannel connected; gating dims state.update traffic until dims.update meta arrives")
+        logger.info("StateChannel connected; gating dims intents until notify.dims metadata arrives")
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
         control_actions.on_state_disconnected(self._loop_state, self._control_state)
         self._layer_bridge.clear_pending_on_reconnect()
         self._state_store.clear_pending_on_reconnect()
-        logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
+        self._loop_state.state_session_metadata = None
+        if isinstance(exc, HeartbeatAckError):
+            logger.warning("StateChannel disconnect triggered by heartbeat timeout; dims intents gated")
+        else:
+            logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
 
     def _dispatch_state_update(self, pending_update: "PendingUpdate", origin: str) -> bool:
         channel = self._loop_state.state_channel
@@ -1032,14 +1047,14 @@ class ClientStreamLoop:
     def _on_frame(self, pkt: Packet) -> None:
         cur = int(pkt.seq)
         if not (self._loop_state.vt_wait_keyframe or self._loop_state.pyav_wait_keyframe):
-            if self._loop_state.sync.update_and_check(cur):
-                if self._vt_decoder is not None:
-                    self._loop_state.vt_wait_keyframe = True
-                    self._loop_state.vt_pipeline.clear(preserve_cache=True)
-                    self._presenter.clear(Source.VT)
-                    self._request_keyframe_once()
-                self._loop_state.pyav_wait_keyframe = True
-                self._loop_state.pyav_pipeline.clear()
+                if self._loop_state.sync.update_and_check(cur):
+                    if self._vt_decoder is not None:
+                        self._loop_state.vt_wait_keyframe = True
+                        self._loop_state.vt_pipeline.clear(preserve_cache=True)
+                        self._presenter.clear(Source.VT)
+                        self._log_keyframe_skip("stream discontinuity")
+                    self._loop_state.pyav_wait_keyframe = True
+                    self._loop_state.pyav_pipeline.clear()
                 self._presenter.clear(Source.PYAV)
                 self._init_decoder()
                 dec = self.decoder.decode if self.decoder else None
@@ -1076,7 +1091,7 @@ class ClientStreamLoop:
                 # Schedule first wake after VT becomes active (thread-safe)
                 self.schedule_next_wake_threadsafe()
             else:
-                self._request_keyframe_once()
+                self._log_keyframe_skip("vt gate pending")
                 return
         if self._vt_decoder is not None and not self._loop_state.vt_wait_keyframe:
             ts_float = float(pkt.ts)

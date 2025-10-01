@@ -10,7 +10,7 @@ config for downstream components to consume gradually.
 """
 
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 import os
 
 
@@ -83,30 +83,6 @@ class ClientConfig:
             draw_fps=draw_fps,
             preview_guard_ms=preview_guard,
         )
-
-
-def extract_video_config(data: Dict[str, Any]) -> Tuple[int, int, float, str, Optional[str]]:
-    """Return (width, height, fps, stream_format, avcc_b64_or_None).
-
-    - stream_format is 'avcc' or 'annexb'
-    - Missing/invalid fields fall back to safe defaults
-    """
-    try:
-        width = int(data.get('width') or 0)
-    except Exception:
-        width = 0
-    try:
-        height = int(data.get('height') or 0)
-    except Exception:
-        height = 0
-    try:
-        fps = float(data.get('fps') or 0.0)
-    except Exception:
-        fps = 0.0
-    fmt = (str(data.get('format') or '')).lower() or 'avcc'
-    stream_format = 'annexb' if fmt.startswith('annex') else 'avcc'
-    avcc_b64 = data.get('data') if isinstance(data.get('data'), str) else None
-    return width, height, fps, stream_format, avcc_b64
 
 
 def nal_length_size_from_avcc(avcc: bytes) -> int:

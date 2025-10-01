@@ -8,6 +8,7 @@ import logging
 import socket
 import time
 import uuid
+from contextlib import suppress
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
@@ -16,10 +17,10 @@ from websockets.exceptions import ConnectionClosed
 
 from numbers import Integral
 
+# Protocol builders & dataclasses
 from napari_cuda.protocol import (
     EnvelopeParser,
     FeatureToggle,
-    FeatureResumeState,
     PROTO_VERSION,
     NOTIFY_CAMERA_TYPE,
     NOTIFY_DIMS_TYPE,
@@ -28,6 +29,8 @@ from napari_cuda.protocol import (
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
+    SESSION_ACK_TYPE,
+    SESSION_GOODBYE_TYPE,
     SESSION_HELLO_TYPE,
     SessionHello,
     SessionReject,
@@ -48,7 +51,11 @@ from napari_cuda.protocol import (
     build_session_reject,
     build_session_welcome,
 )
-from napari_cuda.protocol import NotifyStreamPayload
+from napari_cuda.protocol.messages import (
+    NotifyLayersPayload,
+    NotifyScenePayload,
+    NotifyStreamPayload,
+)
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
 from napari_cuda.server.control import state_update_engine as state_updates
 from napari_cuda.server.control.state_update_engine import (
@@ -74,6 +81,12 @@ from napari_cuda.server.control.scene_snapshot_builder import (
     build_notify_scene_payload,
 )
 from napari_cuda.server.pixel import pixel_channel_server as pixel_channel
+from napari_cuda.server.control.resumable_history_store import (
+    ResumableHistoryStore,
+    FrameBlueprint,
+    ResumeDecision,
+    ResumePlan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +101,7 @@ _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.telemetry": FeatureToggle(enabled=False),
     "call.command": FeatureToggle(enabled=False),
 }
+_RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
 _ENVELOPE_PARSER = EnvelopeParser()
 
 StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
@@ -95,6 +109,113 @@ StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
 
 def _state_session(ws: Any) -> Optional[str]:
     return getattr(ws, "_napari_cuda_session", None)
+
+
+def _history_store(server: Any) -> Optional[ResumableHistoryStore]:
+    store = getattr(server, "_resumable_store", None)
+    if isinstance(store, ResumableHistoryStore):
+        return store
+    return None
+
+
+def _mark_client_activity(ws: Any) -> None:
+    now = time.time()
+    setattr(ws, "_napari_cuda_last_activity", now)
+    setattr(ws, "_napari_cuda_waiting_ack", False)
+    setattr(ws, "_napari_cuda_missed_heartbeats", 0)
+
+
+def _heartbeat_shutting_down(ws: Any) -> bool:
+    return bool(getattr(ws, "_napari_cuda_shutdown", False))
+
+
+def _flag_heartbeat_shutdown(ws: Any) -> None:
+    setattr(ws, "_napari_cuda_shutdown", True)
+
+
+async def _send_session_goodbye(
+    server: Any,
+    ws: Any,
+    *,
+    session_id: str,
+    code: str,
+    message: str,
+    reason: Optional[str] = None,
+) -> None:
+    if getattr(ws, "_napari_cuda_goodbye_sent", False):
+        return
+    frame = build_session_goodbye(
+        session_id=session_id,
+        code=code,
+        message=message,
+        reason=reason,
+        timestamp=time.time(),
+    )
+    await _send_frame(server, ws, frame)
+    setattr(ws, "_napari_cuda_goodbye_sent", True)
+
+
+async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
+    try:
+        interval = float(getattr(ws, "_napari_cuda_heartbeat_interval", 0.0))
+    except Exception:
+        interval = 0.0
+    if interval <= 0.0:
+        return
+
+    log_debug = logger.debug
+    session_id = _state_session(ws)
+    missed = int(getattr(ws, "_napari_cuda_missed_heartbeats", 0))
+
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            if ws.closed or _heartbeat_shutting_down(ws):
+                break
+            session_id = _state_session(ws)
+            if not session_id:
+                break
+
+            waiting_ack = bool(getattr(ws, "_napari_cuda_waiting_ack", False))
+            if waiting_ack:
+                missed += 1
+            else:
+                missed = 0
+            setattr(ws, "_napari_cuda_missed_heartbeats", missed)
+
+            if missed >= 2:
+                logger.warning(
+                    "heartbeat timeout for session %s; closing connection",
+                    session_id,
+                )
+                with suppress(Exception):
+                    await _send_session_goodbye(
+                        server,
+                        ws,
+                        session_id=session_id,
+                        code="timeout",
+                        message="heartbeat timeout",
+                        reason="heartbeat_timeout",
+                    )
+                _flag_heartbeat_shutdown(ws)
+                with suppress(Exception):
+                    await ws.close(code=1011, reason="heartbeat timeout")
+                break
+
+            try:
+                frame = build_session_heartbeat(
+                    session_id=session_id,
+                    timestamp=time.time(),
+                )
+                await _send_frame(server, ws, frame)
+                setattr(ws, "_napari_cuda_waiting_ack", True)
+                setattr(ws, "_napari_cuda_last_heartbeat", time.time())
+            except Exception:
+                log_debug("session.heartbeat send failed", exc_info=True)
+                break
+    except asyncio.CancelledError:
+        pass
+
 
 
 def _state_features(ws: Any) -> Mapping[str, FeatureToggle]:
@@ -191,12 +312,19 @@ async def _broadcast_layers_delta(
 
     payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", changes=changes)
     clients = list(targets) if targets is not None else list(server._state_clients)
-    if not clients:
-        return
-
-    tasks: list[Awaitable[None]] = []
     now = time.time() if timestamp is None else float(timestamp)
 
+    store = _history_store(server)
+    blueprint: FrameBlueprint | None = None
+    if store is not None and targets is None:
+        blueprint = store.delta_blueprint(
+            NOTIFY_LAYERS_TYPE,
+            payload=payload.to_dict(),
+            timestamp=now,
+            intent_id=intent_id,
+        )
+
+    tasks: list[Awaitable[None]] = []
     for ws in clients:
         if not _feature_enabled(ws, "notify.layers"):
             continue
@@ -206,21 +334,25 @@ async def _broadcast_layers_delta(
         kwargs: Dict[str, Any] = {
             "session_id": session_id,
             "payload": payload,
-            "timestamp": now,
+            "timestamp": blueprint.timestamp if blueprint is not None else now,
             "intent_id": intent_id,
         }
-        sequencer = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
-        if sequencer.seq is None:
-            cursor = sequencer.snapshot()
-            kwargs["seq"] = cursor.seq
-            kwargs["delta_token"] = cursor.delta_token
+        if blueprint is not None:
+            kwargs["seq"] = blueprint.seq
+            kwargs["delta_token"] = blueprint.delta_token
+            kwargs["frame_id"] = blueprint.frame_id
         else:
-            kwargs["sequencer"] = sequencer
+            kwargs["sequencer"] = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
         frame = build_notify_layers_delta(**kwargs)
         tasks.append(_send_frame(server, ws, frame))
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    if blueprint is not None:
+        for ws in clients:
+            sequencer = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
+            sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
 
 
 async def _broadcast_dims_state(
@@ -271,31 +403,203 @@ async def _send_stream_frame(
     *,
     payload: NotifyStreamPayload | Mapping[str, Any],
     timestamp: Optional[float],
-    snapshot_cursor: FeatureResumeState | None = None,
-) -> None:
+    blueprint: FrameBlueprint | None = None,
+    snapshot: bool = False,
+) -> FrameBlueprint | None:
     session_id = _state_session(ws)
     if not session_id:
-        return
+        return blueprint
     if not isinstance(payload, NotifyStreamPayload):
         payload = NotifyStreamPayload.from_dict(payload)
+    now = time.time() if timestamp is None else float(timestamp)
+    store = _history_store(server)
+    if blueprint is None and store is not None:
+        payload_dict = payload.to_dict()
+        if snapshot:
+            blueprint = store.snapshot_blueprint(
+                NOTIFY_STREAM_TYPE,
+                payload=payload_dict,
+                timestamp=now,
+            )
+        else:
+            blueprint = store.delta_blueprint(
+                NOTIFY_STREAM_TYPE,
+                payload=payload_dict,
+                timestamp=now,
+            )
+
     kwargs: Dict[str, Any] = {
         "session_id": session_id,
         "payload": payload,
-        "timestamp": time.time() if timestamp is None else float(timestamp),
+        "timestamp": blueprint.timestamp if blueprint is not None else now,
     }
     sequencer = _state_sequencer(ws, NOTIFY_STREAM_TYPE)
-    if snapshot_cursor is not None:
-        sequencer.snapshot(token=snapshot_cursor.delta_token)
-        kwargs["seq"] = snapshot_cursor.seq
-        kwargs["delta_token"] = snapshot_cursor.delta_token
-    elif sequencer.seq is None:
-        cursor = sequencer.snapshot()
-        kwargs["seq"] = cursor.seq
-        kwargs["delta_token"] = cursor.delta_token
+    if blueprint is not None:
+        kwargs["seq"] = blueprint.seq
+        kwargs["delta_token"] = blueprint.delta_token
+        kwargs["frame_id"] = blueprint.frame_id
+        sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
     else:
-        kwargs["sequencer"] = sequencer
+        if snapshot or sequencer.seq is None:
+            cursor = sequencer.snapshot()
+            kwargs["seq"] = cursor.seq
+            kwargs["delta_token"] = cursor.delta_token
+        else:
+            kwargs["sequencer"] = sequencer
     frame = build_notify_stream(**kwargs)
     await _send_frame(server, ws, frame)
+    return blueprint
+
+
+async def _emit_scene_baseline(
+    server: Any,
+    ws: Any,
+    *,
+    payload: NotifyScenePayload | None,
+    plan: ResumePlan | None,
+    reason: str,
+) -> None:
+    store = _history_store(server)
+    blueprint: FrameBlueprint | None = None
+    timestamp = time.time()
+
+    if store is not None:
+        blueprint = store.current_snapshot(NOTIFY_SCENE_TYPE)
+        need_reset = plan is not None and plan.decision == ResumeDecision.RESET
+        if blueprint is None or need_reset:
+            if payload is None:
+                payload = build_notify_scene_payload(
+                    server._scene,
+                    server._scene_manager,
+                    viewer_settings=_viewer_settings(server),
+                )
+            blueprint = store.snapshot_blueprint(
+                NOTIFY_SCENE_TYPE,
+                payload=payload.to_dict(),
+                timestamp=timestamp,
+            )
+            store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=timestamp)
+            store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
+            _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
+            _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
+        await _send_scene_blueprint(server, ws, blueprint)
+    else:
+        if payload is None:
+            payload = build_notify_scene_payload(
+                server._scene,
+                server._scene_manager,
+                viewer_settings=_viewer_settings(server),
+            )
+        session_id = _state_session(ws)
+        if not session_id:
+            return
+        frame = build_notify_scene_snapshot(
+            session_id=session_id,
+            viewer=payload.viewer,
+            layers=payload.layers,
+            policies=payload.policies,
+            ancillary=payload.ancillary,
+            timestamp=timestamp,
+            sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
+        )
+        await _send_frame(server, ws, frame)
+
+    if server._log_dims_info:
+        logger.info("%s: notify.scene sent", reason)
+    else:
+        logger.debug("%s: notify.scene sent", reason)
+
+
+async def _emit_layer_baseline(
+    server: Any,
+    ws: Any,
+    *,
+    plan: ResumePlan | None,
+    fallback_controls: Sequence[tuple[str, Mapping[str, Any]]],
+) -> None:
+    store = _history_store(server)
+    if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
+        if plan.deltas:
+            for blueprint in plan.deltas:
+                await _send_layer_blueprint(server, ws, blueprint)
+        return
+
+    if not fallback_controls:
+        return
+
+    if store is not None:
+        now = time.time()
+        for layer_id, changes in fallback_controls:
+            payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", changes=changes)
+            blueprint = store.delta_blueprint(
+                NOTIFY_LAYERS_TYPE,
+                payload=payload.to_dict(),
+                timestamp=now,
+                intent_id=None,
+            )
+            await _send_layer_blueprint(server, ws, blueprint)
+        return
+
+    for layer_id, changes in fallback_controls:
+        await _broadcast_layers_delta(
+            server,
+            layer_id=layer_id,
+            changes=changes,
+            intent_id=None,
+            timestamp=time.time(),
+            targets=[ws],
+        )
+
+
+async def _emit_stream_baseline(
+    server: Any,
+    ws: Any,
+    *,
+    plan: ResumePlan | None,
+) -> None:
+    store = _history_store(server)
+    if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
+        if plan.deltas:
+            for blueprint in plan.deltas:
+                await _send_stream_blueprint(server, ws, blueprint)
+        return
+
+    channel = getattr(server, "_pixel_channel", None)
+    cfg = getattr(server, "_pixel_config", None)
+    if channel is None or cfg is None:
+        raise AssertionError("Pixel channel not initialized")
+
+    avcc = channel.last_avcc
+    if avcc is not None:
+        stream_payload = pixel_channel.build_notify_stream_payload(cfg, avcc)
+        await _send_stream_frame(
+            server,
+            ws,
+            payload=stream_payload,
+            timestamp=time.time(),
+        )
+    else:
+        pixel_channel.mark_stream_config_dirty(channel)
+
+
+async def _emit_dims_baseline(
+    server: Any,
+    ws: Any,
+    *,
+    step_list: Sequence[int],
+) -> None:
+    await _broadcast_dims_state(
+        server,
+        current_step=step_list,
+        source="server.bootstrap",
+        intent_id=None,
+        timestamp=time.time(),
+        targets=[ws],
+    )
+    if server._log_dims_info:
+        logger.info("connect: notify.dims baseline -> step=%s", step_list)
+    else:
+        logger.debug("connect: notify.dims baseline -> step=%s", step_list)
 
 
 async def broadcast_stream_config(
@@ -306,32 +610,60 @@ async def broadcast_stream_config(
 ) -> None:
     clients = list(server._state_clients)
     if not clients:
+        store = _history_store(server)
+        if store is not None:
+            now = time.time() if timestamp is None else float(timestamp)
+            if store.current_snapshot(NOTIFY_STREAM_TYPE) is None:
+                store.snapshot_blueprint(
+                    NOTIFY_STREAM_TYPE,
+                    payload=payload.to_dict(),
+                    timestamp=now,
+                )
+            else:
+                store.delta_blueprint(
+                    NOTIFY_STREAM_TYPE,
+                    payload=payload.to_dict(),
+                    timestamp=now,
+                )
         return
 
     now = time.time() if timestamp is None else float(timestamp)
-    tasks: list[Awaitable[None]] = []
+    store = _history_store(server)
+    blueprint: FrameBlueprint | None = None
+    snapshot_mode = False
+    if store is not None:
+        payload_dict = payload.to_dict()
+        snapshot_mode = store.current_snapshot(NOTIFY_STREAM_TYPE) is None
+        if snapshot_mode:
+            blueprint = store.snapshot_blueprint(
+                NOTIFY_STREAM_TYPE,
+                payload=payload_dict,
+                timestamp=now,
+            )
+        else:
+            blueprint = store.delta_blueprint(
+                NOTIFY_STREAM_TYPE,
+                payload=payload_dict,
+                timestamp=now,
+            )
 
+    tasks: list[Awaitable[None]] = []
     for ws in clients:
         if not _feature_enabled(ws, "notify.stream"):
             continue
         session_id = _state_session(ws)
         if not session_id:
             continue
-        pending_resume = getattr(ws, "_napari_cuda_pending_resume", None)
-        snapshot_cursor = None
-        if pending_resume:
-            snapshot_cursor = pending_resume.pop(NOTIFY_STREAM_TYPE, None)
         tasks.append(
             _send_stream_frame(
                 server,
                 ws,
                 payload=payload,
                 timestamp=now,
-                snapshot_cursor=snapshot_cursor,
+                blueprint=blueprint,
+                snapshot=snapshot_mode,
             )
         )
-        if pending_resume is not None:
-            setattr(ws, "_napari_cuda_pending_resume", pending_resume)
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -340,11 +672,30 @@ async def broadcast_stream_config(
 async def handle_state(server: Any, ws: Any) -> None:
     """Handle a state-channel websocket connection."""
 
+    heartbeat_task: asyncio.Task[Any] | None = None
     try:
         _disable_nagle(ws)
         handshake_ok = await _perform_state_handshake(server, ws)
         if not handshake_ok:
             return
+        try:
+            heartbeat_task = asyncio.create_task(_state_heartbeat_loop(server, ws))
+
+            def _log_heartbeat_completion(task: asyncio.Task[Any]) -> None:
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    logger.debug("heartbeat task completion probe failed", exc_info=True)
+                    return
+                if exc is not None:
+                    logger.exception("Heartbeat task failed", exc_info=exc)
+
+            heartbeat_task.add_done_callback(_log_heartbeat_completion)
+            setattr(ws, "_napari_cuda_heartbeat_task", heartbeat_task)
+        except Exception:
+            logger.debug("failed to start heartbeat loop", exc_info=True)
         server._state_clients.add(ws)
         server.metrics.inc('napari_cuda_state_connects')
         server._update_client_gauges()
@@ -371,6 +722,15 @@ async def handle_state(server: Any, ws: Any) -> None:
         except Exception:
             logger.exception("state client error remote=%s id=%s", remote, id(ws))
     finally:
+        _flag_heartbeat_shutdown(ws)
+        if heartbeat_task is None:
+            heartbeat_task = getattr(ws, "_napari_cuda_heartbeat_task", None)
+        if isinstance(heartbeat_task, asyncio.Task):
+            heartbeat_task.cancel()
+            with suppress(Exception):
+                await heartbeat_task
+        if hasattr(ws, "_napari_cuda_heartbeat_task"):
+            delattr(ws, "_napari_cuda_heartbeat_task")
         try:
             await ws.close()
         except Exception as exc:
@@ -378,6 +738,43 @@ async def handle_state(server: Any, ws: Any) -> None:
         server._state_clients.discard(ws)
         server._update_client_gauges()
 
+
+
+async def _handle_session_ack(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    _ENVELOPE_PARSER.parse_ack(data)
+    return True
+
+
+async def _handle_session_goodbye(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    reason = None
+    code = None
+    message = "client requested shutdown"
+    try:
+        goodbye = _ENVELOPE_PARSER.parse_goodbye(data)
+        payload = goodbye.payload
+        reason = payload.reason
+        if payload.message:
+            message = payload.message
+        if payload.code:
+            code = payload.code
+    except Exception:
+        logger.debug("session.goodbye payload rejected", exc_info=True)
+
+    session_id = _state_session(ws)
+    if session_id:
+        with suppress(Exception):
+            await _send_session_goodbye(
+                server,
+                ws,
+                session_id=session_id,
+                code=code or "goodbye",
+                message=message,
+                reason=reason or "client_goodbye",
+            )
+    _flag_heartbeat_shutdown(ws)
+    with suppress(Exception):
+        await ws.close()
+    return True
 
 
 async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
@@ -924,12 +1321,15 @@ MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     'ping': _handle_ping,
     'request_keyframe': _handle_force_keyframe,
     'force_idr': _handle_force_keyframe,
+    SESSION_ACK_TYPE: _handle_session_ack,
+    SESSION_GOODBYE_TYPE: _handle_session_goodbye,
 }
 
 
 async def process_state_message(server: Any, data: dict, ws: Any) -> None:
     msg_type = data.get('type')
     frame_id = data.get('frame_id')
+    _mark_client_activity(ws)
     if server._log_state_traces:
         logger.info("state message start type=%s frame=%s", msg_type, frame_id)
     handled = False
@@ -1425,17 +1825,39 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         )
         return False
 
-    pending_resume: Dict[str, FeatureResumeState] = {}
-    pixel_state = getattr(server, "_pixel_channel", None)
-    if pixel_state is not None and getattr(pixel_state, "last_avcc", None) is not None:
-        stream_toggle = negotiated_features.get(NOTIFY_STREAM_TYPE)
-        if stream_toggle is not None and stream_toggle.resume:
-            stream_resume = FeatureResumeState(seq=0, delta_token=uuid.uuid4().hex)
-            negotiated_features[NOTIFY_STREAM_TYPE] = replace(
-                stream_toggle,
-                resume_state=stream_resume,
+    history_store = _history_store(server)
+    client_tokens = hello.payload.resume_tokens
+    resume_plan: Dict[str, ResumePlan] = {}
+
+    for topic in _RESUMABLE_TOPICS:
+        toggle = negotiated_features.get(topic)
+        if toggle is None or not toggle.enabled or not toggle.resume:
+            continue
+        token = client_tokens.get(topic)
+        if history_store is None:
+            resume_plan[topic] = ResumePlan(topic=topic, decision=ResumeDecision.RESET, deltas=[])
+            continue
+        plan = history_store.plan_resume(topic, token)
+        resume_plan[topic] = plan
+        if plan.decision == ResumeDecision.REJECT:
+            await _send_handshake_reject(
+                server,
+                ws,
+                code="invalid_resume_token",
+                message=f"resume token for {topic} rejected",
+                details={"topic": topic},
             )
-            pending_resume[NOTIFY_STREAM_TYPE] = stream_resume
+            return False
+        if plan.decision == ResumeDecision.REPLAY:
+            cursor = history_store.latest_resume_state(topic)
+            if cursor is not None:
+                negotiated_features[topic] = replace(toggle, resume_state=cursor)
+            continue
+        cursor = history_store.latest_resume_state(topic)
+        if cursor is not None:
+            negotiated_features[topic] = replace(toggle, resume_state=cursor)
+
+    setattr(ws, "_napari_cuda_resume_plan", resume_plan)
 
     session_id = str(uuid.uuid4())
     heartbeat_s = getattr(server, "state_heartbeat_s", 15.0)
@@ -1456,8 +1878,9 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
 
     setattr(ws, "_napari_cuda_session", session_id)
     setattr(ws, "_napari_cuda_features", negotiated_features)
-    setattr(ws, "_napari_cuda_resume_tokens", hello.payload.resume_tokens)
-    setattr(ws, "_napari_cuda_pending_resume", pending_resume)
+    setattr(ws, "_napari_cuda_heartbeat_interval", float(heartbeat_s))
+    setattr(ws, "_napari_cuda_shutdown", False)
+    setattr(ws, "_napari_cuda_goodbye_sent", False)
     setattr(
         ws,
         "_napari_cuda_sequencers",
@@ -1467,6 +1890,8 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
             NOTIFY_STREAM_TYPE: ResumableTopicSequencer(topic=NOTIFY_STREAM_TYPE),
         },
     )
+
+    _mark_client_activity(ws)
 
     client_info = hello.payload.client
     client_name = client_info.name
@@ -1587,7 +2012,75 @@ async def _send_frame(server: Any, ws: Any, frame: Any) -> None:
     await _await_state_send(server, ws, text)
 
 
+async def _send_layer_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint) -> None:
+    session_id = _state_session(ws)
+    if not session_id:
+        return
+    payload = NotifyLayersPayload.from_dict(blueprint.payload)
+    frame = build_notify_layers_delta(
+        session_id=session_id,
+        payload=payload,
+        timestamp=blueprint.timestamp,
+        frame_id=blueprint.frame_id,
+        intent_id=blueprint.intent_id,
+        seq=blueprint.seq,
+        delta_token=blueprint.delta_token,
+    )
+    await _send_frame(server, ws, frame)
+    sequencer = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
+    sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+
+
+async def _send_stream_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint) -> None:
+    session_id = _state_session(ws)
+    if not session_id:
+        return
+    payload = NotifyStreamPayload.from_dict(blueprint.payload)
+    frame = build_notify_stream(
+        session_id=session_id,
+        payload=payload,
+        timestamp=blueprint.timestamp,
+        frame_id=blueprint.frame_id,
+        seq=blueprint.seq,
+        delta_token=blueprint.delta_token,
+    )
+    await _send_frame(server, ws, frame)
+    sequencer = _state_sequencer(ws, NOTIFY_STREAM_TYPE)
+    sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+
+
+async def _send_scene_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint) -> None:
+    session_id = _state_session(ws)
+    if not session_id:
+        return
+    payload = NotifyScenePayload.from_dict(blueprint.payload)
+    sequencer = _state_sequencer(ws, NOTIFY_SCENE_TYPE)
+    sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    frame = build_notify_scene_snapshot(
+        session_id=session_id,
+        viewer=payload.viewer,
+        layers=payload.layers,
+        policies=payload.policies,
+        ancillary=payload.ancillary,
+        timestamp=blueprint.timestamp,
+        frame_id=blueprint.frame_id,
+        delta_token=blueprint.delta_token,
+        intent_id=blueprint.intent_id,
+        sequencer=sequencer,
+    )
+    await _send_frame(server, ws, frame)
+
+
 async def _send_state_baseline(server: Any, ws: Any) -> None:
+    resume_map: Dict[str, ResumePlan] = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
+    scene_plan = resume_map.get(NOTIFY_SCENE_TYPE)
+    layers_plan = resume_map.get(NOTIFY_LAYERS_TYPE)
+    stream_plan = resume_map.get(NOTIFY_STREAM_TYPE)
+
+    scene_payload: NotifyScenePayload | None = None
+    step_list: list[int] = []
+    fallback_controls: list[tuple[str, Mapping[str, Any]]] = []
+
     try:
         await server._await_adapter_level_ready(0.5)
         try:
@@ -1598,8 +2091,6 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
 
         with server._state_lock:
             current_step = server._scene.latest_state.current_step
-
-        pending_resume: Dict[str, FeatureResumeState] = getattr(ws, "_napari_cuda_pending_resume", {})
 
         step_list = list(current_step) if current_step is not None else []
         spec = server._scene_manager.scene_spec()
@@ -1619,51 +2110,66 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         while len(step_list) < ndim:
             step_list.append(0)
 
-        await _broadcast_dims_state(
-            server,
-            current_step=step_list,
-            source="server.bootstrap",
-            intent_id=None,
-            timestamp=time.time(),
-            targets=[ws],
+        scene_payload = build_notify_scene_payload(
+            server._scene,
+            server._scene_manager,
+            viewer_settings=_viewer_settings(server),
         )
-        if server._log_dims_info:
-            logger.info("connect: notify.dims baseline -> step=%s", step_list)
-        else:
-            logger.debug("connect: notify.dims baseline -> step=%s", step_list)
+
+        if spec is not None and spec.layers:
+            scene_data = server._scene
+            latest_updates = scene_data.latest_state.layer_updates or {}
+            for layer in spec.layers:
+                layer_id = layer.layer_id
+                if not layer_id:
+                    continue
+                controls: Dict[str, Any] = {}
+                control_state = scene_data.layer_controls.get(layer_id)
+                if control_state is not None:
+                    controls.update(layer_controls_to_dict(control_state))
+                pending = latest_updates.get(layer_id, {})
+                if pending:
+                    for key, value in pending.items():
+                        controls[str(key)] = value
+                if controls:
+                    fallback_controls.append((layer_id, controls))
     except Exception:
-        logger.exception("Initial dims baseline send failed")
+        logger.debug("Initial scene baseline prep failed", exc_info=True)
 
     try:
-        await _send_scene_snapshot(server, ws, reason="connect")
+        await _emit_scene_baseline(
+            server,
+            ws,
+            payload=scene_payload,
+            plan=scene_plan,
+            reason="connect",
+        )
     except Exception:
         logger.exception("Initial notify.scene send failed")
 
     try:
-        await _send_layer_baseline(server, ws)
+        await _emit_layer_baseline(
+            server,
+            ws,
+            plan=layers_plan,
+            fallback_controls=fallback_controls,
+        )
     except Exception:
         logger.exception("Initial layer baseline send failed")
 
     try:
-        channel = getattr(server, "_pixel_channel", None)
-        cfg = getattr(server, "_pixel_config", None)
-        assert channel is not None and cfg is not None, "Pixel channel not initialized"
-        avcc = channel.last_avcc
-        if avcc is not None:
-            stream_payload = pixel_channel.build_notify_stream_payload(cfg, avcc)
-            resume_state = pending_resume.pop(NOTIFY_STREAM_TYPE, None)
-            await _send_stream_frame(
-                server,
-                ws,
-                payload=stream_payload,
-                timestamp=time.time(),
-                snapshot_cursor=resume_state,
-            )
-        else:
-            pixel_channel.mark_stream_config_dirty(channel)
-        setattr(ws, "_napari_cuda_pending_resume", pending_resume)
+        await _emit_stream_baseline(server, ws, plan=stream_plan)
     except Exception:
         logger.exception("Initial state config send failed")
+
+    if step_list:
+        try:
+            await _emit_dims_baseline(server, ws, step_list=step_list)
+        except Exception:
+            logger.exception("Initial dims baseline send failed")
+
+    if hasattr(ws, "_napari_cuda_resume_plan"):
+        delattr(ws, "_napari_cuda_resume_plan")
 
 
 async def _send_scene_snapshot(server: Any, ws: Any, *, reason: str) -> None:
@@ -1677,14 +2183,24 @@ async def _send_scene_snapshot(server: Any, ws: Any, *, reason: str) -> None:
         server._scene_manager,
         viewer_settings=_viewer_settings(server),
     )
+    timestamp = time.time()
+    store = _history_store(server)
+    blueprint: FrameBlueprint | None = None
+    if store is not None:
+        blueprint = store.snapshot_blueprint(
+            NOTIFY_SCENE_TYPE,
+            payload=payload.to_dict(),
+            timestamp=timestamp,
+        )
     frame = build_notify_scene_snapshot(
         session_id=session_id,
         viewer=payload.viewer,
         layers=payload.layers,
         policies=payload.policies,
         ancillary=payload.ancillary,
-        timestamp=time.time(),
-        sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
+        timestamp=blueprint.timestamp if blueprint is not None else timestamp,
+        delta_token=blueprint.delta_token if blueprint is not None else None,
+        frame_id=blueprint.frame_id if blueprint is not None else None,
     )
     await _send_frame(server, ws, frame)
     if server._log_dims_info:
@@ -1703,19 +2219,33 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         viewer_settings=_viewer_settings(server),
     )
     timestamp = time.time()
+    store = _history_store(server)
+    blueprint: FrameBlueprint | None = None
+    if store is not None:
+        blueprint = store.snapshot_blueprint(
+            NOTIFY_SCENE_TYPE,
+            payload=payload.to_dict(),
+            timestamp=timestamp,
+        )
+        store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=timestamp)
+        store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
     tasks: list[Awaitable[None]] = []
     for ws in clients:
         session_id = _state_session(ws)
         if not session_id:
             continue
+        if blueprint is not None:
+            _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
+            _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
         frame = build_notify_scene_snapshot(
             session_id=session_id,
             viewer=payload.viewer,
             layers=payload.layers,
             policies=payload.policies,
             ancillary=payload.ancillary,
-            timestamp=timestamp,
-            sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
+            timestamp=blueprint.timestamp if blueprint is not None else timestamp,
+            delta_token=blueprint.delta_token if blueprint is not None else None,
+            frame_id=blueprint.frame_id if blueprint is not None else None,
         )
         tasks.append(_send_frame(server, ws, frame))
     if not tasks:

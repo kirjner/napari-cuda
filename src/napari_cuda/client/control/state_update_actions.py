@@ -8,6 +8,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
 
+from napari_cuda.protocol.messages import NotifyDimsFrame
+
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.streaming.presenter_facade import PresenterFacade
 
@@ -101,7 +103,6 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateCont
     state.dims_ready = False
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
-    loop_state.last_dims_seq = None
     loop_state.last_dims_payload = None
     state.control_runtimes.clear()
 
@@ -109,7 +110,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateCont
 def handle_dims_update(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    data: dict[str, object],
+    frame: NotifyDimsFrame,
     *,
     presenter: "PresenterFacade",
     viewer_ref,
@@ -118,80 +119,32 @@ def handle_dims_update(
     log_dims_info: bool,
     state_store: Optional["StateStore"] = None,
 ) -> None:
-    seq_val = _int_or_none(data.get('seq'))
-    if seq_val is not None:
-        loop_state.last_dims_seq = seq_val
-
     meta = state.dims_meta
     was_ready = bool(state.dims_ready)
-    cur = data.get('current_step')
-    ndisp = data.get('ndisplay')
-    ndim = data.get('ndim')
-    dims_range = data.get('range')
-    order = data.get('order')
-    axis_labels = data.get('axis_labels')
-    sizes = data.get('sizes')
-    displayed = data.get('displayed')
-    level = data.get('level')
-    level_shape = data.get('level_shape')
-    dtype = data.get('dtype')
-    normalized = data.get('normalized')
-    volume = data.get('volume')
-    render = data.get('render')
-    multiscale = data.get('multiscale')
-    intent_seq = _int_or_none(data.get('intent_seq'))
-    ack_val = data.get('ack') if isinstance(data.get('ack'), bool) else None
 
-    if cur is not None:
-        try:
-            meta['current_step'] = [int(x) for x in cur]
-        except Exception:
-            meta['current_step'] = list(cur)
-    if ndim is not None:
-        meta['ndim'] = int(ndim)
-    if order is not None:
-        meta['order'] = order
-    if axis_labels is not None:
-        meta['axis_labels'] = axis_labels
-    if dims_range is not None:
-        meta['range'] = dims_range
-    if sizes is not None:
-        meta['sizes'] = sizes
-    if displayed is not None:
-        meta['displayed'] = displayed
-    if level is not None:
-        meta['level'] = level
-    if level_shape is not None:
-        meta['level_shape'] = level_shape
-    if dtype is not None:
-        meta['dtype'] = dtype
-    if normalized is not None:
-        meta['normalized'] = normalized
-    if volume is not None:
-        meta['volume'] = bool(volume)
-    if render is not None:
-        meta['render'] = render
-    if multiscale is not None:
-        meta['multiscale'] = multiscale
-    if ndisp is not None:
-        meta['ndisplay'] = int(ndisp)
+    payload = frame.payload
+    current_step = tuple(int(value) for value in payload.current_step)
+    meta['current_step'] = list(current_step)
+    meta['ndisplay'] = int(payload.ndisplay)
+    meta['mode'] = payload.mode
+    meta['source'] = payload.source
 
-    payload = _sync_dims_payload_from_meta(state, loop_state)
+    payload_dict = _sync_dims_payload_from_meta(state, loop_state)
 
     if not was_ready and state_store is not None:
-        _seed_dims_baseline(state, state_store, payload)
+        _seed_dims_baseline(state, state_store, payload_dict)
 
-    if not state.dims_ready and (ndim is not None or order is not None):
+    if not state.dims_ready:
         state.dims_ready = True
-        logger.info("dims.update: metadata received; client intents enabled")
+        logger.info("notify.dims: metadata received; client intents enabled")
         notify_first_dims_ready()
 
     state.primary_axis_index = _compute_primary_axis_index(meta)
 
-    if isinstance(cur, (list, tuple)) and cur and log_dims_info:
+    if current_step and log_dims_info:
         logger.info(
-            "dims_update: step=%s ndisp=%s order=%s labels=%s",
-            list(cur),
+            "notify.dims: step=%s ndisplay=%s order=%s labels=%s",
+            list(current_step),
             meta.get('ndisplay'),
             meta.get('order'),
             meta.get('axis_labels'),
@@ -202,20 +155,17 @@ def handle_dims_update(
         mirror_dims_to_viewer(
             viewer_obj,
             ui_call,
-            current_step=cur,
-            ndisplay=ndisp,
-            ndim=ndim,
-            dims_range=dims_range,
-            order=order,
-            axis_labels=axis_labels,
-            sizes=sizes,
-            displayed=displayed,
+            current_step=current_step,
+            ndisplay=meta.get('ndisplay'),
+            ndim=meta.get('ndim'),
+            dims_range=meta.get('range'),
+            order=meta.get('order'),
+            axis_labels=meta.get('axis_labels'),
+            sizes=meta.get('sizes'),
+            displayed=meta.get('displayed'),
         )
 
-    presenter_payload = dict(payload)
-    if seq_val is not None:
-        presenter_payload['seq'] = seq_val
-    presenter.apply_dims_update(presenter_payload)
+    presenter.apply_dims_update(dict(payload_dict))
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
@@ -364,6 +314,8 @@ def _sync_dims_payload_from_meta(
         'axis_labels': payload_axis_labels,
         'sizes': payload_sizes,
         'displayed': payload_displayed,
+        'mode': meta.get('mode'),
+        'source': meta.get('source'),
     }
 
     loop_state.last_dims_payload = payload

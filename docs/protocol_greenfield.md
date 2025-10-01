@@ -202,6 +202,27 @@ Heartbeats begin once the baseline is sent.
   send that snapshot immediately after `session.welcome` and whenever they
   detect a client missing current view/camera state.
 
+### 4.1 Resumable history store
+
+Servers MUST service the resume contract with a dedicated resumable-history
+store. The store maintains, for every resumable topic:
+
+- the most recent `notify.scene` snapshot (seq reset to 0 with a fresh delta
+  token);
+- a ring buffer that satisfies the minimum retention window (at least 512
+  `notify.layers` deltas or five minutes of history, whichever is larger);
+- the latest `notify.stream` configuration and associated resume cursor.
+
+During `session.hello` the store validates supplied resume tokens, chooses
+between replaying cached deltas or issuing a fresh snapshot, and seeds the
+per-topic `ResumableTopicSequencer` instances accordingly. When the server
+publishes a new `notify.scene` snapshot it MUST treat that as a new epoch by
+advancing the scene sequencer and instructing the store to snapshot or reset
+the associated layer and stream histories so all topics share the fresh delta
+token. Implementations MAY extend the store to persist history across process
+restarts, but in-memory caches that uphold the retention guarantees are
+required for spec compliance.
+
 ## 5. State Update Lane
 
 ### 5.1 Request (`state.update`, version 1)
@@ -445,6 +466,24 @@ when the operation is documented as idempotent.
    protocol.
 8. Refresh documentation, examples, and monitoring tooling.
 
+### 14.1 Post-migration cleanup
+
+Once the feature work lands, schedule a structural pass on the state-channel
+implementation to keep the codebase maintainable:
+
+- Extract the resumable-history store, handshake baseline, and heartbeat logic
+  into dedicated modules instead of concentrating everything in the control
+  handler.
+- Decompose monolithic functions (handshake, message loop, broadcast helpers)
+  into smaller orchestration units that mirror the spec’s sections (§3, §4,
+  §§7–8). This keeps spec drift obvious and simplifies future evolution.
+- Add focused unit tests around the new modules (history store replay, resume
+  validation, heartbeat timeout handling) so future refactors stay safe.
+
+These steps are non-normative but strongly recommended; the spec evolves, and a
+modular control path makes it easier to adopt later revisions without another
+large-scale rewrite.
+
 ## 15. Testing Matrix
 
 | Scenario                    | Expected Frames / Assertions                                                |
@@ -594,5 +633,60 @@ Treat this appendix as the final word on envelope structure; if runtime pressure
 suggests a different optimisation, update the table and accompanying prose so the
 contract remains unambiguous.
 
+## Appendix C. Resumable history store schema
+
+Servers satisfy §4.1 by backing every resumable topic with a
+`ResumableTopicHistory` record held inside a `ResumableHistoryStore`.
+Implementations MAY persist these structures, but the following fields are
+mandatory so clients can depend on deterministic resume behaviour:
+
+```json
+{
+  "topic": "notify.layers",
+  "retention": {
+    "max_age_s": 300,
+    "max_deltas": 1024
+  },
+  "snapshot": {
+    "seq": 0,
+    "delta_token": "scene_tok_d59b",
+    "timestamp": 1759179000.200,
+    "frame": { "type": "notify.scene", "payload": { "viewer": {"dims": {"ndim": 3}} } }
+  },
+  "deltas": [
+    {
+      "seq": 1,
+      "delta_token": "layers_tok_1a",
+      "timestamp": 1759179000.214,
+      "frame": { "type": "notify.layers", "payload": { "layer_id": "image", "changes": {"colormap": "red"} } }
+    }
+  ],
+  "latest_cursor": {
+    "seq": 1,
+    "delta_token": "layers_tok_1a"
+  }
+}
+```
+
+Normative behaviour:
+
+- `snapshot.frame` MUST store the baseline frame for the current epoch. For
+  `notify.layers` and `notify.stream` the snapshot MAY be a synthetic frame that
+  expresses the current configuration as a single payload.
+- `deltas` is an ordered ring buffer that enforces the retention targets
+  advertised in §4 (≥512 deltas or ≥300 s for `notify.layers`; latest config only
+  for `notify.stream`). When trimming, drop the oldest entries and keep
+  `latest_cursor` pointing at the newest frame.
+- `latest_cursor` is the token that will be advertised via
+  `FeatureToggle.resume_state` on the next `session.welcome` and is reused when a
+  client resumes without disconnecting.
+- `validate(cursor)` MUST return one of `"replay"`, `"reset"`, or `"reject"`.
+  `replay` instructs the caller to deliver the buffered `deltas` starting from
+  the matched cursor; `reset` requires a fresh snapshot (`snapshot.frame`
+  followed by current `deltas`); `reject` maps to a handshake failure (malformed
+  token).
+- `reset_epoch()` replaces `snapshot` with the new baseline frame, clears the
+  ring buffer, and seeds a fresh cursor. Call it whenever the server emits a new
+  `notify.scene` snapshot so every topic starts the same epoch.
 
 _Naming note:_ temporary helpers (e.g. `maybe_send_*`) should be renamed once the legacy emission path is removed to better describe their final behaviour.

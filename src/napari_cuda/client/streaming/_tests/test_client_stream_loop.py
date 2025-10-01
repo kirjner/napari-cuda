@@ -8,6 +8,9 @@ from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.control.pending_update_store import StateStore
+from napari_cuda.client.control.control_channel_client import SessionMetadata, ResumeCursor
+from napari_cuda.protocol import build_notify_dims
+from napari_cuda.protocol.messages import NotifyDimsFrame
 
 
 class _StateChannelStub:
@@ -22,9 +25,6 @@ class _StateChannelStub:
     def post(self, payload: dict[str, Any]) -> bool:
         self.posted.append(dict(payload))
         return True
-
-    def request_keyframe_once(self) -> None:  # pragma: no cover - not exercised here
-        return None
 
 
 class _PresenterStub:
@@ -43,7 +43,6 @@ def _make_loop() -> ClientStreamLoop:
     loop._log_dims_info = False
     loop._loop_state = ClientLoopState()
     loop._loop_state.last_dims_payload = None
-    loop._loop_state.last_dims_seq = None
     loop._loop_state.state_channel = _StateChannelStub()
     loop._state_channel_stub = loop._loop_state.state_channel
     loop._viewer_mirror = lambda: None
@@ -115,26 +114,27 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
 def test_handle_dims_update_caches_payload() -> None:
     loop = _make_loop()
 
-    payload = {
-        'frame_id': 'dims-1',
-        'session': 'session-test',
-        'timestamp': 1.5,
-        'seq': 7,
-        'current_step': [1, 2],
-        'ndim': 3,
-        'ndisplay': 2,
-        'order': [0, 1, 2],
-        'axis_labels': ['z', 'y', 'x'],
-        'range': [(0, 10), (0, 5), (0, 3)],
-        'sizes': [11, 6, 4],
-        'displayed': [1, 2],
-        'mode': 'slice',
-        'source': 'test-suite',
-    }
+    meta = loop._control_state.dims_meta
+    meta.update(
+        {
+            'ndim': 3,
+            'order': [0, 1, 2],
+            'axis_labels': ['z', 'y', 'x'],
+            'range': [(0, 10), (0, 5), (0, 3)],
+            'sizes': [11, 6, 4],
+            'displayed': [1, 2],
+        }
+    )
 
-    loop._handle_dims_update(payload)
+    frame = build_notify_dims(
+        session_id='session-test',
+        payload={'current_step': (1, 2), 'ndisplay': 2, 'mode': 'slice', 'source': 'test-suite'},
+        timestamp=1.5,
+        frame_id='dims-1',
+    )
 
-    assert loop._loop_state.last_dims_seq == 7
+    loop._handle_dims_update(frame)
+
     assert loop._loop_state.last_dims_payload == {
         'current_step': [1, 2],
         'ndisplay': 2,
@@ -144,6 +144,8 @@ def test_handle_dims_update_caches_payload() -> None:
         'axis_labels': ['z', 'y', 'x'],
         'sizes': [11, 6, 4],
         'displayed': [1, 2],
+        'mode': 'slice',
+        'source': 'test-suite',
     }
     assert loop._control_state.dims_ready is True
     assert loop._presenter_facade.calls
@@ -187,3 +189,23 @@ def test_replay_last_dims_payload_forwards_to_viewer() -> None:
             'displayed': [2, 1],
         }
     ]
+
+
+def test_session_metadata_propagated_to_loop_state() -> None:
+    loop = _make_loop()
+    metadata = SessionMetadata(
+        session_id='sess-meta',
+        heartbeat_s=3.0,
+        ack_timeout_ms=250,
+        resume_tokens={
+            'notify.scene': ResumeCursor(seq=1, delta_token='scene-a'),
+            'notify.layers': None,
+            'notify.stream': None,
+        },
+    )
+
+    loop._handle_session_ready(metadata)
+    assert loop._loop_state.state_session_metadata is metadata
+
+    loop._on_state_disconnect(None)
+    assert loop._loop_state.state_session_metadata is None

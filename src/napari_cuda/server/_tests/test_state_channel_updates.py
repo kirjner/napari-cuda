@@ -6,7 +6,18 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Coroutine, List
 
-from napari_cuda.protocol import PROTO_VERSION, FeatureToggle, build_state_update
+import time
+
+from napari_cuda.protocol import PROTO_VERSION, FeatureToggle, build_state_update, NotifyStreamPayload
+from napari_cuda.protocol.greenfield.envelopes import build_session_hello
+from napari_cuda.protocol.messages import HelloClientInfo
+from napari_cuda.server.control.resumable_history_store import (
+    FrameBlueprint,
+    ResumableHistoryStore,
+    ResumableRetention,
+    ResumeDecision,
+    ResumePlan,
+)
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.layer_manager import ViewerSceneManager
@@ -88,6 +99,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         _napari_cuda_session="test-session",
         _napari_cuda_features=features,
         _napari_cuda_sequencers={},
+        _napari_cuda_resume_plan={},
     )
 
     server._state_clients = {fake_ws}
@@ -106,6 +118,14 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         server._scene.use_volume = bool(value == 3)
 
     server._handle_set_ndisplay = _handle_set_ndisplay
+
+    server._resumable_store = ResumableHistoryStore(
+        {
+            "notify.scene": ResumableRetention(),
+            "notify.layers": ResumableRetention(min_deltas=512, max_deltas=2048, max_age_s=300.0),
+            "notify.stream": ResumableRetention(min_deltas=1, max_deltas=32),
+        }
+    )
 
     return server, scheduled, captured
 
@@ -377,6 +397,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
         }
         ws._napari_cuda_sequencers = {}
+        ws._napari_cuda_resume_plan = {}
 
         loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
         _drain_scheduled(scheduled)
@@ -393,6 +414,160 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         dims_frames = _frames_of_type(captured, "notify.dims")
         assert dims_frames, "expected notify.dims baseline"
         assert dims_frames[-1]["payload"]["source"] == "server.bootstrap"
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBlueprint, FrameBlueprint]:
+    store: ResumableHistoryStore = server._resumable_store
+    scene_payload = state_channel_handler.build_notify_scene_payload(
+        server._scene,
+        server._scene_manager,
+        viewer_settings={"fps_target": 60.0},
+    )
+    scene_blueprint = store.snapshot_blueprint(
+        state_channel_handler.NOTIFY_SCENE_TYPE,
+        payload=scene_payload.to_dict(),
+        timestamp=time.time(),
+    )
+
+    layer_payload = state_channel_handler.build_notify_layers_payload(
+        layer_id="layer-0",
+        changes={"opacity": 0.42},
+    )
+    layer_blueprint = store.delta_blueprint(
+        state_channel_handler.NOTIFY_LAYERS_TYPE,
+        payload=layer_payload.to_dict(),
+        timestamp=time.time(),
+    )
+
+    stream_payload = NotifyStreamPayload(
+        codec="h264",
+        format="annexb",
+        fps=60.0,
+        frame_size=(640, 480),
+        nal_length_size=4,
+        avcc="AAAA",
+        latency_policy={"mode": "low"},
+    )
+    stream_blueprint = store.snapshot_blueprint(
+        state_channel_handler.NOTIFY_STREAM_TYPE,
+        payload=stream_payload.to_dict(),
+        timestamp=time.time(),
+    )
+
+    return scene_blueprint, layer_blueprint, stream_blueprint
+
+
+def test_handshake_stashes_resume_plan(monkeypatch) -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        server, scheduled, captured = _make_server()
+        scene_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
+        resume_tokens = {
+            state_channel_handler.NOTIFY_SCENE_TYPE: scene_bp.delta_token,
+            state_channel_handler.NOTIFY_LAYERS_TYPE: layer_bp.delta_token,
+            state_channel_handler.NOTIFY_STREAM_TYPE: stream_bp.delta_token,
+        }
+
+        hello = build_session_hello(
+            client=HelloClientInfo(name="tests", version="1.0", platform="test"),
+            features={
+                state_channel_handler.NOTIFY_SCENE_TYPE: True,
+                state_channel_handler.NOTIFY_LAYERS_TYPE: True,
+                state_channel_handler.NOTIFY_STREAM_TYPE: True,
+            },
+            resume_tokens=resume_tokens,
+        )
+
+        hello_json = json.dumps(hello.to_dict(), separators=(",", ":"))
+
+        class _WS:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+                self.transport = SimpleNamespace(get_extra_info=lambda *_: None)
+
+            async def recv(self) -> str:
+                return hello_json
+
+            async def close(self) -> None:  # pragma: no cover - defensive
+                pass
+
+        ws = _WS()
+
+        async def _state_send(_ws: Any, text: str) -> None:
+            captured.append(json.loads(text))
+
+        server._state_send = _state_send
+
+        loop.run_until_complete(state_channel_handler._perform_state_handshake(server, ws))
+        _drain_scheduled(scheduled)
+
+        plan = getattr(ws, "_napari_cuda_resume_plan")
+        assert plan[state_channel_handler.NOTIFY_SCENE_TYPE].decision == ResumeDecision.REPLAY
+        assert plan[state_channel_handler.NOTIFY_LAYERS_TYPE].decision == ResumeDecision.REPLAY
+        assert plan[state_channel_handler.NOTIFY_STREAM_TYPE].decision == ResumeDecision.REPLAY
+
+        welcome = _frames_of_type(captured, "session.welcome")
+        assert welcome, "expected handshake welcome frame"
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_send_state_baseline_replays_store(monkeypatch) -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        server, scheduled, captured = _make_server()
+        scene_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
+
+        server._await_adapter_level_ready = lambda _timeout: asyncio.sleep(0)
+        server._state_send = lambda _ws, text: captured.append(json.loads(text))
+        server._pixel_channel = SimpleNamespace(last_avcc=b"avcc")
+        server._pixel_config = SimpleNamespace()
+
+        ws = _FakeWS(
+            _napari_cuda_session="resume-session",
+            _napari_cuda_features={
+                "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+                "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
+                "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
+                "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+            },
+            _napari_cuda_sequencers={},
+        )
+        ws._napari_cuda_resume_plan = {
+            state_channel_handler.NOTIFY_SCENE_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_SCENE_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[scene_bp],
+            ),
+            state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[layer_bp],
+            ),
+            state_channel_handler.NOTIFY_STREAM_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_STREAM_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[stream_bp],
+            ),
+        }
+
+        loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
+        _drain_scheduled(scheduled)
+
+        scene_frames = _frames_of_type(captured, "notify.scene")
+        assert scene_frames and scene_frames[-1]["seq"] == scene_bp.seq
+
+        layer_frames = _frames_of_type(captured, "notify.layers")
+        assert layer_frames and layer_frames[-1]["seq"] == layer_bp.seq
+
+        stream_frames = _frames_of_type(captured, "notify.stream")
+        assert stream_frames and stream_frames[-1]["seq"] == stream_bp.seq
     finally:
         asyncio.set_event_loop(None)
         loop.close()

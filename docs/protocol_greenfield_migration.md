@@ -64,9 +64,10 @@ Pending follow-up:
   helpers and local projection logic without the legacy "intent" terminology.
 - `client/control/viewer_layer_adapter.py` (archive:
   `layer_state_bridge.py`) translates incoming layer/dims payloads into viewer
-  mutations; today it still listens for legacy formats like `dims.update`.
-- Legacy fallbacks remain: plain `video_config` dicts, `dims.update` diffs, and
-  fire-and-forget keyframe requests to `/state` (`request_keyframe`).
+  mutations using the greenfield envelopes only.
+- Legacy fallbacks (`video_config`, raw `dims.update` diffs, and the
+  fire-and-forget `/state` keyframe request) have been removed; the control
+  channel relies exclusively on the builder-backed notify and ack frames.
 
 ### 2.2 Control Channel (Server)
 
@@ -209,16 +210,19 @@ translating to legacy formats.
   `AckOutcome`, keyed by `frame_id`/`intent_id`, without legacy phase juggling.
 - Streaming loop + viewer bridge consume the new `ControlStateContext` and
   have unit coverage in `client/streaming/_tests/` for accepted/rejected ack paths.
+- Client control stack now consumes `notify.stream` and `notify.dims` frames
+  directly: the `video_config`/`dims.update` fallbacks and the ad-hoc
+  `request_keyframe` helper have been removed.
+- Resume-aware handshake + heartbeat enforcement: the client reuses
+  `session.welcome` resume tokens on reconnect, parses `session.heartbeat`,
+  emits timely `session.ack`, and drops the session when heartbeats or ack
+  enqueueing fail. Loop state tracks the latest `SessionMetadata` so UI/
+  diagnostics can observe negotiated cadence.
 
 **Remaining**
 
-1. Retire the final legacy fallbacks (`video_config`, raw `dims.update` diffs)
-   once downstream consumers rely solely on notify envelopes.
-2. Replace the keyframe request helper with either:
-   - A `call.command` to `napari.pixel.request_keyframe`, or
-   - A `state.update` on a dedicated command scope.
-3. Keep a temporary compatibility mode (`LEGACY_CONTROL_CLIENT`) until the UI
-   no longer references the archived handlers.
+1. Implement the command-lane replacement for manual keyframe requests once
+   Phase 4 wiring lands (`call.command napari.pixel.request_keyframe`).
 
 ### Phase 4 – Command Lane Enablement
 

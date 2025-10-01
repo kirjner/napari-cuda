@@ -26,9 +26,6 @@ def build_vt_pipeline(
     def _on_vt_backlog_gate() -> None:
         loop._loop_state.vt_wait_keyframe = True
 
-    def _request_keyframe() -> None:
-        loop._request_keyframe_once()
-
     def _on_cache_last(payload: object, persistent: bool) -> None:
         try:
             loop._loop_state.fallbacks.update_vt_cache(payload, persistent)
@@ -42,7 +39,6 @@ def build_vt_pipeline(
         backlog_trigger=loop._vt_backlog_trigger,
         is_gated=_is_vt_gated,
         on_backlog_gate=_on_vt_backlog_gate,
-        request_keyframe=_request_keyframe,
         on_cache_last=_on_cache_last,
         metrics=loop._loop_state.metrics,
         schedule_next_wake=schedule_next_wake,

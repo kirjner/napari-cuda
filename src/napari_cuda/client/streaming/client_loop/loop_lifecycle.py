@@ -34,7 +34,7 @@ def start_loop(loop: "ClientStreamLoop") -> None:
     state_controller = StateController(
         loop.server_host,
         loop.state_port,
-        handle_video_config=loop._handle_video_config,  # noqa: SLF001
+        handle_notify_stream=loop._handle_notify_stream,  # noqa: SLF001
         handle_dims_update=loop._handle_dims_update,  # noqa: SLF001
         handle_scene_spec=loop._handle_scene_spec,  # noqa: SLF001
         handle_layer_update=loop._handle_layer_update,  # noqa: SLF001
@@ -198,6 +198,7 @@ def stop_loop(loop: "ClientStreamLoop") -> None:
     loop._loop_state.threads.clear()  # noqa: SLF001
     loop._loop_state.state_channel = None  # noqa: SLF001
     loop._loop_state.pixel_receiver = None  # noqa: SLF001
+    loop._loop_state.state_session_metadata = None  # noqa: SLF001
     loop._loop_state.state_thread = None  # noqa: SLF001
     loop._loop_state.pixel_thread = None  # noqa: SLF001
 

@@ -1,15 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import time
+import types
+from typing import Dict
+
 import pytest
 
 pytest.importorskip("websockets")
 
-from napari_cuda.client.control.control_channel_client import StateChannel
-from napari_cuda.protocol import build_ack_state, build_notify_dims, build_notify_stream
+from napari_cuda.client.control.control_channel_client import (
+    HeartbeatAckError,
+    ResumeCursor,
+    StateChannel,
+)
+from napari_cuda.protocol import (
+    FeatureResumeState,
+    FeatureToggle,
+    build_ack_state,
+    build_notify_dims,
+    build_notify_stream,
+    build_session_heartbeat,
+    build_session_reject,
+    build_session_welcome,
+)
 from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerSpec,
     LayerUpdateMessage,
+    NotifyDimsFrame,
+    NotifyStreamFrame,
     SceneSpec,
     SceneSpecMessage,
 )
@@ -62,9 +82,8 @@ def test_state_channel_layer_remove_callback(state_channel):
 
 
 def test_state_channel_dims_update_dispatch() -> None:
-    captured: list[dict] = []
-    sc = StateChannel('localhost', 8081, handle_dims_update=captured.append)
-
+    frames: list[NotifyDimsFrame] = []
+    sc = StateChannel('localhost', 8081, handle_dims_update=frames.append)
     frame = build_notify_dims(
         session_id='session-42',
         payload={'current_step': (12, 3, 4), 'ndisplay': 2, 'mode': 'slice', 'source': 'test'},
@@ -74,15 +93,15 @@ def test_state_channel_dims_update_dispatch() -> None:
 
     sc._handle_message(frame.to_dict())
 
-    assert len(captured) == 1
-    dims = captured[0]
-    assert dims['frame_id'] == 'dims-007'
-    assert dims['session'] == 'session-42'
-    assert dims['timestamp'] == pytest.approx(frame.envelope.timestamp)
-    assert dims['current_step'] == (12, 3, 4)
-    assert dims['ndisplay'] == 2
-    assert dims['mode'] == 'slice'
-    assert dims['source'] == 'test'
+    assert len(frames) == 1
+    received = frames[0]
+    assert isinstance(received, NotifyDimsFrame)
+    assert received.envelope.frame_id == 'dims-007'
+    assert received.envelope.session == 'session-42'
+    assert received.payload.current_step == (12, 3, 4)
+    assert received.payload.ndisplay == 2
+    assert received.payload.mode == 'slice'
+    assert received.payload.source == 'test'
 
 
 def test_state_channel_ack_dispatch() -> None:
@@ -127,8 +146,8 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
 
 
 def test_state_channel_notify_stream_dispatch() -> None:
-    configs: list[dict] = []
-    sc = StateChannel('localhost', 8081, handle_video_config=configs.append)
+    frames: list[NotifyStreamFrame] = []
+    sc = StateChannel('localhost', 8081, handle_notify_stream=frames.append)
 
     stream_payload = {
         'codec': 'h264',
@@ -149,6 +168,162 @@ def test_state_channel_notify_stream_dispatch() -> None:
 
     sc._handle_message(frame.to_dict())
 
-    assert configs and configs[0]['type'] == 'video_config'
-    assert configs[0]['codec'] == 'h264'
-    assert configs[0]['format'] == 'avcc'
+    assert frames and isinstance(frames[0], NotifyStreamFrame)
+    payload = frames[0].payload
+    assert payload.codec == 'h264'
+    assert payload.format == 'avcc'
+
+
+def _welcome_with_features(session_id: str, resume_tokens: Dict[str, str]) -> object:
+    features: Dict[str, FeatureToggle] = {}
+    for name, token in (
+        ("notify.scene", resume_tokens.get("notify.scene")),
+        ("notify.layers", resume_tokens.get("notify.layers")),
+        ("notify.stream", resume_tokens.get("notify.stream")),
+    ):
+        resume_state = (
+            FeatureResumeState(seq=1, delta_token=token)
+            if token is not None
+            else None
+        )
+        features[name] = FeatureToggle(enabled=True, resume=True, resume_state=resume_state)
+    features.setdefault("notify.dims", FeatureToggle(enabled=True, resume=False))
+    return build_session_welcome(
+        session_id=session_id,
+        heartbeat_s=2.5,
+        ack_timeout_ms=250,
+        features=features,
+        timestamp=time.time(),
+    )
+
+
+def test_session_welcome_records_resume_tokens() -> None:
+    channel = StateChannel('localhost', 8081)
+    welcome = _welcome_with_features(
+        session_id='sess-1',
+        resume_tokens={
+            'notify.scene': 'scene-token',
+            'notify.layers': 'layers-token',
+            'notify.stream': 'stream-token',
+        },
+    )
+
+    metadata = channel._record_session_metadata(welcome)
+
+    assert metadata.session_id == 'sess-1'
+    assert metadata.resume_tokens['notify.scene'] == ResumeCursor(seq=1, delta_token='scene-token')
+    assert metadata.resume_tokens['notify.layers'] == ResumeCursor(seq=1, delta_token='layers-token')
+    assert metadata.resume_tokens['notify.stream'] == ResumeCursor(seq=1, delta_token='stream-token')
+
+    payload = channel._resume_token_payload()
+    assert payload['notify.scene'] == 'scene-token'
+    assert payload['notify.layers'] == 'layers-token'
+    assert payload['notify.stream'] == 'stream-token'
+
+
+def test_handshake_reject_resets_invalid_resume_token() -> None:
+    channel = StateChannel('localhost', 8081)
+    channel._resume_tokens['notify.scene'] = ResumeCursor(seq=4, delta_token='old-scene')
+    channel._resume_tokens['notify.layers'] = ResumeCursor(seq=2, delta_token='keep-me')
+
+    reject = build_session_reject(
+        code='invalid_resume_token',
+        message='bad token',
+        details={'topic': 'notify.scene'},
+        timestamp=time.time(),
+    )
+
+    with pytest.raises(RuntimeError):
+        channel._handle_handshake_reject(reject)
+
+    assert channel._resume_tokens['notify.scene'] is None
+    assert channel._resume_tokens['notify.layers'] == ResumeCursor(seq=2, delta_token='keep-me')
+
+
+def test_handshake_reject_without_topic_resets_all_tokens() -> None:
+    channel = StateChannel('localhost', 8081)
+    channel._resume_tokens['notify.scene'] = ResumeCursor(seq=5, delta_token='scene-old')
+    channel._resume_tokens['notify.layers'] = ResumeCursor(seq=6, delta_token='layers-old')
+
+    reject = build_session_reject(
+        code='invalid_resume_token',
+        message='bad token',
+        details={},
+        timestamp=time.time(),
+    )
+
+    with pytest.raises(RuntimeError):
+        channel._handle_handshake_reject(reject)
+
+    assert channel._resume_tokens['notify.scene'] is None
+    assert channel._resume_tokens['notify.layers'] is None
+
+
+def test_handle_session_heartbeat_sends_ack(monkeypatch) -> None:
+    channel = StateChannel('localhost', 8081)
+    welcome = _welcome_with_features(
+        session_id='sess-heartbeat',
+        resume_tokens={
+            'notify.scene': 's1',
+            'notify.layers': 'l1',
+            'notify.stream': 't1',
+        },
+    )
+    channel._record_session_metadata(welcome)
+
+    captured: Dict[str, object] = {}
+
+    def _fake_send(self, frame):
+        captured['frame'] = frame
+        return True
+
+    channel.send_frame = types.MethodType(_fake_send, channel)  # type: ignore[assignment]
+
+    heartbeat = build_session_heartbeat(session_id='sess-heartbeat', timestamp=time.time())
+    before = channel._last_heartbeat_ts
+
+    channel._handle_session_heartbeat(heartbeat.to_dict())
+
+    assert 'frame' in captured
+    ack = captured['frame']
+    assert ack.envelope.session == 'sess-heartbeat'
+    assert channel._last_heartbeat_ts is not None
+    assert channel._last_heartbeat_ts >= before
+
+
+def test_handle_session_heartbeat_propagates_send_failure() -> None:
+    channel = StateChannel('localhost', 8081)
+    welcome = _welcome_with_features(
+        session_id='sess-fail',
+        resume_tokens={'notify.scene': None, 'notify.layers': None, 'notify.stream': None},
+    )
+    channel._record_session_metadata(welcome)
+
+    def _fail_send(self, frame):  # noqa: ARG001
+        return False
+
+    channel.send_frame = types.MethodType(_fail_send, channel)  # type: ignore[assignment]
+
+    heartbeat = build_session_heartbeat(session_id='sess-fail', timestamp=time.time())
+
+    with pytest.raises(HeartbeatAckError):
+        channel._handle_session_heartbeat(heartbeat.to_dict())
+
+
+def test_monitor_heartbeat_timeout_triggers_close() -> None:
+    channel = StateChannel('localhost', 8081)
+    channel._last_heartbeat_ts = time.time() - 5.0
+
+    closed = {'called': False}
+
+    class DummyWS:
+        async def close(self, code=None, reason=None):  # noqa: ARG002
+            closed['called'] = True
+
+    async def _run() -> None:
+        await channel._monitor_heartbeat(DummyWS(), interval=0.1)
+
+    with pytest.raises(HeartbeatAckError):
+        asyncio.run(_run())
+
+    assert closed['called']

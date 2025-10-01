@@ -3,14 +3,15 @@ from __future__ import annotations
 from collections import deque
 from itertools import count
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import pytest
 
 from napari_cuda.client.streaming.client_loop import control as control_actions
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate
-from napari_cuda.protocol import build_ack_state
+from napari_cuda.protocol import build_ack_state, build_notify_dims
+from napari_cuda.protocol.messages import NotifyDimsFrame
 
 
 class FakeDispatch:
@@ -28,6 +29,29 @@ class PresenterStub:
 
     def apply_dims_update(self, payload: dict[str, Any]) -> None:
         self.calls.append(dict(payload))
+
+
+def _make_notify_dims_frame(
+    *,
+    current_step: Sequence[int],
+    ndisplay: int,
+    mode: str = 'slice',
+    source: str = 'test-suite',
+    session_id: str = 'session-test',
+    frame_id: str = 'dims-test',
+    timestamp: float = 1.5,
+) -> NotifyDimsFrame:
+    return build_notify_dims(
+        session_id=session_id,
+        payload={
+            'current_step': tuple(current_step),
+            'ndisplay': int(ndisplay),
+            'mode': mode,
+            'source': source,
+        },
+        timestamp=timestamp,
+        frame_id=frame_id,
+    )
 
 
 def _make_state() -> tuple[
@@ -102,22 +126,23 @@ def test_handle_dims_update_seeds_state_store() -> None:
     presenter = PresenterStub()
     ready_calls: list[None] = []
 
-    payload = {
-        'seq': 9,
-        'current_step': [1, 2, 3],
-        'ndim': 3,
-        'ndisplay': 2,
-        'order': [0, 1, 2],
-        'axis_labels': ['z', 'y', 'x'],
-        'range': [(0, 10), (0, 5), (0, 3)],
-        'sizes': [11, 6, 4],
-        'displayed': [1, 2],
-    }
+    state.dims_meta.update(
+        {
+            'ndim': 3,
+            'order': [0, 1, 2],
+            'axis_labels': ['z', 'y', 'x'],
+            'range': [(0, 10), (0, 5), (0, 3)],
+            'sizes': [11, 6, 4],
+            'displayed': [1, 2],
+        }
+    )
+
+    frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=2)
 
     control_actions.handle_dims_update(
         state,
         loop_state,
-        payload,
+        frame,
         presenter=presenter,
         viewer_ref=lambda: None,
         ui_call=None,
@@ -127,7 +152,18 @@ def test_handle_dims_update_seeds_state_store() -> None:
     )
 
     assert state.dims_ready is True
-    assert loop_state.last_dims_seq == 9
+    assert loop_state.last_dims_payload == {
+        'current_step': [1, 2, 3],
+        'ndisplay': 2,
+        'ndim': 3,
+        'dims_range': [(0, 10), (0, 5), (0, 3)],
+        'order': [0, 1, 2],
+        'axis_labels': ['z', 'y', 'x'],
+        'sizes': [11, 6, 4],
+        'displayed': [1, 2],
+        'mode': 'slice',
+        'source': 'test-suite',
+    }
     assert presenter.calls
     debug = store.dump_debug()
     assert debug['view:main:ndisplay']['confirmed']['value'] == 2
@@ -166,24 +202,25 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
     state.dims_ready = False
 
     # Seed baseline metadata/state
-    payload = {
-        'seq': 1,
-        'current_step': [4],
-        'ndim': 1,
-        'ndisplay': 2,
-        'order': [0],
-        'axis_labels': ['z'],
-        'range': [(0, 8)],
-        'sizes': [9],
-        'displayed': [0],
-    }
+    state.dims_meta.update(
+        {
+            'ndim': 1,
+            'order': [0],
+            'axis_labels': ['z'],
+            'range': [(0, 8)],
+            'sizes': [9],
+            'displayed': [0],
+        }
+    )
     presenter = PresenterStub()
     viewer_updates: list[dict[str, Any]] = []
+
+    frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
 
     control_actions.handle_dims_update(
         state,
         loop_state,
-        payload,
+        frame,
         presenter=presenter,
         viewer_ref=lambda: None,
         ui_call=None,

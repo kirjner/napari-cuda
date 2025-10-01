@@ -15,6 +15,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from napari_cuda.protocol.messages import (
         LayerRemoveMessage,
         LayerUpdateMessage,
+        NotifyDimsFrame,
+        NotifyStreamFrame,
         SceneSpecMessage,
     )
     from napari_cuda.protocol import AckState, ErrorCommand, ReplyCommand
@@ -27,8 +29,8 @@ from napari_cuda.client.streaming.receiver import PixelReceiver
 class StateController:
     host: str
     port: int
-    handle_video_config: Optional[Callable[[dict], None]] = None
-    handle_dims_update: Optional[Callable[[dict], None]] = None
+    handle_notify_stream: Optional[Callable[["NotifyStreamFrame"], None]] = None
+    handle_dims_update: Optional[Callable[["NotifyDimsFrame"], None]] = None
     handle_scene_spec: Optional[Callable[["SceneSpecMessage"], None]] = None
     handle_layer_update: Optional[Callable[["LayerUpdateMessage"], None]] = None
     handle_layer_remove: Optional[Callable[["LayerRemoveMessage"], None]] = None
@@ -45,7 +47,7 @@ class StateController:
         ch = StateChannel(
             self.host,
             int(self.port),
-            handle_video_config=self.handle_video_config,
+            handle_notify_stream=self.handle_notify_stream,
             handle_dims_update=self.handle_dims_update,
             handle_scene_spec=self.handle_scene_spec,
             handle_layer_update=self.handle_layer_update,

@@ -108,7 +108,12 @@ from napari_cuda.server.config import (
     ServerCtx,
     load_server_ctx,
 )
-from napari_cuda.protocol import NotifyStreamPayload
+from napari_cuda.protocol import (
+    NotifyStreamPayload,
+    NOTIFY_LAYERS_TYPE,
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_STREAM_TYPE,
+)
 from . import pixel_broadcaster, pixel_channel, metrics_server
 from .state_channel_handler import (
     broadcast_dims_update,
@@ -121,6 +126,10 @@ from .worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
+)
+from napari_cuda.server.control.resumable_history_store import (
+    ResumableHistoryStore,
+    ResumableRetention,
 )
 logger = logging.getLogger(__name__)
 
@@ -193,6 +202,21 @@ class EGLHeadlessServer:
         self.metrics = Metrics()
         self._metrics_runner = None
         self._state_clients: Set[websockets.WebSocketServerProtocol] = set()
+        self._resumable_store = ResumableHistoryStore(
+            {
+                NOTIFY_SCENE_TYPE: ResumableRetention(),
+                NOTIFY_LAYERS_TYPE: ResumableRetention(
+                    min_deltas=512,
+                    max_deltas=2048,
+                    max_age_s=300.0,
+                ),
+                NOTIFY_STREAM_TYPE: ResumableRetention(
+                    min_deltas=1,
+                    max_deltas=32,
+                    max_age_s=None,
+                ),
+            }
+        )
         # Keep queue size at 1 for latest-wins, never-block behavior
         qsize = int(self._ctx.frame_queue)
         frame_queue: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))

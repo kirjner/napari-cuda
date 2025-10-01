@@ -5,8 +5,8 @@ import json
 import logging
 import os
 import platform
-import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional
 
@@ -24,6 +24,7 @@ from napari_cuda.protocol import (
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     REPLY_COMMAND_TYPE,
+    SESSION_HEARTBEAT_TYPE,
     EnvelopeParser,
     SESSION_REJECT_TYPE,
     SESSION_WELCOME_TYPE,
@@ -33,6 +34,7 @@ from napari_cuda.protocol import (
     ReplyCommand,
     SessionReject,
     SessionWelcome,
+    build_session_ack,
     build_session_hello,
 )
 from napari_cuda.protocol.messages import (
@@ -41,6 +43,8 @@ from napari_cuda.protocol.messages import (
     SCENE_SPEC_TYPE,
     LayerRemoveMessage,
     LayerUpdateMessage,
+    NotifyDimsFrame,
+    NotifyStreamFrame,
     SceneSpecMessage,
 )
 
@@ -54,6 +58,10 @@ class StateChannelLoop:
     websocket: websockets.WebSocketClientProtocol | None = None
     outbox: asyncio.Queue[str] | None = None
     stop_requested: bool = False
+
+
+class HeartbeatAckError(RuntimeError):
+    """Raised when a heartbeat acknowledgement cannot be enqueued."""
 
 
 def _maybe_enable_debug_logger() -> bool:
@@ -106,17 +114,16 @@ class SessionMetadata:
 class StateChannel:
     """Maintains a WebSocket connection to the state channel.
 
-    - Pings periodically to keep connection alive.
-    - Forwards `video_config` messages via callback.
-    - Can send best-effort keyframe requests (throttled).
+    Pings periodically to keep the connection alive and forwards parsed
+    greenfield envelopes to the caller via callbacks.
     """
 
     def __init__(
         self,
         host: str,
         port: int,
-        handle_video_config: Optional[Callable[[dict], None]] = None,
-        handle_dims_update: Optional[Callable[[dict], None]] = None,
+        handle_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
+        handle_dims_update: Optional[Callable[[NotifyDimsFrame], None]] = None,
         handle_scene_spec: Optional[Callable[[SceneSpecMessage], None]] = None,
         handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
         handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
@@ -129,7 +136,7 @@ class StateChannel:
     ) -> None:
         self.host = host
         self.port = int(port)
-        self.handle_video_config = handle_video_config
+        self.handle_notify_stream = handle_notify_stream
         self.handle_dims_update = handle_dims_update
         self.handle_scene_spec = handle_scene_spec
         self.handle_layer_update = handle_layer_update
@@ -140,9 +147,10 @@ class StateChannel:
         self.handle_session_ready = handle_session_ready
         self.handle_connected = handle_connected
         self.handle_disconnect = handle_disconnect
-        self._last_key_req: Optional[float] = None
         self._loop_state = StateChannelLoop()
         self._session_metadata: SessionMetadata | None = None
+        self._resume_tokens: Dict[str, ResumeCursor | None] = {topic: None for topic in _RESUMABLE_TOPICS}
+        self._last_heartbeat_ts: float | None = None
 
     @property
     def session_metadata(self) -> SessionMetadata | None:
@@ -200,6 +208,13 @@ class StateChannel:
 
                     await self._perform_handshake(ws)
 
+                    heartbeat_task: asyncio.Task[None] | None = None
+                    metadata = self._session_metadata
+                    if metadata is not None and metadata.heartbeat_s > 0:
+                        heartbeat_task = asyncio.create_task(
+                            self._monitor_heartbeat(ws, metadata.heartbeat_s)
+                        )
+
                     async def _pinger() -> None:
                         while True:
                             try:
@@ -225,11 +240,9 @@ class StateChannel:
 
                     ping_task = asyncio.create_task(_pinger())
                     send_task = asyncio.create_task(_sender())
-                    try:
-                        await ws.send('{"type":"request_keyframe"}')
-                    except Exception:
-                        logger.debug("Initial keyframe request failed", exc_info=True)
+                    logger.debug("StateChannel: awaiting server keyframe; legacy request disabled")
                     import json as _json
+                    heartbeat_exc: HeartbeatAckError | None = None
                     async for msg in ws:
                         try:
                             data = _json.loads(msg)
@@ -237,17 +250,33 @@ class StateChannel:
                             continue
                         try:
                             self._handle_message(data)
+                        except HeartbeatAckError as exc:
+                            heartbeat_exc = exc
+                            with suppress(Exception):
+                                await ws.close(code=1011, reason="heartbeat failure")
+                            break
                         except Exception:
                             logger.debug("StateChannel message dispatch failed", exc_info=True)
                     ping_task.cancel()
                     send_task.cancel()
+                    if heartbeat_task is not None:
+                        heartbeat_task.cancel()
                     try:
-                        await asyncio.gather(ping_task, send_task, return_exceptions=True)
+                        tasks = [ping_task, send_task]
+                        if heartbeat_task is not None:
+                            tasks.append(heartbeat_task)
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for result in results:
+                            if isinstance(result, HeartbeatAckError):
+                                heartbeat_exc = result
+                                break
                     except Exception:
                         logger.debug("StateChannel helper cancel failed", exc_info=True)
                     finally:
                         loop_state.websocket = None
                         loop_state.outbox = None
+                    if heartbeat_exc is not None:
+                        raise heartbeat_exc
                     if self.handle_disconnect:
                         try:
                             self.handle_disconnect(None)
@@ -265,6 +294,8 @@ class StateChannel:
                     logger.info("State channel handshake failed (%s); retrying in %.0fs", msg, retry_delay)
                 elif isinstance(e, OSError):
                     logger.info("State channel socket error (%s); retrying in %.0fs", msg, retry_delay)
+                elif isinstance(e, HeartbeatAckError):
+                    logger.warning("State channel heartbeat failed (%s); reconnecting in %.0fs", msg, retry_delay)
                 else:
                     logger.exception("State channel error")
                 loop_state.websocket = None
@@ -318,6 +349,10 @@ class StateChannel:
 
         raw_type = data.get("type")
         msg_type = (raw_type or "").lower()
+
+        if msg_type == SESSION_HEARTBEAT_TYPE:
+            self._handle_session_heartbeat(data)
+            return
 
         if msg_type == ACK_STATE_TYPE:
             self._handle_ack_state(data)
@@ -397,7 +432,7 @@ class StateChannel:
             version=_NAPARI_CUDA_VERSION,
             platform=platform.platform(),
         )
-        resume_tokens = {topic: None for topic in _RESUMABLE_TOPICS}
+        resume_tokens = self._resume_token_payload()
         hello = build_session_hello(
             client=client_info,
             features=_REQUIRED_FEATURES,
@@ -443,92 +478,80 @@ class StateChannel:
 
         if msg_type == SESSION_REJECT_TYPE:
             reject = SessionReject.from_dict(data)
-            details = reject.payload.details or {}
-            code = reject.payload.code
-            message = reject.payload.message
-            raise RuntimeError(
-                f"state handshake rejected: {code}: {message} ({details})" if details else f"state handshake rejected: {code}: {message}"
-            )
+            self._handle_handshake_reject(reject)
 
         raise RuntimeError(f"unexpected handshake response type: {msg_type or 'unknown'}")
 
-    def _handle_notify_scene(self, data: dict) -> None:
-        if not self.handle_scene_spec:
-            return
+    def _handle_notify_scene(self, data: Mapping[str, object]) -> None:
         try:
             envelope = _ENVELOPE_PARSER.parse_notify_scene(data)
-            state_block = envelope.payload.state or {}
-            capabilities = None
-            if isinstance(state_block, dict) and state_block.get('capabilities') is not None:
-                try:
-                    capabilities = [str(entry) for entry in state_block.get('capabilities', [])]
-                except Exception:
-                    capabilities = None
-            spec = SceneSpecMessage(
-                type=SCENE_SPEC_TYPE,
-                version=envelope.payload.version,
-                scene=envelope.payload.scene,
-                capabilities=capabilities,
-                timestamp=envelope.timestamp,
-            )
-            if _STATE_DEBUG:
-                logger.debug(
-                    "received notify.scene: layers=%s capabilities=%s",
-                    [layer.layer_id for layer in spec.scene.layers],
-                    spec.scene.capabilities,
-                )
-            self.handle_scene_spec(spec)
+            self._store_resume_cursor(NOTIFY_SCENE_TYPE, envelope.envelope)
         except Exception:
             logger.debug("notify.scene dispatch failed", exc_info=True)
-
-    def _handle_notify_stream(self, data: dict) -> None:
-        if not self.handle_video_config:
             return
+
+        if not self.handle_scene_spec:
+            return
+
+        state_block = envelope.payload.state or {}
+        capabilities = None
+        if isinstance(state_block, dict) and state_block.get('capabilities') is not None:
+            try:
+                capabilities = [str(entry) for entry in state_block.get('capabilities', [])]
+            except Exception:
+                capabilities = None
+        spec = SceneSpecMessage(
+            type=SCENE_SPEC_TYPE,
+            version=envelope.payload.version,
+            scene=envelope.payload.scene,
+            capabilities=capabilities,
+            timestamp=envelope.timestamp,
+        )
+        if _STATE_DEBUG:
+            logger.debug(
+                "received notify.scene: layers=%s capabilities=%s",
+                [layer.layer_id for layer in spec.scene.layers],
+                spec.scene.capabilities,
+            )
+        self.handle_scene_spec(spec)
+
+    def _handle_notify_stream(self, data: Mapping[str, object]) -> None:
         try:
-            envelope = _ENVELOPE_PARSER.parse_notify_stream(data)
-            payload = envelope.payload
-            config: dict[str, object] = {
-                'type': 'video_config',
-                'codec': payload.codec,
-                'format': payload.format,
-                'fps': payload.fps,
-                'width': payload.frame_size[0],
-                'height': payload.frame_size[1],
-                'nal_length_size': payload.nal_length_size,
-                'avcc': payload.avcc,
-                'latency_policy': dict(payload.latency_policy),
-            }
-            if payload.vt_hint is not None:
-                config['vt_hint'] = dict(payload.vt_hint)
-            self.handle_video_config(config)  # type: ignore[arg-type]
+            frame = _ENVELOPE_PARSER.parse_notify_stream(data)
+            self._store_resume_cursor(NOTIFY_STREAM_TYPE, frame.envelope)
         except Exception:
             logger.debug("notify.stream dispatch failed", exc_info=True)
+            return
+
+        if not self.handle_notify_stream:
+            return
+
+        if _STATE_DEBUG:
+            payload = frame.payload
+            logger.debug(
+                "received notify.stream: codec=%s fps=%.3f size=%sx%s",
+                payload.codec,
+                payload.fps,
+                payload.frame_size[0],
+                payload.frame_size[1],
+            )
+        self.handle_notify_stream(frame)
 
     def _handle_notify_dims(self, data: Mapping[str, object]) -> None:
         if not self.handle_dims_update:
             return
         try:
             frame = _ENVELOPE_PARSER.parse_notify_dims(data)
-            envelope = frame.envelope
-            payload = frame.payload
-            message = {
-                'frame_id': envelope.frame_id,
-                'session': envelope.session,
-                'timestamp': envelope.timestamp,
-                'current_step': tuple(payload.current_step),
-                'ndisplay': payload.ndisplay,
-                'mode': payload.mode,
-                'source': payload.source,
-            }
             if _STATE_DEBUG:
+                payload = frame.payload
                 logger.debug(
                     "received notify.dims: frame=%s step=%s ndisplay=%s mode=%s",
-                    envelope.frame_id,
+                    frame.envelope.frame_id,
                     payload.current_step,
                     payload.ndisplay,
                     payload.mode,
                 )
-            self.handle_dims_update(message)
+            self.handle_dims_update(frame)
         except Exception:
             logger.debug("notify.dims dispatch failed", exc_info=True)
 
@@ -548,12 +571,30 @@ class StateChannel:
             resume_tokens=resume_tokens,
         )
         self._session_metadata = metadata
+        for topic in _RESUMABLE_TOPICS:
+            self._resume_tokens[topic] = resume_tokens.get(topic)
+        self._last_heartbeat_ts = time.time()
         if self.handle_session_ready:
             try:
                 self.handle_session_ready(metadata)
             except Exception:
                 logger.debug("handle_session_ready callback failed", exc_info=True)
         return metadata
+
+    def _handle_session_heartbeat(self, data: Mapping[str, object]) -> None:
+        frame = _ENVELOPE_PARSER.parse_heartbeat(data)
+        session_id = frame.envelope.session or self.session_id
+        if not session_id:
+            raise ValueError("session.heartbeat missing session identifier")
+        ack = build_session_ack(session_id=session_id, timestamp=time.time())
+        if not self.send_frame(ack):
+            raise HeartbeatAckError("unable to enqueue session.ack response")
+        self._last_heartbeat_ts = time.time()
+        if _STATE_DEBUG:
+            logger.debug(
+                "session.heartbeat received frame=%s",
+                frame.envelope.frame_id,
+            )
 
     def _handle_ack_state(self, data: Mapping[str, object]) -> None:
         try:
@@ -581,6 +622,63 @@ class StateChannel:
                 self.handle_ack_state(frame)
             except Exception:
                 logger.debug("handle_ack_state callback failed", exc_info=True)
+
+    def _store_resume_cursor(self, topic: str, envelope: Any) -> None:
+        if topic not in _RESUMABLE_TOPICS:
+            return
+        delta_token = getattr(envelope, "delta_token", None)
+        if delta_token is None:
+            return
+        seq_value = getattr(envelope, "seq", None)
+        seq = 0 if seq_value is None else int(seq_value)
+        cursor = ResumeCursor(seq=seq, delta_token=str(delta_token))
+        self._resume_tokens[topic] = cursor
+        metadata = self._session_metadata
+        if metadata is not None:
+            metadata.resume_tokens[topic] = cursor
+
+    def _resume_token_payload(self) -> Dict[str, str | None]:
+        payload: Dict[str, str | None] = {topic: None for topic in _RESUMABLE_TOPICS}
+        for topic, cursor in self._resume_tokens.items():
+            if cursor is not None:
+                payload[topic] = cursor.delta_token
+        return payload
+
+    def _handle_handshake_reject(self, reject: SessionReject) -> None:
+        details = reject.payload.details or {}
+        code = reject.payload.code
+        message = reject.payload.message
+        if code == "invalid_resume_token":
+            topic = details.get("topic") if isinstance(details, Mapping) else None
+            if topic:
+                self._resume_tokens[str(topic)] = None
+            else:
+                for name in _RESUMABLE_TOPICS:
+                    self._resume_tokens[name] = None
+        detail_text = f" ({details})" if details else ""
+        raise RuntimeError(f"state handshake rejected: {code}: {message}{detail_text}")
+
+    async def _monitor_heartbeat(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+        interval: float,
+    ) -> None:
+        grace = max(interval + 1.0, interval * 1.5)
+        while True:
+            await asyncio.sleep(interval)
+            last = self._last_heartbeat_ts
+            if last is None:
+                continue
+            elapsed = time.time() - last
+            if elapsed > grace:
+                logger.warning(
+                    "State heartbeat timeout after %.2fs (expected %.2fs)",
+                    elapsed,
+                    interval,
+                )
+                with suppress(Exception):
+                    await ws.close(code=1011, reason="heartbeat timeout")
+                raise HeartbeatAckError("heartbeat timeout")
 
     def _handle_reply_command(self, data: Mapping[str, object]) -> None:
         try:
@@ -622,44 +720,6 @@ class StateChannel:
                 self.handle_error_command(frame)
             except Exception:
                 logger.debug("handle_error_command callback failed", exc_info=True)
-
-    def request_keyframe_once(self) -> None:
-        """Best-effort request for a keyframe via state channel (throttled)."""
-        now = time.time()
-        if self._last_key_req is not None and (now - self._last_key_req) < 0.5:
-            return
-        self._last_key_req = now
-        # Prefer sending on the persistent connection via the sender task
-        try:
-            if self._enqueue_text('{"type":"request_keyframe"}'):
-                return
-        except Exception:
-            logger.debug("Keyframe request enqueue failed; falling back", exc_info=True)
-        # Fallback: fire-and-forget short-lived connection
-        async def _send_once(url: str) -> None:
-            try:
-                async with websockets.connect(url) as ws:
-                    await ws.send('{"type":"request_keyframe"}')
-            except Exception:
-                logger.debug("StateChannel._send_once: send failed", exc_info=True)
-        try:
-            url = f"ws://{self.host}:{self.port}"
-            # If we're already inside an event loop (e.g., called from async context),
-            # run the coroutine on a short-lived background thread to avoid
-            # 'coroutine was never awaited' or 'asyncio.run() in running loop' issues.
-            try:
-                asyncio.get_running_loop()
-                def _runner(u: str) -> None:
-                    try:
-                        asyncio.run(_send_once(u))
-                    except Exception:
-                        logger.debug("StateChannel._send_once thread failed", exc_info=True)
-                threading.Thread(target=_runner, args=(url,), daemon=True).start()
-            except RuntimeError:
-                # No running loop in this thread; safe to run directly
-                asyncio.run(_send_once(url))
-        except Exception:
-            logger.debug("Keyframe request (fallback) failed", exc_info=True)
 
     # --- Generic outbound messaging -------------------------------------------------
     def post(self, obj: Mapping[str, Any]) -> bool:

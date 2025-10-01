@@ -94,8 +94,8 @@ class ClientLoopState:
 
     # Intent caches
     pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
-    last_dims_seq: int | None = None
     last_dims_payload: dict[str, object] | None = None
+    state_session_metadata: "SessionMetadata | None" = None
 
     # Stream continuity
     sync: LoopSyncState = field(default_factory=LoopSyncState)
@@ -125,7 +125,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.streaming.metrics import ClientMetrics
     from napari_cuda.client.streaming.presenter import FixedLatencyPresenter
     from napari_cuda.client.streaming.receiver import PixelReceiver
-    from napari_cuda.client.control.control_channel_client import StateChannel
+    from napari_cuda.client.control.control_channel_client import SessionMetadata, StateChannel
     from .warmup import WarmupPolicy
     from .control import ControlStateContext
     from .camera import CameraState
