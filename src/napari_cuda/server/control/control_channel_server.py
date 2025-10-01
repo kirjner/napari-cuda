@@ -629,14 +629,14 @@ async def _broadcast_worker_dims(
             meta.get("ndim"),
         )
 
-        await _broadcast_dims_state(
-            server,
-            current_step=current_step,
-            source="worker",
-            intent_id=None,
-            timestamp=None,
-            meta=meta,
-        )
+    await _broadcast_dims_state(
+        server,
+        current_step=current_step,
+        source="worker",
+        intent_id=None,
+        timestamp=None,
+        meta=meta,
+    )
 
 
 def _normalize_camera_delta(value: Any) -> Any:
@@ -2817,6 +2817,14 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             await _emit_dims_baseline(server, ws, step_list=step_list)
         except Exception:
             logger.exception("Initial dims baseline send failed")
+
+    ensure_cb = getattr(server, "_ensure_keyframe", None)
+    schedule = getattr(server, "_schedule_coro", None)
+    if callable(ensure_cb) and callable(schedule):
+        try:
+            schedule(ensure_cb(), "state-baseline-keyframe")
+        except Exception:
+            logger.debug("state baseline keyframe schedule failed", exc_info=True)
 
     if hasattr(ws, "_napari_cuda_resume_plan"):
         delattr(ws, "_napari_cuda_resume_plan")

@@ -21,6 +21,8 @@ import importlib.resources as ilr
 import socket
 from websockets.exceptions import ConnectionClosed
 
+from .bitstream import build_avcc_config
+
 def _merge_encoder_config(base: Mapping[str, object], override: Mapping[str, object]) -> dict[str, object]:
     merged: dict[str, object] = {k: v for k, v in base.items()}
     for key, value in override.items():
@@ -341,6 +343,24 @@ class EGLHeadlessServer:
         worker.force_idr()
         return True
 
+    def _current_avcc_bytes(self) -> Optional[bytes]:
+        try:
+            channel = getattr(self, "_pixel_channel", None)
+            if channel is not None and getattr(channel, "last_avcc", None):
+                avcc_blob = channel.last_avcc
+                if isinstance(avcc_blob, bytes):
+                    return avcc_blob
+                if avcc_blob is not None:
+                    return bytes(avcc_blob)
+        except Exception:
+            logger.debug("snapshot avcc from pixel channel failed", exc_info=True)
+        try:
+            avcc_from_cache = build_avcc_config(self._param_cache)
+        except Exception:
+            logger.debug("snapshot avcc from param cache failed", exc_info=True)
+            return None
+        return avcc_from_cache
+
     def _schedule_coro(self, coro: Awaitable[None], label: str) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -408,6 +428,7 @@ class EGLHeadlessServer:
             metrics=self.metrics,
             reset_encoder=self._try_reset_encoder,
             send_stream=self._broadcast_stream_config,
+            capture_avcc=self._current_avcc_bytes,
         )
         worker = self._worker
         if worker is not None and hasattr(worker, "_request_encoder_idr"):

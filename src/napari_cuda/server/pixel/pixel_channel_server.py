@@ -87,25 +87,8 @@ async def handle_client(
     pixel_broadcaster.configure_socket(ws, label="pixel ws")
     state.needs_stream_config = True
 
-    try:
-        if reset_encoder():
-            logger.info("Resetting encoder for new pixel client to force keyframe")
-            state.broadcast.bypass_until_key = True
-            state.broadcast.kf_last_reset_ts = time.time()
-            try:
-                metrics.inc("napari_cuda_encoder_resets")
-            except Exception:  # pragma: no cover - defensive metrics guard
-                logger.debug("metrics inc encoder_resets failed", exc_info=True)
-            if state.last_avcc is not None:
-                try:
-                    await send_stream(build_notify_stream_payload(config, state.last_avcc))
-                    state.needs_stream_config = False
-                except Exception:
-                    logger.debug("Proactive notify.stream broadcast failed", exc_info=True)
-        else:
-            logger.debug("Pixel client connected but encoder reset unavailable")
-    except Exception:
-        logger.debug("Encoder reset on client connect failed", exc_info=True)
+    state.broadcast.bypass_until_key = True
+    state.needs_stream_config = True
 
     try:
         await ws.wait_closed()
@@ -121,8 +104,35 @@ async def ensure_keyframe(
     metrics: "Metrics",
     reset_encoder: Callable[[], bool],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
+    capture_avcc: Optional[Callable[[], Optional[bytes]]] = None,
 ) -> None:
     """Force the next frame to be a keyframe and schedule a watchdog."""
+
+    # Emit the latest stream configuration before we gate on the new keyframe.
+    avcc_bytes = state.last_avcc
+    if avcc_bytes is None and capture_avcc is not None:
+        try:
+            avcc_bytes = capture_avcc()
+        except Exception:  # pragma: no cover - defensive snap
+            logger.debug("capture_avcc callback failed", exc_info=True)
+        if avcc_bytes is not None:
+            state.last_avcc = avcc_bytes
+
+    if avcc_bytes is not None and not isinstance(avcc_bytes, bytes):
+        try:
+            avcc_bytes = bytes(avcc_bytes)
+        except Exception:
+            logger.debug("normalize avcc payload failed", exc_info=True)
+            avcc_bytes = None
+        else:
+            state.last_avcc = avcc_bytes
+
+    if avcc_bytes is not None:
+        try:
+            await send_stream(build_notify_stream_payload(config, avcc_bytes))
+            state.needs_stream_config = False
+        except Exception:
+            logger.debug("ensure_keyframe pre-reset notify.stream failed", exc_info=True)
 
     # TODO(encoder-idr): Re-introduce `force_idr` handling once NVENC reliably
     # produces an IDR on demand. For now we always reset the encoder so the next
@@ -146,12 +156,12 @@ async def ensure_keyframe(
 
     start_watchdog(state, reset_encoder=reset_encoder)
 
-    if state.last_avcc is not None:
+    if state.last_avcc is not None and state.needs_stream_config:
         try:
             await send_stream(build_notify_stream_payload(config, state.last_avcc))
             state.needs_stream_config = False
         except Exception:
-            logger.debug("ensure_keyframe notify.stream broadcast failed", exc_info=True)
+            logger.debug("ensure_keyframe post-reset notify.stream failed", exc_info=True)
 
 
 def start_watchdog(
