@@ -231,6 +231,25 @@ translating to legacy formats.
 3. Expand client/server control suites to cover ack rejection paths and heartbeat
    dropout, matching the testing matrix in §7.
 
+**Legacy plumbing scheduled for removal in Phase 4:**
+
+- **Server:** `MESSAGE_HANDLERS` entries for `'request_keyframe'`, `'force_idr'`, and
+  any ad-hoc ping/keyframe verbs will be replaced by `call.command`
+  requests routed through the command registry. `_handle_force_keyframe` and the
+  related manual keyframe helpers become dead code once `napari.pixel.request_keyframe`
+  ships as a command. The scene snapshot path still caches `SceneSpecMessage`
+  payloads for legacy consumers; migrating to greenfield notify snapshots must
+  precede removal of that dataclass.
+- **Client:** the optimistic keyframe helpers (`request_keyframe_once`,
+  `_ensure_keyframe`) and direct `'request_keyframe'`/`'force_idr'` sends are slated
+  for deletion. The streaming loop will instead issue `call.command` envelopes via
+  the new RPC helper and wait on `reply.command` / `error.command` for completion.
+- **Client (scene/layer shims):** `SceneSpecMessage`, `LayerUpdateMessage`, and the
+  associated registry adapters remain as legacy carriers for scene/layer metadata.
+  Phase 4/5 must replace them with greenfield notify envelopes and typed models so
+  the client no longer consumes legacy dataclasses before we drop the compatibility
+  exports.
+
 ### Phase 4 – Command Lane Enablement
 
 1. Define a command registry on the server (initial commands: `napari.viewer.fit_to_view`,
@@ -277,6 +296,16 @@ translating to legacy formats.
  - Rename residual `_handler` modules (e.g., `state_channel_handler`) to match greenfield ownership once legacy paths are gone.
   - Delete the legacy `StateUpdateMessage` module and re-export once both client
     and tests consume the greenfield dataclasses exclusively.
+  - Retire legacy scene/layer messages still in circulation:
+    - `SceneSpecMessage` (`client/control/control_channel_client.py`,
+      `client/runtime/stream_runtime.py`, `server/control/scene_snapshot_builder.py`,
+      `server/scene_spec.py`, layer registry/tests).
+    - `LayerUpdateMessage` and `LayerRemoveMessage` (same modules + layer registry).
+    - `LayerSpec`, `LayerRenderHints`, `MultiscaleSpec`, `MultiscaleLevelSpec`
+      (used by the client layer registry/adapter and server layer manager).
+    Map each consumer to the greenfield notify payloads (`notify.scene` /
+    `notify.layers` dataclasses) so these compatibility shims can be deleted with
+    `StateUpdateMessage`.
 - Remaining references to
     `scene_snapshot_builder.build_scene_spec_json` once no callers require the
     cached legacy JSON representation.
