@@ -13,7 +13,7 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     LayerRenderHints,
-    SceneSpecMessage,
+    NotifyScenePayload,
 )
 
 from .remote_image_layer import RemoteImageLayer
@@ -139,12 +139,13 @@ class RemoteLayerRegistry:
                 self._listeners.remove(callback)
 
     # ------------------------------------------------------------------
-    def apply_scene(self, message: SceneSpecMessage) -> None:
+    def apply_scene(self, payload: NotifyScenePayload) -> None:
         snapshot: Optional[RegistrySnapshot] = None
         with self._lock:
             desired_order: List[str] = []
             changed = False
-            for spec in message.scene.layers:
+            for layer_dict in payload.layers:
+                spec = LayerSpec.from_dict(layer_dict)
                 layer_id = spec.layer_id
                 desired_order.append(layer_id)
                 self._specs[layer_id] = spec

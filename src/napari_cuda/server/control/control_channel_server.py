@@ -467,27 +467,17 @@ def _layer_changes_from_result(server: Any, result: StateUpdateResult) -> tuple[
     return None, {}
 
 
-def _resolve_ndisplay(server: Any) -> int:
-    try:
-        return 3 if bool(server._scene.use_volume) else 2
-    except Exception:
-        return 2
-
-
-def _resolve_dims_mode(ndisplay: int) -> str:
-    return "volume" if int(ndisplay) >= 3 else "plane"
-
-
 def _current_dims_meta(server: Any) -> Mapping[str, Any]:
-    meta = server._dims_metadata() if hasattr(server, "_dims_metadata") else {}
-    if not isinstance(meta, Mapping):
-        meta = {}
+    meta = server._scene.last_dims_payload
+    assert meta is not None, "dims metadata not initialized"
     meta_copy: Dict[str, Any] = dict(meta)
-    if "ndisplay" not in meta_copy:
-        meta_copy["ndisplay"] = _resolve_ndisplay(server)
-    if "mode" not in meta_copy:
-        meta_copy["mode"] = _resolve_dims_mode(int(meta_copy["ndisplay"]))
+    assert "ndisplay" in meta_copy, "dims metadata missing ndisplay"
+    assert "mode" in meta_copy, "dims metadata missing mode"
     return meta_copy
+
+
+def _resolve_dims_mode_from_ndisplay(ndisplay: int) -> str:
+    return "volume" if int(ndisplay) >= 3 else "plane"
 
 
 async def _broadcast_layers_delta(
@@ -561,28 +551,28 @@ async def _broadcast_dims_state(
     if not clients:
         return
 
-    if not isinstance(meta, Mapping):
-        assert False, "notify.dims requires worker metadata"
+    assert meta is not None, "notify.dims requires worker metadata"
 
-    raw_ndisplay = meta.get("ndisplay")
-    raw_mode = meta.get("mode")
+    meta_dict = dict(meta)
 
-    if raw_ndisplay is None or raw_mode is None:
-        fallback = _current_dims_meta(server)
-        raw_ndisplay = fallback.get("ndisplay") if raw_ndisplay is None else raw_ndisplay
-        raw_mode = fallback.get("mode") if raw_mode is None else raw_mode
+    ndisplay_raw = meta_dict["ndisplay"]
+    mode_raw = meta_dict["mode"]
 
-    if raw_ndisplay is None or raw_mode is None:
-        ndisplay = _resolve_ndisplay(server)
-        mode = _resolve_dims_mode(ndisplay)
-    else:
-        ndisplay = int(raw_ndisplay)
-        mode_text = str(raw_mode).strip().lower()
-        assert mode_text in {"volume", "plane"}, f"invalid dims mode: {raw_mode!r}"
-        mode = "volume" if mode_text == "volume" else "plane"
+    ndisplay = int(ndisplay_raw)
+    mode_text = str(mode_raw).strip().lower()
+    assert mode_text in {"volume", "plane"}, f"invalid dims mode: {raw_mode!r}"
+    mode = "volume" if mode_text == "volume" else "plane"
+
+    step_list = [int(value) for value in current_step]
+
+    meta_dict["current_step"] = list(step_list)
+    meta_dict["ndisplay"] = ndisplay
+    meta_dict["mode"] = mode
+
+    server._scene.last_dims_payload = dict(meta_dict)
 
     payload = build_notify_dims_payload(
-        current_step=current_step,
+        current_step=step_list,
         ndisplay=ndisplay,
         mode=mode,
         source=str(source),
@@ -1948,12 +1938,13 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.invalid", f"unsupported dims key {key}", details={"scope": scope, "key": key, "target": target})
             return True
 
-        meta = server._dims_metadata() or {}
+        meta = server._scene.last_dims_payload
+        assert meta is not None, "dims metadata not initialized"
         try:
             result = apply_dims_state_update(
                 server._scene,
                 server._state_lock,
-                meta,
+                dict(meta),
                 axis=target,
                 prop=norm_key,
                 value=value_obj,
@@ -2114,13 +2105,16 @@ async def _broadcast_state_update(
             latest = server._scene.latest_state.current_step
             if latest is not None:
                 step = tuple(int(x) for x in latest)
+        meta = dict(_current_dims_meta(server))
+        meta["ndisplay"] = int(result.value)
+        meta["mode"] = _resolve_dims_mode_from_ndisplay(int(result.value))
         await _broadcast_dims_state(
             server,
             current_step=step,
             source="state.update",
             intent_id=result.intent_id,
             timestamp=result.timestamp,
-            meta=_current_dims_meta(server),
+            meta=meta,
         )
         return
 
@@ -2294,9 +2288,8 @@ def process_worker_notifications(
 
     for note in notifications:
         if note.kind == "dims_update":
-            meta = note.meta or server._dims_metadata() or {}
-            if not isinstance(meta, Mapping):
-                meta = {}
+            assert note.meta is not None, "worker dims notification missing metadata"
+            meta = dict(note.meta)
 
             ndim = _ndim_from_meta(meta)
 

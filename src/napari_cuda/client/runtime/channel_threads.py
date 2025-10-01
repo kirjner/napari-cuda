@@ -16,9 +16,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing aid only
         LayerRemoveMessage,
         LayerUpdateMessage,
         NotifyDimsFrame,
+        NotifySceneFrame,
         NotifySceneLevelPayload,
         NotifyStreamFrame,
-        SceneSpecMessage,
     )
     from napari_cuda.protocol import AckState, ErrorCommand, ReplyCommand
     from napari_cuda.client.control.control_channel_client import SessionMetadata
@@ -32,7 +32,7 @@ class StateController:
     port: int
     handle_notify_stream: Optional[Callable[["NotifyStreamFrame"], None]] = None
     handle_dims_update: Optional[Callable[["NotifyDimsFrame"], None]] = None
-    handle_scene_spec: Optional[Callable[["SceneSpecMessage"], None]] = None
+    handle_scene_snapshot: Optional[Callable[["NotifySceneFrame"], None]] = None
     handle_scene_level: Optional[Callable[["NotifySceneLevelPayload"], None]] = None
     handle_layer_update: Optional[Callable[["LayerUpdateMessage"], None]] = None
     handle_layer_remove: Optional[Callable[["LayerRemoveMessage"], None]] = None
@@ -53,7 +53,7 @@ class StateController:
             int(self.port),
             handle_notify_stream=self.handle_notify_stream,
             handle_dims_update=self.handle_dims_update,
-            handle_scene_spec=self.handle_scene_spec,
+            handle_scene_snapshot=self.handle_scene_snapshot,
             handle_scene_level=self.handle_scene_level,
             handle_layer_update=self.handle_layer_update,
             handle_layer_remove=self.handle_layer_remove,

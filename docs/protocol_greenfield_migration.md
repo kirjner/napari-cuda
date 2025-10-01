@@ -61,7 +61,7 @@ The following deviations are now deliberate, documented behaviour until the corr
 - ~~**Alt-drag orbit gating** – The streaming client continues to gate orbital camera drags on an `in_vol3d` flag that never flips in 2D mode (`src/napari_cuda/client/streaming/client_loop/camera.py:166`). Even though orbit updates now flow through `state.update(camera.orbit)`, Alt-drag still degrades to pan outside true volume sessions. *Target:* derive the volume flag from the negotiated viewer state (e.g., `notify.dims.mode`) and fall back to orbit when a TurntableCamera is active.~~
 - ~~**Camera notify integration (resolved 2025-10-01)** – `notify.camera` deltas are now broadcast via the greenfield path, recorded in the state store, and mirrored into the presenter HUD (`src/napari_cuda/client/runtime/stream_runtime.py:591`, `src/napari_cuda/client/streaming/presenter_facade.py:212`).~~
 - ~~**Alt-drag orbit gating (resolved 2025-10-01)** – `notify.dims.mode` drives the volume gate and Alt+drag emits `camera.orbit` intents with verified test coverage (`src/napari_cuda/client/runtime/stream_runtime.py:1246`, `_tests/test_camera.py`).~~
-- **Dims baseline readiness** – Initial `notify.dims` still relies on the cached scene snapshot before the worker emits its first update; until the worker-driven path is fully authoritative we fall back to the scene manager metadata when worker meta is missing (`src/napari_cuda/server/control/control_channel_server.py:556`).
+- **Dims baseline readiness (resolved 2025-10-xx)** – `notify.dims` now streams directly from the worker snapshot. The server persists the latest `snapshot_dims_metadata()` payload and reuses it for intent echoes instead of rebuilding from `SceneSpec`; the client consumes those metadata fields without touching the cached scene snapshot.
 - **State handler shims** – Compatibility modules (`src/napari_cuda/server/state_channel_handler.py:1`, `src/napari_cuda/client/streaming/client_loop/control.py:1`) still wildcard-import the new implementations to preserve legacy imports. *Target:* drop once downstream call sites are updated.
 - **Minimal client legacy protocol** – `src/napari_cuda/client/minimal_client.py` continues to speak the deprecated control format (`{"type":"ping"}` etc.). *Target:* archive the minimal client alongside the legacy protocol or port it to the greenfield envelopes after the migration reaches Phase 5.
 
@@ -349,9 +349,8 @@ translating to legacy formats.
     Map each consumer to the greenfield notify payloads (`notify.scene` /
     `notify.layers` dataclasses) so these compatibility shims can be deleted with
     `StateUpdateMessage`.
-- Remaining references to
-    `scene_snapshot_builder.build_scene_spec_json` once no callers require the
-    cached legacy JSON representation.
+- `scene_snapshot_builder.build_scene_spec_json` retired; new notifier payloads
+  (`build_notify_scene_payload`) back the remaining callers.
 
 ## 7. Testing Matrix & Instrumentation
 

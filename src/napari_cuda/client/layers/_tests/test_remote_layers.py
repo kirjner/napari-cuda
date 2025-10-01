@@ -15,8 +15,7 @@ try:
         LayerRemoveMessage,
         LayerSpec,
         LayerUpdateMessage,
-        SceneSpec,
-        SceneSpecMessage,
+        NotifyScenePayload,
     )
     NAPARI_AVAILABLE = True
 except Exception as exc:  # pragma: no cover - environment dependent import guard
@@ -24,7 +23,7 @@ except Exception as exc:  # pragma: no cover - environment dependent import guar
     NAPARI_IMPORT_ERROR = str(exc)
     pytestmark = pytest.mark.skip(reason=f"napari unavailable: {NAPARI_IMPORT_ERROR}")
     LayerRecord = RegistrySnapshot = RemoteArray = RemoteLayerRegistry = RemoteImageLayer = RemotePreview = object  # type: ignore[assignment]
-    LayerRenderHints = LayerRemoveMessage = LayerSpec = LayerUpdateMessage = SceneSpec = SceneSpecMessage = object  # type: ignore[assignment]
+    LayerRenderHints = LayerRemoveMessage = LayerSpec = LayerUpdateMessage = NotifyScenePayload = object  # type: ignore[assignment]
 
 
 def make_layer_spec(**overrides) -> LayerSpec:
@@ -127,7 +126,8 @@ def test_remote_layer_registry_lifecycle():
     snapshots = []
     registry.add_listener(snapshots.append)
     spec = make_layer_spec()
-    registry.apply_scene(SceneSpecMessage(scene=SceneSpec(layers=[spec])))
+    payload = NotifyScenePayload(viewer={"dims": {}, "camera": {}, "settings": {}}, layers=(spec.to_dict(),))
+    registry.apply_scene(payload)
     assert snapshots
     first = snapshots[-1]
     assert first.ids() == (spec.layer_id,)

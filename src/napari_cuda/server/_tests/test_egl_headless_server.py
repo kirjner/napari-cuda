@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from napari_cuda.server.egl_headless_server import EGLHeadlessServer
 from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server import state_channel_handler
+from napari_cuda.server.control import control_channel_server
 
 
 class _StubWorker:
@@ -22,12 +23,25 @@ class _StubWorker:
     def request_ndisplay(self, ndisplay: int) -> None:
         self.requested = int(ndisplay)
         self.use_volume = bool(ndisplay == 3)
+        self.force_idr_called = True
 
     def force_idr(self) -> None:
         self.force_idr_called = True
 
     def viewer_model(self):  # type: ignore[no-untyped-def]
         return self._viewer
+
+    def snapshot_dims_metadata(self) -> dict[str, object]:
+        return {
+            "ndim": 3,
+            "ndisplay": int(self._viewer.dims.ndisplay),
+            "mode": "volume" if self._viewer.dims.ndisplay == 3 else "plane",
+            "current_step": [int(x) for x in self._viewer.dims.current_step],
+            "axis_labels": ["z", "y", "x"],
+            "order": [0, 1, 2],
+            "sizes": [8, 8, 8],
+            "range": [[0, 7], [0, 7], [0, 7]],
+        }
 
 
 def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
@@ -44,7 +58,7 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     async def _noop(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
-    monkeypatch.setattr(state_channel_handler, '_broadcast_worker_dims', _fake_broadcast)
+    monkeypatch.setattr(control_channel_server, '_broadcast_worker_dims', _fake_broadcast)
     monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 

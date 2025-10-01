@@ -18,7 +18,6 @@ from napari_cuda.protocol.messages import (
     MultiscaleLevelSpec,
     MultiscaleSpec,
     SceneSpec,
-    SceneSpecMessage,
 )
 from napari_cuda.server import scene_spec as _scene
 from napari_cuda.server.server_scene import (
@@ -162,18 +161,6 @@ class ViewerSceneManager:
 
     def scene_spec(self) -> Optional[SceneSpec]:
         return self._scene
-
-    def scene_message(self, timestamp: Optional[float] = None) -> SceneSpecMessage:
-        scene = self._scene or self.update_from_sources(
-            worker=None,
-            scene_state=None,
-            multiscale_state=None,
-            volume_state=None,
-            current_step=None,
-            ndisplay=2,
-            zarr_path=None,
-        )
-        return SceneSpecMessage(timestamp=timestamp, scene=scene)
 
     def dims_metadata(self) -> Dict[str, Any]:
         scene = self._scene

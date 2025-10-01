@@ -9,42 +9,10 @@ from napari_cuda.protocol.messages import (
     NotifySceneLevelPayload,
     NotifyDimsPayload,
     NotifyLayersPayload,
-    SceneSpecMessage,
 )
 from napari_cuda.server.layer_manager import ViewerSceneManager
 from napari_cuda.server.server_scene import ServerSceneData, layer_controls_to_dict
 from napari_cuda.server.control.state_update_engine import StateUpdateResult
-
-
-# ---------------------------------------------------------------------------
-# Scene spec helpers
-
-
-def build_scene_spec_message(
-    scene: ServerSceneData,
-    manager: ViewerSceneManager,
-    *,
-    timestamp: Optional[float] = None,
-) -> SceneSpecMessage:
-    """Build a `SceneSpecMessage` and cache it on the scene bag."""
-
-    message = manager.scene_message(timestamp)
-    json_payload = message.to_json()
-    scene.last_scene_spec = message.to_dict()
-    scene.last_scene_spec_json = json_payload
-    return message
-
-
-def build_scene_spec_json(
-    scene: ServerSceneData,
-    manager: ViewerSceneManager,
-    *,
-    timestamp: Optional[float] = None,
-) -> str:
-    """Return a JSON-encoded scene spec, caching it on the scene bag."""
-
-    message = build_scene_spec_message(scene, manager, timestamp=timestamp)
-    return scene.last_scene_spec_json or message.to_json()
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +29,8 @@ def build_notify_scene_payload(
 ) -> NotifyScenePayload:
     """Build a ``notify.scene`` payload aligned with the greenfield schema."""
 
-    message = build_scene_spec_message(scene, manager, timestamp=timestamp)
-    spec = message.scene
-
+    spec = manager.scene_spec()
+    assert spec is not None, "viewer scene manager not initialised"
     scene_dict = spec.to_dict()
 
     viewer_block = _build_viewer_block(scene_dict, viewer_settings)
@@ -71,12 +38,14 @@ def build_notify_scene_payload(
     policies_block = _build_policies_block(scene)
     ancillary_block = _build_ancillary_block(scene_dict, scene, ancillary)
 
-    return NotifyScenePayload(
+    payload = NotifyScenePayload(
         viewer=viewer_block,
         layers=layers_block,
         policies=policies_block,
         ancillary=ancillary_block,
     )
+    scene.last_scene_spec = payload.to_dict()
+    return payload
 
 
 def build_notify_scene_level_payload(

@@ -118,20 +118,15 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
 
     server._state_clients = {fake_ws}
-    def _dims_metadata() -> dict[str, Any]:
-        ndisplay = 3 if server.use_volume else 2
-        mode = 'volume' if ndisplay == 3 else 'plane'
-        return {
-            'ndim': 3,
-            'order': ['z', 'y', 'x'],
-            'range': [[0, 9], [0, 9], [0, 9]],
-            'current_step': [0, 0, 0],
-            'ndisplay': ndisplay,
-            'mode': mode,
-            'volume': bool(server.use_volume),
-        }
-
-    server._dims_metadata = _dims_metadata
+    server._scene.last_dims_payload = {
+        'ndim': 3,
+        'order': ['z', 'y', 'x'],
+        'range': [[0, 9], [0, 9], [0, 9]],
+        'current_step': [0, 0, 0],
+        'ndisplay': 2,
+        'mode': 'plane',
+        'volume': False,
+    }
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
     scheduled: list[Coroutine[Any, Any, None]] = []
@@ -288,6 +283,8 @@ def test_dims_update_emits_ack_and_notify() -> None:
     _drain_scheduled(scheduled)
 
     assert server._scene.latest_state.current_step[0] == 5
+    assert server._scene.last_dims_payload is not None
+    assert server._scene.last_dims_payload["current_step"][0] == 5
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -323,6 +320,9 @@ def test_view_ndisplay_update() -> None:
 
     assert server._ndisplay_calls == [3]
     assert server.use_volume is True
+    assert server._scene.last_dims_payload is not None
+    assert server._scene.last_dims_payload["ndisplay"] == 3
+    assert server._scene.last_dims_payload["mode"] == 'volume'
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1

@@ -16,8 +16,6 @@ from napari_cuda.server.control.scene_snapshot_builder import (
     build_notify_dims_from_result,
     build_notify_layers_delta_payload,
     build_notify_scene_payload,
-    build_scene_spec_json,
-    build_scene_spec_message,
 )
 from napari_cuda.protocol import (
     EnvelopeParser,
@@ -47,18 +45,6 @@ def manager() -> ViewerSceneManager:
     return mgr
 
 
-def test_build_scene_spec_message_caches(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
-    message = build_scene_spec_message(scene, manager)
-    assert scene.last_scene_spec is not None
-    assert scene.last_scene_spec_json is not None
-    assert message.to_json() == scene.last_scene_spec_json
-
-
-def test_build_scene_spec_json_round_trip(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
-    json_payload = build_scene_spec_json(scene, manager)
-    assert json_payload == scene.last_scene_spec_json
-
-
 def test_build_notify_scene_payload_round_trip(scene: ServerSceneData, manager: ViewerSceneManager) -> None:
     viewer_settings = {"fps_target": 60.0, "canvas_size": [640, 480]}
     payload = build_notify_scene_payload(
@@ -66,6 +52,9 @@ def test_build_notify_scene_payload_round_trip(scene: ServerSceneData, manager: 
         manager,
         viewer_settings=viewer_settings,
     )
+    cached = scene.last_scene_spec
+    assert cached is not None
+    assert cached == payload.to_dict()
 
     sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_TYPE)
     frame = build_notify_scene_snapshot(

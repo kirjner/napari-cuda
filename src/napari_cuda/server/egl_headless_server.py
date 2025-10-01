@@ -97,9 +97,6 @@ from .worker_notifications import (
     WorkerSceneNotification,
     WorkerSceneNotificationQueue,
 )
-from .server_scene_spec import (
-    build_scene_spec_json,
-)
 from .layer_manager import ViewerSceneManager
 from .bitstream import ParamCache, configure_bitstream
 from .metrics_core import Metrics
@@ -117,6 +114,7 @@ from napari_cuda.protocol import (
     NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
 )
+from napari_cuda.server.control.scene_snapshot_builder import build_notify_scene_payload
 from . import pixel_broadcaster, pixel_channel, metrics_server
 from .state_channel_handler import (
     broadcast_stream_config,
@@ -739,13 +737,14 @@ class EGLHeadlessServer:
             logger.debug("scene manager update failed before scene.spec", exc_info=True)
 
         try:
-            json_payload = build_scene_spec_json(
+            payload = build_notify_scene_payload(
                 self._scene,
                 self._scene_manager,
                 timestamp=time.time(),
             )
+            json_payload = json.dumps(payload.to_dict())
         except Exception:
-            logger.debug("scene.spec build failed", exc_info=True)
+            logger.debug("scene notify snapshot build failed", exc_info=True)
             return None
 
         if self._log_dims_info:
@@ -757,7 +756,7 @@ class EGLHeadlessServer:
                 if layer0.multiscale is not None:
                     ms = layer0.multiscale.to_dict()
             logger.info(
-                "scene.spec dims: sizes=%s range=%s ms_level=%s",
+                "notify.scene dims: sizes=%s range=%s ms_level=%s",
                 dims.get('sizes'),
                 dims.get('range'),
                 (ms or {}).get('current_level') if isinstance(ms, dict) else None,

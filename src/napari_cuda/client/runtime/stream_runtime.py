@@ -56,9 +56,9 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifySceneFrame,
     NotifySceneLevelPayload,
     NotifyStreamFrame,
-    SceneSpecMessage,
 )
 from napari_cuda.protocol import AckState, build_call_command, build_state_update
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
@@ -210,7 +210,7 @@ class ClientStreamLoop:
         self._presenter.set_latency(self._pyav_latency_s)
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
-        self._latest_scene_spec: Optional[SceneSpecMessage] = None
+        self._latest_scene_frame: Optional[NotifySceneFrame] = None
         self._control_state = control_actions.ControlStateContext.from_env(self._env_cfg)
         self._loop_state.control_state = self._control_state
         self._state_store = StateStore(clock=time.time)
@@ -630,15 +630,16 @@ class ClientStreamLoop:
             self._ui_call,
         )
 
-    def _handle_scene_spec(self, msg: SceneSpecMessage) -> None:
-        """Cache latest scene specification and forward to registry."""
+    def _handle_scene_snapshot(self, frame: NotifySceneFrame) -> None:
+        """Cache latest notify.scene frame and forward to registry."""
         with self._scene_lock:
-            self._latest_scene_spec = msg
-        self._layer_registry.apply_scene(msg)
+            self._latest_scene_frame = frame
+        payload = frame.payload
+        self._layer_registry.apply_scene(payload)
         logger.debug(
-            "scene.spec received: %d layers, capabilities=%s",
-            len(msg.scene.layers),
-            msg.scene.capabilities,
+            "notify.scene received: layers=%d policies=%s",
+            len(payload.layers),
+            tuple(payload.policies.keys()) if payload.policies else (),
         )
 
     def _handle_scene_policies(self, policies: Mapping[str, object]) -> None:

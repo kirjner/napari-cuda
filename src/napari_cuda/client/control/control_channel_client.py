@@ -43,13 +43,12 @@ from napari_cuda.protocol import (
 from napari_cuda.protocol.messages import (
     LAYER_REMOVE_TYPE,
     LAYER_UPDATE_TYPE,
-    SCENE_SPEC_TYPE,
     LayerRemoveMessage,
     LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifySceneFrame,
     NotifySceneLevelPayload,
     NotifyStreamFrame,
-    SceneSpecMessage,
 )
 
 
@@ -138,7 +137,7 @@ class StateChannel:
         port: int,
         handle_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
         handle_dims_update: Optional[Callable[[NotifyDimsFrame], None]] = None,
-        handle_scene_spec: Optional[Callable[[SceneSpecMessage], None]] = None,
+        handle_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
         handle_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
         handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
         handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
@@ -155,7 +154,7 @@ class StateChannel:
         self.port = int(port)
         self.handle_notify_stream = handle_notify_stream
         self.handle_dims_update = handle_dims_update
-        self.handle_scene_spec = handle_scene_spec
+        self.handle_scene_snapshot = handle_scene_snapshot
         self.handle_scene_level = handle_scene_level
         self.handle_layer_update = handle_layer_update
         self.handle_layer_remove = handle_layer_remove
@@ -421,21 +420,6 @@ class StateChannel:
             logger.debug("Ignoring post-handshake control message: %s", msg_type)
             return
 
-        if msg_type == SCENE_SPEC_TYPE:
-            if self.handle_scene_spec:
-                try:
-                    spec = SceneSpecMessage.from_dict(data)
-                    if _STATE_DEBUG:
-                        logger.debug(
-                            "received scene.spec: layers=%s capabilities=%s",
-                            [layer.layer_id for layer in spec.scene.layers],
-                            spec.scene.capabilities,
-                        )
-                    self.handle_scene_spec(spec)
-                except Exception:
-                    logger.debug("handle_scene_spec callback failed", exc_info=True)
-            return
-
         if msg_type == LAYER_UPDATE_TYPE:
             if self.handle_layer_update:
                 try:
@@ -524,78 +508,34 @@ class StateChannel:
 
     def _handle_notify_scene(self, data: Mapping[str, object]) -> None:
         try:
-            envelope = _ENVELOPE_PARSER.parse_notify_scene(data)
-            self._store_resume_cursor(NOTIFY_SCENE_TYPE, envelope.envelope)
+            frame = _ENVELOPE_PARSER.parse_notify_scene(data)
+            self._store_resume_cursor(NOTIFY_SCENE_TYPE, frame.envelope)
         except Exception:
             logger.debug("notify.scene dispatch failed", exc_info=True)
             return
 
-        if not self.handle_scene_spec:
-            return
-
-        payload = envelope.payload
-        env_meta = envelope.envelope
-        scene_payload: Dict[str, Any] = {
-            "layers": [dict(layer) for layer in payload.layers],
-        }
-
-        viewer_block = payload.viewer
-        dims_block = viewer_block.get("dims") if isinstance(viewer_block, Mapping) else None
-        camera_block = viewer_block.get("camera") if isinstance(viewer_block, Mapping) else None
-        if isinstance(dims_block, Mapping):
-            scene_payload["dims"] = dict(dims_block)
-        if isinstance(camera_block, Mapping):
-            scene_payload["camera"] = dict(camera_block)
-
-        ancillary = payload.ancillary if isinstance(payload.ancillary, Mapping) else {}
-        metadata_block: Dict[str, Any] = {}
-        if isinstance(ancillary, Mapping):
-            meta_section = ancillary.get("metadata")
-            if isinstance(meta_section, Mapping):
-                metadata_block.update({str(k): v for k, v in meta_section.items()})
-            for extra_key in ("volume_state", "policy_metrics"):
-                extra_value = ancillary.get(extra_key)
-                if extra_value is not None:
-                    metadata_block[extra_key] = extra_value
-        if metadata_block:
-            scene_payload["metadata"] = metadata_block
-
-        policies_mapping = payload.policies if isinstance(payload.policies, Mapping) else None
-        if isinstance(policies_mapping, Mapping) and self.handle_scene_policies:
-            policies_payload = {str(k): _normalize_level_value(v) for k, v in policies_mapping.items()}
+        payload = frame.payload
+        policies_block = payload.policies
+        if self.handle_scene_policies and policies_block is not None:
+            policies_payload = {str(key): _normalize_level_value(value) for key, value in policies_block.items()}
             try:
                 self.handle_scene_policies(policies_payload)
             except Exception:
                 logger.debug("handle_scene_policies callback failed", exc_info=True)
 
-        capabilities = None
-        anc_caps = ancillary.get("capabilities") if isinstance(ancillary, Mapping) else None
-        if isinstance(anc_caps, Sequence):
-            capabilities = [str(entry) for entry in anc_caps if entry is not None]
-            scene_payload["capabilities"] = capabilities
-
-        scene_message_dict: Dict[str, Any] = {
-            "type": SCENE_SPEC_TYPE,
-            "version": 1,
-            "timestamp": env_meta.timestamp,
-            "scene": scene_payload,
-        }
-        if capabilities:
-            scene_message_dict["capabilities"] = capabilities
-
-        try:
-            spec = SceneSpecMessage.from_dict(scene_message_dict)
-        except Exception:
-            logger.debug("notify.scene conversion failed", exc_info=True)
+        if not self.handle_scene_snapshot:
             return
 
         if _STATE_DEBUG:
             logger.debug(
-                "received notify.scene: layers=%s capabilities=%s",
-                [layer.layer_id for layer in spec.scene.layers],
-                spec.scene.capabilities,
+                "received notify.scene: layer_count=%s keys(viewer)=%s",
+                len(payload.layers),
+                list(payload.viewer.keys()),
             )
-        self.handle_scene_spec(spec)
+        try:
+            self.handle_scene_snapshot(frame)
+        except Exception:
+            logger.debug("handle_scene_snapshot callback failed", exc_info=True)
 
     def _handle_scene_level(self, data: Mapping[str, object]) -> None:
         if not self.handle_scene_level:

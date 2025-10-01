@@ -33,10 +33,9 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifySceneFrame,
     NotifySceneLevelPayload,
     NotifyStreamFrame,
-    SceneSpec,
-    SceneSpecMessage,
 )
 
 
@@ -47,7 +46,7 @@ def state_channel() -> StateChannel:
 
 def test_state_channel_scene_callback(state_channel):
     received = []
-    state_channel.handle_scene_spec = received.append
+    state_channel.handle_scene_snapshot = received.append
 
     layer = LayerSpec(layer_id='a', layer_type='image', name='demo', ndim=2, shape=[32, 32])
     frame = build_notify_scene_snapshot(
@@ -61,8 +60,9 @@ def test_state_channel_scene_callback(state_channel):
     state_channel._handle_message(frame.to_dict())
 
     assert len(received) == 1
-    assert isinstance(received[0], SceneSpecMessage)
-    assert received[0].scene.layers[0].layer_id == 'a'
+    frame = received[0]
+    assert isinstance(frame, NotifySceneFrame)
+    assert frame.payload.layers[0]['layer_id'] == 'a'
 
 
 def test_state_channel_layer_update_callback(state_channel):
@@ -141,8 +141,8 @@ def test_state_channel_ack_dispatch() -> None:
 
 
 def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> None:
-    received: list[SceneSpecMessage] = []
-    state_channel.handle_scene_spec = received.append
+    received: list[NotifySceneFrame] = []
+    state_channel.handle_scene_snapshot = received.append
 
     layer = LayerSpec(layer_id='layer-10', layer_type='image', name='demo', ndim=2, shape=[8, 8])
     frame = build_notify_scene_snapshot(
@@ -155,17 +155,19 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
 
     state_channel._handle_message(frame.to_dict())
 
-    assert received and isinstance(received[0], SceneSpecMessage)
-    assert received[0].scene.layers[0].layer_id == 'layer-10'
+    assert received
+    frame = received[0]
+    assert isinstance(frame, NotifySceneFrame)
+    assert frame.payload.layers[0]['layer_id'] == 'layer-10'
 
 
 def test_state_channel_notify_scene_policies_callback() -> None:
-    specs: list[SceneSpecMessage] = []
+    frames: list[NotifySceneFrame] = []
     policies_received: list[dict[str, object]] = []
     sc = StateChannel(
         'localhost',
         8081,
-        handle_scene_spec=specs.append,
+        handle_scene_snapshot=frames.append,
         handle_scene_policies=policies_received.append,
     )
 
@@ -196,9 +198,11 @@ def test_state_channel_notify_scene_policies_callback() -> None:
 
     sc._handle_message(frame.to_dict())
 
-    assert specs and isinstance(specs[0], SceneSpecMessage)
-    scene = specs[0].scene
-    assert scene.metadata is None or 'multiscale' not in scene.metadata
+    assert frames
+    frame = frames[0]
+    assert isinstance(frame, NotifySceneFrame)
+    scene_payload = frame.payload
+    assert scene_payload.ancillary is None or 'multiscale' not in scene_payload.ancillary
 
     assert policies_received, "policies callback should be invoked"
     multiscale = policies_received[0]['multiscale']
