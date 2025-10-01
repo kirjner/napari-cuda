@@ -80,6 +80,8 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._worker = _CaptureWorker()
     server._log_state_traces = False
     server._log_dims_info = False
+    server._log_cam_info = False
+    server._log_cam_debug = False
     server._allowed_render_modes = {"mip"}
     server.metrics = SimpleNamespace(inc=lambda *a, **k: None)
     server.width = 640
@@ -116,7 +118,20 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
 
     server._state_clients = {fake_ws}
-    server._dims_metadata = lambda: {"ndim": 3, "order": ["z", "y", "x"], "range": [[0, 9], [0, 9], [0, 9]]}
+    def _dims_metadata() -> dict[str, Any]:
+        ndisplay = 3 if server.use_volume else 2
+        mode = 'volume' if ndisplay == 3 else 'plane'
+        return {
+            'ndim': 3,
+            'order': ['z', 'y', 'x'],
+            'range': [[0, 9], [0, 9], [0, 9]],
+            'current_step': [0, 0, 0],
+            'ndisplay': ndisplay,
+            'mode': mode,
+            'volume': bool(server.use_volume),
+        }
+
+    server._dims_metadata = _dims_metadata
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
     scheduled: list[Coroutine[Any, Any, None]] = []
@@ -146,6 +161,12 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         server._ensure_keyframe_calls += 1
 
     server._ensure_keyframe = _ensure_keyframe
+    server._idr_on_reset = True
+
+    def _enqueue_camera_command(cmd: Any) -> None:
+        scene.camera_commands.append(cmd)
+
+    server._enqueue_camera_command = _enqueue_camera_command
 
     return server, scheduled, captured
 
@@ -352,6 +373,119 @@ def test_volume_render_mode_update() -> None:
     assert layer_frames
     payload = layer_frames[-1]["payload"]
     assert payload["changes"].get("volume.render_mode") == "iso"
+
+
+def test_camera_zoom_update_emits_notify() -> None:
+    server, scheduled, captured = _make_server()
+
+    payload = {
+        "scope": "camera",
+        "target": "main",
+        "key": "zoom",
+        "value": {"factor": 1.2, "anchor_px": [12, 24]},
+    }
+
+    frame = _build_state_update(payload, intent_id="cam-zoom", frame_id="state-cam-1")
+
+    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    _drain_scheduled(scheduled)
+
+    commands = server._scene.camera_commands
+    assert commands, "expected camera command queued"
+    cmd = commands[-1]
+    assert cmd.kind == 'zoom'
+    assert cmd.factor == 1.2
+    assert cmd.anchor_px == (12.0, 24.0)
+
+    acks = _frames_of_type(captured, "ack.state")
+    assert len(acks) == 1
+    ack_payload = acks[0]["payload"]
+    assert ack_payload == {
+        "intent_id": "cam-zoom",
+        "in_reply_to": "state-cam-1",
+        "status": "accepted",
+        "applied_value": {"factor": 1.2, "anchor_px": [12.0, 24.0]},
+    }
+
+    notify_frames = _frames_of_type(captured, "notify.camera")
+    assert notify_frames, "expected notify.camera frame"
+    camera_payload = notify_frames[-1]["payload"]
+    assert camera_payload["mode"] == "zoom"
+    assert camera_payload["delta"]["factor"] == 1.2
+    assert camera_payload["delta"]["anchor_px"] == [12.0, 24.0]
+    assert camera_payload["origin"] == "state.update"
+
+
+def test_camera_reset_triggers_keyframe() -> None:
+    server, scheduled, captured = _make_server()
+
+    payload = {
+        "scope": "camera",
+        "target": "main",
+        "key": "reset",
+        "value": {"reason": "ui"},
+    }
+
+    frame = _build_state_update(payload, intent_id="cam-reset", frame_id="state-cam-2")
+
+    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    _drain_scheduled(scheduled)
+
+    commands = server._scene.camera_commands
+    assert commands and commands[-1].kind == 'reset'
+    assert server._ensure_keyframe_calls == 1
+
+    acks = _frames_of_type(captured, "ack.state")
+    assert len(acks) == 1
+    ack_payload = acks[0]["payload"]
+    assert ack_payload["intent_id"] == "cam-reset"
+    assert ack_payload["applied_value"] == {"reason": "ui"}
+
+    notify_frames = _frames_of_type(captured, "notify.camera")
+    assert notify_frames
+    camera_payload = notify_frames[-1]["payload"]
+    assert camera_payload["mode"] == "reset"
+    assert camera_payload["delta"] == {"reason": "ui"}
+
+
+def test_camera_set_updates_latest_state() -> None:
+    server, scheduled, captured = _make_server()
+
+    payload = {
+        "scope": "camera",
+        "target": "main",
+        "key": "set",
+        "value": {
+            "center": [1, 2, 3],
+            "zoom": 2.5,
+            "angles": [0.1, 0.2, 0.3],
+        },
+    }
+
+    frame = _build_state_update(payload, intent_id="cam-set", frame_id="state-cam-3")
+
+    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    _drain_scheduled(scheduled)
+
+    latest = server._scene.latest_state
+    assert latest.center == (1.0, 2.0, 3.0)
+    assert latest.zoom == 2.5
+    assert latest.angles == (0.1, 0.2, 0.3)
+
+    acks = _frames_of_type(captured, "ack.state")
+    assert acks
+    applied = acks[-1]["payload"]["applied_value"]
+    assert applied == {
+        "center": [1.0, 2.0, 3.0],
+        "zoom": 2.5,
+        "angles": [0.1, 0.2, 0.3],
+    }
+
+    notify_frames = _frames_of_type(captured, "notify.camera")
+    assert notify_frames
+    camera_payload = notify_frames[-1]["payload"]
+    assert camera_payload["mode"] == "set"
+    assert camera_payload["delta"] == applied
 
 
 def test_parse_failure_emits_rejection_ack() -> None:

@@ -117,11 +117,9 @@ from napari_cuda.protocol import (
 )
 from . import pixel_broadcaster, pixel_channel, metrics_server
 from .state_channel_handler import (
-    broadcast_dims_update,
     broadcast_stream_config,
     handle_state,
     process_worker_notifications,
-    rebroadcast_meta,
 )
 from .worker_lifecycle import (
     WorkerLifecycleState,

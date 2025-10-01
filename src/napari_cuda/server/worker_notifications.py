@@ -12,9 +12,10 @@ from typing import Deque, Literal, Mapping, Optional
 class WorkerSceneNotification:
     """Notification emitted by the render worker to the control loop."""
 
-    kind: Literal["dims_update", "meta_refresh", "scene_level"]
+    kind: Literal["dims_update", "scene_level"]
     step: Optional[tuple[int, ...]] = None
     level: Optional[Mapping[str, object]] = None
+    meta: Optional[Mapping[str, object]] = None
 
 
 class WorkerSceneNotificationQueue:

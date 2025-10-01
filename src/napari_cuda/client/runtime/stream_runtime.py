@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from threading import Thread
-from typing import Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
 from concurrent.futures import Future
 import weakref
 from contextlib import ExitStack
@@ -584,6 +584,21 @@ class ClientStreamLoop:
             state_store=self._state_store,
         )
 
+    def _handle_notify_camera(self, frame: Any) -> None:
+        result = control_actions.handle_notify_camera(
+            self._control_state,
+            self._state_store,
+            frame,
+            log_debug=logger.isEnabledFor(logging.DEBUG),
+        )
+        if result is None:
+            return
+        mode, delta = result
+        try:
+            self._presenter_facade.apply_camera_update(mode=mode, delta=delta)
+        except Exception:
+            logger.debug('apply_camera_update failed', exc_info=True)
+
     def _log_keyframe_skip(self, reason: str) -> None:
         now = time.time()
         if (now - self._keyframe_skip_log_ts) >= 1.0:
@@ -989,8 +1004,11 @@ class ClientStreamLoop:
 
     def _zoom_steps_at_center(self, steps: int) -> None:
         camera.zoom_steps_at_center(
+            self._control_state,
             self._camera_state,
             self._loop_state,
+            self._state_store,
+            self._dispatch_state_update,
             steps,
             widget_to_video=self._widget_to_video,
             server_anchor_from_video=self._server_anchor_from_video,
@@ -999,7 +1017,13 @@ class ClientStreamLoop:
         )
 
     def _reset_camera(self) -> None:
-        camera.reset_camera(self._loop_state, origin='keys')
+        camera.reset_camera(
+            self._control_state,
+            self._loop_state,
+            self._state_store,
+            self._dispatch_state_update,
+            origin='keys',
+        )
 
     def _on_key_event(self, data: dict) -> bool:
         return control_actions.handle_key_event(
@@ -1036,7 +1060,13 @@ class ClientStreamLoop:
 
     def reset_camera(self, origin: str = 'ui') -> bool:
         """Send a camera.reset to the server (used by UI bindings)."""
-        return camera.reset_camera(self._loop_state, origin=origin)
+        return camera.reset_camera(
+            self._control_state,
+            self._loop_state,
+            self._state_store,
+            self._dispatch_state_update,
+            origin=origin,
+        )
 
     def set_camera(self, *, center=None, zoom=None, angles=None, origin: str = 'ui') -> bool:
         """Send absolute camera fields when provided.
@@ -1045,7 +1075,10 @@ class ClientStreamLoop:
         intended for explicit UI actions that set a known state.
         """
         return camera.set_camera(
+            self._control_state,
             self._loop_state,
+            self._state_store,
+            self._dispatch_state_update,
             center=center,
             zoom=zoom,
             angles=angles,
@@ -1202,8 +1235,11 @@ class ClientStreamLoop:
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         camera.handle_wheel_zoom(
+            self._control_state,
             self._camera_state,
             self._loop_state,
+            self._state_store,
+            self._dispatch_state_update,
             data,
             widget_to_video=self._widget_to_video,
             server_anchor_from_video=self._server_anchor_from_video,
@@ -1212,10 +1248,17 @@ class ClientStreamLoop:
 
     def _on_pointer(self, data: dict) -> None:
         dims_meta = self._control_state.dims_meta
-        in_vol3d = self._is_volume_mode() and int(dims_meta.get('ndisplay') or 2) == 3
+        mode = dims_meta.get('mode')
+        ndisplay = dims_meta.get('ndisplay')
+        assert isinstance(mode, str), 'dims.mode not seeded'
+        assert isinstance(ndisplay, int), 'dims.ndisplay not seeded'
+        in_vol3d = (mode.lower() == 'volume') and ndisplay == 3
         camera.handle_pointer(
+            self._control_state,
             self._camera_state,
             self._loop_state,
+            self._state_store,
+            self._dispatch_state_update,
             data,
             widget_to_video=self._widget_to_video,
             video_delta_to_canvas=self._video_delta_to_canvas,

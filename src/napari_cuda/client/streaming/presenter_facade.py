@@ -14,7 +14,7 @@ import os
 import sys
 import time
 import weakref
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Optional, TYPE_CHECKING
 
 from qtpy import QtCore, QtWidgets
 
@@ -71,6 +71,8 @@ class PresenterFacade:
         self._viewer_ref: Optional["weakref.ReferenceType[Any]"] = None
         self._last_dims_payload: Optional[dict[str, Any]] = None
         self._intent_dispatcher: Optional[Callable[[str, dict[str, Any]], None]] = None
+        self._camera_summaries: dict[str, Any] = {}
+        self._hud_camera_snapshot: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ lifecycle
     def start_presenting(
@@ -179,6 +181,8 @@ class PresenterFacade:
             'reordered': 0,
             'duplicated': 0,
         }
+        self._camera_summaries = {}
+        self._hud_camera_snapshot = {}
 
         self._scene_canvas = None
         self._scene_native = None
@@ -201,6 +205,15 @@ class PresenterFacade:
             self._intent_dispatcher('dims', payload)
         except Exception:
             logger.exception('PresenterFacade intent dispatcher failed')
+
+    def apply_camera_update(self, *, mode: str, delta: Mapping[str, Any]) -> None:
+        """Record camera deltas so HUD overlays stay in sync."""
+
+        mode_key = str(mode or 'main')
+        normalized = {str(k): v for k, v in dict(delta).items()}
+        self._camera_summaries[mode_key] = normalized
+        if mode_key == 'main' or 'main' not in self._camera_summaries:
+            self._hud_camera_snapshot = dict(normalized)
 
     def set_viewer_mirror(self, viewer: object) -> None:
         """Record a weakref to the viewer mirror for future mirroring work."""

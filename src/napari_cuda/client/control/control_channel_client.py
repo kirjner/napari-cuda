@@ -20,6 +20,7 @@ except Exception:  # pragma: no cover - fallback for unusual import issues
 from napari_cuda.protocol import (
     ACK_STATE_TYPE,
     ERROR_COMMAND_TYPE,
+    NOTIFY_CAMERA_TYPE,
     NOTIFY_DIMS_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
@@ -141,6 +142,7 @@ class StateChannel:
         handle_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
         handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
         handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
+        handle_notify_camera: Optional[Callable[[Any], None]] = None,
         handle_ack_state: Optional[Callable[[AckState], None]] = None,
         handle_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
         handle_error_command: Optional[Callable[[ErrorCommand], None]] = None,
@@ -157,6 +159,7 @@ class StateChannel:
         self.handle_scene_level = handle_scene_level
         self.handle_layer_update = handle_layer_update
         self.handle_layer_remove = handle_layer_remove
+        self.handle_notify_camera = handle_notify_camera
         self.handle_ack_state = handle_ack_state
         self.handle_reply_command = handle_reply_command
         self.handle_error_command = handle_error_command
@@ -410,6 +413,10 @@ class StateChannel:
             self._handle_notify_dims(data)
             return
 
+        if msg_type == NOTIFY_CAMERA_TYPE:
+            self._handle_notify_camera(data)
+            return
+
         if msg_type in (SESSION_WELCOME_TYPE, SESSION_REJECT_TYPE):
             logger.debug("Ignoring post-handshake control message: %s", msg_type)
             return
@@ -644,6 +651,23 @@ class StateChannel:
             self.handle_dims_update(frame)
         except Exception:
             logger.debug("notify.dims dispatch failed", exc_info=True)
+
+    def _handle_notify_camera(self, data: Mapping[str, object]) -> None:
+        if not self.handle_notify_camera:
+            return
+        try:
+            frame = _ENVELOPE_PARSER.parse_notify_camera(data)
+            if _STATE_DEBUG:
+                payload = frame.payload
+                logger.debug(
+                    "received notify.camera: mode=%s origin=%s intent=%s",
+                    payload.mode,
+                    payload.origin,
+                    frame.envelope.intent_id,
+                )
+            self.handle_notify_camera(frame)
+        except Exception:
+            logger.debug("notify.camera dispatch failed", exc_info=True)
 
     def _record_session_metadata(self, welcome: SessionWelcome) -> SessionMetadata:
         session_info = welcome.payload.session

@@ -13,7 +13,6 @@ from typing import Optional, Sequence, List, Mapping
 from . import pixel_channel
 from .bitstream import build_avcc_config, pack_to_avcc
 from .scene_state import ServerSceneState
-from .state_channel_handler import broadcast_dims_update
 from .worker_notifications import WorkerSceneNotification
 from .render_worker import EGLRendererWorker
 
@@ -132,6 +131,24 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
     def worker_loop() -> None:
         try:
+            def _normalize_step_from_meta(meta: Mapping[str, object]) -> tuple[int, ...]:
+                ndim = 0
+                try:
+                    ndim = int(meta.get("ndim") or 0)
+                except Exception:
+                    ndim = 0
+                if ndim <= 0:
+                    order = meta.get("order")
+                    if isinstance(order, Sequence):
+                        ndim = len(order)
+                if ndim <= 0:
+                    axes = meta.get("axes")
+                    if isinstance(axes, Sequence):
+                        ndim = len(tuple(axes))
+                if ndim <= 0:
+                    ndim = 1
+                return tuple(0 for _ in range(int(ndim)))
+
             def _on_scene_refresh(step: object = None) -> None:
                 if isinstance(step, Mapping) and "scene_level" in step:
                     level_payload = step.get("scene_level") or {}
@@ -143,6 +160,11 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     )
                     loop.call_soon_threadsafe(server._process_worker_notifications)
                     return
+                meta_snapshot = server._dims_metadata() or {}
+                if not isinstance(meta_snapshot, Mapping):
+                    meta_snapshot = {}
+                meta_copy = dict(meta_snapshot)
+
                 if isinstance(step, Sequence):
                     chosen = tuple(int(x) for x in step)
                     with server._state_lock:
@@ -153,18 +175,24 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                             angles=snapshot.angles,
                             current_step=chosen,
                         )
-                    server._worker_notifications.push(
-                        WorkerSceneNotification(
-                            kind="dims_update",
-                            step=chosen,
-                        )
-                    )
                 else:
-                    server._worker_notifications.push(
-                        WorkerSceneNotification(
-                            kind="meta_refresh",
-                        )
+                    with server._state_lock:
+                        snapshot = server._scene.latest_state
+                        current = snapshot.current_step if snapshot.current_step is not None else ()
+                    if current:
+                        chosen = tuple(int(x) for x in current)
+                    else:
+                        chosen = _normalize_step_from_meta(meta_copy)
+
+                meta_copy.setdefault("current_step", [int(x) for x in chosen])
+
+                server._worker_notifications.push(
+                    WorkerSceneNotification(
+                        kind="dims_update",
+                        step=chosen,
+                        meta=meta_copy,
                     )
+                )
                 loop.call_soon_threadsafe(server._process_worker_notifications)
 
             worker = EGLRendererWorker(
@@ -201,14 +229,20 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 ndim = int(meta.get("ndim") or 3)
                 step_list = [0 for _ in range(max(1, ndim))]
 
-            loop.call_soon_threadsafe(
-                lambda steps=step_list: asyncio.create_task(
-                    broadcast_dims_update(
-                        server,
-                        steps,
-                    )
+            meta_init = server._dims_metadata() or {}
+            if not isinstance(meta_init, Mapping):
+                meta_init = {}
+            meta_init = dict(meta_init)
+            if step_list:
+                meta_init.setdefault("current_step", [int(x) for x in step_list])
+            server._worker_notifications.push(
+                WorkerSceneNotification(
+                    kind="dims_update",
+                    step=tuple(int(x) for x in step_list),
+                    meta=meta_init,
                 )
             )
+            loop.call_soon_threadsafe(server._process_worker_notifications)
             if server._log_dims_info:
                 logger.info("init: state.update dims step=%s", step_list)
             else:

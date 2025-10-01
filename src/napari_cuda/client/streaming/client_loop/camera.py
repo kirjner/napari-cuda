@@ -6,9 +6,13 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, Sequence, TYPE_CHECKING
+
+from napari_cuda.client.control import state_update_actions
 
 if TYPE_CHECKING:  # pragma: no cover
+    from napari_cuda.client.control.state_update_actions import ControlStateContext
+    from napari_cuda.client.control.pending_update_store import PendingUpdate, StateStore
     from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 
 logger = logging.getLogger("napari_cuda.client.streaming.client_stream_loop")
@@ -56,17 +60,17 @@ class CameraState:
 
 
 def handle_wheel_zoom(
+    control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     data: dict,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
     server_anchor_from_video: Callable[[float, float], tuple[float, float]],
     log_dims_info: bool,
 ) -> None:
-    ch = loop_state.state_channel
-    if ch is None:
-        return
     ay = float(data.get('angle_y') or 0.0)
     py = float(data.get('pixel_y') or 0.0)
     xw = float(data.get('x_px') or 0.0)
@@ -85,10 +89,20 @@ def handle_wheel_zoom(
     state.last_zoom_widget_px = (float(xw), float(yw))
     state.last_zoom_video_px = (float(xv), float(yv))
     state.last_zoom_anchor_px = (float(ax), float(ay_server))
-    ok = ch.post({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax), float(ay_server)]})
+    ok = state_update_actions.camera_zoom(
+        control_state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        factor=float(factor),
+        anchor_px=(float(ax), float(ay_server)),
+        origin='wheel',
+    )
+    if ok:
+        state.last_cam_send = time.perf_counter()
     if log_dims_info:
         logger.info(
-            "wheel+mod->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s",
+            "wheel+mod->camera.zoom f=%.4f at(%.1f,%.1f) sent=%s",
             float(factor),
             float(ax),
             float(ay_server),
@@ -97,8 +111,11 @@ def handle_wheel_zoom(
 
 
 def handle_pointer(
+    control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     data: dict,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -149,88 +166,179 @@ def handle_pointer(
             state.orbit_del_accum += float(-dy_c) * float(state.orbit_deg_per_px_y)
         else:
             if state.orbit_dragging:
-                flush_orbit(state, loop_state, force=True, log_dims_info=log_dims_info)
+                flush_orbit(
+                    control_state,
+                    state,
+                    loop_state,
+                    state_store,
+                    dispatch_state_update,
+                    force=True,
+                    origin='pointer.move',
+                    log_dims_info=log_dims_info,
+                )
                 state.orbit_dragging = False
             state.pan_dx_accum += float(dx_c)
             state.pan_dy_accum += float(dy_c)
         state.last_wx = xw
         state.last_wy = yw
         if state.orbit_dragging:
-            flush_orbit_if_due(state, loop_state, log_dims_info=log_dims_info)
+            flush_orbit_if_due(
+                control_state,
+                state,
+                loop_state,
+                state_store,
+                dispatch_state_update,
+                log_dims_info=log_dims_info,
+            )
         else:
-            flush_pan_if_due(state, loop_state, log_dims_info=log_dims_info)
+            flush_pan_if_due(
+                control_state,
+                state,
+                loop_state,
+                state_store,
+                dispatch_state_update,
+                log_dims_info=log_dims_info,
+            )
         return
 
     if phase == 'up':
         state.dragging = False
         if state.orbit_dragging:
-            flush_orbit(state, loop_state, force=True, log_dims_info=log_dims_info)
+            flush_orbit(
+                control_state,
+                state,
+                loop_state,
+                state_store,
+                dispatch_state_update,
+                force=True,
+                origin='pointer.up',
+                log_dims_info=log_dims_info,
+            )
             state.orbit_dragging = False
         else:
-            flush_pan(state, loop_state, force=True, log_dims_info=log_dims_info)
+            flush_pan(
+                control_state,
+                state,
+                loop_state,
+                state_store,
+                dispatch_state_update,
+                force=True,
+                origin='pointer.up',
+                log_dims_info=log_dims_info,
+            )
 
 
-def flush_pan_if_due(state: CameraState, loop_state: "ClientLoopState", *, log_dims_info: bool) -> None:
+def flush_pan_if_due(
+    control_state: "ControlStateContext",
+    state: CameraState,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    log_dims_info: bool,
+) -> None:
     now = time.perf_counter()
     if (now - float(state.last_cam_send or 0.0)) >= state.cam_min_dt:
-        flush_pan(state, loop_state, force=False, log_dims_info=log_dims_info)
+        flush_pan(
+            control_state,
+            state,
+            loop_state,
+            state_store,
+            dispatch_state_update,
+            force=False,
+            origin='pointer.drag',
+            log_dims_info=log_dims_info,
+        )
 
 
 def flush_pan(
+    control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     *,
     force: bool,
+    origin: str,
     log_dims_info: bool,
 ) -> None:
     dx = float(state.pan_dx_accum or 0.0)
     dy = float(state.pan_dy_accum or 0.0)
     if not force and abs(dx) < 1e-3 and abs(dy) < 1e-3:
         return
-    ch = loop_state.state_channel
-    if ch is None:
-        state.pan_dx_accum = 0.0
-        state.pan_dy_accum = 0.0
-        return
-    ok = ch.post({'type': 'camera.pan_px', 'dx_px': float(dx), 'dy_px': float(dy)})
-    state.last_pan_dx_sent = float(dx)
-    state.last_pan_dy_sent = float(dy)
-    state.last_cam_send = time.perf_counter()
+    ok = state_update_actions.camera_pan(
+        control_state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        dx_px=float(dx),
+        dy_px=float(dy),
+        origin=origin,
+    )
+    if ok:
+        state.last_pan_dx_sent = float(dx)
+        state.last_pan_dy_sent = float(dy)
+        state.last_cam_send = time.perf_counter()
     state.pan_dx_accum = 0.0
     state.pan_dy_accum = 0.0
     if log_dims_info:
         logger.info(
-            "drag->camera.pan_px dx=%.1f dy=%.1f sent=%s",
+            "drag->camera.pan dx=%.1f dy=%.1f sent=%s",
             float(dx),
             float(dy),
             bool(ok),
         )
 
 
-def flush_orbit_if_due(state: CameraState, loop_state: "ClientLoopState", *, log_dims_info: bool) -> None:
+def flush_orbit_if_due(
+    control_state: "ControlStateContext",
+    state: CameraState,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    log_dims_info: bool,
+) -> None:
     now = time.perf_counter()
     if (now - float(state.last_cam_send or 0.0)) >= state.cam_min_dt:
-        flush_orbit(state, loop_state, force=False, log_dims_info=log_dims_info)
+        flush_orbit(
+            control_state,
+            state,
+            loop_state,
+            state_store,
+            dispatch_state_update,
+            force=False,
+            origin='pointer.drag',
+            log_dims_info=log_dims_info,
+        )
 
 
 def flush_orbit(
+    control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     *,
     force: bool,
+    origin: str,
     log_dims_info: bool,
 ) -> None:
     daz = float(state.orbit_daz_accum or 0.0)
     delv = float(state.orbit_del_accum or 0.0)
     if not force and abs(daz) < 1e-2 and abs(delv) < 1e-2:
         return
-    ch = loop_state.state_channel
-    if ch is None:
-        state.orbit_daz_accum = 0.0
-        state.orbit_del_accum = 0.0
-        return
-    ok = ch.post({'type': 'camera.orbit', 'd_az_deg': float(daz), 'd_el_deg': float(delv)})
-    state.last_cam_send = time.perf_counter()
+    ok = state_update_actions.camera_orbit(
+        control_state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        d_az_deg=float(daz),
+        d_el_deg=float(delv),
+        origin=origin,
+    )
+    if ok:
+        state.last_cam_send = time.perf_counter()
     state.orbit_daz_accum = 0.0
     state.orbit_del_accum = 0.0
     if log_dims_info:
@@ -243,8 +351,11 @@ def flush_orbit(
 
 
 def zoom_steps_at_center(
+    control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     steps: int,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -252,9 +363,6 @@ def zoom_steps_at_center(
     log_dims_info: bool,
     vid_size: tuple[Optional[int], Optional[int]],
 ) -> None:
-    ch = loop_state.state_channel
-    if ch is None:
-        return
     base = float(state.zoom_base)
     s = int(steps)
     if s == 0:
@@ -269,7 +377,17 @@ def zoom_steps_at_center(
         xv = float(vw or 0) / 2.0
         yv = float(vh or 0) / 2.0
     ax_s, ay_s = server_anchor_from_video(xv, yv)
-    ok = ch.post({'type': 'camera.zoom_at', 'factor': float(factor), 'anchor_px': [float(ax_s), float(ay_s)]})
+    ok = state_update_actions.camera_zoom(
+        control_state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        factor=float(factor),
+        anchor_px=(float(ax_s), float(ay_s)),
+        origin='keys',
+    )
+    if ok:
+        state.last_cam_send = time.perf_counter()
     if log_dims_info:
         logger.info(
             "key->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s",
@@ -280,34 +398,56 @@ def zoom_steps_at_center(
         )
 
 
-def reset_camera(loop_state: "ClientLoopState", *, origin: str) -> bool:
-    ch = loop_state.state_channel
-    if ch is None:
-        return False
+def reset_camera(
+    control_state: "ControlStateContext",
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    origin: str,
+) -> bool:
     logger.info("%s->camera.reset (sending)", origin)
-    ok = ch.post({'type': 'camera.reset'})
+    ok = state_update_actions.camera_reset(
+        control_state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        reason=origin,
+        origin=origin,
+    )
     logger.info("%s->camera.reset sent=%s", origin, bool(ok))
     return bool(ok)
 
 
 def set_camera(
+    control_state: "ControlStateContext",
     loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
     *,
-    center=None,
-    zoom=None,
-    angles=None,
+    center: Optional[Sequence[float]] = None,
+    zoom: Optional[float] = None,
+    angles: Optional[Sequence[float]] = None,
     origin: str,
 ) -> bool:
-    ch = loop_state.state_channel
-    if ch is None:
-        return False
-    payload: dict = {'type': 'set_camera'}
+    payload_preview = {}
     if center is not None:
-        payload['center'] = list(center)
+        payload_preview['center'] = list(center)
     if zoom is not None:
-        payload['zoom'] = float(zoom)
+        payload_preview['zoom'] = float(zoom)
     if angles is not None:
-        payload['angles'] = list(angles)
-    logger.info("%s->set_camera %s", origin, {k: v for k, v in payload.items() if k != 'type'})
-    ok = ch.post(payload)
+        payload_preview['angles'] = list(angles)
+    if not payload_preview:
+        return False
+    logger.info("%s->camera.set %s", origin, payload_preview)
+    ok = state_update_actions.camera_set(
+        control_state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        center=center,
+        zoom=zoom,
+        angles=angles,
+        origin=origin,
+    )
     return bool(ok)

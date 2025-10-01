@@ -43,7 +43,7 @@ def _make_notify_dims_frame(
     *,
     current_step: Sequence[int],
     ndisplay: int,
-    mode: str = 'slice',
+    mode: str = 'plane',
     source: str = 'test-suite',
     session_id: str = 'session-test',
     frame_id: str = 'dims-test',
@@ -169,13 +169,54 @@ def test_handle_dims_update_seeds_state_store() -> None:
         'axis_labels': ['z', 'y', 'x'],
         'sizes': [11, 6, 4],
         'displayed': [1, 2],
-        'mode': 'slice',
+        'mode': 'plane',
+        'volume': False,
         'source': 'test-suite',
     }
     assert presenter.calls
     debug = store.dump_debug()
     assert debug['view:main:ndisplay']['confirmed']['value'] == 2
     assert ready_calls, "first dims update should trigger readiness"
+
+
+def test_handle_dims_update_modes_volume_flag() -> None:
+    state, loop_state, store, _dispatch = _make_state()
+    presenter = PresenterStub()
+
+    frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=3, mode='volume')
+
+    control_actions.handle_dims_update(
+        state,
+        loop_state,
+        frame,
+        presenter=presenter,
+        viewer_ref=lambda: None,
+        ui_call=None,
+        notify_first_dims_ready=lambda: None,
+        log_dims_info=False,
+        state_store=store,
+    )
+
+    assert state.dims_meta['mode'] == 'volume'
+    assert state.dims_meta['volume'] is True
+    assert loop_state.last_dims_payload['volume'] is True
+    assert presenter.calls[-1]['mode'] == 'volume'
+
+
+def test_hud_snapshot_carries_volume_state() -> None:
+    state, _, store, _dispatch = _make_state()
+    state.dims_meta['ndisplay'] = 3
+    state.dims_meta['mode'] = 'volume'
+    state.dims_meta['volume'] = True
+
+    snap = control_actions.hud_snapshot(
+        state,
+        video_size=(None, None),
+        zoom_state={},
+    )
+
+    assert snap['volume'] is True
+    assert snap['vol_mode'] is True
 
 
 def test_apply_scene_policies_populates_multiscale_state() -> None:

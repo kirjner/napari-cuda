@@ -8,7 +8,7 @@ receivers so the loop can delegate orchestration to pure helpers.
 
 from dataclasses import dataclass
 from threading import Thread
-from typing import Callable, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from napari_cuda.client.control.control_channel_client import StateChannel
@@ -36,6 +36,7 @@ class StateController:
     handle_scene_level: Optional[Callable[["NotifySceneLevelPayload"], None]] = None
     handle_layer_update: Optional[Callable[["LayerUpdateMessage"], None]] = None
     handle_layer_remove: Optional[Callable[["LayerRemoveMessage"], None]] = None
+    handle_notify_camera: Optional[Callable[[Any], None]] = None
     handle_ack_state: Optional[Callable[["AckState"], None]] = None
     handle_reply_command: Optional[Callable[["ReplyCommand"], None]] = None
     handle_error_command: Optional[Callable[["ErrorCommand"], None]] = None
@@ -56,6 +57,7 @@ class StateController:
             handle_scene_level=self.handle_scene_level,
             handle_layer_update=self.handle_layer_update,
             handle_layer_remove=self.handle_layer_remove,
+            handle_notify_camera=self.handle_notify_camera,
             handle_ack_state=self.handle_ack_state,
             handle_reply_command=self.handle_reply_command,
             handle_error_command=self.handle_error_command,

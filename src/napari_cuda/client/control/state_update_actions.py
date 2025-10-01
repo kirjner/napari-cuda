@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
 
+from napari_cuda.protocol import NotifyCamera
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -28,6 +29,7 @@ def _default_dims_meta() -> dict[str, object | None]:
         'range': None,
         'sizes': None,
         'ndisplay': None,
+        'mode': None,
         'volume': None,
         'render': None,
         'multiscale': None,
@@ -39,6 +41,16 @@ def _normalize_policy_value(value: Any) -> Any:
         return {str(k): _normalize_policy_value(v) for k, v in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_normalize_policy_value(v) for v in value]
+    return value
+
+
+def _normalize_camera_delta_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_camera_delta_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_camera_delta_value(v) for v in value]
+    if isinstance(value, (int, float)):
+        return float(value)
     return value
 
 
@@ -67,6 +79,7 @@ class ControlStateContext:
     volume_state: Dict[str, Any] = field(default_factory=dict)
     multiscale_state: Dict[str, Any] = field(default_factory=dict)
     scene_policies: Dict[str, Any] = field(default_factory=dict)
+    camera_state: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env_cfg: Any) -> "ControlStateContext":
@@ -208,6 +221,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateCont
     loop_state.pending_intents.clear()
     loop_state.last_dims_payload = None
     state.control_runtimes.clear()
+    state.camera_state.clear()
 
 
 def handle_dims_update(
@@ -229,7 +243,9 @@ def handle_dims_update(
     current_step = tuple(int(value) for value in payload.current_step)
     meta['current_step'] = list(current_step)
     meta['ndisplay'] = int(payload.ndisplay)
-    meta['mode'] = payload.mode
+    mode_text = str(payload.mode)
+    meta['mode'] = mode_text
+    meta['volume'] = bool(mode_text.lower() == 'volume')
     meta['source'] = payload.source
 
     payload_dict = _sync_dims_payload_from_meta(state, loop_state)
@@ -269,6 +285,40 @@ def handle_dims_update(
         )
 
     presenter.apply_dims_update(dict(payload_dict))
+
+
+def handle_notify_camera(
+    state: ControlStateContext,
+    state_store: "StateStore",
+    frame: NotifyCamera,
+    *,
+    log_debug: bool = False,
+) -> tuple[str, dict[str, Any]] | None:
+    payload = frame.payload
+    mode = str(payload.mode or "")
+    normalized_delta = _normalize_camera_delta_value(payload.delta)
+    mode_key = mode or 'main'
+    state.camera_state[mode_key] = normalized_delta
+
+    timestamp = frame.envelope.timestamp
+    state_store.seed_confirmed(
+        'camera',
+        'main',
+        mode_key,
+        normalized_delta,
+        timestamp=timestamp,
+    )
+
+    if log_debug:
+        logger.debug(
+            "notify.camera mode=%s origin=%s intent=%s delta=%s",
+            mode,
+            payload.origin,
+            frame.envelope.intent_id,
+            normalized_delta,
+        )
+
+    return mode_key, normalized_delta
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
@@ -418,6 +468,7 @@ def _sync_dims_payload_from_meta(
         'sizes': payload_sizes,
         'displayed': payload_displayed,
         'mode': meta.get('mode'),
+        'volume': meta.get('volume'),
         'source': meta.get('source'),
     }
 
@@ -869,6 +920,13 @@ def handle_generic_ack(
 
     _update_runtime_from_ack_outcome(state, outcome)
 
+    if outcome.status == "accepted" and outcome.scope == "camera" and outcome.key is not None:
+        applied = outcome.applied_value
+        if applied is None:
+            applied = outcome.confirmed_value or outcome.pending_value
+        if applied is not None:
+            state.camera_state[str(outcome.key)] = applied
+
     if outcome.status != "accepted":
         error = outcome.error or {}
         logger.warning(
@@ -1115,6 +1173,182 @@ def view_set_ndisplay(
         value=int(nd_target),
         origin=origin,
     )
+    return ok
+
+
+def camera_zoom(
+    state: ControlStateContext,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    factor: float,
+    anchor_px: tuple[float, float],
+    origin: str,
+) -> bool:
+    sanitized = {
+        "factor": float(factor),
+        "anchor_px": [float(anchor_px[0]), float(anchor_px[1])],
+    }
+    metadata = {
+        "mode": "zoom",
+        "origin": origin,
+        "delta": dict(sanitized),
+    }
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        scope="camera",
+        target="main",
+        key="zoom",
+        value=sanitized,
+        origin=origin,
+        metadata=metadata,
+    )
+    if ok:
+        state.camera_state['zoom'] = sanitized
+    return ok
+
+
+def camera_pan(
+    state: ControlStateContext,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    dx_px: float,
+    dy_px: float,
+    origin: str,
+) -> bool:
+    sanitized = {"dx_px": float(dx_px), "dy_px": float(dy_px)}
+    metadata = {
+        "mode": "pan",
+        "origin": origin,
+        "delta": dict(sanitized),
+    }
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        scope="camera",
+        target="main",
+        key="pan",
+        value=sanitized,
+        origin=origin,
+        metadata=metadata,
+    )
+    if ok:
+        state.camera_state['pan'] = sanitized
+    return ok
+
+
+def camera_orbit(
+    state: ControlStateContext,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    d_az_deg: float,
+    d_el_deg: float,
+    origin: str,
+) -> bool:
+    sanitized = {"d_az_deg": float(d_az_deg), "d_el_deg": float(d_el_deg)}
+    metadata = {
+        "mode": "orbit",
+        "origin": origin,
+        "delta": dict(sanitized),
+    }
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        scope="camera",
+        target="main",
+        key="orbit",
+        value=sanitized,
+        origin=origin,
+        metadata=metadata,
+    )
+    if ok:
+        state.camera_state['orbit'] = sanitized
+    return ok
+
+
+def camera_reset(
+    state: ControlStateContext,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    reason: str,
+    origin: str,
+) -> bool:
+    sanitized = {"reason": str(reason)}
+    metadata = {
+        "mode": "reset",
+        "origin": origin,
+        "delta": dict(sanitized),
+    }
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        scope="camera",
+        target="main",
+        key="reset",
+        value=sanitized,
+        origin=origin,
+        metadata=metadata,
+    )
+    if ok:
+        state.camera_state['reset'] = sanitized
+    return ok
+
+
+def camera_set(
+    state: ControlStateContext,
+    loop_state: "ClientLoopState",
+    state_store: "StateStore",
+    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    *,
+    center: Optional[Sequence[float]] = None,
+    zoom: Optional[float] = None,
+    angles: Optional[Sequence[float]] = None,
+    origin: str,
+) -> bool:
+    payload: Dict[str, Any] = {}
+    if center is not None:
+        payload['center'] = [float(c) for c in center]
+    if zoom is not None:
+        payload['zoom'] = float(zoom)
+    if angles is not None:
+        payload['angles'] = [float(a) for a in angles]
+    if not payload:
+        return False
+    metadata = {
+        "mode": "set",
+        "origin": origin,
+        "delta": dict(payload),
+    }
+    ok, _ = _emit_state_update(
+        state,
+        loop_state,
+        state_store,
+        dispatch_state_update,
+        scope="camera",
+        target="main",
+        key="set",
+        value=payload,
+        origin=origin,
+        metadata=metadata,
+    )
+    if ok:
+        state.camera_state['set'] = payload
     return ok
 
 
@@ -1407,9 +1641,12 @@ def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
 
 
 def _is_volume_mode(state: ControlStateContext) -> bool:
-    vol = bool(state.dims_meta.get('volume'))
+    mode = str(state.dims_meta.get('mode') or '').lower()
     nd = int(state.dims_meta.get('ndisplay') or 2)
-    return bool(vol) and int(nd) == 3
+    if mode:
+        return mode == 'volume' and nd == 3
+    vol = bool(state.dims_meta.get('volume'))
+    return vol and nd == 3
 
 
 def _is_axis_playing(viewer_obj, axis_index: int) -> bool:

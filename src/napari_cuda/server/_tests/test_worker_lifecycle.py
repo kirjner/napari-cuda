@@ -74,7 +74,19 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
     server._scene = scene
     server._worker_notifications = notifications
-    server._dims_metadata = lambda: {}
+    def _dims_meta() -> dict[str, object]:
+        ndisplay = 3 if server.use_volume else 2
+        return {
+            'ndim': 1,
+            'order': ['z'],
+            'range': [[0, 0]],
+            'current_step': [0],
+            'ndisplay': ndisplay,
+            'mode': 'volume' if ndisplay == 3 else 'plane',
+            'volume': bool(server.use_volume),
+        }
+
+    server._dims_metadata = _dims_meta
     server.processed_notifications = processed
 
     def process_worker_notifications() -> None:
@@ -199,8 +211,9 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
 
     assert server.processed_notifications
     note = server.processed_notifications[0]
-    assert note.kind == "meta_refresh"
-    assert note.step is None
+    assert note.kind == "dims_update"
+    assert note.step == (0,)
+    assert isinstance(note.meta, dict)
 
     stop_worker(state)
     _run_loop_once(loop)

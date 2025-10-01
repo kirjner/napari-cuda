@@ -31,20 +31,36 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 - ✅ **Server ack lane** – `control_channel_server._handle_state_update` now parses greenfield envelopes, emits `ack.state` via `build_ack_state`, and no longer fabricates legacy `client_id`/`client_seq` metadata.
 - ✅ **Client ack lane** – `control_channel_client`, `pending_update_store`, and the streaming loop now trade exclusively in greenfield `AckState`/`state.update` envelopes. `ControlStateContext` replaces the old "intent" shims, and tests under `client/streaming/_tests/` cover accepted/rejected ack flows end-to-end.
 
-Pending follow-up:
+## Near-Term Execution Plan (2025-10-01)
 
-1. Enable the command lane (`call.command` / `reply.command` / `error.command`) once both endpoints share the builder-backed handlers.
-2. Expand the protocol round-trip tests to cover command envelopes and resume-token negotiation after reconnect.
-3. Track the documented drifts noted in the *Documented Spec Drifts (2025-10-01)* section until each is resolved (camera verbs, meta refresh removal, keyframe contract, minimal client archival).
+- **Step 0 (complete)** – Keyframe requests now reset the encoder and issue `request_idr()`; keep the VT gate/keyframe diagnostics in the smoke checklist until the next cut.
+1. **Finish the greenfield control channel**
+   - Remove `meta_refresh` by emitting concrete `notify.dims` and scene payloads from the worker.
+   - Replace volume/multiscale rebroadcast shims with direct `notify.layers` deltas driven by intents.
+   - Implement `scope="camera"` on the server, emit `notify.camera`, migrate the client to the new lane, and delete the Alt+drag orbit fallback once the handlers land.
+2. **Retire legacy protocol surface & scaffolding**
+   - Delete `SceneSpecMessage`, `LayerUpdateMessage`, and related adapters once Step 1 ensures consumers hydrate from `notify.scene`/`notify.layers`.
+   - Remove `protocol/messages.py` compatibility exports, control-channel shims, and archive `client/minimal_client.py`.
+   - Track the dependent dataclasses (`LayerSpec`, `LayerRenderHints`, `MultiscaleSpec`, etc.) called out in §6 so the layer registry falls alongside the scene/layer shims.
+3. **Finish the command lane**
+   - Wire `call.command`/`reply.command`/`error.command` end-to-end, including `napari.pixel.request_keyframe`.
+   - Port UI hooks to command helpers so keyframe triggers and menu actions share one path.
+4. **Expand protocol tests & smoke coverage**
+   - Add round-trip tests for reconnect/resume tokens, notify sequencing, and command flows.
+   - Script a smoke run that exercises dims toggles, camera pan/orbit, layer edits, and explicit keyframe requests via the reset path.
+5. **Documentation & migration bookkeeping**
+   - Keep `docs/protocol_greenfield_migration.md` in sync as drifts close, pruning entries instead of letting them rot.
+   - Produce a streamlined smoke-test runbook covering encoder diagnostics and VT gate behaviour.
 
 ## Documented Spec Drifts (2025-10-01)
 
 The following deviations are now deliberate, documented behaviour until the corresponding migration tasks land. Each entry calls out the active code path, the target greenfield contract, and the planned remediation hook.
 
-- **Legacy worker meta refresh** – `src/napari_cuda/server/worker_lifecycle.py:135` still emits `WorkerSceneNotification(kind="meta_refresh")` when the render thread cannot provide a concrete dims step. The control loop handles this via `rebroadcast_meta()` (`src/napari_cuda/server/control/control_channel_server.py:1877`), synthesising `notify.dims` payloads. *Target:* remove the fallback once the worker always supplies explicit dims/scene-level payloads; migration item lives under Phase 2, step 4.
 - **Volume / multiscale rebroadcast dependency** – Volume and multiscale `state.update` handlers normalise inputs but immediately schedule `rebroadcast_meta()` (`src/napari_cuda/server/control/control_channel_server.py:1320`). *Target:* emit layer-scoped `notify.layers` deltas directly from the update sites (no meta rebroadcast) once the worker path above is in place.
-- **Legacy camera verbs** – The state dispatcher still recognises `'set_camera'`, `'camera.*'`, `'ping'`, and `'request_keyframe'` (`src/napari_cuda/server/control/control_channel_server.py:1555`); clients (e.g. `src/napari_cuda/client/streaming/client_loop/camera.py:283`) still send them. *Target:* add `scope == "camera"` handling to `_handle_state_update`, produce `notify.camera`, and delete the legacy handlers.
-- **Unused `notify.camera` lane** – Although `build_notify_camera` is imported (`src/napari_cuda/server/control/control_channel_server.py:43`), no payload is emitted. This is blocked on the previous bullet.
+- ~~**Camera notify integration** – `notify.camera` now carries the authoritative deltas (`src/napari_cuda/server/control/control_channel_server.py:624`), and the client records them in the state store (`src/napari_cuda/client/control/state_update_actions.py:279`). The presenter/viewer mirror still ignores these updates, so local overlays can drift until the next full scene snapshot. *Target:* plumb `handle_notify_camera` into the presenter façade and thin-client HUD.~~
+- ~~**Alt-drag orbit gating** – The streaming client continues to gate orbital camera drags on an `in_vol3d` flag that never flips in 2D mode (`src/napari_cuda/client/streaming/client_loop/camera.py:166`). Even though orbit updates now flow through `state.update(camera.orbit)`, Alt-drag still degrades to pan outside true volume sessions. *Target:* derive the volume flag from the negotiated viewer state (e.g., `notify.dims.mode`) and fall back to orbit when a TurntableCamera is active.~~
+- **Camera notify integration (resolved 2025-10-01)** – `notify.camera` deltas are now broadcast via the greenfield path, recorded in the state store, and mirrored into the presenter HUD (`src/napari_cuda/client/runtime/stream_runtime.py:591`, `src/napari_cuda/client/streaming/presenter_facade.py:212`).
+- **Alt-drag orbit gating (resolved 2025-10-01)** – `notify.dims.mode` drives the volume gate and Alt+drag emits `camera.orbit` intents with verified test coverage (`src/napari_cuda/client/runtime/stream_runtime.py:1246`, `_tests/test_camera.py`).
 - **State handler shims** – Compatibility modules (`src/napari_cuda/server/state_channel_handler.py:1`, `src/napari_cuda/client/streaming/client_loop/control.py:1`) still wildcard-import the new implementations to preserve legacy imports. *Target:* drop once downstream call sites are updated.
 - **Minimal client legacy protocol** – `src/napari_cuda/client/minimal_client.py` continues to speak the deprecated control format (`{"type":"ping"}` etc.). *Target:* archive the minimal client alongside the legacy protocol or port it to the greenfield envelopes after the migration reaches Phase 5.
 

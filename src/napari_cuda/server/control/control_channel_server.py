@@ -478,6 +478,12 @@ def _resolve_dims_mode(ndisplay: int) -> str:
     return "volume" if int(ndisplay) >= 3 else "plane"
 
 
+def _current_dims_meta(server: Any) -> Mapping[str, Any]:
+    meta = server._dims_metadata() if hasattr(server, "_dims_metadata") else {}
+    assert isinstance(meta, Mapping), "server must expose dims metadata"
+    return meta
+
+
 async def _broadcast_layers_delta(
     server: Any,
     *,
@@ -543,16 +549,28 @@ async def _broadcast_dims_state(
     intent_id: Optional[str],
     timestamp: Optional[float],
     targets: Optional[Sequence[Any]] = None,
+    meta: Optional[Mapping[str, Any]] = None,
 ) -> None:
     clients = list(targets) if targets is not None else list(server._state_clients)
     if not clients:
         return
 
-    ndisplay = _resolve_ndisplay(server)
+    if not isinstance(meta, Mapping):
+        assert False, "notify.dims requires worker metadata"
+
+    raw_ndisplay = meta.get("ndisplay")
+    raw_mode = meta.get("mode")
+    assert raw_ndisplay is not None and raw_mode is not None, "dims metadata missing ndisplay/mode"
+
+    ndisplay = int(raw_ndisplay)
+    mode_text = str(raw_mode).strip().lower()
+    assert mode_text in {"volume", "plane"}, f"invalid dims mode from worker meta: {raw_mode!r}"
+    mode = "volume" if mode_text == "volume" else "plane"
+
     payload = build_notify_dims_payload(
         current_step=current_step,
         ndisplay=ndisplay,
-        mode=_resolve_dims_mode(ndisplay),
+        mode=mode,
         source=str(source),
     )
 
@@ -566,6 +584,87 @@ async def _broadcast_dims_state(
         if not session_id:
             continue
         frame = build_notify_dims(
+            session_id=session_id,
+            payload=payload,
+            timestamp=now,
+            intent_id=intent_id,
+        )
+        tasks.append(_send_frame(server, ws, frame))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _broadcast_worker_dims(
+    server: Any,
+    *,
+    current_step: Sequence[int],
+    meta: Mapping[str, Any],
+) -> None:
+    try:
+        if hasattr(server, "_update_scene_manager"):
+            server._update_scene_manager()
+    except Exception:
+        logger.debug("worker dims: scene manager sync failed", exc_info=True)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "worker dims: step=%s ndisplay=%s ndim=%s",
+            [int(x) for x in current_step],
+            meta.get("ndisplay"),
+            meta.get("ndim"),
+        )
+
+        await _broadcast_dims_state(
+            server,
+            current_step=current_step,
+            source="worker",
+            intent_id=None,
+            timestamp=None,
+            meta=meta,
+        )
+
+
+def _normalize_camera_delta(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_camera_delta(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_camera_delta(v) for v in value]
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
+async def _broadcast_camera_delta(
+    server: Any,
+    *,
+    mode: str,
+    delta: Mapping[str, Any],
+    intent_id: Optional[str],
+    origin: str,
+    timestamp: Optional[float] = None,
+    targets: Optional[Sequence[Any]] = None,
+) -> None:
+    clients = list(targets) if targets is not None else list(server._state_clients)
+    if not clients:
+        return
+
+    payload = {
+        "mode": str(mode),
+        "delta": _normalize_camera_delta(delta),
+        "origin": str(origin),
+    }
+
+    tasks: list[Awaitable[None]] = []
+    now = time.time() if timestamp is None else float(timestamp)
+
+    for ws in clients:
+        if not _feature_enabled(ws, "notify.camera"):
+            continue
+        session_id = _state_session(ws)
+        if not session_id:
+            continue
+        frame = build_notify_camera(
             session_id=session_id,
             payload=payload,
             timestamp=now,
@@ -870,6 +969,7 @@ async def _emit_dims_baseline(
         intent_id=None,
         timestamp=time.time(),
         targets=[ws],
+        meta=_current_dims_meta(server),
     )
     if server._log_dims_info:
         logger.info("connect: notify.dims baseline -> step=%s", step_list)
@@ -1116,25 +1216,6 @@ async def _handle_session_goodbye(server: Any, data: Mapping[str, Any], ws: Any)
     return True
 
 
-async def _handle_set_camera(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    center = data.get('center')
-    zoom = data.get('zoom')
-    angles = data.get('angles')
-    if server._log_cam_info:
-        logger.info("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
-    elif server._log_cam_debug:
-        logger.debug("state: set_camera center=%s zoom=%s angles=%s", center, zoom, angles)
-    with server._state_lock:
-        server._scene.latest_state = ServerSceneState(
-            center=tuple(center) if center else None,
-            zoom=float(zoom) if zoom is not None else None,
-            angles=tuple(angles) if angles else None,
-            current_step=server._scene.latest_state.current_step,
-        )
-    _enqueue_latest_state_for_worker(server)
-    return True
-
-
 async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     try:
         frame = _ENVELOPE_PARSER.parse_state_update(data)
@@ -1239,6 +1320,362 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         server._schedule_coro(
             _broadcast_state_update(server, result),
             'state-view-ndisplay',
+        )
+        return True
+
+    # ----- camera scope -------------------------------------------------
+    if scope == 'camera':
+        cam_target = target.lower()
+        if cam_target not in {"", "main"}:
+            await _reject(
+                "state.invalid",
+                f"unsupported camera target {target}",
+                details={"scope": scope, "target": target},
+            )
+            return True
+
+        async def _ack_camera(applied_value: Mapping[str, Any] | str | None) -> None:
+            await _send_state_ack(
+                server,
+                ws,
+                session_id=str(session_id),
+                intent_id=intent_id,
+                in_reply_to=frame_id,
+                status="accepted",
+                applied_value=applied_value,
+            )
+
+        def _log_camera(fmt: str, *args: Any) -> None:
+            if getattr(server, "_log_cam_info", False):
+                logger.info(fmt, *args)
+            elif getattr(server, "_log_cam_debug", False):
+                logger.debug(fmt, *args)
+
+        metrics = getattr(server, "metrics", None)
+
+        if key == 'zoom':
+            if not isinstance(value, Mapping):
+                await _reject(
+                    "state.invalid",
+                    "camera.zoom requires mapping payload",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+            try:
+                factor = float(value.get('factor', 0.0))
+            except Exception:
+                factor = 0.0
+            anchor_raw = value.get('anchor_px')
+            if factor <= 0.0:
+                await _reject(
+                    "state.invalid",
+                    "zoom factor must be positive",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+            if not isinstance(anchor_raw, Sequence) or len(anchor_raw) < 2:
+                await _reject(
+                    "state.invalid",
+                    "anchor_px requires [x, y]",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+            try:
+                anchor = (float(anchor_raw[0]), float(anchor_raw[1]))
+            except Exception:
+                await _reject(
+                    "state.invalid",
+                    "anchor_px must contain numeric values",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+
+            ack_value = {
+                "factor": float(factor),
+                "anchor_px": [float(anchor[0]), float(anchor[1])],
+            }
+
+            await _ack_camera(ack_value)
+
+            _log_camera(
+                "state: camera.zoom factor=%.4f anchor=(%.1f,%.1f)",
+                factor,
+                anchor[0],
+                anchor[1],
+            )
+            if metrics is not None:
+                with suppress(Exception):
+                    metrics.inc('napari_cuda_state_camera_updates')
+
+            try:
+                server._enqueue_camera_command(
+                    ServerSceneCommand(kind='zoom', factor=float(factor), anchor_px=anchor),
+                )
+            except Exception:
+                logger.debug("camera.zoom enqueue failed", exc_info=True)
+
+            server._schedule_coro(
+                _broadcast_camera_delta(
+                    server,
+                    mode='zoom',
+                    delta=ack_value,
+                    intent_id=intent_id,
+                    origin='state.update',
+                ),
+                'state-camera-zoom',
+            )
+            return True
+
+        if key == 'pan':
+            if not isinstance(value, Mapping):
+                await _reject(
+                    "state.invalid",
+                    "camera.pan requires mapping payload",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+            try:
+                dx = float(value.get('dx_px', 0.0))
+            except Exception:
+                dx = 0.0
+            try:
+                dy = float(value.get('dy_px', 0.0))
+            except Exception:
+                dy = 0.0
+
+            ack_value = {"dx_px": dx, "dy_px": dy}
+
+            await _ack_camera(ack_value)
+
+            if dx != 0.0 or dy != 0.0:
+                _log_camera("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
+                if metrics is not None:
+                    with suppress(Exception):
+                        metrics.inc('napari_cuda_state_camera_updates')
+                try:
+                    server._enqueue_camera_command(
+                        ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy)),
+                    )
+                except Exception:
+                    logger.debug("camera.pan enqueue failed", exc_info=True)
+
+                server._schedule_coro(
+                    _broadcast_camera_delta(
+                        server,
+                        mode='pan',
+                        delta=ack_value,
+                        intent_id=intent_id,
+                        origin='state.update',
+                    ),
+                    'state-camera-pan',
+                )
+            return True
+
+        if key == 'orbit':
+            if not isinstance(value, Mapping):
+                await _reject(
+                    "state.invalid",
+                    "camera.orbit requires mapping payload",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+            try:
+                d_az = float(value.get('d_az_deg', 0.0))
+            except Exception:
+                d_az = 0.0
+            try:
+                d_el = float(value.get('d_el_deg', 0.0))
+            except Exception:
+                d_el = 0.0
+
+            ack_value = {"d_az_deg": d_az, "d_el_deg": d_el}
+
+            await _ack_camera(ack_value)
+
+            if d_az != 0.0 or d_el != 0.0:
+                _log_camera("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
+                if metrics is not None:
+                    with suppress(Exception):
+                        metrics.inc('napari_cuda_state_camera_updates')
+                        metrics.inc('napari_cuda_orbit_events')
+                try:
+                    server._enqueue_camera_command(
+                        ServerSceneCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el)),
+                    )
+                except Exception:
+                    logger.debug("camera.orbit enqueue failed", exc_info=True)
+
+                server._schedule_coro(
+                    _broadcast_camera_delta(
+                        server,
+                        mode='orbit',
+                        delta=ack_value,
+                        intent_id=intent_id,
+                        origin='state.update',
+                    ),
+                    'state-camera-orbit',
+                )
+            return True
+
+        if key == 'reset':
+            reason = None
+            if isinstance(value, Mapping):
+                raw_reason = value.get('reason')
+                if raw_reason is not None:
+                    reason = str(raw_reason)
+            elif isinstance(value, str) and value:
+                reason = value
+            else:
+                reason = 'state.update'
+
+            await _ack_camera({'reason': reason})
+
+            _log_camera("state: camera.reset")
+            if metrics is not None:
+                with suppress(Exception):
+                    metrics.inc('napari_cuda_state_camera_updates')
+            try:
+                server._enqueue_camera_command(ServerSceneCommand(kind='reset'))
+            except Exception:
+                logger.debug("camera.reset enqueue failed", exc_info=True)
+            if getattr(server, "_idr_on_reset", False) and getattr(server, "_worker", None) is not None:
+                server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
+
+            server._schedule_coro(
+                _broadcast_camera_delta(
+                    server,
+                    mode='reset',
+                    delta={'reason': reason},
+                    intent_id=intent_id,
+                    origin='state.update',
+                ),
+                'state-camera-reset',
+            )
+            return True
+
+        if key == 'set':
+            if not isinstance(value, Mapping):
+                await _reject(
+                    "state.invalid",
+                    "camera.set requires mapping payload",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+
+            center_val = value.get('center')
+            zoom_val = value.get('zoom')
+            angles_val = value.get('angles')
+
+            if center_val is None and zoom_val is None and angles_val is None:
+                await _reject(
+                    "state.invalid",
+                    "camera.set payload must include center/zoom/angles",
+                    details={"scope": scope, "key": key},
+                )
+                return True
+
+            center_tuple: Optional[tuple[float, ...]] = None
+            if center_val is not None:
+                if not isinstance(center_val, Sequence) or not center_val:
+                    await _reject(
+                        "state.invalid",
+                        "camera.center must be a sequence",
+                        details={"scope": scope, "key": key},
+                    )
+                    return True
+                try:
+                    center_tuple = tuple(float(c) for c in center_val)
+                except Exception:
+                    await _reject(
+                        "state.invalid",
+                        "camera.center values must be numeric",
+                        details={"scope": scope, "key": key},
+                    )
+                    return True
+
+            zoom_float: Optional[float] = None
+            if zoom_val is not None:
+                try:
+                    zoom_float = float(zoom_val)
+                except Exception:
+                    await _reject(
+                        "state.invalid",
+                        "camera.zoom must be numeric",
+                        details={"scope": scope, "key": key},
+                    )
+                    return True
+
+            angles_tuple: Optional[tuple[float, float, float]] = None
+            if angles_val is not None:
+                if not isinstance(angles_val, Sequence) or len(angles_val) < 3:
+                    await _reject(
+                        "state.invalid",
+                        "camera.angles requires [az, el, roll]",
+                        details={"scope": scope, "key": key},
+                    )
+                    return True
+                try:
+                    angles_tuple = (
+                        float(angles_val[0]),
+                        float(angles_val[1]),
+                        float(angles_val[2]),
+                    )
+                except Exception:
+                    await _reject(
+                        "state.invalid",
+                        "camera.angles must be numeric",
+                        details={"scope": scope, "key": key},
+                    )
+                    return True
+
+            with server._state_lock:
+                latest = server._scene.latest_state
+                server._scene.latest_state = replace(
+                    latest,
+                    center=center_tuple if center_tuple is not None else latest.center,
+                    zoom=zoom_float if zoom_float is not None else latest.zoom,
+                    angles=angles_tuple if angles_tuple is not None else latest.angles,
+                )
+
+            _enqueue_latest_state_for_worker(server)
+
+            ack_components: Dict[str, Any] = {}
+            if center_tuple is not None:
+                ack_components['center'] = [float(c) for c in center_tuple]
+            if zoom_float is not None:
+                ack_components['zoom'] = float(zoom_float)
+            if angles_tuple is not None:
+                ack_components['angles'] = [float(a) for a in angles_tuple]
+
+            await _ack_camera(ack_components)
+
+            _log_camera(
+                "state: camera.set center=%s zoom=%s angles=%s",
+                ack_components.get('center'),
+                ack_components.get('zoom'),
+                ack_components.get('angles'),
+            )
+
+            if metrics is not None:
+                with suppress(Exception):
+                    metrics.inc('napari_cuda_state_camera_updates')
+
+            server._schedule_coro(
+                _broadcast_camera_delta(
+                    server,
+                    mode='set',
+                    delta=ack_components,
+                    intent_id=intent_id,
+                    origin='state.update',
+                ),
+                'state-camera-set',
+            )
+            return True
+
+        await _reject(
+            "state.invalid",
+            f"unsupported camera key {key}",
+            details={"scope": scope, "key": key},
         )
         return True
 
@@ -1374,10 +1811,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
 
         _enqueue_latest_state_for_worker(server)
-        server._schedule_coro(
-            rebroadcast_meta(server),
-            rebroadcast_tag,
-        )
         result = _baseline_state_result(
             server,
             scope='volume',
@@ -1457,10 +1890,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             applied_value=normalized_value,
         )
 
-        server._schedule_coro(
-            rebroadcast_meta(server),
-            rebroadcast_tag,
-        )
         result = _baseline_state_result(
             server,
             scope='multiscale',
@@ -1552,94 +1981,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
 
 
 
-async def _handle_camera_zoom(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    try:
-        factor = float(data.get('factor') or 0.0)
-    except Exception:
-        factor = 0.0
-    anchor = data.get('anchor_px')
-    anchor_tuple = (
-        tuple(anchor) if isinstance(anchor, (list, tuple)) and len(anchor) >= 2 else None
-    )
-    if factor > 0.0 and anchor_tuple is not None:
-        server.metrics.inc('napari_cuda_state_camera_updates')
-        if server._log_cam_info:
-            logger.info(
-                "state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)",
-                factor,
-                float(anchor_tuple[0]),
-                float(anchor_tuple[1]),
-            )
-        elif server._log_cam_debug:
-            logger.debug(
-                "state: camera.zoom_at factor=%.4f anchor=(%.1f,%.1f)",
-                factor,
-                float(anchor_tuple[0]),
-                float(anchor_tuple[1]),
-            )
-        server._enqueue_camera_command(
-            ServerSceneCommand(
-                kind='zoom',
-                factor=float(factor),
-                anchor_px=(float(anchor_tuple[0]), float(anchor_tuple[1])),
-            )
-        )
-    return True
-
-
-async def _handle_camera_pan(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    try:
-        dx = float(data.get('dx_px') or 0.0)
-        dy = float(data.get('dy_px') or 0.0)
-    except Exception:
-        dx = 0.0
-        dy = 0.0
-    if dx != 0.0 or dy != 0.0:
-        if server._log_cam_info:
-            logger.info("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
-        elif server._log_cam_debug:
-            logger.debug("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
-        server.metrics.inc('napari_cuda_state_camera_updates')
-        server._enqueue_camera_command(
-            ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy))
-        )
-    return True
-
-
-async def _handle_camera_orbit(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    try:
-        d_az = float(data.get('d_az_deg') or 0.0)
-        d_el = float(data.get('d_el_deg') or 0.0)
-    except Exception:
-        d_az = 0.0
-        d_el = 0.0
-    if d_az != 0.0 or d_el != 0.0:
-        if server._log_cam_info:
-            logger.info("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
-        elif server._log_cam_debug:
-            logger.debug("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
-        server.metrics.inc('napari_cuda_state_camera_updates')
-        server._enqueue_camera_command(
-            ServerSceneCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el))
-        )
-        server.metrics.inc('napari_cuda_orbit_events')
-    return True
-
-
-async def _handle_camera_reset(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    if server._log_cam_info:
-        logger.info("state: camera.reset")
-    elif server._log_cam_debug:
-        logger.debug("state: camera.reset")
-    server.metrics.inc('napari_cuda_state_camera_updates')
-    server._enqueue_camera_command(ServerSceneCommand(kind='reset'))
-    if server._idr_on_reset and server._worker is not None:
-        logger.info("state: camera.reset -> ensure_keyframe start")
-        await server._ensure_keyframe()
-        logger.info("state: camera.reset -> ensure_keyframe done")
-    return True
-
-
 async def _handle_ping(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     await ws.send(json.dumps({'type': 'pong'}))
     return True
@@ -1651,12 +1992,7 @@ async def _handle_force_keyframe(server: Any, data: Mapping[str, Any], ws: Any) 
 
 
 MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
-    'set_camera': _handle_set_camera,
     STATE_UPDATE_TYPE: _handle_state_update,
-    'camera.zoom_at': _handle_camera_zoom,
-    'camera.pan_px': _handle_camera_pan,
-    'camera.orbit': _handle_camera_orbit,
-    'camera.reset': _handle_camera_reset,
     'ping': _handle_ping,
     'request_keyframe': _handle_force_keyframe,
     'force_idr': _handle_force_keyframe,
@@ -1754,6 +2090,7 @@ async def _broadcast_state_update(
             source="state.update",
             intent_id=result.intent_id,
             timestamp=result.timestamp,
+            meta=_current_dims_meta(server),
         )
         return
 
@@ -1769,6 +2106,7 @@ async def _broadcast_state_update(
             source="state.update",
             intent_id=result.intent_id,
             timestamp=result.timestamp,
+            meta=_current_dims_meta(server),
         )
         return
 
@@ -1791,6 +2129,33 @@ async def _broadcast_state_updates(
             result,
             include_control_versions=include_control_versions,
         )
+
+
+def _ndim_from_meta(meta: Mapping[str, Any]) -> int:
+    try:
+        ndim = int(meta.get("ndim") or 0)
+    except Exception:
+        ndim = 0
+
+    if ndim <= 0:
+        for key in ("order", "axes", "range", "sizes"):
+            values = meta.get(key)
+            if isinstance(values, Sequence):
+                try:
+                    length = len(tuple(values))
+                except Exception:
+                    length = 0
+                ndim = max(ndim, length)
+
+    if ndim <= 0:
+        current = meta.get("current_step")
+        if isinstance(current, Sequence):
+            try:
+                ndim = max(ndim, len(tuple(current)))
+            except Exception:
+                ndim = max(ndim, 0)
+
+    return max(1, int(ndim))
 
 
 def _baseline_state_result(
@@ -1874,121 +2239,6 @@ def _layer_results_from_controls(
         )
     return results
 
-async def rebroadcast_meta(server: Any) -> None:
-    """Re-broadcast a dims.update with current_step and updated meta.
-
-    Safe to call after mutating volume/multiscale state. Never raises.
-    """
-    try:
-        # Gather steps from server state, worker viewer, and source
-        state_step: list[int] | None = None
-        with server._state_lock:
-            cur = server._scene.latest_state.current_step
-            state_step = list(cur) if isinstance(cur, (list, tuple)) else None
-
-        w_step = None
-        try:
-            if server._worker is not None:
-                vm = server._worker.viewer_model()
-                if vm is not None:
-                    w_step = tuple(int(x) for x in vm.dims.current_step)  # type: ignore[attr-defined]
-        except Exception:
-            w_step = None
-
-        s_step = None
-        try:
-            src = getattr(server._worker, '_scene_source', None) if server._worker is not None else None
-            if src is not None:
-                s_step = tuple(int(x) for x in (src.current_step or ()))
-        except Exception:
-            s_step = None
-
-        worker_volume = False
-        try:
-            if server._worker is not None:
-                worker_volume = bool(getattr(server._worker, 'use_volume', False))
-        except Exception:
-            worker_volume = False
-
-        # Choose authoritative step: favour worker viewer when volume mode is active
-        chosen: list[int] = []
-        source_of_truth = 'server'
-        if worker_volume and w_step is not None and len(w_step) > 0:
-            chosen = [int(x) for x in w_step]
-            source_of_truth = 'viewer-volume'
-        elif s_step is not None and len(s_step) > 0:
-            chosen = [int(x) for x in s_step]
-            source_of_truth = 'source'
-        elif w_step is not None and len(w_step) > 0:
-            chosen = [int(x) for x in w_step]
-            source_of_truth = 'viewer'
-        elif state_step is not None:
-            chosen = [int(x) for x in state_step]
-            source_of_truth = 'server'
-        else:
-            chosen = [0]
-            source_of_truth = 'default'
-
-        if worker_volume and chosen:
-            while len(chosen) < 3:
-                chosen.append(0)
-        logger.debug('rebroadcast_meta: source=%s step=%s server=%s viewer=%s source_step=%s volume=%s', source_of_truth, chosen, state_step, w_step, s_step, worker_volume)
-
-        # Synchronize server state with chosen step to keep intents consistent
-        try:
-            with server._state_lock:
-                s = server._scene.latest_state
-                server._scene.latest_state = replace(
-                    s,
-                    current_step=tuple(chosen),
-                )
-            _enqueue_latest_state_for_worker(server)
-        except Exception:
-            logger.debug('rebroadcast: failed to sync server state step', exc_info=True)
-
-        # Diagnostics: compare and note source of truth
-        if server._log_dims_info:
-            logger.info(
-                "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
-                source_of_truth, chosen, state_step, w_step, s_step,
-            )
-        else:
-            logger.debug(
-                "rebroadcast: source=%s step=%s server=%s viewer=%s source_step=%s",
-                source_of_truth, chosen, state_step, w_step, s_step,
-            )
-
-        dims_results = _dims_results_from_step(
-            server,
-            chosen,
-            meta=server._dims_metadata() or {},
-            timestamp=time.time(),
-        )
-        await _broadcast_state_updates(server, dims_results)
-    except Exception as e:
-        logger.debug("rebroadcast meta failed: %s", e)
-
-
-
-async def broadcast_dims_update(
-    server: Any,
-    step_list: Sequence[int] | list[int],
-    *,
-    timestamp: Optional[float] = None,
-) -> None:
-    """Broadcast dims state.update messages through the state channel."""
-
-    meta = server._dims_metadata() or {}
-    results = _dims_results_from_step(
-        server,
-        list(int(x) for x in step_list),
-        meta=meta,
-        timestamp=timestamp,
-    )
-
-    await _broadcast_state_updates(server, results)
-
-
 async def broadcast_layer_update(
     server: Any,
     *,
@@ -2029,31 +2279,50 @@ def process_worker_notifications(
     deferred: list[WorkerSceneNotification] = []
 
     for note in notifications:
-        if note.kind == "dims_update" and note.step is not None:
-            meta = server._dims_metadata() or {}
-            ndim = max(1, len(meta.get("order", [])) or len(meta.get("range", [])) or len(meta.get("axes", [])) or meta.get("ndim", 0))
-            step_tuple = tuple(int(x) for x in note.step)
+        if note.kind == "dims_update":
+            meta = note.meta or server._dims_metadata() or {}
+            if not isinstance(meta, Mapping):
+                meta = {}
+
+            ndim = _ndim_from_meta(meta)
+
+            step_tuple: tuple[int, ...]
+            if note.step is not None:
+                step_tuple = tuple(int(x) for x in note.step)
+            else:
+                raw_step = meta.get("current_step")
+                if isinstance(raw_step, Sequence):
+                    step_tuple = tuple(int(x) for x in raw_step)
+                else:
+                    with server._state_lock:
+                        current = server._scene.latest_state.current_step or ()
+                    step_tuple = tuple(int(x) for x in current)
+
+            if not step_tuple:
+                step_tuple = (0,) * ndim
+
             if len(step_tuple) > ndim:
                 deferred.append(
                     WorkerSceneNotification(
                         kind="dims_update",
                         step=step_tuple,
+                        meta=meta,
                     )
                 )
                 continue
 
+            if note.step is None and step_tuple:
+                with server._state_lock:
+                    latest = server._scene.latest_state
+                    server._scene.latest_state = replace(latest, current_step=step_tuple)
+
             server._schedule_coro(
-                broadcast_dims_update(
+                _broadcast_worker_dims(
                     server,
-                    list(step_tuple),
+                    current_step=step_tuple,
+                    meta=meta,
                 ),
                 "dims_update-worker",
-            )
-        elif note.kind == "meta_refresh":
-            server._update_scene_manager()
-            server._schedule_coro(
-                rebroadcast_meta(server),
-                "rebroadcast-worker",
             )
         elif note.kind == "scene_level" and note.level is not None:
             try:

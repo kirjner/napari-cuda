@@ -38,13 +38,13 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
 
     broadcast_calls: list[tuple] = []
 
-    async def _fake_broadcast(server_obj, step_list, *, timestamp=None):  # type: ignore[no-untyped-def]
-        broadcast_calls.append((tuple(step_list), timestamp))
+    async def _fake_broadcast(server_obj, *, current_step, meta):  # type: ignore[no-untyped-def]
+        broadcast_calls.append((tuple(current_step), meta))
 
     async def _noop(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
-    monkeypatch.setattr(state_channel_handler, 'broadcast_dims_update', _fake_broadcast)
+    monkeypatch.setattr(state_channel_handler, '_broadcast_worker_dims', _fake_broadcast)
     monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 
