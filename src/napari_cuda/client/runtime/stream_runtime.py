@@ -1247,12 +1247,15 @@ class ClientStreamLoop:
         )
 
     def _on_pointer(self, data: dict) -> None:
+        if not self._control_state.dims_ready:
+            return
         dims_meta = self._control_state.dims_meta
-        mode = dims_meta.get('mode')
-        ndisplay = dims_meta.get('ndisplay')
-        assert isinstance(mode, str), 'dims.mode not seeded'
-        assert isinstance(ndisplay, int), 'dims.ndisplay not seeded'
-        in_vol3d = (mode.lower() == 'volume') and ndisplay == 3
+        mode_obj = dims_meta.get('mode')
+        ndisplay_obj = dims_meta.get('ndisplay')
+        if isinstance(mode_obj, str) and isinstance(ndisplay_obj, int):
+            in_vol3d = (mode_obj.lower() == 'volume') and ndisplay_obj == 3
+        else:
+            in_vol3d = False
         camera.handle_pointer(
             self._control_state,
             self._camera_state,

@@ -85,6 +85,8 @@ def _make_loop() -> ClientStreamLoop:
         apply_update=lambda msg: None,
         remove_layer=lambda msg: None,
     )
+    loop._widget_to_video = lambda x, y: (float(x), float(y))
+    loop._video_delta_to_canvas = lambda dx, dy: (float(dx), float(dy))
 
     return loop
 
@@ -138,7 +140,7 @@ def test_handle_dims_update_caches_payload() -> None:
 
     frame = build_notify_dims(
         session_id='session-test',
-        payload={'current_step': (1, 2), 'ndisplay': 2, 'mode': 'slice', 'source': 'test-suite'},
+        payload={'current_step': (1, 2), 'ndisplay': 2, 'mode': 'plane', 'source': 'test-suite'},
         timestamp=1.5,
         frame_id='dims-1',
     )
@@ -154,7 +156,8 @@ def test_handle_dims_update_caches_payload() -> None:
         'axis_labels': ['z', 'y', 'x'],
         'sizes': [11, 6, 4],
         'displayed': [1, 2],
-        'mode': 'slice',
+        'mode': 'plane',
+        'volume': False,
         'source': 'test-suite',
     }
     assert loop._control_state.dims_ready is True
@@ -199,6 +202,26 @@ def test_replay_last_dims_payload_forwards_to_viewer() -> None:
             'displayed': [2, 1],
         }
     ]
+
+
+def test_pointer_ignored_until_dims_ready() -> None:
+    loop = _make_loop()
+
+    payload = {
+        'type': 'input.pointer',
+        'phase': 'move',
+        'x_px': 10.0,
+        'y_px': 20.0,
+        'mods': 0,
+        'buttons': 0,
+        'width_px': 100,
+        'height_px': 80,
+        'ts': 1.0,
+    }
+
+    loop._on_pointer(payload)
+
+    assert loop._state_channel_stub.posted == []
 
 
 def test_session_metadata_propagated_to_loop_state() -> None:
