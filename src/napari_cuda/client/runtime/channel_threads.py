@@ -8,7 +8,7 @@ receivers so the loop can delegate orchestration to pure helpers.
 
 from dataclasses import dataclass
 from threading import Thread
-from typing import Callable, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, Mapping, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from napari_cuda.client.control.control_channel_client import StateChannel
@@ -40,6 +40,7 @@ class StateController:
     handle_session_ready: Optional[Callable[["SessionMetadata"], None]] = None
     handle_connected: Optional[Callable[[], None]] = None
     handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None
+    handle_scene_policies: Optional[Callable[[Mapping[str, object]], None]] = None
 
     def start(self) -> Tuple["StateChannel", Thread]:
         from napari_cuda.client.control.control_channel_client import StateChannel
@@ -58,6 +59,7 @@ class StateController:
             handle_session_ready=self.handle_session_ready,
             handle_connected=self.handle_connected,
             handle_disconnect=self.handle_disconnect,
+            handle_scene_policies=self.handle_scene_policies,
         )
         t = Thread(target=ch.run, daemon=True)
         t.start()

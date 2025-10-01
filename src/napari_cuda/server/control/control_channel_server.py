@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from numbers import Integral
 
@@ -170,7 +171,7 @@ async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
     try:
         while True:
             await asyncio.sleep(interval)
-            if bool(getattr(ws, "closed", False)) or _heartbeat_shutting_down(ws):
+            if ws.state is not State.OPEN or _heartbeat_shutting_down(ws):
                 break
             session_id = _state_session(ws)
             if not session_id:

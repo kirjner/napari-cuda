@@ -45,6 +45,7 @@ def start_loop(loop: "ClientStreamLoop") -> None:
         handle_session_ready=loop._handle_session_ready,  # noqa: SLF001
         handle_connected=loop._on_state_connected,  # noqa: SLF001
         handle_disconnect=loop._on_state_disconnect,  # noqa: SLF001
+        handle_scene_policies=loop._handle_scene_policies,  # noqa: SLF001
     )
     state_channel, t_state = state_controller.start()
     loop._loop_state.state_channel = state_channel  # noqa: SLF001

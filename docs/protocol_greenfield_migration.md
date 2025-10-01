@@ -188,8 +188,9 @@ translating to legacy formats.
      `StateUpdateResult`).
    - `call.command` handler → new command registry that calls into AppModel.
 3. Emit `ack.state` after successful mutations (populate `applied_value` or
-   rejection payloads). **Status: complete — server now emits builder-backed `ack.state`
-   responses and rejects invalid payloads per Appendix 5.2.**
+   rejection payloads). **Status: complete — the server now parses greenfield
+   envelopes, emits builder-backed `ack.state` frames with `intent_id`
+   / `in_reply_to`, and rejects malformed requests per Appendix 5.2.**
 4. Broadcast notified state strictly through `notify.scene` / `notify.dims` /
    `notify.camera` / `notify.layers`, validating payloads against
    `docs/protocol_greenfield/schemas/notify.scene.v1.schema.json`,
@@ -197,7 +198,8 @@ translating to legacy formats.
    `notify.layers.v1.schema.json`; remove plain `dims.update` emission.
 5. Keep the legacy WebSocket handler behind a feature flag (`LEGACY_STATE_WS`);
    route current deployments through the new handler in mirrored mode (emit
-   both legacy + greenfield) until clients catch up.
+   both legacy + greenfield) until clients catch up. **Status: greenfield-only;
+   legacy emission for the state lane has been removed.**
 
 ### Phase 3 – Client Control Channel Rewrite
 
@@ -205,24 +207,29 @@ translating to legacy formats.
 
 - `control_channel_client.py` emits builder-backed `session.hello`, parses
   greenfield notify/ack envelopes, and exposes callbacks for
-  `ack.state`/`reply.command`/`error.command`.
-- `pending_update_store.py` now reconciles optimistic updates on
-  `AckOutcome`, keyed by `frame_id`/`intent_id`, without legacy phase juggling.
-- Streaming loop + viewer bridge consume the new `ControlStateContext` and
-  have unit coverage in `client/streaming/_tests/` for accepted/rejected ack paths.
-- Client control stack now consumes `notify.stream` and `notify.dims` frames
-  directly: the `video_config`/`dims.update` fallbacks and the ad-hoc
+  `ack.state`/`reply.command`/`error.command`. The legacy
+  `_handle_legacy_notify_state` path has been deleted.
+- `pending_update_store.py` reconciles optimistic updates on `AckOutcome`,
+  keyed by `frame_id`/`intent_id`, without legacy phase juggling or
+  `client_seq` gating.
+- Streaming loop + viewer bridge consume the new `ControlStateContext`,
+  rebuild multiscale metadata from `notify.scene` policies, and apply
+  ack outcomes to keep the proxy viewer in sync.
+- Client control stack consumes `notify.stream` and `notify.dims` frames
+  directly; the `video_config` / `dims.update` fallbacks and the ad-hoc
   `request_keyframe` helper have been removed.
-- Resume-aware handshake + heartbeat enforcement: the client reuses
-  `session.welcome` resume tokens on reconnect, parses `session.heartbeat`,
-  emits timely `session.ack`, and drops the session when heartbeats or ack
-  enqueueing fail. Loop state tracks the latest `SessionMetadata` so UI/
-  diagnostics can observe negotiated cadence.
+- Resume-aware handshake + heartbeat enforcement is live: the client reuses
+  `session.welcome` resume tokens, responds with `session.ack`, and tears down
+  the session when heartbeats lapse.
 
 **Remaining**
 
 1. Implement the command-lane replacement for manual keyframe requests once
    Phase 4 wiring lands (`call.command napari.pixel.request_keyframe`).
+2. Remove the `StateUpdateMessage` compatibility export once command-lane tests
+   confirm no modules rely on the legacy dataclass.
+3. Expand client/server control suites to cover ack rejection paths and heartbeat
+   dropout, matching the testing matrix in §7.
 
 ### Phase 4 – Command Lane Enablement
 

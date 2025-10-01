@@ -155,6 +155,58 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
     assert received[0].scene.layers[0].layer_id == 'layer-10'
 
 
+def test_state_channel_notify_scene_policies_callback() -> None:
+    specs: list[SceneSpecMessage] = []
+    policies_received: list[dict[str, object]] = []
+    sc = StateChannel(
+        'localhost',
+        8081,
+        handle_scene_spec=specs.append,
+        handle_scene_policies=policies_received.append,
+    )
+
+    layer = LayerSpec(layer_id='layer-20', layer_type='image', name='zarr', ndim=3, shape=[32, 32, 8])
+    policies = {
+        'multiscale': {
+            'policy': 'oversampling',
+            'active_level': 2,
+            'downgraded': False,
+            'index_space': 'zyx',
+            'levels': [
+                {'index': 0, 'path': 'level_00', 'shape': [32, 32, 8], 'downsample': [1, 1, 1]},
+                {'index': 1, 'path': 'level_01', 'shape': [16, 16, 4], 'downsample': [2, 2, 2]},
+                {'index': 2, 'path': 'level_02', 'shape': [8, 8, 2], 'downsample': [4, 4, 4]},
+            ],
+        }
+    }
+    ancillary = {'metadata': {'adapter_engine': 'napari-vispy'}}
+
+    frame = build_notify_scene_snapshot(
+        session_id='session-3',
+        viewer={'dims': {'ndim': 3}, 'camera': {}},
+        layers=[layer.to_dict()],
+        policies=policies,
+        ancillary=ancillary,
+        delta_token='tok-scene-3',
+    )
+
+    sc._handle_message(frame.to_dict())
+
+    assert specs and isinstance(specs[0], SceneSpecMessage)
+    scene = specs[0].scene
+    assert scene.metadata is None or 'multiscale' not in scene.metadata
+
+    assert policies_received, "policies callback should be invoked"
+    multiscale = policies_received[0]['multiscale']
+    assert isinstance(multiscale, dict)
+    assert multiscale['policy'] == 'oversampling'
+    assert multiscale['active_level'] == 2
+    assert multiscale['downgraded'] is False
+    levels = multiscale['levels']
+    assert isinstance(levels, list)
+    assert levels[0]['path'] == 'level_00'
+
+
 def test_state_channel_notify_stream_dispatch() -> None:
     frames: list[NotifyStreamFrame] = []
     sc = StateChannel('localhost', 8081, handle_notify_stream=frames.append)

@@ -34,6 +34,14 @@ def _default_dims_meta() -> dict[str, object | None]:
     }
 
 
+def _normalize_policy_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_policy_value(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_normalize_policy_value(v) for v in value]
+    return value
+
+
 @dataclass
 class ControlStateContext:
     """Mutable control state hoisted out of the loop object."""
@@ -58,6 +66,7 @@ class ControlStateContext:
     view_state: Dict[str, Any] = field(default_factory=dict)
     volume_state: Dict[str, Any] = field(default_factory=dict)
     multiscale_state: Dict[str, Any] = field(default_factory=dict)
+    scene_policies: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env_cfg: Any) -> "ControlStateContext":
@@ -83,6 +92,100 @@ class ControlStateContext:
         intent_id = f"intent-{base}"
         frame_id = f"state-{base}"
         return intent_id, frame_id
+
+
+def apply_scene_policies(state: ControlStateContext, policies: Mapping[str, Any]) -> None:
+    normalized = {str(k): _normalize_policy_value(v) for k, v in policies.items()}
+    state.scene_policies = normalized
+
+    multiscale = normalized.get('multiscale') if isinstance(normalized.get('multiscale'), Mapping) else None
+    if isinstance(multiscale, Mapping):
+        meta_obj = state.dims_meta.get('multiscale')
+        if not isinstance(meta_obj, dict):
+            meta_obj = {}
+            state.dims_meta['multiscale'] = meta_obj
+        meta = meta_obj
+
+        policy_name = multiscale.get('policy')
+        if policy_name is not None:
+            meta['policy'] = str(policy_name)
+            state.multiscale_state['policy'] = str(policy_name)
+
+        level_value = multiscale.get('active_level')
+        if level_value is None:
+            level_value = multiscale.get('current_level')
+        if level_value is not None:
+            try:
+                level_int = int(level_value)
+            except Exception:
+                level_int = level_value
+            meta['current_level'] = level_int
+            meta['level'] = level_int
+            state.multiscale_state['level'] = level_int
+
+        if 'downgraded' in multiscale:
+            meta['downgraded'] = bool(multiscale.get('downgraded'))
+
+        if 'index_space' in multiscale:
+            meta['index_space'] = str(multiscale.get('index_space'))
+
+        sizes: list[int] | None = None
+        ranges: list[list[int]] | None = None
+
+        levels_obj = multiscale.get('levels')
+        if isinstance(levels_obj, Sequence) and not isinstance(levels_obj, (str, bytes, bytearray)):
+            level_entries: list[dict[str, Any]] = []
+            for entry in levels_obj:
+                if isinstance(entry, Mapping):
+                    level_entries.append({str(k): _normalize_policy_value(v) for k, v in entry.items()})
+            if level_entries:
+                meta['levels'] = level_entries
+                if isinstance(level_int, int) and 0 <= level_int < len(level_entries):
+                    active_entry = level_entries[level_int]
+                    shape_obj = active_entry.get('shape')
+                    if isinstance(shape_obj, Sequence) and not isinstance(shape_obj, (str, bytes, bytearray)):
+                        try:
+                            sizes = [max(1, int(x)) for x in shape_obj]
+                        except Exception:
+                            sizes = None
+                    if sizes:
+                        ranges = [[0, max(0, s - 1)] for s in sizes]
+
+        if sizes:
+            meta_root = state.dims_meta
+            meta_root['sizes'] = sizes
+            meta_root['ndim'] = len(sizes)
+            if ranges:
+                meta_root['range'] = ranges
+            current_step_meta = meta_root.get('current_step')
+            if isinstance(current_step_meta, Sequence):
+                clamped: list[int] = []
+                for idx, value in enumerate(current_step_meta):
+                    if idx >= len(sizes):
+                        break
+                    try:
+                        val_int = int(value)
+                    except Exception:
+                        val_int = 0
+                    upper = max(0, sizes[idx] - 1)
+                    clamped_value = max(0, min(val_int, upper))
+                    clamped.append(clamped_value)
+                    state.dims_state[(str(idx), 'index')] = clamped_value
+                meta_root['current_step'] = clamped
+        if ranges is None and 'sizes' not in state.dims_meta:
+            meta_root = state.dims_meta
+            meta_root.pop('range', None)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            levels_data = meta.get('levels') if isinstance(meta.get('levels'), list) else []
+            logger.debug(
+                "apply_scene_policies: multiscale policy=%s level=%s levels=%s",
+                meta.get('policy'),
+                meta.get('current_level'),
+                len(levels_data),
+            )
+    elif logger.isEnabledFor(logging.DEBUG):
+        logger.debug("apply_scene_policies: no multiscale section present")
 
 
 @dataclass
@@ -644,6 +747,46 @@ def handle_dims_ack(
         axis_idx = _axis_index_from_target(state, str(outcome.target))
 
     if outcome.status == "accepted":
+        applied_value = outcome.applied_value
+        if axis_idx is not None and applied_value is not None:
+            meta = state.dims_meta
+            current = list(meta.get('current_step') or [])
+            while len(current) <= axis_idx:
+                current.append(0)
+            try:
+                applied_int = int(applied_value)
+            except Exception:
+                applied_int = applied_value
+            if current[axis_idx] != applied_int:
+                current[axis_idx] = applied_int
+                meta['current_step'] = current
+                state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or 'index'))] = applied_int
+                payload = _sync_dims_payload_from_meta(state, loop_state)
+                state.primary_axis_index = _compute_primary_axis_index(meta)
+                logger.debug(
+                    "dims ack applied_value update axis=%s value=%s", axis_idx, applied_int
+                )
+                if presenter is not None:
+                    try:
+                        presenter.apply_dims_update(dict(payload))
+                    except Exception:
+                        logger.debug("presenter dims update failed", exc_info=True)
+                viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
+                if viewer_obj is not None:
+                    mirror_dims_to_viewer(
+                        viewer_obj,
+                        ui_call,
+                        current_step=payload.get('current_step'),
+                        ndisplay=payload.get('ndisplay'),
+                        ndim=payload.get('ndim'),
+                        dims_range=payload.get('dims_range'),
+                        order=payload.get('order'),
+                        axis_labels=payload.get('axis_labels'),
+                        sizes=payload.get('sizes'),
+                        displayed=payload.get('displayed'),
+                    )
+                else:
+                    logger.debug("dims ack applied_value: viewer_ref missing")
         logger.debug(
             "ack.state dims accepted: target=%s key=%s pending=%d",
             outcome.target,

@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from threading import Thread
-from typing import Callable, Dict, Optional, TYPE_CHECKING
+from typing import Callable, Dict, Mapping, Optional, TYPE_CHECKING
 import weakref
 from contextlib import ExitStack
 
@@ -600,6 +600,17 @@ class ClientStreamLoop:
             len(msg.scene.layers),
             msg.scene.capabilities,
         )
+
+    def _handle_scene_policies(self, policies: Mapping[str, object]) -> None:
+        try:
+            control_actions.apply_scene_policies(self._control_state, policies)
+        except Exception:
+            logger.debug("apply_scene_policies failed", exc_info=True)
+            return
+        if logger.isEnabledFor(logging.DEBUG):
+            multiscale = policies.get('multiscale') if isinstance(policies, Mapping) else None
+            if multiscale is not None:
+                logger.debug("scene policies updated: multiscale keys=%s", list(multiscale.keys()) if isinstance(multiscale, Mapping) else type(multiscale))
 
     def _handle_layer_update(self, msg: LayerUpdateMessage) -> None:
         self._layer_registry.apply_update(msg)

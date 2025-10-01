@@ -97,6 +97,14 @@ _REQUIRED_FEATURES = {
 }
 
 
+def _normalize_level_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _normalize_level_value(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_normalize_level_value(v) for v in value]
+    return value
+
+
 @dataclass(frozen=True)
 class ResumeCursor:
     seq: int
@@ -133,6 +141,7 @@ class StateChannel:
         handle_session_ready: Optional[Callable[[SessionMetadata], None]] = None,
         handle_connected: Optional[Callable[[], None]] = None,
         handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
+        handle_scene_policies: Optional[Callable[[Mapping[str, Any]], None]] = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -147,6 +156,7 @@ class StateChannel:
         self.handle_session_ready = handle_session_ready
         self.handle_connected = handle_connected
         self.handle_disconnect = handle_disconnect
+        self.handle_scene_policies = handle_scene_policies
         self._loop_state = StateChannelLoop()
         self._session_metadata: SessionMetadata | None = None
         self._resume_tokens: Dict[str, ResumeCursor | None] = {topic: None for topic in _RESUMABLE_TOPICS}
@@ -519,6 +529,14 @@ class StateChannel:
                     metadata_block[extra_key] = extra_value
         if metadata_block:
             scene_payload["metadata"] = metadata_block
+
+        policies_mapping = payload.policies if isinstance(payload.policies, Mapping) else None
+        if isinstance(policies_mapping, Mapping) and self.handle_scene_policies:
+            policies_payload = {str(k): _normalize_level_value(v) for k, v in policies_mapping.items()}
+            try:
+                self.handle_scene_policies(policies_payload)
+            except Exception:
+                logger.debug("handle_scene_policies callback failed", exc_info=True)
 
         capabilities = None
         anc_caps = ancillary.get("capabilities") if isinstance(ancillary, Mapping) else None

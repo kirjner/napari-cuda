@@ -31,6 +31,14 @@ class PresenterStub:
         self.calls.append(dict(payload))
 
 
+class ViewerStub:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def _apply_remote_dims_update(self, **kwargs: Any) -> None:
+        self.calls.append(dict(kwargs))
+
+
 def _make_notify_dims_frame(
     *,
     current_step: Sequence[int],
@@ -168,6 +176,90 @@ def test_handle_dims_update_seeds_state_store() -> None:
     debug = store.dump_debug()
     assert debug['view:main:ndisplay']['confirmed']['value'] == 2
     assert ready_calls, "first dims update should trigger readiness"
+
+
+def test_apply_scene_policies_populates_multiscale_state() -> None:
+    state, _, _, _ = _make_state()
+    policies = {
+        'multiscale': {
+            'policy': 'oversampling',
+            'active_level': 3,
+            'downgraded': True,
+            'index_space': 'zyx',
+            'levels': [
+                {'index': 0, 'path': 'level_00'},
+                {'index': 1, 'path': 'level_01'},
+            ],
+        }
+    }
+
+    control_actions.apply_scene_policies(state, policies)
+
+    assert state.scene_policies['multiscale']['policy'] == 'oversampling'
+    assert state.multiscale_state['policy'] == 'oversampling'
+    assert state.multiscale_state['level'] == 3
+    meta = state.dims_meta.get('multiscale')
+    assert isinstance(meta, dict)
+    assert meta['current_level'] == 3
+    assert meta['downgraded'] is True
+    assert meta['index_space'] == 'zyx'
+    levels = meta['levels']
+    assert isinstance(levels, list)
+    assert levels[0]['path'] == 'level_00'
+
+
+def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
+    state, loop_state, store, _ = _make_state()
+    state.dims_ready = True
+    state.dims_meta.update(
+        {
+            'current_step': [148, 0, 0],
+            'axis_labels': ['z', 'y', 'x'],
+            'ndim': 3,
+        }
+    )
+    viewer = ViewerStub()
+    presenter = PresenterStub()
+
+    pending = store.apply_local(
+        'dims',
+        '0',
+        'index',
+        148,
+        'start',
+        intent_id='intent-1',
+        frame_id='state-1',
+        metadata={'axis_index': 0, 'axis_target': '0', 'update_kind': 'index'},
+    )
+    assert pending.metadata is not None
+
+    ack = build_ack_state(
+        session_id='sess-1',
+        frame_id='ack-1',
+        payload={
+            'intent_id': pending.intent_id,
+            'in_reply_to': pending.frame_id,
+            'status': 'accepted',
+            'applied_value': 271,
+        },
+        timestamp=6.0,
+    )
+
+    outcome = store.apply_ack(ack)
+    control_actions.handle_dims_ack(
+        state,
+        loop_state,
+        outcome,
+        presenter=presenter,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        log_dims_info=True,
+    )
+
+    assert state.dims_meta['current_step'][0] == 271
+    assert state.dims_state[('0', 'index')] == 271
+    assert viewer.calls, "viewer should receive applied dims update"
+    assert presenter.calls, "presenter should receive applied dims update"
 
 
 def test_dims_step_attaches_axis_metadata() -> None:
