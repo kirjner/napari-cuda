@@ -480,8 +480,14 @@ def _resolve_dims_mode(ndisplay: int) -> str:
 
 def _current_dims_meta(server: Any) -> Mapping[str, Any]:
     meta = server._dims_metadata() if hasattr(server, "_dims_metadata") else {}
-    assert isinstance(meta, Mapping), "server must expose dims metadata"
-    return meta
+    if not isinstance(meta, Mapping):
+        meta = {}
+    meta_copy: Dict[str, Any] = dict(meta)
+    if "ndisplay" not in meta_copy:
+        meta_copy["ndisplay"] = _resolve_ndisplay(server)
+    if "mode" not in meta_copy:
+        meta_copy["mode"] = _resolve_dims_mode(int(meta_copy["ndisplay"]))
+    return meta_copy
 
 
 async def _broadcast_layers_delta(
