@@ -442,11 +442,11 @@ class EGLHeadlessServer:
                 self._worker.request_ndisplay(int(ndisp))  # type: ignore[attr-defined]
                 # Force a keyframe and bypass pacing so the switch is immediate
                 try:
-                    if self._try_force_idr():
+                    if self._try_reset_encoder():
                         self._pixel_channel.broadcast.bypass_until_key = True
                         pixel_channel.mark_stream_config_dirty(self._pixel_channel)
                 except Exception:
-                    logger.debug("view.set_ndisplay: force_idr failed", exc_info=True)
+                    logger.debug("view.set_ndisplay: encoder reset failed", exc_info=True)
             except Exception:
                 logger.exception("view.set_ndisplay: worker request failed")
         # Let the worker-driven scene refresh broadcast updated dims once the toggle completes
