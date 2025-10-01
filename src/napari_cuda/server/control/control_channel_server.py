@@ -563,16 +563,17 @@ async def _broadcast_dims_state(
 
     if raw_ndisplay is None or raw_mode is None:
         fallback = _current_dims_meta(server)
-        raw_ndisplay = fallback.get("ndisplay")
-        raw_mode = fallback.get("mode")
+        raw_ndisplay = fallback.get("ndisplay") if raw_ndisplay is None else raw_ndisplay
+        raw_mode = fallback.get("mode") if raw_mode is None else raw_mode
 
     if raw_ndisplay is None or raw_mode is None:
-        raise AssertionError("dims metadata missing ndisplay/mode")
-
-    ndisplay = int(raw_ndisplay)
-    mode_text = str(raw_mode).strip().lower()
-    assert mode_text in {"volume", "plane"}, f"invalid dims mode: {raw_mode!r}"
-    mode = "volume" if mode_text == "volume" else "plane"
+        ndisplay = _resolve_ndisplay(server)
+        mode = _resolve_dims_mode(ndisplay)
+    else:
+        ndisplay = int(raw_ndisplay)
+        mode_text = str(raw_mode).strip().lower()
+        assert mode_text in {"volume", "plane"}, f"invalid dims mode: {raw_mode!r}"
+        mode = "volume" if mode_text == "volume" else "plane"
 
     payload = build_notify_dims_payload(
         current_step=current_step,
