@@ -408,10 +408,15 @@ class EGLHeadlessServer:
             self._pixel_channel,
             config=self._pixel_config,
             metrics=self.metrics,
-            try_force_idr=self._try_force_idr,
             reset_encoder=self._try_reset_encoder,
             send_stream=self._broadcast_stream_config,
         )
+        worker = self._worker
+        if worker is not None and hasattr(worker, "_request_encoder_idr"):
+            try:
+                worker._request_encoder_idr()
+            except Exception:
+                logger.debug("ensure_keyframe: request_idr failed", exc_info=True)
 
     async def _handle_set_ndisplay(self, ndisplay: int) -> None:
         """Apply a 2D/3D view toggle request.

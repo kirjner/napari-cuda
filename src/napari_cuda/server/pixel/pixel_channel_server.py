@@ -119,15 +119,14 @@ async def ensure_keyframe(
     *,
     config: PixelChannelConfig,
     metrics: "Metrics",
-    try_force_idr: Callable[[], bool],
     reset_encoder: Callable[[], bool],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
 ) -> None:
     """Force the next frame to be a keyframe and schedule a watchdog."""
 
-    # TODO(encoder-idr): Re-introduce `try_force_idr()` once NVENC reliably produces
-    # an IDR on demand. For now we always reset the encoder so the next frame is
-    # guaranteed to be a keyframe.
+    # TODO(encoder-idr): Re-introduce `force_idr` handling once NVENC reliably
+    # produces an IDR on demand. For now we always reset the encoder so the next
+    # frame is guaranteed to be a keyframe.
     try:
         if not reset_encoder():
             logger.debug("Encoder reset unavailable during keyframe ensure")
