@@ -2818,13 +2818,9 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         except Exception:
             logger.exception("Initial dims baseline send failed")
 
-    ensure_cb = getattr(server, "_ensure_keyframe", None)
-    schedule = getattr(server, "_schedule_coro", None)
-    if callable(ensure_cb) and callable(schedule):
-        try:
-            schedule(ensure_cb(), "state-baseline-keyframe")
-        except Exception:
-            logger.debug("state baseline keyframe schedule failed", exc_info=True)
+    assert hasattr(server, "_ensure_keyframe"), "server must expose _ensure_keyframe"
+    assert hasattr(server, "_schedule_coro"), "server must expose _schedule_coro"
+    server._schedule_coro(server._ensure_keyframe(), "state-baseline-keyframe")
 
     if hasattr(ws, "_napari_cuda_resume_plan"):
         delattr(ws, "_napari_cuda_resume_plan")

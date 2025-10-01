@@ -344,21 +344,15 @@ class EGLHeadlessServer:
         return True
 
     def _current_avcc_bytes(self) -> Optional[bytes]:
-        try:
-            channel = getattr(self, "_pixel_channel", None)
-            if channel is not None and getattr(channel, "last_avcc", None):
-                avcc_blob = channel.last_avcc
-                if isinstance(avcc_blob, bytes):
-                    return avcc_blob
-                if avcc_blob is not None:
-                    return bytes(avcc_blob)
-        except Exception:
-            logger.debug("snapshot avcc from pixel channel failed", exc_info=True)
-        try:
-            avcc_from_cache = build_avcc_config(self._param_cache)
-        except Exception:
-            logger.debug("snapshot avcc from param cache failed", exc_info=True)
+        avcc_blob = self._pixel_channel.last_avcc
+        if avcc_blob is not None:
+            assert isinstance(avcc_blob, bytes), "pixel channel cached avcc must be bytes"
+            return avcc_blob
+
+        avcc_from_cache = build_avcc_config(self._param_cache)
+        if avcc_from_cache is None:
             return None
+        assert isinstance(avcc_from_cache, bytes), "param cache returned invalid avcc payload"
         return avcc_from_cache
 
     def _schedule_coro(self, coro: Awaitable[None], label: str) -> None:

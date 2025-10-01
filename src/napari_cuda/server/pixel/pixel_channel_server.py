@@ -111,38 +111,27 @@ async def ensure_keyframe(
     # Emit the latest stream configuration before we gate on the new keyframe.
     avcc_bytes = state.last_avcc
     if avcc_bytes is None and capture_avcc is not None:
-        try:
-            avcc_bytes = capture_avcc()
-        except Exception:  # pragma: no cover - defensive snap
-            logger.debug("capture_avcc callback failed", exc_info=True)
+        avcc_bytes = capture_avcc()
         if avcc_bytes is not None:
             state.last_avcc = avcc_bytes
 
-    if avcc_bytes is not None and not isinstance(avcc_bytes, bytes):
-        try:
-            avcc_bytes = bytes(avcc_bytes)
-        except Exception:
-            logger.debug("normalize avcc payload failed", exc_info=True)
-            avcc_bytes = None
-        else:
-            state.last_avcc = avcc_bytes
-
     if avcc_bytes is not None:
-        try:
-            await send_stream(build_notify_stream_payload(config, avcc_bytes))
-            state.needs_stream_config = False
-        except Exception:
-            logger.debug("ensure_keyframe pre-reset notify.stream failed", exc_info=True)
+        if isinstance(avcc_bytes, memoryview):
+            avcc_bytes = avcc_bytes.tobytes()
+        elif isinstance(avcc_bytes, bytearray):
+            avcc_bytes = bytes(avcc_bytes)
+        elif not isinstance(avcc_bytes, bytes):
+            raise AssertionError("capture_avcc must return bytes-like avcc payload")
+
+        state.last_avcc = avcc_bytes
+        await send_stream(build_notify_stream_payload(config, avcc_bytes))
+        state.needs_stream_config = False
 
     # TODO(encoder-idr): Re-introduce `force_idr` handling once NVENC reliably
     # produces an IDR on demand. For now we always reset the encoder so the next
     # frame is guaranteed to be a keyframe.
-    try:
-        if not reset_encoder():
-            logger.debug("Encoder reset unavailable during keyframe ensure")
-            return
-    except Exception:
-        logger.exception("Encoder reset failed in ensure_keyframe")
+    if not reset_encoder():
+        logger.debug("Encoder reset unavailable during keyframe ensure")
         return
     state.broadcast.kf_last_reset_ts = time.time()
 
