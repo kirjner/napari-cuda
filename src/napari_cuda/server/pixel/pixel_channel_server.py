@@ -125,21 +125,17 @@ async def ensure_keyframe(
 ) -> None:
     """Force the next frame to be a keyframe and schedule a watchdog."""
 
-    forced = False
+    # TODO(encoder-idr): Re-introduce `try_force_idr()` once NVENC reliably produces
+    # an IDR on demand. For now we always reset the encoder so the next frame is
+    # guaranteed to be a keyframe.
     try:
-        forced = try_force_idr()
-    except Exception:
-        logger.debug("force_idr request failed; will reset encoder", exc_info=True)
-
-    if not forced:
-        try:
-            if not reset_encoder():
-                logger.debug("Encoder reset unavailable during keyframe ensure")
-                return
-        except Exception:
-            logger.exception("Encoder reset failed in ensure_keyframe")
+        if not reset_encoder():
+            logger.debug("Encoder reset unavailable during keyframe ensure")
             return
-        state.broadcast.kf_last_reset_ts = time.time()
+    except Exception:
+        logger.exception("Encoder reset failed in ensure_keyframe")
+        return
+    state.broadcast.kf_last_reset_ts = time.time()
 
     state.broadcast.bypass_until_key = True
     state.needs_stream_config = True

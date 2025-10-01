@@ -95,6 +95,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     features = {
         "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+        "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -134,6 +135,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._resumable_store = ResumableHistoryStore(
         {
             "notify.scene": ResumableRetention(),
+            "notify.scene.level": ResumableRetention(),
             "notify.layers": ResumableRetention(min_deltas=512, max_deltas=2048, max_age_s=300.0),
             "notify.stream": ResumableRetention(min_deltas=1, max_deltas=32),
         }
@@ -430,6 +432,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         ws._napari_cuda_session = "baseline-session"
         ws._napari_cuda_features = {
             "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -442,6 +445,9 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 
         scene_frames = _frames_of_type(captured, "notify.scene")
         assert scene_frames, "expected notify.scene snapshot"
+
+        level_frames = _frames_of_type(captured, "notify.scene.level")
+        assert level_frames, "expected notify.scene.level baseline"
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames, "expected notify.layers baseline"
@@ -457,7 +463,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         loop.close()
 
 
-def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBlueprint, FrameBlueprint]:
+def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBlueprint, FrameBlueprint, FrameBlueprint]:
     store: ResumableHistoryStore = server._resumable_store
     scene_payload = state_channel_handler.build_notify_scene_payload(
         server._scene,
@@ -467,6 +473,16 @@ def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBluep
     scene_blueprint = store.snapshot_blueprint(
         state_channel_handler.NOTIFY_SCENE_TYPE,
         payload=scene_payload.to_dict(),
+        timestamp=time.time(),
+    )
+
+    scene_level_payload = state_channel_handler.build_notify_scene_level_payload(
+        server._scene,
+        server._scene_manager,
+    )
+    scene_level_blueprint = store.snapshot_blueprint(
+        state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE,
+        payload=scene_level_payload.to_dict(),
         timestamp=time.time(),
     )
 
@@ -495,7 +511,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBluep
         timestamp=time.time(),
     )
 
-    return scene_blueprint, layer_blueprint, stream_blueprint
+    return scene_blueprint, scene_level_blueprint, layer_blueprint, stream_blueprint
 
 
 def test_handshake_stashes_resume_plan(monkeypatch) -> None:
@@ -503,9 +519,10 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
     try:
         asyncio.set_event_loop(loop)
         server, scheduled, captured = _make_server()
-        scene_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
+        scene_bp, scene_level_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
         resume_tokens = {
             state_channel_handler.NOTIFY_SCENE_TYPE: scene_bp.delta_token,
+            state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: scene_level_bp.delta_token,
             state_channel_handler.NOTIFY_LAYERS_TYPE: layer_bp.delta_token,
             state_channel_handler.NOTIFY_STREAM_TYPE: stream_bp.delta_token,
         }
@@ -514,6 +531,7 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
             client=HelloClientInfo(name="tests", version="1.0", platform="test"),
             features={
                 state_channel_handler.NOTIFY_SCENE_TYPE: True,
+                state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: True,
                 state_channel_handler.NOTIFY_LAYERS_TYPE: True,
                 state_channel_handler.NOTIFY_STREAM_TYPE: True,
             },
@@ -545,6 +563,7 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
 
         plan = getattr(ws, "_napari_cuda_resume_plan")
         assert plan[state_channel_handler.NOTIFY_SCENE_TYPE].decision == ResumeDecision.REPLAY
+        assert plan[state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE].decision == ResumeDecision.REPLAY
         assert plan[state_channel_handler.NOTIFY_LAYERS_TYPE].decision == ResumeDecision.REPLAY
         assert plan[state_channel_handler.NOTIFY_STREAM_TYPE].decision == ResumeDecision.REPLAY
 
@@ -560,7 +579,7 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
     try:
         asyncio.set_event_loop(loop)
         server, scheduled, captured = _make_server()
-        scene_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
+        scene_bp, scene_level_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
 
         server._await_adapter_level_ready = lambda _timeout: asyncio.sleep(0)
         server._state_send = lambda _ws, text: captured.append(json.loads(text))
@@ -571,6 +590,7 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
             _napari_cuda_session="resume-session",
             _napari_cuda_features={
                 "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+                "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -582,6 +602,11 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
                 topic=state_channel_handler.NOTIFY_SCENE_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[scene_bp],
+            ),
+            state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[scene_level_bp],
             ),
             state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
@@ -600,6 +625,9 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
 
         scene_frames = _frames_of_type(captured, "notify.scene")
         assert scene_frames and scene_frames[-1]["seq"] == scene_bp.seq
+
+        level_frames = _frames_of_type(captured, "notify.scene.level")
+        assert level_frames and level_frames[-1]["seq"] == scene_level_bp.seq
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames and layer_frames[-1]["seq"] == layer_bp.seq

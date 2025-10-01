@@ -35,6 +35,25 @@ Pending follow-up:
 
 1. Enable the command lane (`call.command` / `reply.command` / `error.command`) once both endpoints share the builder-backed handlers.
 2. Expand the protocol round-trip tests to cover command envelopes and resume-token negotiation after reconnect.
+3. Track the documented drifts noted in the *Documented Spec Drifts (2025-10-01)* section until each is resolved (camera verbs, meta refresh removal, keyframe contract, minimal client archival).
+
+## Documented Spec Drifts (2025-10-01)
+
+The following deviations are now deliberate, documented behaviour until the corresponding migration tasks land. Each entry calls out the active code path, the target greenfield contract, and the planned remediation hook.
+
+- **Legacy worker meta refresh** – `src/napari_cuda/server/worker_lifecycle.py:135` still emits `WorkerSceneNotification(kind="meta_refresh")` when the render thread cannot provide a concrete dims step. The control loop handles this via `rebroadcast_meta()` (`src/napari_cuda/server/control/control_channel_server.py:1877`), synthesising `notify.dims` payloads. *Target:* remove the fallback once the worker always supplies explicit dims/scene-level payloads; migration item lives under Phase 2, step 4.
+- **Volume / multiscale rebroadcast dependency** – Volume and multiscale `state.update` handlers normalise inputs but immediately schedule `rebroadcast_meta()` (`src/napari_cuda/server/control/control_channel_server.py:1320`). *Target:* emit layer-scoped `notify.layers` deltas directly from the update sites (no meta rebroadcast) once the worker path above is in place.
+- **Legacy camera verbs** – The state dispatcher still recognises `'set_camera'`, `'camera.*'`, `'ping'`, and `'request_keyframe'` (`src/napari_cuda/server/control/control_channel_server.py:1555`); clients (e.g. `src/napari_cuda/client/streaming/client_loop/camera.py:283`) still send them. *Target:* add `scope == "camera"` handling to `_handle_state_update`, produce `notify.camera`, and delete the legacy handlers.
+- **Unused `notify.camera` lane** – Although `build_notify_camera` is imported (`src/napari_cuda/server/control/control_channel_server.py:43`), no payload is emitted. This is blocked on the previous bullet.
+- **State handler shims** – Compatibility modules (`src/napari_cuda/server/state_channel_handler.py:1`, `src/napari_cuda/client/streaming/client_loop/control.py:1`) still wildcard-import the new implementations to preserve legacy imports. *Target:* drop once downstream call sites are updated.
+- **Minimal client legacy protocol** – `src/napari_cuda/client/minimal_client.py` continues to speak the deprecated control format (`{"type":"ping"}` etc.). *Target:* archive the minimal client alongside the legacy protocol or port it to the greenfield envelopes after the migration reaches Phase 5.
+
+### 3.1 Keyframe Handling Baseline
+
+- **force_idr() limitation** – `src/napari_cuda/server/rendering/encoder.py:223` toggles NVENC reconfigure, but it still fails to guarantee an IDR frame. We now treat encoder reset as the contract: `pixel_channel.ensure_keyframe()` skips `force_idr()` entirely and immediately invokes `_try_reset_encoder()` (`src/napari_cuda/server/egl_headless_server.py:332`). This mirrors the initial startup behaviour, ensures the next frame after a request is produced from a clean encoder state, and leaves a TODO breadcrumb (`src/napari_cuda/server/pixel/pixel_channel_server.py:120`) to re-enable targeted IDR forcing once NVENC reliability is proven.
+- **Client VT gate expectations** – The streaming runtime logs “Keyframe request skipped (vt gate pending)” (`src/napari_cuda/client/runtime/stream_runtime.py:1276`) while waiting for the first IDR after a request. This is expected when the server had to reset the encoder; gating logic should be revisited once `force_idr()` is reliable.
+
+Cross-reference these items when planning migration work; each future change should remove its entry from this section.
 
 ## 1. Scope & Objectives
 
@@ -249,6 +268,13 @@ translating to legacy formats.
   Phase 4/5 must replace them with greenfield notify envelopes and typed models so
   the client no longer consumes legacy dataclasses before we drop the compatibility
   exports.
+- **Protocol extension:** add a resumable `notify.scene.level` lane carrying the
+  active multiscale level (`current_level`, `downgraded`, optional `levels` metadata)
+  so HUD/slider consumers stay in sync with server-driven LOD switches without
+  forcing a full scene snapshot rebroadcast. Advertise the feature in
+  `session.welcome.payload.features`, sequence it alongside `notify.scene`, and
+  teach the client control channel to hydrate multiscale state from the new
+  payload.
 
 ### Phase 4 – Command Lane Enablement
 

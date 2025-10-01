@@ -5,13 +5,16 @@ from itertools import count
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from napari_cuda.client.streaming.client_stream_loop import ClientStreamLoop
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import SessionMetadata, ResumeCursor
+from napari_cuda.client.runtime.stream_runtime import CommandError
 from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command
-from napari_cuda.protocol.messages import NotifyDimsFrame
+from napari_cuda.protocol.messages import NotifyDimsFrame, NotifySceneLevelPayload
 
 
 class _StateChannelStub:
@@ -206,10 +209,14 @@ def test_session_metadata_propagated_to_loop_state() -> None:
         ack_timeout_ms=250,
         resume_tokens={
             'notify.scene': ResumeCursor(seq=1, delta_token='scene-a'),
+            'notify.scene.level': None,
             'notify.layers': None,
             'notify.stream': None,
         },
-        features={'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',))},
+        features={
+            'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
+            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
+        },
     )
 
     loop._handle_session_ready(metadata)
@@ -228,10 +235,14 @@ def test_request_keyframe_command_future_resolves() -> None:
         ack_timeout_ms=250,
         resume_tokens={
             'notify.scene': None,
+            'notify.scene.level': None,
             'notify.layers': None,
             'notify.stream': None,
         },
-        features={'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',))},
+        features={
+            'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
+            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
+        },
     )
     loop._handle_session_ready(metadata)
 
@@ -256,3 +267,53 @@ def test_request_keyframe_command_future_resolves() -> None:
     payload = future.result()
     assert payload.status == 'ok'
     assert payload.in_reply_to == frame_id
+
+
+def test_state_disconnect_aborts_pending_commands() -> None:
+    loop = _make_loop()
+    metadata = SessionMetadata(
+        session_id='sess-meta',
+        heartbeat_s=3.0,
+        ack_timeout_ms=250,
+        resume_tokens={
+            'notify.scene': None,
+            'notify.scene.level': None,
+            'notify.layers': None,
+            'notify.stream': None,
+        },
+        features={
+            'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
+            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
+        },
+    )
+    loop._handle_session_ready(metadata)
+
+    future = loop.request_keyframe(origin='test')
+    assert future is not None
+    assert not future.done()
+
+    loop._on_state_disconnect(RuntimeError('disconnect'))
+
+    assert future.done()
+    with pytest.raises(CommandError) as excinfo:
+        future.result()
+    assert excinfo.value.code == 'command.session_closed'
+
+
+def test_scene_level_payload_updates_control_state() -> None:
+    loop = _make_loop()
+    payload = NotifySceneLevelPayload(
+        current_level=3,
+        downgraded=False,
+        levels=(
+            {'index': 0, 'shape': [64, 64]},
+            {'index': 1, 'shape': [32, 32]},
+        ),
+    )
+
+    loop._handle_scene_level(payload)
+
+    assert loop._control_state.multiscale_state['level'] == 3
+    multiscale_meta = loop._control_state.dims_meta.get('multiscale')
+    assert isinstance(multiscale_meta, dict)
+    assert multiscale_meta.get('current_level') == 3

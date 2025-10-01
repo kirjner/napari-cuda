@@ -22,6 +22,7 @@ from napari_cuda.protocol import (
     ERROR_COMMAND_TYPE,
     NOTIFY_DIMS_TYPE,
     NOTIFY_SCENE_TYPE,
+    NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
     REPLY_COMMAND_TYPE,
     SESSION_HEARTBEAT_TYPE,
@@ -45,6 +46,7 @@ from napari_cuda.protocol.messages import (
     LayerRemoveMessage,
     LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifySceneLevelPayload,
     NotifyStreamFrame,
     SceneSpecMessage,
 )
@@ -88,9 +90,10 @@ _STATE_DEBUG = _maybe_enable_debug_logger()
 _ENVELOPE_PARSER = EnvelopeParser()
 
 _HANDSHAKE_TIMEOUT_S = 5.0
-_RESUMABLE_TOPICS = ("notify.scene", "notify.layers", "notify.stream")
+_RESUMABLE_TOPICS = ("notify.scene", "notify.scene.level", "notify.layers", "notify.stream")
 _REQUIRED_FEATURES = {
     "notify.scene": True,
+    "notify.scene.level": True,
     "notify.layers": True,
     "notify.stream": True,
     "notify.dims": True,
@@ -135,6 +138,7 @@ class StateChannel:
         handle_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
         handle_dims_update: Optional[Callable[[NotifyDimsFrame], None]] = None,
         handle_scene_spec: Optional[Callable[[SceneSpecMessage], None]] = None,
+        handle_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
         handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
         handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
         handle_ack_state: Optional[Callable[[AckState], None]] = None,
@@ -150,6 +154,7 @@ class StateChannel:
         self.handle_notify_stream = handle_notify_stream
         self.handle_dims_update = handle_dims_update
         self.handle_scene_spec = handle_scene_spec
+        self.handle_scene_level = handle_scene_level
         self.handle_layer_update = handle_layer_update
         self.handle_layer_remove = handle_layer_remove
         self.handle_ack_state = handle_ack_state
@@ -393,6 +398,10 @@ class StateChannel:
             self._handle_notify_scene(data)
             return
 
+        if msg_type == NOTIFY_SCENE_LEVEL_TYPE:
+            self._handle_scene_level(data)
+            return
+
         if msg_type == NOTIFY_STREAM_TYPE:
             self._handle_notify_stream(data)
             return
@@ -580,6 +589,21 @@ class StateChannel:
                 spec.scene.capabilities,
             )
         self.handle_scene_spec(spec)
+
+    def _handle_scene_level(self, data: Mapping[str, object]) -> None:
+        if not self.handle_scene_level:
+            return
+        try:
+            frame = _ENVELOPE_PARSER.parse_notify_scene_level(data)
+            self._store_resume_cursor(NOTIFY_SCENE_LEVEL_TYPE, frame.envelope)
+        except Exception:
+            logger.debug("notify.scene.level dispatch failed", exc_info=True)
+            return
+
+        try:
+            self.handle_scene_level(frame.payload)
+        except Exception:
+            logger.debug("handle_scene_level callback failed", exc_info=True)
 
     def _handle_notify_stream(self, data: Mapping[str, object]) -> None:
         try:

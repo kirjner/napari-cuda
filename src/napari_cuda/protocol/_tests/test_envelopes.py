@@ -10,6 +10,7 @@ from napari_cuda.protocol import (
     NOTIFY_ERROR_TYPE,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
+    NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
     SESSION_ACK_TYPE,
@@ -24,6 +25,7 @@ from napari_cuda.protocol import (
     NotifyError,
     NotifyLayers,
     NotifyScene,
+    NotifySceneLevel,
     NotifyStream,
     NotifyTelemetry,
     ResumableTopicSequencer,
@@ -37,6 +39,7 @@ from napari_cuda.protocol import (
     build_notify_error,
     build_notify_layers_delta,
     build_notify_scene_snapshot,
+    build_notify_scene_level,
     build_notify_stream,
     build_notify_telemetry,
     build_session_ack,
@@ -54,8 +57,18 @@ def test_session_hello_roundtrip() -> None:
             version="0.1.0",
             platform="linux",
         ),
-        features={"notify.scene": True, "notify.layers": True, "notify.stream": True},
-        resume_tokens={"notify.scene": None, "notify.layers": None, "notify.stream": None},
+        features={
+            "notify.scene": True,
+            "notify.scene.level": True,
+            "notify.layers": True,
+            "notify.stream": True,
+        },
+        resume_tokens={
+            "notify.scene": None,
+            "notify.scene.level": None,
+            "notify.layers": None,
+            "notify.stream": None,
+        },
         frame_id="hello-1",
         timestamp=1.23,
     )
@@ -90,6 +103,29 @@ def test_notify_scene_roundtrip() -> None:
     assert decoded.payload.layers[0]["layer_id"] == "layer-1"
 
 
+def test_notify_scene_level_roundtrip() -> None:
+    sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_LEVEL_TYPE)
+    sequencer.snapshot()
+    level_frame = build_notify_scene_level(
+        session_id="session-2",
+        payload={
+            "current_level": 3,
+            "downgraded": False,
+            "levels": [{"index": 0, "shape": [64, 64]}, {"index": 1, "shape": [32, 32]}],
+        },
+        sequencer=sequencer,
+    )
+    encoded = level_frame.to_dict()
+
+    assert encoded["type"] == NOTIFY_SCENE_LEVEL_TYPE
+    decoded = NotifySceneLevel.from_dict(encoded)
+
+    assert decoded.envelope.session == "session-2"
+    assert decoded.envelope.seq == 1
+    assert decoded.payload.current_level == 3
+    assert decoded.payload.levels and decoded.payload.levels[0]["index"] == 0
+
+
 def test_parser_dispatch() -> None:
     parser = EnvelopeParser()
     sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_TYPE)
@@ -100,6 +136,13 @@ def test_parser_dispatch() -> None:
         layers=[{"layer_id": "layer"}],
         sequencer=sequencer,
     )
+    level_seq = ResumableTopicSequencer(topic=NOTIFY_SCENE_LEVEL_TYPE)
+    level_seq.snapshot()
+    level_frame = build_notify_scene_level(
+        session_id="sess",
+        payload={"current_level": 1, "downgraded": True},
+        sequencer=level_seq,
+    )
     state_frame = build_state_update(
         session_id="sess",
         intent_id="intent-1",
@@ -108,9 +151,11 @@ def test_parser_dispatch() -> None:
     )
 
     scene_env = parser.parse_notify_scene(scene_frame.to_dict())
+    level_env = parser.parse_notify_scene_level(level_frame.to_dict())
     state_env = parser.parse_state_update(state_frame.to_dict())
 
     assert scene_env.payload.viewer["dims"]["ndim"] == 3
+    assert level_env.payload.current_level == 1
     assert state_env.payload.key == "value"
 
 

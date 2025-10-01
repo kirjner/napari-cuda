@@ -11,6 +11,8 @@ from .greenfield.messages import (  # noqa: F401
     NotifyLayersFrame,
     NotifyLayersPayload,
     NotifySceneFrame,
+    NotifySceneLevelFrame,
+    NotifySceneLevelPayload,
     NotifyScenePayload,
     NotifyStreamFrame,
     NotifyStreamPayload,

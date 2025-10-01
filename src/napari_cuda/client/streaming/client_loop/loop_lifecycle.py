@@ -37,6 +37,7 @@ def start_loop(loop: "ClientStreamLoop") -> None:
         handle_notify_stream=loop._handle_notify_stream,  # noqa: SLF001
         handle_dims_update=loop._handle_dims_update,  # noqa: SLF001
         handle_scene_spec=loop._handle_scene_spec,  # noqa: SLF001
+        handle_scene_level=loop._handle_scene_level,  # noqa: SLF001
         handle_layer_update=loop._handle_layer_update,  # noqa: SLF001
         handle_layer_remove=loop._handle_layer_remove,  # noqa: SLF001
         handle_ack_state=loop._handle_ack_state,  # noqa: SLF001

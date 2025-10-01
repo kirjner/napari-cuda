@@ -5,15 +5,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Literal, Optional
+from typing import Deque, Literal, Mapping, Optional
 
 
 @dataclass(frozen=True)
 class WorkerSceneNotification:
     """Notification emitted by the render worker to the control loop."""
 
-    kind: Literal["dims_update", "meta_refresh"]
+    kind: Literal["dims_update", "meta_refresh", "scene_level"]
     step: Optional[tuple[int, ...]] = None
+    level: Optional[Mapping[str, object]] = None
 
 
 class WorkerSceneNotificationQueue:

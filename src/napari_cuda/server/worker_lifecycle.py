@@ -8,7 +8,7 @@ import threading
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, List
+from typing import Optional, Sequence, List, Mapping
 
 from . import pixel_channel
 from .bitstream import build_avcc_config, pack_to_avcc
@@ -133,6 +133,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
     def worker_loop() -> None:
         try:
             def _on_scene_refresh(step: object = None) -> None:
+                if isinstance(step, Mapping) and "scene_level" in step:
+                    level_payload = step.get("scene_level") or {}
+                    server._worker_notifications.push(
+                        WorkerSceneNotification(
+                            kind="scene_level",
+                            level=dict(level_payload),
+                        )
+                    )
+                    loop.call_soon_threadsafe(server._process_worker_notifications)
+                    return
                 if isinstance(step, Sequence):
                     chosen = tuple(int(x) for x in step)
                     with server._state_lock:

@@ -56,6 +56,7 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifySceneLevelPayload,
     NotifyStreamFrame,
     SceneSpecMessage,
 )
@@ -636,6 +637,30 @@ class ClientStreamLoop:
             if multiscale is not None:
                 logger.debug("scene policies updated: multiscale keys=%s", list(multiscale.keys()) if isinstance(multiscale, Mapping) else type(multiscale))
 
+    def _handle_scene_level(self, payload: NotifySceneLevelPayload) -> None:
+        multiscale: Dict[str, Any] = {
+            'current_level': int(payload.current_level),
+            'active_level': int(payload.current_level),
+        }
+        if payload.downgraded is not None:
+            multiscale['downgraded'] = bool(payload.downgraded)
+        if payload.levels:
+            multiscale['levels'] = [dict(entry) for entry in payload.levels]
+        try:
+            control_actions.apply_scene_policies(
+                self._control_state,
+                {'multiscale': multiscale},
+            )
+        except Exception:
+            logger.debug("apply_scene_policies (scene level) failed", exc_info=True)
+            return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "scene level update: level=%s downgraded=%s",
+                multiscale['current_level'],
+                multiscale.get('downgraded'),
+            )
+
     def _handle_layer_update(self, msg: LayerUpdateMessage) -> None:
         self._layer_registry.apply_update(msg)
         layer_id = msg.layer.layer_id if msg.layer else None
@@ -744,6 +769,15 @@ class ClientStreamLoop:
         with self._command_lock:
             return self._pending_commands.pop(frame_id, None)
 
+    def _abort_pending_commands(self, *, code: str, message: str) -> None:
+        with self._command_lock:
+            pending = list(self._pending_commands.values())
+            self._pending_commands.clear()
+        for future in pending:
+            if future.done():
+                continue
+            future.set_exception(CommandError(code=code, message=message))
+
     def _issue_command(
         self,
         command: str,
@@ -846,6 +880,11 @@ class ClientStreamLoop:
         self._layer_bridge.clear_pending_on_reconnect()
         self._state_store.clear_pending_on_reconnect()
         self._loop_state.state_session_metadata = None
+        self._command_catalog = ()
+        self._abort_pending_commands(
+            code="command.session_closed",
+            message="state channel disconnected",
+        )
         if isinstance(exc, HeartbeatAckError):
             logger.warning("StateChannel disconnect triggered by heartbeat timeout; dims intents gated")
         else:

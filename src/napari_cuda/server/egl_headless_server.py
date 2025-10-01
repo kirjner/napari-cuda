@@ -112,6 +112,7 @@ from napari_cuda.protocol import (
     NotifyStreamPayload,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
+    NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
 )
 from . import pixel_broadcaster, pixel_channel, metrics_server
@@ -205,6 +206,7 @@ class EGLHeadlessServer:
         self._resumable_store = ResumableHistoryStore(
             {
                 NOTIFY_SCENE_TYPE: ResumableRetention(),
+                NOTIFY_SCENE_LEVEL_TYPE: ResumableRetention(),
                 NOTIFY_LAYERS_TYPE: ResumableRetention(
                     min_deltas=512,
                     max_deltas=2048,

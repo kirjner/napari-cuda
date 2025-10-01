@@ -6,6 +6,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from napari_cuda.protocol.messages import (
     NotifyScenePayload,
+    NotifySceneLevelPayload,
     NotifyDimsPayload,
     NotifyLayersPayload,
     SceneSpecMessage,
@@ -75,6 +76,45 @@ def build_notify_scene_payload(
         layers=layers_block,
         policies=policies_block,
         ancillary=ancillary_block,
+    )
+
+
+def build_notify_scene_level_payload(
+    scene: ServerSceneData,
+    manager: ViewerSceneManager,
+) -> NotifySceneLevelPayload:
+    """Build a ``notify.scene.level`` payload representing active LOD metadata."""
+
+    multiscale = scene.multiscale_state or {}
+    current_level = multiscale.get("current_level")
+    if current_level is None:
+        current_level = multiscale.get("level")
+    if current_level is None:
+        try:
+            spec = manager.scene_spec()
+            if spec is not None and getattr(spec, "multiscale", None) is not None:
+                current_level = getattr(spec.multiscale, "current_level", None)
+        except Exception:
+            current_level = None
+    try:
+        level_int = int(current_level) if current_level is not None else 0
+    except Exception:
+        level_int = 0
+
+    downgraded_val = multiscale.get("downgraded")
+    downgraded = None if downgraded_val is None else bool(downgraded_val)
+
+    levels_payload = multiscale.get("levels")
+    levels: list[dict[str, Any]] = []
+    if isinstance(levels_payload, Sequence):
+        for entry in levels_payload:
+            if isinstance(entry, Mapping):
+                levels.append({str(k): _normalize_value(v) for k, v in entry.items()})
+
+    return NotifySceneLevelPayload(
+        current_level=level_int,
+        downgraded=downgraded,
+        levels=tuple(levels) if levels else None,
     )
 
 

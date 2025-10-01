@@ -28,6 +28,7 @@ from napari_cuda.protocol import (
     NOTIFY_ERROR_TYPE,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
+    NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
     SESSION_ACK_TYPE,
@@ -44,6 +45,7 @@ from napari_cuda.protocol import (
     build_notify_error,
     build_notify_layers_delta,
     build_notify_scene_snapshot,
+    build_notify_scene_level,
     build_notify_stream,
     build_notify_telemetry,
     build_error_command,
@@ -57,6 +59,7 @@ from napari_cuda.protocol import (
 from napari_cuda.protocol.messages import (
     NotifyLayersPayload,
     NotifyScenePayload,
+    NotifySceneLevelPayload,
     NotifyStreamPayload,
 )
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
@@ -81,6 +84,7 @@ from napari_cuda.server.control.scene_snapshot_builder import (
     build_notify_dims_payload,
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
+    build_notify_scene_level_payload,
     build_notify_scene_payload,
 )
 from napari_cuda.server.pixel import pixel_channel_server as pixel_channel
@@ -120,6 +124,7 @@ class CommandRejected(RuntimeError):
         self.idempotency_key = idempotency_key
 _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -132,7 +137,12 @@ _SERVER_FEATURES: dict[str, FeatureToggle] = {
         commands=(_COMMAND_KEYFRAME,),
     ),
 }
-_RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
+_RESUMABLE_TOPICS = (
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_LAYERS_TYPE,
+    NOTIFY_STREAM_TYPE,
+)
 _ENVELOPE_PARSER = EnvelopeParser()
 
 CommandHandler = Callable[[Any, CallCommand, Any], Awaitable[CommandResult]]
@@ -621,6 +631,51 @@ async def _send_stream_frame(
     return blueprint
 
 
+async def _send_scene_level_frame(
+    server: Any,
+    ws: Any,
+    *,
+    payload: NotifySceneLevelPayload | Mapping[str, Any],
+    timestamp: Optional[float],
+    blueprint: FrameBlueprint | None = None,
+) -> FrameBlueprint | None:
+    session_id = _state_session(ws)
+    if not session_id:
+        return blueprint
+    if not isinstance(payload, NotifySceneLevelPayload):
+        payload = NotifySceneLevelPayload.from_dict(payload)
+    now = time.time() if timestamp is None else float(timestamp)
+    store = _history_store(server)
+    if blueprint is None and store is not None:
+        blueprint = store.delta_blueprint(
+            NOTIFY_SCENE_LEVEL_TYPE,
+            payload=payload.to_dict(),
+            timestamp=now,
+        )
+
+    kwargs: Dict[str, Any] = {
+        "session_id": session_id,
+        "payload": payload,
+        "timestamp": blueprint.timestamp if blueprint is not None else now,
+    }
+    sequencer = _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE)
+    if blueprint is not None:
+        kwargs["seq"] = blueprint.seq
+        kwargs["delta_token"] = blueprint.delta_token
+        kwargs["frame_id"] = blueprint.frame_id
+        sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    else:
+        if sequencer.seq is None:
+            cursor = sequencer.snapshot()
+            kwargs["seq"] = cursor.seq
+            kwargs["delta_token"] = cursor.delta_token
+        else:
+            kwargs["sequencer"] = sequencer
+    frame = build_notify_scene_level(**kwargs)
+    await _send_frame(server, ws, frame)
+    return blueprint
+
+
 async def _emit_scene_baseline(
     server: Any,
     ws: Any,
@@ -650,8 +705,10 @@ async def _emit_scene_baseline(
             )
             store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=timestamp)
             store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
+            store.reset_epoch(NOTIFY_SCENE_LEVEL_TYPE, timestamp=timestamp)
             _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
+            _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE).clear()
         await _send_scene_blueprint(server, ws, blueprint)
     else:
         if payload is None:
@@ -678,6 +735,54 @@ async def _emit_scene_baseline(
         logger.info("%s: notify.scene sent", reason)
     else:
         logger.debug("%s: notify.scene sent", reason)
+
+
+async def _emit_scene_level_baseline(
+    server: Any,
+    ws: Any,
+    *,
+    plan: ResumePlan | None,
+) -> None:
+    store = _history_store(server)
+    if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
+        if plan.deltas:
+            for blueprint in plan.deltas:
+                await _send_scene_level_frame(
+                    server,
+                    ws,
+                    payload=blueprint.payload,
+                    timestamp=blueprint.timestamp,
+                    blueprint=blueprint,
+                )
+        return
+
+    timestamp = time.time()
+    payload: NotifySceneLevelPayload | None = None
+
+    if store is not None:
+        blueprint = store.current_snapshot(NOTIFY_SCENE_LEVEL_TYPE)
+        need_reset = plan is not None and plan.decision == ResumeDecision.RESET
+        if blueprint is None or need_reset:
+            payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
+            blueprint = store.snapshot_blueprint(
+                NOTIFY_SCENE_LEVEL_TYPE,
+                payload=payload.to_dict(),
+                timestamp=timestamp,
+            )
+        if payload is None:
+            payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
+        await _send_scene_level_frame(
+            server,
+            ws,
+            payload=payload,
+            timestamp=blueprint.timestamp,
+            blueprint=blueprint,
+        )
+        return
+
+    if payload is None:
+        payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
+    await _send_scene_level_frame(server, ws, payload=payload, timestamp=timestamp)
 
 
 async def _emit_layer_baseline(
@@ -837,6 +942,70 @@ async def broadcast_stream_config(
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def broadcast_scene_level(
+    server: Any,
+    *,
+    payload: NotifySceneLevelPayload | Mapping[str, Any] | None = None,
+    timestamp: Optional[float] = None,
+    reason: str = "scene.level",
+) -> None:
+    clients = list(server._state_clients)
+    if not clients:
+        store = _history_store(server)
+        if store is not None:
+            payload_obj = (
+                payload
+                if isinstance(payload, NotifySceneLevelPayload)
+                else build_notify_scene_level_payload(server._scene, server._scene_manager)
+            )
+            if not isinstance(payload_obj, NotifySceneLevelPayload):
+                payload_obj = NotifySceneLevelPayload.from_dict(payload_obj)
+            store.delta_blueprint(
+                NOTIFY_SCENE_LEVEL_TYPE,
+                payload=payload_obj.to_dict(),
+                timestamp=time.time() if timestamp is None else float(timestamp),
+            )
+        return
+
+    if isinstance(payload, NotifySceneLevelPayload):
+        payload_obj = payload
+    elif isinstance(payload, Mapping):
+        payload_obj = NotifySceneLevelPayload.from_dict(payload)
+    else:
+        payload_obj = build_notify_scene_level_payload(server._scene, server._scene_manager)
+
+    now = time.time() if timestamp is None else float(timestamp)
+    store = _history_store(server)
+    blueprint: FrameBlueprint | None = None
+    if store is not None:
+        blueprint = store.delta_blueprint(
+            NOTIFY_SCENE_LEVEL_TYPE,
+            payload=payload_obj.to_dict(),
+            timestamp=now,
+        )
+
+    tasks: list[Awaitable[FrameBlueprint | None]] = []
+    for ws in clients:
+        if not _feature_enabled(ws, "notify.scene.level"):
+            continue
+        tasks.append(
+            _send_scene_level_frame(
+                server,
+                ws,
+                payload=payload_obj,
+                timestamp=now,
+                blueprint=blueprint,
+            )
+        )
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if server._log_dims_info:
+            logger.info("%s: notify.scene.level broadcast to %d clients", reason, len(tasks))
+        else:
+            logger.debug("%s: notify.scene.level broadcast to %d clients", reason, len(tasks))
 
 
 async def handle_state(server: Any, ws: Any) -> None:
@@ -1886,6 +2055,23 @@ def process_worker_notifications(
                 rebroadcast_meta(server),
                 "rebroadcast-worker",
             )
+        elif note.kind == "scene_level" and note.level is not None:
+            try:
+                if hasattr(server, "_update_scene_manager"):
+                    server._update_scene_manager()
+            except Exception:
+                logger.debug("scene level update: scene manager sync failed", exc_info=True)
+            level_payload = note.level
+            if not isinstance(level_payload, Mapping):
+                level_payload = dict(level_payload)
+            server._schedule_coro(
+                broadcast_scene_level(
+                    server,
+                    payload=level_payload,
+                    reason="worker",
+                ),
+                "scene_level-worker",
+            )
 
     if deferred:
         for note in deferred:
@@ -2245,6 +2431,7 @@ async def _send_scene_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint)
 async def _send_state_baseline(server: Any, ws: Any) -> None:
     resume_map: Dict[str, ResumePlan] = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
     scene_plan = resume_map.get(NOTIFY_SCENE_TYPE)
+    scene_level_plan = resume_map.get(NOTIFY_SCENE_LEVEL_TYPE)
     layers_plan = resume_map.get(NOTIFY_LAYERS_TYPE)
     stream_plan = resume_map.get(NOTIFY_STREAM_TYPE)
 
@@ -2317,6 +2504,15 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         )
     except Exception:
         logger.exception("Initial notify.scene send failed")
+
+    try:
+        await _emit_scene_level_baseline(
+            server,
+            ws,
+            plan=scene_level_plan,
+        )
+    except Exception:
+        logger.exception("Initial scene level send failed")
 
     try:
         await _emit_layer_baseline(
@@ -2400,6 +2596,7 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         )
         store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=timestamp)
         store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
+        store.reset_epoch(NOTIFY_SCENE_LEVEL_TYPE, timestamp=timestamp)
     tasks: list[Awaitable[None]] = []
     for ws in clients:
         session_id = _state_session(ws)
@@ -2408,6 +2605,7 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         if blueprint is not None:
             _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
+            _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE).clear()
         frame = build_notify_scene_snapshot(
             session_id=session_id,
             viewer=payload.viewer,
@@ -2426,6 +2624,13 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         logger.info("%s: notify.scene broadcast to %d clients", reason, len(tasks))
     else:
         logger.debug("%s: notify.scene broadcast to %d clients", reason, len(tasks))
+
+    await broadcast_scene_level(
+        server,
+        payload=build_notify_scene_level_payload(server._scene, server._scene_manager),
+        timestamp=timestamp,
+        reason=reason,
+    )
 
 
 async def _send_layer_baseline(server: Any, ws: Any) -> None:

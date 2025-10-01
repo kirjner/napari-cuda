@@ -24,6 +24,7 @@ SESSION_GOODBYE_TYPE = "session.goodbye"
 # Notify frame types
 NOTIFY_SCENE_TYPE = "notify.scene"
 NOTIFY_LAYERS_TYPE = "notify.layers"
+NOTIFY_SCENE_LEVEL_TYPE = "notify.scene.level"
 NOTIFY_STREAM_TYPE = "notify.stream"
 NOTIFY_DIMS_TYPE = "notify.dims"
 NOTIFY_CAMERA_TYPE = "notify.camera"
@@ -503,6 +504,52 @@ class NotifyScenePayload:
             policies=_optional_mapping(mapping.get("policies"), "notify.scene payload.policies"),
             ancillary=_optional_mapping(mapping.get("ancillary"), "notify.scene payload.ancillary"),
         )
+
+
+@dataclass(slots=True)
+class NotifySceneLevelPayload:
+    current_level: int
+    downgraded: bool | None = None
+    levels: Tuple[Dict[str, Any], ...] | None = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _strip_none(
+            {
+                "current_level": int(self.current_level),
+                "downgraded": bool(self.downgraded)
+                if self.downgraded is not None
+                else None,
+                "levels": [dict(entry) for entry in self.levels] if self.levels else None,
+            }
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "NotifySceneLevelPayload":
+        mapping = _as_mapping(data, "notify.scene.level payload")
+        _ensure_keyset(
+            mapping,
+            required=("current_level",),
+            optional=("downgraded", "levels"),
+            context="notify.scene.level payload",
+        )
+        try:
+            current_level = int(mapping["current_level"])
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError("notify.scene.level current_level must be an int") from exc
+        levels_payload = mapping.get("levels")
+        levels: Tuple[Dict[str, Any], ...] | None = None
+        if levels_payload is not None:
+            levels = tuple(
+                _as_mutable_mapping(entry, "notify.scene.level payload.levels[]")
+                for entry in _as_sequence(levels_payload, "notify.scene.level payload.levels")
+            )
+        downgraded_raw = mapping.get("downgraded")
+        downgraded: bool | None
+        if downgraded_raw is None:
+            downgraded = None
+        else:
+            downgraded = bool(downgraded_raw)
+        return cls(current_level=current_level, downgraded=downgraded, levels=levels)
 
 
 @dataclass(slots=True)
@@ -1144,6 +1191,40 @@ class NotifySceneFrame:
 
 
 @dataclass(slots=True)
+class NotifySceneLevelFrame:
+    envelope: FrameEnvelope
+    payload: NotifySceneLevelPayload
+
+    def __post_init__(self) -> None:
+        self._validate()
+
+    def _validate(self) -> None:
+        env = self.envelope
+        _require(
+            env.type == NOTIFY_SCENE_LEVEL_TYPE,
+            "notify.scene.level frame must have type=notify.scene.level",
+        )
+        _require(
+            env.version == PROTO_VERSION,
+            f"notify.scene.level must use protocol version {PROTO_VERSION}",
+        )
+        _require(env.session is not None, "notify.scene.level requires session id")
+        _require(env.timestamp is not None, "notify.scene.level requires timestamp")
+        _require(env.seq is not None, "notify.scene.level requires seq")
+        _require(env.delta_token is not None, "notify.scene.level requires delta_token")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _frame_dict(self.envelope, self.payload.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "NotifySceneLevelFrame":
+        envelope, payload = _pull_payload(data)
+        frame = cls(envelope=envelope, payload=NotifySceneLevelPayload.from_dict(payload))
+        frame._validate()
+        return frame
+
+
+@dataclass(slots=True)
 class NotifyLayersFrame:
     envelope: FrameEnvelope
     payload: NotifyLayersPayload
@@ -1496,6 +1577,7 @@ SessionHeartbeat = SessionHeartbeatFrame
 SessionAck = SessionAckFrame
 SessionGoodbye = SessionGoodbyeFrame
 NotifyScene = NotifySceneFrame
+NotifySceneLevel = NotifySceneLevelFrame
 NotifyLayers = NotifyLayersFrame
 NotifyStream = NotifyStreamFrame
 NotifyDims = NotifyDimsFrame
@@ -1519,6 +1601,7 @@ __all__ = [
     "SESSION_ACK_TYPE",
     "SESSION_GOODBYE_TYPE",
     "NOTIFY_SCENE_TYPE",
+    "NOTIFY_SCENE_LEVEL_TYPE",
     "NOTIFY_LAYERS_TYPE",
     "NOTIFY_STREAM_TYPE",
     "NOTIFY_DIMS_TYPE",
@@ -1558,6 +1641,7 @@ __all__ = [
     "SessionGoodbye",
     # Notify payloads/frames
     "NotifyScenePayload",
+    "NotifySceneLevelPayload",
     "NotifyLayersPayload",
     "NotifyStreamPayload",
     "NotifyDimsPayload",
@@ -1565,6 +1649,7 @@ __all__ = [
     "NotifyTelemetryPayload",
     "NotifyErrorPayload",
     "NotifySceneFrame",
+    "NotifySceneLevelFrame",
     "NotifyLayersFrame",
     "NotifyStreamFrame",
     "NotifyDimsFrame",
@@ -1572,6 +1657,7 @@ __all__ = [
     "NotifyTelemetryFrame",
     "NotifyErrorFrame",
     "NotifyScene",
+    "NotifySceneLevel",
     "NotifyLayers",
     "NotifyStream",
     "NotifyDims",
