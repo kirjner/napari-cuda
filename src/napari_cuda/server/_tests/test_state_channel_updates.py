@@ -8,7 +8,13 @@ from typing import Any, Coroutine, List
 
 import time
 
-from napari_cuda.protocol import PROTO_VERSION, FeatureToggle, build_state_update, NotifyStreamPayload
+from napari_cuda.protocol import (
+    PROTO_VERSION,
+    FeatureToggle,
+    NotifyStreamPayload,
+    build_call_command,
+    build_state_update,
+)
 from napari_cuda.protocol.greenfield.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.control.resumable_history_store import (
@@ -93,6 +99,12 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
         "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
+        "call.command": FeatureToggle(
+            enabled=True,
+            version=1,
+            resume=False,
+            commands=("napari.pixel.request_keyframe",),
+        ),
     }
 
     fake_ws = _FakeWS(
@@ -126,6 +138,12 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
             "notify.stream": ResumableRetention(min_deltas=1, max_deltas=32),
         }
     )
+    server._ensure_keyframe_calls = 0
+
+    async def _ensure_keyframe() -> None:
+        server._ensure_keyframe_calls += 1
+
+    server._ensure_keyframe = _ensure_keyframe
 
     return server, scheduled, captured
 
@@ -185,6 +203,26 @@ def test_layer_update_emits_ack_and_notify() -> None:
     notify_payload = layer_frames[-1]["payload"]
     assert notify_payload["layer_id"] == "layer-0"
     assert notify_payload["changes"]["colormap"] == "red"
+
+
+def test_call_command_requests_keyframe() -> None:
+    server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
+
+    frame = build_call_command(
+        session_id="test-session",
+        frame_id="cmd-test",
+        payload={"command": "napari.pixel.request_keyframe"},
+    )
+
+    asyncio.run(state_channel_handler._handle_call_command(server, frame.to_dict(), fake_ws))
+
+    assert server._ensure_keyframe_calls == 1
+    replies = _frames_of_type(captured, "reply.command")
+    assert replies, "expected reply.command frame"
+    payload = replies[-1]["payload"]
+    assert payload["status"] == "ok"
+    assert payload["in_reply_to"] == "cmd-test"
 
 
 def test_layer_update_rejects_unknown_key() -> None:

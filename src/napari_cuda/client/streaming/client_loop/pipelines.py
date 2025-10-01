@@ -39,6 +39,7 @@ def build_vt_pipeline(
         backlog_trigger=loop._vt_backlog_trigger,
         is_gated=_is_vt_gated,
         on_backlog_gate=_on_vt_backlog_gate,
+        request_keyframe=loop._request_keyframe_command,  # noqa: SLF001
         on_cache_last=_on_cache_last,
         metrics=loop._loop_state.metrics,
         schedule_next_wake=schedule_next_wake,

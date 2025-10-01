@@ -30,6 +30,7 @@ from napari_cuda.protocol import (
     SESSION_WELCOME_TYPE,
     AckState,
     ErrorCommand,
+    FeatureToggle,
     HelloClientInfo,
     ReplyCommand,
     SessionReject,
@@ -117,6 +118,7 @@ class SessionMetadata:
     heartbeat_s: float
     ack_timeout_ms: int | None
     resume_tokens: Dict[str, ResumeCursor | None]
+    features: Dict[str, FeatureToggle]
 
 
 class StateChannel:
@@ -161,6 +163,7 @@ class StateChannel:
         self._session_metadata: SessionMetadata | None = None
         self._resume_tokens: Dict[str, ResumeCursor | None] = {topic: None for topic in _RESUMABLE_TOPICS}
         self._last_heartbeat_ts: float | None = None
+        self._feature_toggles: Dict[str, FeatureToggle] = {}
 
     @property
     def session_metadata(self) -> SessionMetadata | None:
@@ -175,6 +178,16 @@ class StateChannel:
     def ack_timeout_ms(self) -> int | None:
         metadata = self._session_metadata
         return metadata.ack_timeout_ms if metadata is not None else None
+
+    def feature_enabled(self, name: str) -> bool:
+        toggle = self._feature_toggles.get(name)
+        return bool(getattr(toggle, "enabled", False))
+
+    def command_catalog(self) -> tuple[str, ...]:
+        toggle = self._feature_toggles.get("call.command")
+        if toggle and toggle.commands:
+            return tuple(toggle.commands)
+        return ()
 
     def run(self) -> None:
         """Start the state channel event loop and keep reconnecting."""
@@ -437,6 +450,7 @@ class StateChannel:
         """Exchange the session handshake with the state server before use."""
 
         self._session_metadata = None
+        self._feature_toggles = {}
         client_info = HelloClientInfo(
             name="napari-cuda-client",
             version=_NAPARI_CUDA_VERSION,
@@ -609,8 +623,9 @@ class StateChannel:
 
     def _record_session_metadata(self, welcome: SessionWelcome) -> SessionMetadata:
         session_info = welcome.payload.session
+        feature_toggles = welcome.payload.features
         resume_tokens: Dict[str, ResumeCursor | None] = {}
-        for name, toggle in welcome.payload.features.items():
+        for name, toggle in feature_toggles.items():
             resume_state = getattr(toggle, "resume_state", None)
             if resume_state is not None:
                 resume_tokens[name] = ResumeCursor(seq=int(resume_state.seq), delta_token=str(resume_state.delta_token))
@@ -621,8 +636,10 @@ class StateChannel:
             heartbeat_s=float(session_info.heartbeat_s),
             ack_timeout_ms=int(session_info.ack_timeout_ms) if session_info.ack_timeout_ms is not None else None,
             resume_tokens=resume_tokens,
+            features=feature_toggles,
         )
         self._session_metadata = metadata
+        self._feature_toggles = feature_toggles
         for topic in _RESUMABLE_TOPICS:
             self._resume_tokens[topic] = resume_tokens.get(topic)
         self._last_heartbeat_ts = time.time()

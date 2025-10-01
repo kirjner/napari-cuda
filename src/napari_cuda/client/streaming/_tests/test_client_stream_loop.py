@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from itertools import count
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +10,7 @@ from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import SessionMetadata, ResumeCursor
-from napari_cuda.protocol import build_notify_dims
+from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
 
@@ -25,6 +26,9 @@ class _StateChannelStub:
     def post(self, payload: dict[str, Any]) -> bool:
         self.posted.append(dict(payload))
         return True
+
+    def feature_enabled(self, name: str) -> bool:
+        return name == "call.command"
 
 
 class _PresenterStub:
@@ -61,6 +65,9 @@ def _make_loop() -> ClientStreamLoop:
     loop._control_state = ControlStateContext.from_env(env)
     loop._control_state.session_id = "session-test"
     loop._loop_state.control_state = loop._control_state
+    loop._command_lock = threading.Lock()
+    loop._pending_commands = {}
+    loop._command_catalog = ()
 
     clock_counter = count(100)
     loop._state_store = StateStore(clock=lambda: float(next(clock_counter)))
@@ -202,10 +209,50 @@ def test_session_metadata_propagated_to_loop_state() -> None:
             'notify.layers': None,
             'notify.stream': None,
         },
+        features={'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',))},
     )
 
     loop._handle_session_ready(metadata)
     assert loop._loop_state.state_session_metadata is metadata
+    assert loop._command_catalog == ('napari.pixel.request_keyframe',)
 
     loop._on_state_disconnect(None)
     assert loop._loop_state.state_session_metadata is None
+
+
+def test_request_keyframe_command_future_resolves() -> None:
+    loop = _make_loop()
+    metadata = SessionMetadata(
+        session_id='sess-meta',
+        heartbeat_s=3.0,
+        ack_timeout_ms=250,
+        resume_tokens={
+            'notify.scene': None,
+            'notify.layers': None,
+            'notify.stream': None,
+        },
+        features={'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',))},
+    )
+    loop._handle_session_ready(metadata)
+
+    future = loop.request_keyframe(origin='test')
+    assert future is not None
+    assert not future.done()
+
+    call_frame = loop._state_channel_stub.sent_frames[-1]
+    frame_id = call_frame.envelope.frame_id
+    reply = build_reply_command(
+        session_id='sess-meta',
+        frame_id='reply-test',
+        payload={
+            'in_reply_to': frame_id,
+            'status': 'ok',
+            'result': None,
+        },
+    )
+
+    loop._handle_reply_command(reply)
+    assert future.done()
+    payload = future.result()
+    assert payload.status == 'ok'
+    assert payload.in_reply_to == frame_id

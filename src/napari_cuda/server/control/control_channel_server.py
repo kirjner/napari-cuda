@@ -10,7 +10,7 @@ import time
 import uuid
 from contextlib import suppress
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
@@ -36,6 +36,7 @@ from napari_cuda.protocol import (
     SessionHello,
     SessionReject,
     SessionWelcome,
+    CallCommand,
     ResumableTopicSequencer,
     build_ack_state,
     build_notify_camera,
@@ -45,6 +46,7 @@ from napari_cuda.protocol import (
     build_notify_scene_snapshot,
     build_notify_stream,
     build_notify_telemetry,
+    build_error_command,
     build_reply_command,
     build_session_ack,
     build_session_goodbye,
@@ -93,6 +95,29 @@ logger = logging.getLogger(__name__)
 
 _HANDSHAKE_TIMEOUT_S = 5.0
 _REQUIRED_NOTIFY_FEATURES = ("notify.scene", "notify.layers", "notify.stream")
+_COMMAND_KEYFRAME = "napari.pixel.request_keyframe"
+
+
+@dataclass(slots=True)
+class CommandResult:
+    result: Any | None = None
+    idempotency_key: str | None = None
+
+
+class CommandRejected(RuntimeError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
+        self.details = dict(details) if details else None
+        self.idempotency_key = idempotency_key
 _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
@@ -100,10 +125,154 @@ _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
     "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
     "notify.telemetry": FeatureToggle(enabled=False),
-    "call.command": FeatureToggle(enabled=False),
+    "call.command": FeatureToggle(
+        enabled=True,
+        version=1,
+        resume=False,
+        commands=(_COMMAND_KEYFRAME,),
+    ),
 }
 _RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
 _ENVELOPE_PARSER = EnvelopeParser()
+
+CommandHandler = Callable[[Any, CallCommand, Any], Awaitable[CommandResult]]
+
+
+async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
+    if not hasattr(server, "_ensure_keyframe"):
+        raise CommandRejected(
+            code="command.forbidden",
+            message="Keyframe request not supported",
+        )
+    await server._ensure_keyframe()
+    return CommandResult()
+
+
+_COMMAND_HANDLERS: dict[str, CommandHandler] = {
+    _COMMAND_KEYFRAME: _command_request_keyframe,
+}
+
+
+async def _send_command_error(
+    server: Any,
+    ws: Any,
+    *,
+    session_id: str,
+    in_reply_to: str,
+    code: str,
+    message: str,
+    details: Mapping[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> None:
+    payload: Dict[str, Any] = {
+        "in_reply_to": in_reply_to,
+        "status": "error",
+        "code": str(code),
+        "message": str(message),
+    }
+    if details:
+        payload["details"] = dict(details)
+    if idempotency_key is not None:
+        payload["idempotency_key"] = str(idempotency_key)
+    frame = build_error_command(
+        session_id=session_id,
+        frame_id=None,
+        payload=payload,
+        timestamp=time.time(),
+    )
+    await _send_frame(server, ws, frame)
+
+
+async def _handle_call_command(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+    session_id = _state_session(ws)
+    if not session_id:
+        logger.debug("call.command ignored: missing session id")
+        return True
+
+    try:
+        frame = _ENVELOPE_PARSER.parse_call_command(data)
+    except (ValueError, TypeError) as exc:
+        logger.debug("call.command parse failed", exc_info=True)
+        await _send_command_error(
+            server,
+            ws,
+            session_id=session_id,
+            in_reply_to=str(data.get("frame_id") or "unknown"),
+            code="command.forbidden",
+            message=str(exc) or "invalid call.command payload",
+        )
+        return True
+
+    envelope = frame.envelope
+    payload = frame.payload
+    in_reply_to = envelope.frame_id or "unknown"
+
+    if not _feature_enabled(ws, "call.command"):
+        await _send_command_error(
+            server,
+            ws,
+            session_id=session_id,
+            in_reply_to=in_reply_to,
+            code="command.forbidden",
+            message="call.command feature disabled",
+        )
+        return True
+
+    handler = _COMMAND_HANDLERS.get(payload.command)
+    if handler is None:
+        await _send_command_error(
+            server,
+            ws,
+            session_id=session_id,
+            in_reply_to=in_reply_to,
+            code="command.not_found",
+            message=f"unknown command '{payload.command}'",
+        )
+        return True
+
+    try:
+        result = await handler(server, frame, ws)
+    except CommandRejected as exc:
+        await _send_command_error(
+            server,
+            ws,
+            session_id=session_id,
+            in_reply_to=in_reply_to,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details,
+            idempotency_key=exc.idempotency_key,
+        )
+        return True
+    except Exception:
+        logger.exception("command handler failed", extra={"command": payload.command})
+        await _send_command_error(
+            server,
+            ws,
+            session_id=session_id,
+            in_reply_to=in_reply_to,
+            code="command.retryable",
+            message="command handler raised an exception",
+        )
+        return True
+
+    response_payload: Dict[str, Any] = {
+        "in_reply_to": in_reply_to,
+        "status": "ok",
+    }
+    if result.result is not None:
+        response_payload["result"] = result.result
+    if result.idempotency_key is not None:
+        response_payload["idempotency_key"] = result.idempotency_key
+
+    frame_out = build_reply_command(
+        session_id=session_id,
+        frame_id=None,
+        payload=response_payload,
+        timestamp=time.time(),
+    )
+    await _send_frame(server, ws, frame_out)
+    return True
 
 StateMessageHandler = Callable[[Any, Mapping[str, Any], Any], Awaitable[bool]]
 
@@ -1322,6 +1491,7 @@ MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     'ping': _handle_ping,
     'request_keyframe': _handle_force_keyframe,
     'force_idr': _handle_force_keyframe,
+    'call.command': _handle_call_command,
     SESSION_ACK_TYPE: _handle_session_ack,
     SESSION_GOODBYE_TYPE: _handle_session_goodbye,
 }

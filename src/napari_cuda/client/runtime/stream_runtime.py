@@ -7,7 +7,8 @@ import queue
 import threading
 import time
 from threading import Thread
-from typing import Callable, Dict, Mapping, Optional, TYPE_CHECKING
+from typing import Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
+from concurrent.futures import Future
 import weakref
 from contextlib import ExitStack
 
@@ -58,7 +59,7 @@ from napari_cuda.protocol.messages import (
     NotifyStreamFrame,
     SceneSpecMessage,
 )
-from napari_cuda.protocol import AckState, build_state_update
+from napari_cuda.protocol import AckState, build_call_command, build_state_update
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
@@ -70,6 +71,8 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.protocol import ReplyCommand, ErrorCommand
 
 logger = logging.getLogger(__name__)
+
+_KEYFRAME_COMMAND = "napari.pixel.request_keyframe"
 
 
 def _maybe_enable_debug_logger() -> None:
@@ -109,6 +112,24 @@ def _bool_or_none(value: object) -> Optional[bool]:
     if isinstance(value, bool):
         return value
     return bool(value)
+
+
+
+class CommandError(RuntimeError):
+    """Raised when a command lane invocation returns an error frame."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        details: Mapping[str, object] | None = None,
+        idempotency_key: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.details = dict(details) if details else None
+        self.idempotency_key = idempotency_key
 
 
 
@@ -155,6 +176,9 @@ class ClientStreamLoop:
         self.state_port = int(state_port)
         self._stream_format = stream_format
         self._stream_format_set = False
+        self._command_lock = threading.Lock()
+        self._pending_commands: Dict[str, Future] = {}
+        self._command_catalog: tuple[str, ...] = ()
         # Thread/state handles
         # Optional weakref to a ViewerModel mirror (e.g., ProxyViewer)
         self._viewer_mirror = None  # type: ignore[var-annotated]
@@ -622,17 +646,30 @@ class ClientStreamLoop:
         self._layer_registry.remove_layer(msg)
         logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
 
+    def request_keyframe(self, origin: str = "ui") -> Future | None:
+        """Expose a best-effort keyframe command for external callers."""
+
+        return self._issue_command(_KEYFRAME_COMMAND, origin=origin)
+
     def _handle_session_ready(self, metadata: "SessionMetadata") -> None:
         self._state_session_metadata = metadata
         self._control_state.session_id = metadata.session_id
         self._control_state.ack_timeout_ms = metadata.ack_timeout_ms
         self._control_state.intent_counter = 0
         self._loop_state.state_session_metadata = metadata
+        toggle = metadata.features.get("call.command")
+        if toggle and getattr(toggle, "enabled", False):
+            commands = tuple(toggle.commands or ())
+        else:
+            commands = ()
+        self._command_catalog = commands
         logger.info(
             "State session ready: session_id=%s ack_timeout_ms=%s",
             metadata.session_id,
             metadata.ack_timeout_ms,
         )
+        if commands:
+            logger.info("State session command catalogue: %s", ", ".join(commands))
 
     def _handle_ack_state(self, frame: AckState) -> None:
         outcome = self._state_store.apply_ack(frame)
@@ -664,21 +701,116 @@ class ClientStreamLoop:
     def _handle_reply_command(self, frame: "ReplyCommand") -> None:
         payload = frame.payload
         logger.info(
-            "reply.command received intent=%s in_reply_to=%s",
-            payload.intent_id,
+            "reply.command received in_reply_to=%s result=%s",
             payload.in_reply_to,
+            payload.result,
         )
+        future = self._pop_command_future(payload.in_reply_to)
+        if future is not None and not future.done():
+            future.set_result(payload)
+        elif future is None:
+            logger.debug(
+                "reply.command without pending future: in_reply_to=%s",
+                payload.in_reply_to,
+            )
 
     def _handle_error_command(self, frame: "ErrorCommand") -> None:
         payload = frame.payload
-        error = payload.error
         logger.warning(
-            "error.command received intent=%s in_reply_to=%s code=%s message=%s",
-            payload.intent_id,
+            "error.command received in_reply_to=%s code=%s message=%s",
             payload.in_reply_to,
-            error.code,
-            error.message,
+            payload.code,
+            payload.message,
         )
+        future = self._pop_command_future(payload.in_reply_to)
+        if future is not None and not future.done():
+            future.set_exception(
+                CommandError(
+                    code=payload.code,
+                    message=payload.message,
+                    details=payload.details,
+                    idempotency_key=payload.idempotency_key,
+                )
+            )
+        elif future is None:
+            logger.debug(
+                "error.command without pending future: in_reply_to=%s",
+                payload.in_reply_to,
+            )
+
+    def _pop_command_future(self, frame_id: str | None) -> Future | None:
+        if not frame_id:
+            return None
+        with self._command_lock:
+            return self._pending_commands.pop(frame_id, None)
+
+    def _issue_command(
+        self,
+        command: str,
+        *,
+        args: Optional[Sequence[object]] = None,
+        kwargs: Optional[Mapping[str, object]] = None,
+        origin: str = "ui",
+    ) -> Future | None:
+        catalog = self._command_catalog
+        if catalog and command not in catalog:
+            logger.debug("Command %s not advertised; skipping", command)
+            return None
+        state_channel = self._loop_state.state_channel
+        if state_channel is None:
+            logger.debug("Command %s skipped: state channel unavailable", command)
+            return None
+        if not state_channel.feature_enabled("call.command"):
+            logger.debug("Command %s skipped: call.command feature disabled", command)
+            return None
+        session_id = getattr(self._control_state, "session_id", None)
+        if not session_id:
+            logger.debug("Command %s skipped: missing session id", command)
+            return None
+        payload_dict: Dict[str, object] = {"command": command}
+        if args:
+            payload_dict["args"] = list(args)
+        if kwargs:
+            payload_dict["kwargs"] = dict(kwargs)
+        if origin:
+            payload_dict["origin"] = origin
+        frame = build_call_command(session_id=session_id, frame_id=None, payload=payload_dict)
+        frame_id = frame.envelope.frame_id or ""
+        future: Future = Future()
+        with self._command_lock:
+            self._pending_commands[frame_id] = future
+        if not state_channel.send_frame(frame):
+            with self._command_lock:
+                self._pending_commands.pop(frame_id, None)
+            future.set_exception(
+                CommandError(code="command.send_failed", message="failed to enqueue command frame"),
+            )
+            return future
+        logger.debug("Command %s emitted frame=%s", command, frame_id)
+        return future
+
+    def _request_keyframe_command(self, *, origin: str = "auto.keyframe") -> None:
+        future = self._issue_command(_KEYFRAME_COMMAND, origin=origin)
+        if future is None:
+            return
+
+        def _log_result(fut: Future) -> None:
+            try:
+                payload = fut.result()
+                logger.debug(
+                    "Keyframe command acknowledged in_reply_to=%s",
+                    getattr(payload, "in_reply_to", None),
+                )
+            except CommandError as exc:
+                logger.warning(
+                    "Keyframe command rejected code=%s message=%s",
+                    exc.code,
+                    exc,
+                )
+            except Exception:
+                logger.debug("Keyframe command future failed", exc_info=True)
+
+        future.add_done_callback(_log_result)
 
     def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
         def _apply() -> None:
