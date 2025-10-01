@@ -176,6 +176,28 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 meta_snapshot = worker_ref.snapshot_dims_metadata()
                 assert meta_snapshot, "render worker returned empty dims metadata"
                 meta_copy = dict(meta_snapshot)
+
+                if level_payload is not None:
+                    levels_obj = level_payload.get("levels")
+                    if isinstance(levels_obj, Sequence):
+                        try:
+                            level_index = int(level_payload.get("current_level"))
+                        except Exception:
+                            level_index = None
+                        if level_index is not None and 0 <= level_index < len(levels_obj):
+                            entry = levels_obj[level_index]
+                            if isinstance(entry, Mapping):
+                                shape_obj = entry.get("shape")
+                                if isinstance(shape_obj, Sequence):
+                                    try:
+                                        sizes = [max(1, int(value)) for value in shape_obj]
+                                    except Exception:
+                                        sizes = []
+                                    if sizes:
+                                        meta_copy["sizes"] = list(sizes)
+                                        meta_copy["ndim"] = len(sizes)
+                                        meta_copy["range"] = [[0, max(0, size - 1)] for size in sizes]
+
                 server._scene.last_dims_payload = dict(meta_copy)
 
                 notifications_emitted = False
@@ -191,14 +213,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
                 if step_hint is not None:
                     chosen = tuple(int(x) for x in step_hint)
-                    with server._state_lock:
-                        snapshot = server._scene.latest_state
-                        server._scene.latest_state = ServerSceneState(
-                            center=snapshot.center,
-                            zoom=snapshot.zoom,
-                            angles=snapshot.angles,
-                            current_step=chosen,
-                        )
                 else:
                     with server._state_lock:
                         snapshot = server._scene.latest_state
@@ -207,6 +221,15 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         chosen = tuple(int(x) for x in current)
                     else:
                         chosen = _normalize_step_from_meta(meta_copy)
+
+                with server._state_lock:
+                    snapshot = server._scene.latest_state
+                    server._scene.latest_state = ServerSceneState(
+                        center=snapshot.center,
+                        zoom=snapshot.zoom,
+                        angles=snapshot.angles,
+                        current_step=chosen,
+                    )
 
                 meta_copy.setdefault("current_step", [int(x) for x in chosen])
 
