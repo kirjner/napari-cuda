@@ -150,26 +150,47 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 return tuple(0 for _ in range(int(ndim)))
 
             def _on_scene_refresh(step: object = None) -> None:
-                if isinstance(step, Mapping) and "scene_level" in step:
-                    level_payload = step.get("scene_level") or {}
+                level_payload: Optional[Mapping[str, object]] = None
+                step_hint: Optional[Sequence[int]] = None
+                if isinstance(step, Mapping):
+                    if "scene_level" in step:
+                        raw_level = step.get("scene_level") or {}
+                        if isinstance(raw_level, Mapping):
+                            level_payload = dict(raw_level)
+                    raw_step = step.get("step")
+                    if isinstance(raw_step, Sequence):
+                        try:
+                            step_hint = tuple(int(x) for x in raw_step)
+                        except Exception:
+                            step_hint = None
+                elif isinstance(step, Sequence):
+                    try:
+                        step_hint = tuple(int(x) for x in step)
+                    except Exception:
+                        step_hint = None
+
+                worker_ref = state.worker
+                assert worker_ref is not None, "render worker missing during refresh"
+                assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
+
+                meta_snapshot = worker_ref.snapshot_dims_metadata()
+                assert meta_snapshot, "render worker returned empty dims metadata"
+                meta_copy = dict(meta_snapshot)
+                server._scene.last_dims_payload = dict(meta_copy)
+
+                notifications_emitted = False
+
+                if level_payload is not None:
                     server._worker_notifications.push(
                         WorkerSceneNotification(
                             kind="scene_level",
                             level=dict(level_payload),
                         )
                     )
-                    loop.call_soon_threadsafe(server._process_worker_notifications)
-                    return
-                worker_ref = state.worker
-                assert worker_ref is not None, "render worker missing during refresh"
-                assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
-                meta_snapshot = worker_ref.snapshot_dims_metadata()
-                assert meta_snapshot, "render worker returned empty dims metadata"
-                meta_copy = dict(meta_snapshot)
-                server._scene.last_dims_payload = dict(meta_copy)
+                    notifications_emitted = True
 
-                if isinstance(step, Sequence):
-                    chosen = tuple(int(x) for x in step)
+                if step_hint is not None:
+                    chosen = tuple(int(x) for x in step_hint)
                     with server._state_lock:
                         snapshot = server._scene.latest_state
                         server._scene.latest_state = ServerSceneState(
@@ -196,7 +217,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         meta=meta_copy,
                     )
                 )
-                loop.call_soon_threadsafe(server._process_worker_notifications)
+                notifications_emitted = True
+
+                if notifications_emitted:
+                    loop.call_soon_threadsafe(server._process_worker_notifications)
 
             worker = EGLRendererWorker(
                 width=server.width,
