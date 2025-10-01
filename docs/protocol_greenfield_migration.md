@@ -33,7 +33,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 
 ## Near-Term Execution Plan (2025-10-01)
 
-- **Step 0 (complete)** – Keyframe requests now reset the encoder and issue `request_idr()`; keep the VT gate/keyframe diagnostics in the smoke checklist until the next cut.
+- **Step 0 (complete)** – Keyframe requests now replay `notify.stream`, reset the encoder, and immediately issue `request_idr()`; `_ensure_keyframe` runs after the state baseline so VT always opens on a primed avcC. Keep the VT gate/keyframe diagnostics in the smoke checklist until the next cut.
 1. **Finish the greenfield control channel**
    - Remove `meta_refresh` by emitting concrete `notify.dims` and scene payloads from the worker.
    - Replace volume/multiscale rebroadcast shims with direct `notify.layers` deltas driven by intents.
@@ -67,7 +67,7 @@ The following deviations are now deliberate, documented behaviour until the corr
 
 ### 3.1 Keyframe Handling Baseline
 
-- **force_idr() limitation** – `src/napari_cuda/server/rendering/encoder.py:223` toggles NVENC reconfigure, but it still fails to guarantee an IDR frame. We now treat encoder reset plus an explicit `request_idr()` as the contract: `pixel_channel.ensure_keyframe()` skips `force_idr()` entirely and immediately invokes `_try_reset_encoder()` (`src/napari_cuda/server/egl_headless_server.py:332`), and `_ensure_keyframe()` follows up by asking the worker to request an IDR for the next frame (`src/napari_cuda/server/egl_headless_server.py:410`). This mirrors the initial startup behaviour, ensures the next frame after a request is produced from a clean encoder state, and leaves a TODO breadcrumb (`src/napari_cuda/server/pixel/pixel_channel_server.py:121`) to re-enable targeted IDR forcing once NVENC reliability is proven.
+- **force_idr() limitation** – `src/napari_cuda/server/rendering/encoder.py:223` toggles NVENC reconfigure, but it still fails to guarantee an IDR frame. We now treat encoder reset plus an explicit `request_idr()` as the contract: `pixel_channel.ensure_keyframe()` replays the last avcC immediately before calling `_try_reset_encoder()` and marks the stream dirty (`src/napari_cuda/server/pixel/pixel_channel_server.py:100`), `_ensure_keyframe()` schedules the reset after the state baseline (`src/napari_cuda/server/control/control_channel_server.py:2815`) and follows up by asking the worker to request an IDR for the next frame (`src/napari_cuda/server/egl_headless_server.py:425`). This mirrors the initial startup behaviour, ensures the next frame after a request is produced from a clean encoder state, and leaves a TODO breadcrumb (`src/napari_cuda/server/pixel/pixel_channel_server.py:137`) to re-enable targeted IDR forcing once NVENC reliability is proven.
 - **Client VT gate expectations** – The streaming runtime logs “Keyframe request skipped (vt gate pending)” (`src/napari_cuda/client/runtime/stream_runtime.py:1276`) while waiting for the first IDR after a request. This is expected when the server had to reset the encoder; gating logic should be revisited once `force_idr()` is reliable.
 
 Cross-reference these items when planning migration work; each future change should remove its entry from this section.
