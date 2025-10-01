@@ -20,7 +20,7 @@ import os
 import time
 import logging
 
-from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple, List
 import threading
 import math
 
@@ -151,20 +151,44 @@ class EGLRendererWorker:
             except Exception:
                 logger.exception("policy init set failed; continuing with default")
 
-        # Ensure partial initialization is cleaned up if any step fails
+        # Zarr/NGFF dataset configuration (optional); prefer explicit args from server
+        self._zarr_path = zarr_path
+        self._zarr_level = zarr_level
+        self._zarr_axes = (zarr_axes or 'zyx')
+        self._zarr_init_z = (zarr_z if (zarr_z is not None and int(zarr_z) >= 0) else None)
+
+        self._zarr_shape: Optional[tuple[int, ...]] = None
+        self._zarr_dtype: Optional[str] = None
+        self._z_index: Optional[int] = None
+        self._zarr_clim: Optional[tuple[float, float]] = None
+        self._hw_limits = get_hw_limits()
+
+        self._bootstrapped = False
+        self._bootstrapping = False
+        self._debug: Optional[DebugDumper] = None
+        self._debug_config = DebugConfig.from_policy(self._debug_policy.dumps)
+
+    @property
+    def is_bootstrapped(self) -> bool:
+        return self._bootstrapped
+
+    @property
+    def is_bootstrapping(self) -> bool:
+        return self._bootstrapping
+
+    def set_scene_refresh_callback(self, callback: Optional[Callable[[object], None]]) -> None:
+        self._scene_refresh_cb = callback
+
+    def bootstrap(self) -> None:
+        """Complete GPU/VisPy setup once the lifecycle registers the worker."""
+
+        if self._bootstrapped:
+            return
+        if self._bootstrapping:
+            return
+
+        self._bootstrapping = True
         try:
-            # Zarr/NGFF dataset configuration (optional); prefer explicit args from server
-            self._zarr_path = zarr_path
-            self._zarr_level = zarr_level
-            self._zarr_axes = (zarr_axes or 'zyx')
-            self._zarr_init_z = (zarr_z if (zarr_z is not None and int(zarr_z) >= 0) else None)
-
-            self._zarr_shape: Optional[tuple[int, ...]] = None
-            self._zarr_dtype: Optional[str] = None
-            self._z_index: Optional[int] = None
-            self._zarr_clim: Optional[tuple[float, float]] = None
-            self._hw_limits = get_hw_limits()
-
             # Initialize CUDA first (independent of GL)
             self._init_cuda()
             # Create VisPy SceneCanvas (EGL backend) which makes a GL context current
@@ -174,18 +198,17 @@ class EGLRendererWorker:
             self._init_capture()
             self._init_cuda_interop()
             self._init_encoder()
-        except Exception as e:
-            # Best-effort cleanup of resources allocated so far
-            logger.warning("Initialization failed; attempting cleanup: %s", e, exc_info=True)
+        except Exception as exc:
+            logger.warning("Bootstrap failed; attempting cleanup: %s", exc, exc_info=True)
             try:
                 self.cleanup()
-            except Exception as e2:
-                logger.debug("Cleanup after failed init also failed: %s", e2)
+            except Exception as cleanup_exc:
+                logger.debug("Cleanup after failed bootstrap also failed: %s", cleanup_exc)
             raise
-        # Bitstream parameter cache is maintained by the server (for avcC/hvcC)
-        # Debug configuration (single place)
-        dump_cfg = DebugConfig.from_policy(self._debug_policy.dumps)
-        self._debug = DebugDumper(dump_cfg)
+        finally:
+            self._bootstrapping = False
+
+        self._debug = DebugDumper(self._debug_config)
         if self._debug.cfg.enabled:
             self._debug.log_env_once()
             self._debug.ensure_out_dir()
@@ -193,10 +216,15 @@ class EGLRendererWorker:
         self._capture.pipeline.set_raw_dump_budget(self._raw_dump_budget)
         self._capture.cuda.set_force_tight_pitch(self._debug_policy.worker.force_tight_pitch)
         self._log_debug_policy_once()
-        # Log format/size once for clarity
+        self._bootstrapped = True
+
         logger.info(
             "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
-            self.width, self.height, self._capture.pipeline.enc_input_format, self.fps, self._animate,
+            self.width,
+            self.height,
+            self._capture.pipeline.enc_input_format,
+            self.fps,
+            self._animate,
             bool(self._zarr_path),
         )
 
@@ -444,6 +472,116 @@ class EGLRendererWorker:
         self._slice_max_bytes = int(max(0, getattr(cfg, 'max_slice_bytes', 0)))
         self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
+
+    def snapshot_dims_metadata(self) -> Dict[str, Any]:
+        viewer = self._viewer
+        if viewer is None:
+            return {}
+        dims = getattr(viewer, "dims", None)
+        if dims is None:
+            return {}
+
+        meta: Dict[str, Any] = {}
+
+        try:
+            ndim = int(getattr(dims, "ndim", 0))
+        except Exception:
+            ndim = 0
+
+        try:
+            current_step_tuple = tuple(int(x) for x in getattr(dims, "current_step", ()))
+        except Exception:
+            current_step_tuple = ()
+
+        if ndim <= 0:
+            ndim = len(current_step_tuple)
+
+        if ndim > 0:
+            meta["ndim"] = ndim
+
+        if current_step_tuple:
+            normalized_step = list(current_step_tuple[:ndim] if ndim else current_step_tuple)
+            if ndim and len(normalized_step) < ndim:
+                normalized_step.extend([0] * (ndim - len(normalized_step)))
+            meta["current_step"] = [int(value) for value in normalized_step]
+
+        try:
+            ndisplay = int(getattr(dims, "ndisplay", 2))
+        except Exception:
+            ndisplay = 2
+        meta["ndisplay"] = ndisplay
+        meta["mode"] = "volume" if ndisplay >= 3 else "plane"
+
+        try:
+            order = tuple(int(x) for x in getattr(dims, "order", ()))
+        except Exception:
+            order = ()
+        if order:
+            meta["order"] = list(order[:ndim] if ndim else order)
+
+        try:
+            axis_labels = tuple(str(x) for x in getattr(dims, "axis_labels", ()))
+        except Exception:
+            axis_labels = ()
+        if axis_labels:
+            meta["axis_labels"] = list(axis_labels[:ndim] if ndim else axis_labels)
+
+        try:
+            displayed = tuple(int(x) for x in getattr(dims, "displayed", ()))
+        except Exception:
+            displayed = ()
+        if displayed:
+            meta["displayed"] = list(displayed)
+
+        sizes: List[int] = []
+        try:
+            nsteps = getattr(dims, "nsteps", ())
+            for value in nsteps:
+                try:
+                    sizes.append(int(value))
+                except Exception:
+                    sizes.append(1)
+        except Exception:
+            sizes = []
+        if ndim and sizes:
+            if len(sizes) < ndim:
+                sizes.extend(1 for _ in range(ndim - len(sizes)))
+            elif len(sizes) > ndim:
+                sizes = sizes[:ndim]
+        if sizes:
+            meta["sizes"] = [max(1, int(value)) for value in sizes]
+
+        ranges: List[List[int]] = []
+        try:
+            for rng in getattr(dims, "range", ()):  # type: ignore[attr-defined]
+                start = getattr(rng, "start", None)
+                stop = getattr(rng, "stop", None)
+                if start is None or stop is None:
+                    continue
+                try:
+                    lo = int(round(float(start)))
+                    hi = int(round(float(stop)))
+                except Exception:
+                    continue
+                if hi < lo:
+                    lo, hi = hi, lo
+                ranges.append([lo, hi])
+        except Exception:
+            ranges = []
+        if ndim and ranges:
+            if len(ranges) < ndim:
+                padding = ndim - len(ranges)
+                for idx in range(padding):
+                    size_hint = 0
+                    if "sizes" in meta and len(meta["sizes"]) > len(ranges):
+                        size_hint = max(0, int(meta["sizes"][len(ranges)]) - 1)
+                    ranges.append([0, size_hint])
+            elif len(ranges) > ndim:
+                ranges = ranges[:ndim]
+        if ranges:
+            meta["range"] = ranges
+
+        return meta
 
     def _log_debug_policy_once(self) -> None:
         if self._debug_policy_logged:

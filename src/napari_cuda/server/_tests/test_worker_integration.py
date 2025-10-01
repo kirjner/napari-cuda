@@ -334,6 +334,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
     )
 
     worker = rw.EGLRendererWorker(width=320, height=180, ctx=ctx)
+    worker.bootstrap()
     worker.canvas = _FakeCanvas(worker.width, worker.height)
     camera = _FakeCamera2D()
     worker.view = _FakeView(camera)

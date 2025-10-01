@@ -160,10 +160,13 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     )
                     loop.call_soon_threadsafe(server._process_worker_notifications)
                     return
-                meta_snapshot = server._dims_metadata() or {}
-                if not isinstance(meta_snapshot, Mapping):
-                    meta_snapshot = {}
+                worker_ref = state.worker
+                assert worker_ref is not None, "render worker missing during refresh"
+                assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
+                meta_snapshot = worker_ref.snapshot_dims_metadata()
+                assert meta_snapshot, "render worker returned empty dims metadata"
                 meta_copy = dict(meta_snapshot)
+                server._scene.last_dims_payload = dict(meta_copy)
 
                 if isinstance(step, Sequence):
                     chosen = tuple(int(x) for x in step)
@@ -207,11 +210,19 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 zarr_axes=server._zarr_axes,
                 zarr_z=server._zarr_z,
                 policy_name=server._scene.multiscale_state.get("policy"),
-                scene_refresh_cb=_on_scene_refresh,
+                scene_refresh_cb=None,
                 ctx=server._ctx,
                 env=server._ctx_env,
             )
             state.worker = worker
+
+            worker.bootstrap()
+            worker.set_scene_refresh_callback(_on_scene_refresh)
+
+            meta_init = worker.snapshot_dims_metadata()
+            assert meta_init, "render worker returned empty dims metadata during init"
+            meta_init = dict(meta_init)
+            server._scene.last_dims_payload = dict(meta_init)
 
             z_index = worker._z_index
             if z_index is not None:
@@ -225,13 +236,11 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     )
                 step_list = [int(z_index)]
             else:
-                meta = server._dims_metadata() or {}
-                ndim = int(meta.get("ndim") or 3)
-                step_list = [0 for _ in range(max(1, ndim))]
+                ndim = int(meta_init.get("ndim") or 3)
+                step_list = [int(x) for x in meta_init.get("current_step", [])][:ndim]
+                if not step_list:
+                    step_list = [0 for _ in range(max(1, ndim))]
 
-            meta_init = server._dims_metadata() or {}
-            if not isinstance(meta_init, Mapping):
-                meta_init = {}
             meta_init = dict(meta_init)
             if step_list:
                 meta_init.setdefault("current_step", [int(x) for x in step_list])

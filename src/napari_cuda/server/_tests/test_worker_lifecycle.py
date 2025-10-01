@@ -74,19 +74,15 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
     server._scene = scene
     server._worker_notifications = notifications
-    def _dims_meta() -> dict[str, object]:
-        ndisplay = 3 if server.use_volume else 2
-        return {
-            'ndim': 1,
-            'order': ['z'],
-            'range': [[0, 0]],
-            'current_step': [0],
-            'ndisplay': ndisplay,
-            'mode': 'volume' if ndisplay == 3 else 'plane',
-            'volume': bool(server.use_volume),
-        }
-
-    server._dims_metadata = _dims_meta
+    server._scene.last_dims_payload = {
+        'ndim': 1,
+        'order': ['z'],
+        'range': [[0, 0]],
+        'current_step': [0],
+        'ndisplay': 2,
+        'mode': 'plane',
+        'volume': False,
+    }
     server.processed_notifications = processed
 
     def process_worker_notifications() -> None:
@@ -105,57 +101,128 @@ def _run_loop_once(loop: asyncio.AbstractEventLoop) -> None:
     loop.run_until_complete(asyncio.sleep(0))
 
 
+def _wait_for_worker(state: WorkerLifecycleState, *, timeout_s: float = 1.0) -> object:
+    deadline = time.time() + timeout_s
+    while state.worker is None and time.time() < deadline:
+        time.sleep(0.01)
+    assert state.worker is not None, "render worker failed to start"
+    return state.worker
+
+
+class _FakeWorkerBase:
+    """Minimal render worker stub that satisfies lifecycle expectations."""
+
+    _orientation_ready = True
+    _z_index = None
+    default_meta = {
+        'ndim': 2,
+        'order': ['y', 'x'],
+        'range': [[0, 9], [0, 9]],
+        'current_step': [0, 0],
+        'ndisplay': 2,
+        'mode': 'plane',
+    }
+
+    def __init__(self, *, scene_refresh_cb, **kwargs):
+        self._scene_refresh_cb = scene_refresh_cb
+        self._meta = dict(self.default_meta)
+        self._stop_event = None
+        self.applied_states: list = []
+        self.camera_commands: list = []
+        self.frames: list[bytes] = []
+        self._bootstrapped = True
+        self._bootstrapping = False
+
+    def snapshot_dims_metadata(self) -> dict[str, object]:
+        return dict(self._meta)
+
+    @property
+    def is_bootstrapped(self) -> bool:
+        return self._bootstrapped
+
+    @property
+    def is_bootstrapping(self) -> bool:
+        return self._bootstrapping
+
+    def set_scene_refresh_callback(self, callback) -> None:  # noqa: ANN001 - test stub
+        self._scene_refresh_cb = callback
+
+    def bootstrap(self) -> None:
+        self._bootstrapping = True
+        self._bootstrapped = True
+        self._bootstrapping = False
+
+    def apply_state(self, state) -> None:  # noqa: ANN001 - signature mirrors concrete worker
+        self.applied_states.append(state)
+
+    def process_camera_commands(self, commands) -> None:  # noqa: ANN001
+        if commands:
+            self.camera_commands.extend(commands)
+
+    def capture_and_encode_packet(self):
+        timings = SimpleNamespace(
+            render_ms=1.0,
+            blit_gpu_ns=None,
+            blit_cpu_ms=0.0,
+            map_ms=0.0,
+            copy_ms=0.0,
+            convert_ms=0.0,
+            encode_ms=0.0,
+            pack_ms=0.0,
+            total_ms=1.0,
+            capture_wall_ts=time.perf_counter(),
+        )
+        payload = b"frame"
+        self.frames.append(payload)
+        if self._stop_event is not None:
+            self._stop_event.set()
+        return timings, payload, 0, 0
+
+    def cleanup(self) -> None:
+        pass
+
+
+class _FakePacketWorker(_FakeWorkerBase):
+    default_meta = {
+        'ndim': 1,
+        'order': ['z'],
+        'range': [[0, 0]],
+        'current_step': [0],
+        'ndisplay': 2,
+        'mode': 'plane',
+    }
+
+
 def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     server = make_fake_server(loop, tmp_path)
     state = WorkerLifecycleState()
 
-    holder: dict[str, object] = {"stop_event": state.stop_event}
-
-    class StubWorker:
-        _orientation_ready = True
-        _z_index = None
-
-        def __init__(self, *, scene_refresh_cb, **kwargs):
-            holder["refresh_cb"] = scene_refresh_cb
-            holder["stop_event"].set()
-
-        def apply_state(self, state):
-            raise AssertionError("apply_state should not run in this test")
-
-        def process_camera_commands(self, commands):
-            raise AssertionError("process_camera_commands should not run in this test")
-
-        def capture_and_encode_packet(self):
-            raise AssertionError("capture_and_encode_packet should not run in this test")
-
-        def cleanup(self):
-            pass
-
-    async def dummy_send(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", StubWorker)
+    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
         "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_stream_config",
-        lambda *a, **k: dummy_send(*a, **k),
+        lambda *a, **k: asyncio.sleep(0),
     )
 
     start_worker(server, loop, state)
-    state.thread.join(timeout=1.0)
+    worker = _wait_for_worker(state)
+    worker._stop_event = state.stop_event  # type: ignore[attr-defined]
+    worker._meta["current_step"] = [4, 5]  # type: ignore[attr-defined]
 
-    refresh_cb = holder["refresh_cb"]
-    refresh_cb([4, 5])
+    _run_loop_once(loop)
+    server.processed_notifications.clear()
+
+    worker._scene_refresh_cb([4, 5])  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
-    assert server.processed_notifications
-    note = server.processed_notifications[0]
+    assert server.processed_notifications, "expected dims notification"
+    note = server.processed_notifications[-1]
     assert note.kind == "dims_update"
     assert note.step == (4, 5)
-    assert server._scene.latest_state.current_step == (4, 5)
+    assert note.meta["current_step"] == [4, 5]
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -169,51 +236,30 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     server = make_fake_server(loop, tmp_path)
     state = WorkerLifecycleState()
 
-    holder: dict[str, object] = {"stop_event": state.stop_event}
-
-    class StubWorker:
-        _orientation_ready = True
-        _z_index = None
-
-        def __init__(self, *, scene_refresh_cb, **kwargs):
-            holder["refresh_cb"] = scene_refresh_cb
-            holder["stop_event"].set()
-
-        def apply_state(self, state):
-            raise AssertionError
-
-        def process_camera_commands(self, commands):
-            raise AssertionError
-
-        def capture_and_encode_packet(self):
-            raise AssertionError
-
-        def cleanup(self):
-            pass
-
-    async def dummy_send(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", StubWorker)
+    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
         "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_stream_config",
-        lambda *a, **k: dummy_send(*a, **k),
+        lambda *a, **k: asyncio.sleep(0),
     )
 
     start_worker(server, loop, state)
-    state.thread.join(timeout=1.0)
+    worker = _wait_for_worker(state)
+    worker._stop_event = state.stop_event  # type: ignore[attr-defined]
+    worker._meta.pop("current_step", None)  # type: ignore[attr-defined]
 
-    refresh_cb = holder["refresh_cb"]
-    refresh_cb(None)
+    _run_loop_once(loop)
+    server.processed_notifications.clear()
+
+    worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
-    assert server.processed_notifications
-    note = server.processed_notifications[0]
+    assert server.processed_notifications, "expected dims notification"
+    note = server.processed_notifications[-1]
     assert note.kind == "dims_update"
     assert note.step == (0,)
-    assert isinstance(note.meta, dict)
+    assert note.meta["current_step"] == [0]
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -226,46 +272,12 @@ def test_on_frame_schedules_stream_config(monkeypatch, tmp_path):
     asyncio.set_event_loop(loop)
     server = make_fake_server(loop, tmp_path)
     state = WorkerLifecycleState()
-
-    holder: dict[str, object] = {"stop_event": state.stop_event}
     send_calls: list[tuple[tuple, dict]] = []
-
-    class PacketWorker:
-        _orientation_ready = True
-        _z_index = None
-
-        def __init__(self, *, scene_refresh_cb, **kwargs):
-            holder["refresh_cb"] = scene_refresh_cb
-
-        def apply_state(self, state):
-            pass
-
-        def process_camera_commands(self, commands):
-            pass
-
-        def capture_and_encode_packet(self):
-            holder["stop_event"].set()
-            timings = SimpleNamespace(
-                render_ms=1.0,
-                blit_gpu_ns=None,
-                blit_cpu_ms=0.0,
-                map_ms=0.0,
-                copy_ms=0.0,
-                convert_ms=0.0,
-                encode_ms=0.0,
-                pack_ms=0.0,
-                total_ms=1.0,
-                capture_wall_ts=time.perf_counter(),
-            )
-            return timings, b"raw", 0, 7
-
-        def cleanup(self):
-            pass
 
     async def fake_send(*args, **kwargs):
         send_calls.append((args, kwargs))
 
-    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", PacketWorker)
+    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", _FakePacketWorker)
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"avcc", True))
     monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: b"cfg")
     monkeypatch.setattr(
@@ -274,11 +286,14 @@ def test_on_frame_schedules_stream_config(monkeypatch, tmp_path):
     )
 
     start_worker(server, loop, state)
-    state.thread.join(timeout=1.0)
+    worker = _wait_for_worker(state)
+    worker._stop_event = state.stop_event  # type: ignore[attr-defined]
+
+    state.thread.join(timeout=1.0)  # type: ignore[union-attr]
     _run_loop_once(loop)
 
-    assert send_calls
-    assert server.metrics.samples
+    assert send_calls, "expected stream config send"
+    assert server.metrics.samples, "expected timing samples recorded"
 
     stop_worker(state)
     _run_loop_once(loop)
