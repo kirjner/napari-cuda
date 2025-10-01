@@ -8,7 +8,7 @@ import platform
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 import websockets
 
@@ -493,20 +493,54 @@ class StateChannel:
         if not self.handle_scene_spec:
             return
 
-        state_block = envelope.payload.state or {}
+        payload = envelope.payload
+        env_meta = envelope.envelope
+        scene_payload: Dict[str, Any] = {
+            "layers": [dict(layer) for layer in payload.layers],
+        }
+
+        viewer_block = payload.viewer
+        dims_block = viewer_block.get("dims") if isinstance(viewer_block, Mapping) else None
+        camera_block = viewer_block.get("camera") if isinstance(viewer_block, Mapping) else None
+        if isinstance(dims_block, Mapping):
+            scene_payload["dims"] = dict(dims_block)
+        if isinstance(camera_block, Mapping):
+            scene_payload["camera"] = dict(camera_block)
+
+        ancillary = payload.ancillary if isinstance(payload.ancillary, Mapping) else {}
+        metadata_block: Dict[str, Any] = {}
+        if isinstance(ancillary, Mapping):
+            meta_section = ancillary.get("metadata")
+            if isinstance(meta_section, Mapping):
+                metadata_block.update({str(k): v for k, v in meta_section.items()})
+            for extra_key in ("volume_state", "policy_metrics"):
+                extra_value = ancillary.get(extra_key)
+                if extra_value is not None:
+                    metadata_block[extra_key] = extra_value
+        if metadata_block:
+            scene_payload["metadata"] = metadata_block
+
         capabilities = None
-        if isinstance(state_block, dict) and state_block.get('capabilities') is not None:
-            try:
-                capabilities = [str(entry) for entry in state_block.get('capabilities', [])]
-            except Exception:
-                capabilities = None
-        spec = SceneSpecMessage(
-            type=SCENE_SPEC_TYPE,
-            version=envelope.payload.version,
-            scene=envelope.payload.scene,
-            capabilities=capabilities,
-            timestamp=envelope.timestamp,
-        )
+        anc_caps = ancillary.get("capabilities") if isinstance(ancillary, Mapping) else None
+        if isinstance(anc_caps, Sequence):
+            capabilities = [str(entry) for entry in anc_caps if entry is not None]
+            scene_payload["capabilities"] = capabilities
+
+        scene_message_dict: Dict[str, Any] = {
+            "type": SCENE_SPEC_TYPE,
+            "version": 1,
+            "timestamp": env_meta.timestamp,
+            "scene": scene_payload,
+        }
+        if capabilities:
+            scene_message_dict["capabilities"] = capabilities
+
+        try:
+            spec = SceneSpecMessage.from_dict(scene_message_dict)
+        except Exception:
+            logger.debug("notify.scene conversion failed", exc_info=True)
+            return
+
         if _STATE_DEBUG:
             logger.debug(
                 "received notify.scene: layers=%s capabilities=%s",

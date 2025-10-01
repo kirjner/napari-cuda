@@ -170,7 +170,7 @@ async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
     try:
         while True:
             await asyncio.sleep(interval)
-            if ws.closed or _heartbeat_shutting_down(ws):
+            if bool(getattr(ws, "closed", False)) or _heartbeat_shutting_down(ws):
                 break
             session_id = _state_session(ws)
             if not session_id:

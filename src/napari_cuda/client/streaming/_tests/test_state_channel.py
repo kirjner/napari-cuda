@@ -19,6 +19,7 @@ from napari_cuda.protocol import (
     FeatureToggle,
     build_ack_state,
     build_notify_dims,
+    build_notify_scene_snapshot,
     build_notify_stream,
     build_session_heartbeat,
     build_session_reject,
@@ -45,9 +46,15 @@ def test_state_channel_scene_callback(state_channel):
     state_channel.handle_scene_spec = received.append
 
     layer = LayerSpec(layer_id='a', layer_type='image', name='demo', ndim=2, shape=[32, 32])
-    scene_msg = SceneSpecMessage(scene=SceneSpec(layers=[layer]))
+    frame = build_notify_scene_snapshot(
+        session_id='session-1',
+        viewer={'dims': {'ndim': 2}, 'camera': {}},
+        layers=[layer.to_dict()],
+        ancillary={'capabilities': ['layer.update']},
+        delta_token='tok-scene-1',
+    )
 
-    state_channel._handle_message(scene_msg.to_dict())  # type: ignore[arg-type]
+    state_channel._handle_message(frame.to_dict())
 
     assert len(received) == 1
     assert isinstance(received[0], SceneSpecMessage)
@@ -134,12 +141,15 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
     state_channel.handle_scene_spec = received.append
 
     layer = LayerSpec(layer_id='layer-10', layer_type='image', name='demo', ndim=2, shape=[8, 8])
-    envelope = SceneSpecMessage(
-        scene=SceneSpec(layers=[layer]),
-        timestamp=2.0,
+    frame = build_notify_scene_snapshot(
+        session_id='session-2',
+        viewer={'dims': {'ndim': 3}, 'camera': {}},
+        layers=[layer.to_dict()],
+        ancillary=None,
+        delta_token='tok-scene-2',
     )
 
-    state_channel._handle_message(envelope.to_dict())  # type: ignore[arg-type]
+    state_channel._handle_message(frame.to_dict())
 
     assert received and isinstance(received[0], SceneSpecMessage)
     assert received[0].scene.layers[0].layer_id == 'layer-10'
