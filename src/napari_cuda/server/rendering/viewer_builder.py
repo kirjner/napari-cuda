@@ -91,7 +91,7 @@ class ViewerBuilder:
                     logger.info("adapter levels: idx=%d shape=%s plane=%dx%d dtype=%s slice_bytes=%d", int(li), 'x'.join(str(int(x)) for x in desc.shape), int(h), int(w), str(source.dtype), bytes_est)
 
             init_step = source.initial_step(step_or_z=self._bridge._zarr_init_z, level=current_level)
-            step = source.set_current_level(current_level, step=init_step)
+            step = source.set_current_slice(init_step, current_level)
             descriptor = source.level_descriptors[current_level]
             self._bridge._scene_source = source
             self._bridge._active_ms_level = current_level
@@ -129,10 +129,11 @@ class ViewerBuilder:
                     if z_pos < len(step_seq) and step_seq[z_pos] != 0:
                         step_seq[z_pos] = 0
                         try:
-                            step = source.set_current_level(current_level, step=tuple(step_seq))
+                            step = source.set_current_slice(tuple(step_seq), current_level)
                         except Exception:
                             logger.debug("adapter volume: resetting source step to 0 failed", exc_info=True)
                 viewer.dims.current_step = tuple(int(s) for s in step)
+                self._bridge._last_step = tuple(int(s) for s in step)
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
@@ -196,7 +197,8 @@ class ViewerBuilder:
                 )
                 viewer.dims.axis_labels = tuple(source.axes)
                 viewer.dims.ndisplay = 2
-                viewer.dims.current_step = tuple(step)
+                viewer.dims.current_step = tuple(int(s) for s in step)
+                self._bridge._last_step = tuple(int(s) for s in step)
                 # Make sure layer draws fully opaque and on top for debugging
                 try:
                     layer.opacity = 1.0
@@ -242,6 +244,7 @@ class ViewerBuilder:
                 self._bridge._data_d = d
                 view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
                 self._bridge._frame_volume_camera(w, h, d)
+                self._bridge._last_step = tuple(0 for _ in range(volume.ndim))
                 layer.rendering = "mip"
                 scene_src = "napari-adapter-volume"
                 scene_meta = f"synthetic shape={d}x{h}x{w}"
@@ -255,6 +258,7 @@ class ViewerBuilder:
                 h = int(image.shape[0]); w = int(image.shape[1])
                 self._bridge._data_wh = (w, h)
                 view.camera.set_range(x=(0, w), y=(0, h))
+                self._bridge._last_step = tuple(0 for _ in range(image.ndim))
                 scene_src = "napari-adapter-image"
                 scene_meta = f"synthetic shape={h}x{w}"
 

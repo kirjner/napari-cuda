@@ -68,7 +68,7 @@ class _StubSceneSource:
             return (1.0, 0.5, 0.25)
         return (0.5, 0.25)
 
-    def set_current_level(self, level: int, step: tuple[int, ...]) -> tuple[int, ...]:
+    def set_current_slice(self, step: tuple[int, ...], level: int) -> tuple[int, ...]:
         self._current_step = tuple(int(x) for x in step)
         return self._current_step
 
@@ -205,7 +205,7 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
 
     assert mark_calls == [None]
     assert result.z_index is None
-    assert result.last_step == (1, 2, 3)
+    assert result.last_step is None
 
 
 def test_apply_volume_params_sets_visual_fields() -> None:

@@ -112,6 +112,9 @@ class _FakeDims:
         self.current_step: tuple[int, ...] = (0, 0, 0)
         self.range: tuple = ()
         self.ndisplay: int = 2
+        self.ndim: int = 3
+        self.order: tuple[int, ...] = (0, 1, 2)
+        self.axis_labels: tuple[str, ...] = ("z", "y", "x")
 
 
 class _FakeViewer:
@@ -126,6 +129,10 @@ class _FakeLayer:
         self.blending = "opaque"
         self.contrast_limits = [0.0, 1.0]
         self.applied: list[tuple[np.ndarray, object, bool]] = []
+        self.ndim = 3
+        self.data = SimpleNamespace(ndim=3)
+        self.translate = (0.0, 0.0, 0.0)
+        self.scale = (1.0, 1.0, 1.0)
 
 
 class _FakeVisual:
@@ -153,7 +160,10 @@ class _FakeSceneSource:
     def level_shape(self, level: int) -> tuple[int, int, int]:
         return (1, 4, 4)
 
-    def set_current_level(self, level: int, step: tuple[int, ...]) -> tuple[int, ...]:
+    def level_volume(self, level: int, *, compute: bool = True):
+        return np.zeros((1, 4, 4), dtype=np.float32)
+
+    def set_current_slice(self, step: tuple[int, ...], level: int) -> tuple[int, ...]:
         self.current_level = int(level)
         self.current_step = tuple(int(s) for s in step)
         return self.current_step
@@ -202,11 +212,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
                     self._debug = None
                     self._enc_fmt = "YUV444"
                     self.orientation_ready = True
-                    self.black_reset_done = False
                     self._raw_budget = 0
-
-                def configure_auto_reset(self, enabled: bool) -> None:  # type: ignore[no-untyped-def]
-                    return
 
                 def set_debug(self, debug):  # type: ignore[no-untyped-def]
                     self._debug = debug
@@ -227,7 +233,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
                 def map_and_copy_to_torch(self, debug_cb=None):  # type: ignore[no-untyped-def]
                     return 0.0, 0.0
 
-                def convert_for_encoder(self, *, reset_camera=None):  # type: ignore[no-untyped-def]
+                def convert_for_encoder(self):  # type: ignore[no-untyped-def]
                     return SimpleNamespace(device="cpu"), 0.0
 
             class _DummyCuda:
@@ -249,10 +255,6 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
         @property
         def orientation_ready(self) -> bool:
             return self.pipeline.orientation_ready
-
-        @property
-        def black_reset_done(self) -> bool:
-            return self.pipeline.black_reset_done
 
     class _DummyViewerBuilder:
         def __init__(self, worker):  # type: ignore[no-untyped-def]
@@ -536,3 +538,18 @@ def test_ndisplay_switch_back_to_plane_resumes_policy(render_worker_fixture, mon
     assert worker._level_policy_refresh_needed is False
     assert worker._render_tick_required is True
     assert tuple(worker._viewer.dims.current_step)[:2] == (0, 0)
+
+
+def test_ndisplay_switch_notifies_scene_refresh(render_worker_fixture):
+    worker = render_worker_fixture
+    captured_steps: list[tuple[int, ...]] = []
+
+    worker._scene_refresh_cb = captured_steps.append  # type: ignore[assignment]
+    worker._last_step = (1, 2, 3)
+    worker._render_tick_required = False
+
+    apply_ndisplay_switch(worker, 3)
+
+    assert worker._render_tick_required is True
+    assert captured_steps, "Scene refresh callback was not invoked"
+    assert captured_steps[-1] == worker._last_step

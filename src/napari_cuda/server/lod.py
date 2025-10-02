@@ -345,6 +345,18 @@ def apply_level(
         current_z=cur_z,
     )
 
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "lod.apply_level: prev_level=%s target=%s prev_shape=%s new_shape=%s last_step=%s cur_z=%s new_z=%s",
+            prev_level,
+            target_level,
+            prev_shape,
+            desc.shape,
+            last_step,
+            cur_z,
+            new_z,
+        )
+
     # Build step hint and set level
     step_hint: list[int] = [0] * len(desc.shape)
     if new_z is not None and "z" in lower:
@@ -352,7 +364,7 @@ def apply_level(
         if 0 <= zi < len(step_hint):
             step_hint[zi] = int(new_z)
 
-    step = source.set_current_level(int(target_level), step=tuple(step_hint))
+    step = source.set_current_slice(tuple(step_hint), int(target_level))
 
     # Sync viewer: set range first, then current_step to avoid clamping to old range
     if viewer is not None:

@@ -8,13 +8,78 @@ import threading
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, List, Mapping
+from functools import partial
+from typing import Optional, Sequence, List, Mapping, Dict, Any
 
 from . import pixel_channel
 from .bitstream import build_avcc_config, pack_to_avcc
 from .scene_state import ServerSceneState
 from .worker_notifications import WorkerSceneNotification
 from .render_worker import EGLRendererWorker
+
+
+def _handle_scene_refresh(
+    server: object,
+    state: WorkerLifecycleState,
+    loop: asyncio.AbstractEventLoop,
+    step: object = None,
+) -> None:
+    level_payload: Optional[Mapping[str, object]] = None
+    if step and type(step) is dict and "scene_level" in step:
+        raw_level = step["scene_level"]
+        assert type(raw_level) is dict, "scene level payload must be a dict"
+        level_payload = dict(raw_level)
+
+    worker_ref = state.worker
+    assert worker_ref is not None, "render worker missing during refresh"
+    assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
+
+    meta = dict(worker_ref.snapshot_dims_metadata())
+    assert meta, "render worker returned empty dims metadata"
+    meta = _normalize_dims_meta(meta)
+
+    assert worker_ref._last_step is not None, "worker dims step missing"
+    step_tuple = tuple(int(value) for value in worker_ref._last_step)
+
+    notifications: list[WorkerSceneNotification] = []
+
+    if level_payload:
+        state.scene_seq = int(state.scene_seq) + 1
+        notifications.append(
+            WorkerSceneNotification(
+                kind="scene_level",
+                seq=state.scene_seq,
+                level=level_payload,
+            )
+        )
+
+    state.scene_seq = int(state.scene_seq) + 1
+    with server._state_lock:  # type: ignore[attr-defined]
+        snapshot = server._scene.latest_state  # type: ignore[attr-defined]
+        server._scene.latest_state = ServerSceneState(  # type: ignore[attr-defined]
+            center=snapshot.center,
+            zoom=snapshot.zoom,
+            angles=snapshot.angles,
+            current_step=step_tuple,
+        )
+        server._scene.last_dims_payload = dict(meta)  # type: ignore[attr-defined]
+
+    notifications.append(
+        WorkerSceneNotification(
+            kind="dims_update",
+            seq=state.scene_seq,
+            step=step_tuple,
+            meta=meta,
+        )
+    )
+
+    if not notifications:
+        return
+
+    for note in notifications:
+        server._worker_notifications.push(note)  # type: ignore[attr-defined]
+
+    loop.call_soon_threadsafe(server._process_worker_notifications)  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +91,7 @@ class WorkerLifecycleState:
     worker: Optional[EGLRendererWorker] = None
     thread: Optional[threading.Thread] = None
     stop_event: threading.Event = field(default_factory=threading.Event)
+    scene_seq: int = 0
 
 
 def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerLifecycleState) -> None:
@@ -35,6 +101,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         raise RuntimeError("worker thread already running")
 
     state.stop_event.clear()
+    state.scene_seq = int(server._scene.last_scene_seq)
 
     def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
         worker = state.worker
@@ -131,67 +198,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
     def worker_loop() -> None:
         try:
-            def _on_scene_refresh(step: object = None) -> None:
-                level_payload: Optional[Mapping[str, object]] = None
-                step_tuple: Optional[tuple[int, ...]] = None
-                if step and type(step) is dict:
-                    if "scene_level" in step:
-                        raw_level = step["scene_level"]
-                        assert type(raw_level) is dict, "scene level payload must be a dict"
-                        level_payload = dict(raw_level)
-                    raw_step = step.get("step")
-                    if raw_step:
-                        step_tuple = tuple(int(value) for value in raw_step)
-                elif step and type(step) in (tuple, list):
-                    step_tuple = tuple(int(value) for value in step)
-
-                worker_ref = state.worker
-                assert worker_ref is not None, "render worker missing during refresh"
-                assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
-
-                meta = worker_ref.snapshot_dims_metadata()
-                assert meta, "render worker returned empty dims metadata"
-
-                current_step_meta = meta.get("current_step")
-                if step_tuple is None:
-                    assert current_step_meta, "worker dims metadata missing current_step"
-                    step_tuple = tuple(int(value) for value in current_step_meta)
-                meta["current_step"] = [int(value) for value in step_tuple]
-
-                server._scene.last_dims_payload = dict(meta)
-
-                notifications_emitted = False
-
-                if level_payload is not None:
-                    server._worker_notifications.push(
-                        WorkerSceneNotification(
-                            kind="scene_level",
-                            level=dict(level_payload),
-                        )
-                    )
-                    notifications_emitted = True
-
-                with server._state_lock:
-                    snapshot = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=snapshot.center,
-                        zoom=snapshot.zoom,
-                        angles=snapshot.angles,
-                        current_step=step_tuple,
-                    )
-
-                server._worker_notifications.push(
-                    WorkerSceneNotification(
-                        kind="dims_update",
-                        step=step_tuple,
-                        meta=meta,
-                    )
-                )
-                notifications_emitted = True
-
-                if notifications_emitted:
-                    loop.call_soon_threadsafe(server._process_worker_notifications)
-
             worker = EGLRendererWorker(
                 width=server.width,
                 height=server.height,
@@ -211,45 +217,42 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             state.worker = worker
 
             worker.bootstrap()
-            worker.set_scene_refresh_callback(_on_scene_refresh)
+            worker.set_scene_refresh_callback(
+                partial(
+                    _handle_scene_refresh,
+                    server,
+                    state,
+                    loop,
+                )
+            )
 
             meta_init = worker.snapshot_dims_metadata()
             assert meta_init, "render worker returned empty dims metadata during init"
-            meta_init = dict(meta_init)
+            meta_init = _normalize_dims_meta(dict(meta_init))
             server._scene.last_dims_payload = dict(meta_init)
 
-            z_index = worker._z_index
-            if z_index is not None:
-                with server._state_lock:
-                    latest = server._scene.latest_state
-                    server._scene.latest_state = ServerSceneState(
-                        center=latest.center,
-                        zoom=latest.zoom,
-                        angles=latest.angles,
-                        current_step=(int(z_index),),
-                    )
-                step_list = [int(z_index)]
-            else:
-                ndim = int(meta_init.get("ndim") or 3)
-                step_list = [int(x) for x in meta_init.get("current_step", [])][:ndim]
-                if not step_list:
-                    step_list = [0 for _ in range(max(1, ndim))]
+            assert worker._last_step is not None, "worker dims step missing during init"
+            init_step = tuple(int(value) for value in worker._last_step)
 
-            meta_init = dict(meta_init)
-            if step_list:
-                meta_init.setdefault("current_step", [int(x) for x in step_list])
+            with server._state_lock:
+                latest = server._scene.latest_state
+                server._scene.latest_state = ServerSceneState(
+                    center=latest.center,
+                    zoom=latest.zoom,
+                    angles=latest.angles,
+                    current_step=init_step,
+                )
+
+            state.scene_seq = int(state.scene_seq) + 1
             server._worker_notifications.push(
                 WorkerSceneNotification(
                     kind="dims_update",
-                    step=tuple(int(x) for x in step_list),
+                    seq=state.scene_seq,
+                    step=init_step,
                     meta=meta_init,
                 )
             )
             loop.call_soon_threadsafe(server._process_worker_notifications)
-            if server._log_dims_info:
-                logger.info("init: state.update dims step=%s", step_list)
-            else:
-                logger.debug("init: state.update dims step=%s", step_list)
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
@@ -382,3 +385,24 @@ def stop_worker(state: WorkerLifecycleState) -> None:
         thread.join(timeout=3.0)
     state.thread = None
     state.worker = None
+def _normalize_dims_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, value in meta.items():
+        normalized[key] = value
+
+    if "sizes" in normalized:
+        normalized["sizes"] = [int(v) for v in normalized["sizes"]]
+
+    if "range" in normalized:
+        ranges: list[list[int]] = []
+        for bounds in normalized["range"]:
+            ranges.append([int(bounds[0]), int(bounds[1])])
+        normalized["range"] = ranges
+
+    if "order" in normalized:
+        normalized["order"] = [int(v) for v in normalized["order"]]
+
+    if "displayed" in normalized:
+        normalized["displayed"] = [int(v) for v in normalized["displayed"]]
+
+    return normalized

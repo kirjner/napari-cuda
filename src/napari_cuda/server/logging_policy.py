@@ -56,7 +56,6 @@ class WorkerDebug:
     roi_edge_threshold: int = 4
     roi_align_chunks: bool = False
     roi_ensure_contains_viewport: bool = True
-    auto_reset_on_black: bool = True
     force_tight_pitch: bool = False
     layer_interpolation: str = "bilinear"
 
@@ -226,8 +225,6 @@ def load_debug_policy(env: Optional[Mapping[str, str]] = None) -> DebugPolicy:
             worker_kwargs["lock_level"] = int(worker_cfg["lock_level"]) if worker_cfg["lock_level"] is not None else None
         if "roi_edge_threshold" in worker_cfg:
             worker_kwargs["roi_edge_threshold"] = max(0, _coerce_int(worker_cfg["roi_edge_threshold"], worker_defaults.roi_edge_threshold))
-        if "auto_reset_on_black" in worker_cfg:
-            worker_kwargs["auto_reset_on_black"] = _coerce_bool(worker_cfg["auto_reset_on_black"], worker_defaults.auto_reset_on_black)
         if "force_tight_pitch" in worker_cfg:
             worker_kwargs["force_tight_pitch"] = _coerce_bool(worker_cfg["force_tight_pitch"], worker_defaults.force_tight_pitch)
         if "layer_interpolation" in worker_cfg:

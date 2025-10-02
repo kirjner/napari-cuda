@@ -73,7 +73,8 @@ def test_zarr_scene_source_multiscale(tmp_path):
     assert len(initial) == 3
     assert 0 <= initial[0] < 2
 
-    source.set_current_level(1)
+    step = source.initial_step(level=1)
+    source.set_current_slice(step, 1)
     assert source.current_level == 1
     assert source.get_level().shape == (2, 2, 3)
 

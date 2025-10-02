@@ -13,6 +13,7 @@ class WorkerSceneNotification:
     """Notification emitted by the render worker to the control loop."""
 
     kind: Literal["dims_update", "scene_level"]
+    seq: int
     step: Optional[tuple[int, ...]] = None
     level: Optional[Mapping[str, object]] = None
     meta: Optional[Mapping[str, object]] = None

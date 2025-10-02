@@ -175,12 +175,12 @@ class ZarrSceneSource:
         with self._lock:
             return tuple(self._current_step) if self._current_step is not None else None
 
-    def set_current_level(
+    def set_current_slice(
         self,
-        index: int,
-        step: Optional[Sequence[int]] = None,
+        step: Sequence[int],
+        level: int,
     ) -> Tuple[int, ...]:
-        lvl = self._validate_level(index)
+        lvl = self._validate_level(level)
         clamped = self.initial_step(level=lvl, step=step)
         with self._lock:
             self._current_level = lvl

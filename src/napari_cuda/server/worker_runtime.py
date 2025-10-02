@@ -28,41 +28,31 @@ logger = logging.getLogger(__name__)
 def ensure_scene_source(worker) -> ZarrSceneSource:
     """Return a configured ``ZarrSceneSource`` and synchronise worker metadata."""
 
-    zarr_path = getattr(worker, "_zarr_path", None)
-    assert zarr_path, "No OME-Zarr path configured for scene source"
+    assert worker._zarr_path, "No OME-Zarr path configured for scene source"
 
-    source = getattr(worker, "_scene_source", None)
+    source = worker._scene_source
     if source is None:
-        create_scene_source = getattr(worker, "_create_scene_source", None)
-        assert callable(create_scene_source), "Worker must provide _create_scene_source()"
-        created = create_scene_source()
-        assert created is not None, "Failed to create ZarrSceneSource"
-        source = created
-        worker._scene_source = source  # type: ignore[attr-defined]
+        source = worker._create_scene_source()
+        assert source is not None, "Failed to create ZarrSceneSource"
+        worker._scene_source = source
 
-    target = source.current_level
-    zarr_level = getattr(worker, "_zarr_level", None)
-    if zarr_level:
-        target = source.level_index_for_path(zarr_level)
+    target_level = source.current_level
+    if worker._zarr_level:
+        target_level = source.level_index_for_path(worker._zarr_level)
 
-    if getattr(worker, "_log_layer_debug", False):
+    if worker._log_layer_debug:
         current = int(source.current_level)
-        key = (current, str(zarr_level) if zarr_level else None)
-        last_key = getattr(worker, "_last_ensure_log", None)
-        if last_key != key:
-            logger.debug(
-                "ensure_source: current=%d target=%d path=%s",
-                current,
-                int(target),
-                zarr_level,
-            )
-            worker._last_ensure_log = key  # type: ignore[attr-defined]
-            worker._last_ensure_log_ts = time.perf_counter()  # type: ignore[attr-defined]
+        key = (current, worker._zarr_level)
+        if getattr(worker, "_last_ensure_log", None) != key:
+            logger.debug("ensure_source: current=%d target=%d path=%s", current, int(target_level), worker._zarr_level)
+            worker._last_ensure_log = key
+            worker._last_ensure_log_ts = time.perf_counter()
 
-    state_lock = getattr(worker, "_state_lock", None)
-    assert state_lock is not None, "Worker must provide _state_lock"
-    with state_lock:
-        step = source.set_current_level(target, step=source.current_step)
+    if worker._last_step is None:
+        worker._last_step = source.initial_step(level=target_level)
+
+    with worker._state_lock:
+        step = source.set_current_slice(worker._last_step, int(target_level))
 
     descriptor = source.level_descriptors[source.current_level]
     worker._active_ms_level = int(source.current_level)  # type: ignore[attr-defined]
@@ -82,34 +72,16 @@ def ensure_scene_source(worker) -> ZarrSceneSource:
 def notify_scene_refresh(worker, step_hint: Optional[Tuple[int, ...]] = None) -> None:
     """Invoke the worker's scene refresh callback with the best step hint."""
 
-    callback = getattr(worker, "_scene_refresh_cb", None)
+    callback = worker._scene_refresh_cb
     if callback is None:
         return
-    assert callable(callback), "Scene refresh callback must be callable"
 
-    hint = step_hint
-    if hint is None:
-        source = getattr(worker, "_scene_source", None)
-        current_step = getattr(source, "current_step", None) if source is not None else None
-        if current_step is not None:
-            hint = tuple(int(x) for x in current_step)
+    if step_hint is not None:
+        callback(step_hint)
+        return
 
-    if hint is None:
-        viewer = getattr(worker, "_viewer", None)
-        dims = getattr(viewer, "dims", None) if viewer is not None else None
-        current_step = getattr(dims, "current_step", None) if dims is not None else None
-        if current_step is not None:
-            hint = tuple(int(x) for x in current_step)
-
-    if hint is None:
-        z_index = getattr(worker, "_z_index", None)
-        if z_index is not None:
-            hint = (int(z_index),)
-
-    if hint is None:
-        callback()
-    else:
-        callback(hint)
+    assert worker._last_step is not None, "Worker missing last_step for scene refresh"
+    callback(worker._last_step)
 
 
 def notify_scene_level(

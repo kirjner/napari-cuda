@@ -83,11 +83,6 @@ class CaptureFacade:
     def orientation_ready(self) -> bool:
         return self.pipeline.orientation_ready
 
-    @property
-    def black_reset_done(self) -> bool:
-        return self.pipeline.black_reset_done
-
-
 @dataclass
 class FrameCapture:
     frame: Any
@@ -97,7 +92,6 @@ class FrameCapture:
     copy_ms: float
     convert_ms: float
     orientation_ready: bool
-    black_reset_done: bool
 
 
 @dataclass
@@ -107,20 +101,18 @@ class EncodedFrame:
     flags: int
     sequence: int
     orientation_ready: bool
-    black_reset_done: bool
 
 
 def capture_frame_for_encoder(
     facade: CaptureFacade,
     *,
-    debug_cb: Optional[Callable[[int, int, int, object], None]] = None,
-    reset_camera: Optional[Callable[[], None]] = None,
+    debug_cb: Optional[Callable[[int, int, int, object], None]] = None
 ) -> FrameCapture:
     t_b0 = time.perf_counter()
     blit_gpu_ns = facade.pipeline.capture_blit_gpu_ns()
     blit_cpu_ms = (time.perf_counter() - t_b0) * 1000.0
     map_ms, copy_ms = facade.pipeline.map_and_copy_to_torch(debug_cb)
-    frame, convert_ms = facade.pipeline.convert_for_encoder(reset_camera=reset_camera)
+    frame, convert_ms = facade.pipeline.convert_for_encoder()
     return FrameCapture(
         frame=frame,
         blit_gpu_ns=blit_gpu_ns,
@@ -129,7 +121,6 @@ def capture_frame_for_encoder(
         copy_ms=copy_ms,
         convert_ms=convert_ms,
         orientation_ready=facade.orientation_ready,
-        black_reset_done=facade.black_reset_done,
     )
 
 
@@ -140,7 +131,6 @@ def encode_frame(
     obtain_encoder: Callable[[], Optional[Any]],
     encoder_lock: Optional[Lock],
     debug_dumper: Optional[Any],
-    reset_camera: Optional[Callable[[], None]] = None,
     wall_time_fn: Callable[[], float] = time.time,
 ) -> EncodedFrame:
     """Render, capture, and encode a frame via the shared helpers."""
@@ -163,7 +153,6 @@ def encode_frame(
     capture_result = capture_frame_for_encoder(
         capture,
         debug_cb=debug_cb,
-        reset_camera=reset_camera,
     )
 
     dst = capture_result.frame
@@ -225,7 +214,6 @@ def encode_frame(
         flags=0,
         sequence=seq,
         orientation_ready=bool(capture_result.orientation_ready),
-        black_reset_done=bool(capture_result.black_reset_done),
     )
 
 

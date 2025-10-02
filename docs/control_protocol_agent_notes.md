@@ -13,15 +13,17 @@ collaborators.
   `notify.*`) with explicit `frame_id`, `intent_id`, and replay tokens. That
   determinism is the backbone for thin clients and agents that need to reason
   about state transitions.
-- **Optimistic updates with deterministic feedback** – Clients issue
-  `state.update` intents, project changes locally, and receive structured
-  `ack.state` responses that confirm or reject the update. This makes
-  latency-sensitive interactions such as panning, zooming, or color tweaks feel
-  instantaneous while still reconciling with the authoritative server view.
-- **Authoritative notify lanes** – After an ack, servers immediately publish
-  `notify.dims`, `notify.camera`, `notify.scene`, or `notify.layers` updates.
-  Agents can consume these streams to maintain an exact replica of the viewer
-  state without scraping UI widgets.
+- **Optimistic intents with worker-confirmed acks** – Clients issue
+  `state.update` intents and may project changes locally, but metadata-impacting
+  scopes (dims, view mode, ROI) only receive
+  `ack.state(status="accepted")` after the render worker applies the change.
+  Pure control-side tweaks (camera pans, debug toggles) continue to ack
+  immediately, keeping the loop snappy without sacrificing correctness.
+- **Authoritative notify lanes** – Worker snapshots drive `notify.dims`,
+  `notify.scene`, and related streams with a monotonically increasing
+  `scene_seq`. Agents can consume these broadcasts to mirror the viewer
+  precisely, confident each payload reflects committed worker state rather than
+  an optimistic echo.
 - **Resume tokens** – `session.welcome` advertises per-topic resume cursors so
   reconnecting clients (automated or human) can request only the missing
   deltas. This keeps bandwidth manageable and preserves context for long-lived

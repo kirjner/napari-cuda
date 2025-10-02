@@ -146,6 +146,7 @@ class ServerSceneData:
     last_scene_spec: Optional[Dict[str, Any]] = None
     pending_scene_spec: Optional[Dict[str, Any]] = None
     last_dims_payload: Optional[Dict[str, Any]] = None
+    last_scene_seq: int = 0
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
 

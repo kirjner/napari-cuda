@@ -24,7 +24,6 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
     viewer_model = worker._viewer
     if viewer_model is not None:
         viewer_dims = viewer_model.dims
-        viewer_dims.ndisplay = target
 
     if worker.use_volume:
         worker._last_roi = None
@@ -58,6 +57,10 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
         worker._level_policy_refresh_needed = False
     worker._mark_render_tick_needed()
 
+    # Immediately flush updated dims metadata so clients receive the new mode
+    # without waiting for the next render tick side effect.
+    worker._notify_scene_refresh()
+
 
 def _reset_volume_step(worker, source, level: int) -> None:
     descriptors = getattr(source, "level_descriptors", None)
@@ -84,7 +87,7 @@ def _reset_volume_step(worker, source, level: int) -> None:
     state_lock = getattr(worker, "_state_lock", None)
     assert state_lock is not None, "Worker must expose _state_lock"
     with state_lock:
-        source.set_current_level(int(level), step=tuple(clamped_step))
+        source.set_current_slice(tuple(clamped_step), int(level))
     worker._z_index = 0
     worker._last_step = tuple(clamped_step)
 
@@ -130,34 +133,33 @@ def _configure_camera_for_mode(worker) -> None:
 
 def _update_viewer_dims(worker, viewer, target: int) -> None:
     viewer_dims = viewer.dims
-    viewer_dims.ndisplay = target
     layer = worker._napari_layer
-    layer_ndim = int(getattr(layer, "ndim", 0)) if layer is not None else 0
-    data = getattr(layer, "data", None) if layer is not None else None
-    data_ndim = int(getattr(data, "ndim", 0)) if data is not None else 0
-    dims_attr = int(getattr(viewer_dims, "ndim", 0))
-    ndim = max(layer_ndim, data_ndim, dims_attr, target)
-    viewer_dims.ndim = ndim
+    layer_ndim = int(layer.ndim) if layer is not None else 0
+    data = layer.data if layer is not None else None
+    data_ndim = int(data.ndim) if data is not None else 0
+    current_ndim = int(viewer_dims.ndim)
+    ndim = max(layer_ndim, data_ndim, current_ndim, target)
+    if current_ndim != ndim:
+        viewer_dims.ndim = ndim
     displayed_count = min(target, ndim)
     displayed = tuple(range(max(0, ndim - displayed_count), ndim))
-    viewer_dims.displayed = displayed
 
     # Keep the displayed axes as the tail of the order tuple so napari marks
     # them as active. This mirrors the old `displayed` setter without relying on it.
-    order = list(getattr(viewer_dims, "order", ()) or ())
+    order = list(viewer_dims.order or ())
     if len(order) != ndim or any(ax >= ndim for ax in order):
         order = list(range(ndim))
     else:
         order = [ax for ax in order if ax not in displayed]
         order.extend(displayed)
     viewer_dims.order = tuple(order)
-    steps = list(getattr(viewer_dims, "current_step", ()) or ())
+    steps = list(viewer_dims.current_step or ())
     if len(steps) < ndim:
         steps.extend([0] * (ndim - len(steps)))
     elif len(steps) > ndim:
         steps = steps[:ndim]
     if target == 3 and steps and worker._z_index is not None:
-        axis_labels = list(getattr(viewer_dims, "axis_labels", []) or [])
+        axis_labels = list(viewer_dims.axis_labels or [])
         if "z" in axis_labels:
             anchor_axis = axis_labels.index("z")
         elif displayed:
@@ -169,7 +171,7 @@ def _update_viewer_dims(worker, viewer, target: int) -> None:
 
     shape = worker._volume_shape_for_view()
     if shape is not None and target == 3:
-        axes = tuple(getattr(viewer_dims, "axis_labels", []) or [])
+        axes = tuple(viewer_dims.axis_labels or [])
         for axis_idx in range(min(len(steps), len(shape))):
             size = int(max(1, shape[axis_idx]))
             steps[axis_idx] = int(max(0, min(int(steps[axis_idx]), size - 1)))
@@ -179,6 +181,7 @@ def _update_viewer_dims(worker, viewer, target: int) -> None:
                 idx = axis_map.get(label_key)
                 if idx is not None and idx < len(steps):
                     steps[idx] = int(max(0, min(int(steps[idx]), int(dim_size) - 1)))
+    viewer_dims.ndisplay = target
     viewer_dims.current_step = tuple(int(s) for s in steps)
 
 

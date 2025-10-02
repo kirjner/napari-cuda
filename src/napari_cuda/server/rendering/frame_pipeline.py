@@ -36,8 +36,6 @@ class FramePipeline:
         self._width = int(width)
         self._height = int(height)
         self._debug = debug
-        self._auto_reset_on_black: bool = True
-        self._black_reset_done: bool = False
         self._orientation_ready: bool = False
         self._enc_input_format: str = "YUV444"
         self._logged_swizzle = False
@@ -48,9 +46,6 @@ class FramePipeline:
 
     def set_debug(self, debug: Optional[object]) -> None:
         self._debug = debug
-
-    def configure_auto_reset(self, enabled: bool) -> None:
-        self._auto_reset_on_black = bool(enabled)
 
     def set_raw_dump_budget(self, budget: int) -> None:
         self._raw_dump_budget = max(0, int(budget))
@@ -73,10 +68,6 @@ class FramePipeline:
     def orientation_ready(self) -> bool:
         return self._orientation_ready
 
-    @property
-    def black_reset_done(self) -> bool:
-        return self._black_reset_done
-
     # --- Capture helpers ----------------------------------------------------
 
     def capture_blit_gpu_ns(self) -> Optional[int]:
@@ -87,7 +78,7 @@ class FramePipeline:
 
     # --- Conversion ---------------------------------------------------------
 
-    def convert_for_encoder(self, *, reset_camera: Optional[Callable[[], None]] = None) -> tuple[torch.Tensor, float]:
+    def convert_for_encoder(self) -> tuple[torch.Tensor, float]:
         """Convert the CUDA frame to the encoder's expected input format."""
         t_c0 = time.perf_counter()
         frame = self._cuda.torch_frame
@@ -124,14 +115,6 @@ class FramePipeline:
                         cbm,
                         crm,
                     )
-                    if self._auto_reset_on_black and not self._black_reset_done and (rm + gm + bm) < 1e-4:
-                        logger.info("Detected black initial frame; applying one-shot camera reset")
-                        if reset_camera is not None:
-                            try:
-                                reset_camera()
-                            except Exception:  # pragma: no cover - debug path
-                                logger.debug("auto-reset-on-black failed", exc_info=True)
-                        self._black_reset_done = True
                     if (rm + gm + bm) >= 1e-4:
                         self._orientation_ready = True
                 except Exception as exc:  # pragma: no cover - statistics only

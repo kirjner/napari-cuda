@@ -89,6 +89,19 @@ class SceneStateApplier:
         if ctx.use_volume or current_step is None:
             return SceneStateApplyResult()
 
+        src_step = None
+        try:
+            if ctx.scene_source is not None:
+                src_step = tuple(int(x) for x in (ctx.scene_source.current_step or ()))
+        except Exception:
+            src_step = None
+
+        viewer_before = None
+        try:
+            viewer_before = tuple(int(x) for x in (ctx.viewer.dims.current_step or ()))  # type: ignore[attr-defined]
+        except Exception:
+            viewer_before = None
+
         steps = tuple(int(x) for x in current_step)
 
         viewer = ctx.viewer
@@ -106,7 +119,7 @@ class SceneStateApplier:
 
         if z_new is None or (ctx.z_index is not None and int(z_new) == int(ctx.z_index)):
             ctx.mark_render_tick_needed()
-            return SceneStateApplyResult(last_step=steps)
+            return SceneStateApplyResult()
 
         # Update the source step preserving other indices
         axes = source.axes
@@ -117,7 +130,7 @@ class SceneStateApplier:
             base = base + [0] * (len(lvl_shape) - len(base))
         base[zi] = int(z_new)
         with ctx.state_lock:
-            _ = source.set_current_level(ctx.active_ms_level, step=tuple(int(x) for x in base))
+            _ = source.set_current_slice(tuple(int(x) for x in base), ctx.active_ms_level)
 
         # Load slab and update layer/visual
         slab = ctx.load_slice(source, ctx.active_ms_level, int(z_new))

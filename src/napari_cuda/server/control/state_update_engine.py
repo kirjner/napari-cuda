@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any, Mapping, Optional, Sequence
+import logging
 import time
 
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
@@ -47,6 +48,11 @@ def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> 
 
     with lock:
         scene.latest_state = replace(scene.latest_state, **updates)
+        if logging.getLogger(__name__).isEnabledFor(logging.INFO) and "current_step" in updates:
+            logging.getLogger(__name__).info(
+                "latest_state updated: current_step=%s",
+                updates["current_step"],
+            )
         return scene.latest_state
 
 

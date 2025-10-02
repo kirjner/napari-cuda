@@ -120,10 +120,10 @@ class _FakeWorkerBase:
         'axis_labels': ['y', 'x'],
         'order': [0, 1],
         'range': [[0, 9], [0, 9]],
-        'current_step': [0, 0],
         'ndisplay': 2,
         'mode': 'plane',
     }
+    default_step = (0, 0)
 
     def __init__(self, *, scene_refresh_cb, **kwargs):
         self._scene_refresh_cb = scene_refresh_cb
@@ -134,11 +134,7 @@ class _FakeWorkerBase:
         self.frames: list[bytes] = []
         self._bootstrapped = True
         self._bootstrapping = False
-        current = self._meta.get('current_step')
-        if isinstance(current, list):
-            self._last_step = tuple(int(value) for value in current)
-        else:
-            self._last_step = None
+        self._last_step = tuple(int(value) for value in self.default_step)
 
     def snapshot_dims_metadata(self) -> dict[str, object]:
         return dict(self._meta)
@@ -220,7 +216,7 @@ def test_snapshot_dims_metadata_prefers_scene_shape():
     assert meta["axis_labels"] == ["z", "y", "x"]
     assert meta["sizes"] == [8, 256, 256]
     assert meta["range"] == [[0, 7], [0, 255], [0, 255]]
-    assert meta["current_step"] == [5, 2, 1]
+    assert "current_step" not in meta
     assert meta["order"] == [0, 1, 2]
 
 
@@ -254,7 +250,7 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     start_worker(server, loop, state)
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
-    worker._meta["current_step"] = [4, 5]  # type: ignore[attr-defined]
+    worker._last_step = (4, 5)
 
     _run_loop_once(loop)
     server.processed_notifications.clear()
@@ -266,7 +262,7 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     note = server.processed_notifications[-1]
     assert note.kind == "dims_update"
     assert note.step == (4, 5)
-    assert note.meta["current_step"] == [4, 5]
+    assert "current_step" not in note.meta
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -291,7 +287,7 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     start_worker(server, loop, state)
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
-    worker._meta["current_step"] = [7]  # type: ignore[attr-defined]
+    worker._last_step = (7,)
 
     _run_loop_once(loop)
     server.processed_notifications.clear()
@@ -303,7 +299,7 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     note = server.processed_notifications[-1]
     assert note.kind == "dims_update"
     assert note.step == (7,)
-    assert note.meta["current_step"] == [7]
+    assert "current_step" not in note.meta
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -369,6 +365,7 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     worker._meta['sizes'][0] = 8  # type: ignore[index]
     worker._meta['range'][0] = [0, 7]  # type: ignore[index]
     worker._meta['current_step'][0] = 60  # type: ignore[index]
+    worker._last_step = tuple(int(x) for x in worker._meta['current_step'])
     worker._scene_refresh_cb(payload)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 

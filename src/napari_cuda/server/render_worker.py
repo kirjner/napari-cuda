@@ -142,7 +142,6 @@ class EGLRendererWorker:
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
-        self._configure_auto_reset()
         self._configure_budget_limits()
 
         if policy_name:
@@ -462,11 +461,6 @@ class EGLRendererWorker:
         self._idr_on_z = False
         self._last_roi: Optional[tuple[int, SliceROI]] = None
 
-    def _configure_auto_reset(self) -> None:
-        self._auto_reset_on_black = bool(self._debug_policy.worker.auto_reset_on_black)
-        self._capture.pipeline.configure_auto_reset(self._auto_reset_on_black)
-        self._black_reset_done = False
-
     def _configure_budget_limits(self) -> None:
         cfg = self._ctx.cfg
         self._slice_max_bytes = int(max(0, getattr(cfg, 'max_slice_bytes', 0)))
@@ -493,24 +487,37 @@ class EGLRendererWorker:
         if axes_sequence:
             meta["axes"] = list(axes_sequence)
 
-        last_step = self._last_step
-        if last_step:
-            raw_step = tuple(int(value) for value in last_step)
+        if self._zarr_shape:
+            level_shape = tuple(int(size) for size in self._zarr_shape)
+        elif source is not None and source.level_descriptors:
+            idx = int(self._active_ms_level)
+            descriptors = source.level_descriptors
+            if idx < 0 or idx >= len(descriptors):
+                idx = 0
+            level_shape = tuple(int(size) for size in descriptors[idx].shape)
         else:
-            raw_step = tuple(int(value) for value in dims.current_step)
-        ndim = int(dims.ndim) if dims.ndim else 0
-        if ndim <= 0 and axes_sequence:
-            ndim = len(axes_sequence)
-        if raw_step:
-            ndim = max(ndim, len(raw_step))
-        if ndim <= 0:
-            ndim = 1
-        meta["ndim"] = ndim
+            level_shape = ()
 
-        step_list = list(raw_step[:ndim])
-        if len(step_list) < ndim:
-            step_list.extend([0] * (ndim - len(step_list)))
-        meta["current_step"] = step_list
+        # napari's ViewerModel may report transient steps during bootstrap/level flips;
+        # rely on the worker's tracked step instead so metadata reflects what we applied.
+        last_step = self._last_step
+        raw_step = tuple(int(value) for value in last_step) if last_step else ()
+
+        ndim_candidates: list[int] = []
+        if dims.ndim:
+            ndim_candidates.append(int(dims.ndim))
+        if axes_sequence:
+            ndim_candidates.append(len(axes_sequence))
+        if level_shape:
+            ndim_candidates.append(len(level_shape))
+        if raw_step:
+            ndim_candidates.append(len(raw_step))
+        dims_nsteps = getattr(dims, "nsteps", None)
+        if isinstance(dims_nsteps, (list, tuple)) and dims_nsteps:
+            ndim_candidates.append(len(dims_nsteps))
+
+        ndim = max(ndim_candidates) if ndim_candidates else 1
+        meta["ndim"] = ndim
 
         ndisplay = int(dims.ndisplay) if dims.ndisplay else 2
         meta["ndisplay"] = ndisplay
@@ -531,17 +538,6 @@ class EGLRendererWorker:
 
         if dims.displayed:
             meta["displayed"] = [int(value) for value in dims.displayed]
-
-        if self._zarr_shape:
-            level_shape = tuple(int(size) for size in self._zarr_shape)
-        elif source is not None and source.level_descriptors:
-            idx = int(self._active_ms_level)
-            descriptors = source.level_descriptors
-            if idx < 0 or idx >= len(descriptors):
-                idx = 0
-            level_shape = tuple(int(size) for size in descriptors[idx].shape)
-        else:
-            level_shape = ()
 
         if level_shape:
             sizes = [level_shape[idx] if idx < len(level_shape) else 1 for idx in range(ndim)]
@@ -571,6 +567,14 @@ class EGLRendererWorker:
         self._zarr_axes = applied.axes
         self._zarr_dtype = applied.dtype
         self._zarr_clim = applied.contrast
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "worker level applied: level=%s step=%s z=%s shape=%s",
+                applied.level,
+                applied.step,
+                applied.z_index,
+                descriptor.shape,
+            )
 
     def set_policy(self, name: str) -> None:
         new_name = str(name or '').strip().lower()
@@ -1010,6 +1014,7 @@ class EGLRendererWorker:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
         if drain_res.last_step is not None:
             self._last_step = tuple(int(x) for x in drain_res.last_step)
+            self._notify_scene_refresh()
 
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
@@ -1028,26 +1033,15 @@ class EGLRendererWorker:
 
         Flags bit 0x01 indicates keyframe (IDR/CRA).
         """
-        reset_cb: Optional[Callable[[], None]] = None
-        if self._auto_reset_on_black and self.view is not None and self.view.camera is not None:
-            def _reset_camera() -> None:
-                cam = self.view.camera
-                assert cam is not None
-                self._apply_camera_reset(cam)
-
-            reset_cb = _reset_camera
-
         encoded = encode_frame(
             capture=self._capture,
             render_frame=self.render_tick,
             obtain_encoder=lambda: self._encoder,
             encoder_lock=self._enc_lock,
             debug_dumper=self._debug,
-            reset_camera=reset_cb,
         )
 
         self._orientation_ready = encoded.orientation_ready
-        self._black_reset_done = encoded.black_reset_done
 
         return encoded.timings, encoded.packet, encoded.flags, encoded.sequence
 

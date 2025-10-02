@@ -11,7 +11,7 @@ import uuid
 from contextlib import suppress
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Callable
 
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
@@ -122,6 +122,8 @@ class CommandRejected(RuntimeError):
         self.message = str(message)
         self.details = dict(details) if details else None
         self.idempotency_key = idempotency_key
+
+
 _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
@@ -605,11 +607,7 @@ async def _broadcast_worker_dims(
     current_step: Sequence[int],
     meta: Mapping[str, Any],
 ) -> None:
-    try:
-        if hasattr(server, "_update_scene_manager"):
-            server._update_scene_manager()
-    except Exception:
-        logger.debug("worker dims: scene manager sync failed", exc_info=True)
+    server._update_scene_manager()
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -1294,15 +1292,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.error", "failed to apply ndisplay")
             return True
 
-        result = _baseline_state_result(
-            server,
-            scope='view',
-            target=target,
-            key='ndisplay',
-            value=int(ndisplay),
-            intent_id=intent_id,
-        )
-
         await _send_state_ack(
             server,
             ws,
@@ -1310,21 +1299,16 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             intent_id=intent_id,
             in_reply_to=frame_id,
             status="accepted",
-            applied_value=result.value,
+            applied_value=int(ndisplay),
         )
 
-        logger.debug(
-            "state.update view intent=%s frame=%s ndisplay=%s server_seq=%s",
-            intent_id,
-            frame_id,
-            result.value,
-            result.server_seq,
-        )
-
-        server._schedule_coro(
-            _broadcast_state_update(server, result),
-            'state-view-ndisplay',
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "state.update view intent=%s frame=%s ndisplay=%s accepted",
+                intent_id,
+                frame_id,
+                int(ndisplay),
+            )
         return True
 
     # ----- camera scope -------------------------------------------------
@@ -1962,6 +1946,16 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.invalid", "dims update invalid", details={"scope": scope, "key": key, "target": target})
             return True
 
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "state.update dims applied: axis=%s key=%s step_delta=%s set_value=%s current_step=%s",
+                target,
+                key,
+                step_delta,
+                set_value,
+                result.current_step,
+            )
+
         await _send_state_ack(
             server,
             ws,
@@ -2362,27 +2356,29 @@ def process_worker_notifications(
     multiscale_state = scene_data.multiscale_state
 
     for note in notifications:
+        if note.seq <= scene_data.last_scene_seq:
+            continue
+
         if note.kind == "dims_update":
             assert note.meta is not None, "worker dims notification missing metadata"
             meta = dict(note.meta)
 
+            assert note.step is not None, "worker dims notification missing step"
+            step_tuple = tuple(int(value) for value in note.step)
+
             ndim = _ndim_from_meta(meta)
-
-            raw_step = meta.get("current_step")
-            assert isinstance(raw_step, Sequence) and raw_step, "worker dims metadata missing current_step"
-            step_tuple = tuple(int(x) for x in raw_step)
-
-            if note.step is not None:
-                note_step = tuple(int(x) for x in note.step)
-                assert note_step == step_tuple, "worker dims step mismatch"
-
             assert len(step_tuple) == ndim, "worker dims step length mismatch"
 
-            assert "sizes" in meta, "worker dims metadata missing sizes"
-            meta["sizes"] = [int(value) for value in meta["sizes"]]
+            sizes_raw = meta["sizes"]
+            meta["sizes"] = [int(value) for value in sizes_raw]
 
-            assert "range" in meta, "worker dims metadata missing range"
-            meta["range"] = [[int(bounds[0]), int(bounds[1])] for bounds in meta["range"]]
+            ranges_raw = meta["range"]
+            coerced_ranges: list[list[int]] = []
+            for bounds in ranges_raw:
+                low = int(bounds[0])
+                high = int(bounds[1])
+                coerced_ranges.append([low, high])
+            meta["range"] = coerced_ranges
 
             pending_level = None
             if "pending_worker_level" in multiscale_state:
@@ -2403,6 +2399,7 @@ def process_worker_notifications(
             with server._state_lock:
                 latest = server._scene.latest_state
                 server._scene.latest_state = replace(latest, current_step=step_tuple)
+            scene_data.last_dims_payload = dict(meta)
 
             server._schedule_coro(
                 _broadcast_worker_dims(
@@ -2412,12 +2409,9 @@ def process_worker_notifications(
                 ),
                 "dims_update-worker",
             )
+            scene_data.last_scene_seq = note.seq
         elif note.kind == "scene_level" and note.level is not None:
-            try:
-                if hasattr(server, "_update_scene_manager"):
-                    server._update_scene_manager()
-            except Exception:
-                logger.debug("scene level update: scene manager sync failed", exc_info=True)
+            server._update_scene_manager()
             level_payload = note.level
             assert type(level_payload) is dict, "scene level payload must be a dict"
             normalized_level = _normalize_scene_level_payload(level_payload)
@@ -2436,6 +2430,7 @@ def process_worker_notifications(
                 ),
                 "scene_level-worker",
             )
+            scene_data.last_scene_seq = note.seq
 
     if deferred:
         for note in deferred:

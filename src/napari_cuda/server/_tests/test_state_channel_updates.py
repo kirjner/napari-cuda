@@ -134,6 +134,11 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     scheduled: list[Coroutine[Any, Any, None]] = []
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)
 
+    def _update_scene_manager() -> None:
+        return
+
+    server._update_scene_manager = _update_scene_manager
+
     server._ndisplay_calls: list[int] = []
 
     async def _handle_set_ndisplay(ndisplay: int) -> None:
@@ -305,7 +310,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
     assert notify_payload["source"] == "state.update"
 
 
-def test_view_ndisplay_update_defers_to_worker() -> None:
+def test_view_ndisplay_update_ack_is_immediate() -> None:
     server, scheduled, captured = _make_server()
 
     captured.clear()
@@ -329,8 +334,8 @@ def test_view_ndisplay_update_defers_to_worker() -> None:
     assert server._scene.last_dims_payload["mode"] == 'plane'
 
     acks = _frames_of_type(captured, "ack.state")
-    assert len(acks) == 1
-    ack_payload = acks[0]["payload"]
+    assert acks, "expected immediate ack"
+    ack_payload = acks[-1]["payload"]
     assert ack_payload == {
         "intent_id": "view-intent",
         "in_reply_to": "state-view-1",
@@ -357,6 +362,7 @@ def test_view_ndisplay_update_defers_to_worker() -> None:
         [
             WorkerSceneNotification(
                 kind="dims_update",
+                seq=1,
                 step=(0, 0, 0),
                 meta=meta,
             )
@@ -400,8 +406,8 @@ def test_worker_scene_level_dims_metadata_enforced() -> None:
     }
 
     notifications = [
-        WorkerSceneNotification(kind="scene_level", level=level_payload),
-        WorkerSceneNotification(kind="dims_update", step=(0, 0, 0), meta=meta),
+        WorkerSceneNotification(kind="scene_level", seq=2, level=level_payload),
+        WorkerSceneNotification(kind="dims_update", seq=3, step=(0, 0, 0), meta=meta),
     ]
 
     state_channel_handler.process_worker_notifications(server, notifications)
@@ -446,8 +452,8 @@ def test_worker_scene_level_dims_metadata_mismatch_raises() -> None:
     }
 
     notifications = [
-        WorkerSceneNotification(kind="scene_level", level=level_payload),
-        WorkerSceneNotification(kind="dims_update", step=(0, 0, 0), meta=bad_meta),
+        WorkerSceneNotification(kind="scene_level", seq=4, level=level_payload),
+        WorkerSceneNotification(kind="dims_update", seq=5, step=(0, 0, 0), meta=bad_meta),
     ]
 
     with pytest.raises(AssertionError):
