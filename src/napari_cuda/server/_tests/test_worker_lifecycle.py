@@ -362,6 +362,7 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     }
     worker._meta['sizes'][0] = 8  # type: ignore[index]
     worker._meta['range'][0] = [0, 7]  # type: ignore[index]
+    worker._meta['current_step'][0] = 60  # type: ignore[index]
     worker._scene_refresh_cb(payload)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
@@ -369,6 +370,11 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     assert cached['sizes'][0] == worker._meta['sizes'][0]
     assert cached['range'][0] == worker._meta['range'][0]
     assert cached['axes'] == worker._meta['axes']
+
+    assert server.processed_notifications
+    dims_note = server.processed_notifications[-1]
+    assert dims_note.kind == "dims_update"
+    assert dims_note.step[0] == worker._meta['current_step'][0]
 
     stop_worker(state)
     _run_loop_once(loop)

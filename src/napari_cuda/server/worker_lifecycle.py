@@ -131,24 +131,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
     def worker_loop() -> None:
         try:
-            def _normalize_step_from_meta(meta: Mapping[str, object]) -> tuple[int, ...]:
-                ndim = 0
-                try:
-                    ndim = int(meta.get("ndim") or 0)
-                except Exception:
-                    ndim = 0
-                if ndim <= 0:
-                    order = meta.get("order")
-                    if isinstance(order, Sequence):
-                        ndim = len(order)
-                if ndim <= 0:
-                    axes = meta.get("axes")
-                    if isinstance(axes, Sequence):
-                        ndim = len(tuple(axes))
-                if ndim <= 0:
-                    ndim = 1
-                return tuple(0 for _ in range(int(ndim)))
-
             def _on_scene_refresh(step: object = None) -> None:
                 level_payload: Optional[Mapping[str, object]] = None
                 step_hint: Optional[Sequence[int]] = None
@@ -192,13 +174,21 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 if step_hint is not None:
                     chosen = tuple(int(x) for x in step_hint)
                 else:
-                    with server._state_lock:
-                        snapshot = server._scene.latest_state
-                        current = snapshot.current_step if snapshot.current_step is not None else ()
-                    if current:
-                        chosen = tuple(int(x) for x in current)
+                    meta_step = meta["current_step"] if "current_step" in meta else ()
+                    if meta_step:
+                        chosen = tuple(int(x) for x in meta_step)
                     else:
-                        chosen = _normalize_step_from_meta(meta)
+                        with server._state_lock:
+                            snapshot = server._scene.latest_state
+                            current = snapshot.current_step if snapshot.current_step is not None else ()
+                        if current:
+                            chosen = tuple(int(x) for x in current)
+                        else:
+                            sizes_meta = meta["sizes"] if "sizes" in meta else ()
+                            ndim_value = len(sizes_meta) if sizes_meta else int(meta.get("ndim") or 0)
+                            if ndim_value <= 0:
+                                ndim_value = 1
+                            chosen = tuple(0 for _ in range(int(ndim_value)))
 
                 with server._state_lock:
                     snapshot = server._scene.latest_state
@@ -209,7 +199,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         current_step=chosen,
                     )
 
-                meta.setdefault("current_step", [int(x) for x in chosen])
+                meta["current_step"] = [int(x) for x in chosen]
 
                 server._worker_notifications.push(
                     WorkerSceneNotification(
