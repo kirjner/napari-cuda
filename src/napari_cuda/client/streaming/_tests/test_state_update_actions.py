@@ -203,6 +203,101 @@ def test_handle_dims_update_modes_volume_flag() -> None:
     assert presenter.calls[-1]['mode'] == 'volume'
 
 
+def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
+    state, loop_state, store, _dispatch = _make_state()
+    viewer = ViewerStub()
+    presenter = PresenterStub()
+
+    state.dims_meta.update(
+        {
+            'ndim': 3,
+            'axis_labels': ['z', 'y', 'x'],
+            'order': [0, 1, 2],
+            'range': [[0, 5], [0, 5], [0, 5]],
+            'sizes': [6, 6, 6],
+        }
+    )
+
+    frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=3, mode='volume')
+
+    control_actions.handle_dims_update(
+        state,
+        loop_state,
+        frame,
+        presenter=presenter,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        notify_first_dims_ready=lambda: None,
+        log_dims_info=False,
+        state_store=store,
+    )
+
+    assert viewer.calls, "viewer should receive dims update"
+    payload = viewer.calls[-1]
+    assert payload['ndisplay'] == 3
+    assert payload['current_step'] == (1, 2, 3)
+    assert payload['axis_labels'] == ['z', 'y', 'x']
+
+    assert presenter.calls[-1]['ndisplay'] == 3
+    assert loop_state.last_dims_payload['ndisplay'] == 3
+    assert loop_state.last_dims_payload['mode'] == 'volume'
+
+
+def test_scene_level_then_dims_updates_slider_bounds() -> None:
+    state, loop_state, store, _dispatch = _make_state()
+    viewer = ViewerStub()
+    presenter = PresenterStub()
+
+    state.dims_meta.update(
+        {
+            'ndim': 3,
+            'axis_labels': ['z', 'y', 'x'],
+            'order': [0, 1, 2],
+            'sizes': [512, 256, 64],
+            'range': [[0, 511], [0, 255], [0, 63]],
+        }
+    )
+
+    policies = {
+        'multiscale': {
+            'current_level': 1,
+            'active_level': 1,
+            'levels': [
+                {'index': 0, 'shape': [512, 256, 64]},
+                {'index': 1, 'shape': [256, 128, 32]},
+            ],
+        }
+    }
+
+    control_actions.apply_scene_policies(state, policies)
+
+    frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=2)
+
+    control_actions.handle_dims_update(
+        state,
+        loop_state,
+        frame,
+        presenter=presenter,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        notify_first_dims_ready=lambda: None,
+        log_dims_info=False,
+        state_store=store,
+    )
+
+    sizes = state.dims_meta['sizes']
+    assert sizes == [256, 128, 32]
+    dims_range = state.dims_meta['range']
+    assert dims_range and dims_range[2][1] == 31
+
+    assert viewer.calls, 'viewer should receive updated dims metadata'
+    payload = viewer.calls[-1]
+    assert payload['sizes'][2] == 32
+    assert payload['dims_range'][2][1] == 31
+
+    assert loop_state.last_dims_payload['sizes'][2] == 32
+
+
 def test_hud_snapshot_carries_volume_state() -> None:
     state, _, store, _dispatch = _make_state()
     state.dims_meta['ndisplay'] = 3

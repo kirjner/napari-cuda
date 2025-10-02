@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, Coroutine, List
 
 import time
+import pytest
 
 from napari_cuda.protocol import (
     PROTO_VERSION,
@@ -30,6 +31,7 @@ from napari_cuda.server.layer_manager import ViewerSceneManager
 from napari_cuda.server.render_mailbox import RenderDelta
 from napari_cuda.server.server_scene import create_server_scene_data
 from napari_cuda.server.control.state_update_engine import apply_layer_state_update
+from napari_cuda.server.worker_notifications import WorkerSceneNotification
 
 
 class _CaptureWorker:
@@ -303,8 +305,10 @@ def test_dims_update_emits_ack_and_notify() -> None:
     assert notify_payload["source"] == "state.update"
 
 
-def test_view_ndisplay_update() -> None:
+def test_view_ndisplay_update_defers_to_worker() -> None:
     server, scheduled, captured = _make_server()
+
+    captured.clear()
 
     payload = {
         "scope": "view",
@@ -321,8 +325,8 @@ def test_view_ndisplay_update() -> None:
     assert server._ndisplay_calls == [3]
     assert server.use_volume is True
     assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload["ndisplay"] == 3
-    assert server._scene.last_dims_payload["mode"] == 'volume'
+    assert server._scene.last_dims_payload["ndisplay"] == 2
+    assert server._scene.last_dims_payload["mode"] == 'plane'
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -334,11 +338,124 @@ def test_view_ndisplay_update() -> None:
         "applied_value": 3,
     }
 
+    assert not _frames_of_type(captured, "notify.dims")
+
+    meta = {
+        "ndim": 3,
+        "axis_labels": ["z", "y", "x"],
+        "order": [0, 1, 2],
+        "range": [[0, 7], [0, 7], [0, 7]],
+        "sizes": [8, 8, 8],
+        "current_step": [0, 0, 0],
+        "ndisplay": 3,
+        "mode": "volume",
+        "displayed": [0, 1, 2],
+    }
+
+    state_channel_handler.process_worker_notifications(
+        server,
+        [
+            WorkerSceneNotification(
+                kind="dims_update",
+                step=(0, 0, 0),
+                meta=meta,
+            )
+        ],
+    )
+    _drain_scheduled(scheduled)
+
     dims_frames = _frames_of_type(captured, "notify.dims")
-    assert dims_frames
+    assert dims_frames, "expected dims broadcast after worker refresh"
     dims_payload = dims_frames[-1]["payload"]
     assert dims_payload["ndisplay"] == 3
     assert dims_payload["mode"] == "volume"
+    assert server._scene.last_dims_payload is not None
+    assert server._scene.last_dims_payload["ndisplay"] == 3
+    assert server._scene.last_dims_payload["mode"] == "volume"
+
+
+def test_worker_scene_level_dims_metadata_enforced() -> None:
+    server, scheduled, captured = _make_server()
+    captured.clear()
+
+    level_payload = {
+        "current_level": 1,
+        "downgraded": True,
+        "levels": [
+            {"index": 0, "shape": [512, 256, 64]},
+            {"index": 1, "shape": [256, 128, 32]},
+        ],
+    }
+
+    meta = {
+        "ndim": 3,
+        "axis_labels": ["z", "y", "x"],
+        "order": [0, 1, 2],
+        "sizes": [256, 128, 32],
+        "range": [[0, 255], [0, 127], [0, 31]],
+        "current_step": [0, 0, 0],
+        "ndisplay": 2,
+        "mode": "plane",
+        "displayed": [1, 2],
+    }
+
+    notifications = [
+        WorkerSceneNotification(kind="scene_level", level=level_payload),
+        WorkerSceneNotification(kind="dims_update", step=(0, 0, 0), meta=meta),
+    ]
+
+    state_channel_handler.process_worker_notifications(server, notifications)
+    _drain_scheduled(scheduled)
+
+    level_frames = _frames_of_type(captured, "notify.scene.level")
+    assert level_frames, "expected scene level broadcast"
+    dims_frames = _frames_of_type(captured, "notify.dims")
+    assert dims_frames, "expected dims broadcast"
+    assert dims_frames[-1]["payload"]["current_step"] == [0, 0, 0]
+
+    assert server._scene.last_dims_payload is not None
+    assert server._scene.last_dims_payload["sizes"] == [256, 128, 32]
+    assert server._scene.last_dims_payload["range"][2][1] == 31
+
+    ms_state = server._scene.multiscale_state
+    assert ms_state.get("current_level") == 1
+    assert "pending_worker_level" not in ms_state
+
+
+def test_worker_scene_level_dims_metadata_mismatch_raises() -> None:
+    server, scheduled, _ = _make_server()
+
+    level_payload = {
+        "current_level": 1,
+        "levels": [
+            {"index": 0, "shape": [512, 256, 64]},
+            {"index": 1, "shape": [256, 128, 32]},
+        ],
+    }
+
+    bad_meta = {
+        "ndim": 3,
+        "axis_labels": ["z", "y", "x"],
+        "order": [0, 1, 2],
+        "sizes": [512, 256, 64],
+        "range": [[0, 511], [0, 255], [0, 63]],
+        "current_step": [0, 0, 0],
+        "ndisplay": 2,
+        "mode": "plane",
+        "displayed": [1, 2],
+    }
+
+    notifications = [
+        WorkerSceneNotification(kind="scene_level", level=level_payload),
+        WorkerSceneNotification(kind="dims_update", step=(0, 0, 0), meta=bad_meta),
+    ]
+
+    with pytest.raises(AssertionError):
+        state_channel_handler.process_worker_notifications(server, notifications)
+
+    while scheduled:
+        coro = scheduled.pop()
+        coro.close()
 
 
 def test_volume_render_mode_update() -> None:

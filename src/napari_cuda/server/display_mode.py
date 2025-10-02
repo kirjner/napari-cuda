@@ -131,17 +131,16 @@ def _configure_camera_for_mode(worker) -> None:
 def _update_viewer_dims(worker, viewer, target: int) -> None:
     viewer_dims = viewer.dims
     viewer_dims.ndisplay = target
-    if target != 3:
-        return
-
     layer = worker._napari_layer
     layer_ndim = int(getattr(layer, "ndim", 0)) if layer is not None else 0
     data = getattr(layer, "data", None) if layer is not None else None
     data_ndim = int(getattr(data, "ndim", 0)) if data is not None else 0
     dims_attr = int(getattr(viewer_dims, "ndim", 0))
-    ndim = max(layer_ndim, data_ndim, dims_attr, 3)
+    ndim = max(layer_ndim, data_ndim, dims_attr, target)
     viewer_dims.ndim = ndim
-    displayed = tuple(range(max(0, ndim - 3), ndim))
+    displayed_count = min(target, ndim)
+    displayed = tuple(range(max(0, ndim - displayed_count), ndim))
+    viewer_dims.displayed = displayed
 
     # Keep the displayed axes as the tail of the order tuple so napari marks
     # them as active. This mirrors the old `displayed` setter without relying on it.
@@ -157,10 +156,19 @@ def _update_viewer_dims(worker, viewer, target: int) -> None:
         steps.extend([0] * (ndim - len(steps)))
     elif len(steps) > ndim:
         steps = steps[:ndim]
-    if steps and worker._z_index is not None:
-        steps[0] = int(worker._z_index)
+    if target == 3 and steps and worker._z_index is not None:
+        axis_labels = list(getattr(viewer_dims, "axis_labels", []) or [])
+        if "z" in axis_labels:
+            anchor_axis = axis_labels.index("z")
+        elif displayed:
+            anchor_axis = displayed[0]
+        else:
+            anchor_axis = 0
+        if anchor_axis < len(steps):
+            steps[anchor_axis] = int(worker._z_index)
+
     shape = worker._volume_shape_for_view()
-    if shape is not None:
+    if shape is not None and target == 3:
         axes = tuple(getattr(viewer_dims, "axis_labels", []) or [])
         for axis_idx in range(min(len(steps), len(shape))):
             size = int(max(1, shape[axis_idx]))

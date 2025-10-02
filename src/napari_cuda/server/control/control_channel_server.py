@@ -2100,22 +2100,8 @@ async def _broadcast_state_update(
         return
 
     if result.scope == "view" and result.key == "ndisplay":
-        step = ()
-        with server._state_lock:
-            latest = server._scene.latest_state.current_step
-            if latest is not None:
-                step = tuple(int(x) for x in latest)
-        meta = dict(_current_dims_meta(server))
-        meta["ndisplay"] = int(result.value)
-        meta["mode"] = _resolve_dims_mode_from_ndisplay(int(result.value))
-        await _broadcast_dims_state(
-            server,
-            current_step=step,
-            source="state.update",
-            intent_id=result.intent_id,
-            timestamp=result.timestamp,
-            meta=meta,
-        )
+        # Mode switch is completed by the worker; rely on its notify.dims payload
+        # to propagate authoritative metadata instead of replaying cached data.
         return
 
     logger.debug(
@@ -2278,6 +2264,93 @@ async def broadcast_layer_update(
     await _broadcast_state_updates(server, results)
 
 
+def _normalize_scene_level_payload(level_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {str(key): value for key, value in level_payload.items()}
+    assert "current_level" in normalized, "scene level payload missing current_level"
+    normalized["current_level"] = int(normalized["current_level"])
+
+    if "downgraded" in normalized:
+        normalized["downgraded"] = bool(normalized["downgraded"])
+
+    if "levels" in normalized:
+        raw_levels = normalized["levels"]
+        assert type(raw_levels) in (list, tuple), "scene level levels must be a sequence"
+        level_entries: list[Dict[str, Any]] = []
+        for entry in raw_levels:
+            assert type(entry) is dict, "scene level entry must be a dict"
+            entry_normalized: Dict[str, Any] = {str(key): value for key, value in entry.items()}
+            if "index" in entry_normalized:
+                entry_normalized["index"] = int(entry_normalized["index"])
+            if "shape" in entry_normalized:
+                shape_raw = entry_normalized["shape"]
+                assert type(shape_raw) in (list, tuple), "scene level shape must be a sequence"
+                entry_normalized["shape"] = [int(value) for value in shape_raw]
+            if "downsample" in entry_normalized:
+                down_raw = entry_normalized["downsample"]
+                if type(down_raw) in (list, tuple):
+                    entry_normalized["downsample"] = [float(value) for value in down_raw]
+            level_entries.append(entry_normalized)
+        normalized["levels"] = level_entries
+
+    return normalized
+
+
+def _verify_dims_against_level(
+    meta: Dict[str, Any], level_payload: Mapping[str, Any]
+) -> tuple[list[int], list[list[int]]]:
+    levels = level_payload.get("levels")
+    assert levels, "scene level payload missing levels"
+
+    current_level = int(level_payload["current_level"])
+
+    descriptor: Optional[Mapping[str, Any]] = None
+    for entry in levels:
+        assert type(entry) is dict, "scene level entry must be a dict"
+        if "index" not in entry:
+            continue
+        if int(entry["index"]) == current_level:
+            descriptor = entry
+            break
+
+    assert descriptor is not None, "scene level descriptor missing for active level"
+    assert "shape" in descriptor, "scene level descriptor missing shape"
+
+    shape_raw = descriptor["shape"]
+    assert type(shape_raw) in (list, tuple), "scene level shape must be a sequence"
+    shape = [int(value) for value in shape_raw]
+
+    sizes_raw = meta.get("sizes")
+    assert sizes_raw, "worker dims metadata missing sizes"
+    sizes = [int(value) for value in sizes_raw]
+    assert len(sizes) >= len(shape), "worker dims sizes shorter than level shape"
+
+    ranges_raw = meta.get("range")
+    assert ranges_raw, "worker dims metadata missing range"
+    ranges: list[list[int]] = []
+    for bounds in ranges_raw:
+        assert type(bounds) in (list, tuple), "worker dims range entry must be a sequence"
+        low = int(bounds[0])
+        high = int(bounds[1])
+        ranges.append([low, high])
+    assert len(ranges) >= len(shape), "worker dims range shorter than level shape"
+
+    for idx, expected in enumerate(shape):
+        actual = sizes[idx]
+        assert actual == expected, f"worker dims size mismatch at axis {idx}"
+        low, high = ranges[idx]
+        assert low == 0, f"worker dims range lower bound mismatch at axis {idx}"
+        expected_high = max(expected - 1, 0)
+        assert high == expected_high, f"worker dims range upper bound mismatch at axis {idx}"
+
+    ndim = meta.get("ndim")
+    if ndim is not None:
+        assert int(ndim) == len(sizes), "worker dims ndim mismatch"
+    else:
+        meta["ndim"] = len(sizes)
+
+    return sizes, ranges
+
+
 def process_worker_notifications(
     server: Any, notifications: Sequence[WorkerSceneNotification]
 ) -> None:
@@ -2285,6 +2358,8 @@ def process_worker_notifications(
         return
 
     deferred: list[WorkerSceneNotification] = []
+    scene_data = server._scene
+    multiscale_state = scene_data.multiscale_state
 
     for note in notifications:
         if note.kind == "dims_update":
@@ -2293,35 +2368,41 @@ def process_worker_notifications(
 
             ndim = _ndim_from_meta(meta)
 
-            step_tuple: tuple[int, ...]
+            raw_step = meta.get("current_step")
+            assert isinstance(raw_step, Sequence) and raw_step, "worker dims metadata missing current_step"
+            step_tuple = tuple(int(x) for x in raw_step)
+
             if note.step is not None:
-                step_tuple = tuple(int(x) for x in note.step)
-            else:
-                raw_step = meta.get("current_step")
-                if isinstance(raw_step, Sequence):
-                    step_tuple = tuple(int(x) for x in raw_step)
-                else:
-                    with server._state_lock:
-                        current = server._scene.latest_state.current_step or ()
-                    step_tuple = tuple(int(x) for x in current)
+                note_step = tuple(int(x) for x in note.step)
+                assert note_step == step_tuple, "worker dims step mismatch"
 
-            if not step_tuple:
-                step_tuple = (0,) * ndim
+            assert len(step_tuple) == ndim, "worker dims step length mismatch"
 
-            if len(step_tuple) > ndim:
-                deferred.append(
-                    WorkerSceneNotification(
-                        kind="dims_update",
-                        step=step_tuple,
-                        meta=meta,
-                    )
-                )
-                continue
+            assert "sizes" in meta, "worker dims metadata missing sizes"
+            meta["sizes"] = [int(value) for value in meta["sizes"]]
 
-            if note.step is None and step_tuple:
-                with server._state_lock:
-                    latest = server._scene.latest_state
-                    server._scene.latest_state = replace(latest, current_step=step_tuple)
+            assert "range" in meta, "worker dims metadata missing range"
+            meta["range"] = [[int(bounds[0]), int(bounds[1])] for bounds in meta["range"]]
+
+            pending_level = None
+            if "pending_worker_level" in multiscale_state:
+                pending_level = multiscale_state["pending_worker_level"]
+
+            if pending_level is not None:
+                sizes, ranges = _verify_dims_against_level(meta, pending_level)
+                meta["sizes"] = sizes
+                meta["range"] = ranges
+                multiscale_state["current_level"] = int(pending_level["current_level"])
+                multiscale_state["level"] = int(pending_level["current_level"])
+                if "downgraded" in pending_level:
+                    multiscale_state["downgraded"] = bool(pending_level["downgraded"])
+                if "levels" in pending_level:
+                    multiscale_state["levels"] = list(pending_level["levels"])
+                del multiscale_state["pending_worker_level"]
+
+            with server._state_lock:
+                latest = server._scene.latest_state
+                server._scene.latest_state = replace(latest, current_step=step_tuple)
 
             server._schedule_coro(
                 _broadcast_worker_dims(
@@ -2338,12 +2419,19 @@ def process_worker_notifications(
             except Exception:
                 logger.debug("scene level update: scene manager sync failed", exc_info=True)
             level_payload = note.level
-            if not isinstance(level_payload, Mapping):
-                level_payload = dict(level_payload)
+            assert type(level_payload) is dict, "scene level payload must be a dict"
+            normalized_level = _normalize_scene_level_payload(level_payload)
+            pending_level_copy: Dict[str, Any] = {}
+            for key, value in normalized_level.items():
+                if key == "levels" and value is not None:
+                    pending_level_copy[key] = [dict(entry) for entry in value]
+                else:
+                    pending_level_copy[key] = value
+            multiscale_state["pending_worker_level"] = pending_level_copy
             server._schedule_coro(
                 broadcast_scene_level(
                     server,
-                    payload=level_payload,
+                    payload=normalized_level,
                     reason="worker",
                 ),
                 "scene_level-worker",
