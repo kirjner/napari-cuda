@@ -483,103 +483,69 @@ class EGLRendererWorker:
 
         meta: Dict[str, Any] = {}
 
-        try:
-            ndim = int(getattr(dims, "ndim", 0))
-        except Exception:
-            ndim = 0
+        source = self._scene_source
+        if source is not None and source.axes:
+            axes_sequence = tuple(str(axis) for axis in source.axes)
+        elif self._zarr_axes:
+            axes_sequence = tuple(self._zarr_axes)
+        else:
+            axes_sequence = ()
+        if axes_sequence:
+            meta["axes"] = list(axes_sequence)
 
-        try:
-            current_step_tuple = tuple(int(x) for x in getattr(dims, "current_step", ()))
-        except Exception:
-            current_step_tuple = ()
-
+        raw_step = tuple(int(value) for value in dims.current_step)
+        ndim = int(dims.ndim) if dims.ndim else 0
+        if ndim <= 0 and axes_sequence:
+            ndim = len(axes_sequence)
+        if ndim <= 0 and raw_step:
+            ndim = len(raw_step)
         if ndim <= 0:
-            ndim = len(current_step_tuple)
+            ndim = 1
+        meta["ndim"] = ndim
 
-        if ndim > 0:
-            meta["ndim"] = ndim
+        step_list = list(raw_step[:ndim])
+        if len(step_list) < ndim:
+            step_list.extend([0] * (ndim - len(step_list)))
+        meta["current_step"] = step_list
 
-        if current_step_tuple:
-            normalized_step = list(current_step_tuple[:ndim] if ndim else current_step_tuple)
-            if ndim and len(normalized_step) < ndim:
-                normalized_step.extend([0] * (ndim - len(normalized_step)))
-            meta["current_step"] = [int(value) for value in normalized_step]
-
-        try:
-            ndisplay = int(getattr(dims, "ndisplay", 2))
-        except Exception:
-            ndisplay = 2
+        ndisplay = int(dims.ndisplay) if dims.ndisplay else 2
         meta["ndisplay"] = ndisplay
         meta["mode"] = "volume" if ndisplay >= 3 else "plane"
 
-        try:
-            order = tuple(int(x) for x in getattr(dims, "order", ()))
-        except Exception:
-            order = ()
-        if order:
-            meta["order"] = list(order[:ndim] if ndim else order)
+        order_list = [int(value) for value in dims.order]
+        if len(order_list) != ndim:
+            order_list = list(range(ndim))
+        meta["order"] = order_list
 
-        try:
-            axis_labels = tuple(str(x) for x in getattr(dims, "axis_labels", ()))
-        except Exception:
-            axis_labels = ()
-        if axis_labels:
-            meta["axis_labels"] = list(axis_labels[:ndim] if ndim else axis_labels)
+        axis_labels = [str(text) for text in dims.axis_labels if str(text)]
+        if len(axis_labels) < ndim:
+            for idx in range(len(axis_labels), ndim):
+                axis_labels.append(str(axes_sequence[idx]) if idx < len(axes_sequence) else f"axis-{idx}")
+        else:
+            axis_labels = axis_labels[:ndim]
+        meta["axis_labels"] = axis_labels
 
-        try:
-            displayed = tuple(int(x) for x in getattr(dims, "displayed", ()))
-        except Exception:
-            displayed = ()
-        if displayed:
-            meta["displayed"] = list(displayed)
+        if dims.displayed:
+            meta["displayed"] = [int(value) for value in dims.displayed]
 
-        sizes: List[int] = []
-        try:
-            nsteps = getattr(dims, "nsteps", ())
-            for value in nsteps:
-                try:
-                    sizes.append(int(value))
-                except Exception:
-                    sizes.append(1)
-        except Exception:
-            sizes = []
-        if ndim and sizes:
-            if len(sizes) < ndim:
-                sizes.extend(1 for _ in range(ndim - len(sizes)))
-            elif len(sizes) > ndim:
-                sizes = sizes[:ndim]
-        if sizes:
-            meta["sizes"] = [max(1, int(value)) for value in sizes]
+        if self._zarr_shape:
+            level_shape = tuple(int(size) for size in self._zarr_shape)
+        elif source is not None and source.level_descriptors:
+            idx = int(self._active_ms_level)
+            descriptors = source.level_descriptors
+            if idx < 0 or idx >= len(descriptors):
+                idx = 0
+            level_shape = tuple(int(size) for size in descriptors[idx].shape)
+        else:
+            level_shape = ()
 
-        ranges: List[List[int]] = []
-        try:
-            for rng in getattr(dims, "range", ()):  # type: ignore[attr-defined]
-                start = getattr(rng, "start", None)
-                stop = getattr(rng, "stop", None)
-                if start is None or stop is None:
-                    continue
-                try:
-                    lo = int(round(float(start)))
-                    hi = int(round(float(stop)))
-                except Exception:
-                    continue
-                if hi < lo:
-                    lo, hi = hi, lo
-                ranges.append([lo, hi])
-        except Exception:
-            ranges = []
-        if ndim and ranges:
-            if len(ranges) < ndim:
-                padding = ndim - len(ranges)
-                for idx in range(padding):
-                    size_hint = 0
-                    if "sizes" in meta and len(meta["sizes"]) > len(ranges):
-                        size_hint = max(0, int(meta["sizes"][len(ranges)]) - 1)
-                    ranges.append([0, size_hint])
-            elif len(ranges) > ndim:
-                ranges = ranges[:ndim]
-        if ranges:
-            meta["range"] = ranges
+        if level_shape:
+            sizes = [level_shape[idx] if idx < len(level_shape) else 1 for idx in range(ndim)]
+        else:
+            sizes = [max(1, int(value)) for value in dims.nsteps[:ndim]] if dims.nsteps else [1] * ndim
+        meta["sizes"] = sizes
+
+        meta["range"] = [[0, max(0, size - 1)] for size in sizes]
 
         return meta
 

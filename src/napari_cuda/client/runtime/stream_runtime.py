@@ -670,6 +670,14 @@ class ClientStreamLoop:
         except Exception:
             logger.debug("apply_scene_policies (scene level) failed", exc_info=True)
             return
+        payload = control_actions._sync_dims_payload_from_meta(self._control_state, self._loop_state)
+        self._presenter_facade.apply_dims_update(dict(payload))
+        control_actions.replay_last_dims_payload(
+            self._control_state,
+            self._loop_state,
+            self._viewer_mirror,
+            self._ui_call,
+        )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "scene level update: level=%s downgraded=%s",

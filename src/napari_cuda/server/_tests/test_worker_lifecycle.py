@@ -116,7 +116,9 @@ class _FakeWorkerBase:
     _z_index = None
     default_meta = {
         'ndim': 2,
-        'order': ['y', 'x'],
+        'axes': ['y', 'x'],
+        'axis_labels': ['y', 'x'],
+        'order': [0, 1],
         'range': [[0, 9], [0, 9]],
         'current_step': [0, 0],
         'ndisplay': 2,
@@ -182,10 +184,46 @@ class _FakeWorkerBase:
         pass
 
 
+def test_snapshot_dims_metadata_prefers_scene_shape():
+    from napari_cuda.server.render_worker import EGLRendererWorker
+
+    dims = SimpleNamespace(
+        current_step=(5, 2, 1),
+        ndim=3,
+        ndisplay=2,
+        order=(0, 1, 2),
+        axis_labels=("z", "y", "x"),
+        displayed=(0, 1),
+        nsteps=(60, 256, 256),
+    )
+
+    level0 = SimpleNamespace(shape=(60, 256, 256))
+    level1 = SimpleNamespace(shape=(8, 128, 128))
+    scene_source = SimpleNamespace(axes=("z", "y", "x"), level_descriptors=[level0, level1])
+
+    worker = object.__new__(EGLRendererWorker)
+    worker._viewer = SimpleNamespace(dims=dims)
+    worker._scene_source = scene_source
+    worker._zarr_axes = "zyx"
+    worker._zarr_shape = (8, 256, 256)
+    worker._active_ms_level = 0
+
+    meta = EGLRendererWorker.snapshot_dims_metadata(worker)
+
+    assert meta["axes"] == ["z", "y", "x"]
+    assert meta["axis_labels"] == ["z", "y", "x"]
+    assert meta["sizes"] == [8, 256, 256]
+    assert meta["range"] == [[0, 7], [0, 255], [0, 255]]
+    assert meta["current_step"] == [5, 2, 1]
+    assert meta["order"] == [0, 1, 2]
+
+
 class _FakePacketWorker(_FakeWorkerBase):
     default_meta = {
         'ndim': 1,
-        'order': ['z'],
+        'axes': ['z'],
+        'axis_labels': ['z'],
+        'order': [0],
         'range': [[0, 0]],
         'current_step': [0],
         'ndisplay': 2,
@@ -260,6 +298,77 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     assert note.kind == "dims_update"
     assert note.step == (0,)
     assert note.meta["current_step"] == [0]
+
+    stop_worker(state)
+    _run_loop_once(loop)
+    loop.close()
+    asyncio.set_event_loop(None)
+
+
+def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
+    class _DummySource:
+        def __init__(self) -> None:
+            self.axes = ('z', 'y', 'x')
+
+        def level_shape(self, index: int) -> tuple[int, int, int]:
+            if int(index) == 1:
+                return (8, 256, 256)
+            return (60, 256, 256)
+
+    class _FakeMultiscaleWorker(_FakeWorkerBase):
+        default_meta = {
+            'ndim': 3,
+            'axes': ['z', 'y', 'x'],
+            'axis_labels': ['z', 'y', 'x'],
+            'order': [0, 1, 2],
+            'sizes': [60, 256, 256],
+            'range': [[0, 59], [0, 255], [0, 255]],
+            'current_step': [10, 0, 0],
+            'ndisplay': 2,
+            'mode': 'plane',
+        }
+
+        def __init__(self, *, scene_refresh_cb, **kwargs):
+            super().__init__(scene_refresh_cb=scene_refresh_cb, **kwargs)
+            self._scene_source = _DummySource()
+            self._active_ms_level = 0
+            self._zarr_axes = 'zyx'
+            self._z_index = 10
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    server = make_fake_server(loop, tmp_path)
+    state = WorkerLifecycleState()
+
+    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.EGLRendererWorker", _FakeMultiscaleWorker)
+    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
+    monkeypatch.setattr("napari_cuda.server.worker_lifecycle.build_avcc_config", lambda cache: None)
+    monkeypatch.setattr(
+        "napari_cuda.server.worker_lifecycle.pixel_channel.maybe_send_stream_config",
+        lambda *a, **k: asyncio.sleep(0),
+    )
+
+    start_worker(server, loop, state)
+    worker = _wait_for_worker(state)
+    worker._stop_event = state.stop_event  # type: ignore[attr-defined]
+
+    _run_loop_once(loop)
+    server.processed_notifications.clear()
+
+    payload = {
+        'scene_level': {
+            'current_level': 1,
+        }
+    }
+    worker._meta['sizes'][0] = 8  # type: ignore[index]
+    worker._meta['range'][0] = [0, 7]  # type: ignore[index]
+    worker._scene_refresh_cb(payload)  # type: ignore[attr-defined]
+    _run_loop_once(loop)
+
+    cached = server._scene.last_dims_payload
+    assert cached['sizes'][0] == worker._meta['sizes'][0]
+    assert cached['range'][0] == worker._meta['range'][0]
+    assert cached['axes'] == worker._meta['axes']
 
     stop_worker(state)
     _run_loop_once(loop)

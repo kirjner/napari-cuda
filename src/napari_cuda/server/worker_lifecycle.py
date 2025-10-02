@@ -173,32 +173,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 assert worker_ref is not None, "render worker missing during refresh"
                 assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
 
-                meta_snapshot = worker_ref.snapshot_dims_metadata()
-                assert meta_snapshot, "render worker returned empty dims metadata"
-                meta_copy = dict(meta_snapshot)
+                meta = worker_ref.snapshot_dims_metadata()
+                assert meta, "render worker returned empty dims metadata"
 
-                if level_payload is not None:
-                    levels_obj = level_payload.get("levels")
-                    if isinstance(levels_obj, Sequence):
-                        try:
-                            level_index = int(level_payload.get("current_level"))
-                        except Exception:
-                            level_index = None
-                        if level_index is not None and 0 <= level_index < len(levels_obj):
-                            entry = levels_obj[level_index]
-                            if isinstance(entry, Mapping):
-                                shape_obj = entry.get("shape")
-                                if isinstance(shape_obj, Sequence):
-                                    try:
-                                        sizes = [max(1, int(value)) for value in shape_obj]
-                                    except Exception:
-                                        sizes = []
-                                    if sizes:
-                                        meta_copy["sizes"] = list(sizes)
-                                        meta_copy["ndim"] = len(sizes)
-                                        meta_copy["range"] = [[0, max(0, size - 1)] for size in sizes]
-
-                server._scene.last_dims_payload = dict(meta_copy)
+                server._scene.last_dims_payload = dict(meta)
 
                 notifications_emitted = False
 
@@ -220,7 +198,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     if current:
                         chosen = tuple(int(x) for x in current)
                     else:
-                        chosen = _normalize_step_from_meta(meta_copy)
+                        chosen = _normalize_step_from_meta(meta)
 
                 with server._state_lock:
                     snapshot = server._scene.latest_state
@@ -231,13 +209,13 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         current_step=chosen,
                     )
 
-                meta_copy.setdefault("current_step", [int(x) for x in chosen])
+                meta.setdefault("current_step", [int(x) for x in chosen])
 
                 server._worker_notifications.push(
                     WorkerSceneNotification(
                         kind="dims_update",
                         step=chosen,
-                        meta=meta_copy,
+                        meta=meta,
                     )
                 )
                 notifications_emitted = True
