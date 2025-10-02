@@ -21,6 +21,11 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
     previous_volume = bool(worker.use_volume)
     worker.use_volume = bool(target == 3)
 
+    viewer_model = worker._viewer
+    if viewer_model is not None:
+        viewer_dims = viewer_model.dims
+        viewer_dims.ndisplay = target
+
     if worker.use_volume:
         worker._last_roi = None
         source = worker._ensure_scene_source()
@@ -44,9 +49,8 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
 
     _configure_camera_for_mode(worker)
 
-    viewer = worker._viewer
-    if viewer is not None:
-        _update_viewer_dims(worker, viewer, target)
+    if viewer_model is not None:
+        _update_viewer_dims(worker, viewer_model, target)
 
     logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
     if not worker.use_volume:
