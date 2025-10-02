@@ -170,21 +170,8 @@ def apply_scene_policies(state: ControlStateContext, policies: Mapping[str, Any]
             meta_root['ndim'] = len(sizes)
             if ranges:
                 meta_root['range'] = ranges
-            current_step_meta = meta_root.get('current_step')
-            if isinstance(current_step_meta, Sequence):
-                clamped: list[int] = []
-                for idx, value in enumerate(current_step_meta):
-                    if idx >= len(sizes):
-                        break
-                    try:
-                        val_int = int(value)
-                    except Exception:
-                        val_int = 0
-                    upper = max(0, sizes[idx] - 1)
-                    clamped_value = max(0, min(val_int, upper))
-                    clamped.append(clamped_value)
-                    state.dims_state[(str(idx), 'index')] = clamped_value
-                meta_root['current_step'] = clamped
+
+            prev_sizes = meta_root.get('sizes_prev') if False else None
         if ranges is None and 'sizes' not in state.dims_meta:
             meta_root = state.dims_meta
             meta_root.pop('range', None)

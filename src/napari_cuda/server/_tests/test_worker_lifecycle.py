@@ -134,6 +134,11 @@ class _FakeWorkerBase:
         self.frames: list[bytes] = []
         self._bootstrapped = True
         self._bootstrapping = False
+        current = self._meta.get('current_step')
+        if isinstance(current, list):
+            self._last_step = tuple(int(value) for value in current)
+        else:
+            self._last_step = None
 
     def snapshot_dims_metadata(self) -> dict[str, object]:
         return dict(self._meta)
@@ -207,6 +212,7 @@ def test_snapshot_dims_metadata_prefers_scene_shape():
     worker._zarr_axes = "zyx"
     worker._zarr_shape = (8, 256, 256)
     worker._active_ms_level = 0
+    worker._last_step = tuple(int(v) for v in dims.current_step)
 
     meta = EGLRendererWorker.snapshot_dims_metadata(worker)
 
@@ -285,7 +291,7 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     start_worker(server, loop, state)
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
-    worker._meta.pop("current_step", None)  # type: ignore[attr-defined]
+    worker._meta["current_step"] = [7]  # type: ignore[attr-defined]
 
     _run_loop_once(loop)
     server.processed_notifications.clear()
@@ -296,8 +302,8 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     assert server.processed_notifications, "expected dims notification"
     note = server.processed_notifications[-1]
     assert note.kind == "dims_update"
-    assert note.step == (0,)
-    assert note.meta["current_step"] == [0]
+    assert note.step == (7,)
+    assert note.meta["current_step"] == [7]
 
     stop_worker(state)
     _run_loop_once(loop)

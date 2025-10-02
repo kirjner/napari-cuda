@@ -493,12 +493,16 @@ class EGLRendererWorker:
         if axes_sequence:
             meta["axes"] = list(axes_sequence)
 
-        raw_step = tuple(int(value) for value in dims.current_step)
+        last_step = self._last_step
+        if last_step:
+            raw_step = tuple(int(value) for value in last_step)
+        else:
+            raw_step = tuple(int(value) for value in dims.current_step)
         ndim = int(dims.ndim) if dims.ndim else 0
         if ndim <= 0 and axes_sequence:
             ndim = len(axes_sequence)
-        if ndim <= 0 and raw_step:
-            ndim = len(raw_step)
+        if raw_step:
+            ndim = max(ndim, len(raw_step))
         if ndim <= 0:
             ndim = 1
         meta["ndim"] = ndim

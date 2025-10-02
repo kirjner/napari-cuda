@@ -133,23 +133,17 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         try:
             def _on_scene_refresh(step: object = None) -> None:
                 level_payload: Optional[Mapping[str, object]] = None
-                step_hint: Optional[Sequence[int]] = None
-                if isinstance(step, Mapping):
+                step_tuple: Optional[tuple[int, ...]] = None
+                if step and type(step) is dict:
                     if "scene_level" in step:
-                        raw_level = step.get("scene_level") or {}
-                        if isinstance(raw_level, Mapping):
-                            level_payload = dict(raw_level)
+                        raw_level = step["scene_level"]
+                        assert type(raw_level) is dict, "scene level payload must be a dict"
+                        level_payload = dict(raw_level)
                     raw_step = step.get("step")
-                    if isinstance(raw_step, Sequence):
-                        try:
-                            step_hint = tuple(int(x) for x in raw_step)
-                        except Exception:
-                            step_hint = None
-                elif isinstance(step, Sequence):
-                    try:
-                        step_hint = tuple(int(x) for x in step)
-                    except Exception:
-                        step_hint = None
+                    if raw_step:
+                        step_tuple = tuple(int(value) for value in raw_step)
+                elif step and type(step) in (tuple, list):
+                    step_tuple = tuple(int(value) for value in step)
 
                 worker_ref = state.worker
                 assert worker_ref is not None, "render worker missing during refresh"
@@ -157,6 +151,12 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
                 meta = worker_ref.snapshot_dims_metadata()
                 assert meta, "render worker returned empty dims metadata"
+
+                current_step_meta = meta.get("current_step")
+                if step_tuple is None:
+                    assert current_step_meta, "worker dims metadata missing current_step"
+                    step_tuple = tuple(int(value) for value in current_step_meta)
+                meta["current_step"] = [int(value) for value in step_tuple]
 
                 server._scene.last_dims_payload = dict(meta)
 
@@ -171,40 +171,19 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     )
                     notifications_emitted = True
 
-                if step_hint is not None:
-                    chosen = tuple(int(x) for x in step_hint)
-                else:
-                    meta_step = meta["current_step"] if "current_step" in meta else ()
-                    if meta_step:
-                        chosen = tuple(int(x) for x in meta_step)
-                    else:
-                        with server._state_lock:
-                            snapshot = server._scene.latest_state
-                            current = snapshot.current_step if snapshot.current_step is not None else ()
-                        if current:
-                            chosen = tuple(int(x) for x in current)
-                        else:
-                            sizes_meta = meta["sizes"] if "sizes" in meta else ()
-                            ndim_value = len(sizes_meta) if sizes_meta else int(meta.get("ndim") or 0)
-                            if ndim_value <= 0:
-                                ndim_value = 1
-                            chosen = tuple(0 for _ in range(int(ndim_value)))
-
                 with server._state_lock:
                     snapshot = server._scene.latest_state
                     server._scene.latest_state = ServerSceneState(
                         center=snapshot.center,
                         zoom=snapshot.zoom,
                         angles=snapshot.angles,
-                        current_step=chosen,
+                        current_step=step_tuple,
                     )
-
-                meta["current_step"] = [int(x) for x in chosen]
 
                 server._worker_notifications.push(
                     WorkerSceneNotification(
                         kind="dims_update",
-                        step=chosen,
+                        step=step_tuple,
                         meta=meta,
                     )
                 )
