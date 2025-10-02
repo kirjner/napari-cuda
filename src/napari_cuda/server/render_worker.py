@@ -160,6 +160,7 @@ class EGLRendererWorker:
         self._zarr_dtype: Optional[str] = None
         self._z_index: Optional[int] = None
         self._zarr_clim: Optional[tuple[float, float]] = None
+        self._plane_step_restore: Optional[tuple[int, ...]] = None
         self._hw_limits = get_hw_limits()
 
         self._bootstrapped = False
@@ -561,6 +562,8 @@ class EGLRendererWorker:
     def _update_level_metadata(self, descriptor, applied) -> None:
         self._active_ms_level = applied.level
         self._last_step = applied.step
+        if not self.use_volume:
+            self._plane_step_restore = self._last_step
         self._z_index = applied.z_index
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
@@ -1014,6 +1017,8 @@ class EGLRendererWorker:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
         if drain_res.last_step is not None:
             self._last_step = tuple(int(x) for x in drain_res.last_step)
+            if not self.use_volume:
+                self._plane_step_restore = self._last_step
             self._notify_scene_refresh()
 
         if drain_res.policy_refresh_needed and not self.use_volume:

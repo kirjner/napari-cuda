@@ -25,6 +25,17 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
     if viewer_model is not None:
         viewer_dims = viewer_model.dims
 
+    if target == 3:
+        plane_step = getattr(worker, "_last_step", None)
+        if not plane_step and viewer_model is not None:
+            try:
+                current = getattr(viewer_model.dims, "current_step", ())
+                plane_step = tuple(int(s) for s in current)
+            except Exception:
+                plane_step = None
+        if plane_step:
+            worker._plane_step_restore = tuple(int(s) for s in plane_step)
+
     if worker.use_volume:
         worker._last_roi = None
         source = worker._ensure_scene_source()
@@ -181,8 +192,29 @@ def _update_viewer_dims(worker, viewer, target: int) -> None:
                 idx = axis_map.get(label_key)
                 if idx is not None and idx < len(steps):
                     steps[idx] = int(max(0, min(int(steps[idx]), int(dim_size) - 1)))
+    if target == 2:
+        restore = getattr(worker, "_plane_step_restore", None)
+        if restore:
+            restore_vals = [int(val) for val in restore]
+            for idx in range(min(len(steps), len(restore_vals))):
+                steps[idx] = restore_vals[idx]
+        try:
+            nsteps = list(viewer_dims.nsteps)
+        except Exception:
+            nsteps = []
+        for idx in range(min(len(steps), len(nsteps))):
+            max_index = max(0, int(nsteps[idx]) - 1)
+            steps[idx] = int(max(0, min(int(steps[idx]), max_index)))
+        worker._plane_step_restore = tuple(int(s) for s in steps)
+        non_displayed = [ax for ax in range(ndim) if ax not in displayed]
+        if non_displayed:
+            anchor_axis = non_displayed[0]
+            if anchor_axis < len(steps):
+                worker._z_index = int(steps[anchor_axis])
+    updated_step = tuple(int(s) for s in steps)
     viewer_dims.ndisplay = target
-    viewer_dims.current_step = tuple(int(s) for s in steps)
+    viewer_dims.current_step = updated_step
+    worker._last_step = updated_step
 
 
 def _coarsest_level_index(source) -> Optional[int]:

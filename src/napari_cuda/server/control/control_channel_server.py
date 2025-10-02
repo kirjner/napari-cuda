@@ -11,7 +11,7 @@ import uuid
 from contextlib import suppress
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Callable
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State

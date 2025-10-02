@@ -553,3 +553,24 @@ def test_ndisplay_switch_notifies_scene_refresh(render_worker_fixture):
     assert worker._render_tick_required is True
     assert captured_steps, "Scene refresh callback was not invoked"
     assert captured_steps[-1] == worker._last_step
+
+
+def test_ndisplay_toggle_restores_plane_step(render_worker_fixture):
+    worker = render_worker_fixture
+    worker._viewer.dims.current_step = (4, 0, 0)
+    worker._last_step = (4, 0, 0)
+    worker._plane_step_restore = None
+
+    apply_ndisplay_switch(worker, 3)
+    assert worker.use_volume is True
+    assert worker._plane_step_restore == (4, 0, 0)
+
+    worker._render_tick_required = False
+    apply_ndisplay_switch(worker, 2)
+
+    assert worker.use_volume is False
+    restored = tuple(worker._viewer.dims.current_step)
+    assert restored[:3] == (4, 0, 0)
+    assert worker._plane_step_restore == restored
+    assert worker._last_step == restored
+    assert worker._z_index == 4
