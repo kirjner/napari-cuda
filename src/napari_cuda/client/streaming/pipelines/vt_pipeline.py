@@ -255,23 +255,28 @@ class VTPipeline:
             if self._metrics is not None:
                 self._metrics.set('napari_cuda_client_vt_qdepth', float(qd))
             if qd >= max(2, self._backlog_trigger - 1):
-                # Gate and request resync on next keyframe
+                # Gate and request resync on next keyframe, but only emit the
+                # command if we are transitioning into a wait state.
+                was_waiting = bool(self._is_gated())
                 self._on_backlog_gate()
                 if self._metrics is not None:
                     self._metrics.inc('napari_cuda_client_vt_backlog_gates', 1.0)
                 self.clear(preserve_cache=True)
                 self._presenter.clear(Source.VT)
-                self._request_keyframe()
+                if not was_waiting:
+                    self._request_keyframe()
             else:
                 self._in_q.put_nowait((b, ts))
                 self._enqueued += 1
                 self._drain_event.set()
         except queue.Full:
             # If enqueuing fails, gate and request keyframe
+            was_waiting = bool(self._is_gated())
             self._on_backlog_gate()
             if self._metrics is not None:
                 self._metrics.inc('napari_cuda_client_vt_backlog_gates', 1.0)
-            self._request_keyframe()
+            if not was_waiting:
+                self._request_keyframe()
 
     def qsize(self) -> int:
         try:
