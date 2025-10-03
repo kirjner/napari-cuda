@@ -55,7 +55,8 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
     profiles: dict[str, dict[str, object]] = {
         'latency': {
             'runtime': {
-                'rc_mode': 'cbr',
+                'rc_mode': 'vbr',
+                'max_bitrate': 30_000_000,
                 'lookahead': 0,
                 'aq': 0,
                 'temporalaq': 0,
