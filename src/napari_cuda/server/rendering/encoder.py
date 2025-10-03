@@ -83,11 +83,11 @@ class Encoder:
         bitrate = None
         if ctx is not None:
             try:
-                bitrate = int(getattr(ctx.cfg.encode, "bitrate", 10_000_000))
+                bitrate = int(getattr(ctx.cfg.encode, "bitrate", 12_000_000))
             except Exception:
                 bitrate = None
         if bitrate is None or bitrate <= 0:
-            bitrate = 10_000_000
+            bitrate = 12_000_000
 
         max_bitrate = runtime.max_bitrate if runtime.max_bitrate and runtime.max_bitrate > 0 else None
         lookahead = max(0, int(runtime.lookahead))

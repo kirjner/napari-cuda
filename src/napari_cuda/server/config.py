@@ -179,7 +179,7 @@ class EncodeCfg:
 
     fps: int = 60
     codec: str = "h264"  # "h264" | "hevc" | "av1"
-    bitrate: int = 20_000_000
+    bitrate: int = 12_000_000
     keyint: int = 120
 
 
@@ -249,7 +249,7 @@ class EncoderRuntime:
     input_format: str = "NV12"
     rc_mode: str = "cbr"
     preset: str = "P3"
-    max_bitrate: Optional[int] = 30_000_000
+    max_bitrate: Optional[int] = 20_000_000
     lookahead: int = 0
     aq: int = 1
     temporalaq: int = 1
@@ -314,7 +314,7 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     encoder_cfg = _load_json_config(env, "NAPARI_CUDA_ENCODER_CONFIG")
 
     fps = _env_int(env, "NAPARI_CUDA_ENCODE_FPS", 60)
-    bitrate = _env_int(env, "NAPARI_CUDA_ENCODE_BITRATE", 20_000_000)
+    bitrate = _env_int(env, "NAPARI_CUDA_ENCODE_BITRATE", 12_000_000)
     keyint = _env_int(env, "NAPARI_CUDA_ENCODE_KEYINT", 120)
     codec = (_env_str(env, "NAPARI_CUDA_ENCODE_CODEC", "h264") or "h264").lower()
     enc = EncodeCfg(fps=fps, codec=codec, bitrate=bitrate, keyint=keyint)
@@ -435,7 +435,7 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     input_fmt = (_env_str(env, "NAPARI_CUDA_ENCODER_INPUT_FORMAT", None) or _cfg_str(runtime_cfg.get("input_format"), "NV12")).upper()
     rc_mode = (_env_str(env, "NAPARI_CUDA_ENCODER_RC_MODE", None) or _cfg_str(runtime_cfg.get("rc_mode"), "cbr")).lower()
     runtime_preset = _env_str(env, "NAPARI_CUDA_ENCODER_PRESET", None) or _cfg_str(runtime_cfg.get("preset"), "P3")
-    max_bitrate_cfg = _cfg_optional_int(runtime_cfg.get("max_bitrate"), 30_000_000)
+    max_bitrate_cfg = _cfg_optional_int(runtime_cfg.get("max_bitrate"), 20_000_000)
     max_bitrate = _env_optional_int(env, "NAPARI_CUDA_ENCODER_MAX_BITRATE", max_bitrate_cfg)
     if max_bitrate is not None and max_bitrate <= 0:
         max_bitrate = None

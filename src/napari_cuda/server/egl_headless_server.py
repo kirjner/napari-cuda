@@ -79,7 +79,7 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 class EncodeConfig:
     fps: int = 60
     codec: int = 1  # 1=h264, 2=hevc, 3=av1
-    bitrate: int = 20_000_000
+    bitrate: int = 12_000_000
     keyint: int = 120
 
 
@@ -122,7 +122,7 @@ class EGLHeadlessServer:
             self.cfg = EncodeConfig(
                 fps=int(getattr(encode_cfg, 'fps', fps)),
                 codec=codec_map.get(codec_name, 1),
-                bitrate=int(getattr(encode_cfg, 'bitrate', 10_000_000)),
+                bitrate=int(getattr(encode_cfg, 'bitrate', 12_000_000)),
                 keyint=int(getattr(encode_cfg, 'keyint', 120)),
             )
         self._animate = bool(animate)
