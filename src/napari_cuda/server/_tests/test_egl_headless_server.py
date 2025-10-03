@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from napari_cuda.server.egl_headless_server import EGLHeadlessServer
 from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server import state_channel_handler
 from napari_cuda.server.control import control_channel_server
 
 

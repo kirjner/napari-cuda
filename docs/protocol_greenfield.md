@@ -142,9 +142,7 @@ Schemas for each `type` live under
         "enabled": true,
         "version": 1,
         "commands": [
-          "napari.viewer.fit_to_view",
-          "napari.widgets.features_table",
-          "napari.toggle_shape_measures"
+          "napari.pixel.request_keyframe"
         ]
       }
     }
@@ -313,6 +311,11 @@ when the operation is documented as idempotent.
 
 ## 6. Command Lane
 
+The initial command catalogue comprises `napari.pixel.request_keyframe`. Viewer
+actions such as fit-to-view or camera reset continue to publish
+`state.update(camera.*)` intents; the command lane will grow only if future
+clients require additional RPC-style verbs.
+
 ### 6.1 Request (`call.command`, version 1)
 
 ```json
@@ -323,10 +326,10 @@ when the operation is documented as idempotent.
   "frame_id": "cmd-02f9",
   "timestamp": 1759179020.14,
   "payload": {
-    "command": "napari.viewer.fit_to_view",
+    "command": "napari.pixel.request_keyframe",
     "args": [],
     "kwargs": {},
-    "origin": "ui.menu"
+    "origin": "ui.runtime"
   }
 }
 ```
@@ -360,9 +363,9 @@ when the operation is documented as idempotent.
   "payload": {
     "in_reply_to": "cmd-02f9",
     "status": "error",
-    "code": "command.forbidden",
-    "message": "Fit to view unavailable",
-    "details": { "reason": "viewer locked" }
+    "code": "command.retryable",
+    "message": "Keyframe already pending",
+    "details": { "retry_after_ms": 250 }
   }
 }
 ```
@@ -459,8 +462,8 @@ when the operation is documented as idempotent.
 3. Update the thin client to hydrate the new `ClientState` from `notify.*`.
 4. Wire `state.update` + `ack.state` end-to-end with optimistic reducer support.
 5. Bring up the command lane starting with
-   `napari.viewer.fit_to_view`, `napari.widgets.features_table`,
-   `napari.toggle_shape_measures`.
+   `napari.pixel.request_keyframe` (viewer fit/reset actions continue to rely on
+   the `state.update` path until a future command expansion is justified).
 6. Persist resume tokens and validate reconnect flows (stale vs fresh snapshots).
 7. Decommission legacy notify/state messages once all clients speak the new
    protocol.

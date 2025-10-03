@@ -94,6 +94,11 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
 )
+from napari_cuda.server.control.command_registry import (
+    COMMAND_REGISTRY,
+    CommandHandler,
+    register_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,21 +129,6 @@ class CommandRejected(RuntimeError):
         self.idempotency_key = idempotency_key
 
 
-_SERVER_FEATURES: dict[str, FeatureToggle] = {
-    "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
-    "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
-    "notify.telemetry": FeatureToggle(enabled=False),
-    "call.command": FeatureToggle(
-        enabled=True,
-        version=1,
-        resume=False,
-        commands=(_COMMAND_KEYFRAME,),
-    ),
-}
 _RESUMABLE_TOPICS = (
     NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
@@ -146,8 +136,6 @@ _RESUMABLE_TOPICS = (
     NOTIFY_STREAM_TYPE,
 )
 _ENVELOPE_PARSER = EnvelopeParser()
-
-CommandHandler = Callable[[Any, CallCommand, Any], Awaitable[CommandResult]]
 
 
 async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
@@ -160,8 +148,22 @@ async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) ->
     return CommandResult()
 
 
-_COMMAND_HANDLERS: dict[str, CommandHandler] = {
-    _COMMAND_KEYFRAME: _command_request_keyframe,
+register_command(_COMMAND_KEYFRAME, _command_request_keyframe)
+
+
+_SERVER_FEATURES: dict[str, FeatureToggle] = {
+    "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+    "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
+    "notify.telemetry": FeatureToggle(enabled=False),
+    "call.command": FeatureToggle(
+        enabled=True,
+        version=1,
+        resume=False,
+    ),
 }
 
 
@@ -230,7 +232,7 @@ async def _handle_call_command(server: Any, data: Mapping[str, Any], ws: Any) ->
         )
         return True
 
-    handler = _COMMAND_HANDLERS.get(payload.command)
+    handler = COMMAND_REGISTRY.get_handler(payload.command)
     if handler is None:
         await _send_command_error(
             server,
@@ -1978,23 +1980,8 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     await _reject("state.invalid", f"unknown scope {scope}", details={"scope": scope})
     return True
 
-
-
-async def _handle_ping(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    await ws.send(json.dumps({'type': 'pong'}))
-    return True
-
-
-async def _handle_force_keyframe(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
-    await server._ensure_keyframe()
-    return True
-
-
 MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
     STATE_UPDATE_TYPE: _handle_state_update,
-    'ping': _handle_ping,
-    'request_keyframe': _handle_force_keyframe,
-    'force_idr': _handle_force_keyframe,
     'call.command': _handle_call_command,
     SESSION_ACK_TYPE: _handle_session_ack,
     SESSION_GOODBYE_TYPE: _handle_session_goodbye,
@@ -2635,6 +2622,14 @@ def _resolve_handshake_features(hello: SessionHello) -> Dict[str, FeatureToggle]
         # Required features must be explicitly true; optional ones inherit server toggle.
         enabled = server_toggle.enabled and (client_enabled or name not in _REQUIRED_NOTIFY_FEATURES)
         negotiated[name] = replace(server_toggle, enabled=enabled)
+
+    command_toggle = negotiated.get("call.command")
+    if command_toggle is not None:
+        commands = COMMAND_REGISTRY.command_names()
+        negotiated["call.command"] = replace(
+            command_toggle,
+            commands=commands if (command_toggle.enabled and commands) else (),
+        )
     return negotiated
 
 

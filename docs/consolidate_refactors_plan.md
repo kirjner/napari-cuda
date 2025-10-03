@@ -11,7 +11,8 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 ## Deliverable Branch
 - Branch name: `consolidate-refactors` (created from `server-refactor`).
 - Integration complete; branch now carries the reducer-driven client, refactored server, and the enforced handshake/notify protocol.
-- Experimental work outstanding: command-channel scaffolding and naming cleanups (tracked below).
+- Experimental work outstanding: command-lane expansion beyond the
+  `napari.pixel.request_keyframe` RPC and naming cleanups (tracked below).
 
 ## Prerequisites
 1. `git fetch origin client-refactor` to ensure tip `b068480c` is present.
@@ -38,7 +39,10 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 - Ensure `StreamProtocol.parse_message` continues to hydrate `StateUpdateMessage` instances; no other message categories need to change yet.
 
 ### Server (`src/napari_cuda/server/**`)
-- Keep the `server-refactor` modules (`render_worker.py`, `worker_lifecycle.py`, `server_scene/*.py`, `state_channel_handler.py`, etc.). When resolving conflicts with `client-refactor`, favor the refactored architecture and delete references to the old `egl_worker` in client code.
+- Keep the `server-refactor` modules (`render_worker.py`, `worker_lifecycle.py`,
+  `server_scene/*.py`, control channel helpers, etc.). When resolving conflicts
+  with `client-refactor`, favor the refactored architecture and delete
+  references to the old `egl_worker` in client code.
 - Restore deleted test suites from `server-refactor` (state updates, worker lifecycle). If client branch removed them, bring them back unless they rely on removed components.
 - In `egl_headless_server.py`, ensure imports match retained modules (no `egl_worker`). Wire any new client-introduced hooks (e.g., metrics toggles) to the refactored API.
 - Keep server config docs (`docs/server_*`). Merge client docs by adding, not replacing.
@@ -58,12 +62,19 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 1. `uv run pytest -q -m "not slow" src/napari_cuda/server/_tests` (server suite).
 2. `uv run pytest -q src/napari_cuda/client/streaming/_tests` (client reducer suite).
 3. `uv run pytest -q src/napari_cuda/protocol/_tests` (protocol serialization).
-4. Manual smoke: `uv run napari-cuda-server --state-port ...` and `uv run napari-cuda-client` to verify pan/zoom/dims adjust correctly.
+4. Manual smoke: `uv run napari-cuda-server --state-port ...` and
+   `uv run napari-cuda-client` to verify pan/zoom/dims adjust correctly and
+   confirm the Home/reset action issues `call.command napari.pixel.request_keyframe`
+   (check server logs for the command acknowledgement).
 
 ## Post-Merge Follow-Ups
-- Finalise the command channel (`call.command` / `reply.command`) and update docs/tests once handlers exist.
-- Sweep client code to remove remaining “intent” terminology and keep modules (`client_loop/control.py`, etc.) aligned with the reducer architecture.
-- Rename `state_channel_handler.py` and related helpers to notify-centric terminology per `docs/server_streamlining_plan.md`.
+- Extend the command lane (`call.command` / `reply.command`) beyond the
+  already-wired `napari.pixel.request_keyframe` command and update docs/tests as
+  new verbs land.
+- Sweep client code to remove remaining “intent” terminology and keep modules (`client/control/state_update_actions.py`, etc.) aligned with the reducer architecture.
+- Continue converging naming so server control helpers all live under
+  `server/control/` with notify-centric terminology per
+  `docs/server_streamlining_plan.md`.
 - Refresh onboarding/docs to drop references to dual emission and legacy command paths.
 - Expand CI to include the reducer suites and any new command-channel coverage once available.
 

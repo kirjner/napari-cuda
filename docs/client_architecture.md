@@ -91,9 +91,10 @@ leases once the draw call finishes.
 - `client_loop/warmup.py`: the `WarmupPolicy` helper computes the VT latency
   boost on gate lift, drives the timer-free ramp-down in `draw`, and resets
   presenter latency during shutdown.
-- `client_loop/control.py`: `ControlStateContext` captures dims/settings metadata
-  while pure helpers normalise payloads, reconcile ACKs, mirror viewer state,
-  and expose the public control senders used by input bindings.
+- `client/control/state_update_actions.py`: `ControlStateContext` captures
+  dims/settings metadata while pure helpers normalise payloads, reconcile ACKs,
+  mirror viewer state, and expose the public control senders used by input
+  bindings.
 - `client_loop/camera.py`: `CameraState` tracks pan/orbit accumulators, zoom
   anchors, and cadence limits; helper functions emit `camera.*` payloads while
   keeping HUD snapshots in sync.

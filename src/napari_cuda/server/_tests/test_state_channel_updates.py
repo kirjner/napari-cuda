@@ -25,6 +25,7 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
 )
+from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.layer_manager import ViewerSceneManager
@@ -108,7 +109,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
             enabled=True,
             version=1,
             resume=False,
-            commands=("napari.pixel.request_keyframe",),
+            commands=COMMAND_REGISTRY.command_names(),
         ),
     }
 
@@ -248,6 +249,56 @@ def test_call_command_requests_keyframe() -> None:
     payload = replies[-1]["payload"]
     assert payload["status"] == "ok"
     assert payload["in_reply_to"] == "cmd-test"
+
+
+def test_call_command_unknown_command_errors() -> None:
+    server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
+
+    frame = build_call_command(
+        session_id="test-session",
+        frame_id="cmd-missing",
+        payload={"command": "napari.pixel.unknown"},
+    )
+
+    asyncio.run(state_channel_handler._handle_call_command(server, frame.to_dict(), fake_ws))
+
+    errors = _frames_of_type(captured, "error.command")
+    assert errors, "expected error.command frame"
+    payload = errors[-1]["payload"]
+    assert payload["status"] == "error"
+    assert payload["in_reply_to"] == "cmd-missing"
+    assert payload["code"] == "command.not_found"
+
+
+def test_call_command_rejection_propagates_error() -> None:
+    server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
+
+    async def _reject_keyframe() -> None:
+        raise state_channel_handler.CommandRejected(
+            code="command.busy",
+            message="encoder busy",
+            details={"retry_after_ms": 250},
+        )
+
+    server._ensure_keyframe = _reject_keyframe
+
+    frame = build_call_command(
+        session_id="test-session",
+        frame_id="cmd-reject",
+        payload={"command": "napari.pixel.request_keyframe"},
+    )
+
+    asyncio.run(state_channel_handler._handle_call_command(server, frame.to_dict(), fake_ws))
+
+    errors = _frames_of_type(captured, "error.command")
+    assert errors, "expected error.command frame"
+    payload = errors[-1]["payload"]
+    assert payload["status"] == "error"
+    assert payload["code"] == "command.busy"
+    assert payload["message"] == "encoder busy"
+    assert payload["details"] == {"retry_after_ms": 250}
 
 
 def test_layer_update_rejects_unknown_key() -> None:
@@ -822,6 +873,9 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
 
         welcome = _frames_of_type(captured, "session.welcome")
         assert welcome, "expected handshake welcome frame"
+        command_feature = welcome[0]["payload"]["features"].get("call.command")
+        assert command_feature is not None
+        assert command_feature.get("commands") == ["napari.pixel.request_keyframe"]
     finally:
         asyncio.set_event_loop(None)
         loop.close()

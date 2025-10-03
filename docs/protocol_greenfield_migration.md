@@ -56,10 +56,12 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 
 | # | Task | Primary File Touches | Spec References |
 |---|------|----------------------|-----------------|
-| 1 | Drop legacy keyframe verbs from the control dispatcher and route all keyframe triggers through `call.command`. Remove `'request_keyframe'` / `'force_idr'` entries and collapse `_handle_force_keyframe`. | `src/napari_cuda/server/control/control_channel_server.py`, `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/pipelines/vt_pipeline.py` (ensure only `_request_keyframe_command` is used). | `docs/protocol_greenfield.md` §§6.1–6.3 (command request/reply/error contract). |
-| 2 | Introduce a formal command registry that maps spec-qualified command names to server callbacks (initial set: `napari.pixel.request_keyframe`, `napari.viewer.fit_to_view`, `napari.viewer.reset_view`). Advertise the catalogue in `session.welcome.features.call.command.commands`. | `src/napari_cuda/server/control/control_channel_server.py`, `src/napari_cuda/server/server_scene.py`, new helper `src/napari_cuda/server/control/command_registry.py` (optional), `src/napari_cuda/server/_tests/test_state_channel_updates.py`. | `docs/protocol_greenfield.md` §3.2 (feature advertisement in `session.welcome`), §§6.1–6.4. |
-| 3 | Surface the command catalogue in the client UI layer: bind menu/actions to `_issue_command`, remove any residual direct worker shims, and extend command future handling tests. | `src/napari_cuda/client/runtime/stream_runtime.py`, `src/napari_cuda/client/streaming/client_loop/pipelines.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, viewer action wiring. | `docs/protocol_greenfield.md` §§6.1–6.4 (client behaviour), Appendix A table 6 (command capability matrix). |
-| 4 | Update documentation and smoke checklists to reflect the command-only path and archive status, and add regression tests for the new commands. | `docs/protocol_greenfield_migration.md`, `docs/control_protocol_agent_notes.md`, `tests`/`scripts` smoke instructions. | `docs/protocol_greenfield.md` §§6.1–6.4, §8 (operational notes). |
+| ✅ | Drop legacy keyframe verbs from the control dispatcher and route all keyframe triggers through `call.command`. Remove `'request_keyframe'` / `'force_idr'` entries and collapse `_handle_force_keyframe`. *(Completed 2025-10-03.)* | `src/napari_cuda/server/control/control_channel_server.py`, `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/pipelines/vt_pipeline.py` (ensure only `_request_keyframe_command` is used). | `docs/protocol_greenfield.md` §§6.1–6.3 (command request/reply/error contract). |
+| ✅ | Retire the legacy `'ping' → 'pong'` shim on the control channel so liveness flows exclusively through `session.heartbeat` / `session.ack`. *(Completed 2025-10-03.)* | `src/napari_cuda/server/control/control_channel_server.py`, `docs/protocol_greenfield_migration.md`. | `docs/protocol_greenfield.md` §3.1 (session/heartbeat contract). |
+| ✅ | Introduce a formal command registry that maps spec-qualified command names to server callbacks (initial catalogue limited to `napari.pixel.request_keyframe`; viewer fit/reset remain state updates). Advertise the catalogue in `session.welcome.features.call.command.commands`. *(Completed 2025-10-03.)* | `src/napari_cuda/server/control/control_channel_server.py`, `src/napari_cuda/server/server_scene.py`, new helper `src/napari_cuda/server/control/command_registry.py`, `src/napari_cuda/server/_tests/test_state_channel_updates.py`. | `docs/protocol_greenfield.md` §3.2 (feature advertisement in `session.welcome`), §§6.1–6.4. |
+| ✅ | Surface the command catalogue in the client UI layer: bind menu/actions to `_issue_command`, remove any residual direct worker shims, and extend command future handling tests. *(Completed 2025-10-03.)* | `src/napari_cuda/client/runtime/stream_runtime.py`, `src/napari_cuda/client/streaming/client_loop/pipelines.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, viewer action wiring. | `docs/protocol_greenfield.md` §§6.1–6.4 (client behaviour), Appendix A table 6 (command capability matrix). |
+| ✅ | Update documentation and smoke checklists to reflect the command-only path and archive status. *(Completed 2025-10-03.)* | `docs/protocol_greenfield_migration.md`, `docs/control_protocol_agent_notes.md`, `docs/consolidate_refactors_plan.md`. | `docs/protocol_greenfield.md` §§6.1–6.4, §8 (operational notes). |
+| ✅ | Add regression coverage for the command lane (keyframe RPC success/error paths) and fold it into smoke automation. *(Completed 2025-10-03.)* | `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, smoke scripts. | `docs/protocol_greenfield.md` §§6.1–6.4. |
 
 ## Documented Spec Drifts (2025-10-01)
 
@@ -71,7 +73,12 @@ The following deviations are now deliberate, documented behaviour until the corr
 - ~~**Camera notify integration (resolved 2025-10-01)** – `notify.camera` deltas are now broadcast via the greenfield path, recorded in the state store, and mirrored into the presenter HUD (`src/napari_cuda/client/runtime/stream_runtime.py:591`, `src/napari_cuda/client/streaming/presenter_facade.py:212`).~~
 - ~~**Alt-drag orbit gating (resolved 2025-10-01)** – `notify.dims.mode` drives the volume gate and Alt+drag emits `camera.orbit` intents with verified test coverage (`src/napari_cuda/client/runtime/stream_runtime.py:1246`, `_tests/test_camera.py`).~~
 - **Dims baseline readiness (resolved 2025-10-xx)** – `notify.dims` now streams directly from the worker snapshot. The server persists the latest `snapshot_dims_metadata()` payload and reuses it for intent echoes instead of rebuilding from `SceneSpec`; the client consumes those metadata fields without touching the cached scene snapshot.
-- **State handler shims** – Compatibility modules (`src/napari_cuda/server/state_channel_handler.py:1`, `src/napari_cuda/client/streaming/client_loop/control.py:1`) still wildcard-import the new implementations to preserve legacy imports. *Target:* drop once downstream call sites are updated.
+- ~~**Client state helper shim** – `src/napari_cuda/client/streaming/client_loop/control.py` still
+  wildcard-imports the reducer helpers to preserve legacy imports. *Target:* drop once
+  downstream call sites are updated. (Server compatibility shim removed 2025-10-03.)~~
+- **Client state helper shim (resolved 2025-10-03)** – Legacy importers now target
+  `src/napari_cuda/client/control/state_update_actions.py` directly; the
+  compatibility shim has been deleted alongside the server handler.
 - ~~**Minimal client legacy protocol** – `src/napari_cuda/client/minimal_client.py` continues to speak the deprecated control format (`{"type":"ping"}` etc.). *Target:* archive the minimal client alongside the legacy protocol or port it to the greenfield envelopes after the migration reaches Phase 5.~~
 - **Minimal client archive (resolved 2025-10-xx)** – The legacy minimal client now lives in `archive/legacy_client/minimal_client.py` and is excluded from the active packaging targets.
 
@@ -105,9 +112,10 @@ Cross-reference these items when planning migration work; each future change sho
 - `client/control/pending_update_store.py` (archive: `state_store.py`) tracks
   optimistic state via `PendingEntry` queues keyed by `(scope, target, key)`,
   reconciling on inbound `state.update` echoes.
-- `client/control/state_update_actions.py` (archive:
-  `client/streaming/client_loop/control.py`) centralises outgoing state-update
-  helpers and local projection logic without the legacy "intent" terminology.
+- `client/control/state_update_actions.py` (legacy shim
+  `client/streaming/client_loop/control.py` removed 2025-10-03) centralises
+  outgoing state-update helpers and local projection logic without the legacy
+  "intent" terminology.
 - `client/control/viewer_layer_adapter.py` (archive:
   `layer_state_bridge.py`) translates incoming layer/dims payloads into viewer
   mutations using the greenfield envelopes only.
@@ -117,10 +125,9 @@ Cross-reference these items when planning migration work; each future change sho
 
 ### 2.2 Control Channel (Server)
 
-- `server/control/control_channel_server.py` (archived original:
-  `server/state_channel_handler.py`) accepts both greenfield and legacy verbs,
-  dispatching via `MESSAGE_HANDLERS` (`set_camera`, `camera.pan_px`,
-  `request_keyframe`, etc.).
+- `server/control/control_channel_server.py` handles the state lane and command
+  registry directly (legacy `server/state_channel_handler.py` shim removed
+  2025-10-03), dispatching via `MESSAGE_HANDLERS` for the remaining verbs.
 - `server/control/state_update_engine.py` and
   `server/control/scene_snapshot_builder.py` (archive:
   `server/server_state_updates.py` and `server/server_scene_spec.py`) serialize
@@ -172,8 +179,8 @@ Cross-reference these items when planning migration work; each future change sho
 | `client/streaming/layer_state_bridge.py` | `client/control/viewer_layer_adapter.py` | Clarifies its bridging role. |
 | `client/streaming/controllers.py` | `client/runtime/channel_threads.py` | Emphasizes thread orchestration. |
 | `client/streaming/client_stream_loop.py` | `client/runtime/stream_runtime.py` | Marks the orchestrator that binds control + pixel paths. |
-| `client/streaming/client_loop/control.py` | `client/control/state_update_actions.py` | Emits state-update payloads and projection helpers, now surfaced via `ControlStateContext`. |
-| `server/state_channel_handler.py` | `server/control/control_channel_server.py` | Symmetric naming with the client. |
+| ~~`client/streaming/client_loop/control.py`~~ | `client/control/state_update_actions.py` | Legacy shim deleted; reducer helpers now live solely in `ControlStateContext` and friends. |
+| ~~`server/state_channel_handler.py`~~ | — *(removed 2025-10-03; callers use `server/control/control_channel_server.py` directly)* | Legacy compatibility shim no longer required. |
 | `server/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
 | `server/server_scene_spec.py` | `server/control/scene_snapshot_builder.py` | Communicates “baseline snapshot” job. |
 | — *(removed)* | — *(removed)* | Legacy dual-emission bridge deleted once stream lane went greenfield-only. |
@@ -305,12 +312,21 @@ translating to legacy formats.
 
 ### Phase 4 – Command Lane Enablement
 
-1. Define a command registry on the server (initial commands: `napari.viewer.fit_to_view`,
-   `napari.widgets.features_table`, `napari.toggle_shape_measures`, keyframe).
-2. Surface the registry via `session.welcome.payload.features.call.command`.
+1. Define a command registry on the server (initial catalogue limited to
+   `napari.pixel.request_keyframe`; fit-to-view and viewer reset continue as
+   `state.update` interactions for now).
+2. Surface the registry via `session.welcome.payload.features.call.command` and
+   ensure it reflects the active command list.
 3. Implement client-side RPC helpers that queue `call.command` envelopes,
    await `reply.command` / `error.command`, and surface status/error to the UI.
-4. Derive viewer menu actions from the advertised command catalog.
+4. Derive any future command-driven viewer actions from the advertised catalog
+ once additional commands migrate to the lane.
+
+   *Decision:* The viewer “fit to view” behaviour already runs locally on the
+   client and triggers the existing dims/camera state updates. Likewise the
+   home/reset button issues `state.update(camera.reset)` and does not require a
+   separate command verb. We will revisit additional commands only if a future
+   client cannot express the interaction via the state lane.
 
 ### Phase 5 – Legacy Cleanup
 
@@ -344,9 +360,11 @@ translating to legacy formats.
  - Phase juggling in `pending_update_store.apply_local` and
    `pending_update_store.apply_remote` tied to legacy ack semantics.
 - Server:
- - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`,
-   `ping`, `request_keyframe`).
- - Rename residual `_handler` modules (e.g., `state_channel_handler`) to match greenfield ownership once legacy paths are gone.
+  - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`).
+    ~~`ping`, `request_keyframe`~~ *(removed 2025-10-03)*.
+ - Continue renaming residual `_handler` modules to match greenfield ownership;
+   the client shim has been removed, so audit the remaining server helpers for
+   similar cleanup.
   - Delete the legacy `StateUpdateMessage` module and re-export once both client
     and tests consume the greenfield dataclasses exclusively.
   - Retire legacy scene/layer messages still in circulation:
@@ -402,8 +420,8 @@ stack to validate SLAs from the spec.
 - [ ] New server control channel with ack semantics and command registry.
 - [ ] Client control channel rewritten; optimistic state updates mapped to
       `ack.state`.
-- [ ] Command lane MVP live (fit_to_view, features_table, toggle_measures,
-      request_keyframe).
+- [ ] Command lane MVP live (request_keyframe advertised/exercised via
+      `call.command`).
 - [ ] Legacy bridges removed; greenfield-only deployment verified.
 - [ ] Integration suite running greenfield scenarios in CI.
 - [ ] Telemetry dashboards tracking ack latency, notify rates, heartbeat

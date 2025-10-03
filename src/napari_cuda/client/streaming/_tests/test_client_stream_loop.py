@@ -13,7 +13,7 @@ from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import SessionMetadata, ResumeCursor
 from napari_cuda.client.runtime.stream_runtime import CommandError
-from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command
+from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command, build_error_command
 from napari_cuda.protocol.messages import NotifyDimsFrame, NotifySceneLevelPayload
 
 
@@ -290,6 +290,53 @@ def test_request_keyframe_command_future_resolves() -> None:
     payload = future.result()
     assert payload.status == 'ok'
     assert payload.in_reply_to == frame_id
+
+
+def test_request_keyframe_command_future_errors() -> None:
+    loop = _make_loop()
+    metadata = SessionMetadata(
+        session_id='sess-meta',
+        heartbeat_s=3.0,
+        ack_timeout_ms=250,
+        resume_tokens={
+            'notify.scene': None,
+            'notify.scene.level': None,
+            'notify.layers': None,
+            'notify.stream': None,
+        },
+        features={
+            'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
+            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
+        },
+    )
+    loop._handle_session_ready(metadata)
+
+    future = loop.request_keyframe(origin='test')
+    assert future is not None
+    assert not future.done()
+
+    call_frame = loop._state_channel_stub.sent_frames[-1]
+    frame_id = call_frame.envelope.frame_id
+    error = build_error_command(
+        session_id='sess-meta',
+        frame_id='error-test',
+        payload={
+            'in_reply_to': frame_id,
+            'status': 'error',
+            'code': 'command.busy',
+            'message': 'encoder busy',
+            'details': {'retry_after_ms': 250},
+        },
+    )
+
+    loop._handle_error_command(error)
+
+    assert future.done()
+    with pytest.raises(CommandError) as excinfo:
+        future.result()
+    assert excinfo.value.code == 'command.busy'
+    assert excinfo.value.details == {'retry_after_ms': 250}
+    assert str(excinfo.value) == 'encoder busy'
 
 
 def test_state_disconnect_aborts_pending_commands() -> None:

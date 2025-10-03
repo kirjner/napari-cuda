@@ -28,6 +28,10 @@ collaborators.
   reconnecting clients (automated or human) can request only the missing
   deltas. This keeps bandwidth manageable and preserves context for long-lived
   proofreaders.
+- **Command lane** – The server advertises a command catalogue via
+  `session.welcome.features.call.command.commands` and currently exposes
+  `napari.pixel.request_keyframe`. Agents can trigger keyframes without relying
+  on legacy verbs, and additional commands will slot into the same lane.
 - **Transport neutrality** – Because all semantics live in the envelopes,
   the same protocol can be tunneled over different transports or split across
   services without changing payload shapes.

@@ -55,7 +55,7 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.server.control.scene_snapshot_builder import build_notify_scene_payload
 from . import pixel_broadcaster, pixel_channel, metrics_server
-from .state_channel_handler import (
+from napari_cuda.server.control.control_channel_server import (
     broadcast_stream_config,
     handle_state,
     process_worker_notifications,
@@ -261,10 +261,11 @@ class EGLHeadlessServer:
         except Exception:
             logger.debug("volume update log failed", exc_info=True)
 
-    def _try_reset_encoder(self) -> bool:
+    def _try_reset_encoder(self, *, reason: str = "unspecified") -> bool:
         worker = self._worker
         if worker is None:
             return False
+        logger.info("Encoder reset requested (reason=%s)", reason)
         worker.reset_encoder()
         return True
 
