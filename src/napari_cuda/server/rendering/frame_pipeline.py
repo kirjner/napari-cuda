@@ -37,7 +37,7 @@ class FramePipeline:
         self._height = int(height)
         self._debug = debug
         self._orientation_ready: bool = False
-        self._enc_input_format: str = "YUV444"
+        self._enc_input_format: str = "NV12"
         self._logged_swizzle = False
         self._logged_swizzle_stats = False
         self._raw_dump_budget: int = 0

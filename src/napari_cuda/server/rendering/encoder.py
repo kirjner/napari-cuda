@@ -35,7 +35,7 @@ class Encoder:
         self._width = int(width)
         self._height = int(height)
         self._encoder: Optional[Any] = None
-        self._input_format: str = "YUV444"
+        self._input_format: str = "NV12"
         self._log_keyframes = False
         self._log_settings = True
         self._force_next_idr = False
@@ -63,9 +63,9 @@ class Encoder:
         self._ctx = ctx
         runtime = ctx.encoder_runtime if ctx is not None else EncoderRuntime()
 
-        fmt = (runtime.input_format or "YUV444").strip().upper()
+        fmt = (runtime.input_format or "NV12").strip().upper()
         if fmt not in _ALLOWED_INPUT_FORMATS:
-            fmt = "YUV444"
+            fmt = "NV12"
         self._input_format = fmt
 
         if ctx is not None and getattr(ctx, "debug_policy", None) is not None:

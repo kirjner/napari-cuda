@@ -235,7 +235,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
             class _DummyPipeline:
                 def __init__(self) -> None:
                     self._debug = None
-                    self._enc_fmt = "YUV444"
+                    self._enc_fmt = "NV12"
                     self.orientation_ready = True
                     self._raw_budget = 0
 
@@ -296,7 +296,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
             self.width = width
             self.height = height
             self.fps_hint = fps_hint
-            self.input_format = "YUV444"
+            self.input_format = "NV12"
             self.is_ready = True
             self.frame_index = 0
 

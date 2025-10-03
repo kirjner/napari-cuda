@@ -53,6 +53,7 @@ class PixelBroadcastState:
     drops_total: int = 0
     kf_watchdog_task: Optional[asyncio.Task] = None
     kf_last_reset_ts: Optional[float] = None
+    waiting_for_keyframe: bool = False
 
 
 def configure_socket(ws: websockets.WebSocketServerProtocol, *, label: str = "pixel ws") -> None:
@@ -167,6 +168,7 @@ async def broadcast_loop(
                 metrics.inc("napari_cuda_keyframes_total")
                 state.last_key_seq = seq32
                 state.last_key_ts = float(stamp_ts)
+                state.waiting_for_keyframe = False
                 try:
                     metrics.set("napari_cuda_last_key_seq", float(state.last_key_seq))
                     metrics.set("napari_cuda_last_key_ts", float(state.last_key_ts))

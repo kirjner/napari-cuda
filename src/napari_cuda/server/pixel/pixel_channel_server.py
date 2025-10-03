@@ -127,23 +127,30 @@ async def ensure_keyframe(
         await send_stream(build_notify_stream_payload(config, avcc_bytes))
         state.needs_stream_config = False
 
+    now = time.time()
+    if state.broadcast.waiting_for_keyframe:
+        last_reset = state.broadcast.kf_last_reset_ts
+        if last_reset is not None and (now - last_reset) < state.kf_watchdog_cooldown_s:
+            logger.debug("ensure_keyframe skipped: awaiting previous keyframe")
+            return
+
     # TODO(encoder-idr): Re-introduce `force_idr` handling once NVENC reliably
-    # produces an IDR on demand. For now we always reset the encoder so the next
-    # frame is guaranteed to be a keyframe.
+    # produces an IDR on demand. For now we reset the encoder so the next frame
+    # is guaranteed to be a keyframe, but gate repeated resets while the caller
+    # is still waiting on the previous one.
     if not reset_encoder():
         logger.debug("Encoder reset unavailable during keyframe ensure")
         return
-    state.broadcast.kf_last_reset_ts = time.time()
+    state.broadcast.kf_last_reset_ts = now
 
     state.broadcast.bypass_until_key = True
+    state.broadcast.waiting_for_keyframe = True
     state.needs_stream_config = True
 
     try:
         metrics.inc("napari_cuda_encoder_resets")
     except Exception:  # pragma: no cover - defensive metrics guard
         logger.debug("metrics inc encoder_resets failed", exc_info=True)
-
-    start_watchdog(state, reset_encoder=reset_encoder)
 
     if state.last_avcc is not None and state.needs_stream_config:
         try:
@@ -187,6 +194,7 @@ def start_watchdog(
                     return
                 broadcast.bypass_until_key = True
                 broadcast.kf_last_reset_ts = now
+                broadcast.waiting_for_keyframe = True
         except asyncio.CancelledError:  # pragma: no cover - cancellation path
             return
 

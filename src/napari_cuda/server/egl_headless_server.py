@@ -424,6 +424,12 @@ class EGLHeadlessServer:
             capture_avcc=self._current_avcc_bytes,
         )
         worker = self._worker
+        if worker is not None and hasattr(worker, "_mark_render_tick_needed"):
+            try:
+                worker._mark_render_tick_needed()
+            except Exception:
+                logger.debug("ensure_keyframe: mark_render_tick_needed failed", exc_info=True)
+        worker = self._worker
         if worker is not None and hasattr(worker, "_request_encoder_idr"):
             try:
                 worker._request_encoder_idr()
@@ -469,22 +475,16 @@ class EGLHeadlessServer:
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:
                 self._worker.request_ndisplay(int(ndisp))  # type: ignore[attr-defined]
-                # Force a keyframe and bypass pacing so the switch is immediate
-                try:
-                    if self._try_reset_encoder():
-                        self._pixel_channel.broadcast.bypass_until_key = True
-                        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
-                except Exception:
-                    logger.debug("view.set_ndisplay: encoder reset failed", exc_info=True)
+                self._pixel_channel.broadcast.bypass_until_key = True
+                self._pixel_channel.broadcast.waiting_for_keyframe = True
+                pixel_channel.mark_stream_config_dirty(self._pixel_channel)
+                self._schedule_coro(self._ensure_keyframe(), "ndisplay-keyframe")
             except Exception:
                 logger.exception("view.set_ndisplay: worker request failed")
         # Let the worker-driven scene refresh broadcast updated dims once the toggle completes
 
     def _start_kf_watchdog(self) -> None:
-        pixel_channel.start_watchdog(
-            self._pixel_channel,
-            reset_encoder=self._try_reset_encoder,
-        )
+        return
 
     # --- Meta builders ------------------------------------------------------------
     def _populate_multiscale_state(self) -> None:

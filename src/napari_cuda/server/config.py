@@ -186,7 +186,7 @@ class EncodeCfg:
 
     fps: int = 60
     codec: str = "h264"  # "h264" | "hevc" | "av1"
-    bitrate: int = 10_000_000
+    bitrate: int = 20_000_000
     keyint: int = 120
 
 
@@ -200,7 +200,7 @@ def _profile_defaults(name: str) -> EncodeCfg:
             keyint=120,
         )
     # Default to latency profile
-    return EncodeCfg(fps=60, codec="h264", bitrate=10_000_000, keyint=120)
+    return EncodeCfg(fps=60, codec="h264", bitrate=20_000_000, keyint=120)
 
 
 def _codec_to_int(codec: str) -> int:
@@ -267,10 +267,10 @@ class EncoderRuntime:
     construction so the encoder no longer touches `os.environ`.
     """
 
-    input_format: str = "YUV444"
+    input_format: str = "NV12"
     rc_mode: str = "cbr"
     preset: str = "P3"
-    max_bitrate: Optional[int] = None
+    max_bitrate: Optional[int] = 20_000_000
     lookahead: int = 0
     aq: int = 0
     temporalaq: int = 0
@@ -457,7 +457,7 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     # Encoder runtime overrides
     runtime_cfg_in = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
     runtime_cfg = dict(runtime_cfg_in) if isinstance(runtime_cfg_in, dict) else {}
-    input_fmt = _cfg_str(runtime_cfg.get("input_format"), "YUV444").upper()
+    input_fmt = _cfg_str(runtime_cfg.get("input_format"), "NV12").upper()
     rc_mode = _cfg_str(runtime_cfg.get("rc_mode"), "cbr").lower()
     runtime_preset = _cfg_str(runtime_cfg.get("preset"), "P3")
     max_bitrate_val = _cfg_optional_int(runtime_cfg.get("max_bitrate"), None)
@@ -468,7 +468,7 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     bframes = max(0, _cfg_int(runtime_cfg.get("bframes"), 0))
     idr_period = max(1, _cfg_int(runtime_cfg.get("idr_period"), 600))
     encoder_runtime = EncoderRuntime(
-        input_format=input_fmt or "YUV444",
+        input_format=input_fmt or "NV12",
         rc_mode=rc_mode or "cbr",
         preset=runtime_preset or "P3",
         max_bitrate=max_bitrate_val if (max_bitrate_val or 0) > 0 else None,
