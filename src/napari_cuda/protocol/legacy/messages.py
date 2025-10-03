@@ -9,6 +9,8 @@ import json
 from dataclasses import dataclass, asdict, field, is_dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
+from napari_cuda.protocol.axis_labels import normalize_axis_labels
+
 STATE_UPDATE_TYPE = "state.update"
 
 
@@ -433,8 +435,10 @@ class LayerSpec:
         self.shape = [int(x) for x in self.shape]
         if self.axis_order is not None:
             self.axis_order = [str(x) for x in _ensure_list(self.axis_order) or []]
-        if self.axis_labels is not None:
-            self.axis_labels = [str(x) for x in _ensure_list(self.axis_labels) or []]
+        axis_labels = _ensure_list(self.axis_labels)
+        if axis_labels is not None:
+            axis_labels = [str(x) for x in axis_labels or []]
+        self.axis_labels = normalize_axis_labels(axis_labels, self.ndim)
         if self.scale is not None:
             self.scale = [float(x) for x in _ensure_list(self.scale) or []]
         if self.translate is not None:

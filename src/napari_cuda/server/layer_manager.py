@@ -11,6 +11,7 @@ from contextlib import ExitStack, suppress
 
 from napari.components.viewer_model import ViewerModel
 
+from napari_cuda.protocol.axis_labels import normalize_axis_labels
 from napari_cuda.protocol.snapshots import (
     LayerSnapshot,
     SceneSnapshot,
@@ -231,7 +232,7 @@ class ViewerSceneManager:
 
         shape = [int(x) for x in worker_snapshot.shape]
         ndim = len(shape)
-        axis_labels = self._normalize_axis_labels(worker_snapshot.axis_labels, ndim)
+        axis_labels = normalize_axis_labels(worker_snapshot.axis_labels, ndim)
 
         block: Dict[str, Any] = {
             "layer_id": self._default_layer_id,
@@ -280,7 +281,7 @@ class ViewerSceneManager:
             ndisplay_val = int(dims.ndisplay)
         else:
             shape = [int(x) for x in (layer_block.get("shape") or [])]
-            axis_labels = self._normalize_axis_labels(layer_block.get("axis_labels"), len(shape))
+            axis_labels = normalize_axis_labels(layer_block.get("axis_labels"), len(shape))
             order = list(axis_labels)
             current = self._normalize_step(current_step, len(axis_labels))
             ndisplay_val = int(ndisplay or min(2, len(axis_labels)))
@@ -441,18 +442,6 @@ class ViewerSceneManager:
         clim_vs = volume_state.get("clim")
         if isinstance(clim_vs, (list, tuple)) and len(clim_vs) >= 2:
             block["contrast_limits"] = [float(clim_vs[0]), float(clim_vs[1])]
-
-    @staticmethod
-    def _normalize_axis_labels(labels: Optional[Iterable[Any]], ndim: int) -> List[str]:
-        if labels is not None:
-            normalized = [str(label) for label in labels]
-            if len(normalized) == ndim and all(label.strip() for label in normalized):
-                return normalized
-        if ndim == 3:
-            return ["z", "y", "x"]
-        if ndim == 2:
-            return ["y", "x"]
-        return [f"d{i}" for i in range(ndim)]
 
     @staticmethod
     def _normalize_step(step: Optional[Iterable[int]], ndim: int) -> List[int]:
