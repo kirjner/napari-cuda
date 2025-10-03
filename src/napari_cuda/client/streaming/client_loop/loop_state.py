@@ -42,6 +42,12 @@ class LoopSyncState:
         self.last_seq = int(cur)
         return False
 
+    def reset_sequence(self) -> None:
+        """Forget the last seen sequence so the next frame sets the baseline."""
+
+        self.last_seq = None
+        self.last_disco_log = 0.0
+
 
 @dataclass
 class ClientLoopState:

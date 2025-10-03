@@ -180,6 +180,12 @@ class ClientStreamLoop:
         self._command_lock = threading.Lock()
         self._pending_commands: Dict[str, Future] = {}
         self._command_catalog: tuple[str, ...] = ()
+        backoff_env = os.getenv('NAPARI_CUDA_KEYFRAME_BACKOFF_S', '1.0') or '1.0'
+        try:
+            self._keyframe_backoff_s = max(0.0, float(backoff_env))
+        except ValueError:
+            self._keyframe_backoff_s = 1.0
+        self._last_keyframe_request_ts = 0.0
         # Thread/state handles
         # Optional weakref to a ViewerModel mirror (e.g., ProxyViewer)
         self._viewer_mirror = None  # type: ignore[var-annotated]
@@ -538,6 +544,7 @@ class ClientStreamLoop:
         self._vt_cfg_key = cfg_key
         self._last_vcfg_key = cfg_key
         self._loop_state.vt_wait_keyframe = True
+        self._loop_state.sync.reset_sequence()
         # Parse nal length size from avcC if available (5th byte low 2 bits + 1)
         if len(avcc) >= 5:
             nsz = int((avcc[4] & 0x03) + 1)
@@ -839,9 +846,38 @@ class ClientStreamLoop:
         logger.debug("Command %s emitted frame=%s", command, frame_id)
         return future
 
-    def _request_keyframe_command(self, *, origin: str = "auto.keyframe") -> None:
+    def _send_keyframe_command(
+        self,
+        *,
+        origin: str,
+        enforce_backoff: bool,
+    ) -> Future | None:
+        now = time.time()
+        cooldown = self._keyframe_backoff_s if enforce_backoff else 0.0
+        if enforce_backoff and self._last_keyframe_request_ts > 0.0:
+            elapsed = now - self._last_keyframe_request_ts
+            if elapsed < cooldown:
+                remaining = max(0.0, cooldown - elapsed)
+                logger.debug(
+                    "Keyframe request skipped: backoff active (remaining=%.0fms origin=%s)",
+                    remaining * 1000.0,
+                    origin,
+                )
+                return None
+
         future = self._issue_command(_KEYFRAME_COMMAND, origin=origin)
         if future is None:
+            return None
+        if future.done() and future.exception() is not None:
+            return future
+
+        self._last_keyframe_request_ts = now
+        self._loop_state.sync.reset_sequence()
+        return future
+
+    def _request_keyframe_command(self, *, origin: str = "auto.keyframe") -> None:
+        future = self._send_keyframe_command(origin=origin, enforce_backoff=True)
+        if future is None or (future.done() and future.exception() is not None):
             return
 
         def _log_result(fut: Future) -> None:
@@ -879,12 +915,14 @@ class ClientStreamLoop:
         vm_ref._sync_remote_layers(snapshot)  # type: ignore[attr-defined]
 
     def _handle_connected(self) -> None:
+        self._loop_state.sync.reset_sequence()
         self._init_decoder()
         dec = self.decoder.decode if self.decoder else None
         self._loop_state.pyav_pipeline.set_decoder(dec)
 
     def _handle_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
+        self._loop_state.sync.reset_sequence()
 
     # State channel lifecycle: gate dims state.update traffic safely across reconnects
     def _on_state_connected(self) -> None:
@@ -1276,19 +1314,29 @@ class ClientStreamLoop:
     def _on_frame(self, pkt: Packet) -> None:
         cur = int(pkt.seq)
         if not (self._loop_state.vt_wait_keyframe or self._loop_state.pyav_wait_keyframe):
-                if self._loop_state.sync.update_and_check(cur):
-                    if self._vt_decoder is not None:
-                        self._loop_state.vt_wait_keyframe = True
-                        self._loop_state.vt_pipeline.clear(preserve_cache=True)
-                        self._presenter.clear(Source.VT)
-                        self._log_keyframe_skip("stream discontinuity")
-                    self._loop_state.pyav_wait_keyframe = True
-                    self._loop_state.pyav_pipeline.clear()
-                self._presenter.clear(Source.PYAV)
-                self._init_decoder()
-                dec = self.decoder.decode if self.decoder else None
-                self._loop_state.pyav_pipeline.set_decoder(dec)
-                self._loop_state.disco_gated = True
+            if self._loop_state.sync.update_and_check(cur):
+                if self._vt_decoder is not None:
+                    self._loop_state.vt_wait_keyframe = True
+                    self._loop_state.vt_pipeline.clear(preserve_cache=True)
+                    self._presenter.clear(Source.VT)
+                self._loop_state.pyav_wait_keyframe = True
+                self._loop_state.pyav_pipeline.clear()
+                future = self._send_keyframe_command(
+                    origin="auto.discontinuity",
+                    enforce_backoff=False,
+                )
+                if future is None or (future.done() and future.exception() is not None):
+                    self._log_keyframe_skip("stream discontinuity")
+                else:
+                    logger.debug(
+                        "Keyframe request queued for stream discontinuity (seq=%d)",
+                        cur,
+                    )
+            self._presenter.clear(Source.PYAV)
+            self._init_decoder()
+            dec = self.decoder.decode if self.decoder else None
+            self._loop_state.pyav_pipeline.set_decoder(dec)
+            self._loop_state.disco_gated = True
         if not self._stream_seen_keyframe:
             if self._is_keyframe(pkt.payload, pkt.codec) or (pkt.flags & 0x01):
                 self._stream_seen_keyframe = True

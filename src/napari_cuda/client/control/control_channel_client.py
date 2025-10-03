@@ -661,7 +661,7 @@ class StateChannel:
             return
 
         payload = frame.payload
-        logger.info(
+        logger.debug(
             "ack.state received intent=%s in_reply_to=%s status=%s",
             payload.intent_id,
             payload.in_reply_to,

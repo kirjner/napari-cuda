@@ -241,7 +241,7 @@ class LayerStateBridge:
             self._registry.remove_listener(self._on_registry_snapshot)
         except Exception:  # pragma: no cover - defensive cleanup
             logger.debug("LayerStateBridge remove_listener failed", exc_info=True)
-        logger.info("LayerStateBridge shut down")
+        logger.debug("LayerStateBridge shut down")
 
     # ------------------------------------------------------------------
     def clear_pending_on_reconnect(self) -> None:
