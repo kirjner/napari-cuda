@@ -41,7 +41,7 @@ def build_notify_scene_payload(
     payload.policies = _build_policies_block(scene)
     payload.ancillary = _merge_ancillary(snapshot.ancillary, scene, ancillary)
 
-    scene.last_scene_spec = payload.to_dict()
+    scene.last_scene_snapshot = payload.to_dict()
     return payload
 
 

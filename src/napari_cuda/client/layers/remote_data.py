@@ -10,14 +10,12 @@ stream; the objects here simply satisfy `LayerDataProtocol`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Sequence, Tuple, Union, overload
+from typing import Mapping, Iterable, Iterator, Sequence, Tuple, Union, overload
 
 import numpy as np
 
 from napari.layers._data_protocols import LayerDataProtocol
 from napari.layers._multiscale_data import MultiScaleData
-
-from napari_cuda.protocol.messages import LayerSpec, MultiscaleLevelSpec, MultiscaleSpec
 
 IndexKey = Union[int, slice, type(Ellipsis), None]
 
@@ -175,11 +173,9 @@ class RemoteArray(LayerDataProtocol):
                 continue
             lengths.append(_result_length(self._shape[dim], item))
             dim += 1
-        # Spill remaining dimensions
         for idx in range(dim, self.ndim):
             lengths.append(min(self._shape[idx], _PREVIEW_MAX))
 
-        # Remove leading dimensions collapsed by integer indexing
         result_shape = [length for length in lengths if length not in (None,)]
         if not result_shape:
             return np.array(0, dtype=self._dtype)
@@ -187,7 +183,14 @@ class RemoteArray(LayerDataProtocol):
         return preview
 
     # --- Mutation helpers -------------------------------------------------
-    def update(self, *, shape: Sequence[int] | None = None, dtype: str | None = None, data_id: str | None = None, cache_version: int | None = None) -> None:
+    def update(
+        self,
+        *,
+        shape: Sequence[int] | None = None,
+        dtype: str | None = None,
+        data_id: str | None = None,
+        cache_version: int | None = None,
+    ) -> None:
         if shape is not None:
             self._shape = tuple(int(max(0, s)) for s in shape) or (1,)
             self._preview = np.zeros(_preview_shape(self._shape), dtype=self._dtype)
@@ -226,8 +229,6 @@ class RemotePreview:
         self.data = arr
 
     def as_thumbnail(self, rgb: bool, target_shape: Tuple[int, int]) -> np.ndarray:
-        """Return a thumbnail-sized preview (RGB or scalar depending on ``rgb``)."""
-
         h, w = int(target_shape[0]), int(target_shape[1])
         if h <= 0 or w <= 0:
             return np.zeros((1, 1, 3 if rgb else 1), dtype=np.float32)
@@ -243,7 +244,6 @@ class RemotePreview:
         elif arr.ndim == 1:
             arr = arr[np.newaxis, :]
 
-        # Collapse leading dimensions until we have <= 3 dims (assuming final dims are spatial/color)
         while arr.ndim > 3:
             arr = arr.max(axis=0)
 
@@ -259,7 +259,7 @@ class RemotePreview:
                 arr = np.repeat(arr, 3, axis=-1)
             elif channels >= 3:
                 arr = arr[..., :3]
-            else:  # channels == 2
+            else:
                 pad = np.zeros(arr.shape[:2] + (3 - channels,), dtype=arr.dtype)
                 arr = np.concatenate([arr, pad], axis=-1)
         else:
@@ -272,10 +272,7 @@ class RemotePreview:
         arr = arr.astype(np.float32, copy=False)
         arr = np.clip(arr, 0.0, 1.0, out=arr)
 
-        if rgb:
-            out = np.zeros((h, w, 3), dtype=np.float32)
-        else:
-            out = np.zeros((h, w), dtype=np.float32)
+        out = np.zeros((h, w, 3), dtype=np.float32) if rgb else np.zeros((h, w), dtype=np.float32)
         copy_h = min(h, arr.shape[0])
         copy_w = min(w, arr.shape[1])
         if rgb:
@@ -283,6 +280,7 @@ class RemotePreview:
         else:
             out[:copy_h, :copy_w] = arr[:copy_h, :copy_w]
         return out
+
 
 @dataclass(frozen=True)
 class RemoteMultiscale:
@@ -294,11 +292,11 @@ class RemoteMultiscale:
         return MultiScaleData(self.arrays)
 
 
-def build_remote_data(spec: LayerSpec) -> tuple[LayerDataProtocol | MultiScaleData, RemoteMultiscale | None]:
+def build_remote_data(block: Mapping[str, Any]) -> tuple[LayerDataProtocol | MultiScaleData, RemoteMultiscale | None]:
+    extras = block.get("extras")
     data_id = None
     cache_version = None
-    extras = spec.extras or {}
-    if isinstance(extras, dict):
+    if isinstance(extras, Mapping):
         data_id = extras.get("data_id") or extras.get("source_id")
         cache_version = extras.get("cache_version")
         try:
@@ -307,20 +305,35 @@ def build_remote_data(spec: LayerSpec) -> tuple[LayerDataProtocol | MultiScaleDa
         except Exception:
             cache_version = None
 
-    if spec.multiscale and isinstance(spec.multiscale, MultiscaleSpec):
+    shape_value = block.get("shape")
+    if isinstance(shape_value, Sequence):
+        base_shape = [int(s) for s in shape_value]
+    else:
+        base_shape = [1]
+
+    dtype_value = block.get("dtype")
+    dtype = str(dtype_value) if dtype_value is not None else None
+
+    multiscale_block = block.get("multiscale")
+    if isinstance(multiscale_block, Mapping):
+        levels_value = multiscale_block.get("levels")
         arrays: list[RemoteArray] = []
-        base_dtype = spec.dtype
-        for level in spec.multiscale.levels:
-            arrays.append(
-                RemoteArray(
-                    level.shape or spec.shape,
-                    base_dtype,
-                    data_id=data_id,
-                    cache_version=cache_version,
+        if isinstance(levels_value, Sequence):
+            for level in levels_value:
+                if not isinstance(level, Mapping):
+                    continue
+                level_shape_value = level.get("shape")
+                if isinstance(level_shape_value, Sequence) and level_shape_value:
+                    level_shape = [int(s) for s in level_shape_value]
+                else:
+                    level_shape = base_shape
+                arrays.append(
+                    RemoteArray(level_shape, dtype, data_id=data_id, cache_version=cache_version)
                 )
-            )
+        if not arrays:
+            arrays.append(RemoteArray(base_shape, dtype, data_id=data_id, cache_version=cache_version))
         container = RemoteMultiscale(tuple(arrays))
         return container.as_multiscale(), container
 
-    array = RemoteArray(spec.shape, spec.dtype, data_id=data_id, cache_version=cache_version)
+    array = RemoteArray(base_shape, dtype, data_id=data_id, cache_version=cache_version)
     return array, None

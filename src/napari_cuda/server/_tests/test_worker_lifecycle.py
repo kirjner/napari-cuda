@@ -135,6 +135,8 @@ class _FakeWorkerBase:
         self._bootstrapped = True
         self._bootstrapping = False
         self._last_step = tuple(int(value) for value in self.default_step)
+        self._plane_restore_state = None
+        self._active_ms_level = 0
 
     def snapshot_dims_metadata(self) -> dict[str, object]:
         return dict(self._meta)

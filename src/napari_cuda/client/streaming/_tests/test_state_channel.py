@@ -30,7 +30,6 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.greenfield.envelopes import NOTIFY_SCENE_LEVEL_TYPE
 from napari_cuda.protocol.messages import (
-    LayerSpec,
     NotifyDimsFrame,
     NotifyLayersFrame,
     NotifySceneFrame,
@@ -48,11 +47,24 @@ def test_state_channel_scene_callback(state_channel):
     received = []
     state_channel.handle_scene_snapshot = received.append
 
-    layer = LayerSpec(layer_id='a', layer_type='image', name='demo', ndim=2, shape=[32, 32])
+    layer_block = {
+        "layer_id": "a",
+        "layer_type": "image",
+        "name": "demo",
+        "ndim": 2,
+        "shape": [32, 32],
+        "dtype": "float32",
+        "axis_labels": ["y", "x"],
+        "contrast_limits": [0.0, 1.0],
+        "metadata": {},
+        "render": {},
+        "controls": {},
+        "extras": {},
+    }
     frame = build_notify_scene_snapshot(
-        session_id='session-1',
-        viewer={'dims': {'ndim': 2}, 'camera': {}},
-        layers=[layer.to_dict()],
+        session_id="session-1",
+        viewer={"dims": {"ndim": 2}, "camera": {}},
+        layers=[layer_block],
         ancillary={'capabilities': ['layer.update']},
         delta_token='tok-scene-1',
     )
@@ -159,11 +171,18 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
     received: list[NotifySceneFrame] = []
     state_channel.handle_scene_snapshot = received.append
 
-    layer = LayerSpec(layer_id='layer-10', layer_type='image', name='demo', ndim=2, shape=[8, 8])
+    layer_block = {
+        "layer_id": "layer-10",
+        "layer_type": "image",
+        "name": "demo",
+        "ndim": 2,
+        "shape": [8, 8],
+        "axis_labels": ["y", "x"],
+    }
     frame = build_notify_scene_snapshot(
-        session_id='session-2',
-        viewer={'dims': {'ndim': 3}, 'camera': {}},
-        layers=[layer.to_dict()],
+        session_id="session-2",
+        viewer={"dims": {"ndim": 3}, "camera": {}},
+        layers=[layer_block],
         ancillary=None,
         delta_token='tok-scene-2',
     )
@@ -186,7 +205,14 @@ def test_state_channel_notify_scene_policies_callback() -> None:
         handle_scene_policies=policies_received.append,
     )
 
-    layer = LayerSpec(layer_id='layer-20', layer_type='image', name='zarr', ndim=3, shape=[32, 32, 8])
+    layer_block = {
+        "layer_id": "layer-20",
+        "layer_type": "image",
+        "name": "zarr",
+        "ndim": 3,
+        "shape": [32, 32, 8],
+        "axis_labels": ["z", "y", "x"],
+    }
     policies = {
         'multiscale': {
             'policy': 'oversampling',
@@ -205,7 +231,7 @@ def test_state_channel_notify_scene_policies_callback() -> None:
     frame = build_notify_scene_snapshot(
         session_id='session-3',
         viewer={'dims': {'ndim': 3}, 'camera': {}},
-        layers=[layer.to_dict()],
+        layers=[layer_block],
         policies=policies,
         ancillary=ancillary,
         delta_token='tok-scene-3',

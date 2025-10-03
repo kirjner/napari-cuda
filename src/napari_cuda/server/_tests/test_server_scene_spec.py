@@ -52,7 +52,7 @@ def test_build_notify_scene_payload_round_trip(scene: ServerSceneData, manager: 
         manager,
         viewer_settings=viewer_settings,
     )
-    cached = scene.last_scene_spec
+    cached = scene.last_scene_snapshot
     assert cached is not None
     assert cached == payload.to_dict()
 

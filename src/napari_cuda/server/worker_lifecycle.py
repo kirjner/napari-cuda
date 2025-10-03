@@ -47,7 +47,8 @@ def _handle_scene_refresh(
         meta["level"] = plane_state.level
     else:
         meta["level"] = int(worker_ref._active_ms_level)
-    meta["current_step"] = [int(value) for value in step_tuple]
+    meta_copy = dict(meta)
+    meta_copy["current_step"] = [int(value) for value in step_tuple]
 
     notifications: list[WorkerSceneNotification] = []
 
@@ -70,7 +71,7 @@ def _handle_scene_refresh(
             angles=snapshot.angles,
             current_step=step_tuple,
         )
-        server._scene.last_dims_payload = dict(meta)  # type: ignore[attr-defined]
+        server._scene.last_dims_payload = meta_copy  # type: ignore[attr-defined]
 
     if plane_state is not None:
         server._scene.plane_restore_state = plane_state

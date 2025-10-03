@@ -8,7 +8,7 @@ import logging
 import math
 import os
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, TYPE_CHECKING
 
 from napari.utils.events import EventEmitter
 
@@ -17,7 +17,6 @@ from napari_cuda.client.layers.registry import LayerRecord, RegistrySnapshot
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate, AckOutcome
-from napari_cuda.protocol.messages import LayerSpec
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
@@ -80,8 +79,8 @@ def _colormap_name(value: Any) -> Optional[str]:
     return str(value)
 
 
-def _control_value(spec: LayerSpec, key: str) -> Optional[Any]:
-    controls = getattr(spec, "controls", None)
+def _control_value(block: Mapping[str, Any], key: str) -> Optional[Any]:
+    controls = block.get("controls") if isinstance(block.get("controls"), dict) else None
     if isinstance(controls, dict):
         return controls.get(key)
     return None
@@ -101,8 +100,8 @@ def _coerce_bool(value: Any) -> Optional[bool]:
     return bool(value)
 
 
-def _coerce_clim(spec: LayerSpec) -> Optional[tuple[float, float]]:
-    value = _control_value(spec, "contrast_limits")
+def _coerce_clim(block: Mapping[str, Any]) -> Optional[tuple[float, float]]:
+    value = _control_value(block, "contrast_limits")
     if value is None:
         return None
     if isinstance(value, (list, tuple)) and len(value) >= 2:
@@ -120,7 +119,7 @@ class PropertyConfig:
     getter: Callable[[RemoteImageLayer], Any]
     setter: Callable[[RemoteImageLayer, Any], None]
     equals: Callable[[Any, Any], bool]
-    spec_getter: Callable[[LayerSpec], Optional[Any]]
+    block_getter: Callable[[Mapping[str, Any]], Optional[Any]]
 
 
 @dataclass
@@ -150,7 +149,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: float(getattr(layer, "opacity", 0.0)),
         setter=lambda layer, value: setattr(layer, "opacity", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b)),
-        spec_getter=lambda spec: _coerce_float(_control_value(spec, "opacity")),
+        block_getter=lambda block: _coerce_float(_control_value(block, "opacity")),
     ),
     PropertyConfig(
         key="visible",
@@ -159,7 +158,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: bool(getattr(layer, "visible", False)),
         setter=lambda layer, value: setattr(layer, "visible", bool(value)),
         equals=lambda a, b: bool(a) is bool(b),
-        spec_getter=lambda spec: _coerce_bool(_control_value(spec, "visible")),
+        block_getter=lambda block: _coerce_bool(_control_value(block, "visible")),
     ),
     PropertyConfig(
         key="rendering",
@@ -168,7 +167,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: str(getattr(layer, "rendering", "")),
         setter=lambda layer, value: setattr(layer, "rendering", str(value)),
         equals=lambda a, b: str(a) == str(b),
-        spec_getter=lambda spec: _control_value(spec, "rendering"),
+        block_getter=lambda block: _control_value(block, "rendering"),
     ),
     PropertyConfig(
         key="colormap",
@@ -177,7 +176,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: str(_colormap_name(getattr(layer, "colormap", None)) or ""),
         setter=lambda layer, value: setattr(layer, "colormap", str(value)),
         equals=lambda a, b: str(a) == str(b),
-        spec_getter=lambda spec: _colormap_name(_control_value(spec, "colormap")),
+        block_getter=lambda block: _colormap_name(_control_value(block, "colormap")),
     ),
     PropertyConfig(
         key="gamma",
@@ -186,7 +185,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: float(getattr(layer, "gamma", 1.0)),
         setter=lambda layer, value: setattr(layer, "gamma", float(value)),
         equals=lambda a, b: _isclose(float(a), float(b), tol=1e-4),
-        spec_getter=lambda spec: _coerce_float(_control_value(spec, "gamma")),
+        block_getter=lambda block: _coerce_float(_control_value(block, "gamma")),
     ),
     PropertyConfig(
         key="contrast_limits",
@@ -195,7 +194,7 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         getter=lambda layer: tuple(getattr(layer, "contrast_limits", (0.0, 1.0))),
         setter=lambda layer, value: setattr(layer, "contrast_limits", tuple(float(v) for v in value)),
         equals=lambda a, b: _tuples_close(a, b),
-        spec_getter=_coerce_clim,
+        block_getter=_coerce_clim,
     ),
 )
 
@@ -329,7 +328,7 @@ class LayerStateBridge:
         for cfg in PROPERTY_CONFIGS:
             binding.properties[cfg.key] = PropertyRuntime()
 
-        self._seed_binding(binding, record.spec)
+        self._seed_binding(binding, record.block)
 
         for config in PROPERTY_CONFIGS:
             emitter = getattr(layer.events, config.event_name, None)
@@ -343,12 +342,12 @@ class LayerStateBridge:
         logger.debug("LayerStateBridge bound layer %s", remote_id)
 
     # ------------------------------------------------------------------
-    def _seed_binding(self, binding: LayerBinding, spec: LayerSpec) -> None:
+    def _seed_binding(self, binding: LayerBinding, block: Mapping[str, Any]) -> None:
         for config in PROPERTY_CONFIGS:
             runtime = binding.properties.setdefault(config.key, PropertyRuntime())
             raw_value: Any = None
             try:
-                raw_value = config.spec_getter(spec)
+                raw_value = config.block_getter(block)
             except Exception:
                 raw_value = None
             if raw_value is None:

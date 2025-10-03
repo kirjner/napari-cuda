@@ -144,8 +144,7 @@ class ServerSceneData:
     policy_metrics_snapshot: Dict[str, Any] = field(default_factory=dict)
     last_written_decision_seq: int = 0
     policy_event_path: Path = field(default_factory=Path)
-    last_scene_spec: Optional[Dict[str, Any]] = None
-    pending_scene_spec: Optional[Dict[str, Any]] = None
+    last_scene_snapshot: Optional[Dict[str, Any]] = None
     last_dims_payload: Optional[Dict[str, Any]] = None
     last_scene_seq: int = 0
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
@@ -209,7 +208,7 @@ def prune_control_metadata(
 
     ``layer_ids`` should contain the canonical identifiers for active layers.
     ``dims_meta`` is the latest dims metadata snapshot (matching
-    :func:`napari_cuda.server.scene_spec.dims_metadata`).  ``current_step``
+    ``ViewerSceneManager.dims_metadata``.  ``current_step``
     provides a fallback axis count if metadata is incomplete.
     """
 

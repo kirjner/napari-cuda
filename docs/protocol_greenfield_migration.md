@@ -38,10 +38,10 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
    - Remove `meta_refresh` by emitting concrete `notify.dims` and scene payloads from the worker.
    - Replace volume/multiscale rebroadcast shims with direct `notify.layers` deltas driven by intents.
    - Implement `scope="camera"` on the server, emit `notify.camera`, migrate the client to the new lane, and delete the Alt+drag orbit fallback once the handlers land.
-2. **Retire legacy protocol surface & scaffolding**
-   - Delete `SceneSpecMessage`, `LayerUpdateMessage`, and related adapters once Step 1 ensures consumers hydrate from `notify.scene`/`notify.layers`.
-   - Remove `protocol/messages.py` compatibility exports and the remaining control-channel shims. `client/minimal_client.py` has been archived under `archive/legacy_client/`.
-   - Track the dependent dataclasses (`LayerSpec`, `LayerRenderHints`, `MultiscaleSpec`, etc.) called out in §6 so the layer registry falls alongside the scene/layer shims.
+2. **Retire legacy protocol surface & scaffolding** ✅
+   - `SceneSpecMessage`, `LayerSpec`, and related adapters have been removed; all consumers hydrate from the greenfield snapshot helpers.
+   - `protocol/messages.py` now re-exports the greenfield dataclasses exclusively. The archived minimal client remains under `archive/legacy_client/` for reference.
+   - Follow-ups: update remaining docs to reflect the snapshot-based flow and keep smoke instructions aligned.
 3. **Finish the command lane**
    - Wire `call.command`/`reply.command`/`error.command` end-to-end, including `napari.pixel.request_keyframe`.
    - Port UI hooks to command helpers so keyframe triggers and menu actions share one path.
@@ -63,7 +63,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 | ✅ | Update documentation and smoke checklists to reflect the command-only path and archive status. *(Completed 2025-10-03.)* | `docs/protocol_greenfield_migration.md`, `docs/control_protocol_agent_notes.md`, `docs/consolidate_refactors_plan.md`. | `docs/protocol_greenfield.md` §§6.1–6.4, §8 (operational notes). |
 | ✅ | Add regression coverage for the command lane (keyframe RPC success/error paths) and fold it into smoke automation. *(Completed 2025-10-03.)* | `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, smoke scripts. | `docs/protocol_greenfield.md` §§6.1–6.4. |
 | 6 | Introduce typed snapshot helpers for notify lanes (SceneSnapshot/LayerSnapshot now drive `notify.scene` + `notify.layers`; extend to dims/camera/stream as they’re touched). | `src/napari_cuda/protocol/snapshots.py`, `src/napari_cuda/server/layer_manager.py`, `src/napari_cuda/server/control/scene_snapshot_builder.py`, client adapters. | `docs/protocol_greenfield.md` §§4, 6; Appendix B. |
-| 7 | Delete the legacy scene/layer dataclasses (`SceneSpecMessage`, `LayerUpdateMessage`, `LayerRemoveMessage`, `LayerSpec` family) and migrate every consumer to the snapshot helpers + greenfield payloads. | `src/napari_cuda/server/scene_spec.py`, `src/napari_cuda/client/layers/`, `src/napari_cuda/client/control/`, `src/napari_cuda/protocol/messages.py`. | `docs/protocol_greenfield.md` §§4, 6. |
+| ✅ 7 | Delete the legacy scene/layer dataclasses (`SceneSpecMessage`, `LayerUpdateMessage`, `LayerRemoveMessage`, `LayerSpec` family) and migrate every consumer to the snapshot helpers + greenfield payloads. | `src/napari_cuda/server/scene_spec.py`, `src/napari_cuda/client/layers/`, `src/napari_cuda/client/control/`, `src/napari_cuda/protocol/messages.py`. | `docs/protocol_greenfield.md` §§4, 6. |
 
 ## Documented Spec Drifts (2025-10-01)
 
@@ -292,19 +292,11 @@ translating to legacy formats.
   any ad-hoc ping/keyframe verbs will be replaced by `call.command`
   requests routed through the command registry. `_handle_force_keyframe` and the
   related manual keyframe helpers become dead code once `napari.pixel.request_keyframe`
-  ships as a command. The scene snapshot path still caches `SceneSpecMessage`
-  payloads for legacy consumers; migrating to greenfield notify snapshots must
-  precede removal of that dataclass.
+  ships as a command.
 - **Client:** the optimistic keyframe helpers (`request_keyframe_once`,
   `_ensure_keyframe`) and direct `'request_keyframe'`/`'force_idr'` sends are slated
   for deletion. The streaming loop will instead issue `call.command` envelopes via
   the new RPC helper and wait on `reply.command` / `error.command` for completion.
-- **Client (scene/layer shims):** The streaming registry now hydrates from
-  `SceneSnapshot`/`LayerDelta` via `napari_cuda.protocol.snapshots`; legacy
-  `layer.update`/`layer.remove` callbacks have been removed. The server no longer
-  emits through `scene_spec` – `ViewerSceneManager` builds JSON-ready layer/dims
-  blocks directly – so follow-ups can delete the remaining `LayerSpec` helpers
-  once presenter/adapter code is ported to typed snapshots.
 - **Protocol extension:** add a resumable `notify.scene.level` lane carrying the
   active multiscale level (`current_level`, `downgraded`, optional `levels` metadata)
   so HUD/slider consumers stay in sync with server-driven LOD switches without
@@ -365,21 +357,12 @@ translating to legacy formats.
 - Server:
   - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`).
     ~~`ping`, `request_keyframe`~~ *(removed 2025-10-03)*.
- - Continue renaming residual `_handler` modules to match greenfield ownership;
-   the client shim has been removed, so audit the remaining server helpers for
-   similar cleanup.
-  - Delete the legacy `StateUpdateMessage` module and re-export once both client
-    and tests consume the greenfield dataclasses exclusively.
-  - Retire legacy scene/layer messages still in circulation:
-    - `SceneSpecMessage` (`client/control/control_channel_client.py`,
-      `client/runtime/stream_runtime.py`, `server/control/scene_snapshot_builder.py`,
-      `server/scene_spec.py`, layer registry/tests).
-    - `LayerUpdateMessage` and `LayerRemoveMessage` (same modules + layer registry).
-    - `LayerSpec`, `LayerRenderHints`, `MultiscaleSpec`, `MultiscaleLevelSpec`
-      (used by the client layer registry/adapter and server layer manager).
-    Map each consumer to the greenfield notify payloads (`notify.scene` /
-    `notify.layers` dataclasses) so these compatibility shims can be deleted with
-    `StateUpdateMessage`.
+  - Continue renaming residual `_handler` modules to match greenfield ownership;
+    the client shim has been removed, so audit the remaining server helpers for
+    similar cleanup.
+  - ✅ Legacy scene/layer dataclasses (`SceneSpecMessage`, `LayerSpec`,
+    `LayerRenderHints`, `Multiscale*`) deleted; every consumer now hydrates from
+    the greenfield snapshot payloads.
 - `scene_snapshot_builder.build_scene_spec_json` retired; new notifier payloads
   (`build_notify_scene_payload`) back the remaining callers.
 

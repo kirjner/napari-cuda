@@ -10,7 +10,6 @@ try:
     from napari_cuda.client.layers.remote_data import RemoteArray
     from napari_cuda.client.layers.registry import RemoteLayerRegistry
     from napari_cuda.client.layers.remote_image_layer import RemoteImageLayer
-    from napari_cuda.protocol.messages import LayerRenderHints, LayerSpec
     from napari_cuda.protocol.snapshots import LayerDelta, LayerSnapshot, SceneSnapshot, ViewerSnapshot
     NAPARI_AVAILABLE = True
 except Exception as exc:  # pragma: no cover - environment dependent import guard
@@ -18,27 +17,28 @@ except Exception as exc:  # pragma: no cover - environment dependent import guar
     NAPARI_IMPORT_ERROR = str(exc)
     pytestmark = pytest.mark.skip(reason=f"napari unavailable: {NAPARI_IMPORT_ERROR}")
     LayerRecord = RegistrySnapshot = RemoteArray = RemoteLayerRegistry = RemoteImageLayer = RemotePreview = object  # type: ignore[assignment]
-    LayerRenderHints = LayerDelta = LayerSnapshot = SceneSnapshot = ViewerSnapshot = LayerSpec = object  # type: ignore[assignment]
+    LayerDelta = LayerSnapshot = SceneSnapshot = ViewerSnapshot = object  # type: ignore[assignment]
 
 
-def make_layer_spec(**overrides) -> LayerSpec:
-    base = dict(
-        layer_id="layer-1",
-        layer_type="image",
-        name="remote",
-        ndim=3,
-        shape=[16, 32, 48],
-        dtype="float32",
-        axis_labels=["z", "y", "x"],
-        scale=[1.0, 2.0, 2.0],
-        translate=[0.0, 0.0, 0.0],
-        contrast_limits=[0.0, 1.0],
-        metadata={"source": "test"},
-        render=LayerRenderHints(mode="mip", opacity=0.75, visibility=True, colormap="gray"),
-        extras={"data_id": "abc", "cache_version": 1},
-    )
+def make_layer_block(**overrides) -> dict:
+    base: dict[str, object] = {
+        "layer_id": "layer-1",
+        "layer_type": "image",
+        "name": "remote",
+        "ndim": 3,
+        "shape": [16, 32, 48],
+        "dtype": "float32",
+        "axis_labels": ["z", "y", "x"],
+        "scale": [1.0, 2.0, 2.0],
+        "translate": [0.0, 0.0, 0.0],
+        "contrast_limits": [0.0, 1.0],
+        "metadata": {"source": "test"},
+        "render": {"mode": "mip", "opacity": 0.75, "visibility": True, "colormap": "gray"},
+        "extras": {"data_id": "abc", "cache_version": 1},
+        "controls": {},
+    }
     base.update(overrides)
-    return LayerSpec(**base)
+    return base
 
 
 def test_remote_array_protocol():
@@ -58,20 +58,20 @@ def test_remote_array_protocol():
 
 
 def test_remote_image_layer_applies_spec():
-    spec = make_layer_spec()
-    layer = RemoteImageLayer(spec)
-    assert layer.remote_id == spec.layer_id
-    assert layer.name == spec.name
-    assert layer.axis_labels == tuple(spec.axis_labels)
-    assert tuple(map(float, layer.contrast_limits)) == tuple(spec.contrast_limits)
+    block = make_layer_block()
+    layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
+    assert layer.remote_id == block["layer_id"]
+    assert layer.name == block["name"]
+    assert layer.axis_labels == tuple(block["axis_labels"])
+    assert tuple(map(float, layer.contrast_limits)) == tuple(block["contrast_limits"])
     assert layer.opacity == pytest.approx(0.75)
     assert layer.visible is True
-    updated = make_layer_spec(
+    updated = make_layer_block(
         name="remote-updated",
         contrast_limits=[-1.0, 2.0],
-        render=LayerRenderHints(opacity=0.5, visibility=False, gamma=1.2),
+        render={"opacity": 0.5, "visibility": False, "gamma": 1.2},
     )
-    layer.update_from_spec(updated)
+    layer.update_from_block(updated)
     assert layer.name == "remote-updated"
     assert tuple(map(float, layer.contrast_limits)) == (-1.0, 2.0)
     assert layer.opacity == pytest.approx(0.5)
@@ -103,14 +103,14 @@ def test_remote_preview_handles_none_and_arrays():
 
 def test_remote_image_layer_uses_metadata_thumbnail():
     preview = np.linspace(0.0, 1.0, 48, dtype=np.float32).reshape(4, 4, 3)
-    spec = make_layer_spec(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": preview.tolist()})
-    layer = RemoteImageLayer(spec)
+    block = make_layer_block(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": preview.tolist()})
+    layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
     assert layer._remote_preview.data is not None
     np.testing.assert_allclose(layer._remote_preview.data, preview.astype(np.float32))
     assert "thumbnail" not in layer.metadata
     updated_preview = np.zeros_like(preview)
-    updated = make_layer_spec(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": updated_preview.tolist()})
-    layer.update_from_spec(updated)
+    updated = make_layer_block(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": updated_preview.tolist()})
+    layer.update_from_block(updated)
     assert layer._remote_preview.data is not None
     np.testing.assert_allclose(layer._remote_preview.data, updated_preview.astype(np.float32))
     assert "thumbnail" not in layer.metadata
@@ -120,28 +120,28 @@ def test_remote_layer_registry_lifecycle():
     registry = RemoteLayerRegistry()
     snapshots = []
     registry.add_listener(snapshots.append)
-    spec = make_layer_spec()
+    block = make_layer_block()
     snapshot = SceneSnapshot(
         viewer=ViewerSnapshot(settings={}, dims={}, camera={}),
-        layers=(LayerSnapshot(layer_id=spec.layer_id, block=spec.to_dict()),),
+        layers=(LayerSnapshot(layer_id=block["layer_id"], block=dict(block)),),
         policies={},
         ancillary={},
     )
     registry.apply_snapshot(snapshot)
     assert snapshots
     first = snapshots[-1]
-    assert first.ids() == (spec.layer_id,)
+    assert first.ids() == (block["layer_id"],)
     record = first.layers[0]
-    assert record.layer.remote_id == spec.layer_id
-    registry.apply_delta(LayerDelta(layer_id=spec.layer_id, changes={"opacity": 0.25}))
+    assert record.layer.remote_id == block["layer_id"]
+    registry.apply_delta(LayerDelta(layer_id=block["layer_id"], changes={"opacity": 0.25}))
     updated_record = registry.snapshot().layers[0]
     assert updated_record.layer.opacity == pytest.approx(0.25)
     preview = np.ones((4, 4, 1), dtype=np.float32)
-    updated_block = spec.to_dict()
+    updated_block = dict(block)
     updated_block["metadata"] = {"source": "test", "added": True, "thumbnail": preview.tolist()}
     refreshed = SceneSnapshot(
         viewer=snapshot.viewer,
-        layers=(LayerSnapshot(layer_id=spec.layer_id, block=updated_block),),
+        layers=(LayerSnapshot(layer_id=block["layer_id"], block=updated_block),),
         policies={},
         ancillary={},
     )
@@ -152,7 +152,7 @@ def test_remote_layer_registry_lifecycle():
     assert "thumbnail" not in latest.layer.metadata
     assert latest.layer._remote_preview.data is not None
     np.testing.assert_allclose(latest.layer._remote_preview.data, preview.astype(np.float32))
-    registry.apply_delta(LayerDelta.removal(spec.layer_id))
+    registry.apply_delta(LayerDelta.removal(block["layer_id"]))
     assert not registry.snapshot().layers
 
 
@@ -162,9 +162,9 @@ def test_proxy_viewer_sync_layers():
     from napari_cuda.client.proxy_viewer import ProxyViewer
 
     viewer = ProxyViewer(offline=True)
-    spec = make_layer_spec()
-    layer = RemoteImageLayer(spec)
-    snapshot = RegistrySnapshot(layers=(LayerRecord(layer_id=spec.layer_id, spec=spec, layer=layer),))
+    block = make_layer_block()
+    layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
+    snapshot = RegistrySnapshot(layers=(LayerRecord(layer_id=block["layer_id"], block=dict(block), layer=layer),))
     viewer._sync_remote_layers(snapshot)
     assert len(viewer.layers) == 1
     assert viewer.layers[0] is layer
@@ -200,8 +200,8 @@ def test_proxy_viewer_applies_displayed_axes():
 
 
 def test_remote_image_layer_updates_thumbnail_from_preview():
-    spec = make_layer_spec(shape=[4, 4, 3], ndim=3, render=LayerRenderHints(opacity=1.0, visibility=True))
-    layer = RemoteImageLayer(spec)
+    block = make_layer_block(shape=[4, 4, 3], ndim=3, render={"opacity": 1.0, "visibility": True})
+    layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
     preview = np.linspace(0, 1, 48, dtype=np.float32).reshape(4, 4, 3)
     layer.update_preview(preview)
     layer._update_thumbnail()
@@ -229,8 +229,8 @@ def test_remote_image_layer_updates_thumbnail_from_preview():
 
 
 def test_remote_image_layer_gamma_handles_1d_preview():
-    spec = make_layer_spec()
-    layer = RemoteImageLayer(spec)
+    block = make_layer_block()
+    layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
     preview = np.linspace(0.0, 1.0, 32, dtype=np.float32)
     layer.update_preview(preview)
 

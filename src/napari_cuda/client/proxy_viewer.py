@@ -481,7 +481,7 @@ class ProxyViewer(ViewerModel):
                             self.layers.pop(current_index)
                             self.layers.insert(idx, layer)
                     try:
-                        controls = getattr(record.spec, "controls", None)
+                        controls = record.block.get("controls") if isinstance(record.block.get("controls"), dict) else None
                         target = controls.get("visible") if isinstance(controls, dict) else None
                         if target is not None and bool(layer.visible) is not bool(target):
                             emitter = getattr(getattr(layer, "events", None), "visible", None)

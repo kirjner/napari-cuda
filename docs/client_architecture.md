@@ -161,12 +161,12 @@ flow; hot-path logic lives in compact helper modules with targeted tests.
     `layer.update`/`scene.update` broadcasts; reentrancy is avoided by gating
     local widget updates until those mirrors land.
   - Contrast and gamma payloads are forwarded in the exact units advertised by
-    the server (`LayerSpec.contrast_limits`, `LayerRenderHints.gamma`). Avoid
-    introducing local re-normalisation—past bugs stemmed from clients rescaling
-    slider values before emitting intents, which desynchronised the server
-    mirror. If a new control needs custom mapping, document the conversion next
-    to its payload builder and confirm the server helper expects the same
-    units.
+    the server’s snapshot block (`controls['contrast_limits']`, `controls['gamma']`).
+    Avoid introducing local re-normalisation—past bugs stemmed from clients
+    rescaling slider values before emitting intents, which desynchronised the
+    server mirror. If a new control needs custom mapping, document the
+    conversion next to its payload builder and confirm the server helper
+    expects the same units.
   - Initial scope covers volume properties (opacity, clim, colormap, sample
     step) and dims/ndisplay toggles; follow-up passes can fold in blending,
     interpolation, and future scene intents.

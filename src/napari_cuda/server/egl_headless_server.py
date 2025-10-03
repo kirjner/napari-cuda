@@ -673,11 +673,11 @@ class EGLHeadlessServer:
             metrics=self.metrics,
         )
 
-    def _scene_spec_json(self) -> Optional[str]:
+    def _scene_snapshot_json(self) -> Optional[str]:
         try:
             self._update_scene_manager()
         except Exception:
-            logger.debug("scene manager update failed before scene.spec", exc_info=True)
+            logger.debug("scene manager update failed before notify.scene", exc_info=True)
 
         try:
             payload = build_notify_scene_payload(

@@ -1,4 +1,4 @@
-"""Registry that mirrors server-provided layer specifications locally."""
+"""Registry that mirrors server-provided layer snapshots locally."""
 
 from __future__ import annotations
 
@@ -8,28 +8,23 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from napari_cuda.protocol.messages import LayerSpec
 from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
 
 from .remote_image_layer import RemoteImageLayer
-
 
 logger = logging.getLogger(__name__)
 
 
 def _maybe_enable_debug_logger() -> bool:
-    """Enable DEBUG logging for this module when env requests it."""
-
-    flag = (os.getenv('NAPARI_CUDA_LAYER_DEBUG') or '').lower()
-    if flag not in ('1', 'true', 'yes', 'on', 'dbg', 'debug'):
+    flag = (os.getenv("NAPARI_CUDA_LAYER_DEBUG") or "").lower()
+    if flag not in {"1", "true", "yes", "on", "dbg", "debug"}:
         return False
-    has_local = any(getattr(h, '_napari_cuda_local', False) for h in logger.handlers)
+    has_local = any(getattr(handler, "_napari_cuda_local", False) for handler in logger.handlers)
     if not has_local:
         handler = logging.StreamHandler()
-        fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
-        handler.setFormatter(logging.Formatter(fmt))
+        handler.setFormatter(logging.Formatter('[%(asctime)s] %(name)s - %(levelname)s - %(message)s'))
         handler.setLevel(logging.DEBUG)
-        setattr(handler, '_napari_cuda_local', True)
+        setattr(handler, "_napari_cuda_local", True)
         logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -44,7 +39,7 @@ LayerListener = Callable[["RegistrySnapshot"], None]
 @dataclass(frozen=True)
 class LayerRecord:
     layer_id: str
-    spec: LayerSpec
+    block: Dict[str, Any]
     layer: RemoteImageLayer
 
 
@@ -65,10 +60,9 @@ class RemoteLayerRegistry:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._layers: Dict[str, RemoteImageLayer] = {}
-        self._specs: Dict[str, LayerSpec] = {}
+        self._blocks: Dict[str, Dict[str, Any]] = {}
         self._order: List[str] = []
         self._listeners: List[LayerListener] = []
-        self._blocks: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     def add_listener(self, callback: LayerListener) -> None:
@@ -92,38 +86,32 @@ class RemoteLayerRegistry:
                 desired_order.append(layer_id)
                 block = dict(entry.block)
                 self._blocks[layer_id] = block
-                spec = LayerSpec.from_dict(block)
                 layer = self._layers.get(layer_id)
                 if layer is None:
-                    layer = self._create_layer(spec)
+                    layer = self._create_layer(layer_id, block)
                     if layer is None:
                         self._blocks.pop(layer_id, None)
                         continue
                     self._layers[layer_id] = layer
                     changed = True
                     if _LAYER_DEBUG:
-                        logger.debug("created remote layer from snapshot: id=%s name=%s", layer_id, spec.name)
+                        logger.debug("created remote layer: id=%s name=%s", layer_id, block.get("name"))
                 else:
-                    layer.update_from_spec(spec)
+                    self._update_layer(layer, block)
                     changed = True
                     if _LAYER_DEBUG:
-                        logger.debug("updated remote layer from snapshot: id=%s", layer_id)
-                self._specs[layer_id] = spec
+                        logger.debug("updated remote layer: id=%s", layer_id)
 
             current_ids = set(self._layers.keys())
             desired_ids = {layer_id for layer_id in desired_order if layer_id in self._layers}
             for removed_id in current_ids - desired_ids:
                 self._layers.pop(removed_id, None)
-                self._specs.pop(removed_id, None)
                 self._blocks.pop(removed_id, None)
                 changed = True
                 if _LAYER_DEBUG:
                     logger.debug("removed layer missing from snapshot: id=%s", removed_id)
 
-            if desired_order:
-                ordered_ids = [layer_id for layer_id in desired_order if layer_id in self._layers]
-            else:
-                ordered_ids = []
+            ordered_ids = [layer_id for layer_id in desired_order if layer_id in self._layers]
             if ordered_ids != self._order:
                 self._order = ordered_ids
                 changed = True
@@ -145,20 +133,16 @@ class RemoteLayerRegistry:
                 return
 
             if changes.get("removed"):
-                had_spec = layer_id in self._specs
-                had_block = layer_id in self._blocks
-                had_order = layer_id in self._order
-                removed = self._layers.pop(layer_id, None)
-                self._specs.pop(layer_id, None)
+                removed_layer = self._layers.pop(layer_id, None)
                 self._blocks.pop(layer_id, None)
-                if had_order:
+                if layer_id in self._order:
                     self._order.remove(layer_id)
-                if removed is None and not (had_spec or had_block or had_order):
+                if removed_layer is None:
                     if _LAYER_DEBUG:
                         logger.debug("layer removal ignored (no cached layer): id=%s", layer_id)
                     return
                 emitted = self._snapshot_locked()
-                if _LAYER_DEBUG and removed is not None:
+                if _LAYER_DEBUG:
                     logger.debug("layer removed via delta: id=%s", layer_id)
             else:
                 block = self._blocks.get(layer_id)
@@ -184,18 +168,16 @@ class RemoteLayerRegistry:
                 if not updated:
                     return
 
-                spec = LayerSpec.from_dict(dict(block))
-                self._specs[layer_id] = spec
                 layer = self._layers.get(layer_id)
                 if layer is None:
-                    layer = self._create_layer(spec)
+                    layer = self._create_layer(layer_id, block)
                     if layer is None:
                         return
                     self._layers[layer_id] = layer
                     if layer_id not in self._order:
                         self._order.append(layer_id)
                 else:
-                    layer.update_from_spec(spec)
+                    self._update_layer(layer, block)
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:
                     logger.debug("layer delta applied: id=%s keys=%s", layer_id, tuple(changes.keys()))
@@ -212,30 +194,23 @@ class RemoteLayerRegistry:
         entries: List[LayerRecord] = []
         for layer_id in self._order:
             layer = self._layers.get(layer_id)
-            spec = self._specs.get(layer_id)
-            if layer is None or spec is None:
+            block = self._blocks.get(layer_id)
+            if layer is None or block is None:
                 continue
-            entries.append(LayerRecord(layer_id=layer_id, spec=spec, layer=layer))
+            entries.append(LayerRecord(layer_id=layer_id, block=dict(block), layer=layer))
         return RegistrySnapshot(layers=tuple(entries))
 
     def _emit(self, snapshot: RegistrySnapshot) -> None:
-        listeners: List[LayerListener]
-        with self._lock:
-            listeners = list(self._listeners)
-        if _LAYER_DEBUG:
-            logger.debug("emitting registry snapshot: ids=%s", snapshot.ids())
-        for callback in listeners:
+        for callback in list(self._listeners):
             try:
                 callback(snapshot)
-            except Exception:  # pragma: no cover - listeners should handle their own errors
-                continue
+            except Exception:
+                logger.debug("layer registry listener failed", exc_info=True)
 
-    def _create_layer(self, spec: LayerSpec) -> RemoteImageLayer | None:
-        layer_type = spec.layer_type.lower()
-        if layer_type not in ("image", "volume"):
-            if _LAYER_DEBUG:
-                logger.debug("unsupported layer type: id=%s type=%s", spec.layer_id, spec.layer_type)
-            return None
-        if _LAYER_DEBUG:
-            logger.debug("instantiating RemoteImageLayer: id=%s type=%s", spec.layer_id, spec.layer_type)
-        return RemoteImageLayer(spec)
+    def _create_layer(self, layer_id: str, block: Dict[str, Any]) -> RemoteImageLayer | None:
+        layer_type = str(block.get("layer_type", "")).lower()
+        assert layer_type in {"image", "volume"}, f"unsupported layer type: {layer_type!r}"
+        return RemoteImageLayer(layer_id=layer_id, block=block)
+
+    def _update_layer(self, layer: RemoteImageLayer, block: Dict[str, Any]) -> None:
+        layer.update_from_block(block)

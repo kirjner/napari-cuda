@@ -8,7 +8,6 @@ from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.streaming.presenter_facade import PresenterFacade
-from napari_cuda.protocol.messages import LayerRenderHints, LayerSpec
 from napari_cuda.protocol import build_ack_state
 
 
@@ -53,31 +52,34 @@ def control_state() -> ControlStateContext:
 
 
 def _make_layer(remote_id: str = 'layer-1') -> RemoteImageLayer:
-    spec = LayerSpec(
-        layer_id=remote_id,
-        layer_type='image',
-        name='demo',
-        ndim=2,
-        shape=[1, 1],
-        dtype='float32',
-        contrast_limits=None,
-        metadata={},
-        render=LayerRenderHints(mode='mip'),
-        controls={
-            'visible': True,
-            'opacity': 0.5,
-            'rendering': 'mip',
-            'colormap': 'gray',
-            'gamma': 1.0,
-            'contrast_limits': [0.0, 1.0],
+    block = {
+        "layer_id": remote_id,
+        "layer_type": "image",
+        "name": "demo",
+        "ndim": 2,
+        "shape": [1, 1],
+        "dtype": "float32",
+        "axis_labels": ["y", "x"],
+        "scale": None,
+        "translate": None,
+        "contrast_limits": [0.0, 1.0],
+        "metadata": {},
+        "render": {"mode": "mip"},
+        "controls": {
+            "visible": True,
+            "opacity": 0.5,
+            "rendering": "mip",
+            "colormap": "gray",
+            "gamma": 1.0,
+            "contrast_limits": [0.0, 1.0],
         },
-        extras={'data_id': 'demo'},
-    )
-    return RemoteImageLayer(spec)
+        "extras": {"data_id": "demo"},
+    }
+    return RemoteImageLayer(layer_id=remote_id, block=block)
 
 
 def _bind_layer(bridge: LayerStateBridge, registry: DummyRegistry, layer: RemoteImageLayer) -> None:
-    record = LayerRecord(layer_id=layer.remote_id, spec=layer._remote_spec, layer=layer)
+    record = LayerRecord(layer_id=layer.remote_id, block=dict(layer._remote_block), layer=layer)
     registry.emit(RegistrySnapshot(layers=(record,)))
 
 

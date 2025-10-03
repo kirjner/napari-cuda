@@ -20,12 +20,12 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 3. **Worker application** ✅
    - `SceneStateApplier` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.
 
-4. **Spec emission** ✅
-   - `LayerSpec` now carries a dedicated `controls` map; `extras` retains transport metadata only (e.g., volume flags, zarr paths).
-   - `LayerRenderHints` is reduced to renderer-only toggles (e.g., shade/sample-step) so UI controls are not duplicated.
+4. **Snapshot emission** ✅
+   - Layer snapshot blocks (the payload of `notify.scene`) now include a dedicated `controls` map; `extras` retains transport metadata only (e.g., volume flags, zarr paths).
+   - Renderer-only toggles (shade/sample-step) stay under the `render` mapping so UI controls are not duplicated.
 
 5. **ViewerSceneManager** ✅
-   - `update_from_sources` receives the control state and merges it before querying the napari adapter, guaranteeing `scene.spec` echoes the canonical values even if the worker has not yet mutated the layer object.
+   - `update_from_sources` receives the control state and merges it before querying the napari adapter, guaranteeing the emitted `notify.scene` snapshot reflects the canonical values even if the worker has not yet mutated the layer object.
 
 6. **Testing**
    - ✅ Regression coverage added for intent helpers and spec builders; manual smoke confirms opacity persists.
@@ -43,4 +43,4 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 1. Implement `LayerControlState` and migrate intent helpers to it. ✅
 2. Update `SceneStateApplier` / `ViewerSceneManager` to consume the canonical bag. ✅
 3. Rename `extras` → `controls` in `LayerSpec` and strip mirrored fields. ✅
-4. Roll client changes so the bridge and registry rely solely on the new map. (In progress with client agent.)
+4. Roll client changes so the bridge and registry rely solely on the new map. ✅
