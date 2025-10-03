@@ -14,14 +14,13 @@ Usage plan (PR1/PR2):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
-from typing import Mapping, Optional, TypeVar
+from dataclasses import dataclass, field
+from typing import Mapping, Optional
 import json
 import logging
 import os
 
 from napari_cuda.server.logging_policy import DebugPolicy, load_debug_policy
-from napari_cuda.server.presets import resolve_preset
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +62,19 @@ def _env_str(env: Mapping[str, str], name: str, default: Optional[str] = None) -
         return default
     v = v.strip()
     return v if v != "" else default
+
+
+def _env_optional_int(env: Mapping[str, str], name: str, default: Optional[int]) -> Optional[int]:
+    v = env.get(name)
+    if v is None:
+        return default
+    v = v.strip()
+    if v == "" or v.lower() in {"none", "null"}:
+        return None
+    try:
+        return int(v)
+    except Exception:
+        return default
 
 
 def _cfg_bool(value: object, default: bool) -> bool:
@@ -159,48 +171,16 @@ def _load_json_config(env: Mapping[str, str], name: str) -> dict[str, object]:
     return {}
 
 
-_D = TypeVar("_D")
-
-
-def _apply_dataclass_overrides(obj: _D, overrides: Mapping[str, object], label: str) -> _D:
-    if not overrides:
-        return obj
-    valid = {f.name for f in fields(obj)}
-    unknown = [key for key in overrides if key not in valid]
-    if unknown:
-        keys = ", ".join(sorted(unknown))
-        raise KeyError(f"Unknown {label} override keys: {keys}")
-    return replace(obj, **{k: overrides[k] for k in overrides})
-
-
 # ---- Types -------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class EncodeCfg:
-    """Encoder parameters for the streaming pipeline.
-
-    Note: `codec` is a symbolic string for readability; existing code may use
-    numeric mapping (1=h264, 2=hevc, 3=av1). We provide helpers to translate
-    when needed during integration.
-    """
+    """Encoder parameters for the streaming pipeline."""
 
     fps: int = 60
     codec: str = "h264"  # "h264" | "hevc" | "av1"
     bitrate: int = 20_000_000
     keyint: int = 120
-
-
-def _profile_defaults(name: str) -> EncodeCfg:
-    p = (name or "").strip().lower()
-    if p == "quality":
-        return EncodeCfg(
-            fps=60,
-            codec="h264",
-            bitrate=35_000_000,
-            keyint=120,
-        )
-    # Default to latency profile
-    return EncodeCfg(fps=60, codec="h264", bitrate=20_000_000, keyint=120)
 
 
 def _codec_to_int(codec: str) -> int:
@@ -249,8 +229,7 @@ class ServerConfig:
     # Queueing
     frame_queue: int = 1
 
-    # Encoder profile
-    profile: str = "latency"  # "latency" | "quality"
+    # Encoder
     encode: EncodeCfg = EncodeCfg()
 
     # Behavior toggles (kept minimal)
@@ -268,12 +247,12 @@ class EncoderRuntime:
     """
 
     input_format: str = "NV12"
-    rc_mode: str = "vbr"
+    rc_mode: str = "cbr"
     preset: str = "P3"
     max_bitrate: Optional[int] = 30_000_000
     lookahead: int = 0
-    aq: int = 0
-    temporalaq: int = 0
+    aq: int = 1
+    temporalaq: int = 1
     enable_non_ref_p: bool = False
     bframes: int = 0
     idr_period: int = 600
@@ -297,8 +276,13 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     - NAPARI_CUDA_WIDTH, NAPARI_CUDA_HEIGHT, NAPARI_CUDA_USE_VOLUME, NAPARI_CUDA_NDISPLAY
     - NAPARI_CUDA_ANIMATE, NAPARI_CUDA_TURNTABLE_DPS
     - NAPARI_CUDA_FRAME_QUEUE
-    - NAPARI_CUDA_PROFILE (latency|quality)
-    - NAPARI_CUDA_ENCODER_CONFIG (JSON encode/runtime/bitstream overrides)
+    - NAPARI_CUDA_ENCODE_FPS, NAPARI_CUDA_ENCODE_BITRATE, NAPARI_CUDA_ENCODE_KEYINT, NAPARI_CUDA_ENCODE_CODEC
+    - NAPARI_CUDA_ENCODER_PRESET, NAPARI_CUDA_ENCODER_RC_MODE, NAPARI_CUDA_ENCODER_MAX_BITRATE,
+      NAPARI_CUDA_ENCODER_LOOKAHEAD, NAPARI_CUDA_ENCODER_AQ, NAPARI_CUDA_ENCODER_TEMPORALAQ,
+      NAPARI_CUDA_ENCODER_BFRAMES, NAPARI_CUDA_ENCODER_IDR_PERIOD, NAPARI_CUDA_ENCODER_NON_REF_P,
+      NAPARI_CUDA_ENCODER_INPUT_FORMAT
+    - NAPARI_CUDA_DUMP_BITSTREAM, NAPARI_CUDA_DUMP_DIR
+    - NAPARI_CUDA_ENCODER_CONFIG (optional legacy JSON overrides for dump/bitstream)
     - NAPARI_CUDA_POLICY_CONFIG (JSON policy thresholds and hysteresis)
     """
 
@@ -327,24 +311,21 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     animate_dps = _env_float(env, "NAPARI_CUDA_TURNTABLE_DPS", 30.0)
     frame_queue = max(1, _env_int(env, "NAPARI_CUDA_FRAME_QUEUE", 1))
 
-    profile = (_env_str(env, "NAPARI_CUDA_PROFILE", "latency") or "latency").lower()
-    enc = _profile_defaults(profile)
     encoder_cfg = _load_json_config(env, "NAPARI_CUDA_ENCODER_CONFIG")
-    encode_section = encoder_cfg.get("encode") if isinstance(encoder_cfg, dict) else None
-    if not isinstance(encode_section, dict):
-        encode_section = encoder_cfg
-    fps = _cfg_int(encode_section.get("fps") if encode_section else None, enc.fps)
-    bitrate = _cfg_int(encode_section.get("bitrate") if encode_section else None, enc.bitrate)
-    keyint = _cfg_int(encode_section.get("keyint") if encode_section else None, enc.keyint)
-    codec = _cfg_str(encode_section.get("codec") if encode_section else enc.codec, enc.codec)
-    enc = EncodeCfg(fps=fps, codec=codec.lower(), bitrate=bitrate, keyint=keyint)
+
+    fps = _env_int(env, "NAPARI_CUDA_ENCODE_FPS", 60)
+    bitrate = _env_int(env, "NAPARI_CUDA_ENCODE_BITRATE", 20_000_000)
+    keyint = _env_int(env, "NAPARI_CUDA_ENCODE_KEYINT", 120)
+    codec = (_env_str(env, "NAPARI_CUDA_ENCODE_CODEC", "h264") or "h264").lower()
+    enc = EncodeCfg(fps=fps, codec=codec, bitrate=bitrate, keyint=keyint)
 
     max_slice_bytes = max(0, _env_int(env, "NAPARI_CUDA_MAX_SLICE_BYTES", 0))
     max_volume_bytes = max(0, _env_int(env, "NAPARI_CUDA_MAX_VOLUME_BYTES", 0))
     max_volume_voxels = max(0, _env_int(env, "NAPARI_CUDA_MAX_VOLUME_VOXELS", 0))
 
-    idr_on_reset = _cfg_bool(encoder_cfg.get("idr_on_reset") if encoder_cfg else None, True)
-    packer = _cfg_str(encoder_cfg.get("packer") if encoder_cfg else "cython", "cython").lower()
+    idr_default = _cfg_bool(encoder_cfg.get("idr_on_reset") if encoder_cfg else None, True)
+    idr_on_reset = _env_bool(env, "NAPARI_CUDA_ENCODER_IDR_ON_RESET", idr_default)
+    packer = (_env_str(env, "NAPARI_CUDA_PACKER", None) or _cfg_str(encoder_cfg.get("packer") if encoder_cfg else "cython", "cython")).lower()
 
     return ServerConfig(
         host=host,
@@ -364,7 +345,6 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
         animate=animate,
         animate_dps=animate_dps,
         frame_queue=frame_queue,
-        profile=profile,
         encode=enc,
         idr_on_reset=idr_on_reset,
         packer=packer,
@@ -433,18 +413,11 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     cfg = load_server_config(env)
     encoder_cfg = _load_json_config(env, "NAPARI_CUDA_ENCODER_CONFIG")
 
-    preset_name = _env_str(env, "NAPARI_CUDA_PRESET")
-    preset_entry = resolve_preset(preset_name)
-    if preset_entry:
-        if preset_entry.server:
-            cfg = _apply_dataclass_overrides(cfg, preset_entry.server, "ServerConfig")
-        if preset_entry.encode:
-            new_encode = _apply_dataclass_overrides(cfg.encode, preset_entry.encode, "EncodeCfg")
-            cfg = replace(cfg, encode=new_encode)
-
     frame_queue = max(1, int(getattr(cfg, "frame_queue", 1)))
-    dump_bitstream = max(0, _cfg_int(encoder_cfg.get("dump_bitstream") if encoder_cfg else None, 0))
-    dump_dir = _cfg_str(encoder_cfg.get("dump_dir") if encoder_cfg else "benchmarks/bitstreams", "benchmarks/bitstreams")
+    dump_default = _cfg_int(encoder_cfg.get("dump_bitstream") if encoder_cfg else None, 0)
+    dump_bitstream = max(0, _env_int(env, "NAPARI_CUDA_DUMP_BITSTREAM", dump_default))
+    dump_dir_default = _cfg_str(encoder_cfg.get("dump_dir") if encoder_cfg else "benchmarks/bitstreams", "benchmarks/bitstreams")
+    dump_dir = _env_str(env, "NAPARI_CUDA_DUMP_DIR", dump_dir_default) or "benchmarks/bitstreams"
 
     _cool = _env_str(env, "NAPARI_CUDA_KF_WATCHDOG_COOLDOWN")
     try:
@@ -455,30 +428,29 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     debug_policy = load_debug_policy(env)
 
     # Encoder runtime overrides
-    runtime_cfg_in = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
-    runtime_cfg = dict(runtime_cfg_in) if isinstance(runtime_cfg_in, dict) else {}
-    input_fmt = _cfg_str(runtime_cfg.get("input_format"), "NV12").upper()
-    rc_mode = _cfg_str(runtime_cfg.get("rc_mode"), "vbr").lower()
-    runtime_preset = _cfg_str(runtime_cfg.get("preset"), "P3")
-    max_bitrate_val = _cfg_optional_int(runtime_cfg.get("max_bitrate"), 30_000_000)
-    lookahead = max(0, _cfg_int(runtime_cfg.get("lookahead"), 0))
-    aq = max(0, _cfg_int(runtime_cfg.get("aq"), 0))
-    temporalaq = max(0, _cfg_int(runtime_cfg.get("temporalaq"), 0))
-    nonrefp = _cfg_bool(runtime_cfg.get("non_ref_p"), False)
-    bframes = max(0, _cfg_int(runtime_cfg.get("bframes"), 0))
-    idr_period = max(1, _cfg_int(runtime_cfg.get("idr_period"), 600))
-    if max_bitrate_val is None:
-        resolved_max_bitrate: Optional[int] = 30_000_000
-    elif max_bitrate_val > 0:
-        resolved_max_bitrate = max_bitrate_val
-    else:
-        resolved_max_bitrate = None
+    runtime_cfg = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
+    if not isinstance(runtime_cfg, dict):
+        runtime_cfg = {}
+
+    input_fmt = (_env_str(env, "NAPARI_CUDA_ENCODER_INPUT_FORMAT", None) or _cfg_str(runtime_cfg.get("input_format"), "NV12")).upper()
+    rc_mode = (_env_str(env, "NAPARI_CUDA_ENCODER_RC_MODE", None) or _cfg_str(runtime_cfg.get("rc_mode"), "cbr")).lower()
+    runtime_preset = _env_str(env, "NAPARI_CUDA_ENCODER_PRESET", None) or _cfg_str(runtime_cfg.get("preset"), "P3")
+    max_bitrate_cfg = _cfg_optional_int(runtime_cfg.get("max_bitrate"), 30_000_000)
+    max_bitrate = _env_optional_int(env, "NAPARI_CUDA_ENCODER_MAX_BITRATE", max_bitrate_cfg)
+    if max_bitrate is not None and max_bitrate <= 0:
+        max_bitrate = None
+    lookahead = max(0, _env_int(env, "NAPARI_CUDA_ENCODER_LOOKAHEAD", _cfg_int(runtime_cfg.get("lookahead"), 0)))
+    aq = max(0, _env_int(env, "NAPARI_CUDA_ENCODER_AQ", _cfg_int(runtime_cfg.get("aq"), 1)))
+    temporalaq = max(0, _env_int(env, "NAPARI_CUDA_ENCODER_TEMPORALAQ", _cfg_int(runtime_cfg.get("temporalaq"), 1)))
+    nonrefp = _env_bool(env, "NAPARI_CUDA_ENCODER_NON_REF_P", _cfg_bool(runtime_cfg.get("non_ref_p"), False))
+    bframes = max(0, _env_int(env, "NAPARI_CUDA_ENCODER_BFRAMES", _cfg_int(runtime_cfg.get("bframes"), 0)))
+    idr_period = max(1, _env_int(env, "NAPARI_CUDA_ENCODER_IDR_PERIOD", _cfg_int(runtime_cfg.get("idr_period"), 600)))
 
     encoder_runtime = EncoderRuntime(
         input_format=input_fmt or "NV12",
-        rc_mode=rc_mode or "vbr",
+        rc_mode=rc_mode or "cbr",
         preset=runtime_preset or "P3",
-        max_bitrate=resolved_max_bitrate,
+        max_bitrate=max_bitrate if max_bitrate is None or max_bitrate > 0 else None,
         lookahead=lookahead,
         aq=aq,
         temporalaq=temporalaq,
@@ -487,20 +459,14 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         idr_period=int(idr_period),
     )
 
-    if preset_entry and preset_entry.encoder_runtime:
-        encoder_runtime = _apply_dataclass_overrides(encoder_runtime, preset_entry.encoder_runtime, "EncoderRuntime")
-
     bitstream_cfg = encoder_cfg.get("bitstream") if isinstance(encoder_cfg, dict) else {}
     if not isinstance(bitstream_cfg, dict):
         bitstream_cfg = {}
     bitstream_runtime = BitstreamRuntime(
-        build_cython=_cfg_bool(bitstream_cfg.get("build_cython"), True),
-        disable_fast_pack=_cfg_bool(bitstream_cfg.get("disable_fast_pack"), False),
-        allow_py_fallback=_cfg_bool(bitstream_cfg.get("allow_py_fallback"), False),
+        build_cython=_env_bool(env, "NAPARI_CUDA_BITSTREAM_BUILD_CYTHON", _cfg_bool(bitstream_cfg.get("build_cython"), True)),
+        disable_fast_pack=_env_bool(env, "NAPARI_CUDA_BITSTREAM_DISABLE_FAST_PACK", _cfg_bool(bitstream_cfg.get("disable_fast_pack"), False)),
+        allow_py_fallback=_env_bool(env, "NAPARI_CUDA_BITSTREAM_ALLOW_PY_FALLBACK", _cfg_bool(bitstream_cfg.get("allow_py_fallback"), False)),
     )
-
-    if preset_entry and preset_entry.bitstream:
-        bitstream_runtime = _apply_dataclass_overrides(bitstream_runtime, preset_entry.bitstream, "BitstreamRuntime")
 
     metrics_port = _env_int(env, "NAPARI_CUDA_METRICS_PORT", 8083)
     metrics_refresh_ms = _env_int(env, "NAPARI_CUDA_METRICS_REFRESH_MS", 1000)

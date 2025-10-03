@@ -40,7 +40,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
    - Implement `scope="camera"` on the server, emit `notify.camera`, migrate the client to the new lane, and delete the Alt+drag orbit fallback once the handlers land.
 2. **Retire legacy protocol surface & scaffolding**
    - Delete `SceneSpecMessage`, `LayerUpdateMessage`, and related adapters once Step 1 ensures consumers hydrate from `notify.scene`/`notify.layers`.
-   - Remove `protocol/messages.py` compatibility exports, control-channel shims, and archive `client/minimal_client.py`.
+   - Remove `protocol/messages.py` compatibility exports and the remaining control-channel shims. `client/minimal_client.py` has been archived under `archive/legacy_client/`.
    - Track the dependent dataclasses (`LayerSpec`, `LayerRenderHints`, `MultiscaleSpec`, etc.) called out in §6 so the layer registry falls alongside the scene/layer shims.
 3. **Finish the command lane**
    - Wire `call.command`/`reply.command`/`error.command` end-to-end, including `napari.pixel.request_keyframe`.
@@ -50,7 +50,16 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
    - Script a smoke run that exercises dims toggles, camera pan/orbit, layer edits, and explicit keyframe requests via the reset path.
 5. **Documentation & migration bookkeeping**
    - Keep `docs/protocol_greenfield_migration.md` in sync as drifts close, pruning entries instead of letting them rot.
-   - Produce a streamlined smoke-test runbook covering encoder diagnostics and VT gate behaviour.
+ - Produce a streamlined smoke-test runbook covering encoder diagnostics and VT gate behaviour.
+
+## Next Scoped Pass – Command Lane Cutover
+
+| # | Task | Primary File Touches | Spec References |
+|---|------|----------------------|-----------------|
+| 1 | Drop legacy keyframe verbs from the control dispatcher and route all keyframe triggers through `call.command`. Remove `'request_keyframe'` / `'force_idr'` entries and collapse `_handle_force_keyframe`. | `src/napari_cuda/server/control/control_channel_server.py`, `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/pipelines/vt_pipeline.py` (ensure only `_request_keyframe_command` is used). | `docs/protocol_greenfield.md` §§6.1–6.3 (command request/reply/error contract). |
+| 2 | Introduce a formal command registry that maps spec-qualified command names to server callbacks (initial set: `napari.pixel.request_keyframe`, `napari.viewer.fit_to_view`, `napari.viewer.reset_view`). Advertise the catalogue in `session.welcome.features.call.command.commands`. | `src/napari_cuda/server/control/control_channel_server.py`, `src/napari_cuda/server/server_scene.py`, new helper `src/napari_cuda/server/control/command_registry.py` (optional), `src/napari_cuda/server/_tests/test_state_channel_updates.py`. | `docs/protocol_greenfield.md` §3.2 (feature advertisement in `session.welcome`), §§6.1–6.4. |
+| 3 | Surface the command catalogue in the client UI layer: bind menu/actions to `_issue_command`, remove any residual direct worker shims, and extend command future handling tests. | `src/napari_cuda/client/runtime/stream_runtime.py`, `src/napari_cuda/client/streaming/client_loop/pipelines.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, viewer action wiring. | `docs/protocol_greenfield.md` §§6.1–6.4 (client behaviour), Appendix A table 6 (command capability matrix). |
+| 4 | Update documentation and smoke checklists to reflect the command-only path and archive status, and add regression tests for the new commands. | `docs/protocol_greenfield_migration.md`, `docs/control_protocol_agent_notes.md`, `tests`/`scripts` smoke instructions. | `docs/protocol_greenfield.md` §§6.1–6.4, §8 (operational notes). |
 
 ## Documented Spec Drifts (2025-10-01)
 
@@ -63,7 +72,8 @@ The following deviations are now deliberate, documented behaviour until the corr
 - ~~**Alt-drag orbit gating (resolved 2025-10-01)** – `notify.dims.mode` drives the volume gate and Alt+drag emits `camera.orbit` intents with verified test coverage (`src/napari_cuda/client/runtime/stream_runtime.py:1246`, `_tests/test_camera.py`).~~
 - **Dims baseline readiness (resolved 2025-10-xx)** – `notify.dims` now streams directly from the worker snapshot. The server persists the latest `snapshot_dims_metadata()` payload and reuses it for intent echoes instead of rebuilding from `SceneSpec`; the client consumes those metadata fields without touching the cached scene snapshot.
 - **State handler shims** – Compatibility modules (`src/napari_cuda/server/state_channel_handler.py:1`, `src/napari_cuda/client/streaming/client_loop/control.py:1`) still wildcard-import the new implementations to preserve legacy imports. *Target:* drop once downstream call sites are updated.
-- **Minimal client legacy protocol** – `src/napari_cuda/client/minimal_client.py` continues to speak the deprecated control format (`{"type":"ping"}` etc.). *Target:* archive the minimal client alongside the legacy protocol or port it to the greenfield envelopes after the migration reaches Phase 5.
+- ~~**Minimal client legacy protocol** – `src/napari_cuda/client/minimal_client.py` continues to speak the deprecated control format (`{"type":"ping"}` etc.). *Target:* archive the minimal client alongside the legacy protocol or port it to the greenfield envelopes after the migration reaches Phase 5.~~
+- **Minimal client archive (resolved 2025-10-xx)** – The legacy minimal client now lives in `archive/legacy_client/minimal_client.py` and is excluded from the active packaging targets.
 
 ### 3.1 Keyframe Handling Baseline
 

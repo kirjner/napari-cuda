@@ -58,7 +58,7 @@ class PixelReceiver:
         max_delay = 30.0
         while True:
             try:
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, max_size=None) as ws:
                     logger.info("Connected to pixel stream")
                     # Reset backoff on successful connect
                     retry_delay = 5.0

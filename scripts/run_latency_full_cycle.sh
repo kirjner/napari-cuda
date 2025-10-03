@@ -44,6 +44,8 @@ printf 'Starting headless server (logs -> %s)\n' "${LOG_PATH}"
 QT_QPA_PLATFORM=offscreen \
 PYOPENGL_PLATFORM=egl \
 PYTHONUNBUFFERED=1 \
+NAPARI_CUDA_ENCODE_FPS="${FPS}" \
+NAPARI_CUDA_ENCODE_BITRATE="${NAPARI_CUDA_ENCODE_BITRATE:-20000000}" \
 stdbuf -oL -eL uv run napari-cuda-server \
   --host "${HOST}" \
   --state-port "${STATE_PORT}" \
@@ -51,7 +53,6 @@ stdbuf -oL -eL uv run napari-cuda-server \
   --width "${WIDTH}" \
   --height "${HEIGHT}" \
   --fps "${FPS}" \
-  --encoder-profile latency \
   --zarr "${ZARR_PATH}" \
   > "${LOG_PATH}" 2>&1 &
 SERVER_PID=$!

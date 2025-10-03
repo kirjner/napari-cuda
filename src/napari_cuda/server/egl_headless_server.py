@@ -23,69 +23,6 @@ from websockets.exceptions import ConnectionClosed
 
 from .bitstream import build_avcc_config
 
-def _merge_encoder_config(base: Mapping[str, object], override: Mapping[str, object]) -> dict[str, object]:
-    merged: dict[str, object] = {k: v for k, v in base.items()}
-    for key, value in override.items():
-        current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _merge_encoder_config(current, value)
-        else:
-            merged[key] = value
-    return merged
-
-
-def _build_encoder_override_env(base_env: Mapping[str, str], patch: Mapping[str, object]) -> dict[str, str]:
-    if not patch:
-        return {}
-    merged_base: dict[str, object] = {}
-    raw = base_env.get('NAPARI_CUDA_ENCODER_CONFIG')
-    if raw:
-        try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, dict):
-                merged_base = loaded
-        except Exception:
-            logger.debug("Failed to parse existing encoder config; starting fresh", exc_info=True)
-    merged = _merge_encoder_config(merged_base, patch)
-    return {'NAPARI_CUDA_ENCODER_CONFIG': json.dumps(merged)}
-
-
-# Encoder profile presets for convenient NVENC tuning
-def _apply_encoder_profile(profile: str) -> dict[str, object]:
-    profiles: dict[str, dict[str, object]] = {
-        'latency': {
-            'runtime': {
-                'rc_mode': 'vbr',
-                'max_bitrate': 30_000_000,
-                'lookahead': 0,
-                'aq': 0,
-                'temporalaq': 0,
-                'bframes': 0,
-                'preset': 'P3',
-            },
-        },
-        'quality': {
-            'encode': {
-                'bitrate': 35_000_000,
-            },
-            'runtime': {
-                'rc_mode': 'vbr',
-                'max_bitrate': 45_000_000,
-                'lookahead': 10,
-                'aq': 1,
-                'temporalaq': 1,
-                'bframes': 2,
-                'preset': 'P5',
-                'idr_period': 120,
-            },
-        },
-    }
-    settings = profiles.get((profile or '').lower())
-    if not settings:
-        return {}
-    if logger.isEnabledFor(logging.INFO):
-        logger.info("Encoder profile '%s' resolved overrides: %s", profile, settings)
-    return settings
 
 from .scene_state import ServerSceneState
 from .plane_restore_state import PlaneRestoreState
@@ -142,7 +79,7 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 class EncodeConfig:
     fps: int = 60
     codec: int = 1  # 1=h264, 2=hevc, 3=av1
-    bitrate: int = 10_000_000
+    bitrate: int = 20_000_000
     keyint: int = 120
 
 
@@ -155,14 +92,9 @@ class EGLHeadlessServer:
                  animate: bool = False, animate_dps: float = 30.0, log_sends: bool = False,
                  zarr_path: str | None = None, zarr_level: str | None = None,
                  zarr_axes: str | None = None, zarr_z: int | None = None,
-                 debug: bool = False,
-                 env_overrides: Optional[Mapping[str, str]] = None) -> None:
+                 debug: bool = False) -> None:
         # Build once: resolved runtime context (observe-only for now)
-        base_env: dict[str, str] = dict(os.environ)
-        if env_overrides:
-            for key, value in env_overrides.items():
-                base_env[str(key)] = str(value)
-        self._ctx_env: dict[str, str] = base_env
+        self._ctx_env: dict[str, str] = dict(os.environ)
         try:
             self._ctx: ServerCtx = load_server_ctx(self._ctx_env)
         except Exception:
@@ -693,10 +625,18 @@ class EGLHeadlessServer:
             await handle_state(self, ws)
 
         state_server = await websockets.serve(
-            state_handler, self.host, self.state_port, compression=None
+            state_handler,
+            self.host,
+            self.state_port,
+            compression=None,
+            max_size=None,
         )
         pixel_server = await websockets.serve(
-            self._handle_pixel, self.host, self.pixel_port, compression=None
+            self._handle_pixel,
+            self.host,
+            self.pixel_port,
+            compression=None,
+            max_size=None,
         )
         self._metrics_runner = metrics_server.start_metrics_dashboard(
             self.host,
@@ -837,24 +777,15 @@ def main() -> None:
     parser.add_argument('--zarr-z', dest='zarr_z', type=int, default=int(os.getenv('NAPARI_CUDA_ZARR_Z', '-1')), help='Initial Z index for 2D slice (default: mid-slice)')
     parser.add_argument('--log-sends', action='store_true', help='Log per-send timing (seq, send_ts, stamp_ts, delta)')
     parser.add_argument('--debug', action='store_true', help='Enable DEBUG for this server module only')
-    parser.add_argument('--encoder-profile', choices=['latency', 'quality'], default='latency',
-                        help='Apply predefined NVENC configuration (defaults to latency focus)')
     args = parser.parse_args()
 
     async def run():
-        encoder_patch = _apply_encoder_profile(args.encoder_profile)
-        encode_section = encoder_patch.setdefault('encode', {})
-        if not isinstance(encode_section, dict):
-            encode_section = {}
-            encoder_patch['encode'] = encode_section
-        encode_section['fps'] = int(args.fps)
-        profile_overrides = _build_encoder_override_env(os.environ, encoder_patch)
         srv = EGLHeadlessServer(width=args.width, height=args.height, use_volume=args.volume,
                                 host=args.host, state_port=args.state_port, pixel_port=args.pixel_port, fps=args.fps,
                                 animate=args.animate, animate_dps=args.animate_dps, log_sends=bool(args.log_sends),
                                 zarr_path=args.zarr_path, zarr_level=args.zarr_level,
                                 zarr_axes=args.zarr_axes, zarr_z=(None if int(args.zarr_z) < 0 else int(args.zarr_z)),
-                                debug=bool(args.debug), env_overrides=profile_overrides)
+                                debug=bool(args.debug))
         await srv.start()
 
     asyncio.run(run())

@@ -5,39 +5,29 @@ import json
 from napari_cuda.server.config import load_server_ctx
 
 
-def test_load_server_ctx_hydrates_json_bundles() -> None:
+def test_load_server_ctx_honours_env_overrides() -> None:
     env = {
         "NAPARI_CUDA_HOST": "127.0.0.1",
-        "NAPARI_CUDA_PROFILE": "quality",
-        "NAPARI_CUDA_ENCODER_CONFIG": json.dumps(
-            {
-                "encode": {
-                    "fps": 72,
-                    "bitrate": 12_500_000,
-                    "keyint": 90,
-                    "codec": "hevc",
-                },
-                "runtime": {
-                    "input_format": "NV12",
-                    "rc_mode": "vbr",
-                    "max_bitrate": 18_000_000,
-                    "lookahead": 12,
-                    "aq": 2,
-                    "temporalaq": 1,
-                    "non_ref_p": True,
-                    "bframes": 3,
-                    "idr_period": 240,
-                    "preset": "P6",
-                },
-                "bitstream": {
-                    "build_cython": False,
-                    "disable_fast_pack": True,
-                    "allow_py_fallback": True,
-                },
-                "dump_bitstream": 4,
-                "dump_dir": "tmp/custom_bitstreams",
-            }
-        ),
+        "NAPARI_CUDA_ENCODE_FPS": "72",
+        "NAPARI_CUDA_ENCODE_BITRATE": "12500000",
+        "NAPARI_CUDA_ENCODE_KEYINT": "90",
+        "NAPARI_CUDA_ENCODE_CODEC": "hevc",
+        "NAPARI_CUDA_ENCODER_PRESET": "P6",
+        "NAPARI_CUDA_ENCODER_RC_MODE": "vbr",
+        "NAPARI_CUDA_ENCODER_MAX_BITRATE": "18000000",
+        "NAPARI_CUDA_ENCODER_LOOKAHEAD": "12",
+        "NAPARI_CUDA_ENCODER_AQ": "2",
+        "NAPARI_CUDA_ENCODER_TEMPORALAQ": "1",
+        "NAPARI_CUDA_ENCODER_NON_REF_P": "1",
+        "NAPARI_CUDA_ENCODER_BFRAMES": "3",
+        "NAPARI_CUDA_ENCODER_IDR_PERIOD": "240",
+        "NAPARI_CUDA_ENCODER_INPUT_FORMAT": "NV12",
+        "NAPARI_CUDA_DUMP_BITSTREAM": "4",
+        "NAPARI_CUDA_DUMP_DIR": "tmp/custom_bitstreams",
+        "NAPARI_CUDA_BITSTREAM_BUILD_CYTHON": "0",
+        "NAPARI_CUDA_BITSTREAM_DISABLE_FAST_PACK": "1",
+        "NAPARI_CUDA_BITSTREAM_ALLOW_PY_FALLBACK": "1",
+        "NAPARI_CUDA_KF_WATCHDOG_COOLDOWN": "4.5",
         "NAPARI_CUDA_POLICY_CONFIG": json.dumps(
             {
                 "threshold_in": 1.1,
@@ -60,7 +50,6 @@ def test_load_server_ctx_hydrates_json_bundles() -> None:
                 "dumps": {"frames": 2, "dir": "logs/custom_frames"},
             }
         ),
-        "NAPARI_CUDA_KF_WATCHDOG_COOLDOWN": "4.5",
     }
 
     ctx = load_server_ctx(env)
@@ -75,32 +64,39 @@ def test_load_server_ctx_hydrates_json_bundles() -> None:
     assert ctx.dump_dir == "tmp/custom_bitstreams"
     assert ctx.kf_watchdog_cooldown_s == 4.5
 
-    assert ctx.encoder_runtime.input_format == "NV12"
-    assert ctx.encoder_runtime.rc_mode == "vbr"
-    assert ctx.encoder_runtime.max_bitrate == 18_000_000
-    assert ctx.encoder_runtime.lookahead == 12
-    assert ctx.encoder_runtime.aq == 2
-    assert ctx.encoder_runtime.temporalaq == 1
-    assert ctx.encoder_runtime.enable_non_ref_p is True
-    assert ctx.encoder_runtime.bframes == 3
-    assert ctx.encoder_runtime.idr_period == 240
-    assert ctx.encoder_runtime.preset == "P6"
+    runtime = ctx.encoder_runtime
+    assert runtime.input_format == "NV12"
+    assert runtime.rc_mode == "vbr"
+    assert runtime.max_bitrate == 18_000_000
+    assert runtime.lookahead == 12
+    assert runtime.aq == 2
+    assert runtime.temporalaq == 1
+    assert runtime.enable_non_ref_p is True
+    assert runtime.bframes == 3
+    assert runtime.idr_period == 240
+    assert runtime.preset == "P6"
 
-    assert ctx.bitstream.build_cython is False
-    assert ctx.bitstream.disable_fast_pack is True
-    assert ctx.bitstream.allow_py_fallback is True
+    bitstream = ctx.bitstream
+    assert bitstream.build_cython is False
+    assert bitstream.disable_fast_pack is True
+    assert bitstream.allow_py_fallback is True
 
-    assert ctx.debug_policy.enabled is True
-    assert ctx.debug_policy.encoder.log_keyframes is True
-    assert ctx.debug_policy.dumps.frames_budget == 2
-    assert ctx.debug_policy.dumps.output_dir == "logs/custom_frames"
+    debug_policy = ctx.debug_policy
+    assert debug_policy.enabled is True
+    assert debug_policy.encoder.log_keyframes is True
+    assert debug_policy.dumps.frames_budget == 2
+    assert debug_policy.dumps.output_dir == "logs/custom_frames"
 
-    assert ctx.policy.threshold_in == 1.1
-    assert ctx.policy.threshold_out == 1.9
-    assert ctx.policy.hysteresis == 0.05
-    assert ctx.policy.fine_threshold == 1.4
-    assert ctx.policy.cooldown_ms == 80.0
-    assert ctx.policy.preserve_view_on_switch is False
-    assert ctx.policy.sticky_contrast is False
-    assert ctx.policy.oversampling_thresholds == {0: 1.3, 1: 2.7}
-    assert ctx.policy.oversampling_hysteresis == 0.25
+    policy = ctx.policy
+    assert policy.threshold_in == 1.1
+    assert policy.threshold_out == 1.9
+    assert policy.hysteresis == 0.05
+    assert policy.fine_threshold == 1.4
+    assert policy.cooldown_ms == 80.0
+    assert policy.preserve_view_on_switch is False
+    assert policy.sticky_contrast is False
+    assert policy.oversampling_thresholds == {0: 1.3, 1: 2.7}
+    assert policy.oversampling_hysteresis == 0.25
+def test_load_server_ctx_defaults_use_cbr() -> None:
+    ctx = load_server_ctx({})
+    assert ctx.encoder_runtime.rc_mode == "cbr"

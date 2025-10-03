@@ -225,7 +225,7 @@ class StateChannel:
         max_delay = 30.0
         while not loop_state.stop_requested:
             try:
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, max_size=None) as ws:
                     logger.info("Connected to state channel")
                     retry_delay = 5.0
                     loop_state.websocket = ws
