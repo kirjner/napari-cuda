@@ -743,9 +743,9 @@ class StateChannel:
 
         payload = frame.payload
         logger.info(
-            "reply.command received intent=%s in_reply_to=%s",
-            payload.intent_id,
+            "reply.command received in_reply_to=%s idempotency_key=%s",
             payload.in_reply_to,
+            payload.idempotency_key,
         )
         if self.handle_reply_command:
             try:

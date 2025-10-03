@@ -62,7 +62,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 | ✅ | Surface the command catalogue in the client UI layer: bind menu/actions to `_issue_command`, remove any residual direct worker shims, and extend command future handling tests. *(Completed 2025-10-03.)* | `src/napari_cuda/client/runtime/stream_runtime.py`, `src/napari_cuda/client/streaming/client_loop/pipelines.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, viewer action wiring. | `docs/protocol_greenfield.md` §§6.1–6.4 (client behaviour), Appendix A table 6 (command capability matrix). |
 | ✅ | Update documentation and smoke checklists to reflect the command-only path and archive status. *(Completed 2025-10-03.)* | `docs/protocol_greenfield_migration.md`, `docs/control_protocol_agent_notes.md`, `docs/consolidate_refactors_plan.md`. | `docs/protocol_greenfield.md` §§6.1–6.4, §8 (operational notes). |
 | ✅ | Add regression coverage for the command lane (keyframe RPC success/error paths) and fold it into smoke automation. *(Completed 2025-10-03.)* | `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, smoke scripts. | `docs/protocol_greenfield.md` §§6.1–6.4. |
-| 6 | Introduce typed snapshot helpers for notify lanes (SceneSnapshot/LayerSnapshot now drive `notify.scene` + `notify.layers`; extend to dims/camera/stream as they’re touched). | `src/napari_cuda/protocol/snapshots.py`, `src/napari_cuda/server/control/scene_snapshot_builder.py`, client adapters. | `docs/protocol_greenfield.md` §§4, 6; Appendix B. |
+| 6 | Introduce typed snapshot helpers for notify lanes (SceneSnapshot/LayerSnapshot now drive `notify.scene` + `notify.layers`; extend to dims/camera/stream as they’re touched). | `src/napari_cuda/protocol/snapshots.py`, `src/napari_cuda/server/layer_manager.py`, `src/napari_cuda/server/control/scene_snapshot_builder.py`, client adapters. | `docs/protocol_greenfield.md` §§4, 6; Appendix B. |
 | 7 | Delete the legacy scene/layer dataclasses (`SceneSpecMessage`, `LayerUpdateMessage`, `LayerRemoveMessage`, `LayerSpec` family) and migrate every consumer to the snapshot helpers + greenfield payloads. | `src/napari_cuda/server/scene_spec.py`, `src/napari_cuda/client/layers/`, `src/napari_cuda/client/control/`, `src/napari_cuda/protocol/messages.py`. | `docs/protocol_greenfield.md` §§4, 6. |
 
 ## Documented Spec Drifts (2025-10-01)
@@ -301,9 +301,10 @@ translating to legacy formats.
   the new RPC helper and wait on `reply.command` / `error.command` for completion.
 - **Client (scene/layer shims):** The streaming registry now hydrates from
   `SceneSnapshot`/`LayerDelta` via `napari_cuda.protocol.snapshots`; legacy
-  `layer.update`/`layer.remove` callbacks have been removed. Follow-ups will
-  delete the remaining `LayerSpec` conveniences once presenter/adapter code is
-  ported to the typed snapshots so the compatibility exports can be trimmed.
+  `layer.update`/`layer.remove` callbacks have been removed. The server no longer
+  emits through `scene_spec` – `ViewerSceneManager` builds JSON-ready layer/dims
+  blocks directly – so follow-ups can delete the remaining `LayerSpec` helpers
+  once presenter/adapter code is ported to typed snapshots.
 - **Protocol extension:** add a resumable `notify.scene.level` lane carrying the
   active multiscale level (`current_level`, `downgraded`, optional `levels` metadata)
   so HUD/slider consumers stay in sync with server-driven LOD switches without
