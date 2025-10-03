@@ -2082,15 +2082,8 @@ async def _broadcast_state_update(
         return
 
     if result.scope == "dims":
-        step = result.current_step or ()
-        await _broadcast_dims_state(
-            server,
-            current_step=step,
-            source="state.update",
-            intent_id=result.intent_id,
-            timestamp=result.timestamp,
-            meta=_current_dims_meta(server),
-        )
+        # The render worker will emit notify.dims once it applies the update;
+        # avoid duplicating frames from the control plane.
         return
 
     if result.scope == "view" and result.key == "ndisplay":
@@ -2396,11 +2389,23 @@ def process_worker_notifications(
                     multiscale_state["levels"] = list(pending_level["levels"])
                 del multiscale_state["pending_worker_level"]
 
+            mode_text = str(meta.get("mode", "")).strip().lower()
+            if mode_text not in {"plane", "volume"}:
+                raise AssertionError(f"worker dims mode invalid: {mode_text!r}")
+            scene_mode = "volume" if bool(server._scene.use_volume) else "plane"
+            if mode_text != scene_mode:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "worker dims ignored due to mode mismatch: worker=%s control=%s",
+                        mode_text,
+                        scene_mode,
+                    )
+                continue
+
             with server._state_lock:
                 latest = server._scene.latest_state
                 server._scene.latest_state = replace(latest, current_step=step_tuple)
             scene_data.last_dims_payload = dict(meta)
-
             server._schedule_coro(
                 _broadcast_worker_dims(
                     server,

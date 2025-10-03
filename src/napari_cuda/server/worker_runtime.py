@@ -189,6 +189,7 @@ def apply_worker_level(
     level: int,
     *,
     prev_level: Optional[int] = None,
+    restoring_plane_state: bool = False,
 ) -> lod.AppliedLevel:
     """Apply ``level`` through the worker's existing helpers and return the snapshot."""
 
@@ -198,6 +199,7 @@ def apply_worker_level(
         prev_level=prev_level,
         last_step=getattr(worker, "_last_step", None),
         viewer=getattr(worker, "_viewer", None),
+        restoring_plane_state=restoring_plane_state,
     )
 
     descriptor = source.level_descriptors[int(level)]
@@ -208,7 +210,7 @@ def apply_worker_level(
     else:
         apply_worker_slice_level(worker, source, applied)
 
-    worker._notify_scene_refresh()  # type: ignore[attr-defined]
+    # Render loop drain will emit the notify.dims once the new level is in place.
     return applied
 
 
@@ -387,6 +389,7 @@ def set_level_with_budget(
     *,
     reason: str,
     budget_error: type[Exception],
+    restoring_plane_state: bool = False,
 ) -> None:
     source = worker._ensure_scene_source()  # type: ignore[attr-defined]
 
@@ -400,7 +403,13 @@ def set_level_with_budget(
             raise LevelBudgetError(str(exc)) from exc
 
     def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> lod.AppliedLevel:
-        return apply_worker_level(worker, scene, level, prev_level=prev_level)
+        return apply_worker_level(
+            worker,
+            scene,
+            level,
+            prev_level=prev_level,
+            restoring_plane_state=restoring_plane_state,
+        )
 
     def _on_switch(prev_level: int, applied: int, elapsed_ms: float) -> None:
         roi_desc = format_worker_level_roi(worker, source, applied)
@@ -475,6 +484,7 @@ def perform_level_switch(
     selected_level: Optional[int],
     source: Optional[ZarrSceneSource] = None,
     budget_error: type[Exception],
+    restoring_plane_state: bool = False,
 ) -> None:
     if not getattr(worker, "_zarr_path", None):
         return
@@ -487,7 +497,13 @@ def perform_level_switch(
     target_level = int(target_level)
     ctx = worker._build_policy_context(source, requested_level=target_level)  # type: ignore[attr-defined]
     prev = int(getattr(worker, "_active_ms_level", 0))
-    set_level_with_budget(worker, target_level, reason=reason, budget_error=budget_error)
+    set_level_with_budget(
+        worker,
+        target_level,
+        reason=reason,
+        budget_error=budget_error,
+        restoring_plane_state=restoring_plane_state,
+    )
     if reason in {"zoom-in", "zoom-out"}:
         worker._last_zoom_hint_ts = time.perf_counter()  # type: ignore[attr-defined]
     idle_ms = max(0.0, (time.perf_counter() - getattr(worker, "_last_interaction_ts", time.perf_counter())) * 1000.0)

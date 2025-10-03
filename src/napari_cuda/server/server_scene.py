@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari_cuda.server.scene_state import ServerSceneState
+from napari_cuda.server.plane_restore_state import PlaneRestoreState
 
 
 CONTROL_KEYS: tuple[str, ...] = (
@@ -149,6 +150,7 @@ class ServerSceneData:
     last_scene_seq: int = 0
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
+    plane_restore_state: Optional[PlaneRestoreState] = None
 
 
 def create_server_scene_data(*, policy_event_path: Optional[str | Path] = None) -> ServerSceneData:

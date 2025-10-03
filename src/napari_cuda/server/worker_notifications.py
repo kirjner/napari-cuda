@@ -32,6 +32,15 @@ class WorkerSceneNotificationQueue:
         with self._lock:
             self._items.append(notification)
 
+    def discard(self, predicate) -> None:
+        with self._lock:
+            if not self._items:
+                return
+            self._items = deque(item for item in self._items if not predicate(item))
+
+    def discard_kind(self, kind: Literal["dims_update", "scene_level"]) -> None:
+        self.discard(lambda note: note.kind == kind)
+
     def drain(self) -> list[WorkerSceneNotification]:
         with self._lock:
             if not self._items:

@@ -12,7 +12,7 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING
 
@@ -87,6 +87,7 @@ def _apply_encoder_profile(profile: str) -> dict[str, object]:
     return settings
 
 from .scene_state import ServerSceneState
+from .plane_restore_state import PlaneRestoreState
 from .server_scene import (
     ServerSceneCommand,
     ServerSceneData,
@@ -447,6 +448,23 @@ class EGLHeadlessServer:
             logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
         self.use_volume = bool(ndisp == 3)
         self._scene.use_volume = self.use_volume
+
+        if self.use_volume:
+            with self._state_lock:
+                current_step = self._scene.latest_state.current_step
+                level = self._scene.multiscale_state.get("current_level")
+                if current_step is not None and level is not None:
+                    self._scene.plane_restore_state = PlaneRestoreState(
+                        step=tuple(current_step),
+                        level=int(level),
+                    )
+        else:
+            restore_state = self._scene.plane_restore_state
+            if restore_state is not None:
+                with self._state_lock:
+                    latest = self._scene.latest_state
+                    self._scene.latest_state = replace(latest, current_step=restore_state.step)
+                    self._scene.multiscale_state["current_level"] = int(restore_state.level)
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:

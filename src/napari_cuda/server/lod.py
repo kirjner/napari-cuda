@@ -315,6 +315,7 @@ def apply_level(
     prev_level: Optional[int],
     last_step: Optional[Sequence[int]],
     viewer: Optional[ViewerModel],
+    restoring_plane_state: bool = False,
 ) -> AppliedLevel:
     """Apply target level, update dims, and return the applied snapshot."""
     axes = source.axes
@@ -336,14 +337,17 @@ def apply_level(
                 cur_z = None
 
     # Proportional remap if needed
-    new_z = _proportional_z_remap(
-        prev_level=prev_level,
-        prev_shape=prev_shape,
-        new_shape=desc.shape,
-        axes=axes,
-        current_step=last_step,
-        current_z=cur_z,
-    )
+    if restoring_plane_state:
+        new_z = cur_z
+    else:
+        new_z = _proportional_z_remap(
+            prev_level=prev_level,
+            prev_shape=prev_shape,
+            new_shape=desc.shape,
+            axes=axes,
+            current_step=last_step,
+            current_z=cur_z,
+        )
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(

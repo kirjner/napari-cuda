@@ -74,6 +74,7 @@ from napari_cuda.server.scene_state_applier import (
 from napari_cuda.server.camera_controller import process_commands
 from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.server_scene import ServerSceneCommand
+from napari_cuda.server.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.render_mailbox import (
     PendingRenderUpdate,
     RenderDelta,
@@ -160,7 +161,6 @@ class EGLRendererWorker:
         self._zarr_dtype: Optional[str] = None
         self._z_index: Optional[int] = None
         self._zarr_clim: Optional[tuple[float, float]] = None
-        self._plane_step_restore: Optional[tuple[int, ...]] = None
         self._hw_limits = get_hw_limits()
 
         self._bootstrapped = False
@@ -350,6 +350,80 @@ class EGLRendererWorker:
     def _notify_scene_refresh(self) -> None:
         notify_scene_refresh(self)
 
+    # --- Plane restore helpers -------------------------------------------------
+
+    def snapshot_plane_state(self) -> Optional[PlaneRestoreState]:
+        """Capture the current plane state for later restoration."""
+
+        if self._last_step is None:
+            return None
+
+        step_tuple = tuple(int(value) for value in self._last_step)
+        level = int(self._active_ms_level)
+
+        roi_level: Optional[int] = None
+        roi_value: Optional[SliceROI] = None
+        if self._last_roi is not None:
+            roi_level = int(self._last_roi[0])
+            roi_value = self._last_roi[1]
+
+        camera_state = None
+        if self.view is not None and self.view.camera is not None:
+            camera_state = dict(self.view.camera.get_state())
+
+        data_wh = None
+        if self._data_wh is not None:
+            data_wh = (int(self._data_wh[0]), int(self._data_wh[1]))
+
+        state = PlaneRestoreState(
+            step=step_tuple,
+            level=level,
+            roi_level=roi_level,
+            roi=roi_value,
+            camera_state=camera_state,
+            data_wh=data_wh,
+        )
+        self._plane_restore_state = state
+        return state
+
+    def schedule_plane_restore(self, state: PlaneRestoreState) -> None:
+        """Queue a previously captured plane state for restoration."""
+
+        self._plane_restore_state = state
+        self._pending_plane_restore = state
+        self._level_policy_refresh_needed = True
+        self._mark_render_tick_needed()
+
+    def _apply_pending_plane_restore(self) -> None:
+        if self._pending_plane_restore is None or self.use_volume:
+            return
+
+        state = self._pending_plane_restore
+        self._pending_plane_restore = None
+        self._plane_restore_state = state
+
+        source = self._ensure_scene_source()
+        with self._state_lock:
+            source.set_current_slice(tuple(int(v) for v in state.step), int(state.level))
+
+        self._active_ms_level = int(state.level)
+        self._last_step = tuple(int(v) for v in state.step)
+
+        if state.roi_level is not None and state.roi is not None:
+            self._last_roi = (int(state.roi_level), state.roi)
+
+        if state.data_wh is not None:
+            self._data_wh = (int(state.data_wh[0]), int(state.data_wh[1]))
+
+        if self._viewer is not None:
+            self._viewer.dims.current_step = tuple(int(v) for v in state.step)
+
+        if state.camera_state is not None and self.view is not None and self.view.camera is not None:
+            self.view.camera.set_state(state.camera_state)  # type: ignore[arg-type]
+
+        # Notify clients with the restored step metadata.
+        self._notify_scene_refresh()
+
     def _mark_render_tick_needed(self) -> None:
         self._render_tick_required = True
 
@@ -402,6 +476,8 @@ class EGLRendererWorker:
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
+        self._plane_restore_state: Optional[PlaneRestoreState] = None
+        self._pending_plane_restore: Optional[PlaneRestoreState] = None
 
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
@@ -563,7 +639,7 @@ class EGLRendererWorker:
         self._active_ms_level = applied.level
         self._last_step = applied.step
         if not self.use_volume:
-            self._plane_step_restore = self._last_step
+            self.snapshot_plane_state()
         self._z_index = applied.z_index
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
@@ -980,7 +1056,6 @@ class EGLRendererWorker:
             ensure_scene_source=self._ensure_scene_source,
             plane_scale_for_level=plane_scale_for_level,
             load_slice=self._load_slice,
-            notify_scene_refresh=self._notify_scene_refresh,
             mark_render_tick_needed=self._mark_render_tick_needed,
             request_encoder_idr=self._request_encoder_idr,
         )
@@ -988,8 +1063,17 @@ class EGLRendererWorker:
     def drain_scene_updates(self) -> None:
         updates: PendingRenderUpdate = self._render_mailbox.drain()
 
+        previous_volume = self.use_volume
+
         if updates.display_mode is not None:
             apply_ndisplay_switch(self, updates.display_mode)
+            if not previous_volume and self.use_volume:
+                # entering volume: render loop is the only place that can
+                # broadcast updated dims metadata.
+                self._notify_scene_refresh()
+
+        if not self.use_volume:
+            self._apply_pending_plane_restore()
 
         if updates.multiscale is not None:
             lvl = int(updates.multiscale.level)
@@ -1018,8 +1102,8 @@ class EGLRendererWorker:
         if drain_res.last_step is not None:
             self._last_step = tuple(int(x) for x in drain_res.last_step)
             if not self.use_volume:
-                self._plane_step_restore = self._last_step
-            self._notify_scene_refresh()
+                self.snapshot_plane_state()
+                self._notify_scene_refresh()
 
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()

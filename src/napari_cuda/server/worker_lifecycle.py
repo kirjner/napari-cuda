@@ -40,6 +40,14 @@ def _handle_scene_refresh(
 
     assert worker_ref._last_step is not None, "worker dims step missing"
     step_tuple = tuple(int(value) for value in worker_ref._last_step)
+    plane_state = worker_ref._plane_restore_state
+    mode = str(meta.get("mode"))
+    if mode == "volume" and plane_state is not None:
+        step_tuple = plane_state.step
+        meta["level"] = plane_state.level
+    else:
+        meta["level"] = int(worker_ref._active_ms_level)
+    meta["current_step"] = [int(value) for value in step_tuple]
 
     notifications: list[WorkerSceneNotification] = []
 
@@ -64,6 +72,10 @@ def _handle_scene_refresh(
         )
         server._scene.last_dims_payload = dict(meta)  # type: ignore[attr-defined]
 
+    if plane_state is not None:
+        server._scene.plane_restore_state = plane_state
+
+    server._worker_notifications.discard_kind("dims_update")
     notifications.append(
         WorkerSceneNotification(
             kind="dims_update",

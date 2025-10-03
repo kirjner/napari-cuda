@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from types import MethodType, SimpleNamespace
+from typing import Mapping
 
 import numpy as np
 import pytest
@@ -81,6 +82,29 @@ class _FakeCamera2D:
     def _viewbox(self) -> SimpleNamespace:
         return SimpleNamespace(size=(320.0, 180.0))
 
+    def get_state(self) -> dict[str, object]:  # type: ignore[no-untyped-def]
+        return {
+            "center": tuple(self.center),
+            "angles": tuple(self.angles),
+            "zoom_factor": float(self.zoom_factor),
+            "azimuth": float(self.azimuth),
+            "elevation": float(self.elevation),
+        }
+
+    def set_state(self, state: Mapping[str, object]) -> None:  # type: ignore[no-untyped-def]
+        if "center" in state:
+            center = state["center"]
+            self.center = tuple(float(v) for v in center)  # type: ignore[assignment]
+        if "angles" in state:
+            angles = state["angles"]
+            self.angles = tuple(float(v) for v in angles)
+        if "zoom_factor" in state:
+            self.zoom_factor = float(state["zoom_factor"])
+        if "azimuth" in state:
+            self.azimuth = float(state["azimuth"])
+        if "elevation" in state:
+            self.elevation = float(state["elevation"])
+
 
 class _FakeCamera3D(_FakeCamera2D):
     def __init__(self, elevation: float = 30.0, azimuth: float = 30.0, fov: float = 60.0) -> None:
@@ -115,6 +139,7 @@ class _FakeDims:
         self.ndim: int = 3
         self.order: tuple[int, ...] = (0, 1, 2)
         self.axis_labels: tuple[str, ...] = ("z", "y", "x")
+        self.nsteps: tuple[int, ...] = (256, 256, 256)
 
 
 class _FakeViewer:
@@ -492,15 +517,17 @@ def test_render_tick_preserve_view_smoke(render_worker_fixture):
 
 def test_ndisplay_switch_to_volume_pins_coarsest_level(render_worker_fixture, monkeypatch):
     worker = render_worker_fixture
+    worker._last_step = (0, 0, 0)
 
     recorded: dict[str, object] = {}
 
-    def _capture_switch(worker_param, *, target_level, reason, requested_level, selected_level, source=None, budget_error=None):  # type: ignore[no-untyped-def]
+    def _capture_switch(worker_param, *, target_level, reason, requested_level, selected_level, source=None, budget_error=None, restoring_plane_state=False):  # type: ignore[no-untyped-def]
         recorded.update(
             target_level=int(target_level),
             reason=reason,
             requested_level=int(requested_level) if requested_level is not None else None,
             selected_level=int(selected_level) if selected_level is not None else None,
+            restoring_plane_state=bool(restoring_plane_state),
         )
         worker_param._active_ms_level = int(target_level)  # type: ignore[attr-defined]
 
@@ -513,6 +540,7 @@ def test_ndisplay_switch_to_volume_pins_coarsest_level(render_worker_fixture, mo
     assert worker.use_volume is True
     assert recorded.get("target_level") == 2
     assert recorded.get("reason") == "ndisplay-3d"
+    assert recorded.get("restoring_plane_state") is True
     assert worker._level_policy_refresh_needed is False
     assert worker._render_tick_required is True
     assert worker._viewer is not None and worker._viewer.dims.ndisplay == 3
@@ -552,25 +580,40 @@ def test_ndisplay_switch_notifies_scene_refresh(render_worker_fixture):
 
     assert worker._render_tick_required is True
     assert captured_steps, "Scene refresh callback was not invoked"
-    assert captured_steps[-1] == worker._last_step
+    from napari_cuda.server.plane_restore_state import PlaneRestoreState
+
+    resolved_steps: list[tuple[int, ...]] = []
+    for entry in captured_steps:
+        if isinstance(entry, tuple):
+            resolved_steps.append(entry)
+        elif isinstance(entry, PlaneRestoreState):
+            resolved_steps.append(entry.step)
+    if resolved_steps:
+        assert resolved_steps[-1] == worker._last_step
+    else:
+        assert worker._plane_restore_state is not None
 
 
 def test_ndisplay_toggle_restores_plane_step(render_worker_fixture):
     worker = render_worker_fixture
     worker._viewer.dims.current_step = (4, 0, 0)
     worker._last_step = (4, 0, 0)
-    worker._plane_step_restore = None
+    worker._active_ms_level = 2
+    worker._plane_restore_state = None
+    worker._pending_plane_restore = None
 
     apply_ndisplay_switch(worker, 3)
     assert worker.use_volume is True
-    assert worker._plane_step_restore == (4, 0, 0)
+    assert worker._plane_restore_state is not None
+    assert worker._plane_restore_state.step == (4, 0, 0)
+    assert worker._plane_restore_state.level == 2
 
     worker._render_tick_required = False
+    worker._last_step = (0, 0, 0)
     apply_ndisplay_switch(worker, 2)
 
     assert worker.use_volume is False
     restored = tuple(worker._viewer.dims.current_step)
     assert restored[:3] == (4, 0, 0)
-    assert worker._plane_step_restore == restored
     assert worker._last_step == restored
     assert worker._z_index == 4

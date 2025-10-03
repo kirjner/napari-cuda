@@ -291,7 +291,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
 
     assert server._scene.latest_state.current_step[0] == 5
     assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload["current_step"][0] == 5
+    assert server._scene.last_dims_payload["current_step"][0] == 0
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -303,11 +303,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
         "applied_value": 5,
     }
 
-    dims_frames = _frames_of_type(captured, "notify.dims")
-    assert dims_frames, "expected notify.dims frame"
-    notify_payload = dims_frames[-1]["payload"]
-    assert notify_payload["current_step"][0] == 5
-    assert notify_payload["source"] == "state.update"
+    assert not _frames_of_type(captured, "notify.dims")
 
 
 def test_view_ndisplay_update_ack_is_immediate() -> None:

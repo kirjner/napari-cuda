@@ -57,7 +57,6 @@ class SceneStateApplyContext:
     ensure_scene_source: Callable[[], Any]
     plane_scale_for_level: Callable[[Any, int], Tuple[float, float]]
     load_slice: Callable[[Any, int, int], Any]
-    notify_scene_refresh: Callable[[], None]
     mark_render_tick_needed: Callable[[], None]
     request_encoder_idr: Optional[Callable[[], None]] = None
     volume_scale: Optional[Tuple[float, float, float]] = None
@@ -163,7 +162,6 @@ class SceneStateApplier:
         if ctx.idr_on_z and ctx.request_encoder_idr is not None:
             ctx.request_encoder_idr()
 
-        ctx.notify_scene_refresh()
         ctx.mark_render_tick_needed()
 
         h, w = int(slab.shape[0]), int(slab.shape[1])

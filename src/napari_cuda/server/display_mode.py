@@ -14,27 +14,19 @@ logger = logging.getLogger(__name__)
 
 def apply_ndisplay_switch(worker, ndisplay: int) -> None:
     """Apply a 2D/3D toggle using the worker context."""
-    view = worker.view
-    assert view is not None and view.scene is not None, "VisPy view must be initialized"
+
+    assert worker.view is not None and worker.view.scene is not None, "VisPy view must be initialised"
 
     target = 3 if int(ndisplay) >= 3 else 2
-    previous_volume = bool(worker.use_volume)
-    worker.use_volume = bool(target == 3)
+    previous_volume = worker.use_volume
+    worker.use_volume = target == 3
 
     viewer_model = worker._viewer
-    if viewer_model is not None:
-        viewer_dims = viewer_model.dims
+    viewer_dims = viewer_model.dims if viewer_model is not None else None
 
+    plane_state = None
     if target == 3:
-        plane_step = getattr(worker, "_last_step", None)
-        if not plane_step and viewer_model is not None:
-            try:
-                current = getattr(viewer_model.dims, "current_step", ())
-                plane_step = tuple(int(s) for s in current)
-            except Exception:
-                plane_step = None
-        if plane_step:
-            worker._plane_step_restore = tuple(int(s) for s in plane_step)
+        plane_state = worker.snapshot_plane_state()
 
     if worker.use_volume:
         worker._last_roi = None
@@ -43,64 +35,59 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
         assert level is not None, "Volume mode requires a multiscale level"
         perform_level_switch(
             worker,
-            target_level=int(level),
+            target_level=level,
             reason="ndisplay-3d",
-            requested_level=int(level),
-            selected_level=int(level),
+            requested_level=level,
+            selected_level=level,
             source=source,
-            budget_error=getattr(worker, "_budget_error_cls", RuntimeError),
+            budget_error=worker._budget_error_cls,
+            restoring_plane_state=plane_state is not None,
         )
-        _reset_volume_step(worker, source, int(level))
+        _reset_volume_step(worker, source, level)
         worker._level_policy_refresh_needed = False
     else:
         if previous_volume:
+            restore_state = worker._plane_restore_state
+            if restore_state is not None:
+                worker._active_ms_level = restore_state.level
+                worker.request_multiscale_level(restore_state.level)
+                worker.schedule_plane_restore(restore_state)
             worker._level_policy_refresh_needed = True
             worker._mark_render_tick_needed()
 
     _configure_camera_for_mode(worker)
 
-    if viewer_model is not None:
-        _update_viewer_dims(worker, viewer_model, target)
+    if viewer_dims is not None:
+        _update_viewer_dims(worker, viewer_dims, target)
 
-    logger.info("ndisplay switch: %s", "3D" if target == 3 else "2D")
+    mode_label = "3D" if target == 3 else "2D"
+    logger.info("ndisplay switch: %s", mode_label)
     if not worker.use_volume:
         worker._evaluate_level_policy()
         worker._level_policy_refresh_needed = False
     worker._mark_render_tick_needed()
 
-    # Immediately flush updated dims metadata so clients receive the new mode
-    # without waiting for the next render tick side effect.
-    worker._notify_scene_refresh()
-
 
 def _reset_volume_step(worker, source, level: int) -> None:
-    descriptors = getattr(source, "level_descriptors", None)
-    assert descriptors, "Zarr source missing level descriptors"
-    descriptor = descriptors[int(level)]
-    axes = [str(a).lower() for a in getattr(source, "axes", []) or []]
+    descriptor = source.level_descriptors[level]
+    axes = [axis.lower() for axis in source.axes]
+    current_step = list(source.current_step)
+    shape = list(descriptor.shape)
+    dims = max(len(current_step), len(shape), 3)
+    while len(current_step) < dims:
+        current_step.append(0)
+    while len(shape) < dims:
+        shape.append(1)
     z_axis = axes.index("z") if "z" in axes else 0
-    step = list(getattr(source, "current_step", ()) or [])
-    shape = list(getattr(descriptor, "shape", ()) or [])
-    dims = max(len(step), len(shape), 3)
-    if len(step) < dims:
-        step.extend([0] * (dims - len(step)))
-    if len(shape) < dims:
-        shape.extend([1] * (dims - len(shape)))
-    if z_axis >= len(step):
-        step.extend([0] * (z_axis - len(step) + 1))
-    if z_axis >= len(shape):
-        shape.extend([1] * (z_axis - len(shape) + 1))
-    step[z_axis] = 0
-    clamped_step = []
-    for idx, val in enumerate(step):
-        sh = max(1, int(shape[idx] if idx < len(shape) else 1))
-        clamped_step.append(int(max(0, min(int(val), sh - 1))))
-    state_lock = getattr(worker, "_state_lock", None)
-    assert state_lock is not None, "Worker must expose _state_lock"
-    with state_lock:
-        source.set_current_slice(tuple(clamped_step), int(level))
+    current_step[z_axis] = 0
+    clamped: list[int] = []
+    for idx in range(dims):
+        size = max(1, int(shape[idx]))
+        clamped.append(int(max(0, min(current_step[idx], size - 1))))
+    with worker._state_lock:
+        source.set_current_slice(tuple(clamped), level)
     worker._z_index = 0
-    worker._last_step = tuple(clamped_step)
+    worker._last_step = tuple(clamped)
 
 
 def _configure_camera_for_mode(worker) -> None:
@@ -109,123 +96,80 @@ def _configure_camera_for_mode(worker) -> None:
         return
 
     if worker.use_volume:
-        if not isinstance(view.camera, scene.cameras.TurntableCamera):
-            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
-        camera = view.camera
-        assert isinstance(camera, scene.cameras.TurntableCamera)
+        view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
         extent = worker._volume_world_extents()
         if extent is None:
-            w_px, h_px = worker._data_wh
-            d_px = worker._data_d or 1
-            extent = (float(w_px), float(h_px), float(d_px))
-        world_w, world_h, world_d = extent
-        camera.set_range(
-            x=(0.0, max(1.0, world_w)),
-            y=(0.0, max(1.0, world_h)),
-            z=(0.0, max(1.0, world_d)),
+            width_px, height_px = worker._data_wh
+            depth_px = worker._data_d or 1
+            extent = (float(width_px), float(height_px), float(depth_px))
+        view.camera.set_range(
+            x=(0.0, max(1.0, extent[0])),
+            y=(0.0, max(1.0, extent[1])),
+            z=(0.0, max(1.0, extent[2])),
         )
-        worker._frame_volume_camera(world_w, world_h, world_d)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "configure_camera_for_mode: use_volume extent=(%.3f, %.3f, %.3f) center=%s distance=%.3f",
-                world_w,
-                world_h,
-                world_d,
-                getattr(camera, 'center', None),
-                float(getattr(camera, 'distance', 0.0)),
-            )
+        worker._frame_volume_camera(extent[0], extent[1], extent[2])
     else:
-        if not isinstance(view.camera, scene.cameras.PanZoomCamera):
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-        camera = view.camera
-        assert camera is not None
-        worker._apply_camera_reset(camera)
+        view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+        worker._apply_camera_reset(view.camera)
 
 
-def _update_viewer_dims(worker, viewer, target: int) -> None:
-    viewer_dims = viewer.dims
+def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     layer = worker._napari_layer
-    layer_ndim = int(layer.ndim) if layer is not None else 0
+    layer_ndim = layer.ndim if layer is not None else 0
     data = layer.data if layer is not None else None
-    data_ndim = int(data.ndim) if data is not None else 0
-    current_ndim = int(viewer_dims.ndim)
+    data_ndim = data.ndim if data is not None else 0
+    current_ndim = viewer_dims.ndim
     ndim = max(layer_ndim, data_ndim, current_ndim, target)
     if current_ndim != ndim:
         viewer_dims.ndim = ndim
-    displayed_count = min(target, ndim)
-    displayed = tuple(range(max(0, ndim - displayed_count), ndim))
 
-    # Keep the displayed axes as the tail of the order tuple so napari marks
-    # them as active. This mirrors the old `displayed` setter without relying on it.
-    order = list(viewer_dims.order or ())
-    if len(order) != ndim or any(ax >= ndim for ax in order):
+    displayed_count = min(target, ndim)
+    displayed = tuple(range(ndim - displayed_count, ndim))
+
+    order = list(viewer_dims.order)
+    valid_order = len(order) == ndim and all(0 <= axis < ndim for axis in order)
+    if not valid_order:
         order = list(range(ndim))
     else:
-        order = [ax for ax in order if ax not in displayed]
+        order = [axis for axis in order if axis not in displayed]
         order.extend(displayed)
     viewer_dims.order = tuple(order)
-    steps = list(viewer_dims.current_step or ())
+
+    steps = list(viewer_dims.current_step)
     if len(steps) < ndim:
         steps.extend([0] * (ndim - len(steps)))
     elif len(steps) > ndim:
         steps = steps[:ndim]
-    if target == 3 and steps and worker._z_index is not None:
-        axis_labels = list(viewer_dims.axis_labels or [])
-        if "z" in axis_labels:
-            anchor_axis = axis_labels.index("z")
-        elif displayed:
-            anchor_axis = displayed[0]
-        else:
-            anchor_axis = 0
-        if anchor_axis < len(steps):
-            steps[anchor_axis] = int(worker._z_index)
 
-    shape = worker._volume_shape_for_view()
-    if shape is not None and target == 3:
-        axes = tuple(viewer_dims.axis_labels or [])
-        for axis_idx in range(min(len(steps), len(shape))):
-            size = int(max(1, shape[axis_idx]))
-            steps[axis_idx] = int(max(0, min(int(steps[axis_idx]), size - 1)))
-        if axes and shape:
-            axis_map = {label.lower(): idx for idx, label in enumerate(axes)}
-            for label_key, dim_size in zip(("z", "y", "x"), shape):
-                idx = axis_map.get(label_key)
-                if idx is not None and idx < len(steps):
-                    steps[idx] = int(max(0, min(int(steps[idx]), int(dim_size) - 1)))
+    if target == 3 and worker._z_index is not None:
+        anchor_axis = displayed[0] if displayed else 0
+        steps[anchor_axis] = int(worker._z_index)
+
     if target == 2:
-        restore = getattr(worker, "_plane_step_restore", None)
-        if restore:
-            restore_vals = [int(val) for val in restore]
-            for idx in range(min(len(steps), len(restore_vals))):
-                steps[idx] = restore_vals[idx]
-        try:
-            nsteps = list(viewer_dims.nsteps)
-        except Exception:
-            nsteps = []
+        restore_state = worker._plane_restore_state
+        if restore_state is not None:
+            restore_values = list(restore_state.step)
+            for idx in range(min(len(steps), len(restore_values))):
+                steps[idx] = restore_values[idx]
+        nsteps = list(viewer_dims.nsteps)
         for idx in range(min(len(steps), len(nsteps))):
             max_index = max(0, int(nsteps[idx]) - 1)
-            steps[idx] = int(max(0, min(int(steps[idx]), max_index)))
-        worker._plane_step_restore = tuple(int(s) for s in steps)
-        non_displayed = [ax for ax in range(ndim) if ax not in displayed]
-        if non_displayed:
-            anchor_axis = non_displayed[0]
-            if anchor_axis < len(steps):
-                worker._z_index = int(steps[anchor_axis])
-    updated_step = tuple(int(s) for s in steps)
+            steps[idx] = int(max(0, min(steps[idx], max_index)))
+        if ndim > displayed_count:
+            anchor_axis = ndim - displayed_count - 1
+            worker._z_index = int(steps[anchor_axis])
+
     viewer_dims.ndisplay = target
+    updated_step = tuple(int(value) for value in steps)
     viewer_dims.current_step = updated_step
     worker._last_step = updated_step
 
 
 def _coarsest_level_index(source) -> Optional[int]:
-    descriptors = getattr(source, "level_descriptors", None)
+    descriptors = source.level_descriptors
     if not descriptors:
         return None
-    last = descriptors[-1]
-    index_attr = getattr(last, "index", None)
-    if index_attr is not None:
-        return int(index_attr)
-    return int(len(descriptors) - 1)
+    return len(descriptors) - 1
 
 
 __all__ = ["apply_ndisplay_switch"]

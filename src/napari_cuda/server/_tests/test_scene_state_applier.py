@@ -89,7 +89,6 @@ def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
     camera = _StubCamera()
     source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
 
-    notify_calls: list[None] = []
     mark_calls: list[None] = []
     idr_requests: list[None] = []
 
@@ -111,7 +110,6 @@ def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
         ensure_scene_source=lambda: source,
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
-        notify_scene_refresh=lambda: notify_calls.append(None),
         mark_render_tick_needed=lambda: mark_calls.append(None),
         request_encoder_idr=lambda: idr_requests.append(None),
     )
@@ -127,7 +125,6 @@ def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
     assert layer.contrast_limits == [10.0, 13.0]
     assert visual.data is not None and np.all(visual.data == layer.data)
     assert camera.ranges == [((0.0, 1.0), (0.0, 1.0))]
-    assert len(notify_calls) == 1
     assert len(mark_calls) == 1
     assert len(idr_requests) == 1
     assert result.z_index == 1
@@ -160,7 +157,6 @@ def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> No
         ensure_scene_source=lambda: source,
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: None,
     )
 
@@ -196,7 +192,6 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
         ensure_scene_source=lambda: source,
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: mark_calls.append(None),
         request_encoder_idr=lambda: (_ for _ in ()).throw(RuntimeError("should not be called")),
     )
@@ -230,7 +225,6 @@ def test_apply_volume_params_sets_visual_fields() -> None:
         ensure_scene_source=lambda: None,
         plane_scale_for_level=lambda *_: (1.0, 1.0),
         load_slice=lambda *_: None,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: None,
         request_encoder_idr=None,
     )
@@ -274,7 +268,6 @@ def test_apply_layer_updates_sets_gamma_on_visual() -> None:
         ensure_scene_source=lambda: None,
         plane_scale_for_level=lambda *_: (1.0, 1.0),
         load_slice=lambda *_: None,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: None,
         request_encoder_idr=None,
     )
@@ -316,7 +309,6 @@ def test_apply_volume_layer_resets_translate() -> None:
         ensure_scene_source=lambda: source,
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: None,
     )
 
@@ -352,7 +344,6 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
         ensure_scene_source=lambda: source,
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: marks.append(None),
         request_encoder_idr=None,
     )
@@ -394,7 +385,6 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
         ensure_scene_source=lambda: source,
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
-        notify_scene_refresh=lambda: None,
         mark_render_tick_needed=lambda: None,
         request_encoder_idr=None,
     )
