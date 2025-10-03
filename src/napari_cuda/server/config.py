@@ -268,9 +268,9 @@ class EncoderRuntime:
     """
 
     input_format: str = "NV12"
-    rc_mode: str = "cbr"
+    rc_mode: str = "vbr"
     preset: str = "P3"
-    max_bitrate: Optional[int] = 20_000_000
+    max_bitrate: Optional[int] = 30_000_000
     lookahead: int = 0
     aq: int = 0
     temporalaq: int = 0
@@ -458,20 +458,27 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     runtime_cfg_in = encoder_cfg.get("runtime") if isinstance(encoder_cfg, dict) else {}
     runtime_cfg = dict(runtime_cfg_in) if isinstance(runtime_cfg_in, dict) else {}
     input_fmt = _cfg_str(runtime_cfg.get("input_format"), "NV12").upper()
-    rc_mode = _cfg_str(runtime_cfg.get("rc_mode"), "cbr").lower()
+    rc_mode = _cfg_str(runtime_cfg.get("rc_mode"), "vbr").lower()
     runtime_preset = _cfg_str(runtime_cfg.get("preset"), "P3")
-    max_bitrate_val = _cfg_optional_int(runtime_cfg.get("max_bitrate"), None)
+    max_bitrate_val = _cfg_optional_int(runtime_cfg.get("max_bitrate"), 30_000_000)
     lookahead = max(0, _cfg_int(runtime_cfg.get("lookahead"), 0))
     aq = max(0, _cfg_int(runtime_cfg.get("aq"), 0))
     temporalaq = max(0, _cfg_int(runtime_cfg.get("temporalaq"), 0))
     nonrefp = _cfg_bool(runtime_cfg.get("non_ref_p"), False)
     bframes = max(0, _cfg_int(runtime_cfg.get("bframes"), 0))
     idr_period = max(1, _cfg_int(runtime_cfg.get("idr_period"), 600))
+    if max_bitrate_val is None:
+        resolved_max_bitrate: Optional[int] = 30_000_000
+    elif max_bitrate_val > 0:
+        resolved_max_bitrate = max_bitrate_val
+    else:
+        resolved_max_bitrate = None
+
     encoder_runtime = EncoderRuntime(
         input_format=input_fmt or "NV12",
-        rc_mode=rc_mode or "cbr",
+        rc_mode=rc_mode or "vbr",
         preset=runtime_preset or "P3",
-        max_bitrate=max_bitrate_val if (max_bitrate_val or 0) > 0 else None,
+        max_bitrate=resolved_max_bitrate,
         lookahead=lookahead,
         aq=aq,
         temporalaq=temporalaq,
