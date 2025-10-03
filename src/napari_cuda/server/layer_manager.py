@@ -274,7 +274,9 @@ class ViewerSceneManager:
     ) -> Dict[str, Any]:
         if viewer_model is not None:
             dims = viewer_model.dims
-            axis_labels = list(dims.axis_labels)
+            shape = [int(x) for x in (layer_block.get("shape") or [])]
+            ndim_val = int(dims.ndim) if dims.ndim else len(shape)
+            axis_labels = normalize_axis_labels(dims.axis_labels, max(len(shape), ndim_val))
             order = list(dims.order)
             displayed = list(dims.displayed)
             current = list(dims.current_step)
@@ -588,7 +590,7 @@ class ViewerSceneManager:
         else:
             arr = np.asarray(raw_data)
         shape = list(arr.shape)
-        axis_labels = list(layer.axis_labels) if layer.axis_labels else ["y", "x"]
+        axis_labels = normalize_axis_labels(layer.axis_labels, len(shape))
         dtype = str(arr.dtype)
         ndim = len(shape)
         is_volume = bool(ndisplay == 3 or ndim == 3)

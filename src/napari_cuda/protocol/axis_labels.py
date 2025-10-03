@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, List, Optional
 
 
@@ -32,10 +33,21 @@ def normalize_axis_labels(labels: Optional[Iterable[Any]], ndim: int) -> List[st
     if ndim <= 0:
         return []
 
-    if len(cleaned) == ndim:
-        return cleaned
-    if len(cleaned) > ndim:
-        return cleaned[:ndim]
+    if cleaned:
+        placeholder = True
+        for text in cleaned[:ndim]:
+            lowered = text.lower()
+            if lowered.isdigit() or (lowered.startswith("-") and lowered[1:].isdigit()):
+                continue
+            if re.match(r"^axis[\s_-]*[-+]?\d+$", lowered):
+                continue
+            placeholder = False
+            break
+        if not placeholder:
+            if len(cleaned) == ndim:
+                return cleaned
+            if len(cleaned) > ndim:
+                return cleaned[:ndim]
 
     defaults = default_axis_labels(ndim)
     if len(defaults) >= ndim:

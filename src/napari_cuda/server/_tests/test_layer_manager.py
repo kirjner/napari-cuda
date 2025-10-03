@@ -185,6 +185,7 @@ def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
     layer_block = snapshot.layers[0].block
     assert layer_block["shape"] == [32, 48]
     assert layer_block["extras"]["adapter_engine"] == "napari-vispy"
+    assert layer_block["axis_labels"] == ["y", "x"]
     metadata = layer_block.get("metadata", {})
     thumb = metadata.get("thumbnail") if isinstance(metadata, dict) else None
     assert thumb is not None
@@ -221,6 +222,7 @@ def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
     assert snapshot is not None
     dims_block = snapshot.viewer.dims
     assert dims_block["ndisplay"] == 3
+    assert dims_block["axis_labels"] == ["z", "y", "x"]
     extras = snapshot.layers[0].block["extras"]
     assert bool(extras.get("is_volume")) is True
     assert len(dims_block["displayed"]) == 3
