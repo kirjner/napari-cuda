@@ -157,7 +157,7 @@ class StreamingCanvas(VispyCanvas):
             pyav_latency_s=self._pyav_latency_s,
             vt_buffer_limit=self._vt_buffer_limit,
             stream_format='avcc',
-            vt_backlog_trigger=env_int('NAPARI_CUDA_CLIENT_VT_BACKLOG_TRIGGER', 16),
+            vt_backlog_trigger=env_int('NAPARI_CUDA_CLIENT_VT_BACKLOG_TRIGGER', 32),
             pyav_backlog_trigger=env_int('NAPARI_CUDA_CLIENT_PYAV_BACKLOG_TRIGGER', 16),
             client_cfg=self._client_cfg,
             on_first_dims_ready=self._on_first_dims_ready,

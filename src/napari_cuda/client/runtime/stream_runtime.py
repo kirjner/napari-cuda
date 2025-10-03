@@ -152,7 +152,7 @@ class ClientStreamLoop:
         vt_buffer_limit: int,
         pyav_latency_s: Optional[float] = None,
         stream_format: str = 'avcc',
-        vt_backlog_trigger: int = 16,
+        vt_backlog_trigger: int = 32,
         pyav_backlog_trigger: int = 16,
         client_cfg: 'ClientConfig | None' = None,
         *,
