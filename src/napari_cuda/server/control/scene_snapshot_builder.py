@@ -29,21 +29,18 @@ def build_notify_scene_payload(
 ) -> NotifyScenePayload:
     """Build a ``notify.scene`` payload aligned with the greenfield schema."""
 
-    spec = manager.scene_spec()
-    assert spec is not None, "viewer scene manager not initialised"
-    scene_dict = spec.to_dict()
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None, "viewer scene manager not initialised"
 
-    viewer_block = _build_viewer_block(scene_dict, viewer_settings)
-    layers_block = tuple(layer.to_dict() for layer in spec.layers)
-    policies_block = _build_policies_block(scene)
-    ancillary_block = _build_ancillary_block(scene_dict, scene, ancillary)
+    payload = snapshot.to_notify_scene_payload()
 
-    payload = NotifyScenePayload(
-        viewer=viewer_block,
-        layers=layers_block,
-        policies=policies_block,
-        ancillary=ancillary_block,
-    )
+    if viewer_settings:
+        settings = payload.viewer.setdefault("settings", {})
+        settings.update({str(key): _normalize_value(value) for key, value in viewer_settings.items()})
+
+    payload.policies = _build_policies_block(scene)
+    payload.ancillary = _merge_ancillary(snapshot.ancillary, scene, ancillary)
+
     scene.last_scene_spec = payload.to_dict()
     return payload
 
@@ -55,20 +52,8 @@ def build_notify_scene_level_payload(
     """Build a ``notify.scene.level`` payload representing active LOD metadata."""
 
     multiscale = scene.multiscale_state or {}
-    current_level = multiscale.get("current_level")
-    if current_level is None:
-        current_level = multiscale.get("level")
-    if current_level is None:
-        try:
-            spec = manager.scene_spec()
-            if spec is not None and getattr(spec, "multiscale", None) is not None:
-                current_level = getattr(spec.multiscale, "current_level", None)
-        except Exception:
-            current_level = None
-    try:
-        level_int = int(current_level) if current_level is not None else 0
-    except Exception:
-        level_int = 0
+    current_level_raw = multiscale.get("current_level", multiscale.get("level", 0))
+    current_level = int(current_level_raw)
 
     downgraded_val = multiscale.get("downgraded")
     downgraded = None if downgraded_val is None else bool(downgraded_val)
@@ -81,7 +66,7 @@ def build_notify_scene_level_payload(
                 levels.append({str(k): _normalize_value(v) for k, v in entry.items()})
 
     return NotifySceneLevelPayload(
-        current_level=level_int,
+        current_level=current_level,
         downgraded=downgraded,
         levels=tuple(levels) if levels else None,
     )
@@ -156,30 +141,6 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
-def _build_viewer_block(
-    scene_dict: Mapping[str, Any],
-    viewer_settings: Optional[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    viewer: Dict[str, Any] = {}
-
-    dims_block = scene_dict.get("dims")
-    viewer["dims"] = dict(dims_block) if isinstance(dims_block, Mapping) else {}
-
-    camera_block = scene_dict.get("camera")
-    viewer["camera"] = dict(camera_block) if isinstance(camera_block, Mapping) else {}
-
-    settings: Dict[str, Any] = {}
-    if isinstance(viewer_settings, Mapping):
-        for key, value in viewer_settings.items():
-            normalized = _normalize_value(value)
-            if normalized is not None:
-                settings[str(key)] = normalized
-    if not settings:
-        settings = {}
-    viewer["settings"] = settings
-    return viewer
-
-
 def _build_policies_block(scene: ServerSceneData) -> Optional[Dict[str, Any]]:
     policies: Dict[str, Any] = {}
     multiscale = scene.multiscale_state or {}
@@ -214,25 +175,16 @@ def _build_policies_block(scene: ServerSceneData) -> Optional[Dict[str, Any]]:
     return policies or None
 
 
-def _build_ancillary_block(
-    scene_dict: Mapping[str, Any],
+def _merge_ancillary(
+    snapshot_ancillary: Mapping[str, Any],
     scene: ServerSceneData,
     ancillary: Optional[Mapping[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    payload: Dict[str, Any] = {}
-
-    metadata = scene_dict.get("metadata")
-    if isinstance(metadata, Mapping) and metadata:
-        payload["metadata"] = {str(k): _normalize_value(v) for k, v in metadata.items() if v is not None}
-
-    capabilities = scene_dict.get("capabilities")
-    if isinstance(capabilities, Sequence):
-        caps = [str(item) for item in capabilities if item is not None]
-        if caps:
-            payload["capabilities"] = caps
+    payload: Dict[str, Any] = dict(snapshot_ancillary)
 
     if scene.volume_state:
-        payload["volume_state"] = {str(k): _normalize_value(v) for k, v in scene.volume_state.items() if v is not None}
+        payload.setdefault("volume_state", {})
+        payload["volume_state"].update({str(k): _normalize_value(v) for k, v in scene.volume_state.items()})
 
     if scene.policy_metrics_snapshot:
         payload["policy_metrics"] = {
@@ -241,7 +193,7 @@ def _build_ancillary_block(
             if v is not None
         }
 
-    if isinstance(ancillary, Mapping):
+    if ancillary:
         for key, value in ancillary.items():
             payload[str(key)] = _normalize_value(value)
 

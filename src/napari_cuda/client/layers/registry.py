@@ -5,16 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass, fields, replace
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from napari_cuda.protocol.messages import (
-    LayerRemoveMessage,
-    LayerSpec,
-    LayerUpdateMessage,
-    LayerRenderHints,
-    NotifyScenePayload,
-)
+from napari_cuda.protocol.messages import LayerSpec
+from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
 
 from .remote_image_layer import RemoteImageLayer
 
@@ -64,59 +59,6 @@ class RegistrySnapshot:
         return tuple(record.layer_id for record in self.layers)
 
 
-def _has_value(value) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, (list, tuple, dict)):
-        return len(value) > 0
-    return True
-
-
-def _merge_hints(base: LayerRenderHints | None, update: LayerRenderHints | None) -> LayerRenderHints | None:
-    if update is None:
-        return base
-    if base is None:
-        return update
-    overrides = {}
-    for field in fields(LayerRenderHints):
-        value = getattr(update, field.name)
-        if value is not None:
-            overrides[field.name] = value
-    return replace(base, **overrides)
-
-
-def _merge_specs(base: LayerSpec | None, update: LayerSpec, partial: bool) -> LayerSpec:
-    if not partial or base is None:
-        return update
-    overrides = {}
-    for field in fields(LayerSpec):
-        name = field.name
-        value = getattr(update, name)
-        if name == "render":
-            merged = _merge_hints(getattr(base, name), value)
-            if merged is not None:
-                overrides[name] = merged
-            continue
-        if name == "metadata" and isinstance(value, dict):
-            merged_meta = dict(getattr(base, name) or {})
-            merged_meta.update(value)
-            overrides[name] = merged_meta
-            continue
-        if name == "extras" and isinstance(value, dict):
-            merged_extras = dict(getattr(base, name) or {})
-            merged_extras.update(value)
-            overrides[name] = merged_extras
-            continue
-        if name == "controls" and isinstance(value, dict):
-            merged_controls = dict(getattr(base, name) or {})
-            merged_controls.update(value)
-            overrides[name] = merged_controls
-            continue
-        if _has_value(value):
-            overrides[name] = value
-    return replace(base, **overrides)
-
-
 class RemoteLayerRegistry:
     """Thread-safe registry of remote layers."""
 
@@ -126,6 +68,7 @@ class RemoteLayerRegistry:
         self._specs: Dict[str, LayerSpec] = {}
         self._order: List[str] = []
         self._listeners: List[LayerListener] = []
+        self._blocks: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     def add_listener(self, callback: LayerListener) -> None:
@@ -139,105 +82,126 @@ class RemoteLayerRegistry:
                 self._listeners.remove(callback)
 
     # ------------------------------------------------------------------
-    def apply_scene(self, payload: NotifyScenePayload) -> None:
-        snapshot: Optional[RegistrySnapshot] = None
+    def apply_snapshot(self, snapshot: SceneSnapshot) -> None:
+        emitted: Optional[RegistrySnapshot] = None
         with self._lock:
             desired_order: List[str] = []
             changed = False
-            for layer_dict in payload.layers:
-                spec = LayerSpec.from_dict(layer_dict)
-                layer_id = spec.layer_id
+            for entry in snapshot.layers:
+                layer_id = entry.layer_id
                 desired_order.append(layer_id)
-                self._specs[layer_id] = spec
-                existing = self._layers.get(layer_id)
-                if _LAYER_DEBUG:
-                    logger.debug(
-                        "scene layer spec: id=%s type=%s controls=%s extras=%s",
-                        spec.layer_id,
-                        getattr(spec, "layer_type", None),
-                        getattr(spec, "controls", None),
-                        getattr(spec, "extras", None),
-                    )
-                if existing is None:
+                block = dict(entry.block)
+                self._blocks[layer_id] = block
+                spec = LayerSpec.from_dict(block)
+                layer = self._layers.get(layer_id)
+                if layer is None:
                     layer = self._create_layer(spec)
                     if layer is None:
-                        if _LAYER_DEBUG:
-                            logger.debug("skipping unsupported layer type: id=%s type=%s", spec.layer_id, spec.layer_type)
+                        self._blocks.pop(layer_id, None)
                         continue
                     self._layers[layer_id] = layer
                     changed = True
                     if _LAYER_DEBUG:
-                        logger.debug("created remote layer from scene: id=%s name=%s", spec.layer_id, spec.name)
+                        logger.debug("created remote layer from snapshot: id=%s name=%s", layer_id, spec.name)
                 else:
-                    existing.update_from_spec(spec)
+                    layer.update_from_spec(spec)
+                    changed = True
                     if _LAYER_DEBUG:
-                        logger.debug("updated existing layer from scene: id=%s", spec.layer_id)
-            # Remove layers no longer present
+                        logger.debug("updated remote layer from snapshot: id=%s", layer_id)
+                self._specs[layer_id] = spec
+
             current_ids = set(self._layers.keys())
-            desired_ids = set(desired_order)
+            desired_ids = {layer_id for layer_id in desired_order if layer_id in self._layers}
             for removed_id in current_ids - desired_ids:
                 self._layers.pop(removed_id, None)
                 self._specs.pop(removed_id, None)
+                self._blocks.pop(removed_id, None)
                 changed = True
                 if _LAYER_DEBUG:
-                    logger.debug("removed layer missing from scene: id=%s", removed_id)
-            if desired_order != self._order:
-                self._order = [layer_id for layer_id in desired_order if layer_id in self._layers]
-                changed = True
-            if changed:
-                snapshot = self._snapshot_locked()
-                if _LAYER_DEBUG and snapshot is not None:
-                    logger.debug("scene snapshot applied: ids=%s", snapshot.ids())
-        if snapshot is not None:
-            self._emit(snapshot)
+                    logger.debug("removed layer missing from snapshot: id=%s", removed_id)
 
-    def apply_update(self, message: LayerUpdateMessage) -> None:
-        spec = message.layer
-        if spec is None:
-            return
-        snapshot: Optional[RegistrySnapshot] = None
-        with self._lock:
-            base = self._specs.get(spec.layer_id)
-            merged = _merge_specs(base, spec, message.partial)
-            self._specs[merged.layer_id] = merged
-            layer = self._layers.get(merged.layer_id)
-            changed = False
-            if layer is None:
-                layer = self._create_layer(merged)
-                if layer is None:
-                    if _LAYER_DEBUG:
-                        logger.debug("layer.update ignored (unsupported type): id=%s type=%s", merged.layer_id, merged.layer_type)
-                    return
-                self._layers[merged.layer_id] = layer
-                if merged.layer_id not in self._order:
-                    self._order.append(merged.layer_id)
-                changed = True
-                if _LAYER_DEBUG:
-                    logger.debug("layer.update created new layer: id=%s", merged.layer_id)
+            if desired_order:
+                ordered_ids = [layer_id for layer_id in desired_order if layer_id in self._layers]
             else:
-                layer.update_from_spec(merged)
+                ordered_ids = []
+            if ordered_ids != self._order:
+                self._order = ordered_ids
                 changed = True
-                if _LAYER_DEBUG:
-                    logger.debug("layer.update applied to existing layer: id=%s partial=%s", merged.layer_id, message.partial)
-            if changed:
-                snapshot = self._snapshot_locked()
-        if snapshot is not None:
-            self._emit(snapshot)
 
-    def remove_layer(self, message: LayerRemoveMessage) -> None:
-        snapshot: Optional[RegistrySnapshot] = None
+            if changed:
+                emitted = self._snapshot_locked()
+                if _LAYER_DEBUG and emitted is not None:
+                    logger.debug("registry snapshot refreshed: ids=%s", emitted.ids())
+
+        if emitted is not None:
+            self._emit(emitted)
+
+    def apply_delta(self, delta: LayerDelta) -> None:
+        emitted: Optional[RegistrySnapshot] = None
         with self._lock:
-            removed = self._layers.pop(message.layer_id, None)
-            if removed is None:
+            layer_id = delta.layer_id
+            changes = dict(delta.changes)
+            if not changes:
                 return
-            self._specs.pop(message.layer_id, None)
-            if message.layer_id in self._order:
-                self._order.remove(message.layer_id)
-            if _LAYER_DEBUG:
-                logger.debug("layer.remove applied: id=%s reason=%s", message.layer_id, message.reason)
-            snapshot = self._snapshot_locked()
-        if snapshot is not None:
-            self._emit(snapshot)
+
+            if changes.get("removed"):
+                had_spec = layer_id in self._specs
+                had_block = layer_id in self._blocks
+                had_order = layer_id in self._order
+                removed = self._layers.pop(layer_id, None)
+                self._specs.pop(layer_id, None)
+                self._blocks.pop(layer_id, None)
+                if had_order:
+                    self._order.remove(layer_id)
+                if removed is None and not (had_spec or had_block or had_order):
+                    if _LAYER_DEBUG:
+                        logger.debug("layer removal ignored (no cached layer): id=%s", layer_id)
+                    return
+                emitted = self._snapshot_locked()
+                if _LAYER_DEBUG and removed is not None:
+                    logger.debug("layer removed via delta: id=%s", layer_id)
+            else:
+                block = self._blocks.get(layer_id)
+                if block is None:
+                    if _LAYER_DEBUG:
+                        logger.debug("layer delta ignored (no baseline): id=%s", layer_id)
+                    return
+                controls = block.get("controls")
+                if not isinstance(controls, dict):
+                    controls = {}
+                    block["controls"] = controls
+                updated = False
+                for key, value in changes.items():
+                    if key == "removed":
+                        continue
+                    controls[key] = value
+                    if key == "contrast_limits":
+                        if isinstance(value, Sequence):
+                            block["contrast_limits"] = [float(v) for v in value]
+                        else:
+                            block["contrast_limits"] = value
+                    updated = True
+                if not updated:
+                    return
+
+                spec = LayerSpec.from_dict(dict(block))
+                self._specs[layer_id] = spec
+                layer = self._layers.get(layer_id)
+                if layer is None:
+                    layer = self._create_layer(spec)
+                    if layer is None:
+                        return
+                    self._layers[layer_id] = layer
+                    if layer_id not in self._order:
+                        self._order.append(layer_id)
+                else:
+                    layer.update_from_spec(spec)
+                emitted = self._snapshot_locked()
+                if _LAYER_DEBUG:
+                    logger.debug("layer delta applied: id=%s keys=%s", layer_id, tuple(changes.keys()))
+
+        if emitted is not None:
+            self._emit(emitted)
 
     def snapshot(self) -> RegistrySnapshot:
         with self._lock:

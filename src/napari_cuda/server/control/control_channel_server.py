@@ -87,6 +87,7 @@ from napari_cuda.server.control.scene_snapshot_builder import (
     build_notify_scene_level_payload,
     build_notify_scene_payload,
 )
+from napari_cuda.protocol.snapshots import LayerDelta
 from napari_cuda.server.pixel import pixel_channel_server as pixel_channel
 from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
@@ -440,22 +441,10 @@ def _viewer_settings(server: Any) -> Dict[str, Any]:
 
 
 def _default_layer_id(server: Any) -> Optional[str]:
-    try:
-        spec = server._scene_manager.scene_spec()
-        if spec is None or not spec.layers:
-            return None
-        first = spec.layers[0]
-        layer_id = getattr(first, "layer_id", None)
-        if layer_id:
-            return str(layer_id)
-        layer_dict = first.to_dict() if hasattr(first, "to_dict") else None  # type: ignore[attr-defined]
-        if isinstance(layer_dict, Mapping):
-            candidate = layer_dict.get("layer_id")
-            if candidate:
-                return str(candidate)
-    except Exception:
-        logger.debug("default layer id resolution failed", exc_info=True)
-    return None
+    snapshot = server._scene_manager.scene_snapshot()
+    if snapshot is None or not snapshot.layers:
+        return None
+    return snapshot.layers[0].layer_id
 
 
 def _layer_changes_from_result(server: Any, result: StateUpdateResult) -> tuple[str | None, Dict[str, Any]]:
@@ -496,7 +485,8 @@ async def _broadcast_layers_delta(
     if not changes:
         return
 
-    payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", changes=changes)
+    delta = LayerDelta(layer_id=layer_id or "layer-0", changes=dict(changes))
+    payload = delta.to_payload()
     clients = list(targets) if targets is not None else list(server._state_clients)
     now = time.time() if timestamp is None else float(timestamp)
 
@@ -2810,20 +2800,11 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             current_step = server._scene.latest_state.current_step
 
         step_list = list(current_step) if current_step is not None else []
-        spec = server._scene_manager.scene_spec()
-        ndim = 0
-        if spec is not None and spec.dims is not None:
-            try:
-                ndim = int(spec.dims.ndim or 0)
-            except Exception:
-                ndim = 0
-            if ndim <= 0:
-                try:
-                    ndim = len(spec.dims.sizes or [])
-                except Exception:
-                    ndim = 0
-        if ndim <= 0:
-            ndim = len(step_list) if step_list else 3
+
+        snapshot = server._scene_manager.scene_snapshot()
+        assert snapshot is not None, "scene snapshot unavailable"
+        dims_block = snapshot.viewer.dims
+        ndim = int(dims_block.get("ndim", 0) or len(dims_block.get("sizes", [])) or 3)
         while len(step_list) < ndim:
             step_list.append(0)
 
@@ -2833,23 +2814,19 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             viewer_settings=_viewer_settings(server),
         )
 
-        if spec is not None and spec.layers:
-            scene_data = server._scene
-            latest_updates = scene_data.latest_state.layer_updates or {}
-            for layer in spec.layers:
-                layer_id = layer.layer_id
-                if not layer_id:
-                    continue
-                controls: Dict[str, Any] = {}
-                control_state = scene_data.layer_controls.get(layer_id)
-                if control_state is not None:
-                    controls.update(layer_controls_to_dict(control_state))
-                pending = latest_updates.get(layer_id, {})
-                if pending:
-                    for key, value in pending.items():
-                        controls[str(key)] = value
-                if controls:
-                    fallback_controls.append((layer_id, controls))
+        scene_data = server._scene
+        latest_updates = scene_data.latest_state.layer_updates or {}
+        for layer_snapshot in snapshot.layers:
+            layer_id = layer_snapshot.layer_id
+            controls: Dict[str, Any] = {}
+            control_state = scene_data.layer_controls.get(layer_id)
+            if control_state is not None:
+                controls.update(layer_controls_to_dict(control_state))
+            pending = latest_updates.get(layer_id, {})
+            for key, value in pending.items():
+                controls[str(key)] = value
+            if controls:
+                fallback_controls.append((layer_id, controls))
     except Exception:
         logger.debug("Initial scene baseline prep failed", exc_info=True)
 
@@ -3001,13 +2978,13 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
 
     scene = server._scene
     manager = server._scene_manager
-    spec = manager.scene_spec()
-    if spec is None or not spec.layers:
+    snapshot = manager.scene_snapshot()
+    if snapshot is None or not snapshot.layers:
         return
 
     latest_updates = scene.latest_state.layer_updates or {}
 
-    for layer in spec.layers:
+    for layer in snapshot.layers:
         layer_id = layer.layer_id
         if not layer_id:
             continue

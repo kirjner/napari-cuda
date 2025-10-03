@@ -158,10 +158,8 @@ def test_viewer_scene_manager_prefers_control_state(scene: ServerSceneData) -> N
         layer_controls=scene.layer_controls,
     )
 
-    spec = manager.scene_spec()
-    assert spec is not None
-    layer = spec.layers[0]
-    assert layer.extras is not None
-    assert "opacity" not in layer.extras
-    assert layer.controls is not None
-    assert layer.controls.get("opacity") == 0.42
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    layer_block = snapshot.layers[0].block
+    assert "opacity" not in layer_block["extras"]
+    assert layer_block["controls"]["opacity"] == 0.42

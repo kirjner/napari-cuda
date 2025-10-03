@@ -10,20 +10,15 @@ try:
     from napari_cuda.client.layers.remote_data import RemoteArray
     from napari_cuda.client.layers.registry import RemoteLayerRegistry
     from napari_cuda.client.layers.remote_image_layer import RemoteImageLayer
-    from napari_cuda.protocol.messages import (
-        LayerRenderHints,
-        LayerRemoveMessage,
-        LayerSpec,
-        LayerUpdateMessage,
-        NotifyScenePayload,
-    )
+    from napari_cuda.protocol.messages import LayerRenderHints, LayerSpec
+    from napari_cuda.protocol.snapshots import LayerDelta, LayerSnapshot, SceneSnapshot, ViewerSnapshot
     NAPARI_AVAILABLE = True
 except Exception as exc:  # pragma: no cover - environment dependent import guard
     NAPARI_AVAILABLE = False
     NAPARI_IMPORT_ERROR = str(exc)
     pytestmark = pytest.mark.skip(reason=f"napari unavailable: {NAPARI_IMPORT_ERROR}")
     LayerRecord = RegistrySnapshot = RemoteArray = RemoteLayerRegistry = RemoteImageLayer = RemotePreview = object  # type: ignore[assignment]
-    LayerRenderHints = LayerRemoveMessage = LayerSpec = LayerUpdateMessage = NotifyScenePayload = object  # type: ignore[assignment]
+    LayerRenderHints = LayerDelta = LayerSnapshot = SceneSnapshot = ViewerSnapshot = LayerSpec = object  # type: ignore[assignment]
 
 
 def make_layer_spec(**overrides) -> LayerSpec:
@@ -126,27 +121,38 @@ def test_remote_layer_registry_lifecycle():
     snapshots = []
     registry.add_listener(snapshots.append)
     spec = make_layer_spec()
-    payload = NotifyScenePayload(viewer={"dims": {}, "camera": {}, "settings": {}}, layers=(spec.to_dict(),))
-    registry.apply_scene(payload)
+    snapshot = SceneSnapshot(
+        viewer=ViewerSnapshot(settings={}, dims={}, camera={}),
+        layers=(LayerSnapshot(layer_id=spec.layer_id, block=spec.to_dict()),),
+        policies={},
+        ancillary={},
+    )
+    registry.apply_snapshot(snapshot)
     assert snapshots
     first = snapshots[-1]
     assert first.ids() == (spec.layer_id,)
     record = first.layers[0]
     assert record.layer.remote_id == spec.layer_id
-    update_spec = make_layer_spec(render=LayerRenderHints(opacity=0.25))
-    registry.apply_update(LayerUpdateMessage(layer=update_spec, partial=True))
+    registry.apply_delta(LayerDelta(layer_id=spec.layer_id, changes={"opacity": 0.25}))
     updated_record = registry.snapshot().layers[0]
     assert updated_record.layer.opacity == pytest.approx(0.25)
     preview = np.ones((4, 4, 1), dtype=np.float32)
-    new_spec = make_layer_spec(metadata={"source": "test", "added": True, "thumbnail": preview.tolist()})
-    registry.apply_update(LayerUpdateMessage(layer=new_spec, partial=True))
+    updated_block = spec.to_dict()
+    updated_block["metadata"] = {"source": "test", "added": True, "thumbnail": preview.tolist()}
+    refreshed = SceneSnapshot(
+        viewer=snapshot.viewer,
+        layers=(LayerSnapshot(layer_id=spec.layer_id, block=updated_block),),
+        policies={},
+        ancillary={},
+    )
+    registry.apply_snapshot(refreshed)
     latest = registry.snapshot().layers[0]
     assert latest.layer.metadata["added"] is True
     assert latest.layer.metadata["source"] == "test"
     assert "thumbnail" not in latest.layer.metadata
     assert latest.layer._remote_preview.data is not None
     np.testing.assert_allclose(latest.layer._remote_preview.data, preview.astype(np.float32))
-    registry.remove_layer(LayerRemoveMessage(layer_id=spec.layer_id))
+    registry.apply_delta(LayerDelta.removal(spec.layer_id))
     assert not registry.snapshot().layers
 
 

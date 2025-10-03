@@ -240,7 +240,7 @@ class PresenterFacade:
     def current_viewer(self) -> Optional[object]:
         return self._viewer_ref() if self._viewer_ref is not None else None
 
-    def apply_layer_update(self, message: Any) -> None:
+    def apply_layer_delta(self, message: Any) -> None:
         if self._intent_dispatcher is None:
             return
         try:

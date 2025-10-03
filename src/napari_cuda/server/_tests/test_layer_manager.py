@@ -98,12 +98,14 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
     assert meta["multiscale"]["current_level"] == 0
     assert meta["multiscale"]["policy"] == "latency"
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    assert scene.layers[0].extras["zarr_path"] == "/data/sample.zarr"
-    assert scene.dims.ndisplay == 3
-    assert scene.camera is not None
-    assert scene.camera.ndisplay == 3
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    layer_block = snapshot.layers[0].block
+    assert layer_block["extras"]["zarr_path"] == "/data/sample.zarr"
+    dims_block = snapshot.viewer.dims
+    assert dims_block["ndisplay"] == 3
+    camera_block = snapshot.viewer.camera
+    assert camera_block["ndisplay"] == 3
 
 
 def test_update_2d_scene(manager: ViewerSceneManager) -> None:
@@ -131,10 +133,11 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
     assert meta.get("controls") is not None
     assert meta.get("volume") is False
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    assert scene.dims.current_step == [5, 6]
-    assert scene.capabilities == [
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    dims_block = snapshot.viewer.dims
+    assert dims_block["current_step"] == [5, 6]
+    assert snapshot.ancillary["capabilities"] == [
         "layer.remove",
         "state.update",
     ]
@@ -156,9 +159,9 @@ def test_empty_multiscale_levels(manager: ViewerSceneManager) -> None:
     meta = manager.dims_metadata()
     assert meta.get("multiscale") is None
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    assert scene.layers[0].multiscale is None
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    assert snapshot.layers[0].block.get("multiscale") is None
 
 
 def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
@@ -177,20 +180,19 @@ def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
         extras=None,
     )
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    layer = scene.layers[0]
-    assert layer.shape == [32, 48]
-    assert layer.extras is not None
-    assert layer.extras["adapter_engine"] == "napari-vispy"
-    assert layer.metadata is not None
-    thumb = layer.metadata.get("thumbnail") if isinstance(layer.metadata, dict) else None
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    layer_block = snapshot.layers[0].block
+    assert layer_block["shape"] == [32, 48]
+    assert layer_block["extras"]["adapter_engine"] == "napari-vispy"
+    metadata = layer_block.get("metadata", {})
+    thumb = metadata.get("thumbnail") if isinstance(metadata, dict) else None
     assert thumb is not None
     thumb_arr = np.asarray(thumb)
     assert thumb_arr.ndim == 3
     assert thumb_arr.shape[-1] in (1, 3, 4)
-    assert scene.metadata is not None
-    assert scene.metadata["adapter_engine"] == "napari-vispy"
+    ancillary = snapshot.ancillary.get("metadata", {})
+    assert ancillary["adapter_engine"] == "napari-vispy"
 
 
 def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
@@ -215,13 +217,13 @@ def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
         extras=None,
     )
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    assert scene.dims.ndisplay == 3
-    assert scene.layers[0].extras is not None
-    assert bool(scene.layers[0].extras.get("is_volume")) is True
-    assert scene.dims.displayed is not None
-    assert len(scene.dims.displayed) == 3
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    dims_block = snapshot.viewer.dims
+    assert dims_block["ndisplay"] == 3
+    extras = snapshot.layers[0].block["extras"]
+    assert bool(extras.get("is_volume")) is True
+    assert len(dims_block["displayed"]) == 3
 
 
 def test_manager_uses_adapter_multiscale_state(manager: ViewerSceneManager) -> None:
@@ -245,17 +247,17 @@ def test_manager_uses_adapter_multiscale_state(manager: ViewerSceneManager) -> N
         extras=None,
     )
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    assert scene.metadata is not None
-    assert scene.metadata["zarr_path"] == "/tmp/test.zarr"
-    layer_spec = scene.layers[0]
-    assert layer_spec.multiscale is not None
-    assert layer_spec.multiscale.current_level == 1
-    assert len(layer_spec.multiscale.levels) == 2
-    assert layer_spec.multiscale.levels[1].downsample == [2.0, 2.0]
-    assert layer_spec.extras is not None
-    assert layer_spec.extras["scale"] == [0.5, 0.25]
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    ancillary = snapshot.ancillary.get("metadata", {})
+    assert ancillary["zarr_path"] == "/tmp/test.zarr"
+    layer_block = snapshot.layers[0].block
+    ms_block = layer_block.get("multiscale")
+    assert ms_block is not None
+    assert ms_block["current_level"] == 1
+    assert len(ms_block["levels"]) == 2
+    assert ms_block["levels"][1]["downsample"] == [2.0, 2.0]
+    assert layer_block["extras"]["scale"] == [0.5, 0.25]
 
 
 def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> None:
@@ -301,15 +303,15 @@ def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> N
         extras=extras,
     )
 
-    scene = manager.scene_spec()
-    assert scene is not None
-    layer = scene.layers[0]
-    assert layer.multiscale is not None
-    assert layer.multiscale.current_level == 1
-    assert layer.multiscale.levels[1].path == "level_1"
-    assert layer.multiscale.levels[1].downsample == [2.0, 2.0]
-    assert layer.extras is not None
-    assert layer.extras["multiscale_levels"][0]["path"] == "level_0"
-    assert scene.metadata is not None
-    assert scene.metadata["zarr_scale"] == [0.25, 0.5]
-    assert scene.metadata["adapter_engine"] == "napari-vispy"
+    snapshot = manager.scene_snapshot()
+    assert snapshot is not None
+    layer_block = snapshot.layers[0].block
+    ms_block = layer_block["multiscale"]
+    assert ms_block["current_level"] == 1
+    assert ms_block["levels"][1]["path"] == "level_1"
+    assert ms_block["levels"][1]["downsample"] == [2.0, 2.0]
+    extras_block = layer_block["extras"]
+    assert extras_block["multiscale_levels"][0]["path"] == "level_0"
+    metadata_block = snapshot.ancillary.get("metadata", {})
+    assert metadata_block["zarr_scale"] == [0.25, 0.5]
+    assert metadata_block["adapter_engine"] == "napari-vispy"

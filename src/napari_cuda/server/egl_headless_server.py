@@ -491,14 +491,8 @@ class EGLHeadlessServer:
 
     # --- Helper to compute dims metadata for piggyback on dims_update ---------
     def _dims_metadata(self) -> dict:
-        try:
-            self._update_scene_manager()
-        except Exception:
-            logger.debug("scene manager update failed during dims metadata", exc_info=True)
-        # Use centralized helper for HUD dims/meta
-        from napari_cuda.server import scene_spec as _scn
-        scene = self._scene_manager.scene_spec()
-        return _scn.dims_metadata(scene)
+        self._update_scene_manager()
+        return self._scene_manager.dims_metadata()
 
     def _update_scene_manager(self) -> None:
         current_step = None
@@ -564,20 +558,9 @@ class EGLHeadlessServer:
             layer_controls=dict(self._scene.layer_controls),
         )
 
-        try:
-            spec = self._scene_manager.scene_spec()
-            layer_ids = [
-                str(layer.layer_id)
-                for layer in (spec.layers or [])
-                if getattr(layer, "layer_id", None)
-            ] if spec is not None else []
-        except Exception:
-            layer_ids = []
-
-        try:
-            dims_meta = self._scene_manager.dims_metadata()
-        except Exception:
-            dims_meta = {}
+        snapshot = self._scene_manager.scene_snapshot()
+        layer_ids = [layer.layer_id for layer in snapshot.layers] if snapshot else []
+        dims_meta = self._scene_manager.dims_metadata()
 
         prune_control_metadata(
             self._scene,
@@ -708,18 +691,12 @@ class EGLHeadlessServer:
             return None
 
         if self._log_dims_info:
-            spec = self._scene_manager.scene_spec()
-            dims = spec.dims.to_dict() if spec is not None and spec.dims is not None else {}
-            ms = None
-            if spec is not None and spec.layers:
-                layer0 = spec.layers[0]
-                if layer0.multiscale is not None:
-                    ms = layer0.multiscale.to_dict()
+            snapshot = self._scene_manager.scene_snapshot()
+            dims = snapshot.viewer.dims if snapshot is not None else {}
             logger.info(
-                "notify.scene dims: sizes=%s range=%s ms_level=%s",
+                "notify.scene dims: sizes=%s range=%s",
                 dims.get('sizes'),
                 dims.get('range'),
-                (ms or {}).get('current_level') if isinstance(ms, dict) else None,
             )
 
         return json_payload

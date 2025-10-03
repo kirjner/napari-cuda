@@ -1,0 +1,136 @@
+"""Typed snapshots feeding greenfield notify payloads."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Sequence, Tuple
+
+from napari_cuda.protocol.greenfield.messages import (
+    NotifyLayersPayload,
+    NotifyScenePayload,
+)
+
+
+@dataclass(slots=True)
+class ViewerSnapshot:
+    """Minimal viewer block used by ``notify.scene``."""
+
+    settings: Dict[str, Any]
+    dims: Dict[str, Any]
+    camera: Dict[str, Any]
+
+    def to_mapping(self) -> Dict[str, Any]:
+        return {
+            "settings": dict(self.settings),
+            "dims": dict(self.dims),
+            "camera": dict(self.camera),
+        }
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "ViewerSnapshot":
+        settings = mapping.get("settings")
+        dims = mapping.get("dims")
+        camera = mapping.get("camera")
+        return cls(
+            settings=dict(settings) if isinstance(settings, Mapping) else {},
+            dims=dict(dims) if isinstance(dims, Mapping) else {},
+            camera=dict(camera) if isinstance(camera, Mapping) else {},
+        )
+
+
+@dataclass(slots=True)
+class LayerSnapshot:
+    """Layer entry mirrored in ``notify.scene.layers``."""
+
+    layer_id: str
+    block: Dict[str, Any]
+
+    def to_mapping(self) -> Dict[str, Any]:
+        return dict(self.block)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "LayerSnapshot":
+        layer_id = mapping.get("layer_id") or mapping.get("id")
+        if not layer_id:
+            layer_id = "layer-0"
+        return cls(layer_id=str(layer_id), block=dict(mapping))
+
+
+@dataclass(slots=True)
+class SceneSnapshot:
+    """Authoritative scene snapshot emitted on baseline."""
+
+    viewer: ViewerSnapshot
+    layers: Tuple[LayerSnapshot, ...]
+    policies: Dict[str, Any]
+    ancillary: Dict[str, Any]
+
+    def to_notify_scene_payload(self) -> NotifyScenePayload:
+        return NotifyScenePayload(
+            viewer=self.viewer.to_mapping(),
+            layers=tuple(layer.to_mapping() for layer in self.layers),
+            policies=dict(self.policies) if self.policies else None,
+            ancillary=dict(self.ancillary) if self.ancillary else None,
+        )
+
+    @classmethod
+    def from_payload(cls, payload: NotifyScenePayload) -> "SceneSnapshot":
+        viewer = ViewerSnapshot.from_mapping(payload.viewer)
+        layers = tuple(LayerSnapshot.from_mapping(block) for block in payload.layers)
+        policies = dict(payload.policies) if payload.policies else {}
+        ancillary = dict(payload.ancillary) if payload.ancillary else {}
+        return cls(viewer=viewer, layers=layers, policies=policies, ancillary=ancillary)
+
+
+@dataclass(slots=True)
+class LayerDelta:
+    """Incremental layer changes for ``notify.layers``."""
+
+    layer_id: str
+    changes: Dict[str, Any]
+
+    def to_payload(self) -> NotifyLayersPayload:
+        return NotifyLayersPayload(layer_id=self.layer_id, changes=dict(self.changes))
+
+    @classmethod
+    def controls(cls, layer_id: str, controls: Mapping[str, Any]) -> "LayerDelta":
+        return cls(layer_id=layer_id, changes=dict(controls))
+
+    @classmethod
+    def removal(cls, layer_id: str) -> "LayerDelta":
+        return cls(layer_id=layer_id, changes={"removed": True})
+
+    @classmethod
+    def from_state_update(cls, layer_id: str, key: str, value: Any) -> "LayerDelta":
+        return cls(layer_id=layer_id, changes={key: value})
+
+    @classmethod
+    def from_payload(cls, payload: NotifyLayersPayload) -> "LayerDelta":
+        return cls(layer_id=str(payload.layer_id), changes=dict(payload.changes))
+
+
+def viewer_snapshot_from_blocks(*, settings: Mapping[str, Any], dims: Mapping[str, Any], camera: Mapping[str, Any]) -> ViewerSnapshot:
+    return ViewerSnapshot(settings=dict(settings), dims=dict(dims), camera=dict(camera))
+
+
+def scene_snapshot(
+    *,
+    viewer: ViewerSnapshot,
+    layers: Sequence[LayerSnapshot],
+    policies: Mapping[str, Any],
+    ancillary: Mapping[str, Any],
+) -> SceneSnapshot:
+    return SceneSnapshot(
+        viewer=viewer,
+        layers=tuple(layers),
+        policies=dict(policies),
+        ancillary=dict(ancillary),
+    )
+
+
+def scene_snapshot_from_payload(payload: NotifyScenePayload) -> SceneSnapshot:
+    return SceneSnapshot.from_payload(payload)
+
+
+def layer_delta_from_payload(payload: NotifyLayersPayload) -> LayerDelta:
+    return LayerDelta.from_payload(payload)

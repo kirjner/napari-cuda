@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+from contextlib import ExitStack, suppress
 
 from napari.components.viewer_model import ViewerModel
 
@@ -17,9 +18,15 @@ from napari_cuda.protocol.messages import (
     LayerSpec,
     MultiscaleLevelSpec,
     MultiscaleSpec,
-    SceneSpec,
 )
 from napari_cuda.server import scene_spec as _scene
+from napari_cuda.protocol.snapshots import (
+    LayerSnapshot,
+    SceneSnapshot,
+    ViewerSnapshot,
+    scene_snapshot,
+    viewer_snapshot_from_blocks,
+)
 from napari_cuda.server.server_scene import (
     CONTROL_KEYS,
     LayerControlState,
@@ -30,10 +37,9 @@ from napari_cuda.server.server_scene import (
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class _WorkerSnapshot:
-    """Lightweight view of worker state needed for scene metadata."""
-
     ndim: int
     shape: List[int]
     axis_labels: List[str]
@@ -44,7 +50,7 @@ class _WorkerSnapshot:
 
 
 class ViewerSceneManager:
-    """Maintains a headless ``ViewerModel`` and derived scene specifications."""
+    """Maintains a headless ``ViewerModel`` and derived scene snapshots."""
 
     def __init__(
         self,
@@ -58,14 +64,9 @@ class ViewerSceneManager:
         self._canvas_size = (int(canvas_size[0]), int(canvas_size[1]))
         self._default_layer_id = default_layer_id
         self._default_layer_name = default_layer_name
-        self._capabilities: List[str] = [
-            "layer.remove",
-            "state.update",
-        ]
-        self._scene: Optional[SceneSpec] = None
+        self._capabilities: Tuple[str, ...] = ("layer.remove", "state.update")
+        self._snapshot: Optional[SceneSnapshot] = None
 
-    # ------------------------------------------------------------------
-    # Public API
     def update_from_sources(
         self,
         *,
@@ -79,410 +80,142 @@ class ViewerSceneManager:
         viewer_model: Optional[ViewerModel] = None,
         extras: Optional[Dict[str, Any]] = None,
         layer_controls: Optional[Dict[str, LayerControlState]] = None,
-    ) -> SceneSpec:
-        """Refresh the cached scene metadata from the latest server state."""
-
+    ) -> SceneSnapshot:
         if viewer_model is not None and viewer_model is not self._viewer:
             self._viewer = viewer_model
             self._owns_viewer = False
 
-        worker_info = self._snapshot_worker(worker, ndisplay, viewer_model=viewer_model)
+        worker_snapshot = self._snapshot_worker(worker, ndisplay, viewer_model=viewer_model)
 
-        adapter_layer = None
-        if viewer_model is not None:
-            try:
-                adapter_layer = viewer_model.layers[0]
-            except Exception:
-                adapter_layer = None
+        adapter_layer = self._adapter_layer(viewer_model)
+        extras_map = self._compose_extras(extras, adapter_layer)
 
-        extras_map: Dict[str, Any] = {}
-        if extras:
-            extras_map.update(extras)
-        if adapter_layer is not None:
-            extras_map.update(self._adapter_layer_extras(adapter_layer))
+        controls_state = self._resolve_controls(layer_controls)
+        control_map = layer_controls_to_dict(controls_state)
 
-        canonical_layers = layer_controls or {}
-        control_snapshot: LayerControlState | None = None
-        control_map: Optional[Dict[str, Any]] = None
-        if canonical_layers:
-            control_snapshot = canonical_layers.get(self._default_layer_id)
-        if control_snapshot is None:
-            control_snapshot = default_layer_controls()
-        control_map = layer_controls_to_dict(control_snapshot)
-
-        if extras_map:
-            for key in CONTROL_KEYS:
-                extras_map.pop(key, None)
-
-        layer_metadata: Dict[str, Any] = {}
-        if adapter_layer is not None:
-            thumbnail = self._adapter_layer_thumbnail(adapter_layer)
-            if thumbnail is not None:
-                layer_metadata["thumbnail"] = thumbnail
-
-        render_volume_state = volume_state if worker_info.is_volume else None
-
-        layer_spec = self._build_layer_spec(
-            worker_info,
+        layer_metadata = self._layer_metadata(adapter_layer)
+        layer_block = self._build_layer_spec(
+            worker_snapshot,
             multiscale_state=multiscale_state,
-            volume_state=render_volume_state,
+            volume_state=volume_state,
             zarr_path=zarr_path,
-            extras=extras_map or None,
+            extras=extras_map,
             controls=control_map,
-            metadata=layer_metadata or None,
+            metadata=layer_metadata,
             adapter_layer=adapter_layer,
-        )
-        dims_spec = self._build_dims_spec(
-            layer_spec,
+        ).to_dict()
+
+        dims_block = self._build_dims_spec(
+            LayerSpec.from_dict(layer_block),
             current_step=current_step,
             ndisplay=ndisplay,
             viewer_model=viewer_model,
-        )
+        ).to_dict()
+
         camera_spec = self._build_camera_spec(scene_state, ndisplay=ndisplay)
+        camera_block = camera_spec.to_dict() if camera_spec is not None else {}
 
-        metadata: Dict[str, Any] = {}
-        if zarr_path:
-            metadata["zarr_path"] = zarr_path
-        if extras_map:
-            for key, value in extras_map.items():
-                if value is not None:
-                    metadata[key] = value
-
-        self._scene = SceneSpec(
-            layers=[layer_spec],
-            dims=dims_spec,
-            camera=camera_spec,
-            capabilities=list(self._capabilities),
-            metadata=metadata or None,
+        viewer_snapshot = viewer_snapshot_from_blocks(
+            settings=self._viewer_settings(worker_snapshot.is_volume),
+            dims=dims_block,
+            camera=camera_block,
         )
 
-        self._apply_to_viewer(layer_spec, dims_spec, camera_spec)
-        return self._scene
+        layer_snapshot = LayerSnapshot(layer_id=layer_block["layer_id"], block=layer_block)
 
-    def scene_spec(self) -> Optional[SceneSpec]:
-        return self._scene
+        ancillary = self._build_ancillary(extras_map, zarr_path)
+
+        snapshot = scene_snapshot(
+            viewer=viewer_snapshot,
+            layers=[layer_snapshot],
+            policies={},
+            ancillary=ancillary,
+        )
+
+        self._snapshot = snapshot
+        self._apply_to_viewer(LayerSpec.from_dict(layer_block), DimsSpec.from_dict(dims_block), camera_spec)
+        return snapshot
+
+    def scene_snapshot(self) -> Optional[SceneSnapshot]:
+        return self._snapshot
 
     def dims_metadata(self) -> Dict[str, Any]:
-        scene = self._scene
-        if scene is None or scene.dims is None:
+        snapshot = self._snapshot
+        if snapshot is None:
             return {}
-        dims_dict = scene.dims.to_dict()
-        meta: Dict[str, Any] = {
-            "ndim": dims_dict.get("ndim"),
-            "order": dims_dict.get("order"),
-            "sizes": dims_dict.get("sizes"),
-            "range": dims_dict.get("range"),
-            "axis_labels": dims_dict.get("axis_labels"),
-            "displayed": dims_dict.get("displayed"),
-            "ndisplay": dims_dict.get("ndisplay"),
-        }
-        layer = scene.layers[0] if scene.layers else None
-        if layer is not None:
-            extras = layer.extras or {}
-            if "is_volume" in extras:
-                meta["volume"] = bool(extras["is_volume"])
-            if layer.render is not None and bool(meta.get("volume")):
-                meta["render"] = layer.render.to_dict()
-            if layer.controls is not None:
-                meta["controls"] = dict(layer.controls)
-            if layer.multiscale is not None:
-                ms_dict = layer.multiscale.to_dict()
-                policy = None
-                index_space = None
-                md = ms_dict.pop("metadata", None)
-                if isinstance(md, dict):
-                    policy = md.get("policy")
-                    index_space = md.get("index_space")
-                if policy is not None:
-                    ms_dict["policy"] = policy
-                if index_space is not None:
-                    ms_dict["index_space"] = index_space
-                meta["multiscale"] = ms_dict
-            # Robustly derive sizes/range from active level when available.
-            try:
-                eff_shape = None
-                if layer.multiscale is not None and layer.multiscale.levels:
-                    cur = int(layer.multiscale.current_level or 0)
-                    levels = layer.multiscale.levels
-                    if 0 <= cur < len(levels) and levels[cur].shape:
-                        eff_shape = [int(s) for s in levels[cur].shape or []]
-                if not eff_shape and layer.shape:
-                    eff_shape = [int(s) for s in layer.shape]
-                if eff_shape:
-                    meta["sizes"] = list(eff_shape)
-                    meta["range"] = [[0, max(0, int(s) - 1)] for s in eff_shape]
-            except Exception:
-                logger.debug("dims_metadata: shape/range reconciliation failed", exc_info=True)
-        return {key: value for key, value in meta.items() if value is not None}
+
+        dims_block = dict(snapshot.viewer.dims)
+        meta: Dict[str, Any] = dict(dims_block)
+
+        if not snapshot.layers:
+            return meta
+
+        layer_block = snapshot.layers[0].block
+        extras = layer_block.get("extras", {}) or {}
+        if "is_volume" in extras:
+            meta["volume"] = bool(extras["is_volume"])
+
+        controls = layer_block.get("controls", {})
+        if controls:
+            meta["controls"] = dict(controls)
+
+        multiscale_block = layer_block.get("multiscale")
+        if isinstance(multiscale_block, Mapping):
+            ms_dict = dict(multiscale_block)
+            metadata_block = ms_dict.pop("metadata", None)
+            if isinstance(metadata_block, Mapping):
+                for key, value in metadata_block.items():
+                    ms_dict[str(key)] = _normalize_scalar(value)
+            meta["multiscale"] = ms_dict
+            levels = ms_dict.get("levels")
+            if isinstance(levels, Sequence) and levels:
+                index = int(ms_dict.get("current_level", 0))
+                if 0 <= index < len(levels):
+                    level_shape = levels[index].get("shape")
+                    if isinstance(level_shape, Sequence):
+                        shape_list = [int(x) for x in level_shape]
+                        meta["sizes"] = shape_list
+                        meta["range"] = [[0, max(0, s - 1)] for s in shape_list]
+
+        return meta
 
     # ------------------------------------------------------------------
-    # Internal helpers
-    def _snapshot_worker(
-        self,
-        worker: Optional[object],
-        ndisplay: Optional[int],
-        *,
-        viewer_model: Optional[ViewerModel] = None,
-    ) -> _WorkerSnapshot:
-        if viewer_model is not None:
-            adapter_snapshot = self._snapshot_from_viewer(viewer_model, ndisplay)
-            if adapter_snapshot is not None:
-                try:
-                    if worker is not None and not bool(getattr(worker, "use_volume", False)):
-                        zshape = getattr(worker, "_zarr_shape", None)
-                        if isinstance(zshape, tuple) and len(zshape) >= 3:
-                            return _WorkerSnapshot(
-                                ndim=3,
-                                shape=[int(zshape[0]), int(zshape[1]), int(zshape[2])],
-                                axis_labels=["z", "y", "x"],
-                                dtype=adapter_snapshot.dtype,
-                                is_volume=False,
-                                zarr_axes=getattr(worker, "_zarr_axes", None),
-                                zarr_dtype=getattr(worker, "_zarr_dtype", None),
-                            )
-                except Exception:
-                    logger.debug("_snapshot_worker: adapter 2D->3D dims adjust failed", exc_info=True)
-                return adapter_snapshot
-
+    def _viewer_settings(self, use_volume: bool) -> Dict[str, Any]:
         width, height = self._canvas_size
-        if worker is None:
-            ndim = 2
-            shape = [height, width]
-            axis_labels = ["y", "x"]
-            return _WorkerSnapshot(
-                ndim=ndim,
-                shape=shape,
-                axis_labels=axis_labels,
-                dtype=None,
-                is_volume=False,
-                zarr_axes=None,
-                zarr_dtype=None,
-            )
-
-        axes = getattr(worker, "_zarr_axes", None)
-        if axes is not None:
-            axis_labels = [str(a) for a in axes]
-        else:
-            axis_labels = ["y", "x"]
-
-        is_volume = bool(getattr(worker, "use_volume", False))
-        zarr_shape = getattr(worker, "_zarr_shape", None)
-
-        if is_volume:
-            if isinstance(zarr_shape, tuple) and len(zarr_shape) >= 3:
-                shape = [int(x) for x in zarr_shape[:3]]
-            else:
-                depth = int(getattr(worker, "_data_d", 0) or getattr(worker, "volume_depth", 0) or 1)
-                w, h = getattr(worker, "_data_wh", (self._canvas_size[0], self._canvas_size[1]))
-                shape = [depth, int(h), int(w)]
-            if len(axis_labels) != len(shape):
-                axis_labels = ["z", "y", "x"]
-        else:
-            # Prefer exposing a Z axis when slicing a 3D Zarr volume so the client
-            # can show a proper Z slider with the active level's depth range.
-            if isinstance(zarr_shape, tuple) and len(zarr_shape) >= 3:
-                # Keep conventional order Z, Y, X for 3D metadata even in 2D render
-                shape = [int(zarr_shape[0]), int(zarr_shape[1]), int(zarr_shape[2])]
-                if len(axis_labels) != 3:
-                    axis_labels = ["z", "y", "x"]
-            elif isinstance(zarr_shape, tuple) and len(zarr_shape) >= 2:
-                shape = [int(zarr_shape[-2]), int(zarr_shape[-1])]
-                if len(axis_labels) != 2:
-                    axis_labels = ["y", "x"]
-            else:
-                w, h = getattr(worker, "_data_wh", (self._canvas_size[0], self._canvas_size[1]))
-                shape = [int(h), int(w)]
-                if len(axis_labels) != 2:
-                    axis_labels = ["y", "x"]
-
-        dtype = getattr(worker, "_zarr_dtype", None) or getattr(worker, "volume_dtype", None)
-        if dtype is not None:
-            dtype = str(dtype)
-
-        ndim = len(shape)
-        if ndisplay is not None and ndisplay > ndim:
-            ndisplay = ndim
-
-        return _WorkerSnapshot(
-            ndim=ndim,
-            shape=shape,
-            axis_labels=axis_labels,
-            dtype=dtype,
-            is_volume=is_volume or (ndisplay == 3),
-            zarr_axes=getattr(worker, "_zarr_axes", None),
-            zarr_dtype=getattr(worker, "_zarr_dtype", None),
-        )
-
-    def _snapshot_from_viewer(
-        self, viewer: ViewerModel, ndisplay: Optional[int]
-    ) -> Optional[_WorkerSnapshot]:
-        layers = getattr(viewer, "layers", None)
-        if not layers:
-            return None
-        try:
-            layer = layers[0]
-        except Exception:
-            return None
-
-        shape = self._shape_from_data(layer.data)
-        if not shape:
-            shape = [self._canvas_size[1], self._canvas_size[0]]
-        ndim = len(shape)
-        axis_labels = self._normalize_axis_labels(viewer, ndim)
-        dtype = self._dtype_from_layer(layer)
-        zarr_axes = self._zarr_axes_from_layer(layer)
-        zarr_dtype = dtype
-        is_volume = bool((ndisplay if ndisplay is not None else viewer.dims.ndisplay) == 3)
-
-        return _WorkerSnapshot(
-            ndim=ndim,
-            shape=shape,
-            axis_labels=axis_labels,
-            dtype=dtype,
-            is_volume=is_volume,
-            zarr_axes=zarr_axes,
-            zarr_dtype=zarr_dtype,
-        )
-
-    @staticmethod
-    def _shape_from_data(data: Any) -> List[int]:
-        if hasattr(data, "shape"):
-            try:
-                return [int(max(1, s)) for s in tuple(data.shape)]
-            except Exception:
-                return []
-        if isinstance(data, (list, tuple)) and data:
-            return ViewerSceneManager._shape_from_data(data[0])
-        return []
-
-    @staticmethod
-    def _dtype_from_layer(layer: Any) -> Optional[str]:
-        dtype = getattr(layer, "dtype", None)
-        if dtype is None:
-            data = getattr(layer, "data", None)
-            dtype = getattr(data, "dtype", None)
-            if dtype is None and isinstance(data, (list, tuple)) and data:
-                dtype = getattr(data[0], "dtype", None)
-        if dtype is None:
-            return None
-        try:
-            return str(np.dtype(dtype))
-        except Exception:
-            return str(dtype)
-
-    def _normalize_axis_labels(self, viewer: ViewerModel, ndim: int) -> List[str]:
-        defaults: Dict[int, List[str]] = {
-            1: ["x"],
-            2: ["y", "x"],
-            3: ["z", "y", "x"],
-            4: ["t", "z", "y", "x"],
+        return {
+            "fps_target": float(getattr(self._viewer, "fps", 60.0)),
+            "canvas_size": [width, height],
+            "volume_enabled": bool(use_volume),
         }
-        try:
-            labels_source = list(viewer.dims.axis_labels or [])
-        except Exception:
-            labels_source = []
-        normalized: List[str] = []
-        default_labels = defaults.get(ndim, [f"axis-{i}" for i in range(ndim)])
-        for idx in range(ndim):
-            label = None
-            if idx < len(labels_source):
-                label = labels_source[idx]
-            if label is None or str(label).strip() == "":
-                normalized.append(default_labels[idx] if idx < len(default_labels) else f"axis-{idx}")
-            else:
-                normalized.append(str(label))
-        return normalized
 
-    @staticmethod
-    def _zarr_axes_from_layer(layer: Any) -> Optional[str]:
-        metadata = getattr(layer, "metadata", None)
-        if not isinstance(metadata, dict):
+    def _adapter_layer(self, viewer_model: Optional[ViewerModel]) -> Optional[Any]:
+        if viewer_model is None:
             return None
-        axes = metadata.get("axes")
-        if isinstance(axes, str):
-            return axes
-        if isinstance(axes, (list, tuple)):
-            try:
-                return "".join(str(a) for a in axes)
-            except Exception:
-                return None
-        return None
+        return viewer_model.layers[0] if viewer_model.layers else None
 
-    @staticmethod
-    def _adapter_layer_extras(layer: Any) -> Dict[str, Any]:
-        extras: Dict[str, Any] = {"adapter_engine": "napari-vispy"}
-        name = getattr(layer, "name", None)
-        if name:
-            extras["layer_name"] = str(name)
-        visible = getattr(layer, "visible", None)
-        if visible is not None:
-            extras["visible"] = bool(visible)
-        opacity_val = getattr(layer, "opacity", None)
-        if opacity_val is not None:
-            try:
-                extras["opacity"] = float(opacity_val)
-            except Exception:
-                logger.debug("layer_manager: opacity coercion failed", exc_info=True)
-        blending = getattr(layer, "blending", None)
-        if blending is not None:
-            extras["blending"] = str(blending)
-        interpolation = getattr(layer, "interpolation", None)
-        if interpolation is not None:
-            extras["interpolation"] = str(interpolation)
-        colormap = getattr(layer, "colormap", None)
-        if colormap is not None:
-            cmap_name = getattr(colormap, "name", None)
-            if cmap_name is None and isinstance(colormap, dict):
-                cmap_name = colormap.get("name")
-            if cmap_name is not None:
-                extras["colormap"] = str(cmap_name)
-        rendering = getattr(layer, "rendering", None)
-        if rendering is not None:
-            extras["rendering"] = str(rendering)
-        scale = getattr(layer, "scale", None)
-        if scale is not None:
-            try:
-                extras["scale"] = [float(s) for s in scale]
-            except Exception:
-                logger.debug("layer_manager: scale coercion failed", exc_info=True)
-        clim = getattr(layer, "contrast_limits", None)
-        if clim is not None:
-            try:
-                extras["contrast_limits"] = [float(clim[0]), float(clim[1])]
-            except Exception:
-                logger.debug("layer_manager: contrast_limits coercion failed", exc_info=True)
-        return {k: v for k, v in extras.items() if v is not None}
+    def _compose_extras(self, extras: Optional[Dict[str, Any]], adapter_layer: Optional[Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if extras:
+            payload.update({k: v for k, v in extras.items() if v is not None})
+        if adapter_layer is not None:
+            payload.update(self._adapter_layer_extras(adapter_layer))
+        for key in CONTROL_KEYS:
+            payload.pop(key, None)
+        return payload
 
-    @staticmethod
-    def _adapter_layer_thumbnail(layer: Any) -> Optional[List[List[List[float]]]]:
-        try:
-            updater = getattr(layer, '_update_thumbnail', None)
-            if callable(updater):
-                updater()
-        except Exception:
-            logger.debug('layer_manager: thumbnail refresh failed', exc_info=True)
-        try:
-            thumbnail = getattr(layer, 'thumbnail', None)
-        except Exception:
-            return None
-        if thumbnail is None:
-            return None
-        try:
-            arr = np.asarray(thumbnail)
-        except Exception:
-            return None
-        if arr.size == 0:
-            return None
-        arr = np.squeeze(arr)
-        if arr.ndim == 2:
-            arr = arr[..., np.newaxis]
-        if arr.ndim != 3:
-            return None
-        try:
-            arr = np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
-        except Exception:
-            arr = arr.astype(np.float32, copy=False)
-        return arr.tolist()
+    def _resolve_controls(self, layer_controls: Optional[Dict[str, LayerControlState]]) -> LayerControlState:
+        if not layer_controls:
+            return default_layer_controls()
+        return layer_controls.get(self._default_layer_id, default_layer_controls())
+
+    def _layer_metadata(self, adapter_layer: Optional[Any]) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {}
+        if adapter_layer is None:
+            return metadata
+        thumbnail = self._adapter_layer_thumbnail(adapter_layer)
+        if thumbnail is not None:
+            metadata["thumbnail"] = thumbnail.tolist()
+        return metadata
 
     def _build_layer_spec(
         self,
@@ -491,66 +224,36 @@ class ViewerSceneManager:
         multiscale_state: Optional[Dict[str, Any]],
         volume_state: Optional[Dict[str, Any]],
         zarr_path: Optional[str],
-        extras: Optional[Dict[str, Any]],
-        controls: Optional[Dict[str, Any]],
-        metadata: Optional[Dict[str, Any]],
-        adapter_layer: Optional[Any] = None,
+        extras: Dict[str, Any],
+        controls: Dict[str, Any],
+        metadata: Dict[str, Any],
+        adapter_layer: Optional[Any],
     ) -> LayerSpec:
-        # Collect multiscale descriptors
-        ms_adapt = self._adapter_multiscale_spec(adapter_layer, extras, worker_snapshot.shape)
-        ms_state = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
-        levels: Optional[List[Dict[str, Any]]] = None
-        cur_level: Optional[int] = None
-        ms_metadata: Optional[Dict[str, Any]] = None
-        if ms_adapt is not None:
-            try:
-                levels = [lvl.to_dict() for lvl in ms_adapt.levels]
-                cur_level = int(ms_adapt.current_level)
-            except Exception:
-                logger.debug("layer_manager: adapt ms to_dict failed", exc_info=True)
-            ms_metadata = getattr(ms_adapt, "metadata", None)
-        elif ms_state is not None:
-            try:
-                levels = [lvl.to_dict() for lvl in ms_state.levels]
-                cur_level = int(ms_state.current_level)
-            except Exception:
-                logger.debug("layer_manager: state ms to_dict failed", exc_info=True)
-            ms_metadata = getattr(ms_state, "metadata", None)
-
+        multiscale = self._build_multiscale_spec(multiscale_state, worker_snapshot.shape)
+        if multiscale is None:
+            multiscale = self._adapter_multiscale_spec(adapter_layer, extras, worker_snapshot.shape)
         render_hints = self._build_render_hints(volume_state)
-        # Compose extras map
-        layer_extras: Dict[str, Any] = {"zarr_axes": worker_snapshot.zarr_axes}
-        if extras:
-            layer_extras.update({k: v for k, v in extras.items() if v is not None})
+
+        layer_extras = dict(extras)
+        layer_extras["zarr_axes"] = worker_snapshot.zarr_axes
 
         spec = _scene.build_layer_spec(
             shape=worker_snapshot.shape,
             is_volume=worker_snapshot.is_volume,
             zarr_path=zarr_path,
-            multiscale_levels=levels,
-            multiscale_current_level=cur_level,
+            multiscale_levels=[lvl.to_dict() for lvl in multiscale.levels] if multiscale else None,
+            multiscale_current_level=multiscale.current_level if multiscale else None,
             render_hints=render_hints.to_dict() if render_hints else None,  # type: ignore[arg-type]
             extras=layer_extras or None,
-            controls=controls,
+            controls=controls or None,
             metadata=metadata or None,
         )
-        if spec.multiscale is not None and ms_metadata:
-            spec.multiscale.metadata = dict(ms_metadata)
-        # Preserve dtype and axis labels from snapshot logic
-        spec.dtype = worker_snapshot.dtype
+        if worker_snapshot.dtype is not None:
+            spec.dtype = worker_snapshot.dtype
         spec.axis_labels = list(worker_snapshot.axis_labels)
-        # Preserve any contrast limits derived earlier
-        if adapter_layer is not None and hasattr(adapter_layer, "contrast_limits"):
-            clim = adapter_layer.contrast_limits  # type: ignore[attr-defined]
-            if isinstance(clim, (list, tuple)) and len(clim) >= 2:
-                spec.contrast_limits = [float(clim[0]), float(clim[1])]
-        elif isinstance(volume_state, dict):
-            clim_vs = volume_state.get("clim")
-            if isinstance(clim_vs, (list, tuple)) and len(clim_vs) >= 2:
-                try:
-                    spec.contrast_limits = [float(clim_vs[0]), float(clim_vs[1])]
-                except Exception:
-                    logger.debug("layer_manager: volume-state contrast coercion failed", exc_info=True)
+        if multiscale and multiscale.metadata:
+            spec.multiscale.metadata = dict(multiscale.metadata)
+        self._apply_contrast(spec, adapter_layer, volume_state)
         return spec
 
     def _build_dims_spec(
@@ -561,7 +264,6 @@ class ViewerSceneManager:
         ndisplay: Optional[int],
         viewer_model: Optional[ViewerModel],
     ) -> DimsSpec:
-        # Preserve viewer-provided current_step and ndisplay when available
         viewer_dims = viewer_model.dims if viewer_model is not None else None
         if current_step is None and viewer_dims is not None:
             current_step = tuple(viewer_dims.current_step)
@@ -597,59 +299,44 @@ class ViewerSceneManager:
     ) -> Optional[MultiscaleSpec]:
         if not multiscale_state:
             return None
-
         levels_data = multiscale_state.get("levels")
         if not levels_data:
             return None
-
         levels: List[MultiscaleLevelSpec] = []
         for entry in levels_data:
-            if not isinstance(entry, dict):
-                continue
             shape = entry.get("shape")
-            down = entry.get("downsample")
-            if not shape and down:
-                try:
-                    shape = [
-                        int(max(1, round(dim / float(ds))))
-                        for dim, ds in zip(base_shape, down)
-                    ]
-                except (TypeError, ValueError) as exc:
-                    logger.debug("layer_manager: multiscale shape inference failed", exc_info=exc)
-                    shape = None
+            downsample = entry.get("downsample")
+            if not shape and downsample:
+                shape = [int(max(1, round(dim / float(ds)))) for dim, ds in zip(base_shape, downsample)]
             levels.append(
                 MultiscaleLevelSpec(
-                    shape=[int(x) for x in (shape or base_shape)],
-                    downsample=[float(x) for x in (down or [1.0] * len(base_shape))],
+                    shape=[int(x) for x in shape],
+                    downsample=[float(x) for x in (downsample or [1.0] * len(base_shape))],
                     path=entry.get("path"),
                 )
             )
-
-        if not levels:
-            return None
-
-        metadata = {
-            "policy": multiscale_state.get("policy", "latency"),
-            "index_space": multiscale_state.get("index_space", "base"),
-        }
-
+        metadata: Dict[str, Any] = {}
+        if "policy" in multiscale_state:
+            metadata["policy"] = multiscale_state["policy"]
+        if "index_space" in multiscale_state:
+            metadata["index_space"] = multiscale_state["index_space"]
+        current_level = multiscale_state.get("current_level", 0)
         return MultiscaleSpec(
             levels=levels,
-            current_level=int(multiscale_state.get("current_level", 0)),
-            metadata={k: v for k, v in metadata.items() if v is not None},
+            current_level=int(current_level),
+            metadata=metadata or None,
         )
 
     def _adapter_multiscale_spec(
         self,
         layer: Optional[Any],
-        extras: Optional[Dict[str, Any]],
+        extras: Dict[str, Any],
         base_shape: List[int],
     ) -> Optional[MultiscaleSpec]:
         if layer is None or not bool(getattr(layer, "multiscale", False)):
             return None
 
-        current_level = None
-        if extras and extras.get("multiscale_current_level") is not None:
+        if extras.get("multiscale_current_level") is not None:
             current_level = int(extras["multiscale_current_level"])
         elif hasattr(layer, "data_level"):
             current_level = int(getattr(layer, "data_level"))
@@ -657,46 +344,32 @@ class ViewerSceneManager:
             current_level = 0
 
         levels: List[MultiscaleLevelSpec] = []
-        level_entries = extras.get("multiscale_levels") if extras else None
-        if isinstance(level_entries, list) and level_entries:
-            for entry in level_entries:
+        entries = extras.get("multiscale_levels")
+        if isinstance(entries, list):
+            for entry in entries:
                 if not isinstance(entry, dict):
                     continue
-                path = entry.get("path")
                 shape = entry.get("shape") or base_shape
                 downsample = entry.get("downsample") or [1.0] * len(base_shape)
                 levels.append(
                     MultiscaleLevelSpec(
                         shape=[int(x) for x in shape],
                         downsample=[float(x) for x in downsample],
-                        path=str(path) if path else None,
+                        path=entry.get("path"),
                     )
                 )
 
         if not levels:
             data = getattr(layer, "data", None)
-            data_seq: Optional[Sequence[Any]] = None
-            if isinstance(data, Sequence):
-                try:
-                    if len(data) > 0:
-                        data_seq = data
-                except TypeError:
-                    data_seq = None
-            if data_seq:
-                top_shape = base_shape or list(getattr(data_seq[0], "shape", []))
-                for idx in range(len(data_seq)):
-                    arr = data_seq[idx]
-                    arr_shape = list(getattr(arr, "shape", top_shape))
-                    downsample: List[float] = []
-                    for base, level_dim in zip(top_shape, arr_shape):
-                        if level_dim in (0, None):
-                            downsample.append(1.0)
-                        else:
-                            downsample.append(float(base) / float(level_dim))
+            if isinstance(data, Sequence) and data:
+                base = base_shape or list(getattr(data[0], "shape", []))
+                for arr in data:
+                    arr_shape = list(getattr(arr, "shape", base))
+                    downsample = [float(b) / float(d) if d else 1.0 for b, d in zip(base, arr_shape)]
                     levels.append(
                         MultiscaleLevelSpec(
                             shape=[int(x) for x in arr_shape],
-                            downsample=downsample or [1.0] * len(arr_shape),
+                            downsample=downsample,
                             path=None,
                         )
                     )
@@ -705,23 +378,184 @@ class ViewerSceneManager:
             return None
 
         metadata = {"policy": "latency", "index_space": "base"}
-        return MultiscaleSpec(
-            levels=levels,
-            current_level=int(current_level or 0),
-            metadata=metadata,
-        )
+        return MultiscaleSpec(levels=levels, current_level=int(current_level), metadata=metadata)
 
     def _build_render_hints(
         self, volume_state: Optional[Dict[str, Any]]
     ) -> Optional[LayerRenderHints]:
         if not volume_state:
             return None
-
         shading = volume_state.get("shade")
-        hints = LayerRenderHints(
-            shading=str(shading) if shading else None,
-        )
+        hints = LayerRenderHints(shading=str(shading) if shading else None)
         return hints if hints.shading else None
+
+    def _apply_contrast(
+        self,
+        spec: LayerSpec,
+        adapter_layer: Optional[Any],
+        volume_state: Optional[Dict[str, Any]],
+    ) -> None:
+        if adapter_layer is not None and hasattr(adapter_layer, "contrast_limits"):
+            clim = adapter_layer.contrast_limits  # type: ignore[attr-defined]
+            if isinstance(clim, (list, tuple)) and len(clim) >= 2:
+                spec.contrast_limits = [float(clim[0]), float(clim[1])]
+            return
+        if volume_state is None:
+            return
+        clim_vs = volume_state.get("clim")
+        if isinstance(clim_vs, (list, tuple)) and len(clim_vs) >= 2:
+            spec.contrast_limits = [float(clim_vs[0]), float(clim_vs[1])]
+
+    def _adapter_layer_extras(self, layer: Any) -> Dict[str, Any]:
+        extras: Dict[str, Any] = {"adapter_engine": "napari-vispy"}
+        name = getattr(layer, "name", None)
+        if name:
+            extras["layer_name"] = str(name)
+        visible = getattr(layer, "visible", None)
+        if visible is not None:
+            extras["visible"] = bool(visible)
+        opacity_val = getattr(layer, "opacity", None)
+        if opacity_val is not None:
+            extras["opacity"] = float(opacity_val)
+        blending = getattr(layer, "blending", None)
+        if blending is not None:
+            extras["blending"] = str(blending)
+        interpolation = getattr(layer, "interpolation", None)
+        if interpolation is not None:
+            extras["interpolation"] = str(interpolation)
+        colormap = getattr(layer, "colormap", None)
+        if colormap is not None:
+            cmap_name = getattr(colormap, "name", None)
+            if cmap_name is None and isinstance(colormap, dict):
+                cmap_name = colormap.get("name")
+            if cmap_name is not None:
+                extras["colormap"] = str(cmap_name)
+        rendering = getattr(layer, "rendering", None)
+        if rendering is not None:
+            extras["rendering"] = str(rendering)
+        scale = getattr(layer, "scale", None)
+        if scale is not None:
+            extras["scale"] = [float(s) for s in scale]
+        clim = getattr(layer, "contrast_limits", None)
+        if clim is not None:
+            extras["contrast_limits"] = [float(clim[0]), float(clim[1])]
+        if hasattr(layer, "source_path"):
+            extras["source_path"] = layer.source_path  # type: ignore[attr-defined]
+        if hasattr(layer, "data_id"):
+            extras["data_id"] = layer.data_id  # type: ignore[attr-defined]
+        return {k: v for k, v in extras.items() if v is not None}
+
+    @staticmethod
+    def _adapter_layer_thumbnail(layer: Any) -> Optional[np.ndarray]:
+        updater = getattr(layer, "_update_thumbnail", None)
+        if callable(updater):
+            with suppress(Exception):
+                updater()
+        thumbnail = getattr(layer, "thumbnail", None)
+        if thumbnail is None:
+            return None
+        with suppress(Exception):
+            arr = np.asarray(thumbnail)
+        if 'arr' not in locals() or arr.size == 0:
+            return None
+        arr = np.squeeze(arr)
+        if arr.ndim == 2:
+            arr = np.stack([arr, arr, arr], axis=-1)
+        return arr
+
+    def _build_ancillary(self, extras: Dict[str, Any], zarr_path: Optional[str]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if zarr_path:
+            payload.setdefault("metadata", {})["zarr_path"] = zarr_path
+        if extras:
+            payload.setdefault("metadata", {}).update(extras)
+        payload["capabilities"] = list(self._capabilities)
+        return payload
+
+    def _snapshot_worker(
+        self,
+        worker: Optional[object],
+        ndisplay: Optional[int],
+        *,
+        viewer_model: Optional[ViewerModel],
+    ) -> _WorkerSnapshot:
+        if viewer_model is not None and viewer_model.layers:
+            adapter_snapshot = self._snapshot_from_viewer(viewer_model, ndisplay)
+            if adapter_snapshot is not None and (worker is None or not getattr(worker, "use_volume", False)):
+                return adapter_snapshot
+
+        if worker is None:
+            width, height = self._canvas_size
+            return _WorkerSnapshot(
+                ndim=2,
+                shape=[height, width],
+                axis_labels=["y", "x"],
+                dtype=None,
+                is_volume=False,
+                zarr_axes=None,
+                zarr_dtype=None,
+            )
+
+        axes = getattr(worker, "_zarr_axes", None)
+        axis_labels = [str(a) for a in axes] if axes is not None else ["y", "x"]
+
+        is_volume = bool(getattr(worker, "use_volume", False))
+        zarr_shape = getattr(worker, "_zarr_shape", None)
+
+        if is_volume and isinstance(zarr_shape, tuple) and len(zarr_shape) >= 3:
+            shape = [int(x) for x in zarr_shape[:3]]
+            axis_labels = ["z", "y", "x"]
+        elif isinstance(zarr_shape, tuple) and len(zarr_shape) >= 3:
+            shape = [int(zarr_shape[0]), int(zarr_shape[1]), int(zarr_shape[2])]
+            axis_labels = ["z", "y", "x"]
+        elif isinstance(zarr_shape, tuple) and len(zarr_shape) >= 2:
+            shape = [int(zarr_shape[-2]), int(zarr_shape[-1])]
+            axis_labels = ["y", "x"]
+        else:
+            w, h = getattr(worker, "_data_wh", (self._canvas_size[0], self._canvas_size[1]))
+            shape = [int(h), int(w)]
+            axis_labels = ["y", "x"]
+
+        dtype = getattr(worker, "_zarr_dtype", None) or getattr(worker, "volume_dtype", None)
+        dtype_str = str(dtype) if dtype is not None else None
+
+        ndim = len(shape)
+        is_volume = is_volume or (ndisplay == 3)
+
+        return _WorkerSnapshot(
+            ndim=ndim,
+            shape=shape,
+            axis_labels=axis_labels,
+            dtype=dtype_str,
+            is_volume=is_volume,
+            zarr_axes="".join(axis_labels),
+            zarr_dtype=dtype_str,
+        )
+
+    def _snapshot_from_viewer(self, viewer: ViewerModel, ndisplay: Optional[int]) -> Optional[_WorkerSnapshot]:
+        if not viewer.layers:
+            return None
+        layer = viewer.layers[0]
+        raw_data = layer.data
+        if isinstance(raw_data, Sequence) and raw_data:
+            first = raw_data[0]
+            arr = np.asarray(first)
+        else:
+            arr = np.asarray(raw_data)
+        shape = list(arr.shape)
+        axis_labels = list(layer.axis_labels) if layer.axis_labels else ["y", "x"]
+        dtype = str(arr.dtype)
+        ndim = len(shape)
+        is_volume = bool(ndisplay == 3 or ndim == 3)
+        return _WorkerSnapshot(
+            ndim=ndim,
+            shape=shape,
+            axis_labels=axis_labels,
+            dtype=dtype,
+            is_volume=is_volume,
+            zarr_axes="".join(axis_labels),
+            zarr_dtype=dtype,
+        )
 
     def _apply_to_viewer(
         self,
@@ -729,43 +563,34 @@ class ViewerSceneManager:
         dims_spec: DimsSpec,
         camera_spec: Optional[CameraSpec],
     ) -> None:
-        """Keep the internal ``ViewerModel`` roughly in sync."""
-
         dims = self._viewer.dims
-        try:
-            from contextlib import ExitStack
+        with ExitStack() as stack:
+            for attr in ("ndisplay", "current_step", "displayed"):
+                emitter = getattr(dims.events, attr, None)
+                if emitter is not None and hasattr(emitter, "blocker"):
+                    stack.enter_context(emitter.blocker())
+            dims.ndim = dims_spec.ndim
+            if dims_spec.axis_labels:
+                dims.axis_labels = tuple(dims_spec.axis_labels)
+            if dims_spec.displayed:
+                with suppress(AttributeError):
+                    dims.displayed = tuple(dims_spec.displayed)  # type: ignore[attr-defined]
+            if dims_spec.current_step:
+                dims.current_step = tuple(dims_spec.current_step)
+            if dims_spec.ndisplay is not None:
+                dims.ndisplay = int(dims_spec.ndisplay)
+        if camera_spec is None:
+            return
+        camera = self._viewer.camera
+        if camera_spec.center is not None:
+            camera.center = tuple(camera_spec.center)
+        if camera_spec.zoom is not None:
+            camera.zoom = float(camera_spec.zoom)
+        if camera_spec.angles is not None:
+            camera.angles = tuple(camera_spec.angles)
 
-            with ExitStack() as stack:
-                for attr in ("ndisplay", "current_step", "displayed"):
-                    emitter = getattr(dims.events, attr, None)
-                    if emitter is not None and hasattr(emitter, "blocker"):
-                        try:
-                            stack.enter_context(emitter.blocker())
-                        except Exception:
-                            logger.debug("layer_manager: failed to block dims events for %s", attr, exc_info=True)
-                dims.ndim = dims_spec.ndim
-                if dims_spec.axis_labels:
-                    dims.axis_labels = tuple(dims_spec.axis_labels)
-                if dims_spec.displayed:
-                    try:
-                        dims.displayed = tuple(dims_spec.displayed)  # type: ignore[attr-defined]
-                    except Exception:
-                        logger.debug("layer_manager: dims.displayed update failed", exc_info=True)
-                if dims_spec.current_step:
-                    try:
-                        dims.current_step = tuple(dims_spec.current_step)
-                    except Exception:
-                        logger.debug("layer_manager: dims.current_step update failed", exc_info=True)
-                if dims_spec.ndisplay is not None:
-                    try:
-                        dims.ndisplay = int(dims_spec.ndisplay)
-                    except Exception:
-                        logger.debug("layer_manager: dims.ndisplay update failed", exc_info=True)
-        except Exception:
-            logger.debug("layer_manager: dims sync failed", exc_info=True)
-        if camera_spec is not None:
-            cam = self._viewer.camera
-            if camera_spec.center is not None:
-                cam.center = tuple(camera_spec.center)
-            if camera_spec.zoom is not None:
-                cam.zoom = float(camera_spec.zoom)
+
+def _normalize_scalar(value: Any) -> Any:
+    if isinstance(value, (int, float, str, bool)):
+        return value
+    return value

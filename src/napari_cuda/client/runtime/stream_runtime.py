@@ -52,15 +52,17 @@ from napari_cuda.client.streaming.client_loop.telemetry import (
 from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
 from napari_cuda.client.layers import RemoteLayerRegistry, RegistrySnapshot
 from napari_cuda.protocol.messages import (
-    LayerRemoveMessage,
-    LayerSpec,
-    LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifyLayersFrame,
     NotifySceneFrame,
     NotifySceneLevelPayload,
     NotifyStreamFrame,
 )
 from napari_cuda.protocol import AckState, build_call_command, build_state_update
+from napari_cuda.protocol.snapshots import (
+    layer_delta_from_payload,
+    scene_snapshot_from_payload,
+)
 from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
@@ -641,12 +643,12 @@ class ClientStreamLoop:
         """Cache latest notify.scene frame and forward to registry."""
         with self._scene_lock:
             self._latest_scene_frame = frame
-        payload = frame.payload
-        self._layer_registry.apply_scene(payload)
+        snapshot = scene_snapshot_from_payload(frame.payload)
+        self._layer_registry.apply_snapshot(snapshot)
         logger.debug(
             "notify.scene received: layers=%d policies=%s",
-            len(payload.layers),
-            tuple(payload.policies.keys()) if payload.policies else (),
+            len(snapshot.layers),
+            tuple(snapshot.policies.keys()) if snapshot.policies else (),
         )
 
     def _handle_scene_policies(self, policies: Mapping[str, object]) -> None:
@@ -684,15 +686,15 @@ class ClientStreamLoop:
                 multiscale.get('downgraded'),
             )
 
-    def _handle_layer_update(self, msg: LayerUpdateMessage) -> None:
-        self._layer_registry.apply_update(msg)
-        layer_id = msg.layer.layer_id if msg.layer else None
-        logger.debug("layer.update: id=%s partial=%s", layer_id, msg.partial)
-        self._presenter_facade.apply_layer_update(msg)
-
-    def _handle_layer_remove(self, msg: LayerRemoveMessage) -> None:
-        self._layer_registry.remove_layer(msg)
-        logger.debug("layer.remove: id=%s reason=%s", msg.layer_id, msg.reason)
+    def _handle_layer_delta(self, frame: NotifyLayersFrame) -> None:
+        delta = layer_delta_from_payload(frame.payload)
+        self._layer_registry.apply_delta(delta)
+        logger.debug(
+            "notify.layers: id=%s keys=%s",
+            delta.layer_id,
+            tuple(delta.changes.keys()),
+        )
+        self._presenter_facade.apply_layer_delta(delta)
 
     def request_keyframe(self, origin: str = "ui") -> Future | None:
         """Expose a best-effort keyframe command for external callers."""

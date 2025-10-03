@@ -34,7 +34,7 @@
    - Provide a `start_mcp_service(server: EGLHeadlessServer, loop: asyncio.AbstractEventLoop, port: int)` helper that spins up `FastMCP` with the adapted tools and returns a shutdown coroutine.
 2. **Headless tool bindings**
    - Implement tool methods using existing server helpers:
-     - Layer queries: call `server._scene_manager.scene_spec()` or `update_from_sources` to build listings.
+     - Layer queries: call `server._scene_manager.scene_snapshot()` or `update_from_sources` to build listings.
      - Mutations: enqueue updates via `_scene.latest_state`, `_enqueue_camera_command`, and the worker's request queues.
      - Outputs: use the existing `_store_output` utility or a simplified variant for command transcripts.
 3. **Server wiring**

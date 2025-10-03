@@ -13,9 +13,8 @@ from typing import Any, Callable, Mapping, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from napari_cuda.client.control.control_channel_client import StateChannel
     from napari_cuda.protocol.messages import (
-        LayerRemoveMessage,
-        LayerUpdateMessage,
         NotifyDimsFrame,
+        NotifyLayersFrame,
         NotifySceneFrame,
         NotifySceneLevelPayload,
         NotifyStreamFrame,
@@ -34,8 +33,7 @@ class StateController:
     handle_dims_update: Optional[Callable[["NotifyDimsFrame"], None]] = None
     handle_scene_snapshot: Optional[Callable[["NotifySceneFrame"], None]] = None
     handle_scene_level: Optional[Callable[["NotifySceneLevelPayload"], None]] = None
-    handle_layer_update: Optional[Callable[["LayerUpdateMessage"], None]] = None
-    handle_layer_remove: Optional[Callable[["LayerRemoveMessage"], None]] = None
+    handle_layer_delta: Optional[Callable[["NotifyLayersFrame"], None]] = None
     handle_notify_camera: Optional[Callable[[Any], None]] = None
     handle_ack_state: Optional[Callable[["AckState"], None]] = None
     handle_reply_command: Optional[Callable[["ReplyCommand"], None]] = None
@@ -55,8 +53,7 @@ class StateController:
             handle_dims_update=self.handle_dims_update,
             handle_scene_snapshot=self.handle_scene_snapshot,
             handle_scene_level=self.handle_scene_level,
-            handle_layer_update=self.handle_layer_update,
-            handle_layer_remove=self.handle_layer_remove,
+            handle_layer_delta=self.handle_layer_delta,
             handle_notify_camera=self.handle_notify_camera,
             handle_ack_state=self.handle_ack_state,
             handle_reply_command=self.handle_reply_command,

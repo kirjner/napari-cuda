@@ -22,6 +22,7 @@ from napari_cuda.protocol import (
     ERROR_COMMAND_TYPE,
     NOTIFY_CAMERA_TYPE,
     NOTIFY_DIMS_TYPE,
+    NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
@@ -41,11 +42,8 @@ from napari_cuda.protocol import (
     build_session_hello,
 )
 from napari_cuda.protocol.messages import (
-    LAYER_REMOVE_TYPE,
-    LAYER_UPDATE_TYPE,
-    LayerRemoveMessage,
-    LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifyLayersFrame,
     NotifySceneFrame,
     NotifySceneLevelPayload,
     NotifyStreamFrame,
@@ -139,8 +137,7 @@ class StateChannel:
         handle_dims_update: Optional[Callable[[NotifyDimsFrame], None]] = None,
         handle_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
         handle_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
-        handle_layer_update: Optional[Callable[[LayerUpdateMessage], None]] = None,
-        handle_layer_remove: Optional[Callable[[LayerRemoveMessage], None]] = None,
+        handle_layer_delta: Optional[Callable[[NotifyLayersFrame], None]] = None,
         handle_notify_camera: Optional[Callable[[Any], None]] = None,
         handle_ack_state: Optional[Callable[[AckState], None]] = None,
         handle_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
@@ -156,8 +153,7 @@ class StateChannel:
         self.handle_dims_update = handle_dims_update
         self.handle_scene_snapshot = handle_scene_snapshot
         self.handle_scene_level = handle_scene_level
-        self.handle_layer_update = handle_layer_update
-        self.handle_layer_remove = handle_layer_remove
+        self.handle_layer_delta = handle_layer_delta
         self.handle_notify_camera = handle_notify_camera
         self.handle_ack_state = handle_ack_state
         self.handle_reply_command = handle_reply_command
@@ -404,6 +400,10 @@ class StateChannel:
             self._handle_scene_level(data)
             return
 
+        if msg_type == NOTIFY_LAYERS_TYPE:
+            self._handle_notify_layers(data)
+            return
+
         if msg_type == NOTIFY_STREAM_TYPE:
             self._handle_notify_stream(data)
             return
@@ -418,32 +418,6 @@ class StateChannel:
 
         if msg_type in (SESSION_WELCOME_TYPE, SESSION_REJECT_TYPE):
             logger.debug("Ignoring post-handshake control message: %s", msg_type)
-            return
-
-        if msg_type == LAYER_UPDATE_TYPE:
-            if self.handle_layer_update:
-                try:
-                    update = LayerUpdateMessage.from_dict(data)
-                    if _STATE_DEBUG:
-                        logger.debug(
-                            "received layer.update: id=%s partial=%s",
-                            update.layer.layer_id if update.layer else None,
-                            update.partial,
-                        )
-                    self.handle_layer_update(update)
-                except Exception:
-                    logger.debug("handle_layer_update callback failed", exc_info=True)
-            return
-
-        if msg_type == LAYER_REMOVE_TYPE:
-            if self.handle_layer_remove:
-                try:
-                    removal = LayerRemoveMessage.from_dict(data)
-                    if _STATE_DEBUG:
-                        logger.debug("received layer.remove: id=%s reason=%s", removal.layer_id, removal.reason)
-                    self.handle_layer_remove(removal)
-                except Exception:
-                    logger.debug("handle_layer_remove callback failed", exc_info=True)
             return
 
     async def _perform_handshake(self, ws: websockets.WebSocketClientProtocol) -> None:
@@ -551,6 +525,29 @@ class StateChannel:
             self.handle_scene_level(frame.payload)
         except Exception:
             logger.debug("handle_scene_level callback failed", exc_info=True)
+
+    def _handle_notify_layers(self, data: Mapping[str, object]) -> None:
+        if not self.handle_layer_delta:
+            return
+        try:
+            frame = _ENVELOPE_PARSER.parse_notify_layers(data)
+            self._store_resume_cursor(NOTIFY_LAYERS_TYPE, frame.envelope)
+        except Exception:
+            logger.debug("notify.layers dispatch failed", exc_info=True)
+            return
+
+        if _STATE_DEBUG:
+            payload = frame.payload
+            logger.debug(
+                "received notify.layers: id=%s keys=%s",
+                payload.layer_id,
+                sorted(payload.changes.keys()),
+            )
+
+        try:
+            self.handle_layer_delta(frame)
+        except Exception:
+            logger.debug("handle_layer_delta callback failed", exc_info=True)
 
     def _handle_notify_stream(self, data: Mapping[str, object]) -> None:
         try:

@@ -81,9 +81,8 @@ def _make_loop() -> ClientStreamLoop:
         clear_pending_on_reconnect=lambda: None,
     )
     loop._layer_registry = SimpleNamespace(
-        apply_scene=lambda msg: None,
-        apply_update=lambda msg: None,
-        remove_layer=lambda msg: None,
+        apply_snapshot=lambda snapshot: None,
+        apply_delta=lambda delta: None,
     )
     loop._widget_to_video = lambda x, y: (float(x), float(y))
     loop._video_delta_to_canvas = lambda dx, dy: (float(dx), float(dy))

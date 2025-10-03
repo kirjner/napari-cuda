@@ -19,6 +19,7 @@ from napari_cuda.protocol import (
     FeatureToggle,
     ResumableTopicSequencer,
     build_ack_state,
+    build_notify_layers_delta,
     build_notify_dims,
     build_notify_scene_snapshot,
     build_notify_scene_level,
@@ -29,10 +30,9 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.greenfield.envelopes import NOTIFY_SCENE_LEVEL_TYPE
 from napari_cuda.protocol.messages import (
-    LayerRemoveMessage,
     LayerSpec,
-    LayerUpdateMessage,
     NotifyDimsFrame,
+    NotifyLayersFrame,
     NotifySceneFrame,
     NotifySceneLevelPayload,
     NotifyStreamFrame,
@@ -65,31 +65,46 @@ def test_state_channel_scene_callback(state_channel):
     assert frame.payload.layers[0]['layer_id'] == 'a'
 
 
-def test_state_channel_layer_update_callback(state_channel):
+def test_state_channel_layer_delta_callback(state_channel):
     received = []
-    state_channel.handle_layer_update = received.append
+    state_channel.handle_layer_delta = received.append
 
-    layer = LayerSpec(layer_id='layer-1', layer_type='image', name='demo', ndim=2, shape=[16, 16])
-    update_msg = LayerUpdateMessage(layer=layer, partial=False)
+    frame = build_notify_layers_delta(
+        session_id='session-4',
+        payload={'layer_id': 'layer-1', 'changes': {'opacity': 0.5}},
+        timestamp=1.0,
+        delta_token='tok-layer-1',
+        seq=3,
+    )
 
-    state_channel._handle_message(update_msg.to_dict())  # type: ignore[arg-type]
+    state_channel._handle_message(frame.to_dict())
 
     assert len(received) == 1
-    assert isinstance(received[0], LayerUpdateMessage)
-    assert received[0].layer is not None and received[0].layer.layer_id == 'layer-1'
+    message = received[0]
+    assert isinstance(message, NotifyLayersFrame)
+    assert message.payload.layer_id == 'layer-1'
+    assert message.payload.changes['opacity'] == 0.5
 
 
 def test_state_channel_layer_remove_callback(state_channel):
     received = []
-    state_channel.handle_layer_remove = received.append
+    state_channel.handle_layer_delta = received.append
 
-    removal = LayerRemoveMessage(layer_id='layer-2', reason='test')
+    frame = build_notify_layers_delta(
+        session_id='session-5',
+        payload={'layer_id': 'layer-2', 'changes': {'removed': True}},
+        timestamp=2.0,
+        delta_token='tok-layer-2',
+        seq=4,
+    )
 
-    state_channel._handle_message(removal.to_dict())  # type: ignore[arg-type]
+    state_channel._handle_message(frame.to_dict())
 
     assert len(received) == 1
-    assert isinstance(received[0], LayerRemoveMessage)
-    assert received[0].layer_id == 'layer-2'
+    message = received[0]
+    assert isinstance(message, NotifyLayersFrame)
+    assert message.payload.layer_id == 'layer-2'
+    assert message.payload.changes.get('removed') is True
 
 
 def test_state_channel_dims_update_dispatch() -> None:
