@@ -79,10 +79,6 @@ class CaptureFacade:
         except Exception:  # pragma: no cover - defensive cleanup path
             logger.debug("CaptureFacade GL cleanup failed", exc_info=True)
 
-    @property
-    def orientation_ready(self) -> bool:
-        return self.pipeline.orientation_ready
-
 @dataclass
 class FrameCapture:
     frame: Any
@@ -91,7 +87,6 @@ class FrameCapture:
     map_ms: float
     copy_ms: float
     convert_ms: float
-    orientation_ready: bool
 
 
 @dataclass
@@ -100,7 +95,6 @@ class EncodedFrame:
     packet: Optional[bytes]
     flags: int
     sequence: int
-    orientation_ready: bool
 
 
 def capture_frame_for_encoder(
@@ -120,7 +114,6 @@ def capture_frame_for_encoder(
         map_ms=map_ms,
         copy_ms=copy_ms,
         convert_ms=convert_ms,
-        orientation_ready=facade.orientation_ready,
     )
 
 
@@ -213,7 +206,6 @@ def encode_frame(
         packet=pkt,
         flags=0,
         sequence=seq,
-        orientation_ready=bool(capture_result.orientation_ready),
     )
 
 

@@ -472,16 +472,16 @@ class SessionAckPayload:
 class NotifyScenePayload:
     viewer: Dict[str, Any]
     layers: Tuple[Dict[str, Any], ...]
+    metadata: Dict[str, Any] | None = None
     policies: Dict[str, Any] | None = None
-    ancillary: Dict[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return _strip_none(
             {
                 "viewer": dict(self.viewer),
                 "layers": [dict(item) for item in self.layers],
+                "metadata": dict(self.metadata) if self.metadata is not None else None,
                 "policies": dict(self.policies) if self.policies is not None else None,
-                "ancillary": dict(self.ancillary) if self.ancillary is not None else None,
             }
         )
 
@@ -491,7 +491,7 @@ class NotifyScenePayload:
         _ensure_keyset(
             mapping,
             required=("viewer", "layers"),
-            optional=("policies", "ancillary"),
+            optional=("metadata", "policies"),
             context="notify.scene payload",
         )
         layers = tuple(
@@ -501,8 +501,8 @@ class NotifyScenePayload:
         return cls(
             viewer=_as_mutable_mapping(mapping["viewer"], "notify.scene payload.viewer"),
             layers=layers,
+            metadata=_optional_mapping(mapping.get("metadata"), "notify.scene payload.metadata"),
             policies=_optional_mapping(mapping.get("policies"), "notify.scene payload.policies"),
-            ancillary=_optional_mapping(mapping.get("ancillary"), "notify.scene payload.ancillary"),
         )
 
 

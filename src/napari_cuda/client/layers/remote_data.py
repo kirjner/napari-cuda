@@ -10,7 +10,7 @@ stream; the objects here simply satisfy `LayerDataProtocol`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Iterable, Iterator, Sequence, Tuple, Union, overload
+from typing import Any, Mapping, Iterable, Iterator, Sequence, Tuple, Union, overload
 
 import numpy as np
 
@@ -293,17 +293,17 @@ class RemoteMultiscale:
 
 
 def build_remote_data(block: Mapping[str, Any]) -> tuple[LayerDataProtocol | MultiScaleData, RemoteMultiscale | None]:
-    extras = block.get("extras")
+    source = block.get("source")
     data_id = None
     cache_version = None
-    if isinstance(extras, Mapping):
-        data_id = extras.get("data_id") or extras.get("source_id")
-        cache_version = extras.get("cache_version")
-        try:
-            if cache_version is not None:
-                cache_version = int(cache_version)
-        except Exception:
-            cache_version = None
+    if isinstance(source, Mapping):
+        data_id = source.get("data_id") or source.get("source_id")
+        cache_version_raw = source.get("cache_version")
+        if cache_version_raw is not None:
+            try:
+                cache_version = int(cache_version_raw)
+            except Exception:
+                raise ValueError("invalid cache_version in layer source block")
 
     shape_value = block.get("shape")
     if isinstance(shape_value, Sequence):

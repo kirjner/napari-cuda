@@ -25,6 +25,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 - ✅ **Helper coverage & sequencing** – `protocol/greenfield/envelopes.py` now supplies builders for every session/notify lane plus shared `ResumableTopicSequencer`; parser helpers mirror the full matrix.
 - ✅ **Schema tightening** – All greenfield payloads drop legacy `extras` bags; `from_dict` guards now reject unknown fields to match Appendix A.
 - ✅ **Scene snapshot emission** – Server baselines now flow through `build_notify_scene_payload` → `build_notify_scene_snapshot`, replacing legacy `scene.spec` JSON broadcasts and wiring resumable sequencing.
+- ✅ **Lean snapshot payloads** – Layer blocks carry only typed fields (`metadata`, `controls`, `multiscale`, `source`); scene-level metadata now holds the dataset path and policy metrics instead of the old ancillary/extras bags.
 - ✅ **Hot-path notify lanes** – Control channel emits `notify.scene`/`notify.layers`/`notify.dims`, and the pixel channel now issues `notify.stream` snapshots via `build_notify_stream`, advertising the stream sequencer cursor in `session.welcome`.
 - ⏳ **Spec round-trip tests** – Initial handshake + notify scene/state round-trips live in `src/napari_cuda/protocol/_tests/test_envelopes.py`; expand to the remaining lanes and sequencing edge cases next.
 - ✅ **Dual emission cleanup** – Legacy dual-emission shims (`legacy_dual_emitter`, `_broadcast_state_json`, `protocol_bridge`) removed; the server emits greenfield frames exclusively.
@@ -62,7 +63,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 | ✅ | Surface the command catalogue in the client UI layer: bind menu/actions to `_issue_command`, remove any residual direct worker shims, and extend command future handling tests. *(Completed 2025-10-03.)* | `src/napari_cuda/client/runtime/stream_runtime.py`, `src/napari_cuda/client/streaming/client_loop/pipelines.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, viewer action wiring. | `docs/protocol_greenfield.md` §§6.1–6.4 (client behaviour), Appendix A table 6 (command capability matrix). |
 | ✅ | Update documentation and smoke checklists to reflect the command-only path and archive status. *(Completed 2025-10-03.)* | `docs/protocol_greenfield_migration.md`, `docs/control_protocol_agent_notes.md`, `docs/consolidate_refactors_plan.md`. | `docs/protocol_greenfield.md` §§6.1–6.4, §8 (operational notes). |
 | ✅ | Add regression coverage for the command lane (keyframe RPC success/error paths) and fold it into smoke automation. *(Completed 2025-10-03.)* | `src/napari_cuda/server/_tests/test_state_channel_updates.py`, `src/napari_cuda/client/streaming/_tests/test_client_stream_loop.py`, smoke scripts. | `docs/protocol_greenfield.md` §§6.1–6.4. |
-| 6 | Introduce typed snapshot helpers for notify lanes (SceneSnapshot/LayerSnapshot now drive `notify.scene` + `notify.layers`; extend to dims/camera/stream as they’re touched). | `src/napari_cuda/protocol/snapshots.py`, `src/napari_cuda/server/layer_manager.py`, `src/napari_cuda/server/control/scene_snapshot_builder.py`, client adapters. | `docs/protocol_greenfield.md` §§4, 6; Appendix B. |
+| 6 | Introduce typed snapshot helpers for notify lanes (SceneSnapshot/LayerSnapshot now drive `notify.scene` + `notify.layers`; extend to dims/camera/stream as they’re touched). | `src/napari_cuda/protocol/snapshots.py`, `src/napari_cuda/server/layer_manager.py`, `src/napari_cuda/server/control/control_payload_builder.py`, client adapters. | `docs/protocol_greenfield.md` §§4, 6; Appendix B. |
 | ✅ 7 | Delete the legacy scene/layer dataclasses (`SceneSpecMessage`, `LayerUpdateMessage`, `LayerRemoveMessage`, `LayerSpec` family) and migrate every consumer to the snapshot helpers + greenfield payloads. | `src/napari_cuda/server/scene_spec.py`, `src/napari_cuda/client/layers/`, `src/napari_cuda/client/control/`, `src/napari_cuda/protocol/messages.py`. | `docs/protocol_greenfield.md` §§4, 6. |
 
 ## Documented Spec Drifts (2025-10-01)
@@ -131,14 +132,14 @@ Cross-reference these items when planning migration work; each future change sho
   registry directly (legacy `server/state_channel_handler.py` shim removed
   2025-10-03), dispatching via `MESSAGE_HANDLERS` for the remaining verbs.
 - `server/control/state_update_engine.py` and
-  `server/control/scene_snapshot_builder.py` (archive:
-  `server/server_state_updates.py` and `server/server_scene_spec.py`) serialize
+  `server/control/control_payload_builder.py` (archive:
+  `server/server_state_updates.py` (with former `server/server_scene_spec.py` now deleted) serialize
   authoritative `state.update` payloads before they reach the bridge.
 - Legacy dual-emission bridge (`server/control/legacy_dual_emitter.py`,
   `server/protocol_bridge.py`) removed; only greenfield helpers remain on the
   server path.
 - Baseline snapshots now emit through
-  `scene_snapshot_builder.build_notify_scene_payload` →
+  `control_payload_builder.build_notify_scene_payload` →
   `build_notify_scene_snapshot`, so the state channel no longer broadcasts the
   legacy `scene.spec` JSON.
 
@@ -184,7 +185,7 @@ Cross-reference these items when planning migration work; each future change sho
 | ~~`client/streaming/client_loop/control.py`~~ | `client/control/state_update_actions.py` | Legacy shim deleted; reducer helpers now live solely in `ControlStateContext` and friends. |
 | ~~`server/state_channel_handler.py`~~ | — *(removed 2025-10-03; callers use `server/control/control_channel_server.py` directly)* | Legacy compatibility shim no longer required. |
 | `server/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
-| `server/server_scene_spec.py` | `server/control/scene_snapshot_builder.py` | Communicates “baseline snapshot” job. |
+| *(removed)* | `server/control/control_payload_builder.py` | Communicates “baseline snapshot” job. |
 | — *(removed)* | — *(removed)* | Legacy dual-emission bridge deleted once stream lane went greenfield-only. |
 | `server/pixel_channel.py` | `server/pixel/pixel_channel_server.py` | Aligns with the pixel-lane nomenclature. |
 
@@ -327,8 +328,8 @@ translating to legacy formats.
 
 *Dual emission is removed during Phase 2 close-out; this phase sweeps any remaining compatibility artifacts.*
 
-1. Remove `notify_state`/`notify_scene` legacy extras and the capability
-   translation layer in `control_channel_client.py`.
+1. Remove the `notify_state`/`notify_scene` legacy metadata shims and the
+   capability translation layer in `control_channel_client.py`.
 2. Drop the compatibility feature flags and clean out re-export shims.
 3. Remove log noise/artifacts tied to old payloads (e.g., `dims.update raw meta`).
 4. Align terminology: treat protocol messages as `control envelopes` (or `notify envelopes`) and reserve `video frame` / `packet` for the encoder stream; update docs/code accordingly.
@@ -363,7 +364,7 @@ translating to legacy formats.
   - ✅ Legacy scene/layer dataclasses (`SceneSpecMessage`, `LayerSpec`,
     `LayerRenderHints`, `Multiscale*`) deleted; every consumer now hydrates from
     the greenfield snapshot payloads.
-- `scene_snapshot_builder.build_scene_spec_json` retired; new notifier payloads
+- `control_payload_builder.build_scene_spec_json` retired; new notifier payloads
   (`build_notify_scene_payload`) back the remaining callers.
 
 ## 7. Testing Matrix & Instrumentation
@@ -376,7 +377,7 @@ translating to legacy formats.
 | Command success/failure | `call.command` results in `reply.command` / `error.command` with `in_reply_to` = request `frame_id`. |
 | Reconnect with valid token | `notify.layers` deltas replayed; `seq`/`delta_token` progress without forcing a snapshot. |
 | Reconnect with stale token | Server sends `notify.scene(seq=0)` baseline, `notify.layers` issues fresh snapshot, client resets epoch. |
-| Stream config refresh | Encoder reset triggers `notify.stream` reissue carrying updated extras (format/data/fps). |
+| Stream config refresh | Encoder reset triggers `notify.stream` reissue carrying updated format/data/fps fields. |
 | Heartbeat dropout | Missing two beats triggers `session.goodbye`, both sockets close (state/pixel). |
 | Critical error | `notify.error(severity="critical")` precedes orderly socket teardown. |
 

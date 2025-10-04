@@ -34,7 +34,7 @@ def make_layer_block(**overrides) -> dict:
         "contrast_limits": [0.0, 1.0],
         "metadata": {"source": "test"},
         "render": {"mode": "mip", "opacity": 0.75, "visibility": True, "colormap": "gray"},
-        "extras": {"data_id": "abc", "cache_version": 1},
+        "source": {"data_id": "abc", "cache_version": 1},
         "controls": {},
     }
     base.update(overrides)
@@ -125,7 +125,7 @@ def test_remote_layer_registry_lifecycle():
         viewer=ViewerSnapshot(settings={}, dims={}, camera={}),
         layers=(LayerSnapshot(layer_id=block["layer_id"], block=dict(block)),),
         policies={},
-        ancillary={},
+        metadata={},
     )
     registry.apply_snapshot(snapshot)
     assert snapshots
@@ -143,7 +143,7 @@ def test_remote_layer_registry_lifecycle():
         viewer=snapshot.viewer,
         layers=(LayerSnapshot(layer_id=block["layer_id"], block=updated_block),),
         policies={},
-        ancillary={},
+        metadata={},
     )
     registry.apply_snapshot(refreshed)
     latest = registry.snapshot().layers[0]

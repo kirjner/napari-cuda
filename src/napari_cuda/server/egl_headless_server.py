@@ -53,7 +53,7 @@ from napari_cuda.protocol import (
     NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
 )
-from napari_cuda.server.control.scene_snapshot_builder import build_notify_scene_payload
+from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
 from . import pixel_broadcaster, pixel_channel, metrics_server
 from napari_cuda.server.control.control_channel_server import (
     broadcast_stream_config,
@@ -495,66 +495,46 @@ class EGLHeadlessServer:
         return self._scene_manager.dims_metadata()
 
     def _update_scene_manager(self) -> None:
+        worker = self._worker
+        if worker is None or not worker.is_ready:
+            return
+
         current_step = None
         with self._state_lock:
             if self._scene.latest_state.current_step is not None:
                 current_step = list(self._scene.latest_state.current_step)  # type: ignore[arg-type]
-        extras = {
-            'zarr_axes': (self._worker._zarr_axes if self._worker is not None else None),
-            'zarr_level': self._zarr_level,
-        }
-        if self._scene.policy_metrics_snapshot:
-            extras['policy_metrics'] = self._scene.policy_metrics_snapshot
-        if self._worker is not None:
-            source = getattr(self._worker, '_scene_source', None)
-            if source is not None:
-                extras['zarr_scale'] = list(source.level_scale(source.current_level))
-                extras['multiscale_levels'] = [
-                    {
-                        'index': desc.index,
-                        'path': desc.path,
-                        'shape': [int(x) for x in desc.shape],
-                        'downsample': list(desc.downsample),
-                    }
-                    for desc in source.level_descriptors
-                ]
-                extras['multiscale_current_level'] = int(source.current_level)
-                # Keep multiscale server state in sync so client HUD reflects live level
-                try:
-                    # Advertise adaptive policy; reflect zoom-driven switches
-                    self._scene.multiscale_state['policy'] = 'auto'
-                    self._scene.multiscale_state['current_level'] = int(source.current_level)
-                    # Refresh levels if descriptor count changed (defensive)
-                    levels = self._scene.multiscale_state.get('levels') or []
-                    if not isinstance(levels, list) or len(levels) != len(source.level_descriptors):
-                        self._scene.multiscale_state['levels'] = [
-                            {
-                                'path': desc.path,
-                                'downsample': list(desc.downsample),
-                                'shape': [int(x) for x in desc.shape],
-                            }
-                            for desc in source.level_descriptors
-                        ]
-                except Exception:
-                    logger.debug('ms_state sync failed', exc_info=True)
+
+        source = getattr(worker, '_scene_source', None)
+        if source is not None:
+            current_level = int(source.current_level)
+            self._scene.multiscale_state['policy'] = 'auto'
+            self._scene.multiscale_state['current_level'] = current_level
+            descriptors = source.level_descriptors
+            self._scene.multiscale_state['levels'] = [
+                {
+                    'path': desc.path,
+                    'shape': [int(x) for x in desc.shape],
+                    'downsample': list(desc.downsample),
+                    'scale': [float(x) for x in desc.scale],
+                }
+                for desc in descriptors
+            ]
+            self._scene.multiscale_state['index_space'] = 'base'
+        else:
+            self._scene.multiscale_state.pop('levels', None)
+
         viewer_model = None
-        if self._worker is not None:
-            try:
-                viewer_model = self._worker.viewer_model()
-                if viewer_model is not None:
-                    extras.setdefault('adapter_engine', 'napari-vispy')
-            except Exception:
-                logger.debug('worker viewer_model fetch failed', exc_info=True)
+        viewer_model = worker.viewer_model()
         self._scene_manager.update_from_sources(
-            worker=self._worker,
+            worker=worker,
             scene_state=self._scene.latest_state,
             multiscale_state=dict(self._scene.multiscale_state),
             volume_state=dict(self._scene.volume_state),
             current_step=current_step,
             ndisplay=self._current_ndisplay(),
             zarr_path=self._zarr_path,
+            scene_source=source,
             viewer_model=viewer_model,
-            extras=extras,
             layer_controls=dict(self._scene.layer_controls),
         )
 

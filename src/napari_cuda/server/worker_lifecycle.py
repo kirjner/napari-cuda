@@ -16,6 +16,7 @@ from .bitstream import build_avcc_config, pack_to_avcc
 from .scene_state import ServerSceneState
 from .worker_notifications import WorkerSceneNotification
 from .render_worker import EGLRendererWorker
+from .debug_tools import DebugDumper
 
 
 def _handle_scene_refresh(
@@ -32,7 +33,7 @@ def _handle_scene_refresh(
 
     worker_ref = state.worker
     assert worker_ref is not None, "render worker missing during refresh"
-    assert worker_ref.is_bootstrapped, "render worker refresh fired before bootstrap"
+    assert worker_ref.is_ready, "render worker refresh fired before bootstrap"
 
     meta = dict(worker_ref.snapshot_dims_metadata())
     assert meta, "render worker returned empty dims metadata"
@@ -118,9 +119,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
     def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
         worker = state.worker
-        if worker is not None and worker._orientation_ready is False:
-            return
-
         if server._ctx.debug_policy.encoder.log_nals:
             from .bitstream import parse_nals
 
@@ -229,7 +227,32 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             )
             state.worker = worker
 
-            worker.bootstrap()
+            worker._init_cuda()
+            worker._init_vispy_scene()
+            worker._init_egl()
+            worker._init_capture()
+            worker._init_cuda_interop()
+            worker._init_encoder()
+
+            worker._debug = DebugDumper(worker._debug_config)
+            if worker._debug.cfg.enabled:
+                worker._debug.log_env_once()
+                worker._debug.ensure_out_dir()
+            worker._capture.pipeline.set_debug(worker._debug)
+            worker._capture.pipeline.set_raw_dump_budget(worker._raw_dump_budget)
+            worker._capture.cuda.set_force_tight_pitch(worker._debug_policy.worker.force_tight_pitch)
+            worker._log_debug_policy_once()
+            worker._is_ready = True
+            logger.info(
+                "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
+                worker.width,
+                worker.height,
+                worker._capture.pipeline.enc_input_format,
+                worker.fps,
+                worker._animate,
+                bool(worker._zarr_path),
+            )
+
             worker.set_scene_refresh_callback(
                 partial(
                     _handle_scene_refresh,

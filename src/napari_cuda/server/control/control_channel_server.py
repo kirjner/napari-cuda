@@ -79,7 +79,7 @@ from napari_cuda.server.server_scene import (
     layer_controls_to_dict,
 )
 from napari_cuda.server.worker_notifications import WorkerSceneNotification
-from napari_cuda.server.control.scene_snapshot_builder import (
+from napari_cuda.server.control.control_payload_builder import (
     build_notify_dims_from_result,
     build_notify_dims_payload,
     build_notify_layers_delta_payload,
@@ -90,8 +90,8 @@ from napari_cuda.server.control.scene_snapshot_builder import (
 from napari_cuda.protocol.snapshots import LayerDelta
 from napari_cuda.server.pixel import pixel_channel_server as pixel_channel
 from napari_cuda.server.control.resumable_history_store import (
+    EnvelopeSnapshot,
     ResumableHistoryStore,
-    FrameBlueprint,
     ResumeDecision,
     ResumePlan,
 )
@@ -491,9 +491,9 @@ async def _broadcast_layers_delta(
     now = time.time() if timestamp is None else float(timestamp)
 
     store = _history_store(server)
-    blueprint: FrameBlueprint | None = None
+    snapshot: EnvelopeSnapshot | None = None
     if store is not None and targets is None:
-        blueprint = store.delta_blueprint(
+        snapshot = store.delta_envelope(
             NOTIFY_LAYERS_TYPE,
             payload=payload.to_dict(),
             timestamp=now,
@@ -510,13 +510,13 @@ async def _broadcast_layers_delta(
         kwargs: Dict[str, Any] = {
             "session_id": session_id,
             "payload": payload,
-            "timestamp": blueprint.timestamp if blueprint is not None else now,
+            "timestamp": snapshot.timestamp if snapshot is not None else now,
             "intent_id": intent_id,
         }
-        if blueprint is not None:
-            kwargs["seq"] = blueprint.seq
-            kwargs["delta_token"] = blueprint.delta_token
-            kwargs["frame_id"] = blueprint.frame_id
+        if snapshot is not None:
+            kwargs["seq"] = snapshot.seq
+            kwargs["delta_token"] = snapshot.delta_token
+            kwargs["frame_id"] = snapshot.frame_id
         else:
             kwargs["sequencer"] = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
         frame = build_notify_layers_delta(**kwargs)
@@ -525,10 +525,10 @@ async def _broadcast_layers_delta(
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    if blueprint is not None:
+    if snapshot is not None:
         for ws in clients:
             sequencer = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
-            sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+            sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
 
 
 async def _broadcast_dims_state(
@@ -676,26 +676,26 @@ async def _send_stream_frame(
     *,
     payload: NotifyStreamPayload | Mapping[str, Any],
     timestamp: Optional[float],
-    blueprint: FrameBlueprint | None = None,
-    snapshot: bool = False,
-) -> FrameBlueprint | None:
+    snapshot: EnvelopeSnapshot | None = None,
+    force_snapshot: bool = False,
+) -> EnvelopeSnapshot | None:
     session_id = _state_session(ws)
     if not session_id:
-        return blueprint
+        return snapshot
     if not isinstance(payload, NotifyStreamPayload):
         payload = NotifyStreamPayload.from_dict(payload)
     now = time.time() if timestamp is None else float(timestamp)
     store = _history_store(server)
-    if blueprint is None and store is not None:
+    if snapshot is None and store is not None:
         payload_dict = payload.to_dict()
-        if snapshot:
-            blueprint = store.snapshot_blueprint(
+        if force_snapshot:
+            snapshot = store.snapshot_envelope(
                 NOTIFY_STREAM_TYPE,
                 payload=payload_dict,
                 timestamp=now,
             )
         else:
-            blueprint = store.delta_blueprint(
+            snapshot = store.delta_envelope(
                 NOTIFY_STREAM_TYPE,
                 payload=payload_dict,
                 timestamp=now,
@@ -704,16 +704,16 @@ async def _send_stream_frame(
     kwargs: Dict[str, Any] = {
         "session_id": session_id,
         "payload": payload,
-        "timestamp": blueprint.timestamp if blueprint is not None else now,
+        "timestamp": snapshot.timestamp if snapshot is not None else now,
     }
     sequencer = _state_sequencer(ws, NOTIFY_STREAM_TYPE)
-    if blueprint is not None:
-        kwargs["seq"] = blueprint.seq
-        kwargs["delta_token"] = blueprint.delta_token
-        kwargs["frame_id"] = blueprint.frame_id
-        sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    if snapshot is not None:
+        kwargs["seq"] = snapshot.seq
+        kwargs["delta_token"] = snapshot.delta_token
+        kwargs["frame_id"] = snapshot.frame_id
+        sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
     else:
-        if snapshot or sequencer.seq is None:
+        if force_snapshot or sequencer.seq is None:
             cursor = sequencer.snapshot()
             kwargs["seq"] = cursor.seq
             kwargs["delta_token"] = cursor.delta_token
@@ -721,7 +721,7 @@ async def _send_stream_frame(
             kwargs["sequencer"] = sequencer
     frame = build_notify_stream(**kwargs)
     await _send_frame(server, ws, frame)
-    return blueprint
+    return snapshot
 
 
 async def _send_scene_level_frame(
@@ -730,17 +730,17 @@ async def _send_scene_level_frame(
     *,
     payload: NotifySceneLevelPayload | Mapping[str, Any],
     timestamp: Optional[float],
-    blueprint: FrameBlueprint | None = None,
-) -> FrameBlueprint | None:
+    snapshot: EnvelopeSnapshot | None = None,
+) -> EnvelopeSnapshot | None:
     session_id = _state_session(ws)
     if not session_id:
-        return blueprint
+        return snapshot
     if not isinstance(payload, NotifySceneLevelPayload):
         payload = NotifySceneLevelPayload.from_dict(payload)
     now = time.time() if timestamp is None else float(timestamp)
     store = _history_store(server)
-    if blueprint is None and store is not None:
-        blueprint = store.delta_blueprint(
+    if snapshot is None and store is not None:
+        snapshot = store.delta_envelope(
             NOTIFY_SCENE_LEVEL_TYPE,
             payload=payload.to_dict(),
             timestamp=now,
@@ -749,14 +749,14 @@ async def _send_scene_level_frame(
     kwargs: Dict[str, Any] = {
         "session_id": session_id,
         "payload": payload,
-        "timestamp": blueprint.timestamp if blueprint is not None else now,
+        "timestamp": snapshot.timestamp if snapshot is not None else now,
     }
     sequencer = _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE)
-    if blueprint is not None:
-        kwargs["seq"] = blueprint.seq
-        kwargs["delta_token"] = blueprint.delta_token
-        kwargs["frame_id"] = blueprint.frame_id
-        sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    if snapshot is not None:
+        kwargs["seq"] = snapshot.seq
+        kwargs["delta_token"] = snapshot.delta_token
+        kwargs["frame_id"] = snapshot.frame_id
+        sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
     else:
         if sequencer.seq is None:
             cursor = sequencer.snapshot()
@@ -766,7 +766,7 @@ async def _send_scene_level_frame(
             kwargs["sequencer"] = sequencer
     frame = build_notify_scene_level(**kwargs)
     await _send_frame(server, ws, frame)
-    return blueprint
+    return snapshot
 
 
 async def _emit_scene_baseline(
@@ -778,20 +778,20 @@ async def _emit_scene_baseline(
     reason: str,
 ) -> None:
     store = _history_store(server)
-    blueprint: FrameBlueprint | None = None
+    snapshot: EnvelopeSnapshot | None = None
     timestamp = time.time()
 
     if store is not None:
-        blueprint = store.current_snapshot(NOTIFY_SCENE_TYPE)
+        snapshot = store.current_snapshot(NOTIFY_SCENE_TYPE)
         need_reset = plan is not None and plan.decision == ResumeDecision.RESET
-        if blueprint is None or need_reset:
+        if snapshot is None or need_reset:
             if payload is None:
                 payload = build_notify_scene_payload(
                     server._scene,
                     server._scene_manager,
                     viewer_settings=_viewer_settings(server),
                 )
-            blueprint = store.snapshot_blueprint(
+            snapshot = store.snapshot_envelope(
                 NOTIFY_SCENE_TYPE,
                 payload=payload.to_dict(),
                 timestamp=timestamp,
@@ -802,7 +802,7 @@ async def _emit_scene_baseline(
             _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
             _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE).clear()
-        await _send_scene_blueprint(server, ws, blueprint)
+        await _send_scene_snapshot_from_cache(server, ws, snapshot)
     else:
         if payload is None:
             payload = build_notify_scene_payload(
@@ -818,7 +818,7 @@ async def _emit_scene_baseline(
             viewer=payload.viewer,
             layers=payload.layers,
             policies=payload.policies,
-            ancillary=payload.ancillary,
+            metadata=payload.metadata,
             timestamp=timestamp,
             sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
         )
@@ -839,13 +839,13 @@ async def _emit_scene_level_baseline(
     store = _history_store(server)
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
         if plan.deltas:
-            for blueprint in plan.deltas:
+            for snapshot in plan.deltas:
                 await _send_scene_level_frame(
                     server,
                     ws,
-                    payload=blueprint.payload,
-                    timestamp=blueprint.timestamp,
-                    blueprint=blueprint,
+                    payload=snapshot.payload,
+                    timestamp=snapshot.timestamp,
+                    snapshot=snapshot,
                 )
         return
 
@@ -853,11 +853,11 @@ async def _emit_scene_level_baseline(
     payload: NotifySceneLevelPayload | None = None
 
     if store is not None:
-        blueprint = store.current_snapshot(NOTIFY_SCENE_LEVEL_TYPE)
+        snapshot = store.current_snapshot(NOTIFY_SCENE_LEVEL_TYPE)
         need_reset = plan is not None and plan.decision == ResumeDecision.RESET
-        if blueprint is None or need_reset:
+        if snapshot is None or need_reset:
             payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
-            blueprint = store.snapshot_blueprint(
+            snapshot = store.snapshot_envelope(
                 NOTIFY_SCENE_LEVEL_TYPE,
                 payload=payload.to_dict(),
                 timestamp=timestamp,
@@ -868,8 +868,8 @@ async def _emit_scene_level_baseline(
             server,
             ws,
             payload=payload,
-            timestamp=blueprint.timestamp,
-            blueprint=blueprint,
+            timestamp=snapshot.timestamp,
+            snapshot=snapshot,
         )
         return
 
@@ -888,8 +888,8 @@ async def _emit_layer_baseline(
     store = _history_store(server)
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
         if plan.deltas:
-            for blueprint in plan.deltas:
-                await _send_layer_blueprint(server, ws, blueprint)
+            for snapshot in plan.deltas:
+                await _send_layer_snapshot(server, ws, snapshot)
         return
 
     if not fallback_controls:
@@ -899,13 +899,13 @@ async def _emit_layer_baseline(
         now = time.time()
         for layer_id, changes in fallback_controls:
             payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", changes=changes)
-            blueprint = store.delta_blueprint(
+            snapshot = store.delta_envelope(
                 NOTIFY_LAYERS_TYPE,
                 payload=payload.to_dict(),
                 timestamp=now,
                 intent_id=None,
             )
-            await _send_layer_blueprint(server, ws, blueprint)
+            await _send_layer_snapshot(server, ws, snapshot)
         return
 
     for layer_id, changes in fallback_controls:
@@ -928,8 +928,8 @@ async def _emit_stream_baseline(
     store = _history_store(server)
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
         if plan.deltas:
-            for blueprint in plan.deltas:
-                await _send_stream_blueprint(server, ws, blueprint)
+            for snapshot in plan.deltas:
+                await _send_stream_snapshot(server, ws, snapshot)
         return
 
     channel = getattr(server, "_pixel_channel", None)
@@ -983,13 +983,13 @@ async def broadcast_stream_config(
         if store is not None:
             now = time.time() if timestamp is None else float(timestamp)
             if store.current_snapshot(NOTIFY_STREAM_TYPE) is None:
-                store.snapshot_blueprint(
+                store.snapshot_envelope(
                     NOTIFY_STREAM_TYPE,
                     payload=payload.to_dict(),
                     timestamp=now,
                 )
             else:
-                store.delta_blueprint(
+                store.delta_envelope(
                     NOTIFY_STREAM_TYPE,
                     payload=payload.to_dict(),
                     timestamp=now,
@@ -998,19 +998,19 @@ async def broadcast_stream_config(
 
     now = time.time() if timestamp is None else float(timestamp)
     store = _history_store(server)
-    blueprint: FrameBlueprint | None = None
+    snapshot: EnvelopeSnapshot | None = None
     snapshot_mode = False
     if store is not None:
         payload_dict = payload.to_dict()
         snapshot_mode = store.current_snapshot(NOTIFY_STREAM_TYPE) is None
         if snapshot_mode:
-            blueprint = store.snapshot_blueprint(
+            snapshot = store.snapshot_envelope(
                 NOTIFY_STREAM_TYPE,
                 payload=payload_dict,
                 timestamp=now,
             )
         else:
-            blueprint = store.delta_blueprint(
+            snapshot = store.delta_envelope(
                 NOTIFY_STREAM_TYPE,
                 payload=payload_dict,
                 timestamp=now,
@@ -1029,8 +1029,8 @@ async def broadcast_stream_config(
                 ws,
                 payload=payload,
                 timestamp=now,
-                blueprint=blueprint,
-                snapshot=snapshot_mode,
+                snapshot=snapshot,
+                force_snapshot=snapshot_mode,
             )
         )
 
@@ -1056,7 +1056,7 @@ async def broadcast_scene_level(
             )
             if not isinstance(payload_obj, NotifySceneLevelPayload):
                 payload_obj = NotifySceneLevelPayload.from_dict(payload_obj)
-            store.delta_blueprint(
+            store.delta_envelope(
                 NOTIFY_SCENE_LEVEL_TYPE,
                 payload=payload_obj.to_dict(),
                 timestamp=time.time() if timestamp is None else float(timestamp),
@@ -1072,15 +1072,15 @@ async def broadcast_scene_level(
 
     now = time.time() if timestamp is None else float(timestamp)
     store = _history_store(server)
-    blueprint: FrameBlueprint | None = None
+    snapshot: EnvelopeSnapshot | None = None
     if store is not None:
-        blueprint = store.delta_blueprint(
+        snapshot = store.delta_envelope(
             NOTIFY_SCENE_LEVEL_TYPE,
             payload=payload_obj.to_dict(),
             timestamp=now,
         )
 
-    tasks: list[Awaitable[FrameBlueprint | None]] = []
+    tasks: list[Awaitable[EnvelopeSnapshot | None]] = []
     for ws in clients:
         if not _feature_enabled(ws, "notify.scene.level"):
             continue
@@ -1090,7 +1090,7 @@ async def broadcast_scene_level(
                 ws,
                 payload=payload_obj,
                 timestamp=now,
-                blueprint=blueprint,
+                snapshot=snapshot,
             )
         )
 
@@ -2718,60 +2718,60 @@ async def _send_frame(server: Any, ws: Any, frame: Any) -> None:
     await _await_state_send(server, ws, text)
 
 
-async def _send_layer_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint) -> None:
+async def _send_layer_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
     session_id = _state_session(ws)
     if not session_id:
         return
-    payload = NotifyLayersPayload.from_dict(blueprint.payload)
+    payload = NotifyLayersPayload.from_dict(snapshot.payload)
     frame = build_notify_layers_delta(
         session_id=session_id,
         payload=payload,
-        timestamp=blueprint.timestamp,
-        frame_id=blueprint.frame_id,
-        intent_id=blueprint.intent_id,
-        seq=blueprint.seq,
-        delta_token=blueprint.delta_token,
+        timestamp=snapshot.timestamp,
+        frame_id=snapshot.frame_id,
+        intent_id=snapshot.intent_id,
+        seq=snapshot.seq,
+        delta_token=snapshot.delta_token,
     )
     await _send_frame(server, ws, frame)
     sequencer = _state_sequencer(ws, NOTIFY_LAYERS_TYPE)
-    sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
 
 
-async def _send_stream_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint) -> None:
+async def _send_stream_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
     session_id = _state_session(ws)
     if not session_id:
         return
-    payload = NotifyStreamPayload.from_dict(blueprint.payload)
+    payload = NotifyStreamPayload.from_dict(snapshot.payload)
     frame = build_notify_stream(
         session_id=session_id,
         payload=payload,
-        timestamp=blueprint.timestamp,
-        frame_id=blueprint.frame_id,
-        seq=blueprint.seq,
-        delta_token=blueprint.delta_token,
+        timestamp=snapshot.timestamp,
+        frame_id=snapshot.frame_id,
+        seq=snapshot.seq,
+        delta_token=snapshot.delta_token,
     )
     await _send_frame(server, ws, frame)
     sequencer = _state_sequencer(ws, NOTIFY_STREAM_TYPE)
-    sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
 
 
-async def _send_scene_blueprint(server: Any, ws: Any, blueprint: FrameBlueprint) -> None:
+async def _send_scene_snapshot_from_cache(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
     session_id = _state_session(ws)
     if not session_id:
         return
-    payload = NotifyScenePayload.from_dict(blueprint.payload)
+    payload = NotifyScenePayload.from_dict(snapshot.payload)
     sequencer = _state_sequencer(ws, NOTIFY_SCENE_TYPE)
-    sequencer.resume(seq=blueprint.seq, delta_token=blueprint.delta_token)
+    sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
     frame = build_notify_scene_snapshot(
         session_id=session_id,
         viewer=payload.viewer,
         layers=payload.layers,
         policies=payload.policies,
-        ancillary=payload.ancillary,
-        timestamp=blueprint.timestamp,
-        frame_id=blueprint.frame_id,
-        delta_token=blueprint.delta_token,
-        intent_id=blueprint.intent_id,
+        metadata=payload.metadata,
+        timestamp=snapshot.timestamp,
+        frame_id=snapshot.frame_id,
+        delta_token=snapshot.delta_token,
+        intent_id=snapshot.intent_id,
         sequencer=sequencer,
     )
     await _send_frame(server, ws, frame)
@@ -2879,7 +2879,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         delattr(ws, "_napari_cuda_resume_plan")
 
 
-async def _send_scene_snapshot(server: Any, ws: Any, *, reason: str) -> None:
+async def _send_scene_snapshot_direct(server: Any, ws: Any, *, reason: str) -> None:
     session_id = _state_session(ws)
     if not session_id:
         logger.debug("Skipping notify.scene send without session id")
@@ -2892,9 +2892,9 @@ async def _send_scene_snapshot(server: Any, ws: Any, *, reason: str) -> None:
     )
     timestamp = time.time()
     store = _history_store(server)
-    blueprint: FrameBlueprint | None = None
+    snapshot: EnvelopeSnapshot | None = None
     if store is not None:
-        blueprint = store.snapshot_blueprint(
+        snapshot = store.snapshot_envelope(
             NOTIFY_SCENE_TYPE,
             payload=payload.to_dict(),
             timestamp=timestamp,
@@ -2904,10 +2904,10 @@ async def _send_scene_snapshot(server: Any, ws: Any, *, reason: str) -> None:
         viewer=payload.viewer,
         layers=payload.layers,
         policies=payload.policies,
-        ancillary=payload.ancillary,
-        timestamp=blueprint.timestamp if blueprint is not None else timestamp,
-        delta_token=blueprint.delta_token if blueprint is not None else None,
-        frame_id=blueprint.frame_id if blueprint is not None else None,
+        metadata=payload.metadata,
+        timestamp=snapshot.timestamp if snapshot is not None else timestamp,
+        delta_token=snapshot.delta_token if snapshot is not None else None,
+        frame_id=snapshot.frame_id if snapshot is not None else None,
     )
     await _send_frame(server, ws, frame)
     if server._log_dims_info:
@@ -2927,9 +2927,9 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
     )
     timestamp = time.time()
     store = _history_store(server)
-    blueprint: FrameBlueprint | None = None
+    snapshot: EnvelopeSnapshot | None = None
     if store is not None:
-        blueprint = store.snapshot_blueprint(
+        snapshot = store.snapshot_envelope(
             NOTIFY_SCENE_TYPE,
             payload=payload.to_dict(),
             timestamp=timestamp,
@@ -2942,7 +2942,7 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         session_id = _state_session(ws)
         if not session_id:
             continue
-        if blueprint is not None:
+        if snapshot is not None:
             _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
             _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE).clear()
@@ -2951,10 +2951,10 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
             viewer=payload.viewer,
             layers=payload.layers,
             policies=payload.policies,
-            ancillary=payload.ancillary,
-            timestamp=blueprint.timestamp if blueprint is not None else timestamp,
-            delta_token=blueprint.delta_token if blueprint is not None else None,
-            frame_id=blueprint.frame_id if blueprint is not None else None,
+            metadata=payload.metadata,
+            timestamp=snapshot.timestamp if snapshot is not None else timestamp,
+            delta_token=snapshot.delta_token if snapshot is not None else None,
+            frame_id=snapshot.frame_id if snapshot is not None else None,
         )
         tasks.append(_send_frame(server, ws, frame))
     if not tasks:

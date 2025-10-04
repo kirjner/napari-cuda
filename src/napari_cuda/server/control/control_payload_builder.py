@@ -25,7 +25,6 @@ def build_notify_scene_payload(
     *,
     timestamp: Optional[float] = None,
     viewer_settings: Optional[Mapping[str, Any]] = None,
-    ancillary: Optional[Mapping[str, Any]] = None,
 ) -> NotifyScenePayload:
     """Build a ``notify.scene`` payload aligned with the greenfield schema."""
 
@@ -39,7 +38,7 @@ def build_notify_scene_payload(
         settings.update({str(key): _normalize_value(value) for key, value in viewer_settings.items()})
 
     payload.policies = _build_policies_block(scene)
-    payload.ancillary = _merge_ancillary(snapshot.ancillary, scene, ancillary)
+    payload.metadata = _merge_scene_metadata(snapshot.metadata, scene)
 
     scene.last_scene_snapshot = payload.to_dict()
     return payload
@@ -175,26 +174,21 @@ def _build_policies_block(scene: ServerSceneData) -> Optional[Dict[str, Any]]:
     return policies or None
 
 
-def _merge_ancillary(
-    snapshot_ancillary: Mapping[str, Any],
+def _merge_scene_metadata(
+    snapshot_metadata: Mapping[str, Any],
     scene: ServerSceneData,
-    ancillary: Optional[Mapping[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    payload: Dict[str, Any] = dict(snapshot_ancillary)
+    metadata: Dict[str, Any] = dict(snapshot_metadata)
 
     if scene.volume_state:
-        payload.setdefault("volume_state", {})
-        payload["volume_state"].update({str(k): _normalize_value(v) for k, v in scene.volume_state.items()})
+        metadata.setdefault("volume_state", {})
+        metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in scene.volume_state.items()})
 
     if scene.policy_metrics_snapshot:
-        payload["policy_metrics"] = {
+        metadata["policy_metrics"] = {
             str(k): _normalize_value(v)
             for k, v in scene.policy_metrics_snapshot.items()
             if v is not None
         }
 
-    if ancillary:
-        for key, value in ancillary.items():
-            payload[str(key)] = _normalize_value(value)
-
-    return payload or None
+    return metadata or None

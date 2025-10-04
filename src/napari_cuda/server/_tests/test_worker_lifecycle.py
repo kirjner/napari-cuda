@@ -15,6 +15,7 @@ from napari_cuda.server.scene_state import ServerSceneState
 from napari_cuda.server.worker_notifications import WorkerSceneNotificationQueue
 from napari_cuda.server.server_scene import create_server_scene_data
 from napari_cuda.server.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker
+from napari_cuda.server.debug_tools import DebugConfig
 
 
 class DummyMetrics:
@@ -40,7 +41,13 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
 
     server = FakeServer()
     server.metrics = metrics
-    server._ctx = SimpleNamespace(debug_policy=SimpleNamespace(encoder=SimpleNamespace(log_nals=False)))
+    server._ctx = SimpleNamespace(
+        debug_policy=SimpleNamespace(
+            encoder=SimpleNamespace(log_nals=False),
+            worker=SimpleNamespace(force_tight_pitch=False),
+            dumps=SimpleNamespace(raw_budget=0),
+        )
+    )
     server._param_cache = {}
     server._pixel_channel = object()
     server._pixel_config = object()
@@ -112,7 +119,6 @@ def _wait_for_worker(state: WorkerLifecycleState, *, timeout_s: float = 1.0) -> 
 class _FakeWorkerBase:
     """Minimal render worker stub that satisfies lifecycle expectations."""
 
-    _orientation_ready = True
     _z_index = None
     default_meta = {
         'ndim': 2,
@@ -132,30 +138,65 @@ class _FakeWorkerBase:
         self.applied_states: list = []
         self.camera_commands: list = []
         self.frames: list[bytes] = []
-        self._bootstrapped = True
-        self._bootstrapping = False
+        self._ready = False
         self._last_step = tuple(int(value) for value in self.default_step)
         self._plane_restore_state = None
         self._active_ms_level = 0
+        self._scene_source = None
+        self._zarr_axes = kwargs.get('zarr_axes')
+        self._zarr_path = kwargs.get('zarr_path')
+        self.width = int(kwargs.get('width', 640))
+        self.height = int(kwargs.get('height', 480))
+        self.fps = int(kwargs.get('fps', 60))
+        self._animate = bool(kwargs.get('animate', False))
+        self._raw_dump_budget = 0
+        self._debug_policy = SimpleNamespace(worker=SimpleNamespace(force_tight_pitch=False))
+        self._debug_config = DebugConfig()
+        self._capture = SimpleNamespace(
+            pipeline=SimpleNamespace(
+                set_debug=lambda debug: None,
+                set_raw_dump_budget=lambda budget: None,
+                enc_input_format="NV12",
+            ),
+            cuda=SimpleNamespace(set_force_tight_pitch=lambda enabled: None),
+        )
+
+    # --- Lifecycle hooks -------------------------------------------------
+    def _init_cuda(self) -> None:
+        return
+
+    def _init_vispy_scene(self) -> None:
+        return
+
+    def _init_egl(self) -> None:
+        return
+
+    def _init_capture(self) -> None:
+        return
+
+    def _init_cuda_interop(self) -> None:
+        return
+
+    def _init_encoder(self) -> None:
+        return
+
+    def _log_debug_policy_once(self) -> None:
+        return
 
     def snapshot_dims_metadata(self) -> dict[str, object]:
         return dict(self._meta)
 
     @property
-    def is_bootstrapped(self) -> bool:
-        return self._bootstrapped
-
-    @property
-    def is_bootstrapping(self) -> bool:
-        return self._bootstrapping
+    def is_ready(self) -> bool:
+        if hasattr(self, "_is_ready"):
+            return bool(self._is_ready)
+        return self._ready
 
     def set_scene_refresh_callback(self, callback) -> None:  # noqa: ANN001 - test stub
         self._scene_refresh_cb = callback
 
-    def bootstrap(self) -> None:
-        self._bootstrapping = True
-        self._bootstrapped = True
-        self._bootstrapping = False
+    def viewer_model(self):  # noqa: ANN001
+        return None
 
     def apply_state(self, state) -> None:  # noqa: ANN001 - signature mirrors concrete worker
         self.applied_states.append(state)
@@ -184,7 +225,8 @@ class _FakeWorkerBase:
         return timings, payload, 0, 0
 
     def cleanup(self) -> None:
-        pass
+        self._ready = False
+        self._is_ready = False
 
 
 def test_snapshot_dims_metadata_prefers_scene_shape():

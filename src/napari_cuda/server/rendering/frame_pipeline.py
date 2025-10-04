@@ -36,7 +36,6 @@ class FramePipeline:
         self._width = int(width)
         self._height = int(height)
         self._debug = debug
-        self._orientation_ready: bool = False
         self._enc_input_format: str = "NV12"
         self._logged_swizzle = False
         self._logged_swizzle_stats = False
@@ -63,10 +62,6 @@ class FramePipeline:
         if fmt_str != self._enc_input_format:
             self._logged_swizzle = False
         self._enc_input_format = fmt_str
-
-    @property
-    def orientation_ready(self) -> bool:
-        return self._orientation_ready
 
     # --- Capture helpers ----------------------------------------------------
 
@@ -115,8 +110,6 @@ class FramePipeline:
                         cbm,
                         crm,
                     )
-                    if (rm + gm + bm) >= 1e-4:
-                        self._orientation_ready = True
                 except Exception as exc:  # pragma: no cover - statistics only
                     logger.debug("Swizzle stats log failed: %s", exc)
                 self._logged_swizzle_stats = True

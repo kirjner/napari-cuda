@@ -59,13 +59,13 @@ def test_state_channel_scene_callback(state_channel):
         "metadata": {},
         "render": {},
         "controls": {},
-        "extras": {},
+        "source": {},
     }
     frame = build_notify_scene_snapshot(
         session_id="session-1",
         viewer={"dims": {"ndim": 2}, "camera": {}},
         layers=[layer_block],
-        ancillary={'capabilities': ['layer.update']},
+        metadata={'capabilities': ['layer.update']},
         delta_token='tok-scene-1',
     )
 
@@ -183,7 +183,7 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
         session_id="session-2",
         viewer={"dims": {"ndim": 3}, "camera": {}},
         layers=[layer_block],
-        ancillary=None,
+        metadata=None,
         delta_token='tok-scene-2',
     )
 
@@ -226,14 +226,14 @@ def test_state_channel_notify_scene_policies_callback() -> None:
             ],
         }
     }
-    ancillary = {'metadata': {'adapter_engine': 'napari-vispy'}}
+    snapshot_metadata = {'metadata': {'adapter_engine': 'napari-vispy'}}
 
     frame = build_notify_scene_snapshot(
         session_id='session-3',
         viewer={'dims': {'ndim': 3}, 'camera': {}},
         layers=[layer_block],
         policies=policies,
-        ancillary=ancillary,
+        metadata=snapshot_metadata,
         delta_token='tok-scene-3',
     )
 
@@ -243,7 +243,7 @@ def test_state_channel_notify_scene_policies_callback() -> None:
     frame = frames[0]
     assert isinstance(frame, NotifySceneFrame)
     scene_payload = frame.payload
-    assert scene_payload.ancillary is None or 'multiscale' not in scene_payload.ancillary
+    assert scene_payload.metadata is None or 'multiscale' not in scene_payload.metadata
 
     assert policies_received, "policies callback should be invoked"
     multiscale = policies_received[0]['multiscale']

@@ -236,7 +236,6 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
                 def __init__(self) -> None:
                     self._debug = None
                     self._enc_fmt = "NV12"
-                    self.orientation_ready = True
                     self._raw_budget = 0
 
                 def set_debug(self, debug):  # type: ignore[no-untyped-def]
@@ -276,10 +275,6 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
 
         def cleanup(self) -> None:
             return
-
-        @property
-        def orientation_ready(self) -> bool:
-            return self.pipeline.orientation_ready
 
     class _DummyViewerBuilder:
         def __init__(self, worker):  # type: ignore[no-untyped-def]
@@ -344,6 +339,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
     monkeypatch.setattr(rw.EGLRendererWorker, "_init_vispy_scene", lambda self: None)
     monkeypatch.setattr(rw.EGLRendererWorker, "_init_egl", lambda self: None)
     monkeypatch.setattr(rw.EGLRendererWorker, "_init_capture", lambda self: None)
+    monkeypatch.setattr(rw.EGLRendererWorker, "_init_cuda_interop", lambda self: None)
     monkeypatch.setattr(rw.EGLRendererWorker, "_init_encoder", lambda self: None)
 
     ctx = ServerCtx(
@@ -361,7 +357,13 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.render_worker.EGLR
     )
 
     worker = rw.EGLRendererWorker(width=320, height=180, ctx=ctx)
-    worker.bootstrap()
+    worker._init_cuda()
+    worker._init_vispy_scene()
+    worker._init_egl()
+    worker._init_capture()
+    worker._init_cuda_interop()
+    worker._init_encoder()
+    worker._is_ready = True
     worker.canvas = _FakeCanvas(worker.width, worker.height)
     camera = _FakeCamera2D()
     worker.view = _FakeView(camera)

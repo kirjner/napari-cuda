@@ -73,7 +73,7 @@ def _make_layer(remote_id: str = 'layer-1') -> RemoteImageLayer:
             "gamma": 1.0,
             "contrast_limits": [0.0, 1.0],
         },
-        "extras": {"data_id": "demo"},
+        "source": {"data_id": "demo"},
     }
     return RemoteImageLayer(layer_id=remote_id, block=block)
 

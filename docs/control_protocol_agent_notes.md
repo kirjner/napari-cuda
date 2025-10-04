@@ -77,7 +77,7 @@ the following protocol additions:
    deliberately.
 6. **Domain metadata lanes** – Introduce `notify.annotation` or similar topics
    for structured annotation/proofreading data so agents aren’t forced to pack
-   rich semantics into layer extras.
+   rich semantics into ad-hoc layer metadata.
 7. **Identity and audit** – Bind authenticated identities and per-role
    permissions to the handshake. A future agent framework will need to log who
    changed what, enforce approval workflows, and support supervised modes.

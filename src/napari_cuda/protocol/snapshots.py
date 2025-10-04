@@ -63,14 +63,14 @@ class SceneSnapshot:
     viewer: ViewerSnapshot
     layers: Tuple[LayerSnapshot, ...]
     policies: Dict[str, Any]
-    ancillary: Dict[str, Any]
+    metadata: Dict[str, Any]
 
     def to_notify_scene_payload(self) -> NotifyScenePayload:
         return NotifyScenePayload(
             viewer=self.viewer.to_mapping(),
             layers=tuple(layer.to_mapping() for layer in self.layers),
+            metadata=dict(self.metadata) if self.metadata else None,
             policies=dict(self.policies) if self.policies else None,
-            ancillary=dict(self.ancillary) if self.ancillary else None,
         )
 
     @classmethod
@@ -78,8 +78,8 @@ class SceneSnapshot:
         viewer = ViewerSnapshot.from_mapping(payload.viewer)
         layers = tuple(LayerSnapshot.from_mapping(block) for block in payload.layers)
         policies = dict(payload.policies) if payload.policies else {}
-        ancillary = dict(payload.ancillary) if payload.ancillary else {}
-        return cls(viewer=viewer, layers=layers, policies=policies, ancillary=ancillary)
+        metadata = dict(payload.metadata) if payload.metadata else {}
+        return cls(viewer=viewer, layers=layers, policies=policies, metadata=metadata)
 
 
 @dataclass(slots=True)
@@ -118,13 +118,13 @@ def scene_snapshot(
     viewer: ViewerSnapshot,
     layers: Sequence[LayerSnapshot],
     policies: Mapping[str, Any],
-    ancillary: Mapping[str, Any],
+    metadata: Mapping[str, Any],
 ) -> SceneSnapshot:
     return SceneSnapshot(
         viewer=viewer,
         layers=tuple(layers),
         policies=dict(policies),
-        ancillary=dict(ancillary),
+        metadata=dict(metadata),
     )
 
 

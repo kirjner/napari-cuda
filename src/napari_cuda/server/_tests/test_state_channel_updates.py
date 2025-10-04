@@ -19,7 +19,7 @@ from napari_cuda.protocol import (
 from napari_cuda.protocol.greenfield.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.control.resumable_history_store import (
-    FrameBlueprint,
+    EnvelopeSnapshot,
     ResumableHistoryStore,
     ResumableRetention,
     ResumeDecision,
@@ -41,6 +41,17 @@ class _CaptureWorker:
         self.policy_calls: list[str] = []
         self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
+        self.use_volume = False
+        self._is_ready = True
+        self._data_wh = (640, 480)
+        self._zarr_axes = "yx"
+        self._zarr_shape = (480, 640)
+        self._zarr_dtype = "float32"
+        self.volume_dtype = "float32"
+        self._active_ms_level = 0
+        self._plane_restore_state = None
+        self._last_step = (0, 0)
+        self._scene_source = None
 
     def enqueue_update(self, delta: RenderDelta) -> None:
         self.deltas.append(delta)
@@ -57,6 +68,10 @@ class _CaptureWorker:
     def viewer_model(self) -> None:
         return None
 
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
+
 
 class _FakeWS(SimpleNamespace):
     __hash__ = object.__hash__
@@ -65,14 +80,16 @@ class _FakeWS(SimpleNamespace):
 def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
     scene = create_server_scene_data()
     manager = ViewerSceneManager((640, 480))
+    worker = _CaptureWorker()
     manager.update_from_sources(
-        worker=None,
+        worker=worker,
         scene_state=None,
         multiscale_state=None,
         volume_state=None,
         current_step=None,
         ndisplay=2,
         zarr_path=None,
+        scene_source=None,
         layer_controls=None,
     )
 
@@ -80,7 +97,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._scene = scene
     server._scene_manager = manager
     server._state_lock = threading.RLock()
-    server._worker = _CaptureWorker()
+    server._worker = worker
     server._log_state_traces = False
     server._log_dims_info = False
     server._log_cam_info = False
@@ -706,13 +723,14 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         )
 
         server._scene_manager.update_from_sources(
-            worker=None,
+            worker=server._worker,
             scene_state=server._scene.latest_state,
             multiscale_state=None,
             volume_state=None,
             current_step=None,
             ndisplay=2,
             zarr_path=None,
+            scene_source=None,
             layer_controls=server._scene.layer_controls,
         )
 
@@ -767,14 +785,14 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         loop.close()
 
 
-def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBlueprint, FrameBlueprint, FrameBlueprint]:
+def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot]:
     store: ResumableHistoryStore = server._resumable_store
     scene_payload = state_channel_handler.build_notify_scene_payload(
         server._scene,
         server._scene_manager,
         viewer_settings={"fps_target": 60.0},
     )
-    scene_blueprint = store.snapshot_blueprint(
+    scene_snapshot = store.snapshot_envelope(
         state_channel_handler.NOTIFY_SCENE_TYPE,
         payload=scene_payload.to_dict(),
         timestamp=time.time(),
@@ -784,7 +802,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBluep
         server._scene,
         server._scene_manager,
     )
-    scene_level_blueprint = store.snapshot_blueprint(
+    scene_level_snapshot = store.snapshot_envelope(
         state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE,
         payload=scene_level_payload.to_dict(),
         timestamp=time.time(),
@@ -794,7 +812,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBluep
         layer_id="layer-0",
         changes={"opacity": 0.42},
     )
-    layer_blueprint = store.delta_blueprint(
+    layer_snapshot = store.delta_envelope(
         state_channel_handler.NOTIFY_LAYERS_TYPE,
         payload=layer_payload.to_dict(),
         timestamp=time.time(),
@@ -809,13 +827,13 @@ def _prepare_resumable_payloads(server: Any) -> tuple[FrameBlueprint, FrameBluep
         avcc="AAAA",
         latency_policy={"mode": "low"},
     )
-    stream_blueprint = store.snapshot_blueprint(
+    stream_snapshot = store.snapshot_envelope(
         state_channel_handler.NOTIFY_STREAM_TYPE,
         payload=stream_payload.to_dict(),
         timestamp=time.time(),
     )
 
-    return scene_blueprint, scene_level_blueprint, layer_blueprint, stream_blueprint
+    return scene_snapshot, scene_level_snapshot, layer_snapshot, stream_snapshot
 
 
 def test_handshake_stashes_resume_plan(monkeypatch) -> None:
@@ -823,12 +841,12 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
     try:
         asyncio.set_event_loop(loop)
         server, scheduled, captured = _make_server()
-        scene_bp, scene_level_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
+        scene_snap, scene_level_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
         resume_tokens = {
-            state_channel_handler.NOTIFY_SCENE_TYPE: scene_bp.delta_token,
-            state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: scene_level_bp.delta_token,
-            state_channel_handler.NOTIFY_LAYERS_TYPE: layer_bp.delta_token,
-            state_channel_handler.NOTIFY_STREAM_TYPE: stream_bp.delta_token,
+            state_channel_handler.NOTIFY_SCENE_TYPE: scene_snap.delta_token,
+            state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: scene_level_snap.delta_token,
+            state_channel_handler.NOTIFY_LAYERS_TYPE: layer_snap.delta_token,
+            state_channel_handler.NOTIFY_STREAM_TYPE: stream_snap.delta_token,
         }
 
         hello = build_session_hello(
@@ -886,7 +904,7 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
     try:
         asyncio.set_event_loop(loop)
         server, scheduled, captured = _make_server()
-        scene_bp, scene_level_bp, layer_bp, stream_bp = _prepare_resumable_payloads(server)
+        scene_snap, scene_level_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
 
         server._await_adapter_level_ready = lambda _timeout: asyncio.sleep(0)
         server._state_send = lambda _ws, text: captured.append(json.loads(text))
@@ -908,22 +926,22 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
             state_channel_handler.NOTIFY_SCENE_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_SCENE_TYPE,
                 decision=ResumeDecision.REPLAY,
-                deltas=[scene_bp],
+                deltas=[scene_snap],
             ),
             state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE,
                 decision=ResumeDecision.REPLAY,
-                deltas=[scene_level_bp],
+                deltas=[scene_level_snap],
             ),
             state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
                 decision=ResumeDecision.REPLAY,
-                deltas=[layer_bp],
+                deltas=[layer_snap],
             ),
             state_channel_handler.NOTIFY_STREAM_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_STREAM_TYPE,
                 decision=ResumeDecision.REPLAY,
-                deltas=[stream_bp],
+                deltas=[stream_snap],
             ),
         }
 
@@ -931,16 +949,16 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
         _drain_scheduled(scheduled)
 
         scene_frames = _frames_of_type(captured, "notify.scene")
-        assert scene_frames and scene_frames[-1]["seq"] == scene_bp.seq
+        assert scene_frames and scene_frames[-1]["seq"] == scene_snap.seq
 
         level_frames = _frames_of_type(captured, "notify.scene.level")
-        assert level_frames and level_frames[-1]["seq"] == scene_level_bp.seq
+        assert level_frames and level_frames[-1]["seq"] == scene_level_snap.seq
 
         layer_frames = _frames_of_type(captured, "notify.layers")
-        assert layer_frames and layer_frames[-1]["seq"] == layer_bp.seq
+        assert layer_frames and layer_frames[-1]["seq"] == layer_snap.seq
 
         stream_frames = _frames_of_type(captured, "notify.stream")
-        assert stream_frames and stream_frames[-1]["seq"] == stream_bp.seq
+        assert stream_frames and stream_frames[-1]["seq"] == stream_snap.seq
     finally:
         asyncio.set_event_loop(None)
         loop.close()

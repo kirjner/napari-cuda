@@ -8,8 +8,8 @@ snapshots. When a state websocket client connects:
 1. `EGLHeadlessServer` asks `ViewerSceneManager` for a `SceneSnapshot`. The
    snapshot contains JSON-safe layer blocks plus viewer metadata (dims/camera).
 2. The server sends `notify.scene(seq=0)` with that payload. Each layer block
-   carries shape, dtype, axis labels, multiscale levels, extras (e.g. `zarr_path`),
-   and a `controls` map with the canonical intent state (opacity, visible, etc.).
+   carries shape, dtype, axis labels, multiscale levels, a `source` section, and
+   a `controls` map with the canonical intent state (opacity, visible, etc.).
 3. Subsequent changes reuse the same helpers:
    - bulk refresh → `notify.scene`
    - per-layer updates → `notify.layers`
@@ -53,12 +53,14 @@ A typical `notify.scene` payload looks like:
         "current_level": 0,
         "metadata": {"policy": "latency", "index_space": "base"}
       },
-      "extras": {"is_volume": true, "zarr_path": "/data/sample.zarr"},
+      "volume": true,
+      "scale": [1.0, 1.0, 1.0],
+      "source": {"kind": "ome-zarr"},
       "controls": {"visible": true, "opacity": 0.8, "contrast_limits": [0.0, 1.0]}
     }
   ],
   "policies": {"multiscale": {"policy": "latency", "active_level": 0}},
-  "ancillary": {"metadata": {"zarr_path": "/data/sample.zarr"}}
+  "metadata": {"source_path": "/data/sample.zarr"}
 }
 ```
 

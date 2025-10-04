@@ -163,70 +163,16 @@ class EGLRendererWorker:
         self._zarr_clim: Optional[tuple[float, float]] = None
         self._hw_limits = get_hw_limits()
 
-        self._bootstrapped = False
-        self._bootstrapping = False
+        self._is_ready = False
         self._debug: Optional[DebugDumper] = None
         self._debug_config = DebugConfig.from_policy(self._debug_policy.dumps)
 
     @property
-    def is_bootstrapped(self) -> bool:
-        return self._bootstrapped
-
-    @property
-    def is_bootstrapping(self) -> bool:
-        return self._bootstrapping
+    def is_ready(self) -> bool:
+        return self._is_ready
 
     def set_scene_refresh_callback(self, callback: Optional[Callable[[object], None]]) -> None:
         self._scene_refresh_cb = callback
-
-    def bootstrap(self) -> None:
-        """Complete GPU/VisPy setup once the lifecycle registers the worker."""
-
-        if self._bootstrapped:
-            return
-        if self._bootstrapping:
-            return
-
-        self._bootstrapping = True
-        try:
-            # Initialize CUDA first (independent of GL)
-            self._init_cuda()
-            # Create VisPy SceneCanvas (EGL backend) which makes a GL context current
-            self._init_vispy_scene()
-            # Adopt the current EGL context created by VisPy for capture
-            self._init_egl()
-            self._init_capture()
-            self._init_cuda_interop()
-            self._init_encoder()
-        except Exception as exc:
-            logger.warning("Bootstrap failed; attempting cleanup: %s", exc, exc_info=True)
-            try:
-                self.cleanup()
-            except Exception as cleanup_exc:
-                logger.debug("Cleanup after failed bootstrap also failed: %s", cleanup_exc)
-            raise
-        finally:
-            self._bootstrapping = False
-
-        self._debug = DebugDumper(self._debug_config)
-        if self._debug.cfg.enabled:
-            self._debug.log_env_once()
-            self._debug.ensure_out_dir()
-        self._capture.pipeline.set_debug(self._debug)
-        self._capture.pipeline.set_raw_dump_budget(self._raw_dump_budget)
-        self._capture.cuda.set_force_tight_pitch(self._debug_policy.worker.force_tight_pitch)
-        self._log_debug_policy_once()
-        self._bootstrapped = True
-
-        logger.info(
-            "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
-            self.width,
-            self.height,
-            self._capture.pipeline.enc_input_format,
-            self.fps,
-            self._animate,
-            bool(self._zarr_path),
-        )
 
     def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
         """Choose stable initial center and distance for TurntableCamera.
@@ -472,7 +418,6 @@ class EGLRendererWorker:
         self._data_wh = (int(self.width), int(self.height))
         self._data_d = None
         self._volume_scale = (1.0, 1.0, 1.0)
-        self._orientation_ready = False
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
@@ -1130,8 +1075,6 @@ class EGLRendererWorker:
             debug_dumper=self._debug,
         )
 
-        self._orientation_ready = encoded.orientation_ready
-
         return encoded.timings, encoded.packet, encoded.flags, encoded.sequence
 
     # ---- C5 helpers (pure refactor; no behavior change) ---------------------
@@ -1256,6 +1199,7 @@ class EGLRendererWorker:
         self._napari_layer = None
 
         self._egl.cleanup()
+        self._is_ready = False
 
     def viewer_model(self) -> Optional[ViewerModel]:
         """Expose the napari ``ViewerModel`` when adapter mode is active."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from types import SimpleNamespace
+from typing import Any, Dict, Optional, Sequence
 
 import pytest
 import numpy as np
@@ -24,16 +25,21 @@ class _StubWorker:
     ) -> None:
         self.use_volume = use_volume
         self._data_wh = data_wh
+        self._is_ready = True
         if data_d is not None:
             self._data_d = data_d
-        if zarr_axes is not None:
-            self._zarr_axes = zarr_axes
-        if zarr_shape is not None:
-            self._zarr_shape = zarr_shape
-        if zarr_dtype is not None:
-            self._zarr_dtype = zarr_dtype
-        if volume_dtype is not None:
-            self.volume_dtype = volume_dtype
+        self._zarr_axes = zarr_axes
+        self._zarr_shape = zarr_shape
+        self._zarr_dtype = zarr_dtype
+        self.volume_dtype = volume_dtype
+        self._scene_source = None
+
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
+
+    def viewer_model(self):
+        return None
 
 
 class _StubSceneState:
@@ -62,7 +68,7 @@ def _multiscale_state() -> Dict[str, Any]:
     return {
         "levels": [
             {"path": "level_0", "downsample": [1.0, 1.0, 1.0], "shape": [20, 40, 60]},
-            {"path": "level_1", "downsample": [1.0, 2.0, 2.0]},
+            {"path": "level_1", "downsample": [1.0, 2.0, 2.0], "shape": [20, 20, 30]},
         ],
         "current_level": 0,
         "policy": "latency",
@@ -79,6 +85,7 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
         zarr_shape=(20, 40, 60),
         zarr_dtype="float32",
     )
+    scene_source = _StubSceneSource(current_level=0, scale=(1.0, 1.0, 1.0))
     manager.update_from_sources(
         worker=worker,
         scene_state=_StubSceneState(center=(10.0, 20.0, 30.0), zoom=2.5),
@@ -87,7 +94,7 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
         current_step=(1, 2, 3),
         ndisplay=3,
         zarr_path="/data/sample.zarr",
-        extras={"note": "test"},
+        scene_source=scene_source,
     )
 
     meta = manager.dims_metadata()
@@ -101,7 +108,8 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
     snapshot = manager.scene_snapshot()
     assert snapshot is not None
     layer_block = snapshot.layers[0].block
-    assert layer_block["extras"]["zarr_path"] == "/data/sample.zarr"
+    assert snapshot.metadata["source_path"] == "/data/sample.zarr"
+    assert layer_block["source"]["kind"] == "ome-zarr"
     dims_block = snapshot.viewer.dims
     assert dims_block["ndisplay"] == 3
     camera_block = snapshot.viewer.camera
@@ -123,7 +131,7 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
         current_step=(5, 6),
         ndisplay=2,
         zarr_path=None,
-        extras=None,
+        scene_source=None,
     )
 
     meta = manager.dims_metadata()
@@ -137,10 +145,7 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
     assert snapshot is not None
     dims_block = snapshot.viewer.dims
     assert dims_block["current_step"] == [5, 6]
-    assert snapshot.ancillary["capabilities"] == [
-        "layer.remove",
-        "state.update",
-    ]
+    assert snapshot.metadata.get("source_path") is None
 
 
 def test_empty_multiscale_levels(manager: ViewerSceneManager) -> None:
@@ -153,7 +158,7 @@ def test_empty_multiscale_levels(manager: ViewerSceneManager) -> None:
         current_step=None,
         ndisplay=2,
         zarr_path=None,
-        extras=None,
+        scene_source=None,
     )
 
     meta = manager.dims_metadata()
@@ -164,58 +169,49 @@ def test_empty_multiscale_levels(manager: ViewerSceneManager) -> None:
     assert snapshot.layers[0].block.get("multiscale") is None
 
 
-def test_update_with_viewer_adapter(manager: ViewerSceneManager) -> None:
-    viewer = ViewerModel()
-    data = np.ones((32, 48), dtype=np.float32)
-    viewer.add_image(data, name="adapter-image")
+def test_update_with_worker_only(manager: ViewerSceneManager) -> None:
+    worker = _StubWorker(use_volume=False, data_wh=(32, 48), zarr_axes="yx", zarr_shape=(32, 48), zarr_dtype="float32")
     manager.update_from_sources(
-        worker=None,
+        worker=worker,
         scene_state=None,
         multiscale_state=None,
         volume_state=None,
         current_step=None,
         ndisplay=2,
         zarr_path=None,
-        viewer_model=viewer,
-        extras=None,
+        viewer_model=None,
+        scene_source=None,
     )
 
     snapshot = manager.scene_snapshot()
     assert snapshot is not None
     layer_block = snapshot.layers[0].block
     assert layer_block["shape"] == [32, 48]
-    assert layer_block["extras"]["adapter_engine"] == "napari-vispy"
     assert layer_block["axis_labels"] == ["y", "x"]
-    metadata = layer_block.get("metadata", {})
-    thumb = metadata.get("thumbnail") if isinstance(metadata, dict) else None
-    assert thumb is not None
-    thumb_arr = np.asarray(thumb)
-    assert thumb_arr.ndim == 3
-    assert thumb_arr.shape[-1] in (1, 3, 4)
-    ancillary = snapshot.ancillary.get("metadata", {})
-    assert ancillary["adapter_engine"] == "napari-vispy"
+    assert layer_block.get("source") is None
 
 
-def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
-    viewer = ViewerModel()
-    data = np.ones((4, 32, 48), dtype=np.float32)
-    viewer.add_image(data, name="volume")
-    viewer.dims.ndisplay = 3
-    try:
-        viewer.dims.displayed = (0, 1, 2)
-    except Exception:
-        pass
+def test_worker_ndisplay_3d(manager: ViewerSceneManager) -> None:
+    worker = _StubWorker(
+        use_volume=True,
+        data_wh=(48, 32),
+        data_d=4,
+        zarr_axes="zyx",
+        zarr_shape=(4, 32, 48),
+        zarr_dtype="float32",
+    )
 
+    scene_source = _StubSceneSource(current_level=0, scale=(1.0, 1.0, 1.0))
     manager.update_from_sources(
-        worker=None,
+        worker=worker,
         scene_state=None,
         multiscale_state=None,
         volume_state=None,
         current_step=None,
-        ndisplay=None,
+        ndisplay=3,
         zarr_path=None,
-        viewer_model=viewer,
-        extras=None,
+        viewer_model=None,
+        scene_source=scene_source,
     )
 
     snapshot = manager.scene_snapshot()
@@ -223,67 +219,62 @@ def test_viewer_ndisplay_3d(manager: ViewerSceneManager) -> None:
     dims_block = snapshot.viewer.dims
     assert dims_block["ndisplay"] == 3
     assert dims_block["axis_labels"] == ["z", "y", "x"]
-    extras = snapshot.layers[0].block["extras"]
-    assert bool(extras.get("is_volume")) is True
+    assert snapshot.layers[0].block.get("volume") is True
     assert len(dims_block["displayed"]) == 3
 
 
 def test_manager_uses_adapter_multiscale_state(manager: ViewerSceneManager) -> None:
-    viewer = ViewerModel()
-    data = [
-        np.ones((16, 32), dtype=np.float32),
-        np.ones((8, 16), dtype=np.float32),
-    ]
-    layer = viewer.add_image(data, multiscale=True, scale=(0.5, 0.25), name="ms")
-    layer.data_level = 1
+    worker = _StubWorker(
+        use_volume=False,
+        data_wh=(32, 32),
+        zarr_axes="yx",
+        zarr_shape=(16, 32),
+        zarr_dtype="float32",
+    )
+
+    multiscale_state = {
+        "levels": [
+            {"path": "level_0", "downsample": [1.0, 1.0], "shape": [32, 32]},
+            {"path": "level_1", "downsample": [2.0, 2.0], "shape": [16, 16]},
+        ],
+        "current_level": 1,
+        "policy": "latency",
+        "index_space": "base",
+    }
+    source = _StubSceneSource(
+        current_level=1,
+        scale=(0.5, 0.25),
+        descriptors=[
+            SimpleNamespace(index=0, path="level_0", shape=(32, 32), downsample=(1.0, 1.0), scale=(1.0, 1.0)),
+            SimpleNamespace(index=1, path="level_1", shape=(16, 16), downsample=(2.0, 2.0), scale=(0.5, 0.5)),
+        ],
+    )
 
     manager.update_from_sources(
-        worker=None,
+        worker=worker,
         scene_state=None,
-        multiscale_state=None,
+        multiscale_state=multiscale_state,
         volume_state=None,
         current_step=None,
         ndisplay=2,
         zarr_path="/tmp/test.zarr",
-        viewer_model=viewer,
-        extras=None,
+        scene_source=source,
     )
 
     snapshot = manager.scene_snapshot()
     assert snapshot is not None
-    ancillary = snapshot.ancillary.get("metadata", {})
-    assert ancillary["zarr_path"] == "/tmp/test.zarr"
+    assert snapshot.metadata["source_path"] == "/tmp/test.zarr"
     layer_block = snapshot.layers[0].block
     ms_block = layer_block.get("multiscale")
     assert ms_block is not None
     assert ms_block["current_level"] == 1
     assert len(ms_block["levels"]) == 2
     assert ms_block["levels"][1]["downsample"] == [2.0, 2.0]
-    assert layer_block["extras"]["scale"] == [0.5, 0.25]
+    assert layer_block["scale"] == [0.5, 0.25]
 
 
-def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> None:
+def test_manager_multiscale_levels_from_scene_source(manager: ViewerSceneManager) -> None:
     worker = _StubWorker(use_volume=False, data_wh=(64, 32))
-    extras: Dict[str, Any] = {
-        "multiscale_levels": [
-            {
-                "index": 0,
-                "path": "level_0",
-                "shape": [32, 64],
-                "downsample": [1.0, 1.0],
-            },
-            {
-                "index": 1,
-                "path": "level_1",
-                "shape": [16, 32],
-                "downsample": [2.0, 2.0],
-            },
-        ],
-        "multiscale_current_level": 1,
-        "zarr_scale": [0.25, 0.5],
-        "adapter_engine": "napari-vispy",
-    }
-
     multiscale_state = {
         "levels": [
             {"path": "level_0", "downsample": [1.0, 1.0], "shape": [32, 64]},
@@ -293,6 +284,14 @@ def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> N
         "policy": "latency",
         "index_space": "base",
     }
+    source = _StubSceneSource(
+        current_level=1,
+        scale=(0.25, 0.5),
+        descriptors=[
+            SimpleNamespace(index=0, path="level_0", shape=(32, 64), downsample=(1.0, 1.0), scale=(1.0, 1.0)),
+            SimpleNamespace(index=1, path="level_1", shape=(16, 32), downsample=(2.0, 2.0), scale=(0.25, 0.5)),
+        ],
+    )
 
     manager.update_from_sources(
         worker=worker,
@@ -302,7 +301,7 @@ def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> N
         current_step=None,
         ndisplay=2,
         zarr_path="/data/sample.zarr",
-        extras=extras,
+        scene_source=source,
     )
 
     snapshot = manager.scene_snapshot()
@@ -312,8 +311,13 @@ def test_manager_multiscale_levels_from_extras(manager: ViewerSceneManager) -> N
     assert ms_block["current_level"] == 1
     assert ms_block["levels"][1]["path"] == "level_1"
     assert ms_block["levels"][1]["downsample"] == [2.0, 2.0]
-    extras_block = layer_block["extras"]
-    assert extras_block["multiscale_levels"][0]["path"] == "level_0"
-    metadata_block = snapshot.ancillary.get("metadata", {})
-    assert metadata_block["zarr_scale"] == [0.25, 0.5]
-    assert metadata_block["adapter_engine"] == "napari-vispy"
+    assert layer_block["scale"] == [0.25, 0.5]
+    assert snapshot.metadata["source_path"] == "/data/sample.zarr"
+class _StubSceneSource:
+    def __init__(self, *, current_level: int = 0, scale: Sequence[float] = (1.0, 1.0, 1.0), descriptors: Optional[Sequence[SimpleNamespace]] = None) -> None:
+        self.current_level = current_level
+        self._scale = tuple(float(v) for v in scale)
+        self.level_descriptors = list(descriptors or [])
+
+    def level_scale(self, index: int) -> Sequence[float]:
+        return self._scale

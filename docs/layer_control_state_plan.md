@@ -21,7 +21,7 @@ This document captures the ongoing work to make layer intents (opacity, visibili
    - `SceneStateApplier` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.
 
 4. **Snapshot emission** ✅
-   - Layer snapshot blocks (the payload of `notify.scene`) now include a dedicated `controls` map; `extras` retains transport metadata only (e.g., volume flags, zarr paths).
+   - Layer snapshot blocks (the payload of `notify.scene`) now include a dedicated `controls` map plus a lean `source` section; transport metadata (source path, volume flags, policy metrics) lives under the scene-level `metadata` block.
    - Renderer-only toggles (shade/sample-step) stay under the `render` mapping so UI controls are not duplicated.
 
 5. **ViewerSceneManager** ✅
@@ -33,7 +33,7 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 
 ## Client considerations
 
-- Clients should consume the `controls` map exclusively; `extras` and `render` no longer contain UI state.
+- Clients should consume the `controls` map exclusively; the legacy `extras` bag has been deleted and `render` only carries renderer-specific hints.
 - Remote layer mirrors must apply acknowledgements from `controls` (opacity, visibility, rendering, etc.) and ignore the deprecated paths.
 - The bridge can treat `controls` as authoritative and drop the fallback normalisation logic once the corresponding client patch lands.
 - Colormap intents deliver `name` strings that must match napari’s registered palette names; the server normalises case but no longer honours the legacy `colormap` field.

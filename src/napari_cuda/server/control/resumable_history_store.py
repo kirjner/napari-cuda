@@ -7,14 +7,14 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Deque, Dict, List, Mapping, Optional
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 
 from napari_cuda.protocol import FeatureResumeState
 
 
 @dataclass(frozen=True)
-class FrameBlueprint:
-    """Persistent description of a resumable frame payload."""
+class EnvelopeSnapshot:
+    """Persistent description of a resumable notify envelope."""
 
     seq: int
     delta_token: str
@@ -39,8 +39,8 @@ class ResumableTopicHistory:
 
     topic: str
     retention: ResumableRetention
-    snapshot: Optional[FrameBlueprint] = None
-    deltas: Deque[FrameBlueprint] = field(default_factory=deque)
+    snapshot: Optional[EnvelopeSnapshot] = None
+    deltas: Deque[EnvelopeSnapshot] = field(default_factory=deque)
 
     def latest_cursor(self) -> Optional[FeatureResumeState]:
         if self.deltas:
@@ -64,7 +64,7 @@ class ResumePlan:
 
     topic: str
     decision: ResumeDecision
-    deltas: List[FrameBlueprint]
+    deltas: List[EnvelopeSnapshot]
 
 
 class ResumableHistoryStore:
@@ -85,7 +85,7 @@ class ResumableHistoryStore:
     # Snapshot / delta recording
     # ------------------------------------------------------------------
 
-    def snapshot_blueprint(
+    def snapshot_envelope(
         self,
         topic: str,
         *,
@@ -93,16 +93,16 @@ class ResumableHistoryStore:
         timestamp: Optional[float] = None,
         frame_id: Optional[str] = None,
         intent_id: Optional[str] = None,
-    ) -> FrameBlueprint:
+    ) -> EnvelopeSnapshot:
         history = self._topic(topic)
         ts = float(timestamp) if timestamp is not None else time.time()
         token = self._new_token()
-        frame = FrameBlueprint(
+        frame = EnvelopeSnapshot(
             seq=0,
             delta_token=token,
             frame_id=frame_id or self._new_frame_id(topic),
             timestamp=ts,
-        payload=dict(payload),
+            payload=dict(payload),
             intent_id=intent_id,
         )
         history.snapshot = frame
@@ -110,7 +110,7 @@ class ResumableHistoryStore:
         self._seq_state[topic] = 0
         return frame
 
-    def delta_blueprint(
+    def delta_envelope(
         self,
         topic: str,
         *,
@@ -118,12 +118,12 @@ class ResumableHistoryStore:
         timestamp: Optional[float] = None,
         frame_id: Optional[str] = None,
         intent_id: Optional[str] = None,
-    ) -> FrameBlueprint:
+    ) -> EnvelopeSnapshot:
         history = self._topic(topic)
         if history.snapshot is None:
             # Treat the first emission as the snapshot baseline so resumable
             # state exists even if we have not sent an explicit snapshot yet.
-            return self.snapshot_blueprint(
+            return self.snapshot_envelope(
                 topic,
                 payload=payload,
                 timestamp=timestamp,
@@ -133,7 +133,7 @@ class ResumableHistoryStore:
         seq = self._seq_state[topic] + 1
         self._seq_state[topic] = seq
         ts = float(timestamp) if timestamp is not None else time.time()
-        entry = FrameBlueprint(
+        entry = EnvelopeSnapshot(
             seq=seq,
             delta_token=self._new_token(),
             frame_id=frame_id or self._new_frame_id(topic),
@@ -179,15 +179,15 @@ class ResumableHistoryStore:
 
         return ResumePlan(topic=topic, decision=ResumeDecision.RESET, deltas=list(history.deltas))
 
-    def apply_replay(self, topic: str, cursors: Iterable[FrameBlueprint]) -> None:
+    def apply_replay(self, topic: str, cursors: Iterable[EnvelopeSnapshot]) -> None:
         history = self._topic(topic)
         history.deltas.extend(cursors)
         self._prune(history)
 
-    def current_snapshot(self, topic: str) -> Optional[FrameBlueprint]:
+    def current_snapshot(self, topic: str) -> Optional[EnvelopeSnapshot]:
         return self._topic(topic).snapshot
 
-    def all_deltas(self, topic: str) -> List[FrameBlueprint]:
+    def all_deltas(self, topic: str) -> List[EnvelopeSnapshot]:
         return list(self._topic(topic).deltas)
 
     def reset_epoch(
@@ -196,11 +196,11 @@ class ResumableHistoryStore:
         *,
         timestamp: Optional[float] = None,
         payload: Mapping[str, Any] | None = None,
-    ) -> FrameBlueprint:
+    ) -> EnvelopeSnapshot:
         history = self._topic(topic)
         ts = float(timestamp) if timestamp is not None else time.time()
         token = self._new_token()
-        frame = FrameBlueprint(
+        frame = EnvelopeSnapshot(
             seq=0,
             delta_token=token,
             frame_id=self._new_frame_id(topic),

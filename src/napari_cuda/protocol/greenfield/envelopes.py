@@ -389,8 +389,8 @@ def build_notify_scene_snapshot(
     session_id: str,
     viewer: Mapping[str, Any],
     layers: Sequence[Mapping[str, Any]],
+    metadata: Mapping[str, Any] | None = None,
     policies: Mapping[str, Any] | None = None,
-    ancillary: Mapping[str, Any] | None = None,
     frame_id: str | None = None,
     timestamp: float | None = None,
     intent_id: str | None = None,
@@ -402,8 +402,8 @@ def build_notify_scene_snapshot(
     payload = NotifyScenePayload(
         viewer=dict(viewer),
         layers=tuple(dict(item) for item in layers),
+        metadata=dict(metadata) if metadata is not None else None,
         policies=dict(policies) if policies is not None else None,
-        ancillary=dict(ancillary) if ancillary is not None else None,
     )
     cursor = _resolve_resumable_cursor(
         topic=NOTIFY_SCENE_TYPE,
