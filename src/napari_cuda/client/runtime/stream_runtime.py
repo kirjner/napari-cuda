@@ -646,6 +646,8 @@ class ClientStreamLoop:
         snapshot = scene_snapshot_from_payload(frame.payload)
         with self._layer_bridge.remote_sync():
             self._layer_registry.apply_snapshot(snapshot)
+            for entry in snapshot.layers:
+                self._layer_bridge.seed_remote_values(entry.layer_id, entry.block.get("controls") or {})
         logger.debug(
             "notify.scene received: layers=%d policies=%s",
             len(snapshot.layers),
@@ -691,7 +693,7 @@ class ClientStreamLoop:
         delta = layer_delta_from_payload(frame.payload)
         with self._layer_bridge.remote_sync():
             self._layer_registry.apply_delta(delta)
-        self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
+            self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
         logger.debug(
             "notify.layers: id=%s keys=%s",
             delta.layer_id,

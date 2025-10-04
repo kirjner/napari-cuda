@@ -297,6 +297,25 @@ class StateStore:
             }
         return summary
 
+    # ------------------------------------------------------------------
+    def has_pending(self, scope: str, target: str, key: str) -> bool:
+        property_key = (scope, target, key)
+        state = self._state.get(property_key)
+        if state is None:
+            return False
+        return bool(state.pending)
+
+    def pending_projection_value(self, scope: str, target: str, key: str) -> Any:
+        property_key = (scope, target, key)
+        state = self._state.get(property_key)
+        if state is None:
+            return None
+        if state.pending:
+            return next(reversed(state.pending.values())).value
+        if state.confirmed is not None:
+            return state.confirmed.value
+        return None
+
 
 __all__ = [
     "ConfirmedState",

@@ -522,6 +522,14 @@ class LayerStateBridge:
             encoded = self._encode_value(config, raw_value)
             if encoded is None:
                 continue
+            if self._state_store.has_pending("layer", layer_id, config.key):
+                if binding is not None:
+                    runtime = binding.properties.setdefault(config.key, PropertyRuntime())
+                    pending_value = self._state_store.pending_projection_value("layer", layer_id, config.key)
+                    if pending_value is not None:
+                        self._apply_projection(binding, config, pending_value, suppress_blocker=True)
+                    runtime.active = True
+                continue
             self._state_store.seed_confirmed("layer", layer_id, config.key, encoded)
             if binding is None:
                 continue
