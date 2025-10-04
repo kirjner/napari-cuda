@@ -32,7 +32,6 @@ from napari_cuda.codec.avcc import (
     find_sps_pps,
 )
 from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
-from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.client.runtime.client_loop.scheduler import CallProxy, WakeProxy
 from napari_cuda.client.runtime.client_loop.pipelines import (
     build_pyav_pipeline,
