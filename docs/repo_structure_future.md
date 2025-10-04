@@ -30,8 +30,7 @@ napari_cuda/
 │   ├── rendering/       # Worker, encoder, pixel broadcaster
 │   ├── data/            # Zarr source, ROI, LOD
 │   └── tests/
-├── protocol/
-│   ├── greenfield/      # Messages, snapshots, parser
+├── protocol/            # Unified messages, snapshots, parser
 │   └── tests/
 ├── docs/
 └── tools/
@@ -78,4 +77,3 @@ Offensive coding tenet: make invariants explicit and crash on violation.
 - Document module ownership in `docs/architecture` tree.
 - Ensure both client and server expose AgentBridge APIs at the `state` layer.
 Offensive coding tenet: no defensive fallbacks, no silent failures.
-
