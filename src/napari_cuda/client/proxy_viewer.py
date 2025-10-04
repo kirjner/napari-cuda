@@ -6,6 +6,7 @@ state channel. No direct sockets or legacy dims.set paths remain here.
 """
 
 import logging
+import math
 import os
 from contextlib import nullcontext
 from typing import Optional, TYPE_CHECKING
@@ -332,6 +333,10 @@ class ProxyViewer(ViewerModel):
     def attach_state_sender(self, sender) -> None:
         """Attach a coordinator-like sender for thin client state forwarding."""
         self._state_sender = sender
+        assert hasattr(sender, '_control_state'), "state sender missing control_state"
+        control_state = sender._control_state  # type: ignore[attr-defined]
+        interval_ms = int(math.ceil(control_state.dims_min_dt * 1000.0))
+        self._dims_tx_interval_ms = max(self._dims_tx_interval_ms, interval_ms)
 
     def _apply_remote_dims_update(
         self,
