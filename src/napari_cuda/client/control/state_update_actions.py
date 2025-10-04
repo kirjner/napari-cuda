@@ -631,13 +631,6 @@ def dims_step(
     if _is_axis_playing(viewer_obj, idx) and origin != 'play':
         return False
     now = time.perf_counter()
-    if origin == 'keys':
-        min_dt = 0.0
-    else:
-        min_dt = float(state.dims_min_dt)
-    if (now - float(state.last_dims_send or 0.0)) < min_dt:
-        logger.debug("state.update dims.step gated by rate limiter (%s)", origin)
-        return False
     axis_idx = int(idx)
     target_label = _axis_target_label(state, axis_idx)
     ok, _ = _emit_state_update(
@@ -728,13 +721,6 @@ def dims_set_index(
     if _is_axis_playing(viewer_obj, idx) and origin != 'play':
         return False
     now = time.perf_counter()
-    if origin == 'keys':
-        min_dt = 0.0
-    else:
-        min_dt = float(state.dims_min_dt)
-    if (now - float(state.last_dims_send or 0.0)) < min_dt:
-        logger.debug("state.update dims.index gated by rate limiter (%s)", origin)
-        return False
     axis_idx = int(idx)
     target_label = _axis_target_label(state, axis_idx)
     ok, _ = _emit_state_update(
