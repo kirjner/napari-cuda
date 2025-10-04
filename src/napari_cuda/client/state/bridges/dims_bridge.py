@@ -190,6 +190,9 @@ class DimsBridge:
                     dims.point = tuple(float(x) for x in current_step)
                 except Exception:
                     self._logger.debug("DimsBridge: dims.point apply failed", exc_info=True)
+                if self._dims_tx_timer is not None and self._dims_tx_timer.isActive():
+                    self._dims_tx_timer.stop()
+                self._dims_tx_pending = None
                 self._last_step_ui = step_tuple
             if self._log_dims_info:
                 self._logger.info(

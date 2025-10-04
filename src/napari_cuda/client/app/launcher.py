@@ -334,7 +334,7 @@ def main():
             # Set a marker env so downstream components can apply if launched differently
             os.environ['NAPARI_CUDA_JIT_PRESET'] = str(args.jitter_preset)
         # Apply now in this process for consistency
-        from .streaming.pipelines.jitter_presets import apply_preset as _apply_jit
+        from napari_cuda.client.rendering.pipelines.jitter_presets import apply_preset as _apply_jit
         preset_name = os.getenv('NAPARI_CUDA_JIT_PRESET')
         if preset_name:
             try:
@@ -343,6 +343,8 @@ def main():
                     logger.info("launcher: applied jitter preset='%s' (set %d vars; existing envs preserved)", preset_name, len(applied))
             except Exception:
                 logger.exception("launcher: failed to apply jitter preset '%s'", preset_name)
+    except ImportError:
+        logger.warning('launcher: jitter preset handling skipped (module unavailable)')
     except Exception:
         logger.exception('launcher: jitter preset handling failed')
 
