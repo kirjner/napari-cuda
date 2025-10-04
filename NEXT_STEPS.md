@@ -50,7 +50,7 @@ def _capture_and_encode(self, request):
 
 #### 2.2 Implement Client Canvas
 ```python
-# src/napari_cuda/client/streaming_canvas.py
+# src/napari_cuda/client/app/streaming_canvas.py
 class StreamingCanvas(QWidget):
     async def receive_frames(self):
         async with websockets.connect(self.pixel_url) as ws:

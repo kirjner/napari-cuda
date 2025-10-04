@@ -24,7 +24,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from napari_cuda.server.bitstream import ParamCache, pack_to_avcc, build_avcc_config
+from napari_cuda.server.rendering.bitstream import ParamCache, pack_to_avcc, build_avcc_config
 from napari_cuda.codec.avcc import split_avcc_by_len, AccessUnit
 
 
@@ -132,7 +132,7 @@ def encode_all(
 
 
 def decode_with_vt(avcc: bytes, aus: List[AccessUnit], min_decoded: int = 0) -> int:
-    from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
+    from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
 
     vt = VTLiveDecoder(avcc, 0, 0)  # width/height are not used by shim mapping in this demo
     # Gate decode until keyframe
@@ -195,7 +195,7 @@ def main() -> None:
 
     # Print packer fast-path availability
     try:
-        from napari_cuda.server.bitstream import _FAST_PACK  # type: ignore
+        from napari_cuda.server.rendering.bitstream import _FAST_PACK  # type: ignore
         print(f'FAST_PACK available: {bool(_FAST_PACK)}')
     except Exception:
         pass

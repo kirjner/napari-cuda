@@ -18,8 +18,8 @@ import time
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
-from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene import (
+from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.state.server_scene import (
     LayerControlState,
     ServerSceneData,
     default_layer_controls,

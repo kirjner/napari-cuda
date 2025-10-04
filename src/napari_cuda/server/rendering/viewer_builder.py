@@ -16,8 +16,8 @@ import numpy as np
 from vispy import scene
 from napari.components.viewer_model import ViewerModel
 
-from napari_cuda.server.roi import plane_scale_for_level, plane_wh_for_level
-from napari_cuda.server.zarr_source import ZarrSceneSource
+from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
+from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
 logger = logging.getLogger(__name__)
 

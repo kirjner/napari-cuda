@@ -70,15 +70,15 @@ from napari_cuda.server.control.state_update_engine import (
     apply_layer_state_update,
     axis_label_from_meta,
 )
-from napari_cuda.server.render_mailbox import RenderDelta
-from napari_cuda.server.scene_state import ServerSceneState
-from napari_cuda.server.server_scene import (
+from napari_cuda.server.rendering.render_mailbox import RenderDelta
+from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.state.server_scene import (
     ServerSceneCommand,
     get_control_meta,
     increment_server_sequence,
     layer_controls_to_dict,
 )
-from napari_cuda.server.worker_notifications import WorkerSceneNotification
+from napari_cuda.server.rendering.worker_notifications import WorkerSceneNotification
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_dims_from_result,
     build_notify_dims_payload,
@@ -88,7 +88,7 @@ from napari_cuda.server.control.control_payload_builder import (
     build_notify_scene_payload,
 )
 from napari_cuda.protocol.snapshots import LayerDelta
-from napari_cuda.server.pixel import pixel_channel_server as pixel_channel
+from napari_cuda.server.rendering.pixel import pixel_channel_server as pixel_channel
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
     ResumableHistoryStore,

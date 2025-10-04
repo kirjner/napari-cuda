@@ -31,7 +31,7 @@ sporadic segmentation faults observed while presenting VT zero-copy frames in
 GLRenderer._draw_vt_texture -> GLRenderer.draw -> ClientStreamLoop.draw
 StreamingCanvas._draw_video_frame -> vispy.app.backends._qt.QGLWidget.paintGL
 napari._qt.qt_main_window.Window.event -> napari._qt.qt_event_loop.run
-napari_cuda.client.launcher.launch_streaming_client -> main
+napari_cuda.client.app.launcher.launch_streaming_client -> main
 ```
 
 ## Accounting Fixes (Done)

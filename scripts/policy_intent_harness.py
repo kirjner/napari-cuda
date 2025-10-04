@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List
 
-from napari_cuda.client.streaming.controllers import StateController
+from napari_cuda.client.runtime.channel_threads import StateController
 
 logger = logging.getLogger(__name__)
 

@@ -51,7 +51,7 @@ def main() -> int:
         print(f"VisPy not available: {e}")
         return 2
     try:
-        from napari_cuda.client.streaming.renderer import GLRenderer
+        from napari_cuda.client.rendering.renderer import GLRenderer
     except Exception as e:
         print(f"GLRenderer import failed: {e}")
         return 2

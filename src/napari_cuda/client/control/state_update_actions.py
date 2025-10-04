@@ -12,13 +12,13 @@ from napari_cuda.protocol import NotifyCamera
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
 if TYPE_CHECKING:  # pragma: no cover
-    from napari_cuda.client.streaming.presenter_facade import PresenterFacade
+    from napari_cuda.client.rendering.presenter_facade import PresenterFacade
 
-    from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
+    from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
     from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate, AckOutcome
 
 
-logger = logging.getLogger("napari_cuda.client.streaming.client_stream_loop")
+logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
 
 
 def _default_dims_meta() -> dict[str, object | None]:

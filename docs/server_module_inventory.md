@@ -1,97 +1,112 @@
 # Server Module Inventory
 
-Deep-dive catalogue of the server-side code base (Oct 2025). Focus is on the
-streaming/control path analogous to the client inventory: identify modules,
-responsibilities, sizes, and hotspots that complicate maintenance.
+Deep-dive catalogue of the server-side code base (Oct 2025). The tree now
+matches the target layout: entry points under `server/app`, authoritative
+state in `server/state`, data helpers in `server/data`, rendering pipeline in
+`server/rendering`, transport in `server/control`, and colocated tests in
+`server/tests`.
 
-## Top-Level Server Modules
+## App Package (`server/app`)
 
 | Module | Lines | Purpose | Notes |
 | --- | ---:| --- | --- |
-| `server/egl_headless_server.py` | 753 | Entry point for running the headless GL renderer and control loop. | Handles CLI parsing, config loading, worker lifecycle. Mixed concerns (CLI + setup). |
-| `server/config.py` | 539 | Environment/configuration context for server components. | Centralized but verbose; defines dataclasses for GPU/encoder limits, loop params, logging. |
-| `server/render_worker.py` | 1 208 | Core render worker: GL context, capture, encoder integration. | Large file orchestrating capture pipelines, multi-threading, metrics. |
-| `server/worker_runtime.py` | 537 | Manages background worker threads/process state. | Coordinates interop with render loop, pixel channel, control callbacks. |
-| `server/worker_lifecycle.py` | 444 | Hooks to start/stop the worker, manage callbacks into render worker. |
-| `server/layer_manager.py` | 566 | Maintains layer state on the server, builds SceneSnapshot blocks. | Emits control updates and notifies worker; tight coupling with napari viewer. |
-| `server/scene_state_applier.py` | 444 | Applies control updates/incoming state to napari viewer/layer objects. |
-| `server/control/control_channel_server.py` | 3 012 | WebSocket control server (state.update handling, resume tokens, heartbeats). | Single largest file; handles handshake, acknowledge queue, history store, command execution. |
-
-Other key single-file modules:
-- `render_mailbox.py` (140) – GPU frame hand-off queue.
-- `roi.py` / `roi_applier.py` (502 / 123) – region-of-interest selection logic.
-- `logging_policy.py` (257) – log suppression policy per stream.
+| `app/egl_headless_server.py` | 753 | Headless EGL server bootstrap (CLI, config load, worker orchestration). | Still mixes CLI parsing, asyncio loop wiring, and worker lifecycle glue. |
+| `app/config.py` | 539 | Resolves environment/config values into dataclasses (`ServerCtx`, `EncoderRuntime`, policy settings). | Central source of truth for downstream packages. |
+| `app/dash_dashboard.py` | 389 | Optional Dash monitoring UI. | Reads metrics snapshots and exposes simple controls. |
+| `app/metrics_core.py` | 143 | Shared metrics containers (frame timings, counters). | Consumed by `egl_headless_server`, render worker, and dashboard. |
+| `app/metrics_server.py` | 80 | Writes metrics/policy snapshots to disk; optional HTTP hooks. |
+| `app/experiments/*` | ~200 | Legacy benchmarking tools (baseline capture, vispy spike). | Consider archiving once profiling story stabilises. |
 
 ## Control Package (`server/control`)
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `control_channel_server.py` | 3 012 | Accepts state channel connections, parses greenfield frames, issues acks and notify.* broadcasts. Contains embedded history store, command catalogue, resume logic. |
-| `state_update_engine.py` | 505 | Implements reducers for state.update (dims, camera, settings, layers). Parses payloads, applies to server state, issues acks. |
-| `resumable_history_store.py` | 249 | Stores mutable history for resumable topics (scene, layers, stream). |
-| `command_registry.py` | 54 | Maps command names to callables (keyframe, etc.). |
-| `control_payload_builder.py` | 194 | Builds ack/notify payloads from server state. |
+| `control_channel_server.py` | 3 012 | WebSocket server handling state.update, notify.*, resume tokens, command execution. |
+| `state_update_engine.py` | 505 | Reducers that apply state.update payloads to server state/scene. |
+| `resumable_history_store.py` | 249 | Maintains topic history for resume/replay. |
+| `control_payload_builder.py` | 194 | Builds ack/notify payloads from `ServerScene`. |
+| `command_registry.py` | 54 | Maps greenfield command names to callables (e.g., `napari.pixel.request_keyframe`). |
 
-Observations:
-- `control_channel_server.py` is a kitchen sink (websocket server, message parsing, ack emission, state routing). Needs decomposition.
-- `state_update_engine.py` mirrors client `state_update_actions.py`, but server-specific (applies to napari objects via `scene_state_applier`).
-
-## Pixel / Rendering Modules
+## State Package (`server/state`)
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `pixel_channel_server.py` | 312 | WebSocket for streaming pixel frames to clients. |
+| `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas. |
+| `scene_state_applier.py` | 444 | Applies reducer outputs to napari viewer/layer manager. |
+| `camera_controller.py` | 287 | Interprets camera intents and delegates to `camera_ops`. |
+| `server_scene.py` | 297 | Aggregates viewer state, metrics snapshots, policy metadata. |
+| `scene_types.py` | 87 | Typed helpers describing scene payload structures. |
+| `camera_ops.py` | 167 | Low-level napari camera mutations. |
+| `camera_animator.py` | 37 | Optional auto-rotation animation hooks. |
+| `plane_restore_state.py` | 23 | Stores plane widget state during transitions. |
+| `scene_state.py` | 23 | Lightweight container for dims/camera metadata. |
+| `server_state_updates.py` | 4 | Shims for legacy imports (to be removed once callsites migrate). |
+
+## Data Package (`server/data`)
+
+| Module | Lines | Purpose |
+| --- | ---:| --- |
+| `zarr_source.py` | 538 | Zarr-backed multiscale data access, caching, LOD descriptors. |
+| `lod.py` | 667 | Level-of-detail calculations, oversampling, heuristics. |
+| `roi.py` / `roi_applier.py` | 502 / 123 | ROI selection and application to layer data. |
+| `logging_policy.py` | 257 | Controls stream logging verbosity based on events. |
+| `policy.py` | 73 | Level selection policy (oversampling thresholds, hysteresis). |
+| `level_budget.py` | 74 | Tracks level budgets for throttling. |
+| `level_logging.py` | 77 | Debug logging helpers for LOD decisions. |
+| `hw_limits.py` | 64 | GPU capability discovery. |
+| `alignment/__init__.py` | 97 | Optional Allen CCF alignment profile loader (extra dependency). |
+
+## Rendering Package (`server/rendering`)
+
+| Module | Lines | Purpose |
+| --- | ---:| --- |
+| `render_worker.py` | 1 208 | Core render worker orchestrating GL capture, NVENC encoding, policy metrics. |
+| `worker_runtime.py` | 537 | Manages worker thread/process state. |
+| `worker_lifecycle.py` | 444 | Start/stop hooks tying worker, control callbacks, metrics. |
+| `bitstream.py` | 361 | AVC Annex-B/avcC helpers, bitstream dumping. |
+| `capture.py` | 219 | Captures frames from OpenGL into GPU buffers. |
+| `encoder.py` | 389 | Encapsulates NVENC configuration and frame submission. |
+| `display_mode.py` | 175 | Applies napari ndisplay transitions (2D↔3D). |
+| `debug_tools.py` | 176 | Dumps renderer state / GL buffers for diagnostics. |
+| `patterns.py` | 206 | Generates test patterns for validation runs. |
+| `render_mailbox.py` | 140 | Thread-safe mailbox for frame hand-off. |
+| `render_loop.py` | 33 | Legacy helper (largely superseded by worker). |
+| `frame_pipeline.py` / `gl_capture.py` | 152 / 177 | Capture helpers (GPU copy, staging). |
+| `vispy_intercept.py` | 267 | Hooks vispy GL calls to integrate with the worker. |
+| `viewer_builder.py` | 347 | Constructs napari viewer for server-side rendering. |
+| `policy_metrics.py` | 67 | Collects policy/LOD metrics for telemetry. |
 | `pixel_broadcaster.py` | 244 | Multi-client broadcaster for encoded frames. |
-| `render_worker.py` | 1 208 | See above. |
-| `rendering/*` | ~1 400 total | GL capture, CUDA interop, encoder wrappers (NVENC), viewer builder. |
-| `bitstream.py` | 361 | AVC Annex-B/avcC bitstream helpers. |
-| `capture.py` | 219 | Captures frames from OpenGL to GPU buffers. |
-| `render_loop.py` | 33 | Legacy render loop stub (mostly superseded). |
-| `render_mailbox.py` | 140 | Thread-safe mailbox for GPU frames. |
+| `pixel_channel.py` | 4 | Compatibility shim pointing to `pixel/pixel_channel_server.py`. |
 
-## Scene/Layer Management
+### Pixel Subpackage (`server/rendering/pixel`)
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `server_scene.py` | 297 | Coordinates viewer, layer manager, and policies. Builds snapshots. |
-| `layer_manager.py` | 566 | Maintains layer blocks, responds to notify.scene requests, handles deltas. |
-| `scene_state_applier.py` | 444 | Applies state updates (from control channel) to napari viewer + layer manager. |
-| `scene_state.py` | 23 | Minimal structure describing current scene metadata. |
-| `plane_restore_state.py` | 23 | Stores slice plane state during transitions. |
-| `zarr_source.py` | 538 | Access to Zarr-backed data sources (mip levels, caching). |
+| `pixel_channel_server.py` | 312 | WebSocket channel serving encoded frames to clients. |
 
-## Supporting Modules
+## Tests (`server/tests`)
 
-- `camera_controller.py` (287), `camera_ops.py` (167), `camera_animator.py` (37) – server control of napari camera.
-- `lod.py` (667), `level_budget.py` (74), `level_logging.py` (77) – level-of-detail management.
-- `policy.py` (73), `policy_metrics.py` (67) – streaming policy decisions (quality, keyframes).
-- `patterns.py` (206), `display_mode.py` (175) – UI/layout control hints.
-- `metrics_core.py` (143), `metrics_server.py` (80) – capture metrics and expose web dashboard (with `dash_dashboard.py`).
-- `debug_tools.py` (176) – utilities for dumping renderer state.
-- `worker_notifications.py` (56) – send structured updates to clients about worker state.
-- `hw_limits.py` (64) – GPU capability probes.
-
-## Tests (`server/_tests`)
-
-- Coverage for bitstream, camera, config, layer manager, LOD, logging policy, pixel channel, ROI, scene state applier, server state updates, worker lifecycle, Zarr source, etc. Largest test is `test_state_channel_updates.py` (964 lines) exercising greenfield protocol end-to-end.
+Moved from `server/_tests` to mirror the runtime structure. Coverage includes
+bitstream helpers, camera controller, config context, layer manager, policy/LOD
+logic, ROI application, state channel integration, worker lifecycle, and Zarr
+source access.
 
 ## Pain Points / Observations
 
-1. **Control channel size** – `control_channel_server.py` at 3k lines handles transport, routing, acking, history. Needs decomposition (e.g. websocket server vs message router vs resume/history).
-2. **Duplicated logic** – Many helpers (state reducers, ack builders) mirror client code. Potential for shared utilities or protocol modules.
-3. **Scene/Layer coupling** – Layer manager, scene state applier, server scene, and viewer manager each manipulate napari objects. Responsibilities overlap; projection logic could be centralized.
-4. **Legacy artifacts** – Files like `render_loop.py`, `pixel_channel.py` (4 lines) hint at old architecture left in place to avoid breaking imports. Should be cleaned.
-5. **Configuration sprawl** – Config flows from `config.py` into many modules via environment variables, sometimes read repeatedly (dash dashboard, metrics). Documenting a single config source would help.
-6. **Concurrency complexity** – render worker, pixel channel, control server each spawn threads/loops; `render_worker.py` alone orchestrates GL, CUDA, NVENC, ROI, metrics. Hard to unit test.
-7. **Telemetry** – `metrics_server.py`, `dash_dashboard.py`, `metrics_core.py` form a monitoring stack; architecture doc should decide whether this remains tightly coupled to render worker or separated.
-8. **Testing** – Integration tests exist (`test_worker_integration`, `test_state_channel_updates`), but there’s no automated coverage for new snapshot-based layer manager flows except `test_layer_manager`. Worth verifying after refactor.
+1. **Control channel size** – `control_channel_server.py` still folds transport,
+   resume/history, acking, and command routing into one 3k-line module.
+2. **Render worker complexity** – `render_worker.py` coordinates capture,
+   encoding, policy metrics, camera updates, and telemetry; refactoring into
+   smaller components remains high priority.
+3. **Policy/LOD split across packages** – `data/lod.py`, `data/policy.py`, and
+   rendering-side `policy_metrics.py` share concepts; aligning interfaces would
+   simplify debugging.
+4. **Legacy shims** – Lightweight files like `render_loop.py` and
+   `rendering/pixel_channel.py` exist purely for compatibility; consider
+   removing once downstream imports are updated.
+5. **Concurrency clarity** – Documenting which threads own GL contexts, pixel
+   streaming, and control dispatch will help future refactors (and matches the
+   checklist in `docs/repo_structure_future.md`).
 
-## Immediate Hygiene Targets
-
-- Split `control_channel_server.py` into smaller modules: transport (websocket), session management (resume/history), message handling (state.update vs notify), command registry.
-- Extract projection/apply logic from `scene_state_applier.py` into reusable components (align with upcoming client projections).
-- Consolidate config reading: single config object passed through rather than environment reads everywhere.
-- Remove or clearly archive legacy stubs (`render_loop.py`, `pixel_channel.py`).
-- Document concurrency model (which threads own GL, control, pixel) to prepare for multi-client control.
-
-This inventory complements the client map and should inform the upcoming architecture doc and cleanup plan.
+This inventory mirrors the client-side map so forthcoming cleanup can follow a
+consistent package structure.

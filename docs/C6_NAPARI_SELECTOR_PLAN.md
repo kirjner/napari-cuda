@@ -43,8 +43,8 @@ Implementation Steps
    - Expose counters in `/metrics.json` and emit a single INFO if disagree ≥ threshold (e.g., ≥10/100).
 
 Files to Touch
-- `src/napari_cuda/server/lod.py`: add `compute_napari_level`; keep selector helpers (`LevelPolicy*`, `select_level`) co-located to avoid duplicate modules.
-- `src/napari_cuda/server/render_worker.py`: wire gate in `_evaluate_level_policy` (no change to apply path).
+- `src/napari_cuda/server/data/lod.py`: add `compute_napari_level`; keep selector helpers (`LevelPolicy*`, `select_level`) co-located to avoid duplicate modules.
+- `src/napari_cuda/server/rendering/render_worker.py`: wire gate in `_evaluate_level_policy` (no change to apply path).
 
 Gating / Rollout
 - Enable: `export NAPARI_CUDA_USE_NAPARI_LEVEL=1` (default off).

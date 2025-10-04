@@ -77,13 +77,13 @@ def test_napari_client():
         import napari
         log.info(f'✓ napari version: {napari.__version__}')
         
-        from napari_cuda.client.proxy_viewer import ProxyViewer
+        from napari_cuda.client.app.proxy_viewer import ProxyViewer
         log.info('✓ ProxyViewer importable')
         
-        from napari_cuda.client.streaming_canvas import StreamingCanvas
+        from napari_cuda.client.app.streaming_canvas import StreamingCanvas
         log.info('✓ StreamingCanvas importable')
         
-        from napari_cuda.client.launcher import launch_streaming_client
+        from napari_cuda.client.app.launcher import launch_streaming_client
         log.info('✓ Client launcher importable')
         
         return True

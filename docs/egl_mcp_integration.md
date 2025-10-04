@@ -44,7 +44,7 @@
    - Ensure MCP-triggered mutations trigger the same broadcast path as WebSocket state changes. For example, after `add_points`, schedule `_schedule_scene_broadcast("mcp")`.
    - Guard long operations with the server's existing locks (`_viewer_lock` equivalent is `_state_lock`) to avoid cross-thread races.
 5. **Testing**
-   - Add targeted async tests under `src/napari_cuda/server/_tests/test_mcp_service.py` exercising: layer listing, camera adjustments, dims update propagation, and execute_code sandboxing.
+   - Add targeted async tests under `src/napari_cuda/server/tests/test_mcp_service.py` exercising: layer listing, camera adjustments, dims update propagation, and execute_code sandboxing.
 
 ## Security & Access Control
 - Default to disabled in production builds; require an explicit config or environment variable to expose MCP.

@@ -1,12 +1,12 @@
 # Client Presenter Facade Plan
 
 ## Motivation
-- Historically `src/napari_cuda/client/streaming_canvas.py` owned Qt bootstrap, draw-hook wiring, FPS HUD timers, and ad-hoc presenter plumbing. This duplicated logic already present in `ClientStreamLoop` and made refactors risky.
+- Historically `src/napari_cuda/client/app/streaming_canvas.py` owned Qt bootstrap, draw-hook wiring, FPS HUD timers, and ad-hoc presenter plumbing. This duplicated logic already present in `ClientStreamLoop` and made refactors risky.
 - `ClientStreamLoop` is the authoritative home for the presenter (`FixedLatencyPresenter`), renderer, intent dispatch, and dims mirroring. We now expose that functionality through a façade so Qt-specific code can stay thin and testable.
 - A dedicated façade gives the upcoming `LayerStateBridge` a stable hook while keeping the Qt canvas focused on window deferral and keymap setup.
 
 ## Target Module
-- New module: `src/napari_cuda/client/streaming/presenter_facade.py` (lives alongside `presenter.py`, `renderer.py`, etc.).
+- New module: `src/napari_cuda/client/rendering/presenter_facade.py` (lives alongside `presenter.py`, `renderer.py`, etc.).
 - Exported class: `PresenterFacade`.
 - Dependencies: limited to `QtCore`, `QtWidgets`, `FixedLatencyPresenter`, `SourceMux`, `GLRenderer`, and lightweight helpers (`ClientConfig`, metrics hooks). Avoid importing `StreamingCanvas` to keep layering clean.
 

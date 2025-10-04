@@ -77,7 +77,7 @@ leases once the draw call finishes.
 ### ClientStreamLoop
 
 - Coordinates lifecycle for pipelines, presenter, renderer, input, telemetry.
-- Holds a `ClientLoopState` data bag (`src/napari_cuda/client/streaming/client_loop/loop_state.py`)
+- Holds a `ClientLoopState` data bag (`src/napari_cuda/client/runtime/client_loop/loop_state.py`)
   that owns the render queue, wake scheduling handles, timers, metrics facade,
   and VT/PyAV gating flags so helpers no longer poke private attributes.
 - Tracks cached VT/PyAV fallbacks through the state bag instead of ad-hoc
@@ -178,7 +178,7 @@ presenter gains a dedicated facade.
 ## ClientLoopState Data Bag
 
 `ClientStreamLoop` now instantiates `ClientLoopState` from
-`src/napari_cuda/client/streaming/client_loop/loop_state.py`. The bag groups
+`src/napari_cuda/client/runtime/client_loop/loop_state.py`. The bag groups
 threads, channels, render queue, pipelines, timers, and warmup/gating flags so
 helpers manipulate explicit state instead of mutating `self` attributes. The
 core fields look like this:

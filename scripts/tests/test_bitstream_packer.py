@@ -1,6 +1,6 @@
 import pytest
 
-from napari_cuda.server.bitstream import pack_to_annexb, ParamCache
+from napari_cuda.server.rendering.bitstream import pack_to_annexb, ParamCache
 
 
 def start_code4():

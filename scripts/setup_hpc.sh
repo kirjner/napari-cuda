@@ -222,7 +222,7 @@ echo "Clients can connect to:"
 echo "  State port: 8081"
 echo "  Pixel port: 8082"
 echo ""
-exec uv run python -m napari_cuda.server.headless_server ${1:-data/test_volume.npy}
+exec uv run python -m napari_cuda.server.app.egl_headless_server ${1:-data/test_volume.npy}
 EOF
 chmod +x start_server.sh
 

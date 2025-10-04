@@ -51,8 +51,8 @@ make typecheck                        # Run mypy type checking
 
 #### Client (Local machine)
 - `src/napari_cuda/client/proxy_viewer.py`: Thin client preventing local Window
-- `src/napari_cuda/client/streaming_canvas.py`: Decodes and displays H.264 streams
-- `src/napari_cuda/client/launcher.py`: Entry point for connections
+- `src/napari_cuda/client/app/streaming_canvas.py`: Decodes and displays H.264 streams
+- `src/napari_cuda/client/app/launcher.py`: Entry point for connections
 
 #### Protocol
 - `src/napari_cuda/protocol/messages.py`: Type-safe message classes, binary packing

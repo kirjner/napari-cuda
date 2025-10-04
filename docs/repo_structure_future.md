@@ -41,7 +41,7 @@ Offensive coding tenet: no defensive fallbacks, no silent failures.
 Offensive coding tenet: assertions over guards unless interfacing external systems.
 
 - `client/app`: `launcher.py`, `streaming_canvas.py`, minimal Qt glue. Should not contain business logic.
-- `client/state`: new home for state store, projections (layers, dims, camera, settings, volume), intent bridge. Removes logic from `proxy_viewer.py`, `state_update_actions.py`, `viewer_layer_adapter.py`.
+- `client/state`: new home for state store, projections (layers, dims, camera, settings, volume), intent bridge. Removes logic from `proxy_viewer.py`, `state_update_actions.py`, `state/bridges/layer_state_bridge.py`.
 - `client/control`: websocket client, pending store (if any), command interface. `control_channel_client.py` split into transport + router.
 - `client/rendering`: presenter, renderer, HUD. Presenter facade trimmed to focus on draw pipeline, metrics.
 - `client/runtime`: orchestrator that wires control, state, and rendering.

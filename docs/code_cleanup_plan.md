@@ -12,15 +12,13 @@ Offensive coding tenet: remove try/except scaffolding that hides bugs.
 ## Client Cleanups
 Offensive coding tenet: make invariants explicit and crash on violation.
 
-1. **Retire legacy streaming shells**
-   - Delete `client/streaming/client_stream_loop.py`, `state.py`, `state_store.py`
-     once imports are redirected to new modules.
-2. **Slim down PresenterFacade**
-   - Remove `legacy_draw` wiring and reconnect logic.
-   - Strip unused HUD/metrics hooks guarded by env flags.
-3. **ProxyViewer minimalism**
-   - Move slider/camera forwarding into intent bridge; keep ProxyViewer focused
-     on Qt integration only.
+1. ~~**Retire legacy streaming shells**~~
+   - ~~Delete `client/streaming/client_stream_loop.py`, `state.py`, `state_store.py` once imports are redirected to new modules.~~
+2. ~~**Slim down PresenterFacade**~~
+   - ~~Remove `legacy_draw` wiring and reconnect logic.~~
+   - ~~Strip unused HUD/metrics hooks guarded by env flags.~~
+3. ~~**ProxyViewer minimalism**~~
+   - ~~Move slider/camera forwarding into intent bridge; keep ProxyViewer focused on Qt integration only.~~
 4. **Consolidate config reads**
    - Replace scattered `os.getenv` calls with helper functions in a single
      config module.
@@ -54,9 +52,8 @@ Offensive coding tenet: make invariants explicit and crash on violation.
 5. **Logging consistency**
    - Standardize on structured logs for key events; remove string concatenation
      debug statements.
-6. **Deprecation cleanup**
-   - Delete compatibility shims in `protocol/envelopes.py` after consumers
-     migrate to greenfield imports.
+6. ~~**Deprecation cleanup**~~
+   - ~~Delete compatibility shims in `protocol/envelopes.py` after consumers migrate to greenfield imports.~~
 Offensive coding tenet: no defensive fallbacks, no silent failures.
 
 ## Shared Tasks

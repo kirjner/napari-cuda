@@ -48,7 +48,7 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 - Keep server config docs (`docs/server_*`). Merge client docs by adding, not replacing.
 
 ### Client (`src/napari_cuda/client/**`)
-- Accept the new reducer pipeline: files like `client_stream_loop.py`, `state_store.py`, `layer_state_bridge.py`, and client-loop utilities should come from `origin/client-refactor`.
+- Accept the new reducer pipeline: files like `client_stream_loop.py`, `state_store.py`, `state/bridges/layer_state_bridge.py`, and client-loop utilities should come from `origin/client-refactor`.
 - Update any imports that expect removed server helpers (e.g., `control_sessions`) to the merged protocol API.
 - Review `launcher.py`, `proxy_viewer.py`, and `streaming_canvas.py` for references to the old intent bridge; ensure they now instantiate `ClientStreamLoop` and `LayerStateBridge` correctly.
 - Align `StateStore` with the merged `StateUpdateMessage`: handle optional `meta`/`current_step` fields that the server still sends.
@@ -59,8 +59,8 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 - Defer to `docs/protocol_greenfield.md` for the canonical control-plane contract; legacy protocol/doc plans now live under `docs/archive_local/`.
 
 ## Testing Checklist
-1. `uv run pytest -q -m "not slow" src/napari_cuda/server/_tests` (server suite).
-2. `uv run pytest -q src/napari_cuda/client/streaming/_tests` (client reducer suite).
+1. `uv run pytest -q -m "not slow" src/napari_cuda/server/tests` (server suite).
+2. `uv run pytest -q src/napari_cuda/client/runtime/_tests src/napari_cuda/client/control/_tests src/napari_cuda/client/state/_tests` (client runtime + reducer suites).
 3. `uv run pytest -q src/napari_cuda/protocol/_tests` (protocol serialization).
 4. Manual smoke: `uv run napari-cuda-server --state-port ...` and
    `uv run napari-cuda-client` to verify pan/zoom/dims adjust correctly and

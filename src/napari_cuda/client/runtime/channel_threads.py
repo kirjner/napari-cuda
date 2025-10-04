@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from napari_cuda.protocol import AckState, ErrorCommand, ReplyCommand
     from napari_cuda.client.control.control_channel_client import SessionMetadata
 
-from napari_cuda.client.streaming.receiver import PixelReceiver
+from napari_cuda.client.runtime.receiver import PixelReceiver
 
 
 @dataclass

@@ -48,7 +48,7 @@
    - RegisteredImage for texture mapping
    - NVENC hardware encoding pipeline
 
-3. **ProxyViewer** (src/napari_cuda/client/proxy_viewer.py)
+3. **ProxyViewer** (src/napari_cuda/client/app/proxy_viewer.py)
    - Prevents local Window creation
    - Event forwarding to server
    - Thin client architecture

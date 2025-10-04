@@ -15,14 +15,14 @@ from contextlib import ExitStack
 import numpy as np
 from qtpy import QtCore
 
-from napari_cuda.client.streaming.presenter import FixedLatencyPresenter, SourceMux
-from napari_cuda.client.streaming.presenter_facade import PresenterFacade
-from napari_cuda.client.streaming.receiver import PixelReceiver, Packet
-from napari_cuda.client.streaming.types import Source, SubmittedFrame
-from napari_cuda.client.streaming.renderer import GLRenderer
-from napari_cuda.client.streaming.decoders.pyav import PyAVDecoder
-from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
-from napari_cuda.client.streaming.input import InputSender
+from napari_cuda.client.rendering.presenter import FixedLatencyPresenter, SourceMux
+from napari_cuda.client.rendering.presenter_facade import PresenterFacade
+from napari_cuda.client.runtime.receiver import PixelReceiver, Packet
+from napari_cuda.client.rendering.types import Source, SubmittedFrame
+from napari_cuda.client.rendering.renderer import GLRenderer
+from napari_cuda.client.rendering.decoders.pyav import PyAVDecoder
+from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
+from napari_cuda.client.runtime.input import InputSender
 from napari_cuda.codec.avcc import (
     annexb_to_avcc,
     is_annexb,
@@ -33,24 +33,24 @@ from napari_cuda.codec.avcc import (
 )
 from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
 from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
-from napari_cuda.client.streaming.client_loop.scheduler import CallProxy, WakeProxy
-from napari_cuda.client.streaming.client_loop.pipelines import (
+from napari_cuda.client.runtime.client_loop.scheduler import CallProxy, WakeProxy
+from napari_cuda.client.runtime.client_loop.pipelines import (
     build_pyav_pipeline,
     build_vt_pipeline,
 )
-from napari_cuda.client.streaming.client_loop.renderer_fallbacks import RendererFallbacks
-from napari_cuda.client.streaming.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.streaming.client_loop import warmup, camera, loop_lifecycle
+from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFallbacks
+from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+from napari_cuda.client.runtime.client_loop import warmup, camera, loop_lifecycle
 from napari_cuda.client.control import state_update_actions as control_actions
-from napari_cuda.client.streaming.client_loop.scheduler_helpers import (
+from napari_cuda.client.runtime.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
-from napari_cuda.client.streaming.client_loop.telemetry import (
+from napari_cuda.client.runtime.client_loop.telemetry import (
     build_telemetry_config,
     create_metrics,
 )
-from napari_cuda.client.streaming.client_loop.client_loop_config import load_client_loop_config
-from napari_cuda.client.layers import RemoteLayerRegistry, RegistrySnapshot
+from napari_cuda.client.runtime.client_loop.client_loop_config import load_client_loop_config
+from napari_cuda.client.data import RemoteLayerRegistry, RegistrySnapshot
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
@@ -63,14 +63,14 @@ from napari_cuda.protocol.snapshots import (
     layer_delta_from_payload,
     scene_snapshot_from_payload,
 )
-from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
+from napari_cuda.client.state import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.control.control_channel_client import StateChannel, SessionMetadata
     from napari_cuda.client.control.pending_update_store import PendingUpdate, AckOutcome
-    from napari_cuda.client.streaming.config import ClientConfig
+    from napari_cuda.client.runtime.config import ClientConfig
     from napari_cuda.protocol import ReplyCommand, ErrorCommand
 
 logger = logging.getLogger(__name__)
@@ -915,9 +915,9 @@ class ClientStreamLoop:
 
     def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
         vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is None or not hasattr(vm_ref, '_sync_remote_layers'):
+        if vm_ref is None:
             return
-        vm_ref._sync_remote_layers(snapshot)  # type: ignore[attr-defined]
+        self._layer_bridge.sync_viewer_layers(vm_ref, snapshot)
 
     def _handle_connected(self) -> None:
         self._loop_state.sync.reset_sequence()

@@ -89,7 +89,7 @@ Example: `LayerProjection` manages a `RemoteImageLayer` instance.
 - Tracks napari event emitters to block feedback loops using explicit context
   managers (`with projection.guard('contrast_limits')`).
 
-Same pattern for `DimsProjection` (drives `ViewerModel.dims` fields) and
+Same pattern for `DimsBridge` (drives `ViewerModel.dims` fields) and
 `CameraProjection`.
 
 ### Intent Bridge

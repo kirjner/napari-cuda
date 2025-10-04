@@ -109,7 +109,7 @@ def encode_decode_demo(
     use_container_encoder: bool = True,
 ) -> None:
     import av
-    from napari_cuda.client.streaming.decoders.vt import VTLiveDecoder
+    from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
 
     if not _is_darwin():
         raise RuntimeError("VT decode demo requires macOS (VideoToolbox)")
@@ -267,7 +267,7 @@ def encode_decode_demo(
                 cap, pts = item
                 arr = None
                 try:
-                    from napari_cuda.client.vt_shim import VTShimDecoder as _VT
+                    from napari_cuda.client.rendering.vt_shim import VTShimDecoder as _VT
                     arr = _VT.map_to_rgb(vt._shim._vt, cap)  # type: ignore[attr-defined]
                 except Exception:
                     pass

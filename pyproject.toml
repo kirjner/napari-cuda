@@ -303,7 +303,7 @@ napari_builtins = "napari_builtins:builtins.yaml"
 [project.scripts]
 napari = "napari.__main__:main"
 napari-cuda-server = "napari_cuda.server.egl_headless_server:main"
-napari-cuda-client = "napari_cuda.client.launcher:main"
+napari-cuda-client = "napari_cuda.client.app.launcher:main"
 napari-cuda-test = "napari_cuda.tests.test_interop:main"
 
 [tool.setuptools]
