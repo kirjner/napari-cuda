@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 import logging
 import math
@@ -222,6 +222,7 @@ class LayerStateBridge:
         self._enabled = enabled if enabled is not None else _env_bridge_enabled()
         self._bindings: Dict[str, LayerBinding] = {}
         self._state_store = state_store or StateStore(clock=time.time)
+        self._mute_depth = 0
 
         if not self._enabled:
             logger.debug("LayerStateBridge disabled via environment")
@@ -385,6 +386,10 @@ class LayerStateBridge:
 
     # ------------------------------------------------------------------
     def _on_property_change(self, binding: LayerBinding, config: PropertyConfig) -> None:
+        if not self._enabled:
+            return
+        if self._mute_depth > 0:
+            return
         if config.key in binding.suspended:
             return
         try:
@@ -492,6 +497,39 @@ class LayerStateBridge:
                 exc_info=True,
             )
             return None
+
+    @contextmanager
+    def remote_sync(self):
+        if not self._enabled:
+            yield
+            return
+        self._mute_depth += 1
+        try:
+            yield
+        finally:
+            self._mute_depth -= 1
+
+    def seed_remote_values(self, layer_id: str, changes: Mapping[str, Any]) -> None:
+        if not self._enabled or not changes:
+            return
+        binding = self._bindings.get(layer_id)
+        for key, raw_value in changes.items():
+            if key == "removed":
+                continue
+            config = PROPERTY_BY_KEY.get(key)
+            if config is None:
+                continue
+            encoded = self._encode_value(config, raw_value)
+            if encoded is None:
+                continue
+            self._state_store.seed_confirmed("layer", layer_id, config.key, encoded)
+            if binding is None:
+                continue
+            runtime = binding.properties.setdefault(config.key, PropertyRuntime())
+            runtime.active = False
+            runtime.active_intent_id = None
+            runtime.active_frame_id = None
+            runtime.last_phase = None
 
 
 class suppress_exception:

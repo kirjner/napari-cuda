@@ -644,7 +644,8 @@ class ClientStreamLoop:
         with self._scene_lock:
             self._latest_scene_frame = frame
         snapshot = scene_snapshot_from_payload(frame.payload)
-        self._layer_registry.apply_snapshot(snapshot)
+        with self._layer_bridge.remote_sync():
+            self._layer_registry.apply_snapshot(snapshot)
         logger.debug(
             "notify.scene received: layers=%d policies=%s",
             len(snapshot.layers),
@@ -688,7 +689,9 @@ class ClientStreamLoop:
 
     def _handle_layer_delta(self, frame: NotifyLayersFrame) -> None:
         delta = layer_delta_from_payload(frame.payload)
-        self._layer_registry.apply_delta(delta)
+        with self._layer_bridge.remote_sync():
+            self._layer_registry.apply_delta(delta)
+        self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
         logger.debug(
             "notify.layers: id=%s keys=%s",
             delta.layer_id,
