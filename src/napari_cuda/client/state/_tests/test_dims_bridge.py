@@ -171,3 +171,25 @@ def test_apply_remote_updates_viewer(logger: logging.Logger) -> None:
     assert viewer.dims.axis_labels == ("z", "y", "x")
     assert viewer.dims.order == (0, 1, 2)
     assert bridge.suppress_forward is False
+
+
+def test_noop_current_step_does_not_emit(logger: logging.Logger) -> None:
+    viewer = DummyViewer(ndim=2)
+    sender = DummySender()
+
+    bridge = DimsBridge(viewer, logger=logger, tx_interval_ms=0)
+    bridge.attach_state_sender(sender)
+
+    # Seeded current_step should not emit anything on first identical event.
+    viewer.dims.current_step = (0, 0)
+    bridge.handle_dims_change()
+    assert sender.index_calls == []
+
+    # No emission for unchanged state.
+    bridge.handle_dims_change()
+    assert sender.index_calls == []
+
+    # A real delta forwards to the coordinator exactly once.
+    viewer.dims.current_step = (1, 0)
+    bridge.handle_dims_change()
+    assert sender.index_calls == [(0, 1, "ui")]
