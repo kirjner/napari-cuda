@@ -179,4 +179,6 @@ Each phase should land with unit tests + doc updates.
   allow per-scope seeding.
 - Multi-client arbitration may require server-side versioning adjustments; keep
   store API flexible.
-
+- Agent integration spans both client and server. This doc assumes agents use
+  the client-side store/bridge API only; a companion server design must cover
+  authentication, attribution, and conflict resolution semantics.
