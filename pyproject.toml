@@ -326,7 +326,7 @@ namespaces = false
 napari_builtins = [
     "builtins.yaml",
 ]
-"napari_cuda.server" = [
+"napari_cuda.server.rendering" = [
     "_avcc_packer*.so",
     "_avcc_packer*.pyd",
 ]
