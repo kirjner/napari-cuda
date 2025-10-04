@@ -11,12 +11,12 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Optional, Sequence, List, Mapping, Dict, Any
 
-from . import pixel_channel
-from .bitstream import build_avcc_config, pack_to_avcc
+from napari_cuda.server.control import pixel_channel
+from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
 from napari_cuda.server.state.scene_state import ServerSceneState
 from .worker_notifications import WorkerSceneNotification
-from .render_worker import EGLRendererWorker
-from .debug_tools import DebugDumper
+from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
+from napari_cuda.server.rendering.debug_tools import DebugDumper
 
 
 def _handle_scene_refresh(

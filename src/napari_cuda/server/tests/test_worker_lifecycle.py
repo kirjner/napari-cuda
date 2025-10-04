@@ -12,9 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.rendering.worker_notifications import WorkerSceneNotificationQueue
+from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotificationQueue
 from napari_cuda.server.state.server_scene import create_server_scene_data
-from napari_cuda.server.rendering.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker
+from napari_cuda.server.runtime.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker
 from napari_cuda.server.rendering.debug_tools import DebugConfig
 
 
@@ -230,7 +230,7 @@ class _FakeWorkerBase:
 
 
 def test_snapshot_dims_metadata_prefers_scene_shape():
-    from napari_cuda.server.rendering.render_worker import EGLRendererWorker
+    from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 
     dims = SimpleNamespace(
         current_step=(5, 2, 1),
@@ -283,11 +283,11 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     server = make_fake_server(loop, tmp_path)
     state = WorkerLifecycleState()
 
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.build_avcc_config", lambda cache: None)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
-        "napari_cuda.server.rendering.worker_lifecycle.pixel_channel.maybe_send_stream_config",
+        "napari_cuda.server.runtime.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: asyncio.sleep(0),
     )
 
@@ -320,11 +320,11 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     server = make_fake_server(loop, tmp_path)
     state = WorkerLifecycleState()
 
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.build_avcc_config", lambda cache: None)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
-        "napari_cuda.server.rendering.worker_lifecycle.pixel_channel.maybe_send_stream_config",
+        "napari_cuda.server.runtime.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: asyncio.sleep(0),
     )
 
@@ -386,11 +386,11 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     server = make_fake_server(loop, tmp_path)
     state = WorkerLifecycleState()
 
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.EGLRendererWorker", _FakeMultiscaleWorker)
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.build_avcc_config", lambda cache: None)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.EGLRendererWorker", _FakeMultiscaleWorker)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.build_avcc_config", lambda cache: None)
     monkeypatch.setattr(
-        "napari_cuda.server.rendering.worker_lifecycle.pixel_channel.maybe_send_stream_config",
+        "napari_cuda.server.runtime.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: asyncio.sleep(0),
     )
 
@@ -439,11 +439,11 @@ def test_on_frame_schedules_stream_config(monkeypatch, tmp_path):
     async def fake_send(*args, **kwargs):
         send_calls.append((args, kwargs))
 
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.EGLRendererWorker", _FakePacketWorker)
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"avcc", True))
-    monkeypatch.setattr("napari_cuda.server.rendering.worker_lifecycle.build_avcc_config", lambda cache: b"cfg")
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.EGLRendererWorker", _FakePacketWorker)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"avcc", True))
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.build_avcc_config", lambda cache: b"cfg")
     monkeypatch.setattr(
-        "napari_cuda.server.rendering.worker_lifecycle.pixel_channel.maybe_send_stream_config",
+        "napari_cuda.server.runtime.worker_lifecycle.pixel_channel.maybe_send_stream_config",
         lambda *a, **k: fake_send(*a, **k),
     )
 

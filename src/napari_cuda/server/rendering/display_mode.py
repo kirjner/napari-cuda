@@ -7,7 +7,7 @@ import logging
 
 from vispy import scene  # type: ignore
 
-from napari_cuda.server.rendering.worker_runtime import perform_level_switch
+from napari_cuda.server.runtime.worker_runtime import perform_level_switch
 
 logger = logging.getLogger(__name__)
 

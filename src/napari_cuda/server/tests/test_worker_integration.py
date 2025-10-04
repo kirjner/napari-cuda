@@ -211,8 +211,8 @@ class _FakeSceneSource:
 
 
 @pytest.fixture()
-def render_worker_fixture(monkeypatch) -> "napari_cuda.server.rendering.render_worker.EGLRendererWorker":
-    from napari_cuda.server.rendering import render_worker as rw
+def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker.EGLRendererWorker":
+    from napari_cuda.server.runtime import egl_worker as rw
     from napari_cuda.server.state import scene_state_applier as ssa
 
     class _DummyEglContext:
@@ -395,7 +395,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.rendering.render_w
 
 
 def test_zoom_hint_reaches_lod_selector(render_worker_fixture, monkeypatch):
-    from napari_cuda.server.rendering import render_worker as rw
+    from napari_cuda.server.runtime import egl_worker as rw
 
     worker = render_worker_fixture
     ratios: list[float | None] = []

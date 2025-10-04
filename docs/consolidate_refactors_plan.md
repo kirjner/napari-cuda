@@ -39,12 +39,12 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 - Ensure `StreamProtocol.parse_message` continues to hydrate `StateUpdateMessage` instances; no other message categories need to change yet.
 
 ### Server (`src/napari_cuda/server/**`)
-- Keep the `server-refactor` modules (`render_worker.py`, `worker_lifecycle.py`,
+- Keep the `server-refactor` modules (`runtime/egl_worker.py`, `worker_lifecycle.py`,
   `server_scene/*.py`, control channel helpers, etc.). When resolving conflicts
   with `client-refactor`, favor the refactored architecture and delete
   references to the old `egl_worker` in client code.
 - Restore deleted test suites from `server-refactor` (state updates, worker lifecycle). If client branch removed them, bring them back unless they rely on removed components.
-- In `egl_headless_server.py`, ensure imports match retained modules (no `egl_worker`). Wire any new client-introduced hooks (e.g., metrics toggles) to the refactored API.
+- In `egl_headless_server.py`, ensure imports match retained modules (`runtime/egl_worker`). Wire any new client-introduced hooks (e.g., metrics toggles) to the refactored API.
 - Keep server config docs (`docs/server_*`). Merge client docs by adding, not replacing.
 
 ### Client (`src/napari_cuda/client/**`)

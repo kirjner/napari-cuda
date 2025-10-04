@@ -36,7 +36,7 @@ Offensive coding tenet: assertions over guards unless interfacing external syste
 Offensive coding tenet: remove try/except scaffolding that hides bugs.
 
 1. **Archive empty stubs**
-   - Remove `server/render_loop.py`, `server/pixel_channel.py` after ensuring
+  - Remove `server/runtime/runtime_loop.py`, `server/control/pixel_channel.py` after ensuring
      callers reference new modules.
 2. **Split control channel**
    - Move WebSocket setup to a new `transport.py`.
@@ -74,4 +74,3 @@ Offensive coding tenet: make invariants explicit and crash on violation.
 4. Revisit cleanup list after each phase to remove completed items and add new
    findings.
 Offensive coding tenet: no defensive fallbacks, no silent failures.
-

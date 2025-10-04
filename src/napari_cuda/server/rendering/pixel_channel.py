@@ -1,4 +1,3 @@
 """Compatibility shim forwarding to the server pixel channel."""
 
-from .pixel.pixel_channel_server import *  # noqa: F401,F403
-
+from napari_cuda.server.control.pixel_channel import *  # noqa: F401,F403

@@ -18,7 +18,7 @@ import numpy as np
 from napari_cuda.server.state.scene_types import SliceROI
 from napari_cuda.server.data.roi_applier import SliceDataApplier
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.rendering.render_mailbox import RenderMailbox
+from napari_cuda.server.runtime.runtime_mailbox import RenderMailbox
 
 from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.utils.colormaps.colormap_utils import ensure_colormap

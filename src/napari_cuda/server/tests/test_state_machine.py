@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.rendering.render_mailbox import RenderMailbox
+from napari_cuda.server.runtime.runtime_mailbox import RenderMailbox
 
 
 class _FakeClock:

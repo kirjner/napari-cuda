@@ -87,7 +87,7 @@ The following deviations are now deliberate, documented behaviour until the corr
 
 ### 3.1 Keyframe Handling Baseline
 
-- **force_idr() limitation** – `src/napari_cuda/server/rendering/encoder.py:223` toggles NVENC reconfigure, but it still fails to guarantee an IDR frame. We now treat encoder reset plus an explicit `request_idr()` as the contract: `pixel_channel.ensure_keyframe()` replays the last avcC immediately before calling `_try_reset_encoder()` and marks the stream dirty (`src/napari_cuda/server/rendering/pixel/pixel_channel_server.py:100`), `_ensure_keyframe()` schedules the reset after the state baseline (`src/napari_cuda/server/control/control_channel_server.py:2815`) and follows up by asking the worker to request an IDR for the next frame (`src/napari_cuda/server/app/egl_headless_server.py:425`). This mirrors the initial startup behaviour, ensures the next frame after a request is produced from a clean encoder state, and leaves a TODO breadcrumb (`src/napari_cuda/server/rendering/pixel/pixel_channel_server.py:137`) to re-enable targeted IDR forcing once NVENC reliability is proven.
+- **force_idr() limitation** – `src/napari_cuda/server/rendering/encoder.py:223` toggles NVENC reconfigure, but it still fails to guarantee an IDR frame. We now treat encoder reset plus an explicit `request_idr()` as the contract: `pixel_channel.ensure_keyframe()` replays the last avcC immediately before calling `_try_reset_encoder()` and marks the stream dirty (`src/napari_cuda/server/control/pixel_channel.py:100`), `_ensure_keyframe()` schedules the reset after the state baseline (`src/napari_cuda/server/control/control_channel_server.py:2815`) and follows up by asking the worker to request an IDR for the next frame (`src/napari_cuda/server/app/egl_headless_server.py:425`). This mirrors the initial startup behaviour, ensures the next frame after a request is produced from a clean encoder state, and leaves a TODO breadcrumb (`src/napari_cuda/server/control/pixel_channel.py:137`) to re-enable targeted IDR forcing once NVENC reliability is proven.
 - **Client VT gate expectations** – The streaming runtime logs “Keyframe request skipped (vt gate pending)” (`src/napari_cuda/client/runtime/stream_runtime.py:1276`) while waiting for the first IDR after a request. This is expected when the server had to reset the encoder; gating logic should be revisited once `force_idr()` is reliable.
 
 Cross-reference these items when planning migration work; each future change should remove its entry from this section.
@@ -148,7 +148,7 @@ Cross-reference these items when planning migration work; each future change sho
 - `client/pixel/pixel_channel_client.py` / `client/pixel/frame_presenter.py` /
   `client/pixel/renderer.py` (archived under `client/streaming/`) handle pixel
   frames without protocol coupling.
-- `server/pixel/pixel_channel_server.py` (archive: `server/pixel_channel.py`)
+- `server/control/pixel_channel.py` (archive: `server/rendering/pixel_channel.py`)
   now emits `notify.stream` payloads via `build_notify_stream`, feeding the
   control-channel sequencer instead of the legacy `video_config` JSON helper.
 
@@ -187,7 +187,7 @@ Cross-reference these items when planning migration work; each future change sho
 | `server/state/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
 | *(removed)* | `server/control/control_payload_builder.py` | Communicates “baseline snapshot” job. |
 | — *(removed)* | — *(removed)* | Legacy dual-emission bridge deleted once stream lane went greenfield-only. |
-| `server/pixel_channel.py` | `server/pixel/pixel_channel_server.py` | Aligns with the pixel-lane nomenclature. |
+| `server/rendering/pixel_channel.py` | `server/control/pixel_channel.py` | Aligns with the pixel-lane nomenclature. |
 
 Renames happen early so the new directory tree mirrors the future ownership
 model before logic changes land.

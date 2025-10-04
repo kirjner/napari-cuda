@@ -42,8 +42,8 @@ from napari._vispy.layers.image import VispyImageLayer, _napari_cmap_to_vispy
 
 import pycuda.driver as cuda  # type: ignore
 # Bitstream packing happens in the server layer
-from .patterns import make_rgba_image
-from .debug_tools import DebugConfig, DebugDumper
+from napari_cuda.server.rendering.patterns import make_rgba_image
+from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.state.scene_types import SliceROI
@@ -57,7 +57,7 @@ from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.rendering.capture import CaptureFacade, FrameTimings, encode_frame
-from napari_cuda.server.rendering.render_loop import run_render_tick
+from napari_cuda.server.runtime.runtime_loop import run_render_tick
 from napari_cuda.server.data.roi_applier import (
     SliceUpdatePlanner,
     refresh_slice,
@@ -75,14 +75,14 @@ from napari_cuda.server.state.camera_controller import process_commands
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.server_scene import ServerSceneCommand
 from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
-from napari_cuda.server.rendering.render_mailbox import (
+from napari_cuda.server.runtime.runtime_mailbox import (
     PendingRenderUpdate,
     RenderDelta,
     RenderMailbox,
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
-from napari_cuda.server.rendering.worker_runtime import (
+from napari_cuda.server.runtime.worker_runtime import (
     apply_worker_level,
     apply_worker_volume_level,
     apply_worker_slice_level,

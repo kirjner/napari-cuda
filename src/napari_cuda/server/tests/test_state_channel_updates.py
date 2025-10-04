@@ -29,10 +29,10 @@ from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
-from napari_cuda.server.rendering.render_mailbox import RenderDelta
+from napari_cuda.server.runtime.runtime_mailbox import RenderDelta
 from napari_cuda.server.state.server_scene import create_server_scene_data
 from napari_cuda.server.control.state_update_engine import apply_layer_state_update
-from napari_cuda.server.rendering.worker_notifications import WorkerSceneNotification
+from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotification
 
 
 class _CaptureWorker:

@@ -44,7 +44,7 @@ Implementation Steps
 
 Files to Touch
 - `src/napari_cuda/server/data/lod.py`: add `compute_napari_level`; keep selector helpers (`LevelPolicy*`, `select_level`) co-located to avoid duplicate modules.
-- `src/napari_cuda/server/rendering/render_worker.py`: wire gate in `_evaluate_level_policy` (no change to apply path).
+- `src/napari_cuda/server/runtime/egl_worker.py`: wire gate in `_evaluate_level_policy` (no change to apply path).
 
 Gating / Rollout
 - Enable: `export NAPARI_CUDA_USE_NAPARI_LEVEL=1` (default off).

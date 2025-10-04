@@ -26,7 +26,7 @@ from napari_cuda.server.state.server_scene import (
 )
 
 if TYPE_CHECKING:
-    from napari_cuda.server.rendering.render_worker import EGLRendererWorker
+    from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 
 
 logger = logging.getLogger(__name__)

@@ -32,7 +32,7 @@ from napari_cuda.server.state.server_scene import (
     create_server_scene_data,
     prune_control_metadata,
 )
-from napari_cuda.server.rendering.worker_notifications import (
+from napari_cuda.server.runtime.worker_notifications import (
     WorkerSceneNotification,
     WorkerSceneNotificationQueue,
 )
@@ -54,14 +54,15 @@ from napari_cuda.protocol import (
     NOTIFY_STREAM_TYPE,
 )
 from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
-from napari_cuda.server.rendering import pixel_broadcaster, pixel_channel
+from napari_cuda.server.rendering import pixel_broadcaster
+from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
     broadcast_stream_config,
     handle_state,
     process_worker_notifications,
 )
-from napari_cuda.server.rendering.worker_lifecycle import (
+from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
@@ -73,7 +74,7 @@ from napari_cuda.server.control.resumable_history_store import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
-    from napari_cuda.server.rendering.render_worker import EGLRendererWorker
+    from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 
 
 @dataclass

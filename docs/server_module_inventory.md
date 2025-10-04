@@ -60,29 +60,23 @@ state in `server/state`, data helpers in `server/data`, rendering pipeline in
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `render_worker.py` | 1 208 | Core render worker orchestrating GL capture, NVENC encoding, policy metrics. |
-| `worker_runtime.py` | 537 | Manages worker thread/process state. |
-| `worker_lifecycle.py` | 444 | Start/stop hooks tying worker, control callbacks, metrics. |
+| `runtime/egl_worker.py` | 1 208 | Core EGL-backed worker orchestrating GL capture, NVENC encoding, policy metrics. |
+| `runtime/worker_runtime.py` | 537 | Manages worker thread/process state. |
+| `runtime/worker_lifecycle.py` | 444 | Start/stop hooks tying worker, control callbacks, metrics. |
 | `bitstream.py` | 361 | AVC Annex-B/avcC helpers, bitstream dumping. |
 | `capture.py` | 219 | Captures frames from OpenGL into GPU buffers. |
 | `encoder.py` | 389 | Encapsulates NVENC configuration and frame submission. |
 | `display_mode.py` | 175 | Applies napari ndisplay transitions (2D↔3D). |
 | `debug_tools.py` | 176 | Dumps renderer state / GL buffers for diagnostics. |
 | `patterns.py` | 206 | Generates test patterns for validation runs. |
-| `render_mailbox.py` | 140 | Thread-safe mailbox for frame hand-off. |
-| `render_loop.py` | 33 | Legacy helper (largely superseded by worker). |
+| `runtime/runtime_mailbox.py` | 140 | Thread-safe mailbox for frame hand-off. |
+| `runtime/runtime_loop.py` | 33 | Legacy helper (largely superseded by worker). |
 | `frame_pipeline.py` / `gl_capture.py` | 152 / 177 | Capture helpers (GPU copy, staging). |
 | `vispy_intercept.py` | 267 | Hooks vispy GL calls to integrate with the worker. |
 | `viewer_builder.py` | 347 | Constructs napari viewer for server-side rendering. |
 | `policy_metrics.py` | 67 | Collects policy/LOD metrics for telemetry. |
 | `pixel_broadcaster.py` | 244 | Multi-client broadcaster for encoded frames. |
-| `pixel_channel.py` | 4 | Compatibility shim pointing to `pixel/pixel_channel_server.py`. |
-
-### Pixel Subpackage (`server/rendering/pixel`)
-
-| Module | Lines | Purpose |
-| --- | ---:| --- |
-| `pixel_channel_server.py` | 312 | WebSocket channel serving encoded frames to clients. |
+| `control/pixel_channel.py` | 312 | WebSocket channel serving encoded frames to clients. |
 
 ## Tests (`server/tests`)
 
@@ -95,14 +89,14 @@ source access.
 
 1. **Control channel size** – `control_channel_server.py` still folds transport,
    resume/history, acking, and command routing into one 3k-line module.
-2. **Render worker complexity** – `render_worker.py` coordinates capture,
+2. **Render worker complexity** – `runtime/egl_worker.py` coordinates capture,
    encoding, policy metrics, camera updates, and telemetry; refactoring into
    smaller components remains high priority.
 3. **Policy/LOD split across packages** – `data/lod.py`, `data/policy.py`, and
    rendering-side `policy_metrics.py` share concepts; aligning interfaces would
    simplify debugging.
-4. **Legacy shims** – Lightweight files like `render_loop.py` and
-   `rendering/pixel_channel.py` exist purely for compatibility; consider
+4. **Legacy shims** – Lightweight files like `runtime/runtime_loop.py` and
+   `control/pixel_channel.py` exist purely for compatibility; consider
    removing once downstream imports are updated.
 5. **Concurrency clarity** – Documenting which threads own GL contexts, pixel
    streaming, and control dispatch will help future refactors (and matches the
