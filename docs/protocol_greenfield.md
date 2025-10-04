@@ -573,7 +573,7 @@ re-parsing the prose.
 
 Use this checklist when emitting or parsing frames so envelope fields never drift
 from the spec. Think of it as the builder/parsing contract that the helpers in
-`napari_cuda.protocol.greenfield.envelopes` must enforce.
+`napari_cuda.protocol.envelopes` must enforce.
 
 ### B.1 Core Rules (apply to every frame)
 
@@ -618,7 +618,7 @@ from the spec. Think of it as the builder/parsing contract that the helpers in
 
 ### B.3 Helper Expectations
 
-When rebuilding `protocol.greenfield.envelopes`:
+When rebuilding `protocol.envelopes`:
 
 1. **Builder functions** must inject the correct envelope defaults (version,
    timestamp, identifier strategy) and call the `validate()` methods on the new

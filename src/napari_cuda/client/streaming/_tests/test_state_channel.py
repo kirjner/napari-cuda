@@ -28,7 +28,7 @@ from napari_cuda.protocol import (
     build_session_reject,
     build_session_welcome,
 )
-from napari_cuda.protocol.greenfield.envelopes import NOTIFY_SCENE_LEVEL_TYPE
+from napari_cuda.protocol.envelopes import NOTIFY_SCENE_LEVEL_TYPE
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,

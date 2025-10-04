@@ -1,11 +1,11 @@
-"""Typed snapshots feeding greenfield notify payloads."""
+"""Typed snapshots feeding control protocol notify payloads."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
-from napari_cuda.protocol.greenfield.messages import (
+from napari_cuda.protocol.messages import (
     NotifyLayersPayload,
     NotifyScenePayload,
 )

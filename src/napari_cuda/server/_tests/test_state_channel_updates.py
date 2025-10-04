@@ -16,7 +16,7 @@ from napari_cuda.protocol import (
     build_call_command,
     build_state_update,
 )
-from napari_cuda.protocol.greenfield.envelopes import build_session_hello
+from napari_cuda.protocol.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
