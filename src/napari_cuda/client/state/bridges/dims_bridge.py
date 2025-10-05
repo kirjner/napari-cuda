@@ -92,13 +92,20 @@ class DimsBridge:
 
 
     def _on_dims_change(self, event: Any | None = None) -> None:
-        if self._suppress_forward:
-            return
-        sender = self._state_sender
-        if sender is None:
-            return
         dims = self._viewer.dims
         current = self._coerce_step(dims.current_step)
+
+        if self._suppress_forward:
+            self._last_step_ui = current
+            if self._dims_tx_timer is not None and self._dims_tx_timer.isActive():
+                self._dims_tx_timer.stop()
+            self._dims_tx_pending = None
+            return
+
+        sender = self._state_sender
+        if sender is None:
+            self._last_step_ui = current
+            return
 
         if self._last_step_ui is not None and current == self._last_step_ui:
             return
