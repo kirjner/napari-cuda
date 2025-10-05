@@ -29,10 +29,11 @@ class ViewerBuilder:
         self._bridge = bridge
 
     def build(self, source: Optional[ZarrSceneSource]) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
-        worker_policy = getattr(self._bridge, "_debug_policy", None)
-        worker_debug = getattr(worker_policy, "worker", None)
-        debug_bg = bool(getattr(worker_debug, "debug_bg_overlay", False))
-        layer_interpolation = (getattr(worker_debug, "layer_interpolation", "bilinear") or "bilinear").strip().lower()
+        worker_policy = self._bridge._debug_policy  # type: ignore[attr-defined]
+        worker_debug = worker_policy.worker
+        debug_bg = bool(worker_debug.debug_bg_overlay)
+        layer_interpolation = worker_debug.layer_interpolation
+        assert layer_interpolation, "worker debug policy missing layer_interpolation"
         bgcolor = (0.08, 0.08, 0.08, 1.0) if debug_bg else "black"
         # Create a native EGL-backed SceneCanvas. The worker will adopt this
         # context for capture to ensure a single GL context is used.
@@ -200,20 +201,11 @@ class ViewerBuilder:
                 viewer.dims.current_step = tuple(int(s) for s in step)
                 self._bridge._last_step = tuple(int(s) for s in step)
                 # Make sure layer draws fully opaque and on top for debugging
-                try:
-                    layer.opacity = 1.0
-                    layer.blending = 'opaque'
-                    layer.gamma = 1.0
-                    layer.colormap = 'gray'
-                except Exception:
-                    logger.debug("adapter: layer visual props set failed", exc_info=True)
-                # Configurable interpolation; default to policy-specified value (bilinear by default)
-                interp = layer_interpolation or 'bilinear'
-                if hasattr(layer, 'interpolation'):
-                    try:
-                        layer.interpolation = interp
-                    except Exception:
-                        logger.debug("adapter: setting interpolation failed (interp=%s)", interp, exc_info=True)
+                layer.opacity = 1.0
+                layer.blending = 'opaque'
+                layer.gamma = 1.0
+                layer.colormap = 'gray'
+                layer.interpolation = layer_interpolation
                 try:
                     self._bridge._set_dims_range_for_level(source, current_level)
                 except Exception:

@@ -8,6 +8,8 @@ import os
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
+from napari.layers.image._image_constants import Interpolation as NapariInterpolation
+
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ class WorkerDebug:
     roi_align_chunks: bool = False
     roi_ensure_contains_viewport: bool = True
     force_tight_pitch: bool = False
-    layer_interpolation: str = "bilinear"
+    layer_interpolation: str = NapariInterpolation.LINEAR.value
 
 
 @dataclass(frozen=True)
@@ -228,7 +230,8 @@ def load_debug_policy(env: Optional[Mapping[str, str]] = None) -> DebugPolicy:
         if "force_tight_pitch" in worker_cfg:
             worker_kwargs["force_tight_pitch"] = _coerce_bool(worker_cfg["force_tight_pitch"], worker_defaults.force_tight_pitch)
         if "layer_interpolation" in worker_cfg:
-            worker_kwargs["layer_interpolation"] = str(worker_cfg["layer_interpolation"]).strip().lower() or worker_defaults.layer_interpolation
+            raw = worker_cfg["layer_interpolation"]
+            worker_kwargs["layer_interpolation"] = NapariInterpolation(str(raw).strip().lower()).value
         if "orbit_el_min" in worker_cfg:
             worker_kwargs["orbit_el_min"] = _coerce_float(worker_cfg["orbit_el_min"], worker_defaults.orbit_el_min)
         if "orbit_el_max" in worker_cfg:

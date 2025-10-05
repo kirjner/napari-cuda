@@ -18,6 +18,8 @@ import time
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
+from napari.layers.image._image_constants import Interpolation as NapariInterpolation
+
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.server_scene import (
     LayerControlState,
@@ -215,6 +217,8 @@ def update_volume_sample_step(scene: ServerSceneData, lock: Lock, rel: float) ->
 _BOOL_TRUE = {"1", "true", "yes", "on"}
 _BOOL_FALSE = {"0", "false", "no", "off"}
 
+_ALLOWED_INTERPOLATIONS = {mode.value for mode in NapariInterpolation}
+
 _ALLOWED_BLENDING = {
     "opaque",
     "translucent",
@@ -222,14 +226,6 @@ _ALLOWED_BLENDING = {
     "minimum",
     "maximum",
     "average",
-}
-
-_INTERPOLATION_MODES = {
-    "nearest": "nearest",
-    "linear": "linear",
-    "bilinear": "linear",
-    "bicubic": "cubic",
-    "cubic": "cubic",
 }
 
 _ALLOWED_DEPICTION = {"volume", "plane"}
@@ -328,8 +324,10 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
     if prop == "blending":
         return _normalize_string(value, allowed=_ALLOWED_BLENDING)
     if prop == "interpolation":
-        normal = _normalize_string(value, allowed=set(_INTERPOLATION_MODES.keys()))
-        return _INTERPOLATION_MODES[normal]
+        assert isinstance(value, str), "interpolation update must be a string"
+        token = value.strip().lower()
+        assert token in _ALLOWED_INTERPOLATIONS, f"invalid interpolation mode: {token}"
+        return token
     if prop == "gamma":
         return _normalize_gamma(value)
     if prop == "contrast_limits":

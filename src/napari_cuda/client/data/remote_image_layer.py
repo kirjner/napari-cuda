@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-import math
-from contextlib import nullcontext
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
 from napari.layers.image.image import Image
 from napari.layers._scalar_field._slice import _ScalarFieldSliceResponse, _ScalarFieldView
+from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 try:
     from qtpy import QtCore  # type: ignore
 except Exception:  # pragma: no cover - best effort import
@@ -70,7 +69,9 @@ class RemoteImageLayer(Image):
         self._install_empty_slice()
         fallback_preview = self._extract_preview() if preview is None else preview
         self.update_preview(fallback_preview)
-        self._apply_controls(self._remote_block.get("controls") or {})
+        controls_block = self._remote_block["controls"]
+        assert isinstance(controls_block, Mapping), "remote layer missing controls mapping"
+        self._apply_controls(controls_block)
 
     # ------------------------------------------------------------------
     def update_from_block(self, block: Mapping[str, Any]) -> None:
@@ -134,7 +135,9 @@ class RemoteImageLayer(Image):
                     self.metadata.update(metadata)
 
         self._apply_render(self._remote_block.get("render"))
-        self._apply_controls(self._remote_block.get("controls") or {})
+        controls_block = self._remote_block["controls"]
+        assert isinstance(controls_block, Mapping), "remote layer missing controls mapping"
+        self._apply_controls(controls_block)
         if control_only:
             fallback_preview = self._extract_preview() if preview is None else preview
             if fallback_preview is not None:
@@ -220,213 +223,133 @@ class RemoteImageLayer(Image):
                 list(controls.keys()),
             )
 
-        def _set_attr(attr: str, value: Any, *, equals: Optional[Callable[[Any, Any], bool]] = None) -> None:
-            current = getattr(self, attr, None)
-            if equals is not None:
-                if current is not None and equals(current, value):
-                    return
-            else:
-                if current == value:
-                    return
-            events_obj = getattr(self, "events", None)
-            emitter = getattr(events_obj, attr, None)
-            blocker = emitter.blocker() if emitter is not None and hasattr(emitter, "blocker") else nullcontext()
-            with blocker:
-                setattr(self, attr, value)
+        known_keys = {
+            "visible",
+            "opacity",
+            "blending",
+            "interpolation",
+            "colormap",
+            "rendering",
+            "gamma",
+            "contrast_limits",
+            "iso_threshold",
+            "attenuation",
+        }
+        unexpected = set(controls) - known_keys
+        assert not unexpected, f"Unsupported control keys for remote layer: {sorted(unexpected)}"
 
-        try:
-            value = controls.get("visible")
-            if value is not None:
-                new_val = bool(value)
-                if bool(getattr(self, "visible", new_val)) is not new_val:
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set visible -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr("visible", new_val)
-        except Exception:
-            logger.debug("RemoteImageLayer: visible control failed", exc_info=True)
+        if "visible" in controls:
+            value = controls["visible"]
+            assert value is not None, "visible control cannot be None"
+            new_val = bool(value)
+            if bool(self.visible) is not new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set visible -> %s", self._remote_id, new_val)
+                with self.events.visible.blocker():
+                    self.visible = new_val
 
-        try:
-            value = controls.get("opacity")
-            if value is not None:
-                new_val = float(value)
-                if not math.isclose(float(getattr(self, "opacity", new_val)), new_val, rel_tol=1e-6, abs_tol=1e-6):
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set opacity -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr(
-                        "opacity",
-                        new_val,
-                        equals=lambda cur, val: math.isclose(float(cur), float(val), rel_tol=1e-6, abs_tol=1e-6),
-                    )
-        except Exception:
-            logger.debug("RemoteImageLayer: opacity control failed", exc_info=True)
+        if "opacity" in controls:
+            value = controls["opacity"]
+            assert value is not None, "opacity control cannot be None"
+            new_val = float(value)
+            current = float(self.opacity)
+            if current != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set opacity -> %s", self._remote_id, new_val)
+                with self.events.opacity.blocker():
+                    self.opacity = new_val
 
-        try:
-            value = controls.get("blending")
-            if value:
-                new_val = str(value)
-                if str(getattr(self, "blending", "")) != new_val:
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set blending -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr("blending", new_val)
-        except Exception:
-            logger.debug("RemoteImageLayer: blending control failed", exc_info=True)
+        if "blending" in controls:
+            new_val = str(controls["blending"])
+            if self.blending != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set blending -> %s", self._remote_id, new_val)
+                with self.events.blending.blocker():
+                    self.blending = new_val
 
-        try:
-            value = controls.get("interpolation")
-            if value:
-                new_val = str(value)
-                if str(getattr(self, "interpolation", "")) != new_val:
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set interpolation -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr("interpolation", new_val)
-        except Exception:
-            logger.debug("RemoteImageLayer: interpolation control failed", exc_info=True)
+        if "interpolation" in controls:
+            new_val = str(controls["interpolation"])
+            change_2d = str(self.interpolation2d) != new_val
+            change_3d = str(self.interpolation3d) != new_val
+            if change_2d or change_3d:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set interpolation -> %s", self._remote_id, new_val)
+                if change_2d:
+                    with self.events.interpolation2d.blocker():
+                        self.interpolation2d = new_val
+                if change_3d:
+                    with self.events.interpolation3d.blocker():
+                        self.interpolation3d = new_val
 
-        try:
-            value = controls.get("colormap")
-            if value:
-                new_val = str(value)
-                if str(getattr(self, "colormap", "")) != new_val:
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set colormap -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr("colormap", new_val)
-        except Exception:
-            logger.debug("RemoteImageLayer: colormap control failed", exc_info=True)
+        if "colormap" in controls:
+            new_val = str(controls["colormap"])
+            if str(self.colormap) != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set colormap -> %s", self._remote_id, new_val)
+                with self.events.colormap.blocker():
+                    self.colormap = new_val
 
-        try:
-            value = controls.get("rendering")
-            if value:
-                new_val = str(value)
-                if str(getattr(self, "rendering", "")) != new_val:
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set rendering -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr("rendering", new_val)
-        except Exception:
-            logger.debug("RemoteImageLayer: rendering control failed", exc_info=True)
+        if "rendering" in controls:
+            new_val = str(controls["rendering"])
+            if self.rendering != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set rendering -> %s", self._remote_id, new_val)
+                with self.events.rendering.blocker():
+                    self.rendering = new_val
 
-        try:
-            value = controls.get("gamma")
-            if value is not None:
-                new_val = float(value)
-                if not math.isclose(float(getattr(self, "gamma", new_val)), new_val, rel_tol=1e-6, abs_tol=1e-6):
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set gamma -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr(
-                        "gamma",
-                        new_val,
-                        equals=lambda cur, val: math.isclose(float(cur), float(val), rel_tol=1e-6, abs_tol=1e-6),
-                    )
-        except Exception:
-            logger.debug("RemoteImageLayer: gamma control failed", exc_info=True)
+        if "gamma" in controls:
+            value = controls["gamma"]
+            assert value is not None, "gamma control cannot be None"
+            new_val = float(value)
+            if float(self.gamma) != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set gamma -> %s", self._remote_id, new_val)
+                with self.events.gamma.blocker():
+                    self.gamma = new_val
 
-        try:
-            value = controls.get("contrast_limits")
-            if isinstance(value, (list, tuple)) and len(value) >= 2:
-                new_limits = (float(value[0]), float(value[1]))
-                current_limits = getattr(self, "contrast_limits", new_limits)
-                if (
-                    len(current_limits) < 2
-                    or not math.isclose(float(current_limits[0]), new_limits[0], rel_tol=1e-6, abs_tol=1e-6)
-                    or not math.isclose(float(current_limits[1]), new_limits[1], rel_tol=1e-6, abs_tol=1e-6)
-                ):
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set contrast_limits -> %s",
-                            self._remote_id,
-                            new_limits,
-                        )
-                    _set_attr(
-                        "contrast_limits",
-                        new_limits,
-                        equals=lambda cur, val: (
-                            len(cur) >= 2
-                            and math.isclose(float(cur[0]), float(val[0]), rel_tol=1e-6, abs_tol=1e-6)
-                            and math.isclose(float(cur[1]), float(val[1]), rel_tol=1e-6, abs_tol=1e-6)
-                        ),
-                    )
-        except Exception:
-            logger.debug("RemoteImageLayer: contrast_limits control failed", exc_info=True)
+        if "contrast_limits" in controls:
+            pair = controls["contrast_limits"]
+            assert isinstance(pair, (list, tuple)) and len(pair) == 2, "contrast_limits requires 2 values"
+            new_limits = (float(pair[0]), float(pair[1]))
+            current = tuple(float(v) for v in self.contrast_limits)
+            if current != new_limits:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set contrast_limits -> %s", self._remote_id, new_limits)
+                with self.events.contrast_limits.blocker():
+                    self.contrast_limits = new_limits
 
-        try:
-            value = controls.get("iso_threshold")
-            if value is not None:
-                new_val = float(value)
-                if not math.isclose(float(getattr(self, "iso_threshold", new_val)), new_val, rel_tol=1e-6, abs_tol=1e-6):
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set iso_threshold -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr(
-                        "iso_threshold",
-                        new_val,
-                        equals=lambda cur, val: math.isclose(float(cur), float(val), rel_tol=1e-6, abs_tol=1e-6),
-                    )
-        except Exception:
-            logger.debug("RemoteImageLayer: iso_threshold control failed", exc_info=True)
+        if "iso_threshold" in controls:
+            value = controls["iso_threshold"]
+            assert value is not None, "iso_threshold control cannot be None"
+            new_val = float(value)
+            if float(self.iso_threshold) != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set iso_threshold -> %s", self._remote_id, new_val)
+                with self.events.iso_threshold.blocker():
+                    self.iso_threshold = new_val
 
-        try:
-            value = controls.get("attenuation")
-            if value is not None:
-                new_val = float(value)
-                if not math.isclose(float(getattr(self, "attenuation", new_val)), new_val, rel_tol=1e-6, abs_tol=1e-6):
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "RemoteImageLayer[%s]: set attenuation -> %s",
-                            self._remote_id,
-                            new_val,
-                        )
-                    _set_attr(
-                        "attenuation",
-                        new_val,
-                        equals=lambda cur, val: math.isclose(float(cur), float(val), rel_tol=1e-6, abs_tol=1e-6),
-                    )
-        except Exception:
-            logger.debug("RemoteImageLayer: attenuation control failed", exc_info=True)
+        if "attenuation" in controls:
+            value = controls["attenuation"]
+            assert value is not None, "attenuation control cannot be None"
+            new_val = float(value)
+            if float(self.attenuation) != new_val:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("RemoteImageLayer[%s]: set attenuation -> %s", self._remote_id, new_val)
+                with self.events.attenuation.blocker():
+                    self.attenuation = new_val
 
     def apply_control_changes(self, block: Mapping[str, Any], changes: Mapping[str, Any]) -> None:
         self._remote_block = dict(block)
-        controls = self._remote_block.get("controls")
-        if not isinstance(controls, Mapping):
-            return
+        controls = self._remote_block["controls"]
+        assert isinstance(controls, Mapping), "control block missing 'controls' mapping"
         subset: dict[str, Any] = {}
         for key in changes:
             if key == "removed":
                 continue
-            if key == "contrast_limits" and key not in controls and key in self._remote_block:
-                subset[key] = self._remote_block.get(key)
-            else:
-                subset[key] = controls.get(key)
-        self._apply_controls({k: v for k, v in subset.items() if v is not None})
+            assert key in controls, f"control delta missing value for {key}"
+            subset[key] = controls[key]
+        if subset:
+            self._apply_controls(subset)
 
     def _is_control_only_update(self, new_block: Mapping[str, Any]) -> bool:
         if not self._remote_block:
