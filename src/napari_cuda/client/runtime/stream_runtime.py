@@ -688,8 +688,19 @@ class ClientStreamLoop:
 
     def _handle_layer_delta(self, frame: NotifyLayersFrame) -> None:
         delta = layer_delta_from_payload(frame.payload)
-        with self._layer_bridge.remote_sync():
-            self._layer_registry.apply_delta(delta)
+        viewer = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+        had_flag = False
+        previous_flag = False
+        if viewer is not None and hasattr(viewer, "_suppress_forward"):
+            had_flag = True
+            previous_flag = getattr(viewer, "_suppress_forward", False)
+            setattr(viewer, "_suppress_forward", True)
+        try:
+            with self._layer_bridge.remote_sync():
+                self._layer_registry.apply_delta(delta)
+        finally:
+            if had_flag:
+                setattr(viewer, "_suppress_forward", previous_flag)
         self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
         logger.debug(
             "notify.layers: id=%s keys=%s",

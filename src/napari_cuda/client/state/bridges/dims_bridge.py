@@ -35,7 +35,6 @@ class DimsBridge:
         self._logger = logger
         self._state_sender: Any | None = None
         self._suppress_forward = False
-        self._pending_release_flush = False
         self._last_step_ui: Tuple[int, ...] | None = None
         self._dims_tx_interval_ms = max(0, int(tx_interval_ms))
         self._dims_tx_timer: QtCore.QTimer | None = None
@@ -68,10 +67,6 @@ class DimsBridge:
         if self._suppress_forward == value_bool:
             return
         self._suppress_forward = value_bool
-        if not value_bool:
-            self._pending_release_flush = True
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: suppression released; arming release flush")
 
     def set_logging(self, enabled: bool) -> None:
         self._log_dims_info = bool(enabled)
@@ -126,13 +121,6 @@ class DimsBridge:
             self._last_step_ui = current
             if self._logger.isEnabledFor(logging.DEBUG):
                 self._logger.debug("DimsBridge: no sender; cache set to %s", current)
-            return
-
-        if self._pending_release_flush:
-            self._pending_release_flush = False
-            self._last_step_ui = current
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: release flush consumed; cache=%s", current)
             return
 
         if self._last_step_ui is not None and current == self._last_step_ui:
