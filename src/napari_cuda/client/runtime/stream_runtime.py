@@ -32,7 +32,6 @@ from napari_cuda.codec.avcc import (
     find_sps_pps,
 )
 from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
-from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.client.runtime.client_loop.scheduler import CallProxy, WakeProxy
 from napari_cuda.client.runtime.client_loop.pipelines import (
     build_pyav_pipeline,
@@ -78,30 +77,8 @@ logger = logging.getLogger(__name__)
 _KEYFRAME_COMMAND = "napari.pixel.request_keyframe"
 
 
-def _maybe_enable_debug_logger() -> None:
-    """Enable DEBUG logs for this module only when env is set.
-
-    - Attaches a dedicated StreamHandler at DEBUG.
-    - Disables propagation so other libraries don't flood the console.
-    - Triggered by NAPARI_CUDA_CLIENT_DEBUG or NAPARI_CUDA_DEBUG.
-    """
-    flag = (os.getenv('NAPARI_CUDA_CLIENT_DEBUG') or os.getenv('NAPARI_CUDA_DEBUG') or '').lower()
-    if flag not in ('1', 'true', 'yes', 'on', 'dbg', 'debug'):
-        return
-    has_local = any(hasattr(h, '_napari_cuda_local') and h._napari_cuda_local for h in logger.handlers)
-    if has_local:
-        return
-    handler = logging.StreamHandler()
-    fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
-    handler.setFormatter(logging.Formatter(fmt))
-    handler.setLevel(logging.DEBUG)
-    setattr(handler, '_napari_cuda_local', True)
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-
-
-def _int_or_none(value: object) -> Optional[int]:
+def
+ _int_or_none(value: object) -> Optional[int]:
     return None if value is None else int(value)  # type: ignore[arg-type]
 
 
