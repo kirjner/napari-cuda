@@ -208,6 +208,16 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
     viewer = ViewerStub()
     presenter = PresenterStub()
 
+    control_actions.DimsUpdate(
+        state=state,
+        loop_state=loop_state,
+        state_store=store,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        presenter=presenter,
+        log_dims_info=False,
+    )
+
     state.dims_meta.update(
         {
             'ndim': 3,
@@ -235,7 +245,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
     assert viewer.calls, "viewer should receive dims update"
     payload = viewer.calls[-1]
     assert payload['ndisplay'] == 3
-    assert payload['current_step'] == (1, 2, 3)
+    assert tuple(payload['current_step']) == (1, 2, 3)
     assert payload['axis_labels'] == ['z', 'y', 'x']
 
     assert presenter.calls[-1]['ndisplay'] == 3
@@ -247,6 +257,17 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
     state, loop_state, store, _dispatch = _make_state()
     viewer = ViewerStub()
     presenter = PresenterStub()
+
+    control_actions.DimsUpdate(
+        state=state,
+        loop_state=loop_state,
+        state_store=store,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        presenter=presenter,
+        log_dims_info=False,
+    )
+
 
     state.dims_meta.update(
         {
@@ -357,6 +378,17 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     viewer = ViewerStub()
     presenter = PresenterStub()
 
+    control_actions.DimsUpdate(
+        state=state,
+        loop_state=loop_state,
+        state_store=store,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        presenter=presenter,
+        log_dims_info=False,
+    )
+
+
     pending = store.apply_local(
         'dims',
         '0',
@@ -367,6 +399,7 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         frame_id='state-1',
         metadata={'axis_index': 0, 'axis_target': '0', 'update_kind': 'index'},
     )
+    assert pending is not None
     assert pending.metadata is not None
 
     ack = build_ack_state(
@@ -394,8 +427,8 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
 
     assert state.dims_meta['current_step'][0] == 271
     assert state.dims_state[('0', 'index')] == 271
-    assert viewer.calls, "viewer should receive applied dims update"
-    assert presenter.calls, "presenter should receive applied dims update"
+    assert len(viewer.calls) >= 1, "viewer should receive applied dims update"
+    assert len(presenter.calls) >= 1, "presenter should receive applied dims update"
 
 
 def test_dims_step_attaches_axis_metadata() -> None:
@@ -425,6 +458,28 @@ def test_dims_step_attaches_axis_metadata() -> None:
     }
 
 
+def test_dims_set_index_suppresses_duplicate_value() -> None:
+    state, loop_state, store, dispatch = _make_state()
+    state.dims_ready = True
+    state.dims_meta['current_step'] = [7]
+    store.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
+
+    sent = control_actions.dims_set_index(
+        state,
+        loop_state,
+        store,
+        dispatch,
+        axis=0,
+        value=7,
+        origin='ui',
+        viewer_ref=lambda: None,
+        ui_call=None,
+    )
+
+    assert sent is False
+    assert dispatch.calls == []
+
+
 def test_handle_dims_ack_rejected_reverts_projection() -> None:
     state, loop_state, store, dispatch = _make_state()
     state.dims_ready = False
@@ -442,6 +497,22 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
     )
     presenter = PresenterStub()
     viewer_updates: list[dict[str, Any]] = []
+
+    class Viewer:
+        def _apply_remote_dims_update(self, **kwargs: Any) -> None:
+            viewer_updates.append(dict(kwargs))
+
+    viewer = Viewer()
+
+    control_actions.DimsUpdate(
+        state=state,
+        loop_state=loop_state,
+        state_store=store,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        presenter=presenter,
+        log_dims_info=False,
+    )
 
     frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
 
@@ -477,12 +548,6 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         error={'code': 'state.bad_value', 'message': 'invalid axis'},
     )
     outcome = store.apply_ack(ack)
-
-    class Viewer:
-        def _apply_remote_dims_update(self, **kwargs: Any) -> None:
-            viewer_updates.append(dict(kwargs))
-
-    viewer = Viewer()
 
     control_actions.handle_dims_ack(
         state,

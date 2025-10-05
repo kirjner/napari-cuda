@@ -30,6 +30,9 @@ from napari_cuda.server.state.server_scene import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class StateUpdateResult:
     """Authoritative result from applying a state update."""
@@ -431,6 +434,19 @@ def apply_dims_state_update(
     with lock:
         meta_entry = get_control_meta(scene, "dims", control_target, prop)
 
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "dims apply incoming: axis=%s target=%s prop=%s value=%r step_delta=%r set_value=%r current_step=%s range=%s",
+                idx,
+                control_target,
+                prop,
+                value,
+                step_delta,
+                set_value,
+                current,
+                meta.get("range"),
+            )
+
         target = int(step[idx])
         if value is not None:
             try:
@@ -461,6 +477,16 @@ def apply_dims_state_update(
             pass
 
         step[idx] = int(target)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "dims apply result: axis=%s target=%s prop=%s stored=%s step=%s",
+                idx,
+                control_target,
+                prop,
+                step[idx],
+                tuple(step),
+            )
 
         latest = replace(scene.latest_state, current_step=tuple(step))
         scene.latest_state = latest

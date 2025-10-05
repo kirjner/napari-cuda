@@ -503,6 +503,14 @@ class LayerStateBridge:
                 "property": config.key,
             },
         )
+        if pending is None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "LayerStateBridge:on_property_change suppressed duplicate id=%s key=%s",
+                    binding.remote_id,
+                    config.key,
+                )
+            return
         self._apply_projection(binding, config, pending.projection_value)
 
         runtime.active = True
@@ -600,14 +608,31 @@ class LayerStateBridge:
         if not self._enabled or not changes:
             return
         binding = self._bindings.get(layer_id)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "LayerStateBridge: seed_remote_values id=%s keys=%s",
+                layer_id,
+                tuple(changes.keys()),
+            )
         for key, raw_value in changes.items():
             if key == "removed":
                 continue
             config = PROPERTY_BY_KEY.get(key)
             if config is None:
+                logger.debug(
+                    "LayerStateBridge: seed skip (unknown key) id=%s key=%s",
+                    layer_id,
+                    key,
+                )
                 continue
             encoded = self._encode_value(config, raw_value)
             if encoded is None:
+                logger.debug(
+                    "LayerStateBridge: seed skip (encode failed) id=%s key=%s raw=%r",
+                    layer_id,
+                    key,
+                    raw_value,
+                )
                 continue
             pending_value = self._state_store.latest_pending_value("layer", layer_id, config.key)
             if pending_value is not None and not config.equals(pending_value, encoded):
@@ -625,6 +650,12 @@ class LayerStateBridge:
                         pending_value,
                     )
                 continue
+            logger.debug(
+                "LayerStateBridge: seed apply id=%s key=%s value=%r",
+                layer_id,
+                config.key,
+                encoded,
+            )
             self._state_store.seed_confirmed("layer", layer_id, config.key, encoded)
             if binding is None:
                 continue
@@ -633,6 +664,17 @@ class LayerStateBridge:
             runtime.active_intent_id = None
             runtime.active_frame_id = None
             runtime.last_phase = None
+
+    def seed_snapshot_block(self, layer_id: str, block: Mapping[str, Any]) -> None:
+        if not self._enabled:
+            return
+        payload: Dict[str, Any] = {}
+        for config in PROPERTY_CONFIGS:
+            value = config.block_getter(block)
+            if value is not None:
+                payload[config.key] = value
+        if payload:
+            self.seed_remote_values(layer_id, payload)
 
 
 class suppress_exception:

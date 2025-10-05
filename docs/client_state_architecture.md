@@ -155,21 +155,34 @@ Same pattern for `DimsBridge` (drives `ViewerModel.dims` fields) and
 
 ## Migration Plan
 
-1. **Hygiene pass** – (tracked separately) simplify modules, create placeholders
-   for new projections, remove redundant logic.
-2. **Introduce Store Contract** – refactor existing `pending_update_store` into
-   new store, backfill projection notifications but keep old handlers.
-3. **Implement Layer Projection** – detach napari writes from registry; ensure
-   layer bridge uses store callbacks exclusively.
-4. **Implement Dims/Camera Projection** – remove `_apply_remote_dims_update`
-   heuristics; intent bridge moves out of proxy.
-5. **Refactor Intent Bridge** – create new module that handles event wiring and
-   state comparisons; proxy becomes thin event emitter.
-6. **Runtime adjustments** – replace direct mutations with store seeding.
-7. **Remove legacy streaming stack** – once new flow is proven, delete obsolete
-   modules or migrate them under new architecture.
+We will land the refactor in four focused stages so each slice stays testable
+and reviewable.
 
-Each phase should land with unit tests + doc updates.
+1. **Stage 1 – Store Contract & Dims Helper** *(shipped)*
+   - Restore the richer `StateStore` API (provenance fields, subscriptions,
+     pending snapshots) and port existing callers/tests.
+   - Introduce `DimsUpdate`, subscribe it to the store inside
+     `ClientStreamLoop`, and delete the legacy wobble guards in
+     `DimsBridge`.
+   - Update this document and the server counterpart so the design matches the
+     implementation.
+
+2. **Stage 2 – Layer/Camera Helpers & Auto-Config** *(next up)*
+   - Generate layer property configs and server `CONTROL_KEYS` from napari’s own
+     enums (`Interpolation`, `layer._projectionclass`, etc.) so every UI control
+     round-trips without hard-coded alias tables.
+   - Add `LayerUpdate` and `CameraUpdate` helpers that subscribe to the store
+     and own all napari mutations.
+   - Update the intent bridge to consult `pending_state_snapshot` for all
+     scopes, skipping duplicates automatically.
+
+3. **Stage 3 – Cleanup & Coverage**
+   - Prune any remaining defensive guards made obsolete by the helpers.
+   - Beef up regression coverage (e.g., assert the supported-control set matches
+     napari’s events) and polish diagnostics/logging.
+
+Each stage must land with updated tests and documentation so we never diverge
+from the stated contract.
 
 ## Open Questions
 

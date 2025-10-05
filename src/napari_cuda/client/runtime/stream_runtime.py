@@ -181,6 +181,7 @@ class ClientStreamLoop:
         self._command_lock = threading.Lock()
         self._pending_commands: Dict[str, Future] = {}
         self._command_catalog: tuple[str, ...] = ()
+        self._log_dims_info: bool = False
         backoff_env = os.getenv('NAPARI_CUDA_KEYFRAME_BACKOFF_S', '1.0') or '1.0'
         try:
             self._keyframe_backoff_s = max(0.0, float(backoff_env))
@@ -223,6 +224,7 @@ class ClientStreamLoop:
         self._state_store = StateStore(clock=time.time)
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
+        self._dims_update: control_actions.DimsUpdate | None = None
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         self._state_session_metadata: "SessionMetadata | None" = None
@@ -388,6 +390,7 @@ class ClientStreamLoop:
 
     def start(self) -> None:
         loop_lifecycle.start_loop(self)
+        self._ensure_dims_update()
 
     def _enqueue_frame(self, frame: object) -> None:
         if self._loop_state.frame_queue.full():
@@ -645,6 +648,9 @@ class ClientStreamLoop:
         snapshot = scene_snapshot_from_payload(frame.payload)
         with self._layer_bridge.remote_sync():
             self._layer_registry.apply_snapshot(snapshot)
+            for layer_snapshot in snapshot.layers:
+                if isinstance(layer_snapshot.block, Mapping):
+                    self._layer_bridge.seed_snapshot_block(layer_snapshot.layer_id, layer_snapshot.block)
         logger.debug(
             "notify.scene received: layers=%d policies=%s",
             len(snapshot.layers),
@@ -1073,6 +1079,22 @@ class ClientStreamLoop:
             data,
             reset_camera=self._reset_camera,
             step_primary=lambda delta: self.dims_step('primary', delta, origin='keys'),
+        )
+
+    def _current_viewer(self) -> object | None:
+        return self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
+
+    def _ensure_dims_update(self) -> None:
+        if self._dims_update is not None:
+            return
+        self._dims_update = control_actions.DimsUpdate(
+            state=self._control_state,
+            loop_state=self._loop_state,
+            state_store=self._state_store,
+            viewer_ref=self._current_viewer,
+            ui_call=self._ui_call,
+            presenter=self._presenter_facade,
+            log_dims_info=self._log_dims_info,
         )
 
     # --- Public UI/state bridge methods -------------------------------------------

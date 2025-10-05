@@ -7,6 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
+from numbers import Integral, Real
 
 from napari_cuda.protocol import NotifyCamera
 from napari_cuda.protocol.messages import NotifyDimsFrame
@@ -15,7 +16,12 @@ if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
 
     from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-    from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate, AckOutcome
+from napari_cuda.client.control.pending_update_store import (
+    StateStore,
+    PendingUpdate,
+    AckOutcome,
+    StateStoreUpdate,
+)
 
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
@@ -226,6 +232,15 @@ def handle_dims_update(
     meta = state.dims_meta
     was_ready = bool(state.dims_ready)
 
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "dims inbound notify: frame=%s current_step=%s ndisplay=%s mode=%s",
+            frame.envelope.frame_id,
+            tuple(int(x) for x in frame.payload.current_step),
+            frame.payload.ndisplay,
+            frame.payload.mode,
+        )
+
     payload = frame.payload
     current_step = tuple(int(value) for value in payload.current_step)
     meta['current_step'] = list(current_step)
@@ -239,6 +254,8 @@ def handle_dims_update(
 
     if not was_ready and state_store is not None:
         _seed_dims_baseline(state, state_store, payload_dict)
+    elif state_store is not None:
+        _seed_dims_indices(state, state_store, payload_dict, update_kind='notify')
 
     if not state.dims_ready:
         state.dims_ready = True
@@ -254,21 +271,6 @@ def handle_dims_update(
             meta.get('ndisplay'),
             meta.get('order'),
             meta.get('axis_labels'),
-        )
-
-    viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-    if viewer_obj is not None:
-        mirror_dims_to_viewer(
-            viewer_obj,
-            ui_call,
-            current_step=current_step,
-            ndisplay=meta.get('ndisplay'),
-            ndim=meta.get('ndim'),
-            dims_range=meta.get('range'),
-            order=meta.get('order'),
-            axis_labels=meta.get('axis_labels'),
-            sizes=meta.get('sizes'),
-            displayed=meta.get('displayed'),
         )
 
     presenter.apply_dims_update(dict(payload_dict))
@@ -364,6 +366,20 @@ def _emit_state_update(
         frame_id=frame_id,
         metadata=metadata,
     )
+
+    if pending is None:
+        projection_value = state_store.confirmed_value(scope, target, key)
+        if projection_value is None:
+            projection_value = value
+        logger.debug(
+            "state.update suppressed (duplicate): scope=%s target=%s key=%s value=%s runtime.active=%s",
+            scope,
+            target,
+            key,
+            value,
+            runtime.active,
+        )
+        return False, projection_value
 
     if not dispatch_state_update(pending, origin):
         state_store.discard_pending(frame_id)
@@ -474,12 +490,22 @@ def _seed_dims_baseline(
             if value is None:
                 continue
             target_label = _axis_target_label(state, idx)
+            value_int = _coerce_step_value(value)
+            if value_int is None:
+                continue
             state_store.seed_confirmed(
                 'dims',
                 target_label,
                 'index',
-                int(value),
+                value_int,
+                metadata={
+                    'axis_index': idx,
+                    'axis_target': target_label,
+                    'update_kind': 'baseline',
+                },
             )
+
+    _seed_dims_indices(state, state_store, payload, update_kind='baseline')
 
     ndisplay = payload.get('ndisplay')
     if ndisplay is not None:
@@ -514,6 +540,43 @@ def _seed_dims_baseline(
         if sample_val is not None:
             state_store.seed_confirmed('volume', 'main', 'sample_step', float(sample_val))
 
+
+def _seed_dims_indices(
+    state: ControlStateContext,
+    state_store: "StateStore",
+    payload: Mapping[str, Any],
+    *,
+    update_kind: str,
+) -> None:
+    current_step = payload.get('current_step')
+    if not isinstance(current_step, (list, tuple)):
+        return
+    for idx, value in enumerate(current_step):
+        if value is None:
+            continue
+        value_int = _coerce_step_value(value)
+        if value_int is None:
+            continue
+        target_label = _axis_target_label(state, idx)
+        metadata = {
+            'axis_index': idx,
+            'axis_target': target_label,
+            'update_kind': update_kind,
+        }
+        state_store.seed_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
+
+
+def _coerce_step_value(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        value_int = int(value)
+        if abs(float(value) - float(value_int)) < 1e-6:
+            return value_int
+        return None
+    return None
 
 def _apply_dims_meta_snapshot(
     meta: dict[str, object | None],
@@ -589,6 +652,114 @@ def mirror_dims_to_viewer(
     _apply()
 
 
+class DimsUpdate:
+    """Apply authoritative dims updates emitted by the StateStore."""
+
+    def __init__(
+        self,
+        *,
+        state: ControlStateContext,
+        loop_state: "ClientLoopState",
+        state_store: "StateStore",
+        viewer_ref,
+        ui_call,
+        presenter: Optional["PresenterFacade"],
+        log_dims_info: bool,
+    ) -> None:
+        self._state = state
+        self._loop_state = loop_state
+        self._viewer_ref = viewer_ref
+        self._ui_call = ui_call
+        self._presenter = presenter
+        self._log_dims_info = bool(log_dims_info)
+        state_store.subscribe_all(self._handle_store_update)
+
+    # ------------------------------------------------------------------
+    def _handle_store_update(self, update: StateStoreUpdate) -> None:
+        scope = update.scope
+        if scope == 'dims' and update.key in {'index', 'step'}:
+            self._handle_axis_update(update)
+            return
+        if scope == 'view' and update.target == 'main' and update.key == 'ndisplay':
+            self._handle_ndisplay_update(update)
+
+    def _handle_axis_update(self, update: StateStoreUpdate) -> None:
+        metadata = update.metadata or {}
+        axis_idx: Optional[int] = None
+        if 'axis_index' in metadata:
+            try:
+                axis_idx = int(metadata['axis_index'])
+            except Exception:
+                axis_idx = None
+        if axis_idx is None:
+            axis_idx = _axis_index_from_target(self._state, str(update.target))
+        assert axis_idx is not None, f"unknown dims axis target={update.target!r}"
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "dims store update: axis=%s target=%s key=%s value=%s metadata=%s",
+                axis_idx,
+                update.target,
+                update.key,
+                update.value,
+                metadata,
+            )
+
+        try:
+            value_int = int(update.value)
+        except Exception as exc:  # pragma: no cover - defensive crash hook
+            raise AssertionError(f"dims value must be int-like: {update.value!r}") from exc
+
+        meta = self._state.dims_meta
+        current = list(meta.get('current_step') or [])
+        while len(current) <= axis_idx:
+            current.append(0)
+        current[axis_idx] = value_int
+        meta['current_step'] = current
+
+        self._state.dims_state[(str(update.target), str(update.key))] = value_int
+        self._state.primary_axis_index = _compute_primary_axis_index(meta)
+        self._flush_dims_payload(reason=f"axis:{axis_idx}")
+
+    def _handle_ndisplay_update(self, update: StateStoreUpdate) -> None:
+        try:
+            ndisplay = int(update.value)
+        except Exception as exc:  # pragma: no cover - defensive crash hook
+            raise AssertionError(f"ndisplay value must be int-like: {update.value!r}") from exc
+        self._state.dims_meta['ndisplay'] = ndisplay
+        self._flush_dims_payload(reason="ndisplay")
+
+    def _flush_dims_payload(self, *, reason: str) -> None:
+        payload = _sync_dims_payload_from_meta(self._state, self._loop_state)
+        if self._log_dims_info and payload.get('current_step') is not None:
+            logger.info(
+                "dims update (%s): step=%s ndisplay=%s",
+                reason,
+                payload.get('current_step'),
+                payload.get('ndisplay'),
+            )
+
+        if self._presenter is not None:
+            try:
+                self._presenter.apply_dims_update(dict(payload))
+            except Exception:
+                logger.debug("presenter dims update failed", exc_info=True)
+
+        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
+        mirror_dims_to_viewer(
+            viewer_obj,
+            self._ui_call,
+            current_step=payload.get('current_step'),
+            ndisplay=payload.get('ndisplay'),
+            ndim=payload.get('ndim'),
+            dims_range=payload.get('dims_range'),
+            order=payload.get('order'),
+            axis_labels=payload.get('axis_labels'),
+            sizes=payload.get('sizes'),
+            displayed=payload.get('displayed'),
+        )
+
+
 def replay_last_dims_payload(state: ControlStateContext, loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
     payload = loop_state.last_dims_payload
     if not payload:
@@ -633,6 +804,17 @@ def dims_step(
     now = time.perf_counter()
     axis_idx = int(idx)
     target_label = _axis_target_label(state, axis_idx)
+    if logger.isEnabledFor(logging.DEBUG):
+        confirmed = state_store.confirmed_value('dims', target_label, 'index')
+        logger.debug(
+            "dims_step request: axis=%s target=%s delta=%s origin=%s confirmed_index=%s pending_step=%s",
+            axis_idx,
+            target_label,
+            delta,
+            origin,
+            confirmed,
+            state_store.has_pending('dims', target_label, 'step'),
+        )
     ok, _ = _emit_state_update(
         state,
         loop_state,
@@ -723,6 +905,17 @@ def dims_set_index(
     now = time.perf_counter()
     axis_idx = int(idx)
     target_label = _axis_target_label(state, axis_idx)
+    if logger.isEnabledFor(logging.DEBUG):
+        confirmed = state_store.confirmed_value('dims', target_label, 'index')
+        logger.debug(
+            "dims_set_index request: axis=%s target=%s value=%s origin=%s confirmed_index=%s pending_index=%s",
+            axis_idx,
+            target_label,
+            value,
+            origin,
+            confirmed,
+            state_store.has_pending('dims', target_label, 'index'),
+        )
     ok, _ = _emit_state_update(
         state,
         loop_state,
@@ -758,6 +951,7 @@ def handle_dims_ack(
     if outcome.scope != "dims":
         return
 
+    _ = viewer_ref, ui_call
     _update_runtime_from_ack_outcome(state, outcome)
 
     axis_idx: Optional[int] = None
@@ -771,46 +965,18 @@ def handle_dims_ack(
         axis_idx = _axis_index_from_target(state, str(outcome.target))
 
     if outcome.status == "accepted":
-        applied_value = outcome.applied_value
-        if axis_idx is not None and applied_value is not None:
-            meta = state.dims_meta
-            current = list(meta.get('current_step') or [])
-            while len(current) <= axis_idx:
-                current.append(0)
+        payload = _sync_dims_payload_from_meta(state, loop_state)
+        if presenter is not None:
             try:
-                applied_int = int(applied_value)
+                presenter.apply_dims_update(dict(payload))
             except Exception:
-                applied_int = applied_value
-            if current[axis_idx] != applied_int:
-                current[axis_idx] = applied_int
-                meta['current_step'] = current
-                state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or 'index'))] = applied_int
-                payload = _sync_dims_payload_from_meta(state, loop_state)
-                state.primary_axis_index = _compute_primary_axis_index(meta)
-                logger.debug(
-                    "dims ack applied_value update axis=%s value=%s", axis_idx, applied_int
-                )
-                if presenter is not None:
-                    try:
-                        presenter.apply_dims_update(dict(payload))
-                    except Exception:
-                        logger.debug("presenter dims update failed", exc_info=True)
-                viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-                if viewer_obj is not None:
-                    mirror_dims_to_viewer(
-                        viewer_obj,
-                        ui_call,
-                        current_step=payload.get('current_step'),
-                        ndisplay=payload.get('ndisplay'),
-                        ndim=payload.get('ndim'),
-                        dims_range=payload.get('dims_range'),
-                        order=payload.get('order'),
-                        axis_labels=payload.get('axis_labels'),
-                        sizes=payload.get('sizes'),
-                        displayed=payload.get('displayed'),
-                    )
-                else:
-                    logger.debug("dims ack applied_value: viewer_ref missing")
+                logger.debug("presenter dims update failed", exc_info=True)
+        if log_dims_info and axis_idx is not None and outcome.applied_value is not None:
+            logger.info(
+                "dims ack accepted: axis=%s value=%s",
+                axis_idx,
+                outcome.applied_value,
+            )
         logger.debug(
             "ack.state dims accepted: target=%s key=%s pending=%d",
             outcome.target,
@@ -832,53 +998,23 @@ def handle_dims_ack(
         error.get("details"),
     )
 
-    confirmed_value = outcome.confirmed_value
-    if confirmed_value is None:
-        confirmed_value = state.dims_state.get((str(outcome.target or ""), str(outcome.key or "")))
-
-    if axis_idx is not None and confirmed_value is not None:
-        meta = state.dims_meta
-        current = list(meta.get('current_step') or [])
-        while len(current) <= axis_idx:
-            current.append(0)
+    payload = _sync_dims_payload_from_meta(state, loop_state)
+    if presenter is not None:
         try:
-            current[axis_idx] = int(confirmed_value)
+            presenter.apply_dims_update(dict(payload))
         except Exception:
-            current[axis_idx] = 0
-        meta['current_step'] = current
-        state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or "index"))] = confirmed_value
+            logger.debug("presenter dims update failed", exc_info=True)
 
-        payload = _sync_dims_payload_from_meta(state, loop_state)
-        state.dims_ready = True
-        state.primary_axis_index = _compute_primary_axis_index(meta)
-
-        if presenter is not None:
-            try:
-                presenter.apply_dims_update(dict(payload))
-            except Exception:
-                logger.debug("presenter dims update failed", exc_info=True)
-
-        viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-        if viewer_obj is not None:
-            mirror_dims_to_viewer(
-                viewer_obj,
-                ui_call,
-                current_step=payload.get('current_step'),
-                ndisplay=payload.get('ndisplay'),
-                ndim=payload.get('ndim'),
-                dims_range=payload.get('dims_range'),
-                order=payload.get('order'),
-                axis_labels=payload.get('axis_labels'),
-                sizes=payload.get('sizes'),
-                displayed=payload.get('displayed'),
-            )
-            if log_dims_info:
-                logger.info(
-                    "dims intent reverted: axis=%s target=%s value=%s",
-                    axis_idx,
-                    outcome.target,
-                    confirmed_value,
-                )
+    if log_dims_info and axis_idx is not None:
+        confirmed_value = outcome.confirmed_value
+        if confirmed_value is None:
+            confirmed_value = state.dims_state.get((str(outcome.target or ""), str(outcome.key or "")))
+        logger.info(
+            "dims intent reverted: axis=%s target=%s value=%s",
+            axis_idx,
+            outcome.target,
+            confirmed_value,
+        )
 
 
 def handle_generic_ack(

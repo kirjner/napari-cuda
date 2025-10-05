@@ -54,6 +54,8 @@ class DimsBridge:
         events.current_step.connect(self._on_dims_change)
         events.ndisplay.connect(self._on_ndisplay_change)
 
+        self._sync_last_step_from_viewer()
+
     # ------------------------------------------------------------------ configuration
     @property
     def suppress_forward(self) -> bool:
@@ -75,6 +77,8 @@ class DimsBridge:
         self._state_sender = sender
         # Once attached to the coordinator we rely on its scheduling; disable local coalescing.
         self._dims_tx_interval_ms = 0
+        if self._last_step_ui is None:
+            self._sync_last_step_from_viewer()
 
     def detach_state_sender(self) -> None:
         self._state_sender = None
@@ -94,27 +98,22 @@ class DimsBridge:
         if sender is None:
             return
         dims = self._viewer.dims
-        try:
-            current = tuple(int(x) for x in dims.current_step)
-        except Exception:
-            self._logger.debug("DimsBridge: current_step coercion failed", exc_info=True)
+        current = self._coerce_step(dims.current_step)
+
+        if self._last_step_ui is not None and current == self._last_step_ui:
             return
 
         changed_axis = self._detect_changed_axis(current)
         self._update_play_state(changed_axis)
 
         if changed_axis is None:
-            primary = getattr(sender, "_primary_axis_index", 0)
-            try:
-                changed_axis = int(primary)
-            except Exception:
-                changed_axis = 0
+            if self._last_step_ui is None:
+                changed_axis = self._primary_axis_index(sender)
+            else:
+                self._last_step_ui = current
+                return
 
-        try:
-            value = int(current[changed_axis])
-        except Exception:
-            self._logger.debug("DimsBridge: axis %s value parse failed", changed_axis, exc_info=True)
-            return
+        value = int(current[changed_axis])
 
         if self._is_playing and self._play_axis is not None and int(changed_axis) == int(self._play_axis):
             self._handle_play_tick(sender, changed_axis, value)
@@ -135,16 +134,8 @@ class DimsBridge:
             return
         raw_value = getattr(event, "value", None)
         if raw_value is None:
-            try:
-                raw_value = self._viewer.dims.ndisplay
-            except Exception:
-                self._logger.debug("DimsBridge: ndisplay read failed", exc_info=True)
-                return
-        try:
-            ndisplay = int(raw_value)
-        except (TypeError, ValueError):
-            self._logger.debug("DimsBridge: ndisplay parse failed (%r)", raw_value)
-            return
+            raw_value = self._viewer.dims.ndisplay
+        ndisplay = int(raw_value)
         fn = getattr(sender, "view_set_ndisplay", None)
         if callable(fn) and not fn(ndisplay, origin="ui"):
             self._logger.debug("DimsBridge: ndisplay intent rejected by coordinator")
@@ -184,12 +175,9 @@ class DimsBridge:
             if displayed is not None:
                 self._apply_displayed_axes(displayed)
             if current_step is not None:
-                step_tuple = tuple(int(x) for x in current_step)
+                step_tuple = self._coerce_step(current_step)
                 dims.current_step = step_tuple
-                try:
-                    dims.point = tuple(float(x) for x in current_step)
-                except Exception:
-                    self._logger.debug("DimsBridge: dims.point apply failed", exc_info=True)
+                dims.point = tuple(float(x) for x in current_step)
                 if self._dims_tx_timer is not None and self._dims_tx_timer.isActive():
                     self._dims_tx_timer.stop()
                 self._dims_tx_pending = None
@@ -206,9 +194,23 @@ class DimsBridge:
         except Exception:
             self._logger.debug("DimsBridge: apply_remote failed", exc_info=True)
         finally:
-            self._suppress_forward = prev
+            if prev:
+                self._suppress_forward = prev
+            else:
+                self._clear_suppression()
+
+    def _clear_suppression(self) -> None:
+        self._suppress_forward = False
 
     # ------------------------------------------------------------------ helpers
+    def _sync_last_step_from_viewer(self) -> None:
+        dims = getattr(self._viewer, "dims")
+        step = self._coerce_step(dims.current_step)
+        self._last_step_ui = step if step else None
+
+    def _coerce_step(self, raw: Sequence[object]) -> Tuple[int, ...]:
+        return tuple(int(value) for value in raw)
+
     def _detect_changed_axis(self, current: Tuple[int, ...]) -> int | None:
         prev = self._last_step_ui
         if prev is None or len(prev) != len(current):
@@ -217,6 +219,11 @@ class DimsBridge:
             if before != after:
                 return idx
         return None
+
+    @staticmethod
+    def _primary_axis_index(sender: Any) -> int:
+        primary = getattr(sender, "_primary_axis_index", 0)
+        return int(primary)
 
     def _update_play_state(self, changed_axis: int | None) -> None:
         window = getattr(self._viewer, "window", None)

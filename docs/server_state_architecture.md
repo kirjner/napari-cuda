@@ -7,7 +7,7 @@ Offensive coding tenet: assertions over guards unless interfacing external syste
 - Provide an authoritative server-side model that mirrors the client’s state store.
 - Decompose the monolithic control channel into transport, routing, and reducers.
 - Define provenance/version semantics for multi-client and agent scenarios.
-- Align layer/dims/camera projections with the upcoming client projections.
+- Align layer/dims/camera update modules with the upcoming client helpers.
 - Document threading/concurrency boundaries for render worker vs. control loop.
 Offensive coding tenet: remove try/except scaffolding that hides bugs.
 
@@ -41,14 +41,14 @@ Offensive coding tenet: assertions over guards unless interfacing external syste
   render worker.
 Offensive coding tenet: remove try/except scaffolding that hides bugs.
 
-## Scene Projection Layers
+## Scene Update Modules
 Offensive coding tenet: make invariants explicit and crash on violation.
 
-- **LayerProjectionServer** – owns napari layer objects on the server, applies
+- **LayerUpdateServer** – owns napari layer objects on the server, applies
   confirmed values from store, generates `LayerSnapshot` for clients.
-- **DimsProjectionServer** – controls viewer dims sliders, ensures `current_step`
+- **DimsUpdateServer** – controls viewer dims sliders, ensures `current_step`
   and metadata stay consistent. Emits deltas via store.
-- **CameraProjectionServer** – handles camera state (zoom, pan, orbit) and
+- **CameraUpdateServer** – handles camera state (zoom, pan, orbit) and
   ensures render worker receives updates.
 - Each projection:
   - Subscribes to store topics.
@@ -128,13 +128,12 @@ Offensive coding tenet: no defensive fallbacks, no silent failures.
 ## Migration Plan
 Offensive coding tenet: assertions over guards unless interfacing external systems.
 
-1. Extract store/history into dedicated module with unit tests.
-2. Refactor `state_update_engine` to use store API and return structured
+1. *(Shipped)* Extract store/history into dedicated module with unit tests.
+2. *(In progress)* Refactor `state_update_engine` to use store API and return structured
    results.
-3. Implement projections for layers/dims/camera, relocating code from layer
+3. Implement update modules for layers/camera, relocating code from layer
    manager and scene state applier.
 4. Split `control_channel_server.py` into transport/session/router modules.
 5. Update render worker to consume store notifications (instead of direct calls).
 6. Remove legacy shims once new modules are stable.
 Offensive coding tenet: remove try/except scaffolding that hides bugs.
-

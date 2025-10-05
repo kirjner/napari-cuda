@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from itertools import count
+from typing import Any
 
 import pytest
 
@@ -35,6 +36,7 @@ def test_apply_local_tracks_pending_and_projection(store: StateStore) -> None:
         intent_id=intent1,
         frame_id=frame1,
     )
+    assert pending_start is not None
 
     assert pending_start.update_phase == "start"
     assert pending_start.projection_value == pytest.approx(0.5)
@@ -52,6 +54,7 @@ def test_apply_local_tracks_pending_and_projection(store: StateStore) -> None:
         intent_id=intent2,
         frame_id=frame2,
     )
+    assert pending_update is not None
 
     assert pending_update.update_phase == "update"
     assert pending_update.projection_value == pytest.approx(0.7)
@@ -85,6 +88,7 @@ def test_apply_ack_accepted_updates_confirmed_state(store: StateStore) -> None:
         intent_id=intent2,
         frame_id=frame2,
     )
+    assert pending is not None
 
     ack = build_ack_state(
         session_id="session-1",
@@ -125,6 +129,7 @@ def test_apply_ack_rejected_reverts_to_confirmed(store: StateStore) -> None:
         intent_id=intent,
         frame_id=frame,
     )
+    assert pending is not None
 
     ack = build_ack_state(
         session_id="session-1",
@@ -165,7 +170,7 @@ def test_clear_pending_on_reconnect_resets_index(store: StateStore) -> None:
     )
 
     intent2, frame2 = next(ids)
-    store.apply_local(
+    pending = store.apply_local(
         "layer",
         "layer-3",
         "gamma",
@@ -174,7 +179,72 @@ def test_clear_pending_on_reconnect_resets_index(store: StateStore) -> None:
         intent_id=intent2,
         frame_id=frame2,
     )
+    assert pending is not None
 
     store.clear_pending_on_reconnect()
     debug = store.dump_debug()["layer:layer-3:gamma"]
     assert debug["pending"] == []
+
+
+def test_subscribe_all_receives_confirmed_updates(store: StateStore) -> None:
+    events: list[Any] = []
+
+    def _capture(update: Any) -> None:
+        events.append(update)
+
+    store.subscribe_all(_capture)
+    store.seed_confirmed('dims', 'z', 'index', 5, metadata={'axis_index': 0})
+
+    assert len(events) == 1
+    update = events[0]
+    assert update.scope == 'dims'
+    assert update.target == 'z'
+    assert update.key == 'index'
+    assert update.value == 5
+    assert update.metadata == {'axis_index': 0}
+
+
+def test_pending_state_snapshot_reports_confirmed_value(store: StateStore) -> None:
+    store.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
+
+    snapshot = store.pending_state_snapshot('dims', '0', 'index')
+
+    assert snapshot is not None
+    projection, pending_len, origin, confirmed = snapshot
+    assert projection == 7
+    assert pending_len == 0
+    assert origin == 'remote'
+    assert confirmed == 7
+
+
+def test_apply_local_duplicate_absolute_returns_none(store: StateStore) -> None:
+    store.seed_confirmed('layer', 'layer-4', 'gamma', 1.0)
+
+    result = store.apply_local(
+        'layer',
+        'layer-4',
+        'gamma',
+        1.0,
+        'start',
+        intent_id='intent-dup-1',
+        frame_id='state-dup-1',
+    )
+
+    assert result is None
+
+
+def test_apply_local_delta_update_not_suppressed(store: StateStore) -> None:
+    store.seed_confirmed('dims', '0', 'step', 1, metadata={'axis_index': 0})
+
+    pending = store.apply_local(
+        'dims',
+        '0',
+        'step',
+        1,
+        'start',
+        intent_id='intent-delta-1',
+        frame_id='state-delta-1',
+        metadata={'update_kind': 'step'},
+    )
+
+    assert pending is not None

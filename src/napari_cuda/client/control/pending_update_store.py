@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+import logging
 import time
-from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Tuple
 
 from napari_cuda.protocol import AckState
 
@@ -17,6 +18,9 @@ PropertyKey = Tuple[str, str, str]
 class ConfirmedState:
     value: Any
     timestamp: float
+    origin: str
+    version: Any | None
+    metadata: Dict[str, Any] | None
 
 
 @dataclass
@@ -77,6 +81,21 @@ class PropertyState:
     pending: "OrderedDict[str, PendingEntry]" = field(default_factory=OrderedDict)
 
 
+@dataclass(frozen=True)
+class StateStoreUpdate:
+    scope: str
+    target: str
+    key: str
+    value: Any
+    origin: str
+    version: Any | None
+    timestamp: float
+    metadata: Dict[str, Any] | None
+
+
+logger = logging.getLogger(__name__)
+
+
 class StateStore:
     """Track optimistic + confirmed values keyed by ``(scope, target, key)``."""
 
@@ -84,6 +103,8 @@ class StateStore:
         self._clock = clock
         self._state: MutableMapping[PropertyKey, PropertyState] = {}
         self._pending_index: Dict[str, PropertyKey] = {}
+        self._subscribers: Dict[PropertyKey, List[Callable[[StateStoreUpdate], None]]] = {}
+        self._global_subscribers: List[Callable[[StateStoreUpdate], None]] = []
 
     # ------------------------------------------------------------------
     def apply_local(
@@ -98,12 +119,21 @@ class StateStore:
         frame_id: str,
         timestamp: Optional[float] = None,
         metadata: Optional[Mapping[str, Any]] = None,
-    ) -> PendingUpdate:
+        dedupe: bool = True,
+    ) -> PendingUpdate | None:
         """Register a local mutation and return a pending update descriptor."""
 
         phase_normalized = (update_phase or "update").lower()
         property_key = (scope, target, key)
         state = self._state.setdefault(property_key, PropertyState())
+
+        metadata_dict = dict(metadata) if metadata is not None else None
+        update_kind = None
+        if metadata_dict is not None and "update_kind" in metadata_dict:
+            raw_kind = metadata_dict["update_kind"]
+            if raw_kind is not None:
+                update_kind = str(raw_kind).lower()
+        is_delta_update = update_kind in {"step", "delta"}
 
         if phase_normalized in {"start", "reset"}:
             for stale_frame in list(state.pending.keys()):
@@ -114,18 +144,48 @@ class StateStore:
             state.pending.pop(last_frame_id, None)
             self._pending_index.pop(last_frame_id, None)
 
+        if (
+            dedupe
+            and not state.pending
+            and state.confirmed is not None
+            and not is_delta_update
+            and state.confirmed.value == value
+        ):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "store dedupe: scope=%s target=%s key=%s value=%r confirmed_ts=%s",
+                    scope,
+                    target,
+                    key,
+                    value,
+                    state.confirmed.timestamp,
+                )
+            return None
+
         timestamp_value = float(timestamp if timestamp is not None else self._clock())
 
+        entry_metadata = dict(metadata_dict) if metadata_dict is not None else None
         entry = PendingEntry(
             intent_id=intent_id,
             frame_id=frame_id,
             value=value,
             update_phase=phase_normalized,
             timestamp=timestamp_value,
-            metadata=dict(metadata) if metadata is not None else None,
+            metadata=entry_metadata,
         )
         state.pending[frame_id] = entry
         self._pending_index[frame_id] = property_key
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "store pending add: scope=%s target=%s key=%s phase=%s value=%r pending_len=%d",
+                scope,
+                target,
+                key,
+                phase_normalized,
+                value,
+                len(state.pending),
+            )
 
         if state.pending:
             projection_value = next(reversed(state.pending.values())).value
@@ -134,6 +194,7 @@ class StateStore:
         else:
             projection_value = value
 
+        pending_metadata = dict(metadata_dict) if metadata_dict is not None else None
         return PendingUpdate(
             scope=scope,
             target=target,
@@ -144,7 +205,7 @@ class StateStore:
             frame_id=frame_id,
             timestamp=timestamp_value,
             projection_value=projection_value,
-            metadata=dict(metadata) if metadata is not None else None,
+            metadata=pending_metadata,
         )
 
     # ------------------------------------------------------------------
@@ -193,7 +254,13 @@ class StateStore:
             if property_state is not None:
                 value_to_store = applied_value if applied_value is not None else pending_value
                 if value_to_store is not None:
-                    property_state.confirmed = ConfirmedState(value=value_to_store, timestamp=float(self._clock()))
+                    property_state.confirmed = ConfirmedState(
+                        value=value_to_store,
+                        timestamp=float(self._clock()),
+                        origin="remote_ack",
+                        version=None,
+                        metadata=dict(metadata) if metadata is not None else None,
+                    )
                     confirmed_value = property_state.confirmed.value
                     projection_value = property_state.confirmed.value if not property_state.pending else projection_value
                 elif property_state.confirmed is not None:
@@ -209,9 +276,11 @@ class StateStore:
             if property_state is not None and property_state.confirmed is not None:
                 confirmed_value = property_state.confirmed.value
                 projection_value = property_state.confirmed.value if not property_state.pending else projection_value
+                if metadata is None and property_state.confirmed.metadata is not None:
+                    metadata = dict(property_state.confirmed.metadata)
 
         envelope = ack.envelope
-        return AckOutcome(
+        outcome = AckOutcome(
             status=status,
             intent_id=str(payload.intent_id),
             ack_frame_id=envelope.frame_id,
@@ -230,6 +299,11 @@ class StateStore:
             was_pending=pending_entry is not None,
         )
 
+        if property_key is not None and property_state is not None and property_state.confirmed is not None:
+            self._notify(property_key, property_state.confirmed)
+
+        return outcome
+
     # ------------------------------------------------------------------
     def seed_confirmed(
         self,
@@ -238,6 +312,10 @@ class StateStore:
         key: str,
         value: Any,
         timestamp: Optional[float] = None,
+        *,
+        origin: str = "remote",
+        version: Any | None = None,
+        metadata: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Prime a property with authoritative baseline state."""
 
@@ -249,7 +327,20 @@ class StateStore:
         state.confirmed = ConfirmedState(
             value=value,
             timestamp=float(timestamp) if timestamp is not None else float(self._clock()),
+            origin=str(origin),
+            version=version,
+            metadata=dict(metadata) if metadata is not None else None,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "store seed_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
+                scope,
+                target,
+                key,
+                value,
+                origin,
+            )
+        self._notify(property_key, state.confirmed)
 
     # ------------------------------------------------------------------
     def clear_pending_on_reconnect(self) -> None:
@@ -272,13 +363,13 @@ class StateStore:
 
     # ------------------------------------------------------------------
     def has_pending(self, scope: str, target: str, key: str) -> bool:
-        """Return whether there are outstanding optimistic values for a property."""
+        """Return whether there are pending optimistic values for the property."""
 
         state = self._state.get((scope, target, key))
         return bool(state and state.pending)
 
     def latest_pending_value(self, scope: str, target: str, key: str) -> Any | None:
-        """Return the most recent optimistic value, if any."""
+        """Return the newest optimistic value, if present."""
 
         state = self._state.get((scope, target, key))
         if not state or not state.pending:
@@ -286,6 +377,8 @@ class StateStore:
         return next(reversed(state.pending.values())).value
 
     def confirmed_value(self, scope: str, target: str, key: str) -> Any | None:
+        """Return the last confirmed value for the property, if present."""
+
         state = self._state.get((scope, target, key))
         if not state or state.confirmed is None:
             return None
@@ -302,6 +395,9 @@ class StateStore:
                 confirmed = {
                     "value": state.confirmed.value,
                     "timestamp": state.confirmed.timestamp,
+                    "origin": state.confirmed.origin,
+                    "version": state.confirmed.version,
+                    "metadata": dict(state.confirmed.metadata) if state.confirmed.metadata is not None else None,
                 }
             summary[k] = {
                 "confirmed": confirmed,
@@ -318,6 +414,71 @@ class StateStore:
             }
         return summary
 
+    # ------------------------------------------------------------------
+    def subscribe(
+        self,
+        scope: str,
+        target: str,
+        key: str,
+        callback: Callable[[StateStoreUpdate], None],
+    ) -> None:
+        assert callable(callback), "StateStore subscriber must be callable"
+        property_key = (scope, target, key)
+        listeners = self._subscribers.setdefault(property_key, [])
+        assert callback not in listeners, "StateStore subscriber already registered"
+        listeners.append(callback)
+
+    def subscribe_all(self, callback: Callable[[StateStoreUpdate], None]) -> None:
+        assert callable(callback), "StateStore subscriber must be callable"
+        assert callback not in self._global_subscribers, "StateStore global subscriber already registered"
+        self._global_subscribers.append(callback)
+
+    # ------------------------------------------------------------------
+    def _notify(self, property_key: PropertyKey, confirmed: ConfirmedState) -> None:
+        scope, target, key = property_key
+        update = StateStoreUpdate(
+            scope=scope,
+            target=target,
+            key=key,
+            value=confirmed.value,
+            origin=confirmed.origin,
+            version=confirmed.version,
+            timestamp=confirmed.timestamp,
+            metadata=dict(confirmed.metadata) if confirmed.metadata is not None else None,
+        )
+        for callback in tuple(self._global_subscribers):
+            callback(update)
+        listeners = self._subscribers.get(property_key)
+        if not listeners:
+            return
+        for callback in tuple(listeners):
+            callback(update)
+
+    # ------------------------------------------------------------------
+    def pending_state_snapshot(
+        self,
+        scope: str,
+        target: str,
+        key: str,
+    ) -> tuple[Any, int, Optional[str], Optional[Any]] | None:
+        """Return current projection value, pending len, and confirmed origin/value."""
+
+        property_key = (scope, target, key)
+        state = self._state.get(property_key)
+        if state is None:
+            return None
+        if state.pending:
+            projection_value = next(reversed(state.pending.values())).value
+            pending_len = len(state.pending)
+        elif state.confirmed is not None:
+            projection_value = state.confirmed.value
+            pending_len = 0
+        else:
+            return None
+        origin = state.confirmed.origin if state.confirmed is not None else None
+        confirmed_value = state.confirmed.value if state.confirmed is not None else None
+        return projection_value, pending_len, origin, confirmed_value
+
 
 __all__ = [
     "ConfirmedState",
@@ -326,4 +487,5 @@ __all__ = [
     "AckOutcome",
     "PropertyState",
     "StateStore",
+    "StateStoreUpdate",
 ]
