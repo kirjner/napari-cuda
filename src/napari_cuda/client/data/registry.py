@@ -33,6 +33,19 @@ def _maybe_enable_debug_logger() -> bool:
 
 _LAYER_DEBUG = _maybe_enable_debug_logger()
 
+_CONTROL_ONLY_KEYS = {
+    "opacity",
+    "visible",
+    "blending",
+    "interpolation",
+    "colormap",
+    "rendering",
+    "gamma",
+    "contrast_limits",
+    "iso_threshold",
+    "attenuation",
+}
+
 LayerListener = Callable[["RegistrySnapshot"], None]
 
 
@@ -97,7 +110,10 @@ class RemoteLayerRegistry:
                     if _LAYER_DEBUG:
                         logger.debug("created remote layer: id=%s name=%s", layer_id, block.get("name"))
                 else:
-                    self._update_layer(layer, block)
+                    if control_only:
+                        layer.update_from_block(block)
+                    else:
+                        self._update_layer(layer, block)
                     changed = True
                     if _LAYER_DEBUG:
                         logger.debug("updated remote layer: id=%s", layer_id)
@@ -155,9 +171,12 @@ class RemoteLayerRegistry:
                     controls = {}
                     block["controls"] = controls
                 updated = False
+                control_only = True
                 for key, value in changes.items():
                     if key == "removed":
                         continue
+                    if control_only and key not in _CONTROL_ONLY_KEYS:
+                        control_only = False
                     controls[key] = value
                     if key == "contrast_limits":
                         if isinstance(value, Sequence):
@@ -177,7 +196,10 @@ class RemoteLayerRegistry:
                     if layer_id not in self._order:
                         self._order.append(layer_id)
                 else:
-                    self._update_layer(layer, block)
+                    if control_only:
+                        layer.apply_control_changes(block, changes)
+                    else:
+                        self._update_layer(layer, block)
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:
                     logger.debug("layer delta applied: id=%s keys=%s", layer_id, tuple(changes.keys()))

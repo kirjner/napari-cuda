@@ -24,9 +24,12 @@ _PREVIEW_MAX = 8
 
 def _safe_dtype(value: str | None) -> np.dtype:
     try:
-        return np.dtype(value) if value is not None else np.dtype("float32")
+        dtype = np.dtype(value) if value is not None else np.dtype("float32")
     except Exception:
+        dtype = np.dtype("float32")
+    if np.issubdtype(dtype, np.integer):
         return np.dtype("float32")
+    return dtype
 
 
 def _preview_shape(shape: Sequence[int]) -> Tuple[int, ...]:

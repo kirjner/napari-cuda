@@ -464,6 +464,28 @@ class LayerStateBridge:
         if encoded is None:
             return
         runtime = binding.properties.setdefault(config.key, PropertyRuntime())
+        confirmed_value = self._state_store.confirmed_value("layer", binding.remote_id, config.key)
+        if (
+            confirmed_value is not None
+            and not self._state_store.has_pending("layer", binding.remote_id, config.key)
+        ):
+            if config.equals(confirmed_value, encoded):
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "LayerStateBridge:on_property_change ignored confirmed value id=%s key=%s value=%r",
+                        binding.remote_id,
+                        config.key,
+                        encoded,
+                    )
+                return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "LayerStateBridge:on_property_change id=%s key=%s value=%r active=%s",
+                binding.remote_id,
+                config.key,
+                encoded,
+                runtime.active,
+            )
         phase = "start" if not runtime.active else "update"
 
         intent_id, frame_id = self._control_state.next_intent_ids()
@@ -528,6 +550,14 @@ class LayerStateBridge:
                     emitter, callback = handler
                     if hasattr(emitter, "blocker"):
                         blocker_ctx = emitter.blocker(callback)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "LayerStateBridge:_apply_projection id=%s key=%s value=%r suppress_blocker=%s",
+                    binding.remote_id,
+                    config.key,
+                    value,
+                    suppress_blocker,
+                )
             with blocker_ctx:
                 config.setter(binding.layer, value)
         except Exception:
@@ -578,6 +608,22 @@ class LayerStateBridge:
                 continue
             encoded = self._encode_value(config, raw_value)
             if encoded is None:
+                continue
+            pending_value = self._state_store.latest_pending_value("layer", layer_id, config.key)
+            if pending_value is not None and not config.equals(pending_value, encoded):
+                logger.debug(
+                    "LayerStateBridge: skipping remote value (pending newer): id=%s key=%s pending=%r remote=%r",
+                    layer_id,
+                    config.key,
+                    pending_value,
+                    encoded,
+                )
+                if binding is not None:
+                    self._apply_projection(
+                        binding,
+                        config,
+                        pending_value,
+                    )
                 continue
             self._state_store.seed_confirmed("layer", layer_id, config.key, encoded)
             if binding is None:

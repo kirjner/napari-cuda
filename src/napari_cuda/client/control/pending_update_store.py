@@ -271,6 +271,27 @@ class StateStore:
         property_state.pending.pop(frame_id, None)
 
     # ------------------------------------------------------------------
+    def has_pending(self, scope: str, target: str, key: str) -> bool:
+        """Return whether there are outstanding optimistic values for a property."""
+
+        state = self._state.get((scope, target, key))
+        return bool(state and state.pending)
+
+    def latest_pending_value(self, scope: str, target: str, key: str) -> Any | None:
+        """Return the most recent optimistic value, if any."""
+
+        state = self._state.get((scope, target, key))
+        if not state or not state.pending:
+            return None
+        return next(reversed(state.pending.values())).value
+
+    def confirmed_value(self, scope: str, target: str, key: str) -> Any | None:
+        state = self._state.get((scope, target, key))
+        if not state or state.confirmed is None:
+            return None
+        return state.confirmed.value
+
+    # ------------------------------------------------------------------
     def dump_debug(self) -> Dict[str, Any]:  # pragma: no cover - diagnostic helper
         summary: Dict[str, Any] = {}
         for key, state in self._state.items():
