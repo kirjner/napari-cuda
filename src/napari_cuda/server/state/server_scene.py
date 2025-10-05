@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
+from napari.layers.base._base_constants import Blending as NapariBlending
+from napari.layers.image._image_constants import Interpolation as NapariInterpolation
+
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
 
@@ -106,8 +109,8 @@ class LayerControlState:
 
     visible: bool = True
     opacity: float = 1.0
-    blending: str = "opaque"
-    interpolation: str = "bilinear"
+    blending: str = NapariBlending.OPAQUE.value
+    interpolation: str = NapariInterpolation.LINEAR.value
     gamma: float = 1.0
     colormap: Optional[str] = None
     contrast_limits: Optional[tuple[float, float]] = None

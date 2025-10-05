@@ -15,6 +15,9 @@ import logging
 
 import numpy as np
 
+from napari.layers.base._base_constants import Blending as NapariBlending
+from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
+
 from napari_cuda.server.state.scene_types import SliceROI
 from napari_cuda.server.data.roi_applier import SliceDataApplier
 from napari_cuda.server.state.scene_state import ServerSceneState
@@ -182,12 +185,10 @@ class SceneStateApplier:
         sy, sx = ctx.plane_scale_for_level(source, int(ctx.active_ms_level))
         roi_to_apply = roi or SliceROI(0, int(slab.shape[0]), 0, int(slab.shape[1]))
         SliceDataApplier(layer=layer).apply(slab=slab, roi=roi_to_apply, scale=(sy, sx))
-        if hasattr(layer, "visible"):
-            layer.visible = True  # type: ignore[assignment]
-        if hasattr(layer, "opacity"):
-            layer.opacity = 1.0  # type: ignore[assignment]
-        if hasattr(layer, "blending") and not getattr(layer, "blending", ""):
-            layer.blending = "opaque"  # type: ignore[assignment]
+        layer.visible = True  # type: ignore[assignment]
+        layer.opacity = 1.0  # type: ignore[assignment]
+        if not layer.blending:
+            layer.blending = NapariBlending.OPAQUE.value  # type: ignore[assignment]
 
         if update_contrast:
             smin = float(np.nanmin(slab)) if hasattr(np, "nanmin") else float(np.min(slab))
@@ -216,8 +217,6 @@ class SceneStateApplier:
             hi = float(contrast[1])
             if hi <= lo:
                 hi = lo + 1.0
-            if not hasattr(layer, 'translate'):
-                raise AttributeError("volume layer must expose a 'translate' attribute")
             layer.translate = tuple(0.0 for _ in range(int(volume.ndim)))  # type: ignore[assignment]
             data_min = float(np.nanmin(volume)) if hasattr(np, 'nanmin') else float(np.min(volume))
             data_max = float(np.nanmax(volume)) if hasattr(np, 'nanmax') else float(np.max(volume))
@@ -245,8 +244,6 @@ class SceneStateApplier:
                 pad = int(volume.ndim) - len(scale_vals)
                 scale_vals = tuple(1.0 for _ in range(pad)) + scale_vals
             scale_vals = tuple(scale_vals[-int(volume.ndim):])
-            if not hasattr(layer, 'scale'):
-                raise AttributeError("volume layer must expose a 'scale' attribute")
             layer.scale = scale_vals  # type: ignore[assignment]
 
         depth = int(volume.shape[0])
@@ -270,9 +267,9 @@ class SceneStateApplier:
         if vis is None:
             return
         if mode:
-            mm = str(mode).lower()
-            if mm in ("mip", "translucent", "iso"):
-                vis.method = mm  # type: ignore[attr-defined]
+            token = str(mode).strip().lower()
+            mm = NapariImageRendering(token).value
+            vis.method = mm  # type: ignore[attr-defined]
         if colormap:
             name = str(colormap).lower()
             if name == "gray":
@@ -311,9 +308,8 @@ class SceneStateApplier:
                 if not gamma > 0.0:
                     raise ValueError("gamma must be positive")
                 layer.gamma = gamma  # type: ignore[assignment]
-                visual = ctx.visual
-                if visual is not None and hasattr(visual, "gamma"):
-                    visual.gamma = gamma  # type: ignore[assignment]
+                if ctx.visual is not None:
+                    ctx.visual.gamma = gamma  # type: ignore[assignment]
             elif prop == "contrast_limits":
                 if not isinstance(value, (list, tuple)) or len(value) < 2:
                     raise ValueError("contrast_limits must be a length-2 sequence")
@@ -337,11 +333,9 @@ class SceneStateApplier:
             elif prop == "rendering":
                 layer.rendering = str(value)  # type: ignore[assignment]
             elif prop == "attenuation":
-                if hasattr(layer, "attenuation"):
-                    setattr(layer, "attenuation", float(value))
+                layer.attenuation = float(value)  # type: ignore[assignment]
             elif prop == "iso_threshold":
-                if hasattr(layer, "iso_threshold"):
-                    setattr(layer, "iso_threshold", float(value))
+                layer.iso_threshold = float(value)  # type: ignore[assignment]
             else:
                 raise KeyError(f"Unsupported layer property '{prop}'")
 
