@@ -177,7 +177,26 @@ class RemoteLayerRegistry:
                     if layer_id not in self._order:
                         self._order.append(layer_id)
                 else:
-                    self._update_layer(layer, block)
+                    handled = False
+                    if isinstance(layer, RemoteImageLayer):
+                        try:
+                            layer.apply_controls_delta(controls)
+                            if "contrast_limits" in changes:
+                                value = changes["contrast_limits"]
+                                if isinstance(value, Sequence) and len(value) >= 2:
+                                    layer.contrast_limits = (
+                                        float(value[0]),
+                                        float(value[1]),
+                                    )
+                            handled = True
+                        except Exception:
+                            logger.debug(
+                                "registry: apply_controls_delta failed id=%s",
+                                layer_id,
+                                exc_info=True,
+                            )
+                    if not handled:
+                        self._update_layer(layer, block)
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:
                     logger.debug("layer delta applied: id=%s keys=%s", layer_id, tuple(changes.keys()))
