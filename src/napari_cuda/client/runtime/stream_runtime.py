@@ -77,8 +77,7 @@ logger = logging.getLogger(__name__)
 _KEYFRAME_COMMAND = "napari.pixel.request_keyframe"
 
 
-def
- _int_or_none(value: object) -> Optional[int]:
+def _int_or_none(value: object) -> Optional[int]:
     return None if value is None else int(value)  # type: ignore[arg-type]
 
 
