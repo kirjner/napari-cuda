@@ -694,13 +694,26 @@ class ClientStreamLoop:
         if viewer is not None and hasattr(viewer, "_suppress_forward"):
             had_flag = True
             previous_flag = getattr(viewer, "_suppress_forward", False)
+            logger.debug("StreamRuntime: delta -> suppress_forward True (prev=%s)", previous_flag)
             setattr(viewer, "_suppress_forward", True)
         try:
             with self._layer_bridge.remote_sync():
                 self._layer_registry.apply_delta(delta)
         finally:
             if had_flag:
-                setattr(viewer, "_suppress_forward", previous_flag)
+                restore_target = getattr(getattr(viewer, "window", None), "_qt_viewer", None)
+
+                def _restore_suppression() -> None:
+                    logger.debug(
+                        "StreamRuntime: delta restore suppress_forward -> %s",
+                        previous_flag,
+                    )
+                    setattr(viewer, "_suppress_forward", previous_flag)
+
+                if restore_target is not None and hasattr(QtCore, "QTimer"):
+                    QtCore.QTimer.singleShot(0, _restore_suppression)
+                else:
+                    _restore_suppression()
         self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
         logger.debug(
             "notify.layers: id=%s keys=%s",
