@@ -258,10 +258,6 @@ class RemoteImageLayer(Image):
         except Exception:
             logger.debug("RemoteImageLayer: attenuation control failed", exc_info=True)
 
-    def apply_controls_delta(self, controls: Mapping[str, Any]) -> None:
-        """Apply a partial controls update without rebuilding the layer."""
-        self._apply_controls(controls)
-
     # ------------------------------------------------------------------
     @property
     def remote_id(self) -> str:

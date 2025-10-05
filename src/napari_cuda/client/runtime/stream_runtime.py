@@ -32,6 +32,7 @@ from napari_cuda.codec.avcc import (
     find_sps_pps,
 )
 from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
+from napari_cuda.codec.h264_encoder import H264Encoder, EncoderConfig
 from napari_cuda.client.runtime.client_loop.scheduler import CallProxy, WakeProxy
 from napari_cuda.client.runtime.client_loop.pipelines import (
     build_pyav_pipeline,
@@ -62,7 +63,7 @@ from napari_cuda.protocol.snapshots import (
     layer_delta_from_payload,
     scene_snapshot_from_payload,
 )
-from napari_cuda.client.state import LayerStateBridge
+from napari_cuda.client.control.viewer_layer_adapter import LayerStateBridge
 from napari_cuda.client.control.pending_update_store import StateStore
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
@@ -688,26 +689,8 @@ class ClientStreamLoop:
 
     def _handle_layer_delta(self, frame: NotifyLayersFrame) -> None:
         delta = layer_delta_from_payload(frame.payload)
-        viewer = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        restore_callback: Callable[[], None] | None = None
-        if viewer is not None and hasattr(viewer, "_suppress_forward"):
-            previous_flag = getattr(viewer, "_suppress_forward", False)
-            setattr(viewer, "_suppress_forward", True)
-
-            def _restore() -> None:
-                setattr(viewer, "_suppress_forward", previous_flag)
-
-            restore_callback = _restore
-
-        try:
-            with self._layer_bridge.remote_sync():
-                self._layer_registry.apply_delta(delta)
-        finally:
-            if restore_callback is not None:
-                if hasattr(QtCore, "QTimer"):
-                    QtCore.QTimer.singleShot(0, restore_callback)
-                else:
-                    restore_callback()
+        with self._layer_bridge.remote_sync():
+            self._layer_registry.apply_delta(delta)
         self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
         logger.debug(
             "notify.layers: id=%s keys=%s",
@@ -932,9 +915,9 @@ class ClientStreamLoop:
 
     def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
         vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is None:
+        if vm_ref is None or not hasattr(vm_ref, '_sync_remote_layers'):
             return
-        self._layer_bridge.sync_viewer_layers(vm_ref, snapshot)
+        vm_ref._sync_remote_layers(snapshot)  # type: ignore[attr-defined]
 
     def _handle_connected(self) -> None:
         self._loop_state.sync.reset_sequence()
