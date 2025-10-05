@@ -63,10 +63,7 @@ class DimsBridge:
 
     @suppress_forward.setter
     def suppress_forward(self, value: bool) -> None:
-        value_bool = bool(value)
-        if self._suppress_forward == value_bool:
-            return
-        self._suppress_forward = value_bool
+        self._suppress_forward = bool(value)
 
     def set_logging(self, enabled: bool) -> None:
         self._log_dims_info = bool(enabled)
@@ -95,37 +92,15 @@ class DimsBridge:
 
 
     def _on_dims_change(self, event: Any | None = None) -> None:
-        dims = self._viewer.dims
-        current = self._coerce_step(dims.current_step)
-        if self._logger.isEnabledFor(logging.DEBUG):
-            self._logger.debug(
-                "DimsBridge: on_dims_change current=%s last=%s suppress=%s",
-                current,
-                self._last_step_ui,
-                self._suppress_forward,
-            )
-
         if self._suppress_forward:
-            self._last_step_ui = current
-            if self._dims_tx_timer is not None and self._dims_tx_timer.isActive():
-                self._dims_tx_timer.stop()
-                if self._logger.isEnabledFor(logging.DEBUG):
-                    self._logger.debug("DimsBridge: suppressed; pending coalesce cancelled")
-            self._dims_tx_pending = None
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: suppression active; cache refreshed to %s", current)
             return
-
         sender = self._state_sender
         if sender is None:
-            self._last_step_ui = current
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: no sender; cache set to %s", current)
             return
+        dims = self._viewer.dims
+        current = self._coerce_step(dims.current_step)
 
         if self._last_step_ui is not None and current == self._last_step_ui:
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: current matches cache; skip")
             return
 
         changed_axis = self._detect_changed_axis(current)
@@ -136,39 +111,20 @@ class DimsBridge:
                 changed_axis = self._primary_axis_index(sender)
             else:
                 self._last_step_ui = current
-                if self._logger.isEnabledFor(logging.DEBUG):
-                    self._logger.debug("DimsBridge: no change detected; cache reset")
                 return
 
         value = int(current[changed_axis])
-        if self._logger.isEnabledFor(logging.DEBUG):
-            self._logger.debug(
-                "DimsBridge: axis=%d value=%d last=%s play_axis=%s is_playing=%s",
-                changed_axis,
-                value,
-                self._last_step_ui,
-                self._play_axis,
-                self._is_playing,
-            )
 
         if self._is_playing and self._play_axis is not None and int(changed_axis) == int(self._play_axis):
             self._handle_play_tick(sender, changed_axis, value)
             self._last_step_ui = current
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: play tick handled; cache=%s", current)
             return
 
         if self._dims_tx_interval_ms <= 0:
             self._dispatch_index(sender, changed_axis, value)
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: dispatched immediate dims_set_index axis=%d value=%d", changed_axis, value)
         else:
             self._queue_coalesced_update(changed_axis, value)
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("DimsBridge: queued coalesced update axis=%d value=%d", changed_axis, value)
         self._last_step_ui = current
-        if self._logger.isEnabledFor(logging.DEBUG):
-            self._logger.debug("DimsBridge: cache updated to %s", current)
 
     def _on_ndisplay_change(self, event: Any | None = None) -> None:
         if self._suppress_forward:
