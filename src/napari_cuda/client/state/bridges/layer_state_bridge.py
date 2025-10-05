@@ -382,56 +382,58 @@ class LayerStateBridge:
     def sync_viewer_layers(viewer: Any, snapshot: RegistrySnapshot) -> None:
         """Mirror the registry snapshot into the viewer's layer list."""
 
-        layers_obj = getattr(viewer, "layers", None)
-        if layers_obj is None:
-            return
-        blocker_factory = getattr(getattr(layers_obj, "events", None), "blocker", None)
-        ctx_manager = blocker_factory() if callable(blocker_factory) else nullcontext()
+        assert hasattr(viewer, "layers"), "proxy viewer must expose a layers collection"
+        layers_obj = viewer.layers
+        events = layers_obj.events
+        assert hasattr(events, "blocker"), "LayerList events missing blocker()"
+        ctx_manager = events.blocker()
         had_flag = hasattr(viewer, "_suppress_forward")
         previous_flag = getattr(viewer, "_suppress_forward", False) if had_flag else False
         if had_flag:
-            try:
-                setattr(viewer, "_suppress_forward", True)
-            except Exception:
-                logger.debug("LayerStateBridge: suppress_forward set failed", exc_info=True)
+            setattr(viewer, "_suppress_forward", True)
         try:
             with ctx_manager:
-                desired_ids = list(snapshot.ids())
-                existing_layers = list(layers_obj)
-                for layer in existing_layers:
-                    remote_id = getattr(layer, "remote_id", None)
-                    if remote_id and remote_id not in desired_ids:
-                        try:
-                            layers_obj.remove(layer)
-                        except ValueError:
-                            continue
-                for idx, record in enumerate(snapshot.iter()):
-                    layer = record.layer
-                    if layer not in layers_obj:
-                        layers_obj.insert(idx, layer)
-                    current_index = layers_obj.index(layer)
+                desired_records = tuple(snapshot.iter())
+                desired_ids = [record.layer_id for record in desired_records]
+
+                for layer in list(layers_obj):
+                    assert hasattr(layer, "remote_id"), "encountered non-remote layer in proxy viewer"
+                    remote_id = str(layer.remote_id)
+                    if remote_id not in desired_ids:
+                        layers_obj.remove(layer)
+
+                existing_map: dict[str, Any] = {}
+                for layer in list(layers_obj):
+                    remote_id = str(layer.remote_id)
+                    existing_map[remote_id] = layer
+
+                for idx, record in enumerate(desired_records):
+                    layer_id = record.layer_id
+                    current = existing_map.get(layer_id)
+
+                    if current is None:
+                        insert_at = min(idx, len(layers_obj))
+                        layers_obj.insert(insert_at, record.layer)
+                        current = record.layer
+                        existing_map[layer_id] = current
+                    else:
+                        if current is not record.layer:
+                            assert hasattr(current, "update_from_block"), "remote layer missing update_from_block"
+                            current.update_from_block(record.block)
+
+                    current_index = layers_obj.index(current)
                     if current_index != idx:
-                        try:
-                            layers_obj.move(current_index, idx)
-                        except Exception:
-                            layers_obj.pop(current_index)
-                            layers_obj.insert(idx, layer)
-                    try:
-                        controls = record.block.get("controls") if isinstance(record.block.get("controls"), dict) else None
-                        target = controls.get("visible") if isinstance(controls, dict) else None
-                        if target is not None and bool(layer.visible) is not bool(target):
-                            emitter = getattr(getattr(layer, "events", None), "visible", None)
-                            block_ctx = emitter.blocker() if hasattr(emitter, "blocker") else nullcontext()
-                            with block_ctx:
-                                layer.visible = bool(target)
-                    except Exception:
-                        logger.debug("LayerStateBridge: apply visible sync failed", exc_info=True)
+                        layers_obj.move(current_index, idx)
+
+                    controls = record.block.get("controls") if isinstance(record.block.get("controls"), dict) else None
+                    if isinstance(controls, dict) and "visible" in controls:
+                        emitter = current.events.visible
+                        block_ctx = emitter.blocker()
+                        with block_ctx:
+                            current.visible = bool(controls["visible"])
         finally:
             if had_flag:
-                try:
-                    setattr(viewer, "_suppress_forward", previous_flag)
-                except Exception:
-                    logger.debug("LayerStateBridge: restore suppress_forward failed", exc_info=True)
+                setattr(viewer, "_suppress_forward", previous_flag)
 
     def _make_property_handler(
         self, binding: LayerBinding, config: PropertyConfig
