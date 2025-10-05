@@ -259,6 +259,6 @@ class ProxyViewer(ViewerModel):
 
     @_suppress_forward.setter
     def _suppress_forward(self, value: bool) -> None:
+        logger.debug("ProxyViewer: _suppress_forward -> %s", value)
         if self._dims_bridge is not None:
             self._dims_bridge.suppress_forward = bool(value)
-

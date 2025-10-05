@@ -390,6 +390,7 @@ class LayerStateBridge:
         had_flag = hasattr(viewer, "_suppress_forward")
         previous_flag = getattr(viewer, "_suppress_forward", False) if had_flag else False
         if had_flag:
+            logger.debug("LayerStateBridge: forcing viewer._suppress_forward -> True")
             setattr(viewer, "_suppress_forward", True)
         try:
             with ctx_manager:
@@ -433,6 +434,10 @@ class LayerStateBridge:
                             current.visible = bool(controls["visible"])
         finally:
             if had_flag:
+                logger.debug(
+                    "LayerStateBridge: restoring viewer._suppress_forward -> %s",
+                    previous_flag,
+                )
                 setattr(viewer, "_suppress_forward", previous_flag)
 
     def _make_property_handler(
