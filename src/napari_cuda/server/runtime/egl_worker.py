@@ -400,6 +400,15 @@ class EGLRendererWorker:
             if state.zoom is not None:
                 camera.zoom = float(state.zoom)
 
+        viewer_cam = self._viewer.camera
+        if state.center is not None:
+            viewer_cam.center = (
+                0.0,
+                float(state.center[1]),
+                float(state.center[0]),
+            )
+        viewer_cam.zoom = float(state.zoom)
+
         # Notify clients with the restored step metadata.
         self._notify_scene_refresh()
 
