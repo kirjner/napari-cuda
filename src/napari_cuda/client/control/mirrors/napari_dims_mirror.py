@@ -17,73 +17,6 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-def ingest_notify_dims(
-    state: "ControlStateContext",
-    loop_state: "ClientLoopState",
-    frame: NotifyDimsFrame,
-    *,
-    presenter: "PresenterFacade",
-    viewer_ref,
-    ui_call,
-    notify_first_dims_ready: Callable[[], None],
-    log_dims_info: bool,
-    state_ledger: Optional[ClientStateLedger] = None,
-) -> None:
-    """Record a ``notify.dims`` snapshot and mirror it into napari."""
-
-    meta = state.dims_meta
-    was_ready = bool(state.dims_ready)
-
-    payload = frame.payload
-    current_step = tuple(int(value) for value in payload.current_step)
-    meta['current_step'] = list(current_step)
-    meta['ndisplay'] = int(payload.ndisplay)
-    mode_text = str(payload.mode)
-    meta['mode'] = mode_text
-    meta['volume'] = bool(mode_text.lower() == 'volume')
-    meta['source'] = payload.source
-
-    snapshot_payload = _sync_dims_payload_from_meta(state, loop_state)
-
-    if state_ledger is not None:
-        if not was_ready:
-            _record_dims_snapshot(state, state_ledger, snapshot_payload)
-        else:
-            _record_dims_delta(state, state_ledger, snapshot_payload, update_kind='notify')
-
-    if not state.dims_ready:
-        state.dims_ready = True
-        logger.info("notify.dims: metadata received; client intents enabled")
-        notify_first_dims_ready()
-
-    state.primary_axis_index = _compute_primary_axis_index(meta)
-
-    if current_step and log_dims_info:
-        logger.info(
-            "notify.dims: step=%s ndisplay=%s order=%s labels=%s",
-            list(current_step),
-            meta.get('ndisplay'),
-            meta.get('order'),
-            meta.get('axis_labels'),
-        )
-
-    presenter.apply_dims_update(dict(snapshot_payload))
-
-    viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-    mirror_dims_to_viewer(
-        viewer_obj,
-        ui_call,
-        current_step=snapshot_payload.get('current_step'),
-        ndisplay=snapshot_payload.get('ndisplay'),
-        ndim=snapshot_payload.get('ndim'),
-        dims_range=snapshot_payload.get('dims_range'),
-        order=snapshot_payload.get('order'),
-        axis_labels=snapshot_payload.get('axis_labels'),
-        sizes=snapshot_payload.get('sizes'),
-        displayed=snapshot_payload.get('displayed'),
-    )
-
-
 class NapariDimsMirror:
     """Subscribe to dims-related ledger events and mirror them into napari."""
 
@@ -106,6 +39,52 @@ class NapariDimsMirror:
         self._presenter = presenter
         self._log_dims_info = bool(log_dims_info)
         ledger.subscribe_all(self._handle_ledger_update)
+
+    def ingest_notify(
+        self,
+        frame: NotifyDimsFrame,
+        *,
+        notify_first_ready: Callable[[], None],
+    ) -> None:
+        """Record a ``notify.dims`` snapshot and mirror it into napari."""
+
+        state = self._state
+        meta = state.dims_meta
+        was_ready = bool(state.dims_ready)
+
+        payload = frame.payload
+        current_step = tuple(int(value) for value in payload.current_step)
+        meta['current_step'] = list(current_step)
+        meta['ndisplay'] = int(payload.ndisplay)
+        mode_text = str(payload.mode)
+        meta['mode'] = mode_text
+        meta['volume'] = bool(mode_text.lower() == 'volume')
+        meta['source'] = payload.source
+
+        snapshot_payload = _build_confirmed_dims_payload(state, self._loop_state)
+
+        if not was_ready:
+            _record_dims_snapshot(state, self._ledger, snapshot_payload)
+        else:
+            _record_dims_delta(state, self._ledger, snapshot_payload, update_kind='notify')
+
+        if not state.dims_ready:
+            state.dims_ready = True
+            logger.info("notify.dims: metadata received; client intents enabled")
+            notify_first_ready()
+
+        state.primary_axis_index = _compute_primary_axis_index(meta)
+
+        if current_step and self._log_dims_info:
+            logger.info(
+                "notify.dims: step=%s ndisplay=%s order=%s labels=%s",
+                list(current_step),
+                meta.get('ndisplay'),
+                meta.get('order'),
+                meta.get('axis_labels'),
+            )
+
+        self._mirror_confirmed_dims(reason="notify", payload=snapshot_payload)
 
     # ------------------------------------------------------------------
     def _handle_ledger_update(self, update: MirrorEvent) -> None:
@@ -152,7 +131,7 @@ class NapariDimsMirror:
 
         self._state.dims_state[(str(update.target), str(update.key))] = value_int
         self._state.primary_axis_index = _compute_primary_axis_index(meta)
-        self._flush_dims_payload(reason=f"axis:{axis_idx}")
+        self._mirror_confirmed_dims(reason=f"axis:{axis_idx}")
 
     def _handle_ndisplay_update(self, update: MirrorEvent) -> None:
         try:
@@ -160,36 +139,43 @@ class NapariDimsMirror:
         except Exception as exc:  # pragma: no cover - intentional crash path
             raise AssertionError(f"ndisplay value must be int-like: {update.value!r}") from exc
         self._state.dims_meta['ndisplay'] = ndisplay
-        self._flush_dims_payload(reason="ndisplay")
+        self._mirror_confirmed_dims(reason="ndisplay")
 
-    def _flush_dims_payload(self, *, reason: str) -> None:
-        payload = _sync_dims_payload_from_meta(self._state, self._loop_state)
-        if self._log_dims_info and payload.get('current_step') is not None:
+    def _mirror_confirmed_dims(
+        self,
+        *,
+        reason: str,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        confirmed_payload = (
+            dict(payload)
+            if payload is not None
+            else _build_confirmed_dims_payload(self._state, self._loop_state)
+        )
+
+        if self._log_dims_info and confirmed_payload.get('current_step') is not None:
             logger.info(
                 "dims mirror (%s): step=%s ndisplay=%s",
                 reason,
-                payload.get('current_step'),
-                payload.get('ndisplay'),
+                confirmed_payload.get('current_step'),
+                confirmed_payload.get('ndisplay'),
             )
 
         if self._presenter is not None:
-            try:
-                self._presenter.apply_dims_update(dict(payload))
-            except Exception:
-                logger.debug("presenter dims update failed", exc_info=True)
+            self._presenter.apply_dims_update(dict(confirmed_payload))
 
         viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
         mirror_dims_to_viewer(
             viewer_obj,
             self._ui_call,
-            current_step=payload.get('current_step'),
-            ndisplay=payload.get('ndisplay'),
-            ndim=payload.get('ndim'),
-            dims_range=payload.get('dims_range'),
-            order=payload.get('order'),
-            axis_labels=payload.get('axis_labels'),
-            sizes=payload.get('sizes'),
-            displayed=payload.get('displayed'),
+            current_step=confirmed_payload.get('current_step'),
+            ndisplay=confirmed_payload.get('ndisplay'),
+            ndim=confirmed_payload.get('ndim'),
+            dims_range=confirmed_payload.get('dims_range'),
+            order=confirmed_payload.get('order'),
+            axis_labels=confirmed_payload.get('axis_labels'),
+            sizes=confirmed_payload.get('sizes'),
+            displayed=confirmed_payload.get('displayed'),
         )
 
 
@@ -236,7 +222,7 @@ def _record_dims_delta(
         ledger.record_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
 
 
-def _sync_dims_payload_from_meta(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
+def _build_confirmed_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
     meta = state.dims_meta
     payload: dict[str, Any] = {}
 
@@ -292,12 +278,6 @@ def _sync_dims_payload_from_meta(state: "ControlStateContext", loop_state: "Clie
 
     loop_state.last_dims_payload = dict(payload)
     return payload
-
-
-def build_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
-    """Public helper to mirror dims metadata into a payload dict."""
-
-    return _sync_dims_payload_from_meta(state, loop_state)
 
 
 def _record_multiscale_metadata(state: "ControlStateContext", ledger: ClientStateLedger) -> None:
@@ -457,8 +437,6 @@ def replay_last_dims_payload(state: "ControlStateContext", loop_state: "ClientLo
 
 __all__ = [
     "NapariDimsMirror",
-    "ingest_notify_dims",
-    "build_dims_payload",
     "mirror_dims_to_viewer",
     "replay_last_dims_payload",
 ]

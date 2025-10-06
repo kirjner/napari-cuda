@@ -56,6 +56,7 @@ def _make_loop() -> ClientStreamLoop:
     loop._ui_call = None
     loop._first_dims_ready_cb = None
     loop._first_dims_notified = False
+    loop._dims_mirror = None
 
     env = SimpleNamespace(
         dims_rate_hz=60.0,

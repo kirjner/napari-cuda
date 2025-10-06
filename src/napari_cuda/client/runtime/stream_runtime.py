@@ -584,16 +584,11 @@ class ClientStreamLoop:
             self._init_vt_from_avcc(avcc_b64, int(width), int(height))
 
     def _handle_dims_update(self, frame: NotifyDimsFrame) -> None:
-        napari_dims_mirror.ingest_notify_dims(
-            self._control_state,
-            self._loop_state,
+        self._ensure_dims_update()
+        assert self._dims_mirror is not None
+        self._dims_mirror.ingest_notify(
             frame,
-            presenter=self._presenter_facade,
-            viewer_ref=self._viewer_mirror,
-            ui_call=self._ui_call,
-            notify_first_dims_ready=self._notify_first_dims_ready,
-            log_dims_info=self._log_dims_info,
-            state_ledger=self._state_ledger,
+            notify_first_ready=self._notify_first_dims_ready,
         )
 
     def _handle_notify_camera(self, frame: Any) -> None:

@@ -10,7 +10,6 @@ import pytest
 from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
-from napari_cuda.client.control.mirrors import napari_dims_mirror
 from napari_cuda.client.control.mirrors.napari_dims_mirror import NapariDimsMirror
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
@@ -149,17 +148,17 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
 
     frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=2)
 
-    napari_dims_mirror.ingest_notify_dims(
-        state,
-        loop_state,
-        frame,
-        presenter=presenter,
+    mirror = NapariDimsMirror(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
         viewer_ref=lambda: None,
         ui_call=None,
-        notify_first_dims_ready=lambda: ready_calls.append(None),
+        presenter=presenter,
         log_dims_info=False,
-        state_ledger=ledger,
     )
+
+    mirror.ingest_notify(frame, notify_first_ready=lambda: ready_calls.append(None))
 
     assert state.dims_ready is True
     assert loop_state.last_dims_payload == {
@@ -187,17 +186,17 @@ def test_handle_dims_update_modes_volume_flag() -> None:
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=3, mode='volume')
 
-    napari_dims_mirror.ingest_notify_dims(
-        state,
-        loop_state,
-        frame,
-        presenter=presenter,
+    mirror = NapariDimsMirror(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
         viewer_ref=lambda: None,
         ui_call=None,
-        notify_first_dims_ready=lambda: None,
+        presenter=presenter,
         log_dims_info=False,
-        state_ledger=ledger,
     )
+
+    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
 
     assert state.dims_meta['mode'] == 'volume'
     assert state.dims_meta['volume'] is True
@@ -210,7 +209,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
     viewer = ViewerStub()
     presenter = PresenterStub()
 
-    NapariDimsMirror(
+    mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
@@ -232,17 +231,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
 
     frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=3, mode='volume')
 
-    napari_dims_mirror.ingest_notify_dims(
-        state,
-        loop_state,
-        frame,
-        presenter=presenter,
-        viewer_ref=lambda: viewer,
-        ui_call=None,
-        notify_first_dims_ready=lambda: None,
-        log_dims_info=False,
-        state_ledger=ledger,
-    )
+    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
 
     assert viewer.calls, "viewer should receive dims update"
     payload = viewer.calls[-1]
@@ -260,7 +249,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
     viewer = ViewerStub()
     presenter = PresenterStub()
 
-    NapariDimsMirror(
+    mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
@@ -296,17 +285,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=2)
 
-    napari_dims_mirror.ingest_notify_dims(
-        state,
-        loop_state,
-        frame,
-        presenter=presenter,
-        viewer_ref=lambda: viewer,
-        ui_call=None,
-        notify_first_dims_ready=lambda: None,
-        log_dims_info=False,
-        state_ledger=ledger,
-    )
+    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
 
     sizes = state.dims_meta['sizes']
     assert sizes == [256, 128, 32]
@@ -506,7 +485,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
 
     viewer = Viewer()
 
-    NapariDimsMirror(
+    mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
@@ -518,17 +497,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
 
     frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
 
-    napari_dims_mirror.ingest_notify_dims(
-        state,
-        loop_state,
-        frame,
-        presenter=presenter,
-        viewer_ref=lambda: None,
-        ui_call=None,
-        notify_first_dims_ready=lambda: None,
-        log_dims_info=False,
-        state_ledger=ledger,
-    )
+    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
 
     # Emit a new intent that should be rejected
     control_actions.dims_set_index(
