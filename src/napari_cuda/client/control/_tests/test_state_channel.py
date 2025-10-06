@@ -121,7 +121,7 @@ def test_state_channel_layer_remove_callback(state_channel):
 
 def test_state_channel_dims_update_dispatch() -> None:
     frames: list[NotifyDimsFrame] = []
-    sc = StateChannel('localhost', 8081, handle_dims_update=frames.append)
+    sc = StateChannel('localhost', 8081, ingest_dims_notify=frames.append)
     frame = build_notify_dims(
         session_id='session-42',
         payload={'current_step': (12, 3, 4), 'ndisplay': 2, 'mode': 'slice', 'source': 'test'},

@@ -390,8 +390,8 @@ class ClientStreamLoop:
         self._loop_state.in_present = False
 
     def start(self) -> None:
+        self._initialize_mirrors()
         loop_lifecycle.start_loop(self)
-        self._ensure_dims_update()
 
     def _enqueue_frame(self, frame: object) -> None:
         if self._loop_state.frame_queue.full():
@@ -582,14 +582,6 @@ class ClientStreamLoop:
         if width > 0 and height > 0 and avcc_b64:
             # Cache video dimensions for input mapping and prime VT decode
             self._init_vt_from_avcc(avcc_b64, int(width), int(height))
-
-    def _handle_dims_update(self, frame: NotifyDimsFrame) -> None:
-        self._ensure_dims_update()
-        assert self._dims_mirror is not None
-        self._dims_mirror.ingest_notify(
-            frame,
-            notify_first_ready=self._notify_first_dims_ready,
-        )
 
     def _handle_notify_camera(self, frame: Any) -> None:
         result = control_actions.handle_notify_camera(
@@ -1080,7 +1072,7 @@ class ClientStreamLoop:
     def _current_viewer(self) -> object | None:
         return self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
 
-    def _ensure_dims_update(self) -> None:
+    def _initialize_mirrors(self) -> None:
         if self._dims_mirror is not None:
             return
         self._dims_mirror = napari_dims_mirror.NapariDimsMirror(
@@ -1091,13 +1083,17 @@ class ClientStreamLoop:
             ui_call=self._ui_call,
             presenter=self._presenter_facade,
             log_dims_info=self._log_dims_info,
+            notify_first_ready=self._notify_first_dims_ready,
         )
+        self._dims_mirror.set_logging(self._log_dims_info)
 
     # --- Public UI/state bridge methods -------------------------------------------
-    def attach_viewer_mirror(self, viewer: object) -> None:
-        """Attach a viewer to mirror server dims updates into local UI.
+    def attach_viewer_proxy(self, viewer: object) -> None:
+        """Attach the viewer proxy the runtime mirrors state into.
 
-        Stores a weak reference to avoid lifetime coupling.
+        We keep only a weak reference so the viewer can drop without waiting
+        on the runtime, and immediately replay the last confirmed payload to
+        seed both dims and presenter state.
         """
         self._viewer_mirror = weakref.ref(viewer)  # type: ignore[attr-defined]
         self._presenter_facade.set_viewer_mirror(viewer)

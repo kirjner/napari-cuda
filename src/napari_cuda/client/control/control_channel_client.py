@@ -134,7 +134,7 @@ class StateChannel:
         host: str,
         port: int,
         handle_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
-        handle_dims_update: Optional[Callable[[NotifyDimsFrame], None]] = None,
+        ingest_dims_notify: Optional[Callable[[NotifyDimsFrame], None]] = None,
         handle_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
         handle_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
         handle_layer_delta: Optional[Callable[[NotifyLayersFrame], None]] = None,
@@ -150,7 +150,7 @@ class StateChannel:
         self.host = host
         self.port = int(port)
         self.handle_notify_stream = handle_notify_stream
-        self.handle_dims_update = handle_dims_update
+        self.ingest_dims_notify = ingest_dims_notify
         self.handle_scene_snapshot = handle_scene_snapshot
         self.handle_scene_level = handle_scene_level
         self.handle_layer_delta = handle_layer_delta
@@ -572,7 +572,7 @@ class StateChannel:
         self.handle_notify_stream(frame)
 
     def _handle_notify_dims(self, data: Mapping[str, object]) -> None:
-        if not self.handle_dims_update:
+        if not self.ingest_dims_notify:
             return
         try:
             frame = _ENVELOPE_PARSER.parse_notify_dims(data)
@@ -585,7 +585,7 @@ class StateChannel:
                     payload.ndisplay,
                     payload.mode,
                 )
-            self.handle_dims_update(frame)
+            self.ingest_dims_notify(frame)
         except Exception:
             logger.debug("notify.dims dispatch failed", exc_info=True)
 

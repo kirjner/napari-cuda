@@ -30,6 +30,7 @@ class NapariDimsMirror:
         ui_call,
         presenter: Optional["PresenterFacade"],
         log_dims_info: bool,
+        notify_first_ready: Optional[Callable[[], None]] = None,
     ) -> None:
         self._ledger = ledger
         self._state = state
@@ -38,14 +39,13 @@ class NapariDimsMirror:
         self._ui_call = ui_call
         self._presenter = presenter
         self._log_dims_info = bool(log_dims_info)
+        self._notify_first_ready = notify_first_ready
         ledger.subscribe_all(self._handle_ledger_update)
 
-    def ingest_notify(
-        self,
-        frame: NotifyDimsFrame,
-        *,
-        notify_first_ready: Callable[[], None],
-    ) -> None:
+    def set_logging(self, enabled: bool) -> None:
+        self._log_dims_info = bool(enabled)
+
+    def ingest_dims_notify(self, frame: NotifyDimsFrame) -> None:
         """Record a ``notify.dims`` snapshot and mirror it into napari."""
 
         state = self._state
@@ -71,7 +71,8 @@ class NapariDimsMirror:
         if not state.dims_ready:
             state.dims_ready = True
             logger.info("notify.dims: metadata received; client intents enabled")
-            notify_first_ready()
+            if self._notify_first_ready is not None:
+                self._notify_first_ready()
 
         state.primary_axis_index = _compute_primary_axis_index(meta)
 

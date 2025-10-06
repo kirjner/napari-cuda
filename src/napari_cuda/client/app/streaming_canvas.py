@@ -163,7 +163,7 @@ class StreamingCanvas(VispyCanvas):
             on_first_dims_ready=self._on_first_dims_ready,
         )
         self._manager.start()
-        self._manager.attach_viewer_mirror(viewer)
+        self._manager.attach_viewer_proxy(viewer)
         if hasattr(viewer, 'attach_state_sender'):
             viewer.attach_state_sender(self._manager)  # type: ignore[attr-defined]
         self._manager.presenter_facade.bind_canvas(

@@ -156,9 +156,10 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         ui_call=None,
         presenter=presenter,
         log_dims_info=False,
+        notify_first_ready=lambda: ready_calls.append(None),
     )
 
-    mirror.ingest_notify(frame, notify_first_ready=lambda: ready_calls.append(None))
+    mirror.ingest_dims_notify(frame)
 
     assert state.dims_ready is True
     assert loop_state.last_dims_payload == {
@@ -196,7 +197,7 @@ def test_handle_dims_update_modes_volume_flag() -> None:
         log_dims_info=False,
     )
 
-    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
+    mirror.ingest_dims_notify(frame)
 
     assert state.dims_meta['mode'] == 'volume'
     assert state.dims_meta['volume'] is True
@@ -231,7 +232,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
 
     frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=3, mode='volume')
 
-    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
+    mirror.ingest_dims_notify(frame)
 
     assert viewer.calls, "viewer should receive dims update"
     payload = viewer.calls[-1]
@@ -285,7 +286,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=2)
 
-    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
+    mirror.ingest_dims_notify(frame)
 
     sizes = state.dims_meta['sizes']
     assert sizes == [256, 128, 32]
@@ -497,7 +498,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
 
     frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
 
-    mirror.ingest_notify(frame, notify_first_ready=lambda: None)
+    mirror.ingest_dims_notify(frame)
 
     # Emit a new intent that should be rejected
     control_actions.dims_set_index(
