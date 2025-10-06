@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Tuple
+from typing import Optional
 
 from napari_cuda.server.state.scene_types import SliceROI
 
@@ -12,12 +12,14 @@ from napari_cuda.server.state.scene_types import SliceROI
 class PlaneRestoreState:
     """Capture the 2D plane context prior to switching into volume mode."""
 
-    step: Tuple[int, ...]
+    step: tuple[int, ...]
     level: int
     roi_level: Optional[int] = None
     roi: Optional[SliceROI] = None
-    camera_state: Optional[Mapping[str, Any]] = None
-    data_wh: Optional[Tuple[int, int]] = None
+    rect: Optional[tuple[float, float, float, float]] = None
+    zoom: Optional[float] = None
+    center: Optional[tuple[float, float]] = None
+    data_wh: Optional[tuple[int, int]] = None
 
 
 __all__ = ["PlaneRestoreState"]

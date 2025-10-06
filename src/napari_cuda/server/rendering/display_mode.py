@@ -19,14 +19,15 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
 
     target = 3 if int(ndisplay) >= 3 else 2
     previous_volume = worker.use_volume
+
+    plane_state = None
+    if target == 3 and not previous_volume:
+        plane_state = worker.snapshot_plane_state()
+
     worker.use_volume = target == 3
 
     viewer_model = worker._viewer
     viewer_dims = viewer_model.dims if viewer_model is not None else None
-
-    plane_state = None
-    if target == 3:
-        plane_state = worker.snapshot_plane_state()
 
     if worker.use_volume:
         worker._last_roi = None

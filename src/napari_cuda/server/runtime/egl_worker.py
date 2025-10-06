@@ -36,6 +36,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
 from vispy import scene  # type: ignore
+from vispy.geometry import Rect
 
 from napari.components.viewer_model import ViewerModel
 from napari._vispy.layers.image import VispyImageLayer, _napari_cmap_to_vispy
@@ -98,6 +99,13 @@ from napari_cuda.server.runtime.worker_runtime import (
 from napari_cuda.server.rendering.display_mode import apply_ndisplay_switch
 
 logger = logging.getLogger(__name__)
+
+
+def _rect_to_tuple(rect: Rect) -> tuple[float, float, float, float]:
+    """Normalize a VisPy Rect into (left, bottom, width, height)."""
+
+    return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
+
 
 # Back-compat for tests patching the selector directly
 select_level = lod.select_level
@@ -301,7 +309,12 @@ class EGLRendererWorker:
     def snapshot_plane_state(self) -> Optional[PlaneRestoreState]:
         """Capture the current plane state for later restoration."""
 
-        if self._last_step is None:
+        if self.use_volume or self._last_step is None:
+            return None
+
+        if self.view is None:
+            return None
+        if self._viewer is None or self._viewer.camera is None:
             return None
 
         step_tuple = tuple(int(value) for value in self._last_step)
@@ -313,9 +326,18 @@ class EGLRendererWorker:
             roi_level = int(self._last_roi[0])
             roi_value = self._last_roi[1]
 
-        camera_state = None
-        if self.view is not None and self.view.camera is not None:
-            camera_state = dict(self.view.camera.get_state())
+        cam = self.view.camera
+        if cam is None or not hasattr(cam, "get_state"):
+            return None
+        cam_state = cam.get_state()
+        rect_obj = cam_state.get('rect')
+        if rect_obj is None:
+            return None
+        rect = _rect_to_tuple(rect_obj)
+        rect_center = rect_obj.center
+        center = (float(rect_center[0]), float(rect_center[1]))
+
+        zoom = float(self._viewer.camera.zoom)
 
         data_wh = None
         if self._data_wh is not None:
@@ -326,7 +348,9 @@ class EGLRendererWorker:
             level=level,
             roi_level=roi_level,
             roi=roi_value,
-            camera_state=camera_state,
+            rect=rect,
+            zoom=zoom,
+            center=center,
             data_wh=data_wh,
         )
         self._plane_restore_state = state
@@ -364,8 +388,17 @@ class EGLRendererWorker:
         if self._viewer is not None:
             self._viewer.dims.current_step = tuple(int(v) for v in state.step)
 
-        if state.camera_state is not None and self.view is not None and self.view.camera is not None:
-            self.view.camera.set_state(state.camera_state)  # type: ignore[arg-type]
+        if self.view is not None:
+            camera = self.view.camera
+            if not isinstance(camera, scene.cameras.PanZoomCamera):
+                camera = scene.cameras.PanZoomCamera(aspect=1.0)
+                self.view.camera = camera
+            if state.rect is not None:
+                camera.rect = Rect(*state.rect)
+            if state.center is not None:
+                camera.center = (float(state.center[0]), float(state.center[1]), 0.0)
+            if state.zoom is not None:
+                camera.zoom = float(state.zoom)
 
         # Notify clients with the restored step metadata.
         self._notify_scene_refresh()
@@ -583,8 +616,6 @@ class EGLRendererWorker:
     def _update_level_metadata(self, descriptor, applied) -> None:
         self._active_ms_level = applied.level
         self._last_step = applied.step
-        if not self.use_volume:
-            self.snapshot_plane_state()
         self._z_index = applied.z_index
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
@@ -1047,7 +1078,6 @@ class EGLRendererWorker:
         if drain_res.last_step is not None:
             self._last_step = tuple(int(x) for x in drain_res.last_step)
             if not self.use_volume:
-                self.snapshot_plane_state()
                 self._notify_scene_refresh()
 
         if drain_res.policy_refresh_needed and not self.use_volume:

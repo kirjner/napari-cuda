@@ -6,6 +6,7 @@ from typing import Mapping
 
 import numpy as np
 import pytest
+from vispy.geometry import Rect
 
 from napari_cuda.server.app.config import LevelPolicySettings, ServerConfig, ServerCtx
 from napari_cuda.server.state.scene_state import ServerSceneState
@@ -52,27 +53,52 @@ class _FakeCanvas:
 
 class _FakeCamera2D:
     def __init__(self, aspect: float | None = None) -> None:
-        self.center = (0.0, 0.0)
+        self.aspect = aspect
         self.angles = (0.0, 0.0, 0.0)
         self.zoom_factor = 1.0
         self.zoom_calls: list[tuple[float, tuple[float, float] | None]] = []
         self.set_range_calls: list[dict[str, tuple[float, float] | None]] = []
         self.azimuth = 0.0
         self.elevation = 0.0
-        self.aspect = aspect
+        self._rect = Rect(0.0, 0.0, 1.0, 1.0)
+        self._center = (0.5, 0.5, 0.0)
 
     def zoom(self, factor: float, center: tuple[float, float] | None = None) -> None:
         self.zoom_factor *= float(factor)
         self.zoom_calls.append((float(factor), center))
         if center is not None:
-            self.center = (float(center[0]), float(center[1]))
+            self.center = (float(center[0]), float(center[1]), self._center[2])
 
     def set_range(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         self.set_range_calls.append({str(k): v for k, v in kwargs.items()})
 
     @property
-    def rect(self) -> tuple[int, int, int, int]:
-        return (0, 0, 1, 1)
+    def center(self) -> tuple[float, float, float]:
+        return self._center
+
+    @center.setter
+    def center(self, value: tuple[float, ...]) -> None:
+        values = tuple(float(v) for v in value)
+        if len(values) == 2:
+            values = (values[0], values[1], 0.0)
+        self._center = values
+        width = float(self._rect.width)
+        height = float(self._rect.height)
+        self._rect = Rect(values[0] - width / 2.0, values[1] - height / 2.0, width, height)
+
+    @property
+    def rect(self) -> Rect:
+        return Rect(self._rect)
+
+    @rect.setter
+    def rect(self, value) -> None:  # type: ignore[no-untyped-def]
+        if isinstance(value, Rect):
+            self._rect = Rect(value)
+        else:
+            left, bottom, width, height = value
+            self._rect = Rect(float(left), float(bottom), float(width), float(height))
+        center = self._rect.center
+        self._center = (float(center[0]), float(center[1]), self._center[2])
 
     @property
     def scale(self) -> tuple[float, float]:
@@ -83,27 +109,12 @@ class _FakeCamera2D:
         return SimpleNamespace(size=(320.0, 180.0))
 
     def get_state(self) -> dict[str, object]:  # type: ignore[no-untyped-def]
-        return {
-            "center": tuple(self.center),
-            "angles": tuple(self.angles),
-            "zoom_factor": float(self.zoom_factor),
-            "azimuth": float(self.azimuth),
-            "elevation": float(self.elevation),
-        }
+        return {"rect": Rect(self._rect)}
 
     def set_state(self, state: Mapping[str, object]) -> None:  # type: ignore[no-untyped-def]
-        if "center" in state:
-            center = state["center"]
-            self.center = tuple(float(v) for v in center)  # type: ignore[assignment]
-        if "angles" in state:
-            angles = state["angles"]
-            self.angles = tuple(float(v) for v in angles)
-        if "zoom_factor" in state:
-            self.zoom_factor = float(state["zoom_factor"])
-        if "azimuth" in state:
-            self.azimuth = float(state["azimuth"])
-        if "elevation" in state:
-            self.elevation = float(state["elevation"])
+        rect = state.get("rect")
+        if rect is not None:
+            self.rect = rect
 
 
 class _FakeCamera3D(_FakeCamera2D):
@@ -145,6 +156,7 @@ class _FakeDims:
 class _FakeViewer:
     def __init__(self) -> None:
         self.dims = _FakeDims()
+        self.camera = SimpleNamespace(center=(0.0, 0.0, 0.0), zoom=1.0)
 
 
 class _FakeLayer:
@@ -282,7 +294,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker
 
         def build(self, source):  # type: ignore[no-untyped-def]
             canvas = _FakeCanvas(self._worker.width, self._worker.height)
-            view = _FakeView(_FakeCamera2D())
+            view = _FakeView(rw.scene.cameras.PanZoomCamera(aspect=1.0))
             viewer = _FakeViewer()
             return canvas, view, viewer
 
@@ -368,6 +380,8 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker
     camera = _FakeCamera2D()
     worker.view = _FakeView(camera)
     worker._viewer = _FakeViewer()
+    worker._viewer.camera.center = worker.view.camera.center  # type: ignore[attr-defined]
+    worker._viewer.camera.zoom = 1.0
     worker._napari_layer = _FakeLayer()
     worker._visual = _FakeVisual()
     worker._scene_source = _FakeSceneSource()
