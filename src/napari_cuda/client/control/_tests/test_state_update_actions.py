@@ -578,3 +578,26 @@ def test_handle_generic_ack_updates_view_metadata() -> None:
     control_actions.handle_generic_ack(state, loop_state, outcome, presenter=presenter)
 
     assert state.dims_meta['ndisplay'] == 2
+
+
+def test_camera_zoom_bypasses_dedupe() -> None:
+    state, loop_state, ledger, dispatch = _make_state()
+    # Seed a confirmed camera zoom to mimic the server acknowledging a prior zoom.
+    zoom_value = {"factor": 1.2, "anchor_px": [128.0, 256.0]}
+    ledger.seed_confirmed('camera', 'main', 'zoom', zoom_value)
+
+    sent = control_actions.camera_zoom(
+        state,
+        loop_state,
+        ledger,
+        dispatch,
+        factor=1.2,
+        anchor_px=(128.0, 256.0),
+        origin='ui',
+    )
+
+    assert sent is True
+    pending, origin = dispatch.calls[-1]
+    assert origin == 'ui'
+    assert pending.metadata is not None
+    assert pending.metadata.get('update_kind') == 'delta'

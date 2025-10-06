@@ -1196,6 +1196,7 @@ def camera_zoom(
         "mode": "zoom",
         "origin": origin,
         "delta": dict(sanitized),
+        "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
         state,
@@ -1229,6 +1230,7 @@ def camera_pan(
         "mode": "pan",
         "origin": origin,
         "delta": dict(sanitized),
+        "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
         state,
@@ -1262,6 +1264,7 @@ def camera_orbit(
         "mode": "orbit",
         "origin": origin,
         "delta": dict(sanitized),
+        "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
         state,
@@ -1294,6 +1297,7 @@ def camera_reset(
         "mode": "reset",
         "origin": origin,
         "delta": dict(sanitized),
+        "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
         state,

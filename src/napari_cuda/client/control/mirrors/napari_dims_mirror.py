@@ -134,8 +134,7 @@ def _sync_dims_payload_from_meta(state: "ControlStateContext", loop_state: "Clie
 
     current_step = meta.get('current_step')
     if isinstance(current_step, Sequence):
-        payload['current_step'] = list(int(value) for value in current_step)
-        loop_state.last_dims_payload = dict(payload)
+        payload['current_step'] = [int(value) for value in current_step]
     else:
         payload['current_step'] = None
 
@@ -175,6 +174,18 @@ def _sync_dims_payload_from_meta(state: "ControlStateContext", loop_state: "Clie
     else:
         payload['displayed'] = None
 
+    mode = meta.get('mode')
+    payload['mode'] = str(mode) if mode is not None else None
+
+    volume_flag = meta.get('volume')
+    if volume_flag is None:
+        payload['volume'] = None
+    else:
+        payload['volume'] = bool(volume_flag)
+
+    payload['source'] = meta.get('source')
+
+    loop_state.last_dims_payload = dict(payload)
     return payload
 
 
