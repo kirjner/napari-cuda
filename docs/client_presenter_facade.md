@@ -28,7 +28,7 @@
 ### `PresenterFacade.apply_dims_update(data: dict)`
 - Called from `ClientStreamLoop._mirror_dims_to_viewer` (or its successor once the state bag lands).
 - Responsibilities:
-  - Mirror dims metadata/step to the attached viewer via a stored weakref (currently `ClientStreamLoop.attach_viewer_mirror`).
+  - Mirror dims metadata/step to the attached viewer via a stored weakref (currently `ClientStreamLoop.attach_viewer_proxy`).
   - Trigger presenter HUD updates if range/ndisplay changes affect overlay text.
   - Call into an optional intent dispatcher with `intent='dims'` events so the layer bridge can coalesce changes.
   - Maintain internal caches required for `PresenterFacade` to answer lightweight queries (e.g., `current_ndisplay()` for UI toggles).

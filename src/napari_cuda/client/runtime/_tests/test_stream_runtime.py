@@ -87,6 +87,8 @@ def _make_loop() -> ClientStreamLoop:
     loop._widget_to_video = lambda x, y: (float(x), float(y))
     loop._video_delta_to_canvas = lambda dx, dy: (float(dx), float(dy))
 
+    loop._initialize_mirrors()
+
     return loop
 
 
@@ -144,7 +146,7 @@ def test_handle_dims_update_caches_payload() -> None:
         frame_id='dims-1',
     )
 
-    loop._handle_dims_update(frame)
+    loop._dims_mirror.ingest_dims_notify(frame)
 
     assert loop._loop_state.last_dims_payload == {
         'current_step': [1, 2],

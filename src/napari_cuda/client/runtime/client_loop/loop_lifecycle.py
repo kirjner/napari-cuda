@@ -29,13 +29,15 @@ def start_loop(loop: "ClientStreamLoop") -> None:
     """Bring the streaming loop online (state/pixel threads, timers, hooks)."""
 
     loop._stopped = False  # noqa: SLF001
+    loop._initialize_mirrors()  # ensure mirrors are ready before wiring threads
+    assert loop._dims_mirror is not None, "dims mirror must be initialised"
 
     # State channel thread
     state_controller = StateController(
         loop.server_host,
         loop.state_port,
         handle_notify_stream=loop._handle_notify_stream,  # noqa: SLF001
-        handle_dims_update=loop._handle_dims_update,  # noqa: SLF001
+        ingest_dims_notify=loop._dims_mirror.ingest_dims_notify,  # noqa: SLF001
         handle_scene_snapshot=loop._handle_scene_snapshot,  # noqa: SLF001
         handle_scene_level=loop._handle_scene_level,  # noqa: SLF001
         handle_layer_delta=loop._handle_layer_delta,  # noqa: SLF001
@@ -55,6 +57,7 @@ def start_loop(loop: "ClientStreamLoop") -> None:
 
     # Input wiring now that state channel exists
     loop._log_dims_info = bool(loop._env_cfg.input_log)  # type: ignore[attr-defined]  # noqa: SLF001
+    loop._dims_mirror.set_logging(loop._log_dims_info)  # noqa: SLF001
     attach_input_sender(loop)
     bind_shortcuts(loop)
 

@@ -30,7 +30,7 @@ class StateController:
     host: str
     port: int
     handle_notify_stream: Optional[Callable[["NotifyStreamFrame"], None]] = None
-    handle_dims_update: Optional[Callable[["NotifyDimsFrame"], None]] = None
+    ingest_dims_notify: Optional[Callable[["NotifyDimsFrame"], None]] = None
     handle_scene_snapshot: Optional[Callable[["NotifySceneFrame"], None]] = None
     handle_scene_level: Optional[Callable[["NotifySceneLevelPayload"], None]] = None
     handle_layer_delta: Optional[Callable[["NotifyLayersFrame"], None]] = None
@@ -50,7 +50,7 @@ class StateController:
             self.host,
             int(self.port),
             handle_notify_stream=self.handle_notify_stream,
-            handle_dims_update=self.handle_dims_update,
+            ingest_dims_notify=self.ingest_dims_notify,
             handle_scene_snapshot=self.handle_scene_snapshot,
             handle_scene_level=self.handle_scene_level,
             handle_layer_delta=self.handle_layer_delta,
