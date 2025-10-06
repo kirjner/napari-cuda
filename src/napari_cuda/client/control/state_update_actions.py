@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKI
 from numbers import Integral, Real
 
 from napari_cuda.protocol import NotifyCamera
-from napari_cuda.protocol.messages import NotifyDimsFrame
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -22,6 +21,7 @@ from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
     MirrorEvent,
 )
+from napari_cuda.client.control.mirrors import napari_dims_mirror
 
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
@@ -215,67 +215,6 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateCont
     loop_state.last_dims_payload = None
     state.control_runtimes.clear()
     state.camera_state.clear()
-
-
-def handle_dims_update(
-    state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    frame: NotifyDimsFrame,
-    *,
-    presenter: "PresenterFacade",
-    viewer_ref,
-    ui_call,
-    notify_first_dims_ready: Callable[[], None],
-    log_dims_info: bool,
-    state_ledger: Optional["ClientStateLedger"] = None,
-) -> None:
-    meta = state.dims_meta
-    was_ready = bool(state.dims_ready)
-
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "dims inbound notify: frame=%s current_step=%s ndisplay=%s mode=%s",
-            frame.envelope.frame_id,
-            tuple(int(x) for x in frame.payload.current_step),
-            frame.payload.ndisplay,
-            frame.payload.mode,
-        )
-
-    payload = frame.payload
-    current_step = tuple(int(value) for value in payload.current_step)
-    meta['current_step'] = list(current_step)
-    meta['ndisplay'] = int(payload.ndisplay)
-    mode_text = str(payload.mode)
-    meta['mode'] = mode_text
-    meta['volume'] = bool(mode_text.lower() == 'volume')
-    meta['source'] = payload.source
-
-    payload_dict = _sync_dims_payload_from_meta(state, loop_state)
-
-    if not was_ready and state_ledger is not None:
-        _seed_dims_baseline(state, state_ledger, payload_dict)
-    elif state_ledger is not None:
-        _seed_dims_indices(state, state_ledger, payload_dict, update_kind='notify')
-
-    if not state.dims_ready:
-        state.dims_ready = True
-        logger.info("notify.dims: metadata received; client intents enabled")
-        notify_first_dims_ready()
-
-    state.primary_axis_index = _compute_primary_axis_index(meta)
-
-    if current_step and log_dims_info:
-        logger.info(
-            "notify.dims: step=%s ndisplay=%s order=%s labels=%s",
-            list(current_step),
-            meta.get('ndisplay'),
-            meta.get('order'),
-            meta.get('axis_labels'),
-        )
-
-    presenter.apply_dims_update(dict(payload_dict))
-
-
 def handle_notify_camera(
     state: ControlStateContext,
     state_ledger: "ClientStateLedger",
@@ -290,7 +229,7 @@ def handle_notify_camera(
     state.camera_state[mode_key] = normalized_delta
 
     timestamp = frame.envelope.timestamp
-    state_ledger.seed_confirmed(
+    state_ledger.record_confirmed(
         'camera',
         'main',
         mode_key,
@@ -493,7 +432,7 @@ def _seed_dims_baseline(
             value_int = _coerce_step_value(value)
             if value_int is None:
                 continue
-            state_ledger.seed_confirmed(
+            state_ledger.record_confirmed(
                 'dims',
                 target_label,
                 'index',
@@ -509,36 +448,36 @@ def _seed_dims_baseline(
 
     ndisplay = payload.get('ndisplay')
     if ndisplay is not None:
-        state_ledger.seed_confirmed('view', 'main', 'ndisplay', int(ndisplay))
+        state_ledger.record_confirmed('view', 'main', 'ndisplay', int(ndisplay))
 
     multiscale_meta = state.dims_meta.get('multiscale')
     if isinstance(multiscale_meta, dict):
         level_val = multiscale_meta.get('level')
         if level_val is not None:
-            state_ledger.seed_confirmed('multiscale', 'main', 'level', int(level_val))
+            state_ledger.record_confirmed('multiscale', 'main', 'level', int(level_val))
         policy_val = multiscale_meta.get('policy')
         if policy_val is not None:
-            state_ledger.seed_confirmed('multiscale', 'main', 'policy', str(policy_val))
+            state_ledger.record_confirmed('multiscale', 'main', 'policy', str(policy_val))
 
     render_meta = state.dims_meta.get('render')
     if isinstance(render_meta, dict):
         mode_val = render_meta.get('mode') or render_meta.get('render_mode')
         if mode_val is not None:
-            state_ledger.seed_confirmed('volume', 'main', 'render_mode', str(mode_val))
+            state_ledger.record_confirmed('volume', 'main', 'render_mode', str(mode_val))
         clim_val = render_meta.get('contrast_limits')
         if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
             lo = float(clim_val[0])
             hi = float(clim_val[1])
-            state_ledger.seed_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
+            state_ledger.record_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
         cmap_val = render_meta.get('colormap')
         if cmap_val is not None:
-            state_ledger.seed_confirmed('volume', 'main', 'colormap', str(cmap_val))
+            state_ledger.record_confirmed('volume', 'main', 'colormap', str(cmap_val))
         opacity_val = render_meta.get('opacity')
         if opacity_val is not None:
-            state_ledger.seed_confirmed('volume', 'main', 'opacity', float(opacity_val))
+            state_ledger.record_confirmed('volume', 'main', 'opacity', float(opacity_val))
         sample_val = render_meta.get('sample_step')
         if sample_val is not None:
-            state_ledger.seed_confirmed('volume', 'main', 'sample_step', float(sample_val))
+            state_ledger.record_confirmed('volume', 'main', 'sample_step', float(sample_val))
 
 
 def _seed_dims_indices(
@@ -563,7 +502,7 @@ def _seed_dims_indices(
             'axis_target': target_label,
             'update_kind': update_kind,
         }
-        state_ledger.seed_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
+        state_ledger.record_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
 
 
 def _coerce_step_value(value: Any) -> Optional[int]:

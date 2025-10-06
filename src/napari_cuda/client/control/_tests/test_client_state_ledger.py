@@ -117,7 +117,7 @@ def test_apply_ack_accepted_updates_confirmed_state(store: ClientStateLedger) ->
 
 def test_apply_ack_rejected_reverts_to_confirmed(store: ClientStateLedger) -> None:
     ids = _id_pairs()
-    store.seed_confirmed("layer", "layer-2", "gamma", 0.9, timestamp=5.0)
+    store.record_confirmed("layer", "layer-2", "gamma", 0.9, timestamp=5.0)
 
     intent, frame = next(ids)
     pending = store.apply_local(
@@ -193,7 +193,7 @@ def test_subscribe_all_receives_confirmed_updates(store: ClientStateLedger) -> N
         events.append(update)
 
     store.subscribe_all(_capture)
-    store.seed_confirmed('dims', 'z', 'index', 5, metadata={'axis_index': 0})
+    store.record_confirmed('dims', 'z', 'index', 5, metadata={'axis_index': 0})
 
     assert len(events) == 1
     update = events[0]
@@ -205,7 +205,7 @@ def test_subscribe_all_receives_confirmed_updates(store: ClientStateLedger) -> N
 
 
 def test_pending_state_snapshot_reports_confirmed_value(store: ClientStateLedger) -> None:
-    store.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
+    store.record_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
     snapshot = store.pending_state_snapshot('dims', '0', 'index')
 
@@ -218,7 +218,7 @@ def test_pending_state_snapshot_reports_confirmed_value(store: ClientStateLedger
 
 
 def test_apply_local_duplicate_absolute_returns_none(store: ClientStateLedger) -> None:
-    store.seed_confirmed('layer', 'layer-4', 'gamma', 1.0)
+    store.record_confirmed('layer', 'layer-4', 'gamma', 1.0)
 
     result = store.apply_local(
         'layer',
@@ -234,7 +234,7 @@ def test_apply_local_duplicate_absolute_returns_none(store: ClientStateLedger) -
 
 
 def test_apply_local_delta_update_not_suppressed(store: ClientStateLedger) -> None:
-    store.seed_confirmed('dims', '0', 'step', 1, metadata={'axis_index': 0})
+    store.record_confirmed('dims', '0', 'step', 1, metadata={'axis_index': 0})
 
     pending = store.apply_local(
         'dims',

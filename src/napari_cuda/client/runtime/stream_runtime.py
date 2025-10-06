@@ -584,7 +584,7 @@ class ClientStreamLoop:
             self._init_vt_from_avcc(avcc_b64, int(width), int(height))
 
     def _handle_dims_update(self, frame: NotifyDimsFrame) -> None:
-        control_actions.handle_dims_update(
+        napari_dims_mirror.ingest_notify_dims(
             self._control_state,
             self._loop_state,
             frame,

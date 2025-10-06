@@ -10,6 +10,7 @@ import pytest
 from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
+from napari_cuda.client.control.mirrors import napari_dims_mirror
 from napari_cuda.client.control.mirrors.napari_dims_mirror import NapariDimsMirror
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
@@ -148,7 +149,7 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
 
     frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=2)
 
-    control_actions.handle_dims_update(
+    napari_dims_mirror.ingest_notify_dims(
         state,
         loop_state,
         frame,
@@ -165,7 +166,7 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         'current_step': [1, 2, 3],
         'ndisplay': 2,
         'ndim': 3,
-        'dims_range': [(0, 10), (0, 5), (0, 3)],
+        'dims_range': [[0, 10], [0, 5], [0, 3]],
         'order': [0, 1, 2],
         'axis_labels': ['z', 'y', 'x'],
         'sizes': [11, 6, 4],
@@ -186,7 +187,7 @@ def test_handle_dims_update_modes_volume_flag() -> None:
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=3, mode='volume')
 
-    control_actions.handle_dims_update(
+    napari_dims_mirror.ingest_notify_dims(
         state,
         loop_state,
         frame,
@@ -231,7 +232,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
 
     frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=3, mode='volume')
 
-    control_actions.handle_dims_update(
+    napari_dims_mirror.ingest_notify_dims(
         state,
         loop_state,
         frame,
@@ -295,7 +296,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=2)
 
-    control_actions.handle_dims_update(
+    napari_dims_mirror.ingest_notify_dims(
         state,
         loop_state,
         frame,
@@ -463,7 +464,7 @@ def test_dims_set_index_suppresses_duplicate_value() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta['current_step'] = [7]
-    ledger.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
+    ledger.record_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
     sent = control_actions.dims_set_index(
         state,
@@ -517,7 +518,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
 
     frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
 
-    control_actions.handle_dims_update(
+    napari_dims_mirror.ingest_notify_dims(
         state,
         loop_state,
         frame,
@@ -584,7 +585,7 @@ def test_camera_zoom_bypasses_dedupe() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     # Seed a confirmed camera zoom to mimic the server acknowledging a prior zoom.
     zoom_value = {"factor": 1.2, "anchor_px": [128.0, 256.0]}
-    ledger.seed_confirmed('camera', 'main', 'zoom', zoom_value)
+    ledger.record_confirmed('camera', 'main', 'zoom', zoom_value)
 
     sent = control_actions.camera_zoom(
         state,

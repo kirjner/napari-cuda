@@ -359,7 +359,7 @@ class LayerStateBridge:
             encoded = self._encode_value(config, raw_value)
             if encoded is None:
                 continue
-            self._state_ledger.seed_confirmed("layer", binding.remote_id, config.key, encoded)
+            self._state_ledger.record_confirmed("layer", binding.remote_id, config.key, encoded)
             runtime.last_phase = "seed"
             self._apply_pending_update(binding, config, encoded, suppress_blocker=True)
 
@@ -656,7 +656,7 @@ class LayerStateBridge:
                 config.key,
                 encoded,
             )
-            self._state_ledger.seed_confirmed("layer", layer_id, config.key, encoded)
+            self._state_ledger.record_confirmed("layer", layer_id, config.key, encoded)
             if binding is None:
                 continue
             runtime = binding.properties.setdefault(config.key, PropertyRuntime())

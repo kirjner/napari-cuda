@@ -158,11 +158,11 @@ Same pattern for `DimsBridge` (drives `ViewerModel.dims` fields) and
 We will land the refactor in four focused stages so each slice stays testable
 and reviewable.
 
-1. **Stage 1 – Ledger Contract & Dims Helper** *(shipped)*
-   - Restore the richer `StateStore` API (provenance fields, subscriptions,
+1. **Stage 1 – Ledger Contract & Dims Mirror** *(shipped)*
+   - Restore the richer ledger API (provenance fields, subscriptions,
      pending snapshots) and port existing callers/tests.
-   - Introduce `DimsUpdate`, subscribe it to the ledger inside
-     `ClientStreamLoop`, and delete the legacy wobble guards in
+   - Introduce `NapariDimsMirror` plus an ingest helper for `notify.dims`, wire it
+     into `ClientStreamLoop`, and delete the legacy wobble guards in
      `DimsBridge`.
    - Update this document and the server counterpart so the design matches the
      implementation.

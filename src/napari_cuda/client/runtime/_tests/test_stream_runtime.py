@@ -150,7 +150,7 @@ def test_handle_dims_update_caches_payload() -> None:
         'current_step': [1, 2],
         'ndisplay': 2,
         'ndim': 3,
-        'dims_range': [(0, 10), (0, 5), (0, 3)],
+        'dims_range': [[0, 10], [0, 5], [0, 3]],
         'order': [0, 1, 2],
         'axis_labels': ['z', 'y', 'x'],
         'sizes': [11, 6, 4],

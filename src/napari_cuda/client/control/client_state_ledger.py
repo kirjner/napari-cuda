@@ -305,7 +305,7 @@ class ClientStateLedger:
         return outcome
 
     # ------------------------------------------------------------------
-    def seed_confirmed(
+    def record_confirmed(
         self,
         scope: str,
         target: str,
@@ -333,7 +333,7 @@ class ClientStateLedger:
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "ledger seed_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
+                "ledger record_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
                 scope,
                 target,
                 key,

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Optional, Sequence, TYPE_CHECKING
+from numbers import Integral, Real
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger, MirrorEvent
+from napari_cuda.protocol.messages import NotifyDimsFrame
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.state_update_actions import ControlStateContext
@@ -13,6 +15,73 @@ if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
 
 logger = logging.getLogger(__name__)
+
+
+def ingest_notify_dims(
+    state: "ControlStateContext",
+    loop_state: "ClientLoopState",
+    frame: NotifyDimsFrame,
+    *,
+    presenter: "PresenterFacade",
+    viewer_ref,
+    ui_call,
+    notify_first_dims_ready: Callable[[], None],
+    log_dims_info: bool,
+    state_ledger: Optional[ClientStateLedger] = None,
+) -> None:
+    """Record a ``notify.dims`` snapshot and mirror it into napari."""
+
+    meta = state.dims_meta
+    was_ready = bool(state.dims_ready)
+
+    payload = frame.payload
+    current_step = tuple(int(value) for value in payload.current_step)
+    meta['current_step'] = list(current_step)
+    meta['ndisplay'] = int(payload.ndisplay)
+    mode_text = str(payload.mode)
+    meta['mode'] = mode_text
+    meta['volume'] = bool(mode_text.lower() == 'volume')
+    meta['source'] = payload.source
+
+    snapshot_payload = _sync_dims_payload_from_meta(state, loop_state)
+
+    if state_ledger is not None:
+        if not was_ready:
+            _record_dims_snapshot(state, state_ledger, snapshot_payload)
+        else:
+            _record_dims_delta(state, state_ledger, snapshot_payload, update_kind='notify')
+
+    if not state.dims_ready:
+        state.dims_ready = True
+        logger.info("notify.dims: metadata received; client intents enabled")
+        notify_first_dims_ready()
+
+    state.primary_axis_index = _compute_primary_axis_index(meta)
+
+    if current_step and log_dims_info:
+        logger.info(
+            "notify.dims: step=%s ndisplay=%s order=%s labels=%s",
+            list(current_step),
+            meta.get('ndisplay'),
+            meta.get('order'),
+            meta.get('axis_labels'),
+        )
+
+    presenter.apply_dims_update(dict(snapshot_payload))
+
+    viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
+    mirror_dims_to_viewer(
+        viewer_obj,
+        ui_call,
+        current_step=snapshot_payload.get('current_step'),
+        ndisplay=snapshot_payload.get('ndisplay'),
+        ndim=snapshot_payload.get('ndim'),
+        dims_range=snapshot_payload.get('dims_range'),
+        order=snapshot_payload.get('order'),
+        axis_labels=snapshot_payload.get('axis_labels'),
+        sizes=snapshot_payload.get('sizes'),
+        displayed=snapshot_payload.get('displayed'),
+    )
 
 
 class NapariDimsMirror:
@@ -124,8 +193,47 @@ class NapariDimsMirror:
         )
 
 
-# ---------------------------------------------------------------------------
 # Shared helpers (lifted from the legacy state_update_actions module)
+
+
+def _record_dims_snapshot(
+    state: "ControlStateContext",
+    ledger: ClientStateLedger,
+    payload: Mapping[str, Any],
+) -> None:
+    _record_dims_delta(state, ledger, payload, update_kind='snapshot')
+
+    ndisplay = payload.get('ndisplay')
+    if ndisplay is not None:
+        ledger.record_confirmed('view', 'main', 'ndisplay', int(ndisplay))
+
+    _record_multiscale_metadata(state, ledger)
+    _record_volume_metadata(state, ledger)
+
+
+def _record_dims_delta(
+    state: "ControlStateContext",
+    ledger: ClientStateLedger,
+    payload: Mapping[str, Any],
+    *,
+    update_kind: str,
+) -> None:
+    current_step = payload.get('current_step')
+    if not isinstance(current_step, (list, tuple)):
+        return
+    for idx, value in enumerate(current_step):
+        if value is None:
+            continue
+        value_int = _coerce_step_value(value)
+        if value_int is None:
+            continue
+        target_label = _axis_target_label(state, idx)
+        metadata = {
+            'axis_index': idx,
+            'axis_target': target_label,
+            'update_kind': update_kind,
+        }
+        ledger.record_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
 
 
 def _sync_dims_payload_from_meta(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
@@ -178,15 +286,62 @@ def _sync_dims_payload_from_meta(state: "ControlStateContext", loop_state: "Clie
     payload['mode'] = str(mode) if mode is not None else None
 
     volume_flag = meta.get('volume')
-    if volume_flag is None:
-        payload['volume'] = None
-    else:
-        payload['volume'] = bool(volume_flag)
+    payload['volume'] = bool(volume_flag) if volume_flag is not None else None
 
     payload['source'] = meta.get('source')
 
     loop_state.last_dims_payload = dict(payload)
     return payload
+
+
+def build_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
+    """Public helper to mirror dims metadata into a payload dict."""
+
+    return _sync_dims_payload_from_meta(state, loop_state)
+
+
+def _record_multiscale_metadata(state: "ControlStateContext", ledger: ClientStateLedger) -> None:
+    multiscale_meta = state.dims_meta.get('multiscale')
+    if not isinstance(multiscale_meta, Mapping):
+        return
+
+    level_val = multiscale_meta.get('level')
+    if level_val is None:
+        level_val = multiscale_meta.get('current_level')
+    if level_val is not None:
+        ledger.record_confirmed('multiscale', 'main', 'level', int(level_val))
+
+    policy_val = multiscale_meta.get('policy')
+    if policy_val is not None:
+        ledger.record_confirmed('multiscale', 'main', 'policy', str(policy_val))
+
+
+def _record_volume_metadata(state: "ControlStateContext", ledger: ClientStateLedger) -> None:
+    render_meta = state.dims_meta.get('render')
+    if not isinstance(render_meta, Mapping):
+        return
+
+    mode_val = render_meta.get('mode') or render_meta.get('render_mode')
+    if mode_val is not None:
+        ledger.record_confirmed('volume', 'main', 'render_mode', str(mode_val))
+
+    clim_val = render_meta.get('contrast_limits')
+    if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
+        lo = float(clim_val[0])
+        hi = float(clim_val[1])
+        ledger.record_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
+
+    cmap_val = render_meta.get('colormap')
+    if cmap_val is not None:
+        ledger.record_confirmed('volume', 'main', 'colormap', str(cmap_val))
+
+    opacity_val = render_meta.get('opacity')
+    if opacity_val is not None:
+        ledger.record_confirmed('volume', 'main', 'opacity', float(opacity_val))
+
+    sample_val = render_meta.get('sample_step')
+    if sample_val is not None:
+        ledger.record_confirmed('volume', 'main', 'sample_step', float(sample_val))
 
 
 def _axis_index_from_target(state: "ControlStateContext", target: str) -> Optional[int]:
@@ -220,6 +375,28 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
     if idx_order and len(idx_order) > nd:
         return int(idx_order[0])
     return 0
+
+
+def _axis_target_label(state: "ControlStateContext", axis_idx: int) -> str:
+    labels = state.dims_meta.get('axis_labels')
+    if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
+        label = labels[axis_idx]
+        if isinstance(label, str) and label.strip():
+            return label
+    return str(axis_idx)
+
+
+def _coerce_step_value(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        value_int = int(value)
+        if abs(float(value) - float(value_int)) < 1e-6:
+            return value_int
+        return None
+    return None
 
 
 def mirror_dims_to_viewer(
@@ -280,6 +457,8 @@ def replay_last_dims_payload(state: "ControlStateContext", loop_state: "ClientLo
 
 __all__ = [
     "NapariDimsMirror",
+    "ingest_notify_dims",
+    "build_dims_payload",
     "mirror_dims_to_viewer",
     "replay_last_dims_payload",
 ]
