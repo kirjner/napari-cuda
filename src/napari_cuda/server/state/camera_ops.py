@@ -69,10 +69,8 @@ def apply_zoom_2d(cam, factor: float, anchor_px: Tuple[float, float], canvas_wh:
     if factor <= 0.0:
         return
     wx, wy = anchor_to_world(anchor_px[0], anchor_px[1], canvas_wh, view)
-    try:
-        cam.zoom(float(factor), center=(wx, wy))  # type: ignore[call-arg]
-    except Exception:
-        logger.debug("apply_zoom_2d: cam.zoom failed", exc_info=True)
+    result = cam.zoom(float(factor), center=(wx, wy))  # type: ignore[call-arg]
+    assert result is None or result is cam, "PanZoomCamera.zoom must succeed"
 
 
 def apply_pan_3d(cam, dx_px: float, dy_px: float, canvas_wh: Tuple[int, int]) -> None:

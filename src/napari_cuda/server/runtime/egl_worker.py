@@ -339,6 +339,17 @@ class EGLRendererWorker:
 
         zoom = float(self._viewer.camera.zoom)
 
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "snapshot_plane_state: step=%s level=%s rect=%s center=(%.3f, %.3f) zoom=%.5f",
+                step_tuple,
+                level,
+                rect,
+                center[0],
+                center[1],
+                zoom,
+            )
+
         data_wh = None
         if self._data_wh is not None:
             data_wh = (int(self._data_wh[0]), int(self._data_wh[1]))
@@ -397,8 +408,6 @@ class EGLRendererWorker:
                 camera.rect = Rect(*state.rect)
             if state.center is not None:
                 camera.center = (float(state.center[0]), float(state.center[1]), 0.0)
-            if state.zoom is not None:
-                camera.zoom = float(state.zoom)
 
         viewer_cam = self._viewer.camera
         if state.center is not None:
@@ -408,6 +417,16 @@ class EGLRendererWorker:
                 float(state.center[0]),
             )
         viewer_cam.zoom = float(state.zoom)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "apply_pending_plane_restore: restored step=%s zoom=%.5f center_vispy=(%.3f, %.3f) center_viewer=%s",
+                state.step,
+                state.zoom,
+                state.center[0] if state.center else float('nan'),
+                state.center[1] if state.center else float('nan'),
+                viewer_cam.center,
+            )
 
         # Notify clients with the restored step metadata.
         self._notify_scene_refresh()
