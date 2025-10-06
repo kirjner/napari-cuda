@@ -73,7 +73,7 @@ def _make_loop() -> ClientStreamLoop:
     loop._command_catalog = ()
 
     clock_counter = count(100)
-    loop._state_store = ClientStateLedger(clock=lambda: float(next(clock_counter)))
+    loop._state_ledger = ClientStateLedger(clock=lambda: float(next(clock_counter)))
 
     loop._presenter_facade = _PresenterStub()
     loop._layer_bridge = SimpleNamespace(

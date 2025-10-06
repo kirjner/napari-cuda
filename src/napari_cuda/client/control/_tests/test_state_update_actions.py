@@ -10,6 +10,7 @@ import pytest
 from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
+from napari_cuda.client.control.mirrors.napari_dims_mirror import NapariDimsMirror
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
@@ -80,9 +81,9 @@ def _make_state() -> tuple[
     loop_state = ClientLoopState()
     loop_state.control_state = state
     clock_steps = deque(float(x) for x in range(100, 200))
-    store = ClientStateLedger(clock=lambda: clock_steps.popleft())
+    ledger = ClientStateLedger(clock=lambda: clock_steps.popleft())
     dispatch = FakeDispatch()
-    return state, loop_state, store, dispatch
+    return state, loop_state, ledger, dispatch
 
 
 def _ack_from_pending(pending: IntentRecord, *, status: str, applied_value: Any | None = None, error: dict[str, Any] | None = None) -> Any:
@@ -104,19 +105,19 @@ def _ack_from_pending(pending: IntentRecord, *, status: str, applied_value: Any 
 
 
 def test_toggle_ndisplay_requires_ready() -> None:
-    state, loop_state, store, dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
 
-    sent = control_actions.toggle_ndisplay(state, loop_state, store, dispatch, origin='ui')
+    sent = control_actions.toggle_ndisplay(state, loop_state, ledger, dispatch, origin='ui')
 
     assert sent is False
     assert dispatch.calls == []
 
 
 def test_toggle_ndisplay_dispatches_state_update() -> None:
-    state, loop_state, store, dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
 
-    sent = control_actions.toggle_ndisplay(state, loop_state, store, dispatch, origin='ui')
+    sent = control_actions.toggle_ndisplay(state, loop_state, ledger, dispatch, origin='ui')
 
     assert sent is True
     pending, origin = dispatch.calls[-1]
@@ -128,8 +129,8 @@ def test_toggle_ndisplay_dispatches_state_update() -> None:
     assert pending.update_phase == 'start'
 
 
-def test_handle_dims_update_seeds_state_store() -> None:
-    state, loop_state, store, dispatch = _make_state()
+def test_handle_dims_update_seeds_state_ledger() -> None:
+    state, loop_state, ledger, dispatch = _make_state()
 
     presenter = PresenterStub()
     ready_calls: list[None] = []
@@ -156,7 +157,7 @@ def test_handle_dims_update_seeds_state_store() -> None:
         ui_call=None,
         notify_first_dims_ready=lambda: ready_calls.append(None),
         log_dims_info=False,
-        state_store=store,
+        state_ledger=ledger,
     )
 
     assert state.dims_ready is True
@@ -174,13 +175,13 @@ def test_handle_dims_update_seeds_state_store() -> None:
         'source': 'test-suite',
     }
     assert presenter.calls
-    debug = store.dump_debug()
+    debug = ledger.dump_debug()
     assert debug['view:main:ndisplay']['confirmed']['value'] == 2
     assert ready_calls, "first dims update should trigger readiness"
 
 
 def test_handle_dims_update_modes_volume_flag() -> None:
-    state, loop_state, store, _dispatch = _make_state()
+    state, loop_state, ledger, _dispatch = _make_state()
     presenter = PresenterStub()
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=3, mode='volume')
@@ -194,7 +195,7 @@ def test_handle_dims_update_modes_volume_flag() -> None:
         ui_call=None,
         notify_first_dims_ready=lambda: None,
         log_dims_info=False,
-        state_store=store,
+        state_ledger=ledger,
     )
 
     assert state.dims_meta['mode'] == 'volume'
@@ -204,14 +205,14 @@ def test_handle_dims_update_modes_volume_flag() -> None:
 
 
 def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
-    state, loop_state, store, _dispatch = _make_state()
+    state, loop_state, ledger, _dispatch = _make_state()
     viewer = ViewerStub()
     presenter = PresenterStub()
 
-    control_actions.DimsUpdate(
+    NapariDimsMirror(
+        ledger=ledger,
         state=state,
         loop_state=loop_state,
-        state_store=store,
         viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
@@ -239,7 +240,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
         ui_call=None,
         notify_first_dims_ready=lambda: None,
         log_dims_info=False,
-        state_store=store,
+        state_ledger=ledger,
     )
 
     assert viewer.calls, "viewer should receive dims update"
@@ -254,14 +255,14 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
 
 
 def test_scene_level_then_dims_updates_slider_bounds() -> None:
-    state, loop_state, store, _dispatch = _make_state()
+    state, loop_state, ledger, _dispatch = _make_state()
     viewer = ViewerStub()
     presenter = PresenterStub()
 
-    control_actions.DimsUpdate(
+    NapariDimsMirror(
+        ledger=ledger,
         state=state,
         loop_state=loop_state,
-        state_store=store,
         viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
@@ -303,7 +304,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
         ui_call=None,
         notify_first_dims_ready=lambda: None,
         log_dims_info=False,
-        state_store=store,
+        state_ledger=ledger,
     )
 
     sizes = state.dims_meta['sizes']
@@ -320,7 +321,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
 
 def test_hud_snapshot_carries_volume_state() -> None:
-    state, _, store, _dispatch = _make_state()
+    state, _, ledger, _dispatch = _make_state()
     state.dims_meta['ndisplay'] = 3
     state.dims_meta['mode'] = 'volume'
     state.dims_meta['volume'] = True
@@ -366,7 +367,7 @@ def test_apply_scene_policies_populates_multiscale_state() -> None:
 
 
 def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
-    state, loop_state, store, _ = _make_state()
+    state, loop_state, ledger, _ = _make_state()
     state.dims_ready = True
     state.dims_meta.update(
         {
@@ -378,10 +379,10 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     viewer = ViewerStub()
     presenter = PresenterStub()
 
-    control_actions.DimsUpdate(
+    NapariDimsMirror(
+        ledger=ledger,
         state=state,
         loop_state=loop_state,
-        state_store=store,
         viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
@@ -389,7 +390,7 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     )
 
 
-    pending = store.apply_local(
+    pending = ledger.apply_local(
         'dims',
         '0',
         'index',
@@ -414,7 +415,7 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         timestamp=6.0,
     )
 
-    outcome = store.apply_ack(ack)
+    outcome = ledger.apply_ack(ack)
     control_actions.handle_dims_ack(
         state,
         loop_state,
@@ -432,14 +433,14 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
 
 
 def test_dims_step_attaches_axis_metadata() -> None:
-    state, loop_state, store, dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta['current_step'] = [5, 0, 0]
 
     sent = control_actions.dims_step(
         state,
         loop_state,
-        store,
+        ledger,
         dispatch,
         axis=0,
         delta=1,
@@ -459,15 +460,15 @@ def test_dims_step_attaches_axis_metadata() -> None:
 
 
 def test_dims_set_index_suppresses_duplicate_value() -> None:
-    state, loop_state, store, dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta['current_step'] = [7]
-    store.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
+    ledger.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
     sent = control_actions.dims_set_index(
         state,
         loop_state,
-        store,
+        ledger,
         dispatch,
         axis=0,
         value=7,
@@ -481,7 +482,7 @@ def test_dims_set_index_suppresses_duplicate_value() -> None:
 
 
 def test_handle_dims_ack_rejected_reverts_projection() -> None:
-    state, loop_state, store, dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = False
 
     # Seed baseline metadata/state
@@ -504,10 +505,10 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
 
     viewer = Viewer()
 
-    control_actions.DimsUpdate(
+    NapariDimsMirror(
+        ledger=ledger,
         state=state,
         loop_state=loop_state,
-        state_store=store,
         viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
@@ -525,14 +526,14 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         ui_call=None,
         notify_first_dims_ready=lambda: None,
         log_dims_info=False,
-        state_store=store,
+        state_ledger=ledger,
     )
 
     # Emit a new intent that should be rejected
     control_actions.dims_set_index(
         state,
         loop_state,
-        store,
+        ledger,
         dispatch,
         axis='primary',
         value=7,
@@ -547,7 +548,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         status='rejected',
         error={'code': 'state.bad_value', 'message': 'invalid axis'},
     )
-    outcome = store.apply_ack(ack)
+    outcome = ledger.apply_ack(ack)
 
     control_actions.handle_dims_ack(
         state,
@@ -564,14 +565,14 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
 
 
 def test_handle_generic_ack_updates_view_metadata() -> None:
-    state, loop_state, store, dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
 
-    control_actions.view_set_ndisplay(state, loop_state, store, dispatch, 3, origin='ui')
+    control_actions.view_set_ndisplay(state, loop_state, ledger, dispatch, 3, origin='ui')
     pending, _ = dispatch.calls[-1]
 
     ack = _ack_from_pending(pending, status='accepted', applied_value=2)
-    outcome = store.apply_ack(ack)
+    outcome = ledger.apply_ack(ack)
 
     presenter = PresenterStub()
     control_actions.handle_generic_ack(state, loop_state, outcome, presenter=presenter)

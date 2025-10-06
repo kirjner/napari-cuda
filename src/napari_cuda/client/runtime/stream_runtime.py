@@ -41,6 +41,7 @@ from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFa
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.runtime.client_loop import warmup, camera, loop_lifecycle
 from napari_cuda.client.control import state_update_actions as control_actions
+from napari_cuda.client.control.mirrors import napari_dims_mirror
 from napari_cuda.client.runtime.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
@@ -221,10 +222,10 @@ class ClientStreamLoop:
         self._latest_scene_frame: Optional[NotifySceneFrame] = None
         self._control_state = control_actions.ControlStateContext.from_env(self._env_cfg)
         self._loop_state.control_state = self._control_state
-        self._state_store = ClientStateLedger(clock=time.time)
+        self._state_ledger = ClientStateLedger(clock=time.time)
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
-        self._dims_update: control_actions.DimsUpdate | None = None
+        self._dims_mirror: napari_dims_mirror.NapariDimsMirror | None = None
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         self._state_session_metadata: "SessionMetadata | None" = None
@@ -249,7 +250,7 @@ class ClientStreamLoop:
             self._layer_registry,
             control_state=self._control_state,
             loop_state=self._loop_state,
-            state_store=self._state_store,
+            state_ledger=self._state_ledger,
         )
 
         # Decoders
@@ -592,13 +593,13 @@ class ClientStreamLoop:
             ui_call=self._ui_call,
             notify_first_dims_ready=self._notify_first_dims_ready,
             log_dims_info=self._log_dims_info,
-            state_store=self._state_store,
+            state_ledger=self._state_ledger,
         )
 
     def _handle_notify_camera(self, frame: Any) -> None:
         result = control_actions.handle_notify_camera(
             self._control_state,
-            self._state_store,
+            self._state_ledger,
             frame,
             log_debug=logger.isEnabledFor(logging.DEBUG),
         )
@@ -634,7 +635,7 @@ class ClientStreamLoop:
         _invoke()
 
     def _replay_last_dims_payload(self) -> None:
-        control_actions.replay_last_dims_payload(
+        napari_dims_mirror.replay_last_dims_payload(
             self._control_state,
             self._loop_state,
             self._viewer_mirror,
@@ -730,7 +731,7 @@ class ClientStreamLoop:
             logger.info("State session command catalogue: %s", ", ".join(commands))
 
     def _handle_ack_state(self, frame: AckState) -> None:
-        outcome = self._state_store.apply_ack(frame)
+        outcome = self._state_ledger.apply_ack(frame)
         logger.debug(
             "ack.state outcome: status=%s intent=%s in_reply_to=%s pending=%d was_pending=%s",
             outcome.status,
@@ -942,7 +943,7 @@ class ClientStreamLoop:
     def _on_state_disconnect(self, exc: Exception | None) -> None:
         control_actions.on_state_disconnected(self._loop_state, self._control_state)
         self._layer_bridge.clear_pending_on_reconnect()
-        self._state_store.clear_pending_on_reconnect()
+        self._state_ledger.clear_pending_on_reconnect()
         self._loop_state.state_session_metadata = None
         self._command_catalog = ()
         self._abort_pending_commands(
@@ -958,7 +959,7 @@ class ClientStreamLoop:
         channel = self._loop_state.state_channel
         if channel is None:
             logger.debug("state.update emit skipped: channel unavailable")
-            self._state_store.discard_pending(pending_update.frame_id)
+            self._state_ledger.discard_pending(pending_update.frame_id)
             return False
 
         session_id = self._control_state.session_id
@@ -968,7 +969,7 @@ class ClientStreamLoop:
                 pending_update.intent_id,
                 pending_update.frame_id,
             )
-            self._state_store.discard_pending(pending_update.frame_id)
+            self._state_ledger.discard_pending(pending_update.frame_id)
             return False
 
         frame = build_state_update(
@@ -992,7 +993,7 @@ class ClientStreamLoop:
             pending_update.metadata,
         )
         if not ok:
-            self._state_store.discard_pending(pending_update.frame_id)
+            self._state_ledger.discard_pending(pending_update.frame_id)
             return False
         return True
 
@@ -1014,7 +1015,7 @@ class ClientStreamLoop:
         control_actions.handle_wheel_for_dims(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             data,
             viewer_ref=self._viewer_mirror,
@@ -1056,7 +1057,7 @@ class ClientStreamLoop:
             self._control_state,
             self._camera_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             steps,
             widget_to_video=self._widget_to_video,
@@ -1069,7 +1070,7 @@ class ClientStreamLoop:
         camera.reset_camera(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             origin='keys',
         )
@@ -1085,12 +1086,12 @@ class ClientStreamLoop:
         return self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
 
     def _ensure_dims_update(self) -> None:
-        if self._dims_update is not None:
+        if self._dims_mirror is not None:
             return
-        self._dims_update = control_actions.DimsUpdate(
+        self._dims_mirror = napari_dims_mirror.NapariDimsMirror(
+            ledger=self._state_ledger,
             state=self._control_state,
             loop_state=self._loop_state,
-            state_store=self._state_store,
             viewer_ref=self._current_viewer,
             ui_call=self._ui_call,
             presenter=self._presenter_facade,
@@ -1114,10 +1115,10 @@ class ClientStreamLoop:
         return self._presenter_facade
 
     @property
-    def state_store(self) -> ClientStateLedger:
+    def state_ledger(self) -> ClientStateLedger:
         """Expose the shared reducer for auxiliary bridges/tests."""
 
-        return self._state_store
+        return self._state_ledger
 
     def post(self, obj: dict) -> bool:
         ch = self._loop_state.state_channel
@@ -1128,7 +1129,7 @@ class ClientStreamLoop:
         return camera.reset_camera(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             origin=origin,
         )
@@ -1142,7 +1143,7 @@ class ClientStreamLoop:
         return camera.set_camera(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             center=center,
             zoom=zoom,
@@ -1182,7 +1183,7 @@ class ClientStreamLoop:
         return control_actions.dims_step(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             axis,
             delta,
@@ -1195,7 +1196,7 @@ class ClientStreamLoop:
         return control_actions.dims_set_index(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             axis,
             value,
@@ -1209,7 +1210,7 @@ class ClientStreamLoop:
         return control_actions.volume_set_render_mode(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             mode,
             origin=origin,
@@ -1219,7 +1220,7 @@ class ClientStreamLoop:
         return control_actions.volume_set_clim(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             lo,
             hi,
@@ -1230,7 +1231,7 @@ class ClientStreamLoop:
         return control_actions.volume_set_colormap(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             name,
             origin=origin,
@@ -1240,7 +1241,7 @@ class ClientStreamLoop:
         return control_actions.volume_set_opacity(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             alpha,
             origin=origin,
@@ -1250,7 +1251,7 @@ class ClientStreamLoop:
         return control_actions.volume_set_sample_step(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             relative,
             origin=origin,
@@ -1260,7 +1261,7 @@ class ClientStreamLoop:
         return control_actions.multiscale_set_policy(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             policy,
             origin=origin,
@@ -1270,7 +1271,7 @@ class ClientStreamLoop:
         return control_actions.multiscale_set_level(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             level,
             origin=origin,
@@ -1280,7 +1281,7 @@ class ClientStreamLoop:
         return control_actions.view_set_ndisplay(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             ndisplay,
             origin=origin,
@@ -1293,7 +1294,7 @@ class ClientStreamLoop:
         return control_actions.toggle_ndisplay(
             self._control_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             origin=origin,
         )
@@ -1303,7 +1304,7 @@ class ClientStreamLoop:
             self._control_state,
             self._camera_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             data,
             widget_to_video=self._widget_to_video,
@@ -1325,7 +1326,7 @@ class ClientStreamLoop:
             self._control_state,
             self._camera_state,
             self._loop_state,
-            self._state_store,
+            self._state_ledger,
             self._dispatch_state_update,
             data,
             widget_to_video=self._widget_to_video,

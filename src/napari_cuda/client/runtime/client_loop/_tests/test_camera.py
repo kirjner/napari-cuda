@@ -30,7 +30,7 @@ def _make_state(
     control_state = ControlStateContext.from_env(ctrl_env)
     cam_state = camera.CameraState.from_env(cam_env)
     loop_state = ClientLoopState()
-    state_store = ClientStateLedger()
+    state_ledger = ClientStateLedger()
     cam_state.cam_min_dt = 0.0
     dispatched: List[Tuple[IntentRecord, str]] = []
 
@@ -38,17 +38,17 @@ def _make_state(
         dispatched.append((pending_update, origin))
         return True
 
-    return control_state, cam_state, loop_state, state_store, dispatched, dispatch
+    return control_state, cam_state, loop_state, state_ledger, dispatched, dispatch
 
 
 def test_handle_wheel_zoom_posts_camera_zoom() -> None:
-    control_state, cam_state, loop_state, state_store, dispatched, dispatch = _make_state()
+    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
 
     camera.handle_wheel_zoom(
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'angle_y': 120, 'x_px': 10, 'y_px': 20},
         widget_to_video=lambda x, y: (x, y),
@@ -67,13 +67,13 @@ def test_handle_wheel_zoom_posts_camera_zoom() -> None:
 
 
 def test_handle_pointer_pan_posts_delta() -> None:
-    control_state, cam_state, loop_state, state_store, dispatched, dispatch = _make_state()
+    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
 
     camera.handle_pointer(
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'phase': 'down', 'x_px': 0, 'y_px': 0, 'mods': 0},
         widget_to_video=lambda x, y: (x, y),
@@ -87,7 +87,7 @@ def test_handle_pointer_pan_posts_delta() -> None:
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'phase': 'move', 'x_px': 5, 'y_px': 3, 'mods': 0},
         widget_to_video=lambda x, y: (x, y),
@@ -101,7 +101,7 @@ def test_handle_pointer_pan_posts_delta() -> None:
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'phase': 'up', 'x_px': 5, 'y_px': 3, 'mods': 0},
         widget_to_video=lambda x, y: (x, y),
@@ -121,7 +121,7 @@ def test_handle_pointer_pan_posts_delta() -> None:
 
 
 def test_handle_pointer_orbit_posts_delta() -> None:
-    control_state, cam_state, loop_state, state_store, dispatched, dispatch = _make_state()
+    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
     control_state.dims_ready = True
     control_state.dims_meta['mode'] = 'volume'
     control_state.dims_meta['ndisplay'] = 3
@@ -130,7 +130,7 @@ def test_handle_pointer_orbit_posts_delta() -> None:
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'phase': 'down', 'x_px': 0, 'y_px': 0, 'mods': 0x2000},
         widget_to_video=lambda x, y: (x, y),
@@ -144,7 +144,7 @@ def test_handle_pointer_orbit_posts_delta() -> None:
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'phase': 'move', 'x_px': 4, 'y_px': 2, 'mods': 0x2000},
         widget_to_video=lambda x, y: (x, y),
@@ -158,7 +158,7 @@ def test_handle_pointer_orbit_posts_delta() -> None:
         control_state,
         cam_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         {'phase': 'up', 'x_px': 4, 'y_px': 2, 'mods': 0x2000},
         widget_to_video=lambda x, y: (x, y),
@@ -178,12 +178,12 @@ def test_handle_pointer_orbit_posts_delta() -> None:
 
 
 def test_reset_and_set_camera_send_payloads() -> None:
-    control_state, cam_state, loop_state, state_store, dispatched, dispatch = _make_state()
+    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
 
     assert camera.reset_camera(
         control_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         origin='ui',
     ) is True
@@ -197,7 +197,7 @@ def test_reset_and_set_camera_send_payloads() -> None:
     assert camera.set_camera(
         control_state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch,
         center=(1, 2, 3),
         zoom=2.5,

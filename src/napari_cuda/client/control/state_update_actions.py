@@ -227,7 +227,7 @@ def handle_dims_update(
     ui_call,
     notify_first_dims_ready: Callable[[], None],
     log_dims_info: bool,
-    state_store: Optional["ClientStateLedger"] = None,
+    state_ledger: Optional["ClientStateLedger"] = None,
 ) -> None:
     meta = state.dims_meta
     was_ready = bool(state.dims_ready)
@@ -252,10 +252,10 @@ def handle_dims_update(
 
     payload_dict = _sync_dims_payload_from_meta(state, loop_state)
 
-    if not was_ready and state_store is not None:
-        _seed_dims_baseline(state, state_store, payload_dict)
-    elif state_store is not None:
-        _seed_dims_indices(state, state_store, payload_dict, update_kind='notify')
+    if not was_ready and state_ledger is not None:
+        _seed_dims_baseline(state, state_ledger, payload_dict)
+    elif state_ledger is not None:
+        _seed_dims_indices(state, state_ledger, payload_dict, update_kind='notify')
 
     if not state.dims_ready:
         state.dims_ready = True
@@ -278,7 +278,7 @@ def handle_dims_update(
 
 def handle_notify_camera(
     state: ControlStateContext,
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     frame: NotifyCamera,
     *,
     log_debug: bool = False,
@@ -290,7 +290,7 @@ def handle_notify_camera(
     state.camera_state[mode_key] = normalized_delta
 
     timestamp = frame.envelope.timestamp
-    state_store.seed_confirmed(
+    state_ledger.seed_confirmed(
         'camera',
         'main',
         mode_key,
@@ -342,7 +342,7 @@ def _runtime_key(scope: str, target: str, key: str) -> str:
 def _emit_state_update(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     scope: str,
@@ -356,7 +356,7 @@ def _emit_state_update(
     runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
     phase = "start" if not runtime.active else "update"
     intent_id, frame_id = state.next_intent_ids()
-    pending = state_store.apply_local(
+    pending = state_ledger.apply_local(
         scope,
         target,
         key,
@@ -368,7 +368,7 @@ def _emit_state_update(
     )
 
     if pending is None:
-        projection_value = state_store.confirmed_value(scope, target, key)
+        projection_value = state_ledger.confirmed_value(scope, target, key)
         if projection_value is None:
             projection_value = value
         logger.debug(
@@ -382,7 +382,7 @@ def _emit_state_update(
         return False, projection_value
 
     if not dispatch_state_update(pending, origin):
-        state_store.discard_pending(frame_id)
+        state_ledger.discard_pending(frame_id)
         return False, None
 
     runtime.active = True
@@ -481,7 +481,7 @@ def _sync_dims_payload_from_meta(
 
 def _seed_dims_baseline(
     state: ControlStateContext,
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     payload: dict[str, Any],
 ) -> None:
     current_step = payload.get('current_step') or []
@@ -493,7 +493,7 @@ def _seed_dims_baseline(
             value_int = _coerce_step_value(value)
             if value_int is None:
                 continue
-            state_store.seed_confirmed(
+            state_ledger.seed_confirmed(
                 'dims',
                 target_label,
                 'index',
@@ -505,45 +505,45 @@ def _seed_dims_baseline(
                 },
             )
 
-    _seed_dims_indices(state, state_store, payload, update_kind='baseline')
+    _seed_dims_indices(state, state_ledger, payload, update_kind='baseline')
 
     ndisplay = payload.get('ndisplay')
     if ndisplay is not None:
-        state_store.seed_confirmed('view', 'main', 'ndisplay', int(ndisplay))
+        state_ledger.seed_confirmed('view', 'main', 'ndisplay', int(ndisplay))
 
     multiscale_meta = state.dims_meta.get('multiscale')
     if isinstance(multiscale_meta, dict):
         level_val = multiscale_meta.get('level')
         if level_val is not None:
-            state_store.seed_confirmed('multiscale', 'main', 'level', int(level_val))
+            state_ledger.seed_confirmed('multiscale', 'main', 'level', int(level_val))
         policy_val = multiscale_meta.get('policy')
         if policy_val is not None:
-            state_store.seed_confirmed('multiscale', 'main', 'policy', str(policy_val))
+            state_ledger.seed_confirmed('multiscale', 'main', 'policy', str(policy_val))
 
     render_meta = state.dims_meta.get('render')
     if isinstance(render_meta, dict):
         mode_val = render_meta.get('mode') or render_meta.get('render_mode')
         if mode_val is not None:
-            state_store.seed_confirmed('volume', 'main', 'render_mode', str(mode_val))
+            state_ledger.seed_confirmed('volume', 'main', 'render_mode', str(mode_val))
         clim_val = render_meta.get('contrast_limits')
         if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
             lo = float(clim_val[0])
             hi = float(clim_val[1])
-            state_store.seed_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
+            state_ledger.seed_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
         cmap_val = render_meta.get('colormap')
         if cmap_val is not None:
-            state_store.seed_confirmed('volume', 'main', 'colormap', str(cmap_val))
+            state_ledger.seed_confirmed('volume', 'main', 'colormap', str(cmap_val))
         opacity_val = render_meta.get('opacity')
         if opacity_val is not None:
-            state_store.seed_confirmed('volume', 'main', 'opacity', float(opacity_val))
+            state_ledger.seed_confirmed('volume', 'main', 'opacity', float(opacity_val))
         sample_val = render_meta.get('sample_step')
         if sample_val is not None:
-            state_store.seed_confirmed('volume', 'main', 'sample_step', float(sample_val))
+            state_ledger.seed_confirmed('volume', 'main', 'sample_step', float(sample_val))
 
 
 def _seed_dims_indices(
     state: ControlStateContext,
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     payload: Mapping[str, Any],
     *,
     update_kind: str,
@@ -563,7 +563,7 @@ def _seed_dims_indices(
             'axis_target': target_label,
             'update_kind': update_kind,
         }
-        state_store.seed_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
+        state_ledger.seed_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
 
 
 def _coerce_step_value(value: Any) -> Optional[int]:
@@ -652,113 +652,6 @@ def mirror_dims_to_viewer(
     _apply()
 
 
-class DimsUpdate:
-    """Apply authoritative dims updates emitted by the ClientStateLedger."""
-
-    def __init__(
-        self,
-        *,
-        state: ControlStateContext,
-        loop_state: "ClientLoopState",
-        state_store: "ClientStateLedger",
-        viewer_ref,
-        ui_call,
-        presenter: Optional["PresenterFacade"],
-        log_dims_info: bool,
-    ) -> None:
-        self._state = state
-        self._loop_state = loop_state
-        self._viewer_ref = viewer_ref
-        self._ui_call = ui_call
-        self._presenter = presenter
-        self._log_dims_info = bool(log_dims_info)
-        state_store.subscribe_all(self._handle_store_update)
-
-    # ------------------------------------------------------------------
-    def _handle_store_update(self, update: MirrorEvent) -> None:
-        scope = update.scope
-        if scope == 'dims' and update.key in {'index', 'step'}:
-            self._handle_axis_update(update)
-            return
-        if scope == 'view' and update.target == 'main' and update.key == 'ndisplay':
-            self._handle_ndisplay_update(update)
-
-    def _handle_axis_update(self, update: MirrorEvent) -> None:
-        metadata = update.metadata or {}
-        axis_idx: Optional[int] = None
-        if 'axis_index' in metadata:
-            try:
-                axis_idx = int(metadata['axis_index'])
-            except Exception:
-                axis_idx = None
-        if axis_idx is None:
-            axis_idx = _axis_index_from_target(self._state, str(update.target))
-        assert axis_idx is not None, f"unknown dims axis target={update.target!r}"
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "dims store update: axis=%s target=%s key=%s value=%s metadata=%s",
-                axis_idx,
-                update.target,
-                update.key,
-                update.value,
-                metadata,
-            )
-
-        try:
-            value_int = int(update.value)
-        except Exception as exc:  # pragma: no cover - defensive crash hook
-            raise AssertionError(f"dims value must be int-like: {update.value!r}") from exc
-
-        meta = self._state.dims_meta
-        current = list(meta.get('current_step') or [])
-        while len(current) <= axis_idx:
-            current.append(0)
-        current[axis_idx] = value_int
-        meta['current_step'] = current
-
-        self._state.dims_state[(str(update.target), str(update.key))] = value_int
-        self._state.primary_axis_index = _compute_primary_axis_index(meta)
-        self._flush_dims_payload(reason=f"axis:{axis_idx}")
-
-    def _handle_ndisplay_update(self, update: MirrorEvent) -> None:
-        try:
-            ndisplay = int(update.value)
-        except Exception as exc:  # pragma: no cover - defensive crash hook
-            raise AssertionError(f"ndisplay value must be int-like: {update.value!r}") from exc
-        self._state.dims_meta['ndisplay'] = ndisplay
-        self._flush_dims_payload(reason="ndisplay")
-
-    def _flush_dims_payload(self, *, reason: str) -> None:
-        payload = _sync_dims_payload_from_meta(self._state, self._loop_state)
-        if self._log_dims_info and payload.get('current_step') is not None:
-            logger.info(
-                "dims update (%s): step=%s ndisplay=%s",
-                reason,
-                payload.get('current_step'),
-                payload.get('ndisplay'),
-            )
-
-        if self._presenter is not None:
-            try:
-                self._presenter.apply_dims_update(dict(payload))
-            except Exception:
-                logger.debug("presenter dims update failed", exc_info=True)
-
-        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
-        mirror_dims_to_viewer(
-            viewer_obj,
-            self._ui_call,
-            current_step=payload.get('current_step'),
-            ndisplay=payload.get('ndisplay'),
-            ndim=payload.get('ndim'),
-            dims_range=payload.get('dims_range'),
-            order=payload.get('order'),
-            axis_labels=payload.get('axis_labels'),
-            sizes=payload.get('sizes'),
-            displayed=payload.get('displayed'),
-        )
-
 
 def replay_last_dims_payload(state: ControlStateContext, loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
     payload = loop_state.last_dims_payload
@@ -784,7 +677,7 @@ def replay_last_dims_payload(state: ControlStateContext, loop_state: "ClientLoop
 def dims_step(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     axis: int | str,
     delta: int,
@@ -805,7 +698,7 @@ def dims_step(
     axis_idx = int(idx)
     target_label = _axis_target_label(state, axis_idx)
     if logger.isEnabledFor(logging.DEBUG):
-        confirmed = state_store.confirmed_value('dims', target_label, 'index')
+        confirmed = state_ledger.confirmed_value('dims', target_label, 'index')
         logger.debug(
             "dims_step request: axis=%s target=%s delta=%s origin=%s confirmed_index=%s pending_step=%s",
             axis_idx,
@@ -813,12 +706,12 @@ def dims_step(
             delta,
             origin,
             confirmed,
-            state_store.has_pending('dims', target_label, 'step'),
+            state_ledger.has_pending('dims', target_label, 'step'),
         )
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="dims",
         target=target_label,
@@ -840,7 +733,7 @@ def dims_step(
 def handle_wheel_for_dims(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     data: dict,
     *,
@@ -867,7 +760,7 @@ def handle_wheel_for_dims(
     sent = dims_step(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         'primary',
         int(step),
@@ -885,7 +778,7 @@ def handle_wheel_for_dims(
 def dims_set_index(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     axis: int | str,
     value: int,
@@ -906,7 +799,7 @@ def dims_set_index(
     axis_idx = int(idx)
     target_label = _axis_target_label(state, axis_idx)
     if logger.isEnabledFor(logging.DEBUG):
-        confirmed = state_store.confirmed_value('dims', target_label, 'index')
+        confirmed = state_ledger.confirmed_value('dims', target_label, 'index')
         logger.debug(
             "dims_set_index request: axis=%s target=%s value=%s origin=%s confirmed_index=%s pending_index=%s",
             axis_idx,
@@ -914,12 +807,12 @@ def dims_set_index(
             value,
             origin,
             confirmed,
-            state_store.has_pending('dims', target_label, 'index'),
+            state_ledger.has_pending('dims', target_label, 'index'),
         )
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="dims",
         target=target_label,
@@ -1183,7 +1076,7 @@ def current_ndisplay(state: ControlStateContext) -> Optional[int]:
 def toggle_ndisplay(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     origin: str,
@@ -1195,7 +1088,7 @@ def toggle_ndisplay(
     return view_set_ndisplay(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         target,
         origin=origin,
@@ -1256,7 +1149,7 @@ def handle_key_event(
 def view_set_ndisplay(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     ndisplay: int,
     *,
@@ -1274,7 +1167,7 @@ def view_set_ndisplay(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="view",
         target="main",
@@ -1288,7 +1181,7 @@ def view_set_ndisplay(
 def camera_zoom(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     factor: float,
@@ -1307,7 +1200,7 @@ def camera_zoom(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="camera",
         target="main",
@@ -1324,7 +1217,7 @@ def camera_zoom(
 def camera_pan(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     dx_px: float,
@@ -1340,7 +1233,7 @@ def camera_pan(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="camera",
         target="main",
@@ -1357,7 +1250,7 @@ def camera_pan(
 def camera_orbit(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     d_az_deg: float,
@@ -1373,7 +1266,7 @@ def camera_orbit(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="camera",
         target="main",
@@ -1390,7 +1283,7 @@ def camera_orbit(
 def camera_reset(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     reason: str,
@@ -1405,7 +1298,7 @@ def camera_reset(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="camera",
         target="main",
@@ -1422,7 +1315,7 @@ def camera_reset(
 def camera_set(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     center: Optional[Sequence[float]] = None,
@@ -1447,7 +1340,7 @@ def camera_set(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="camera",
         target="main",
@@ -1464,7 +1357,7 @@ def camera_set(
 def volume_set_render_mode(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     mode: str,
     *,
@@ -1478,7 +1371,7 @@ def volume_set_render_mode(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="volume",
         target="main",
@@ -1492,7 +1385,7 @@ def volume_set_render_mode(
 def volume_set_clim(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     lo: float,
     hi: float,
@@ -1507,7 +1400,7 @@ def volume_set_clim(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="volume",
         target="main",
@@ -1521,7 +1414,7 @@ def volume_set_clim(
 def volume_set_colormap(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     name: str,
     *,
@@ -1534,7 +1427,7 @@ def volume_set_colormap(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="volume",
         target="main",
@@ -1548,7 +1441,7 @@ def volume_set_colormap(
 def volume_set_opacity(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     alpha: float,
     *,
@@ -1562,7 +1455,7 @@ def volume_set_opacity(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="volume",
         target="main",
@@ -1576,7 +1469,7 @@ def volume_set_opacity(
 def volume_set_sample_step(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     relative: float,
     *,
@@ -1590,7 +1483,7 @@ def volume_set_sample_step(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="volume",
         target="main",
@@ -1604,7 +1497,7 @@ def volume_set_sample_step(
 def multiscale_set_policy(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     policy: str,
     *,
@@ -1621,7 +1514,7 @@ def multiscale_set_policy(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="multiscale",
         target="main",
@@ -1635,7 +1528,7 @@ def multiscale_set_policy(
 def multiscale_set_level(
     state: ControlStateContext,
     loop_state: "ClientLoopState",
-    state_store: "ClientStateLedger",
+    state_ledger: "ClientStateLedger",
     dispatch_state_update: Callable[["IntentRecord", str], bool],
     level: int,
     *,
@@ -1649,7 +1542,7 @@ def multiscale_set_level(
     ok, _ = _emit_state_update(
         state,
         loop_state,
-        state_store,
+        state_ledger,
         dispatch_state_update,
         scope="multiscale",
         target="main",

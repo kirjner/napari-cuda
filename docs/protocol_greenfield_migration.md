@@ -112,7 +112,7 @@ Cross-reference these items when planning migration work; each future change sho
   `client/streaming/state.py`) maintains the WebSocket, issues a
   `SessionHello` built around `PROTO_VERSION = 1`, and still expects legacy
   payloads alongside `notify.*` envelopes.
-- `client/control/client_state_ledger.py` (archive: `state_store.py`) tracks
+- `client/control/client_state_ledger.py` (archive: `state_ledger.py`) tracks
   optimistic state via `PendingEntry` queues keyed by `(scope, target, key)`,
   reconciling on inbound `state.update` echoes.
 - `client/control/state_update_actions.py` (legacy shim
@@ -178,7 +178,7 @@ Cross-reference these items when planning migration work; each future change sho
 | `protocol/parser.py` | `protocol/greenfield/parser.py` | Explicitly names the parser domain. |
 | `protocol/messages.py` | Split into `protocol/legacy/messages.py` and `protocol/greenfield/messages.py` (temporary) | Remove mixed concerns during migration; legacy module deleted once the legacy bridge is removed. |
 | `client/streaming/state.py` | `client/control/control_channel_client.py` | Matches the control-lane responsibility. |
-| `client/streaming/state_store.py` | `client/control/client_state_ledger.py` | Tracks pending `state.update` emissions and ack reconciliation without legacy "intent" terminology. |
+| `client/streaming/state_ledger.py` | `client/control/client_state_ledger.py` | Tracks pending `state.update` emissions and ack reconciliation without legacy "intent" terminology. |
 | `client/streaming/layer_state_bridge.py` | `client/state/bridges/layer_state_bridge.py` | Clarifies its bridging role. |
 | `client/streaming/controllers.py` | `client/runtime/channel_threads.py` | Emphasizes thread orchestration. |
 | `client/streaming/client_stream_loop.py` | `client/runtime/stream_runtime.py` | Marks the orchestrator that binds control + pixel paths. |

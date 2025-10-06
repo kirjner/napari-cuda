@@ -48,7 +48,7 @@ Server work on `server-refactor` rebuilt the headless EGL worker, state channel,
 - Keep server config docs (`docs/server_*`). Merge client docs by adding, not replacing.
 
 ### Client (`src/napari_cuda/client/**`)
-- Accept the new reducer pipeline: files like `client_stream_loop.py`, `state_store.py`, `state/bridges/layer_state_bridge.py`, and client-loop utilities should come from `origin/client-refactor`.
+- Accept the new reducer pipeline: files like `client_stream_loop.py`, `state_ledger.py`, `state/bridges/layer_state_bridge.py`, and client-loop utilities should come from `origin/client-refactor`.
 - Update any imports that expect removed server helpers (e.g., `control_sessions`) to the merged protocol API.
 - Review `launcher.py`, `proxy_viewer.py`, and `streaming_canvas.py` for references to the old intent bridge; ensure they now instantiate `ClientStreamLoop` and `LayerStateBridge` correctly.
 - Align `StateStore` with the merged `StateUpdateMessage`: handle optional `meta`/`current_step` fields that the server still sends.

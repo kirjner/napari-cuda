@@ -213,7 +213,7 @@ class LayerStateBridge:
         loop_state: ClientLoopState,
         *,
         enabled: Optional[bool] = None,
-        state_store: Optional[ClientStateLedger] = None,
+        state_ledger: Optional[ClientStateLedger] = None,
     ) -> None:
         self._loop = loop
         self._registry = registry
@@ -221,7 +221,7 @@ class LayerStateBridge:
         self._loop_state = loop_state
         self._enabled = enabled if enabled is not None else _env_bridge_enabled()
         self._bindings: Dict[str, LayerBinding] = {}
-        self._state_store = state_store or ClientStateLedger(clock=time.time)
+        self._state_ledger = state_ledger or ClientStateLedger(clock=time.time)
         self._mute_depth = 0
 
         if not self._enabled:
@@ -247,7 +247,7 @@ class LayerStateBridge:
     def clear_pending_on_reconnect(self) -> None:
         if not self._enabled:
             return
-        self._state_store.clear_pending_on_reconnect()
+        self._state_ledger.clear_pending_on_reconnect()
         for binding in self._bindings.values():
             for runtime in binding.properties.values():
                 runtime.active = False
@@ -359,7 +359,7 @@ class LayerStateBridge:
             encoded = self._encode_value(config, raw_value)
             if encoded is None:
                 continue
-            self._state_store.seed_confirmed("layer", binding.remote_id, config.key, encoded)
+            self._state_ledger.seed_confirmed("layer", binding.remote_id, config.key, encoded)
             runtime.last_phase = "seed"
             self._apply_pending_update(binding, config, encoded, suppress_blocker=True)
 
@@ -464,10 +464,10 @@ class LayerStateBridge:
         if encoded is None:
             return
         runtime = binding.properties.setdefault(config.key, PropertyRuntime())
-        confirmed_value = self._state_store.confirmed_value("layer", binding.remote_id, config.key)
+        confirmed_value = self._state_ledger.confirmed_value("layer", binding.remote_id, config.key)
         if (
             confirmed_value is not None
-            and not self._state_store.has_pending("layer", binding.remote_id, config.key)
+            and not self._state_ledger.has_pending("layer", binding.remote_id, config.key)
         ):
             if config.equals(confirmed_value, encoded):
                 if logger.isEnabledFor(logging.DEBUG):
@@ -490,7 +490,7 @@ class LayerStateBridge:
 
         intent_id, frame_id = self._control_state.next_intent_ids()
 
-        pending = self._state_store.apply_local(
+        pending = self._state_ledger.apply_local(
             "layer",
             binding.remote_id,
             config.key,
@@ -634,7 +634,7 @@ class LayerStateBridge:
                     raw_value,
                 )
                 continue
-            pending_value = self._state_store.latest_pending_value("layer", layer_id, config.key)
+            pending_value = self._state_ledger.latest_pending_value("layer", layer_id, config.key)
             if pending_value is not None and not config.equals(pending_value, encoded):
                 logger.debug(
                     "LayerStateBridge: skipping remote value (pending newer): id=%s key=%s pending=%r remote=%r",
@@ -656,7 +656,7 @@ class LayerStateBridge:
                 config.key,
                 encoded,
             )
-            self._state_store.seed_confirmed("layer", layer_id, config.key, encoded)
+            self._state_ledger.seed_confirmed("layer", layer_id, config.key, encoded)
             if binding is None:
                 continue
             runtime = binding.properties.setdefault(config.key, PropertyRuntime())

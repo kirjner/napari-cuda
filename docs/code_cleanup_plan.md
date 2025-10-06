@@ -13,7 +13,7 @@ Offensive coding tenet: remove try/except scaffolding that hides bugs.
 Offensive coding tenet: make invariants explicit and crash on violation.
 
 1. ~~**Retire legacy streaming shells**~~
-   - ~~Delete `client/streaming/client_stream_loop.py`, `state.py`, `state_store.py` once imports are redirected to new modules.~~
+   - ~~Delete `client/streaming/client_stream_loop.py`, `state.py`, `state_ledger.py` once imports are redirected to new modules.~~
 2. ~~**Slim down PresenterFacade**~~
    - ~~Remove `legacy_draw` wiring and reconnect logic.~~
    - ~~Strip unused HUD/metrics hooks guarded by env flags.~~
