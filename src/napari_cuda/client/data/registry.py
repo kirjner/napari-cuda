@@ -110,10 +110,7 @@ class RemoteLayerRegistry:
                     if _LAYER_DEBUG:
                         logger.debug("created remote layer: id=%s name=%s", layer_id, block.get("name"))
                 else:
-                    if control_only:
-                        layer.update_from_block(block)
-                    else:
-                        self._update_layer(layer, block)
+                    self._update_layer(layer, block)
                     changed = True
                     if _LAYER_DEBUG:
                         logger.debug("updated remote layer: id=%s", layer_id)
@@ -175,14 +172,22 @@ class RemoteLayerRegistry:
                 for key, value in changes.items():
                     if key == "removed":
                         continue
-                    if control_only and key not in _CONTROL_ONLY_KEYS:
-                        control_only = False
-                    controls[key] = value
-                    if key == "contrast_limits":
-                        if isinstance(value, Sequence):
-                            block["contrast_limits"] = [float(v) for v in value]
+                    if key in _CONTROL_ONLY_KEYS:
+                        controls[key] = value
+                        if key == "contrast_limits":
+                            if isinstance(value, Sequence):
+                                block["contrast_limits"] = [float(v) for v in value]
+                            else:
+                                block["contrast_limits"] = value
+                    elif key == "metadata":
+                        if isinstance(value, Mapping):
+                            block["metadata"] = dict(value)
                         else:
-                            block["contrast_limits"] = value
+                            block["metadata"] = value
+                        control_only = False
+                    else:
+                        block[key] = value
+                        control_only = False
                     updated = True
                 if not updated:
                     return

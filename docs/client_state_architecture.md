@@ -167,7 +167,7 @@ and reviewable.
    - Update this document and the server counterpart so the design matches the
      implementation.
 
-2. **Stage 2 – Layer/Camera Helpers & Auto-Config** *(next up)*
+2. **Stage 2 – Layer/Camera Helpers & Auto-Config** *(in progress / next)*
    - Generate layer property configs and server `CONTROL_KEYS` from napari’s own
      enums (`Interpolation`, `layer._projectionclass`, etc.) so every UI control
      round-trips without hard-coded alias tables.
@@ -175,9 +175,28 @@ and reviewable.
      and own all napari mutations.
    - Update the intent bridge to consult `pending_state_snapshot` for all
      scopes, skipping duplicates automatically.
+   - **Actionable next steps:**
+     1. Implement per-axis monotonic sequencing for dims intents and gate
+        projection mirroring on acknowledged sequence numbers so sliders stop
+        jittering.
+     2. Extend the layer intent bridge to read the new store helpers (pending
+        vs confirmed) instead of hand-written guards; once that is in place,
+        delete the manual napari event re-emission we just added and rely on the
+        projection for UI sync.
+     3. Move camera property application into a dedicated `CameraUpdate`
+        projection so notify.camera follows the same store-driven flow.
 
-3. **Stage 3 – Cleanup & Coverage**
-   - Prune any remaining defensive guards made obsolete by the helpers.
+3. **Stage 3 – Prefetch & Playback Smoothing** *(future)
+   - Introduce predictive/pre-fetch helpers for dims playback so the presenter
+     can run ahead of acknowledgements.
+   - Wire the intent bridge to expose per-domain throttling policies
+     (e.g. configurable slider debounce) that consult the store’s
+     `last_dims_send` metadata.
+   - Instrument telemetry (pending depth, ack latency) so we can diagnose jitter
+     and adjust hysteresis.
+
+4. **Stage 4 – Cleanup & Coverage**
+   - Prune remaining defensive guards made obsolete by the helpers.
    - Beef up regression coverage (e.g., assert the supported-control set matches
      napari’s events) and polish diagnostics/logging.
 

@@ -305,7 +305,7 @@ class LayerStateBridge:
             revert_value = outcome.pending_value
 
         if revert_value is not None:
-            self._apply_projection(binding, config, revert_value, suppress_blocker=True)
+            self._apply_pending_update(binding, config, revert_value, suppress_blocker=True)
 
     # ------------------------------------------------------------------
     def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
@@ -361,7 +361,7 @@ class LayerStateBridge:
                 continue
             self._state_store.seed_confirmed("layer", binding.remote_id, config.key, encoded)
             runtime.last_phase = "seed"
-            self._apply_projection(binding, config, encoded, suppress_blocker=True)
+            self._apply_pending_update(binding, config, encoded, suppress_blocker=True)
 
     # ------------------------------------------------------------------
     def _unbind_layer(self, remote_id: str) -> None:
@@ -511,7 +511,7 @@ class LayerStateBridge:
                     config.key,
                 )
             return
-        self._apply_projection(binding, config, pending.projection_value)
+        self._apply_pending_update(binding, config, pending.projection_value)
 
         runtime.active = True
         runtime.last_phase = phase
@@ -531,7 +531,7 @@ class LayerStateBridge:
             runtime.active_frame_id = None
 
     # ------------------------------------------------------------------
-    def _apply_projection(
+    def _apply_pending_update(
         self,
         binding: LayerBinding,
         config: PropertyConfig,
@@ -560,7 +560,7 @@ class LayerStateBridge:
                         blocker_ctx = emitter.blocker(callback)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "LayerStateBridge:_apply_projection id=%s key=%s value=%r suppress_blocker=%s",
+                    "LayerStateBridge:_apply_pending_update id=%s key=%s value=%r suppress_blocker=%s",
                     binding.remote_id,
                     config.key,
                     value,
@@ -644,7 +644,7 @@ class LayerStateBridge:
                     encoded,
                 )
                 if binding is not None:
-                    self._apply_projection(
+                    self._apply_pending_update(
                         binding,
                         config,
                         pending_value,
