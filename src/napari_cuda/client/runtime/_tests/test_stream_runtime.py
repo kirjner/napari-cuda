@@ -10,7 +10,7 @@ import pytest
 from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.state_update_actions import ControlStateContext
-from napari_cuda.client.control.pending_update_store import StateStore
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import SessionMetadata, ResumeCursor
 from napari_cuda.client.runtime.stream_runtime import CommandError
 from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command, build_error_command
@@ -73,7 +73,7 @@ def _make_loop() -> ClientStreamLoop:
     loop._command_catalog = ()
 
     clock_counter = count(100)
-    loop._state_store = StateStore(clock=lambda: float(next(clock_counter)))
+    loop._state_store = ClientStateLedger(clock=lambda: float(next(clock_counter)))
 
     loop._presenter_facade = _PresenterStub()
     loop._layer_bridge = SimpleNamespace(

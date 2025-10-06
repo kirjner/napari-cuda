@@ -63,12 +63,12 @@ from napari_cuda.protocol.snapshots import (
     scene_snapshot_from_payload,
 )
 from napari_cuda.client.state import LayerStateBridge
-from napari_cuda.client.control.pending_update_store import StateStore
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from napari_cuda.client.control.control_channel_client import StateChannel, SessionMetadata
-    from napari_cuda.client.control.pending_update_store import PendingUpdate, AckOutcome
+    from napari_cuda.client.control.client_state_ledger import IntentRecord, AckReconciliation
     from napari_cuda.client.runtime.config import ClientConfig
     from napari_cuda.protocol import ReplyCommand, ErrorCommand
 
@@ -221,7 +221,7 @@ class ClientStreamLoop:
         self._latest_scene_frame: Optional[NotifySceneFrame] = None
         self._control_state = control_actions.ControlStateContext.from_env(self._env_cfg)
         self._loop_state.control_state = self._control_state
-        self._state_store = StateStore(clock=time.time)
+        self._state_store = ClientStateLedger(clock=time.time)
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
         self._dims_update: control_actions.DimsUpdate | None = None
@@ -954,7 +954,7 @@ class ClientStreamLoop:
         else:
             logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
 
-    def _dispatch_state_update(self, pending_update: "PendingUpdate", origin: str) -> bool:
+    def _dispatch_state_update(self, pending_update: "IntentRecord", origin: str) -> bool:
         channel = self._loop_state.state_channel
         if channel is None:
             logger.debug("state.update emit skipped: channel unavailable")
@@ -1114,7 +1114,7 @@ class ClientStreamLoop:
         return self._presenter_facade
 
     @property
-    def state_store(self) -> StateStore:
+    def state_store(self) -> ClientStateLedger:
         """Expose the shared reducer for auxiliary bridges/tests."""
 
         return self._state_store

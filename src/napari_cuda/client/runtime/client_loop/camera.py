@@ -12,7 +12,7 @@ from napari_cuda.client.control import state_update_actions
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.state_update_actions import ControlStateContext
-    from napari_cuda.client.control.pending_update_store import PendingUpdate, StateStore
+    from napari_cuda.client.control.client_state_ledger import IntentRecord, ClientStateLedger
     from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
@@ -63,8 +63,8 @@ def handle_wheel_zoom(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     data: dict,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -114,8 +114,8 @@ def handle_pointer(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     data: dict,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -232,8 +232,8 @@ def flush_pan_if_due(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     log_dims_info: bool,
 ) -> None:
@@ -255,8 +255,8 @@ def flush_pan(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     force: bool,
     origin: str,
@@ -294,8 +294,8 @@ def flush_orbit_if_due(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     log_dims_info: bool,
 ) -> None:
@@ -317,8 +317,8 @@ def flush_orbit(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     force: bool,
     origin: str,
@@ -354,8 +354,8 @@ def zoom_steps_at_center(
     control_state: "ControlStateContext",
     state: CameraState,
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     steps: int,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -401,8 +401,8 @@ def zoom_steps_at_center(
 def reset_camera(
     control_state: "ControlStateContext",
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     origin: str,
 ) -> bool:
@@ -422,8 +422,8 @@ def reset_camera(
 def set_camera(
     control_state: "ControlStateContext",
     loop_state: "ClientLoopState",
-    state_store: "StateStore",
-    dispatch_state_update: Callable[["PendingUpdate", str], bool],
+    state_store: "ClientStateLedger",
+    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     center: Optional[Sequence[float]] = None,
     zoom: Optional[float] = None,

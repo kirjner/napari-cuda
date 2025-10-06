@@ -5,7 +5,7 @@ from typing import Any, Callable, List, Tuple
 
 import pytest
 
-from napari_cuda.client.control.pending_update_store import PendingUpdate, StateStore
+from napari_cuda.client.control.client_state_ledger import IntentRecord, ClientStateLedger
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop import camera
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
@@ -16,9 +16,9 @@ def _make_state(
     ControlStateContext,
     camera.CameraState,
     ClientLoopState,
-    StateStore,
-    List[Tuple[PendingUpdate, str]],
-    Callable[[PendingUpdate, str], bool],
+    ClientStateLedger,
+    List[Tuple[IntentRecord, str]],
+    Callable[[IntentRecord, str], bool],
 ]:
     cam_env = SimpleNamespace(
         zoom_base=1.2,
@@ -30,11 +30,11 @@ def _make_state(
     control_state = ControlStateContext.from_env(ctrl_env)
     cam_state = camera.CameraState.from_env(cam_env)
     loop_state = ClientLoopState()
-    state_store = StateStore()
+    state_store = ClientStateLedger()
     cam_state.cam_min_dt = 0.0
-    dispatched: List[Tuple[PendingUpdate, str]] = []
+    dispatched: List[Tuple[IntentRecord, str]] = []
 
-    def dispatch(pending_update: PendingUpdate, origin: str) -> bool:
+    def dispatch(pending_update: IntentRecord, origin: str) -> bool:
         dispatched.append((pending_update, origin))
         return True
 

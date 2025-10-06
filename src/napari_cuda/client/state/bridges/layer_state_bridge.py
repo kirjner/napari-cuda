@@ -16,7 +16,7 @@ from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.data.registry import LayerRecord, RegistrySnapshot
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate, AckOutcome
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord, AckReconciliation
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
@@ -213,7 +213,7 @@ class LayerStateBridge:
         loop_state: ClientLoopState,
         *,
         enabled: Optional[bool] = None,
-        state_store: Optional[StateStore] = None,
+        state_store: Optional[ClientStateLedger] = None,
     ) -> None:
         self._loop = loop
         self._registry = registry
@@ -221,7 +221,7 @@ class LayerStateBridge:
         self._loop_state = loop_state
         self._enabled = enabled if enabled is not None else _env_bridge_enabled()
         self._bindings: Dict[str, LayerBinding] = {}
-        self._state_store = state_store or StateStore(clock=time.time)
+        self._state_store = state_store or ClientStateLedger(clock=time.time)
         self._mute_depth = 0
 
         if not self._enabled:
@@ -255,7 +255,7 @@ class LayerStateBridge:
                 runtime.active_frame_id = None
 
     # ------------------------------------------------------------------
-    def handle_ack(self, outcome: AckOutcome) -> None:
+    def handle_ack(self, outcome: AckReconciliation) -> None:
         if not self._enabled:
             return
         if outcome.scope != "layer" or outcome.target is None or outcome.key is None:

@@ -25,7 +25,7 @@ Other single-module entry points:
 | `control_channel_client.py` | 820 | Async state-channel client (websockets, resume tokens, message dispatch). | Monolithic; mixes networking, logging, heartbeats, and callbacks wiring. |
 | `state_update_actions.py` | 1 687 | All state intent helpers (dims, camera, layers, volume, HUD). | Largest single file; contains rate limiting, ack handling, viewer mirroring, policy application. |
 | `state/bridges/layer_state_bridge.py` | 549 | Layer bridge between napari events and `state.update`. | Recently gained mute guard; still handles store seeding, projection, ack reconciliation. |
-| `pending_update_store.py` | 308 | Tracks confirmed/pending values and ack reconciliation. | Clean but still lacks provenance metadata. |
+| `client_state_ledger.py` | 308 | Tracks confirmed/pending values and ack reconciliation. | Clean but still lacks provenance metadata. |
 
 ## Runtime Package (`client/runtime`)
 

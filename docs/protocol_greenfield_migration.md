@@ -30,7 +30,7 @@ and risk mitigations. Treat this as the canonical playbook for the migration.
 - ⏳ **Spec round-trip tests** – Initial handshake + notify scene/state round-trips live in `src/napari_cuda/protocol/_tests/test_envelopes.py`; expand to the remaining lanes and sequencing edge cases next.
 - ✅ **Dual emission cleanup** – Legacy dual-emission shims (`legacy_dual_emitter`, `_broadcast_state_json`, `protocol_bridge`) removed; the server emits greenfield frames exclusively.
 - ✅ **Server ack lane** – `control_channel_server._handle_state_update` now parses greenfield envelopes, emits `ack.state` via `build_ack_state`, and no longer fabricates legacy `client_id`/`client_seq` metadata.
-- ✅ **Client ack lane** – `control_channel_client`, `pending_update_store`, and the streaming loop now trade exclusively in greenfield `AckState`/`state.update` envelopes. `ControlStateContext` replaces the old "intent" shims, and tests under `client/control/_tests/` and `client/runtime/_tests/` cover accepted/rejected ack flows end-to-end.
+- ✅ **Client ack lane** – `control_channel_client`, `client_state_ledger`, and the streaming loop now trade exclusively in greenfield `AckState`/`state.update` envelopes. `ControlStateContext` replaces the old "intent" shims, and tests under `client/control/_tests/` and `client/runtime/_tests/` cover accepted/rejected ack flows end-to-end.
 
 ## Near-Term Execution Plan (2025-10-01)
 
@@ -112,7 +112,7 @@ Cross-reference these items when planning migration work; each future change sho
   `client/streaming/state.py`) maintains the WebSocket, issues a
   `SessionHello` built around `PROTO_VERSION = 1`, and still expects legacy
   payloads alongside `notify.*` envelopes.
-- `client/control/pending_update_store.py` (archive: `state_store.py`) tracks
+- `client/control/client_state_ledger.py` (archive: `state_store.py`) tracks
   optimistic state via `PendingEntry` queues keyed by `(scope, target, key)`,
   reconciling on inbound `state.update` echoes.
 - `client/control/state_update_actions.py` (legacy shim
@@ -178,7 +178,7 @@ Cross-reference these items when planning migration work; each future change sho
 | `protocol/parser.py` | `protocol/greenfield/parser.py` | Explicitly names the parser domain. |
 | `protocol/messages.py` | Split into `protocol/legacy/messages.py` and `protocol/greenfield/messages.py` (temporary) | Remove mixed concerns during migration; legacy module deleted once the legacy bridge is removed. |
 | `client/streaming/state.py` | `client/control/control_channel_client.py` | Matches the control-lane responsibility. |
-| `client/streaming/state_store.py` | `client/control/pending_update_store.py` | Tracks pending `state.update` emissions and ack reconciliation without legacy "intent" terminology. |
+| `client/streaming/state_store.py` | `client/control/client_state_ledger.py` | Tracks pending `state.update` emissions and ack reconciliation without legacy "intent" terminology. |
 | `client/streaming/layer_state_bridge.py` | `client/state/bridges/layer_state_bridge.py` | Clarifies its bridging role. |
 | `client/streaming/controllers.py` | `client/runtime/channel_threads.py` | Emphasizes thread orchestration. |
 | `client/streaming/client_stream_loop.py` | `client/runtime/stream_runtime.py` | Marks the orchestrator that binds control + pixel paths. |
@@ -265,7 +265,7 @@ translating to legacy formats.
   greenfield notify/ack envelopes, and exposes callbacks for
   `ack.state`/`reply.command`/`error.command`. The legacy
   `_handle_legacy_notify_state` path has been deleted.
-- `pending_update_store.py` reconciles optimistic updates on `AckOutcome`,
+- `client_state_ledger.py` reconciles optimistic updates on `AckReconciliation`,
   keyed by `frame_id`/`intent_id`, without legacy phase juggling or
   `client_seq` gating.
 - Streaming loop + viewer bridge consume the new `ControlStateContext`,
@@ -353,8 +353,8 @@ translating to legacy formats.
   - `control_channel_client._handle_message` branches for `'video_config'` and
     `'dims.update'`.
  - Fire-and-forget keyframe connection in `request_keyframe_once`.
- - Phase juggling in `pending_update_store.apply_local` and
-   `pending_update_store.apply_remote` tied to legacy ack semantics.
+ - Phase juggling in `client_state_ledger.apply_local` and
+   `client_state_ledger.apply_remote` tied to legacy ack semantics.
 - Server:
   - `MESSAGE_HANDLERS` entries for bespoke verbs (`set_camera`, `camera.*`).
     ~~`ping`, `request_keyframe`~~ *(removed 2025-10-03)*.

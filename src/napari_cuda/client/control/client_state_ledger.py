@@ -15,7 +15,7 @@ PropertyKey = Tuple[str, str, str]
 
 
 @dataclass
-class ConfirmedState:
+class LedgerConfirmedEntry:
     value: Any
     timestamp: float
     origin: str
@@ -24,7 +24,7 @@ class ConfirmedState:
 
 
 @dataclass
-class PendingEntry:
+class PendingIntentEntry:
     intent_id: str
     frame_id: str
     value: Any
@@ -34,7 +34,7 @@ class PendingEntry:
 
 
 @dataclass(frozen=True)
-class PendingUpdate:
+class IntentRecord:
     scope: str
     target: str
     key: str
@@ -56,7 +56,7 @@ class PendingUpdate:
 
 
 @dataclass(frozen=True)
-class AckOutcome:
+class AckReconciliation:
     status: str
     intent_id: str
     ack_frame_id: Optional[str]
@@ -76,13 +76,13 @@ class AckOutcome:
 
 
 @dataclass
-class PropertyState:
-    confirmed: Optional[ConfirmedState] = None
-    pending: "OrderedDict[str, PendingEntry]" = field(default_factory=OrderedDict)
+class LedgerPropertyState:
+    confirmed: Optional[LedgerConfirmedEntry] = None
+    pending: "OrderedDict[str, PendingIntentEntry]" = field(default_factory=OrderedDict)
 
 
 @dataclass(frozen=True)
-class StateStoreUpdate:
+class MirrorEvent:
     scope: str
     target: str
     key: str
@@ -96,15 +96,15 @@ class StateStoreUpdate:
 logger = logging.getLogger(__name__)
 
 
-class StateStore:
+class ClientStateLedger:
     """Track optimistic + confirmed values keyed by ``(scope, target, key)``."""
 
     def __init__(self, *, clock=time.time) -> None:
         self._clock = clock
-        self._state: MutableMapping[PropertyKey, PropertyState] = {}
+        self._state: MutableMapping[PropertyKey, LedgerPropertyState] = {}
         self._pending_index: Dict[str, PropertyKey] = {}
-        self._subscribers: Dict[PropertyKey, List[Callable[[StateStoreUpdate], None]]] = {}
-        self._global_subscribers: List[Callable[[StateStoreUpdate], None]] = []
+        self._subscribers: Dict[PropertyKey, List[Callable[[MirrorEvent], None]]] = {}
+        self._global_subscribers: List[Callable[[MirrorEvent], None]] = []
 
     # ------------------------------------------------------------------
     def apply_local(
@@ -120,12 +120,12 @@ class StateStore:
         timestamp: Optional[float] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         dedupe: bool = True,
-    ) -> PendingUpdate | None:
-        """Register a local mutation and return a pending update descriptor."""
+    ) -> IntentRecord | None:
+        """Register a local mutation and return an intent record for dispatch."""
 
         phase_normalized = (update_phase or "update").lower()
         property_key = (scope, target, key)
-        state = self._state.setdefault(property_key, PropertyState())
+        state = self._state.setdefault(property_key, LedgerPropertyState())
 
         metadata_dict = dict(metadata) if metadata is not None else None
         update_kind = None
@@ -153,7 +153,7 @@ class StateStore:
         ):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "store dedupe: scope=%s target=%s key=%s value=%r confirmed_ts=%s",
+                    "ledger dedupe: scope=%s target=%s key=%s value=%r confirmed_ts=%s",
                     scope,
                     target,
                     key,
@@ -165,7 +165,7 @@ class StateStore:
         timestamp_value = float(timestamp if timestamp is not None else self._clock())
 
         entry_metadata = dict(metadata_dict) if metadata_dict is not None else None
-        entry = PendingEntry(
+        entry = PendingIntentEntry(
             intent_id=intent_id,
             frame_id=frame_id,
             value=value,
@@ -178,7 +178,7 @@ class StateStore:
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "store pending add: scope=%s target=%s key=%s phase=%s value=%r pending_len=%d",
+                "ledger pending add: scope=%s target=%s key=%s phase=%s value=%r pending_len=%d",
                 scope,
                 target,
                 key,
@@ -195,7 +195,7 @@ class StateStore:
             projection_value = value
 
         pending_metadata = dict(metadata_dict) if metadata_dict is not None else None
-        return PendingUpdate(
+        return IntentRecord(
             scope=scope,
             target=target,
             key=key,
@@ -209,14 +209,14 @@ class StateStore:
         )
 
     # ------------------------------------------------------------------
-    def apply_ack(self, ack: AckState) -> AckOutcome:
+    def apply_ack(self, ack: AckState) -> AckReconciliation:
         """Reconcile an ``ack.state`` frame against pending optimistic entries."""
 
         payload = ack.payload
         frame_id = str(payload.in_reply_to)
         property_key = self._pending_index.pop(frame_id, None)
-        property_state: Optional[PropertyState] = None
-        pending_entry: Optional[PendingEntry] = None
+        property_state: Optional[LedgerPropertyState] = None
+        pending_entry: Optional[PendingIntentEntry] = None
 
         if property_key is not None:
             property_state = self._state.get(property_key)
@@ -254,7 +254,7 @@ class StateStore:
             if property_state is not None:
                 value_to_store = applied_value if applied_value is not None else pending_value
                 if value_to_store is not None:
-                    property_state.confirmed = ConfirmedState(
+                    property_state.confirmed = LedgerConfirmedEntry(
                         value=value_to_store,
                         timestamp=float(self._clock()),
                         origin="remote_ack",
@@ -280,7 +280,7 @@ class StateStore:
                     metadata = dict(property_state.confirmed.metadata)
 
         envelope = ack.envelope
-        outcome = AckOutcome(
+        outcome = AckReconciliation(
             status=status,
             intent_id=str(payload.intent_id),
             ack_frame_id=envelope.frame_id,
@@ -320,11 +320,11 @@ class StateStore:
         """Prime a property with authoritative baseline state."""
 
         property_key = (scope, target, key)
-        state = self._state.setdefault(property_key, PropertyState())
+        state = self._state.setdefault(property_key, LedgerPropertyState())
         for stale_frame in list(state.pending.keys()):
             self._pending_index.pop(stale_frame, None)
         state.pending.clear()
-        state.confirmed = ConfirmedState(
+        state.confirmed = LedgerConfirmedEntry(
             value=value,
             timestamp=float(timestamp) if timestamp is not None else float(self._clock()),
             origin=str(origin),
@@ -333,7 +333,7 @@ class StateStore:
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "store seed_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
+                "ledger seed_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
                 scope,
                 target,
                 key,
@@ -420,23 +420,23 @@ class StateStore:
         scope: str,
         target: str,
         key: str,
-        callback: Callable[[StateStoreUpdate], None],
+        callback: Callable[[MirrorEvent], None],
     ) -> None:
-        assert callable(callback), "StateStore subscriber must be callable"
+        assert callable(callback), "ClientStateLedger subscriber must be callable"
         property_key = (scope, target, key)
         listeners = self._subscribers.setdefault(property_key, [])
-        assert callback not in listeners, "StateStore subscriber already registered"
+        assert callback not in listeners, "ClientStateLedger subscriber already registered"
         listeners.append(callback)
 
-    def subscribe_all(self, callback: Callable[[StateStoreUpdate], None]) -> None:
-        assert callable(callback), "StateStore subscriber must be callable"
-        assert callback not in self._global_subscribers, "StateStore global subscriber already registered"
+    def subscribe_all(self, callback: Callable[[MirrorEvent], None]) -> None:
+        assert callable(callback), "ClientStateLedger subscriber must be callable"
+        assert callback not in self._global_subscribers, "ClientStateLedger global subscriber already registered"
         self._global_subscribers.append(callback)
 
     # ------------------------------------------------------------------
-    def _notify(self, property_key: PropertyKey, confirmed: ConfirmedState) -> None:
+    def _notify(self, property_key: PropertyKey, confirmed: LedgerConfirmedEntry) -> None:
         scope, target, key = property_key
-        update = StateStoreUpdate(
+        update = MirrorEvent(
             scope=scope,
             target=target,
             key=key,
@@ -481,11 +481,11 @@ class StateStore:
 
 
 __all__ = [
-    "ConfirmedState",
-    "PendingEntry",
-    "PendingUpdate",
-    "AckOutcome",
-    "PropertyState",
-    "StateStore",
-    "StateStoreUpdate",
+    "LedgerConfirmedEntry",
+    "PendingIntentEntry",
+    "IntentRecord",
+    "AckReconciliation",
+    "LedgerPropertyState",
+    "ClientStateLedger",
+    "MirrorEvent",
 ]

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from napari_cuda.client.control.pending_update_store import StateStore
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.protocol import build_ack_state
 
 
@@ -18,12 +18,12 @@ def _id_pairs():
 
 
 @pytest.fixture
-def store() -> StateStore:
+def store() -> ClientStateLedger:
     clock_steps = deque(float(x) for x in range(100, 200))
-    return StateStore(clock=lambda: clock_steps.popleft())
+    return ClientStateLedger(clock=lambda: clock_steps.popleft())
 
 
-def test_apply_local_tracks_pending_and_projection(store: StateStore) -> None:
+def test_apply_local_tracks_pending_and_projection(store: ClientStateLedger) -> None:
     ids = _id_pairs()
 
     intent1, frame1 = next(ids)
@@ -64,7 +64,7 @@ def test_apply_local_tracks_pending_and_projection(store: StateStore) -> None:
     assert debug["pending"][0]["value"] == pytest.approx(0.7)
 
 
-def test_apply_ack_accepted_updates_confirmed_state(store: StateStore) -> None:
+def test_apply_ack_accepted_updates_confirmed_state(store: ClientStateLedger) -> None:
     ids = _id_pairs()
 
     intent1, frame1 = next(ids)
@@ -115,7 +115,7 @@ def test_apply_ack_accepted_updates_confirmed_state(store: StateStore) -> None:
     assert debug["confirmed"]["value"] == pytest.approx(0.5)
 
 
-def test_apply_ack_rejected_reverts_to_confirmed(store: StateStore) -> None:
+def test_apply_ack_rejected_reverts_to_confirmed(store: ClientStateLedger) -> None:
     ids = _id_pairs()
     store.seed_confirmed("layer", "layer-2", "gamma", 0.9, timestamp=5.0)
 
@@ -155,7 +155,7 @@ def test_apply_ack_rejected_reverts_to_confirmed(store: StateStore) -> None:
     assert debug["confirmed"]["value"] == pytest.approx(0.9)
 
 
-def test_clear_pending_on_reconnect_resets_index(store: StateStore) -> None:
+def test_clear_pending_on_reconnect_resets_index(store: ClientStateLedger) -> None:
     ids = _id_pairs()
 
     intent1, frame1 = next(ids)
@@ -186,7 +186,7 @@ def test_clear_pending_on_reconnect_resets_index(store: StateStore) -> None:
     assert debug["pending"] == []
 
 
-def test_subscribe_all_receives_confirmed_updates(store: StateStore) -> None:
+def test_subscribe_all_receives_confirmed_updates(store: ClientStateLedger) -> None:
     events: list[Any] = []
 
     def _capture(update: Any) -> None:
@@ -204,7 +204,7 @@ def test_subscribe_all_receives_confirmed_updates(store: StateStore) -> None:
     assert update.metadata == {'axis_index': 0}
 
 
-def test_pending_state_snapshot_reports_confirmed_value(store: StateStore) -> None:
+def test_pending_state_snapshot_reports_confirmed_value(store: ClientStateLedger) -> None:
     store.seed_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
     snapshot = store.pending_state_snapshot('dims', '0', 'index')
@@ -217,7 +217,7 @@ def test_pending_state_snapshot_reports_confirmed_value(store: StateStore) -> No
     assert confirmed == 7
 
 
-def test_apply_local_duplicate_absolute_returns_none(store: StateStore) -> None:
+def test_apply_local_duplicate_absolute_returns_none(store: ClientStateLedger) -> None:
     store.seed_confirmed('layer', 'layer-4', 'gamma', 1.0)
 
     result = store.apply_local(
@@ -233,7 +233,7 @@ def test_apply_local_duplicate_absolute_returns_none(store: StateStore) -> None:
     assert result is None
 
 
-def test_apply_local_delta_update_not_suppressed(store: StateStore) -> None:
+def test_apply_local_delta_update_not_suppressed(store: ClientStateLedger) -> None:
     store.seed_confirmed('dims', '0', 'step', 1, metadata={'axis_index': 0})
 
     pending = store.apply_local(

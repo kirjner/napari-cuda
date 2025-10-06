@@ -9,16 +9,16 @@ import pytest
 
 from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.control.pending_update_store import StateStore, PendingUpdate
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
 
 class FakeDispatch:
     def __init__(self) -> None:
-        self.calls: list[tuple[PendingUpdate, str]] = []
+        self.calls: list[tuple[IntentRecord, str]] = []
 
-    def __call__(self, pending: PendingUpdate, origin: str) -> bool:
+    def __call__(self, pending: IntentRecord, origin: str) -> bool:
         self.calls.append((pending, origin))
         return True
 
@@ -65,7 +65,7 @@ def _make_notify_dims_frame(
 def _make_state() -> tuple[
     control_actions.ControlStateContext,
     ClientLoopState,
-    StateStore,
+    ClientStateLedger,
     FakeDispatch,
 ]:
     env = SimpleNamespace(
@@ -80,12 +80,12 @@ def _make_state() -> tuple[
     loop_state = ClientLoopState()
     loop_state.control_state = state
     clock_steps = deque(float(x) for x in range(100, 200))
-    store = StateStore(clock=lambda: clock_steps.popleft())
+    store = ClientStateLedger(clock=lambda: clock_steps.popleft())
     dispatch = FakeDispatch()
     return state, loop_state, store, dispatch
 
 
-def _ack_from_pending(pending: PendingUpdate, *, status: str, applied_value: Any | None = None, error: dict[str, Any] | None = None) -> Any:
+def _ack_from_pending(pending: IntentRecord, *, status: str, applied_value: Any | None = None, error: dict[str, Any] | None = None) -> Any:
     payload: dict[str, Any] = {
         'intent_id': pending.intent_id,
         'in_reply_to': pending.frame_id,
