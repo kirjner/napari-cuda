@@ -306,17 +306,24 @@ class EGLHeadlessServer:
 
         task.add_done_callback(_log_task_result)
 
-    async def _await_adapter_level_ready(self, timeout_s: float = 0.5) -> None:
-        """Wait briefly for the adapter's multiscale level to stabilize.
-
-        This reduces races where the first dims.update after connect is built
-        before the adapter selects the intended level. Returns after timeout or
-        when two consecutive reads of (current_level, level_shape) match.
-        """
-        start = time.perf_counter()
+    async def _await_worker_bootstrap(self, timeout_s: float = 0.5) -> None:
+        """Wait for the worker to signal readiness and the multiscale level to stabilize."""
+        deadline = time.perf_counter() + max(0.0, float(timeout_s))
         last: tuple[int | None, tuple[int, ...] | None] | None = None
-        # Wait for worker and scene source to appear, then for level/shape to stabilize
-        while (time.perf_counter() - start) < max(0.0, float(timeout_s)):
+        lifecycle = self._worker_lifecycle
+        ready_event = lifecycle.ready_event
+
+        if not ready_event.is_set():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return
+            loop = asyncio.get_running_loop()
+            try:
+                await asyncio.wait_for(loop.run_in_executor(None, ready_event.wait), remaining)
+            except asyncio.TimeoutError:
+                return
+
+        while time.perf_counter() < deadline:
             try:
                 if self._worker is None:
                     await asyncio.sleep(0.01)

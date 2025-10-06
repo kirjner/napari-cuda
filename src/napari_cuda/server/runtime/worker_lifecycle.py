@@ -105,6 +105,7 @@ class WorkerLifecycleState:
     worker: Optional[EGLRendererWorker] = None
     thread: Optional[threading.Thread] = None
     stop_event: threading.Event = field(default_factory=threading.Event)
+    ready_event: threading.Event = field(default_factory=threading.Event)
     scene_seq: int = 0
 
 
@@ -115,6 +116,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         raise RuntimeError("worker thread already running")
 
     state.stop_event.clear()
+    state.ready_event.clear()
     state.scene_seq = int(server._scene.last_scene_seq)
 
     def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
@@ -242,7 +244,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             worker._capture.pipeline.set_raw_dump_budget(worker._raw_dump_budget)
             worker._capture.cuda.set_force_tight_pitch(worker._debug_policy.worker.force_tight_pitch)
             worker._log_debug_policy_once()
-            worker._is_ready = True
             logger.info(
                 "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
                 worker.width,
@@ -289,6 +290,9 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
             )
             loop.call_soon_threadsafe(server._process_worker_notifications)
+
+            worker._is_ready = True
+            state.ready_event.set()
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
@@ -406,6 +410,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 except Exception as cleanup_exc:  # pragma: no cover - defensive cleanup
                     logger.debug("Worker cleanup error: %s", cleanup_exc)
             state.worker = None
+            state.ready_event.clear()
 
     thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
     state.thread = thread
@@ -416,6 +421,7 @@ def stop_worker(state: WorkerLifecycleState) -> None:
     """Signal the render worker to stop and wait for the thread to exit."""
 
     state.stop_event.set()
+    state.ready_event.clear()
     thread = state.thread
     if thread and thread.is_alive():
         thread.join(timeout=3.0)

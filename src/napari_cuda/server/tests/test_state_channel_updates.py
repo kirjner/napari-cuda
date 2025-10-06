@@ -734,7 +734,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             layer_controls=server._scene.layer_controls,
         )
 
-        server._await_adapter_level_ready = lambda _timeout: asyncio.sleep(0)
+        server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
         server._state_send = lambda _ws, text: captured.append(json.loads(text))
         server._update_scene_manager = lambda: None
         server._schedule_coro = lambda coro, _label: scheduled.append(coro)
@@ -906,7 +906,7 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
         server, scheduled, captured = _make_server()
         scene_snap, scene_level_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
 
-        server._await_adapter_level_ready = lambda _timeout: asyncio.sleep(0)
+        server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
         server._state_send = lambda _ws, text: captured.append(json.loads(text))
         server._pixel_channel = SimpleNamespace(last_avcc=b"avcc")
         server._pixel_config = SimpleNamespace()

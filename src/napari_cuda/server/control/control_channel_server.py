@@ -813,6 +813,7 @@ async def _emit_scene_baseline(
         session_id = _state_session(ws)
         if not session_id:
             return
+        sequencer = _state_sequencer(ws, NOTIFY_SCENE_TYPE)
         frame = build_notify_scene_snapshot(
             session_id=session_id,
             viewer=payload.viewer,
@@ -820,7 +821,7 @@ async def _emit_scene_baseline(
             policies=payload.policies,
             metadata=payload.metadata,
             timestamp=timestamp,
-            sequencer=_state_sequencer(ws, NOTIFY_SCENE_TYPE),
+            sequencer=sequencer,
         )
         await _send_frame(server, ws, frame)
 
@@ -883,7 +884,7 @@ async def _emit_layer_baseline(
     ws: Any,
     *,
     plan: ResumePlan | None,
-    fallback_controls: Sequence[tuple[str, Mapping[str, Any]]],
+    default_controls: Sequence[tuple[str, Mapping[str, Any]]],
 ) -> None:
     store = _history_store(server)
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
@@ -892,12 +893,12 @@ async def _emit_layer_baseline(
                 await _send_layer_snapshot(server, ws, snapshot)
         return
 
-    if not fallback_controls:
+    if not default_controls:
         return
 
     if store is not None:
         now = time.time()
-        for layer_id, changes in fallback_controls:
+        for layer_id, changes in default_controls:
             payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", changes=changes)
             snapshot = store.delta_envelope(
                 NOTIFY_LAYERS_TYPE,
@@ -908,7 +909,7 @@ async def _emit_layer_baseline(
             await _send_layer_snapshot(server, ws, snapshot)
         return
 
-    for layer_id, changes in fallback_controls:
+    for layer_id, changes in default_controls:
         await _broadcast_layers_delta(
             server,
             layer_id=layer_id,
@@ -2786,10 +2787,10 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
 
     scene_payload: NotifyScenePayload | None = None
     step_list: list[int] = []
-    fallback_controls: list[tuple[str, Mapping[str, Any]]] = []
+    default_controls: list[tuple[str, Mapping[str, Any]]] = []
 
     try:
-        await server._await_adapter_level_ready(0.5)
+        await server._await_worker_bootstrap(0.5)
         try:
             if hasattr(server, "_update_scene_manager"):
                 server._update_scene_manager()
@@ -2825,8 +2826,12 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             pending = latest_updates.get(layer_id, {})
             for key, value in pending.items():
                 controls[str(key)] = value
+            if not controls and "controls" in layer_snapshot.block:
+                block_controls = layer_snapshot.block["controls"]
+                assert isinstance(block_controls, Mapping), "layer snapshot controls missing mapping"
+                controls.update({str(key): value for key, value in block_controls.items()})
             if controls:
-                fallback_controls.append((layer_id, controls))
+                default_controls.append((layer_id, controls))
     except Exception:
         logger.debug("Initial scene baseline prep failed", exc_info=True)
 
@@ -2855,7 +2860,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             server,
             ws,
             plan=layers_plan,
-            fallback_controls=fallback_controls,
+            default_controls=default_controls,
         )
     except Exception:
         logger.exception("Initial layer baseline send failed")
