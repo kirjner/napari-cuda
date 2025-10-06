@@ -13,6 +13,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.state_update_actions import ControlStateContext
     from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
+    from napari_cuda.client.control.emitters.napari_dims_intent_emitter import NapariDimsIntentEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,14 @@ class NapariDimsMirror:
         self._presenter = presenter
         self._log_dims_info = bool(log_dims_info)
         self._notify_first_ready = notify_first_ready
+        self._emitter: Optional["NapariDimsIntentEmitter"] = None
         ledger.subscribe_all(self._handle_ledger_update)
 
     def set_logging(self, enabled: bool) -> None:
         self._log_dims_info = bool(enabled)
+
+    def attach_emitter(self, emitter: "NapariDimsIntentEmitter") -> None:
+        self._emitter = emitter
 
     def ingest_dims_notify(self, frame: NotifyDimsFrame) -> None:
         """Record a ``notify.dims`` snapshot and mirror it into napari."""
@@ -86,6 +91,31 @@ class NapariDimsMirror:
             )
 
         self._mirror_confirmed_dims(reason="notify", payload=snapshot_payload)
+
+    def replay_last_payload(self) -> None:
+        """Replay the last confirmed dims payload into the viewer."""
+
+        payload = self._loop_state.last_dims_payload
+        if not payload:
+            return
+        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
+        if viewer_obj is None:
+            return
+        emitter = self._emitter
+        assert emitter is not None, "mirror requires a dims emitter"
+        with emitter.suppressing():
+            mirror_dims_to_viewer(
+                viewer_obj,
+                self._ui_call,
+                current_step=payload.get('current_step'),
+                ndisplay=payload.get('ndisplay'),
+                ndim=payload.get('ndim'),
+                dims_range=payload.get('dims_range'),
+                order=payload.get('order'),
+                axis_labels=payload.get('axis_labels'),
+                sizes=payload.get('sizes'),
+                displayed=payload.get('displayed'),
+            )
 
     # ------------------------------------------------------------------
     def _handle_ledger_update(self, update: MirrorEvent) -> None:
@@ -162,22 +192,25 @@ class NapariDimsMirror:
                 confirmed_payload.get('ndisplay'),
             )
 
-        if self._presenter is not None:
-            self._presenter.apply_dims_update(dict(confirmed_payload))
+        emitter = self._emitter
+        assert emitter is not None, "mirror requires a dims emitter"
+        with emitter.suppressing():
+            if self._presenter is not None:
+                self._presenter.apply_dims_update(dict(confirmed_payload))
 
-        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
-        mirror_dims_to_viewer(
-            viewer_obj,
-            self._ui_call,
-            current_step=confirmed_payload.get('current_step'),
-            ndisplay=confirmed_payload.get('ndisplay'),
-            ndim=confirmed_payload.get('ndim'),
-            dims_range=confirmed_payload.get('dims_range'),
-            order=confirmed_payload.get('order'),
-            axis_labels=confirmed_payload.get('axis_labels'),
-            sizes=confirmed_payload.get('sizes'),
-            displayed=confirmed_payload.get('displayed'),
-        )
+            viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
+            mirror_dims_to_viewer(
+                viewer_obj,
+                self._ui_call,
+                current_step=confirmed_payload.get('current_step'),
+                ndisplay=confirmed_payload.get('ndisplay'),
+                ndim=confirmed_payload.get('ndim'),
+                dims_range=confirmed_payload.get('dims_range'),
+                order=confirmed_payload.get('order'),
+                axis_labels=confirmed_payload.get('axis_labels'),
+                sizes=confirmed_payload.get('sizes'),
+                displayed=confirmed_payload.get('displayed'),
+            )
 
 
 # Shared helpers (lifted from the legacy state_update_actions module)
@@ -415,29 +448,7 @@ def mirror_dims_to_viewer(
     _apply()
 
 
-def replay_last_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState", viewer_ref, ui_call) -> None:
-    payload = loop_state.last_dims_payload
-    if not payload:
-        return
-    viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-    if viewer_obj is None:
-        return
-    mirror_dims_to_viewer(
-        viewer_obj,
-        ui_call,
-        current_step=payload.get('current_step'),
-        ndisplay=payload.get('ndisplay'),
-        ndim=payload.get('ndim'),
-        dims_range=payload.get('dims_range'),
-        order=payload.get('order'),
-        axis_labels=payload.get('axis_labels'),
-        sizes=payload.get('sizes'),
-        displayed=payload.get('displayed'),
-    )
-
-
 __all__ = [
     "NapariDimsMirror",
     "mirror_dims_to_viewer",
-    "replay_last_dims_payload",
 ]

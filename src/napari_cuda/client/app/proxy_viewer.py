@@ -7,7 +7,7 @@ state channel. No direct sockets or legacy dims.set paths remain here.
 
 import logging
 import os
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Sequence
 
 import napari
 from qtpy.QtWidgets import QApplication
@@ -18,7 +18,6 @@ try:
 except Exception:  # pragma: no cover
     from pydantic import PrivateAttr  # type: ignore
 from napari.components import LayerList, Dims, Camera
-from napari_cuda.client.state import DimsBridge
 
 if TYPE_CHECKING:
     # This import reveals napari's intentional architectural coupling between
@@ -76,8 +75,8 @@ class ProxyViewer(ViewerModel):
     _connection_pending: bool = PrivateAttr(default=False)
     # Bridge to coordinator (thin client path)
     _state_sender = PrivateAttr(default=None)
-    _dims_bridge: DimsBridge | None = PrivateAttr(default=None)
     _log_dims_info: bool = PrivateAttr(default=False)
+    _suppress_forward_flag: bool = PrivateAttr(default=False)
 
     def __init__(self, server_host: str = 'localhost', server_port: int = 8081, offline: bool = False, **kwargs):
         """Initialize proxy viewer connected to the remote coordinator."""
@@ -101,28 +100,7 @@ class ProxyViewer(ViewerModel):
         except Exception:
             self._log_dims_info = False
 
-        tx_interval = 10
-        try:
-            raw_interval = os.getenv('NAPARI_CUDA_SLIDER_TX_MS')
-            if raw_interval is not None and raw_interval.strip():
-                tx_interval = max(0, int(raw_interval))
-        except Exception:
-            logger.debug('ProxyViewer: slider interval parse failed', exc_info=True)
-
-        self._dims_bridge = DimsBridge(
-            viewer=self,
-            logger=logger.getChild('dims'),
-            tx_interval_ms=tx_interval,
-            log_dims_info=self._log_dims_info,
-        )
-
         logger.info('ProxyViewer initialized for %s:%s', server_host, server_port)
-    def __setattr__(self, name: str, value: object) -> None:
-        if name == '_log_dims_info':
-            dims_projection = getattr(self, '_dims_bridge', None)
-            if dims_projection is not None:  # pragma: no branch - guard only
-                dims_projection.set_logging(bool(value))
-        super().__setattr__(name, value)
 
 
     # Expose read-only properties for host/port
@@ -155,27 +133,11 @@ class ProxyViewer(ViewerModel):
         """
         return
     
-    def _on_dims_change(self, event=None):
-        projection = self._dims_bridge
-        if projection is None:
-            return
-        projection.handle_dims_change(event)
-        return
-
-    def _on_ndisplay_change(self, event=None):
-        projection = self._dims_bridge
-        if projection is None:
-            return
-        projection.handle_ndisplay_change(event)
-
-
     # --- Streaming client bridge -------------------------------------------------
     def attach_state_sender(self, sender) -> None:
         """Attach a coordinator-like sender for thin client state forwarding."""
         self._state_sender = sender
         assert hasattr(sender, '_control_state'), "state sender missing control_state"
-        if self._dims_bridge is not None:
-            self._dims_bridge.attach_state_sender(sender)
 
     def _apply_remote_dims_update(
         self,
@@ -189,19 +151,72 @@ class ProxyViewer(ViewerModel):
         sizes=None,
         displayed=None,
     ) -> None:
-        """Delegate server-driven dims updates to the projection helper."""
-        if self._dims_bridge is None:
+        dims = self.dims
+        prev_flag = self._suppress_forward_flag
+        self._suppress_forward_flag = True
+        try:
+            if ndim is not None:
+                dims.ndim = int(ndim)
+            if dims_range is not None:
+                coerced = tuple(self._coerce_range(entry) for entry in dims_range)
+                dims.range = coerced
+            elif sizes is not None:
+                dims.range = tuple((0.0, float(int(size) - 1), 1.0) for size in sizes)
+            if order is not None:
+                dims.order = self._coerce_order(order, axis_labels)
+            if axis_labels is not None:
+                dims.axis_labels = tuple(str(lbl) for lbl in axis_labels)
+            if ndisplay is not None:
+                dims.ndisplay = int(ndisplay)
+            if displayed is not None:
+                self._apply_displayed_axes(displayed)
+            if current_step is not None:
+                step_tuple = tuple(int(value) for value in current_step)
+                dims.current_step = step_tuple
+                dims.point = tuple(float(x) for x in current_step)
+        except Exception:
+            logger.debug("ProxyViewer: remote dims apply failed", exc_info=True)
+        finally:
+            self._suppress_forward_flag = prev_flag
+
+    @staticmethod
+    def _coerce_range(entry) -> tuple[float, float, float]:
+        if entry is None:
+            return (0.0, 0.0, 1.0)
+        if len(entry) == 2:
+            start, stop = entry
+            step = 1.0
+        elif len(entry) >= 3:
+            start, stop, step = entry[:3]
+        else:
+            raise ValueError("range entry must contain at least 2 values")
+        return (float(start), float(stop), float(step))
+
+    def _coerce_order(self, order, axis_labels) -> tuple[int, ...]:
+        if not order:
+            return tuple()
+        try:
+            return tuple(int(x) for x in order)
+        except Exception:
+            if axis_labels is None:
+                raise
+            label_to_idx = {str(lbl): idx for idx, lbl in enumerate(axis_labels)}
+            return tuple(int(label_to_idx[str(lbl)]) for lbl in order)
+
+    def _apply_displayed_axes(self, displayed) -> None:
+        dims = self.dims
+        values = [int(x) for x in displayed]
+        values = [x for x in values if 0 <= x < dims.ndim]
+        if not values:
             return
-        self._dims_bridge.apply_remote(
-            current_step=current_step,
-            ndisplay=ndisplay,
-            ndim=ndim,
-            dims_range=dims_range,
-            order=order,
-            axis_labels=axis_labels,
-            sizes=sizes,
-            displayed=displayed,
-        )
+        current_order = list(dims.order) or list(range(dims.ndim))
+        base = [axis for axis in current_order if axis not in values]
+        base.extend(axis for axis in values if axis not in base)
+        for axis in range(dims.ndim):
+            if axis not in base:
+                base.insert(0, axis)
+        if len(base) == len(current_order):
+            dims.order = tuple(base)
 
 
 
@@ -244,8 +259,6 @@ class ProxyViewer(ViewerModel):
     
     def close(self):
         """Close connection to server and window if exists."""
-        if self._dims_bridge is not None:
-            self._dims_bridge.shutdown()
         if self._window:
             self._window.close()
         logger.info("ProxyViewer closed")
@@ -253,12 +266,8 @@ class ProxyViewer(ViewerModel):
     @property
     def _suppress_forward(self) -> bool:  # noqa: D401 - legacy compatibility
         """Expose suppression flag for legacy callers."""
-        if self._dims_bridge is None:
-            return False
-        return self._dims_bridge.suppress_forward
+        return bool(self._suppress_forward_flag)
 
     @_suppress_forward.setter
     def _suppress_forward(self, value: bool) -> None:
-        if self._dims_bridge is not None:
-            self._dims_bridge.suppress_forward = bool(value)
-
+        self._suppress_forward_flag = bool(value)

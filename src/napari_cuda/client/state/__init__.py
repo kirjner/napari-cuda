@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .bridges import DimsBridge, LayerStateBridge
+from .bridges import LayerStateBridge
 
-__all__ = ["DimsBridge", "LayerStateBridge"]
+__all__ = ["LayerStateBridge"]

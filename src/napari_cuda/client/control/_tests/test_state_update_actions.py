@@ -11,6 +11,7 @@ from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
 from napari_cuda.client.control.mirrors.napari_dims_mirror import NapariDimsMirror
+from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
@@ -104,31 +105,6 @@ def _ack_from_pending(pending: IntentRecord, *, status: str, applied_value: Any 
     )
 
 
-def test_toggle_ndisplay_requires_ready() -> None:
-    state, loop_state, ledger, dispatch = _make_state()
-
-    sent = control_actions.toggle_ndisplay(state, loop_state, ledger, dispatch, origin='ui')
-
-    assert sent is False
-    assert dispatch.calls == []
-
-
-def test_toggle_ndisplay_dispatches_state_update() -> None:
-    state, loop_state, ledger, dispatch = _make_state()
-    state.dims_ready = True
-
-    sent = control_actions.toggle_ndisplay(state, loop_state, ledger, dispatch, origin='ui')
-
-    assert sent is True
-    pending, origin = dispatch.calls[-1]
-    assert origin == 'ui'
-    assert pending.scope == 'view'
-    assert pending.target == 'main'
-    assert pending.key == 'ndisplay'
-    assert pending.value == 3
-    assert pending.update_phase == 'start'
-
-
 def test_handle_dims_update_seeds_state_ledger() -> None:
     state, loop_state, ledger, dispatch = _make_state()
 
@@ -158,6 +134,16 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         log_dims_info=False,
         notify_first_ready=lambda: ready_calls.append(None),
     )
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
 
     mirror.ingest_dims_notify(frame)
 
@@ -182,7 +168,7 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
 
 
 def test_handle_dims_update_modes_volume_flag() -> None:
-    state, loop_state, ledger, _dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     presenter = PresenterStub()
 
     frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=3, mode='volume')
@@ -197,6 +183,17 @@ def test_handle_dims_update_modes_volume_flag() -> None:
         log_dims_info=False,
     )
 
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
+
     mirror.ingest_dims_notify(frame)
 
     assert state.dims_meta['mode'] == 'volume'
@@ -206,7 +203,7 @@ def test_handle_dims_update_modes_volume_flag() -> None:
 
 
 def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
-    state, loop_state, ledger, _dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     viewer = ViewerStub()
     presenter = PresenterStub()
 
@@ -219,6 +216,28 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
         presenter=presenter,
         log_dims_info=False,
     )
+
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
+
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
 
     state.dims_meta.update(
         {
@@ -246,7 +265,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
 
 
 def test_scene_level_then_dims_updates_slider_bounds() -> None:
-    state, loop_state, ledger, _dispatch = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     viewer = ViewerStub()
     presenter = PresenterStub()
 
@@ -259,6 +278,17 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
         presenter=presenter,
         log_dims_info=False,
     )
+
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
 
 
     state.dims_meta.update(
@@ -348,7 +378,7 @@ def test_apply_scene_policies_populates_multiscale_state() -> None:
 
 
 def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
-    state, loop_state, ledger, _ = _make_state()
+    state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta.update(
         {
@@ -360,7 +390,7 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     viewer = ViewerStub()
     presenter = PresenterStub()
 
-    NapariDimsMirror(
+    mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
@@ -369,6 +399,17 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         presenter=presenter,
         log_dims_info=False,
     )
+
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
 
 
     pending = ledger.apply_local(
@@ -418,17 +459,17 @@ def test_dims_step_attaches_axis_metadata() -> None:
     state.dims_ready = True
     state.dims_meta['current_step'] = [5, 0, 0]
 
-    sent = control_actions.dims_step(
-        state,
-        loop_state,
-        ledger,
-        dispatch,
-        axis=0,
-        delta=1,
-        origin='ui',
-        viewer_ref=lambda: None,
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
         ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
     )
+
+    sent = emitter.dims_step(axis=0, delta=1, origin='ui')
 
     assert sent is True
     pending, _ = dispatch.calls[-1]
@@ -446,17 +487,17 @@ def test_dims_set_index_suppresses_duplicate_value() -> None:
     state.dims_meta['current_step'] = [7]
     ledger.record_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
-    sent = control_actions.dims_set_index(
-        state,
-        loop_state,
-        ledger,
-        dispatch,
-        axis=0,
-        value=7,
-        origin='ui',
-        viewer_ref=lambda: None,
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
         ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
     )
+
+    sent = emitter.dims_set_index(axis=0, value=7, origin='ui')
 
     assert sent is False
     assert dispatch.calls == []
@@ -496,22 +537,23 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         log_dims_info=False,
     )
 
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
+
     frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
 
     mirror.ingest_dims_notify(frame)
 
     # Emit a new intent that should be rejected
-    control_actions.dims_set_index(
-        state,
-        loop_state,
-        ledger,
-        dispatch,
-        axis='primary',
-        value=7,
-        origin='ui',
-        viewer_ref=lambda: None,
-        ui_call=None,
-    )
+    emitter.dims_set_index('primary', 7, origin='ui')
 
     pending, _ = dispatch.calls[-1]
     ack = _ack_from_pending(
@@ -539,7 +581,16 @@ def test_handle_generic_ack_updates_view_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
 
-    control_actions.view_set_ndisplay(state, loop_state, ledger, dispatch, 3, origin='ui')
+    emitter2 = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    emitter2.view_set_ndisplay(3, origin='ui')
     pending, _ = dispatch.calls[-1]
 
     ack = _ack_from_pending(pending, status='accepted', applied_value=2)

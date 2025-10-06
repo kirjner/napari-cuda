@@ -86,8 +86,11 @@ def _make_loop() -> ClientStreamLoop:
     )
     loop._widget_to_video = lambda x, y: (float(x), float(y))
     loop._video_delta_to_canvas = lambda dx, dy: (float(dx), float(dy))
+    loop._dims_mirror = None
+    loop._dims_emitter = None
+    loop._slider_tx_interval_ms = 10
 
-    loop._initialize_mirrors()
+    loop._initialize_mirrors_and_emitters()
 
     return loop
 
@@ -95,7 +98,8 @@ def _make_loop() -> ClientStreamLoop:
 def test_toggle_ndisplay_requires_ready() -> None:
     loop = _make_loop()
 
-    assert loop.toggle_ndisplay(origin='ui') is False
+    with pytest.raises(AssertionError):
+        loop.toggle_ndisplay(origin='ui')
     assert loop._state_channel_stub.sent_frames == []
 
 

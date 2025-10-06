@@ -58,6 +58,7 @@ class ClientLoopConfig:
     resize_debounce_ms: int
     input_log: bool
     zoom_base: float
+    slider_tx_ms: int
 
 
 def load_client_loop_config() -> ClientLoopConfig:
@@ -101,6 +102,9 @@ def load_client_loop_config() -> ClientLoopConfig:
     input_log = env_bool("NAPARI_CUDA_INPUT_LOG", False)
 
     zoom_base = float(env_float("NAPARI_CUDA_ZOOM_BASE", 1.1))
+    slider_tx_ms = _optional_int("NAPARI_CUDA_SLIDER_TX_MS")
+    if slider_tx_ms is None or slider_tx_ms < 0:
+        slider_tx_ms = 10
 
     return ClientLoopConfig(
         warmup_ms_override=warmup_ms_override,
@@ -129,4 +133,5 @@ def load_client_loop_config() -> ClientLoopConfig:
         resize_debounce_ms=resize_debounce_ms,
         input_log=input_log,
         zoom_base=zoom_base,
+        slider_tx_ms=int(slider_tx_ms),
     )
