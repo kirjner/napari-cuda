@@ -41,6 +41,7 @@ from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFa
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.runtime.client_loop import warmup, camera, loop_lifecycle
 from napari_cuda.client.control import state_update_actions as control_actions
+from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
 from napari_cuda.client.control.mirrors import napari_dims_mirror
 from napari_cuda.client.runtime.client_loop.scheduler_helpers import (
     init_wake_scheduler,
@@ -183,6 +184,7 @@ class ClientStreamLoop:
         self._pending_commands: Dict[str, Future] = {}
         self._command_catalog: tuple[str, ...] = ()
         self._log_dims_info: bool = False
+        self._slider_tx_interval_ms = int(getattr(self._env_cfg, 'slider_tx_ms', 0))
         backoff_env = os.getenv('NAPARI_CUDA_KEYFRAME_BACKOFF_S', '1.0') or '1.0'
         try:
             self._keyframe_backoff_s = max(0.0, float(backoff_env))
@@ -226,6 +228,7 @@ class ClientStreamLoop:
         self._layer_registry = RemoteLayerRegistry()
         self._layer_registry.add_listener(self._on_registry_snapshot)
         self._dims_mirror: napari_dims_mirror.NapariDimsMirror | None = None
+        self._dims_emitter: NapariDimsIntentEmitter | None = None
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         self._state_session_metadata: "SessionMetadata | None" = None
@@ -390,7 +393,7 @@ class ClientStreamLoop:
         self._loop_state.in_present = False
 
     def start(self) -> None:
-        self._initialize_mirrors()
+        self._initialize_mirrors_and_emitters()
         loop_lifecycle.start_loop(self)
 
     def _enqueue_frame(self, frame: object) -> None:
@@ -622,12 +625,10 @@ class ClientStreamLoop:
         _invoke()
 
     def _replay_last_dims_payload(self) -> None:
-        napari_dims_mirror.replay_last_dims_payload(
-            self._control_state,
-            self._loop_state,
-            self._viewer_mirror,
-            self._ui_call,
-        )
+        mirror = self._dims_mirror
+        if mirror is None:
+            return
+        mirror.replay_last_payload()
 
     def _handle_scene_snapshot(self, frame: NotifySceneFrame) -> None:
         """Cache latest notify.scene frame and forward to registry."""
@@ -999,16 +1000,14 @@ class ClientStreamLoop:
 
     # --- Input mapping: wheel -> dims.intent.step (primary axis) ---------------------
     def _on_wheel_for_dims(self, data: dict) -> None:
-        control_actions.handle_wheel_for_dims(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            data,
-            viewer_ref=self._viewer_mirror,
-            ui_call=self._ui_call,
-            log_dims_info=self._log_dims_info,
-        )
+        emitter = self._dims_emitter
+        if emitter is None:
+            logger.debug("wheel event skipped: emitter unavailable")
+            return
+        try:
+            emitter.handle_wheel(data)
+        except Exception:
+            logger.debug("wheel handler failed", exc_info=True)
 
     # Shortcut-driven stepping via intents (arrows/page)
     # --- Camera ops: zoom/pan/reset -----------------------------------------------
@@ -1072,20 +1071,36 @@ class ClientStreamLoop:
     def _current_viewer(self) -> object | None:
         return self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
 
-    def _initialize_mirrors(self) -> None:
-        if self._dims_mirror is not None:
-            return
-        self._dims_mirror = napari_dims_mirror.NapariDimsMirror(
-            ledger=self._state_ledger,
-            state=self._control_state,
-            loop_state=self._loop_state,
-            viewer_ref=self._current_viewer,
-            ui_call=self._ui_call,
-            presenter=self._presenter_facade,
-            log_dims_info=self._log_dims_info,
-            notify_first_ready=self._notify_first_dims_ready,
-        )
+    def _initialize_mirrors_and_emitters(self) -> None:
+        if self._dims_mirror is None:
+            self._dims_mirror = napari_dims_mirror.NapariDimsMirror(
+                ledger=self._state_ledger,
+                state=self._control_state,
+                loop_state=self._loop_state,
+                viewer_ref=self._current_viewer,
+                ui_call=self._ui_call,
+                presenter=self._presenter_facade,
+                log_dims_info=self._log_dims_info,
+                notify_first_ready=self._notify_first_dims_ready,
+            )
+
+        tx_interval = int(getattr(self, '_slider_tx_interval_ms', 0))
+        if self._dims_emitter is None:
+            self._dims_emitter = NapariDimsIntentEmitter(
+                ledger=self._state_ledger,
+                state=self._control_state,
+                loop_state=self._loop_state,
+                dispatch_state_update=self._dispatch_state_update,
+                ui_call=self._ui_call,
+                log_dims_info=self._log_dims_info,
+                tx_interval_ms=tx_interval,
+            )
+        else:
+            self._dims_emitter.set_tx_interval_ms(tx_interval)
+
         self._dims_mirror.set_logging(self._log_dims_info)
+        self._dims_emitter.set_logging(self._log_dims_info)
+        self._dims_mirror.attach_emitter(self._dims_emitter)
 
     # --- Public UI/state bridge methods -------------------------------------------
     def attach_viewer_proxy(self, viewer: object) -> None:
@@ -1097,6 +1112,9 @@ class ClientStreamLoop:
         """
         self._viewer_mirror = weakref.ref(viewer)  # type: ignore[attr-defined]
         self._presenter_facade.set_viewer_mirror(viewer)
+        self._initialize_mirrors_and_emitters()
+        if self._dims_emitter is not None:
+            self._dims_emitter.attach_viewer(viewer)
         self._replay_last_dims_payload()
 
     @property
@@ -1171,30 +1189,18 @@ class ClientStreamLoop:
         )
 
     def dims_step(self, axis: int | str, delta: int, *, origin: str = 'ui') -> bool:
-        return control_actions.dims_step(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            axis,
-            delta,
-            origin=origin,
-            viewer_ref=self._viewer_mirror,
-            ui_call=self._ui_call,
-        )
+        emitter = self._dims_emitter
+        if emitter is None:
+            logger.debug("dims_step skipped: emitter unavailable")
+            return False
+        return emitter.dims_step(axis, delta, origin=origin)
 
     def dims_set_index(self, axis: int | str, value: int, *, origin: str = 'ui') -> bool:
-        return control_actions.dims_set_index(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            axis,
-            value,
-            origin=origin,
-            viewer_ref=self._viewer_mirror,
-            ui_call=self._ui_call,
-        )
+        emitter = self._dims_emitter
+        if emitter is None:
+            logger.debug("dims_set_index skipped: emitter unavailable")
+            return False
+        return emitter.dims_set_index(axis, value, origin=origin)
 
     # --- Volume/multiscale intent senders --------------------------------------
     def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
@@ -1269,26 +1275,21 @@ class ClientStreamLoop:
         )
 
     def view_set_ndisplay(self, ndisplay: int, *, origin: str = 'ui') -> bool:
-        return control_actions.view_set_ndisplay(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            ndisplay,
-            origin=origin,
-        )
+        emitter = self._dims_emitter
+        if emitter is None:
+            logger.debug("view_set_ndisplay skipped: emitter unavailable")
+            return False
+        return emitter.view_set_ndisplay(ndisplay, origin=origin)
 
     def current_ndisplay(self) -> Optional[int]:
         return control_actions.current_ndisplay(self._control_state)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
-        return control_actions.toggle_ndisplay(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            origin=origin,
-        )
+        emitter = self._dims_emitter
+        if emitter is None:
+            logger.debug("toggle_ndisplay skipped: emitter unavailable")
+            return False
+        return emitter.toggle_ndisplay(origin=origin)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
         camera.handle_wheel_zoom(

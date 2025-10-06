@@ -75,7 +75,6 @@ class NapariDimsIntentEmitter:
 
         self._viewer_ref = weakref.ref(viewer)
         self._viewer_dims = dims
-        setattr(viewer, '_attach_control_runtime', self._attach_control_runtime)
         self._sync_last_step_from_viewer()
 
     def detach_viewer(self) -> None:
@@ -426,6 +425,3 @@ class NapariDimsIntentEmitter:
             self._play_axis = int(changed_axis)
 
 __all__ = ["NapariDimsIntentEmitter"]
-    def _attach_control_runtime(self, runtime) -> None:
-        setattr(self, '_state_sender', runtime)
-        runtime._dims_emitter = self
