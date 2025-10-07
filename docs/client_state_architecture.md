@@ -72,6 +72,9 @@ ack.state → Client State Ledger → Napari Mirrors (confirm) → Napari
 
 - `seed_remote(scope, target, key, value, *, version, metadata)` – called by
   runtime when notify frames arrive.
+- `batch_record_confirmed(entries, *, origin, timestamp)` – promotes a group of
+  confirmed values atomically; used for notify.dims / notify.camera snapshots so
+  subscribers observe the whole bundle in one pass.
 - `apply_local(scope, target, key, value, *, origin, actor_id, metadata)` – used
   by intent bridge to enqueue pending update; returns object containing payload,
   projection value, and metadata for dispatch.

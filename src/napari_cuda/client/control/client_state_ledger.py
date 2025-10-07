@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import logging
 import time
-from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 from napari_cuda.protocol import AckState
 
@@ -341,6 +341,66 @@ class ClientStateLedger:
                 origin,
             )
         self._notify(property_key, state.confirmed)
+
+    # ------------------------------------------------------------------
+    def batch_record_confirmed(
+        self,
+        entries: Iterable[Tuple[Any, ...]],
+        *,
+        timestamp: Optional[float] = None,
+        origin: str = "remote",
+    ) -> None:
+        """Promote multiple confirmed properties in a single batch."""
+
+        materialized = list(entries)
+        if not materialized:
+            return
+
+        notifications: List[Tuple[PropertyKey, LedgerConfirmedEntry]] = []
+
+        for raw_entry in materialized:
+            length = len(raw_entry)
+            if length < 4 or length > 6:
+                raise ValueError("batch_record_confirmed entries must contain 4-6 items")
+
+            scope = str(raw_entry[0])
+            target = str(raw_entry[1])
+            key = str(raw_entry[2])
+            value = raw_entry[3]
+            metadata = raw_entry[4] if length >= 5 else None
+            version = raw_entry[5] if length == 6 else None
+
+            property_key = (scope, target, key)
+            state = self._state.setdefault(property_key, LedgerPropertyState())
+            for stale_frame in list(state.pending.keys()):
+                self._pending_index.pop(stale_frame, None)
+            state.pending.clear()
+
+            entry_timestamp = float(timestamp) if timestamp is not None else float(self._clock())
+            entry_metadata = dict(metadata) if isinstance(metadata, Mapping) else None
+
+            state.confirmed = LedgerConfirmedEntry(
+                value=value,
+                timestamp=entry_timestamp,
+                origin=str(origin),
+                version=version,
+                metadata=entry_metadata,
+            )
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "ledger batch record_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
+                    scope,
+                    target,
+                    key,
+                    value,
+                    origin,
+                )
+
+            notifications.append((property_key, state.confirmed))
+
+        for property_key, confirmed in notifications:
+            self._notify(property_key, confirmed)
 
     # ------------------------------------------------------------------
     def clear_pending_on_reconnect(self) -> None:

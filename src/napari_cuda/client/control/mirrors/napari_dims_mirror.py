@@ -293,8 +293,20 @@ def _record_dims_snapshot(
     _record_dims_delta(state, ledger, payload, update_kind='snapshot')
 
     ndisplay = payload.get('ndisplay')
+    entries: list[tuple[Any, ...]] = []
     if ndisplay is not None:
-        ledger.record_confirmed('view', 'main', 'ndisplay', int(ndisplay))
+        entries.append(('view', 'main', 'ndisplay', int(ndisplay)))
+
+    order = payload.get('order')
+    if isinstance(order, (list, tuple)):
+        entries.append(('view', 'main', 'order', tuple(int(v) for v in order)))
+
+    displayed = payload.get('displayed')
+    if isinstance(displayed, (list, tuple)):
+        entries.append(('view', 'main', 'displayed', tuple(int(v) for v in displayed)))
+
+    if entries:
+        ledger.batch_record_confirmed(entries)
 
     _record_multiscale_metadata(state, ledger)
     _record_volume_metadata(state, ledger)
@@ -327,6 +339,7 @@ def _record_dims_delta(
     current_step = payload.get('current_step')
     if not isinstance(current_step, (list, tuple)):
         return
+    entries: list[tuple[Any, ...]] = []
     for idx, value in enumerate(current_step):
         if value is None:
             continue
@@ -339,7 +352,10 @@ def _record_dims_delta(
             'axis_target': target_label,
             'update_kind': update_kind,
         }
-        ledger.record_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
+        entries.append(('dims', target_label, 'index', value_int, metadata))
+
+    if entries:
+        ledger.batch_record_confirmed(entries)
 
 
 def _build_consumer_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
@@ -399,43 +415,56 @@ def _record_multiscale_metadata(state: "ControlStateContext", ledger: ClientStat
     if not isinstance(multiscale_meta, Mapping):
         return
 
+    entries: list[tuple[Any, ...]] = []
+
     level_val = multiscale_meta.get('level')
     if level_val is None:
         level_val = multiscale_meta.get('current_level')
     if level_val is not None:
-        ledger.record_confirmed('multiscale', 'main', 'level', int(level_val))
+        entries.append(('multiscale', 'main', 'level', int(level_val)))
 
     policy_val = multiscale_meta.get('policy')
     if policy_val is not None:
-        ledger.record_confirmed('multiscale', 'main', 'policy', str(policy_val))
+        entries.append(('multiscale', 'main', 'policy', str(policy_val)))
 
+    downgraded = multiscale_meta.get('downgraded')
+    if downgraded is not None:
+        entries.append(('multiscale', 'main', 'downgraded', bool(downgraded)))
+
+    if entries:
+        ledger.batch_record_confirmed(entries)
 
 def _record_volume_metadata(state: "ControlStateContext", ledger: ClientStateLedger) -> None:
     render_meta = state.dims_meta.get('render')
     if not isinstance(render_meta, Mapping):
         return
 
+    entries: list[tuple[Any, ...]] = []
+
     mode_val = render_meta.get('mode') or render_meta.get('render_mode')
     if mode_val is not None:
-        ledger.record_confirmed('volume', 'main', 'render_mode', str(mode_val))
+        entries.append(('volume', 'main', 'render_mode', str(mode_val)))
 
     clim_val = render_meta.get('contrast_limits')
     if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
         lo = float(clim_val[0])
         hi = float(clim_val[1])
-        ledger.record_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
+        entries.append(('volume', 'main', 'contrast_limits', (lo, hi)))
 
     cmap_val = render_meta.get('colormap')
     if cmap_val is not None:
-        ledger.record_confirmed('volume', 'main', 'colormap', str(cmap_val))
+        entries.append(('volume', 'main', 'colormap', str(cmap_val)))
 
     opacity_val = render_meta.get('opacity')
     if opacity_val is not None:
-        ledger.record_confirmed('volume', 'main', 'opacity', float(opacity_val))
+        entries.append(('volume', 'main', 'opacity', float(opacity_val)))
 
     sample_val = render_meta.get('sample_step')
     if sample_val is not None:
-        ledger.record_confirmed('volume', 'main', 'sample_step', float(sample_val))
+        entries.append(('volume', 'main', 'sample_step', float(sample_val)))
+
+    if entries:
+        ledger.batch_record_confirmed(entries)
 
 
 def _axis_index_from_target(state: "ControlStateContext", target: str) -> Optional[int]:

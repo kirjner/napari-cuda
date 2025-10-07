@@ -204,6 +204,33 @@ def test_subscribe_all_receives_confirmed_updates(store: ClientStateLedger) -> N
     assert update.metadata == {'axis_index': 0}
 
 
+def test_batch_record_confirmed_promotes_multiple_entries(store: ClientStateLedger) -> None:
+    events: list[Any] = []
+
+    def _capture(update: Any) -> None:
+        events.append(update)
+
+    store.subscribe_all(_capture)
+
+    store.batch_record_confirmed(
+        [
+            ('dims', 'z', 'index', 12, {'axis_index': 0}),
+            ('view', 'main', 'ndisplay', 3, None),
+        ],
+        origin='worker_refresh',
+    )
+
+    assert store.confirmed_value('dims', 'z', 'index') == 12
+    assert store.confirmed_value('view', 'main', 'ndisplay') == 3
+
+    assert len(events) == 2
+    scopes = {event.scope for event in events}
+    assert scopes == {'dims', 'view'}
+    dims_event = next(event for event in events if event.scope == 'dims')
+    assert dims_event.metadata == {'axis_index': 0}
+    assert dims_event.origin == 'worker_refresh'
+
+
 def test_pending_state_snapshot_reports_confirmed_value(store: ClientStateLedger) -> None:
     store.record_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
