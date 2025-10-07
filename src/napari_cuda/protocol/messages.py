@@ -634,8 +634,7 @@ class NotifyStreamPayload:
 @dataclass(slots=True)
 class NotifyDimsPayload:
     current_step: Tuple[int, ...]
-    level_shapes: Tuple[Tuple[int, ...], ...] | None
-    sizes: Tuple[int, ...] | None
+    level_shapes: Tuple[Tuple[int, ...], ...]
     levels: Tuple[Dict[str, Any], ...]
     current_level: int
     downgraded: bool | None
@@ -656,11 +655,8 @@ class NotifyDimsPayload:
             "ndisplay": int(self.ndisplay),
         }
 
-        if self.level_shapes is not None:
-            payload["level_shapes"] = [[int(v) for v in shape] for shape in self.level_shapes]
+        payload["level_shapes"] = [[int(v) for v in shape] for shape in self.level_shapes]
 
-        if self.sizes is not None:
-            payload["sizes"] = [int(v) for v in self.sizes]
         if self.downgraded is not None:
             payload["downgraded"] = bool(self.downgraded)
         if self.axis_labels is not None:
@@ -678,20 +674,14 @@ class NotifyDimsPayload:
         mapping = _as_mapping(data, "notify.dims payload")
         _ensure_keyset(
             mapping,
-            required=("step", "levels", "current_level", "mode", "ndisplay"),
-            optional=("sizes", "downgraded", "axis_labels", "order", "displayed", "labels", "current_step", "level_shapes"),
+            required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes"),
+            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step"),
             context="notify.dims payload",
         )
 
         step_seq = _as_sequence(mapping["step"], "notify.dims payload.step")
         current_step_seq = _as_sequence(mapping.get("current_step", step_seq), "notify.dims payload.current_step")
         levels_seq = _as_sequence(mapping["levels"], "notify.dims payload.levels")
-
-        sizes_value = mapping.get("sizes")
-        if sizes_value is not None:
-            sizes = tuple(int(v) for v in _as_sequence(sizes_value, "notify.dims payload.sizes"))
-        else:
-            sizes = None
 
         downgraded_value = mapping.get("downgraded")
         downgraded = bool(downgraded_value) if downgraded_value is not None else None
@@ -724,16 +714,13 @@ class NotifyDimsPayload:
             else None
         )
 
-        level_shapes_value = mapping.get("level_shapes")
-        if level_shapes_value is None:
-            level_shapes = None
-        else:
-            level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
-            parsed_shapes: list[tuple[int, ...]] = []
-            for idx, entry in enumerate(level_shapes_seq):
-                shape_seq = _as_sequence(entry, f"notify.dims payload.level_shapes[{idx}]")
-                parsed_shapes.append(tuple(int(dim) for dim in shape_seq))
-            level_shapes = tuple(parsed_shapes)
+        level_shapes_value = mapping["level_shapes"]
+        level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
+        parsed_shapes: list[tuple[int, ...]] = []
+        for idx, entry in enumerate(level_shapes_seq):
+            shape_seq = _as_sequence(entry, f"notify.dims payload.level_shapes[{idx}]")
+            parsed_shapes.append(tuple(int(dim) for dim in shape_seq))
+        level_shapes = tuple(parsed_shapes)
 
         levels: list[Dict[str, Any]] = []
         for idx, entry in enumerate(levels_seq):
@@ -742,7 +729,6 @@ class NotifyDimsPayload:
         return cls(
             current_step=tuple(int(v) for v in current_step_seq),
             level_shapes=level_shapes,
-            sizes=sizes,
             levels=tuple(levels),
             current_level=int(mapping["current_level"]),
             downgraded=downgraded,
