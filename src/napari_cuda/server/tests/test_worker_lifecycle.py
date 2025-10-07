@@ -239,6 +239,11 @@ class _FakeWorkerBase:
         snapshot['current_step'] = list(snapshot['step'])
         return NotifyDimsPayload.from_dict(snapshot)
 
+    def _notify_scene_refresh(self) -> None:
+        callback = getattr(self, "_scene_refresh_cb", None)
+        if callback is not None:
+            callback(None)
+
     @property
     def is_ready(self) -> bool:
         if hasattr(self, "_is_ready"):
@@ -357,11 +362,10 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     start_worker(server, loop, state)
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
-    worker._last_step = (4, 5)
-
     _run_loop_once(loop)
     server.processed_notifications.clear()
 
+    worker._last_step = (4, 5)
     worker._scene_refresh_cb([4, 5])  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
@@ -393,11 +397,10 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     start_worker(server, loop, state)
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
-    worker._last_step = (7,)
-
     _run_loop_once(loop)
     server.processed_notifications.clear()
 
+    worker._last_step = (7,)
     worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 

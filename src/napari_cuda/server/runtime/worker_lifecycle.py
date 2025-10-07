@@ -47,6 +47,12 @@ def _handle_scene_refresh(
     elif override_level != dims_payload.current_level:
         dims_payload = replace(dims_payload, current_level=override_level)
 
+    prev_payload = server._scene.last_dims_payload  # type: ignore[attr-defined]
+    if prev_payload is not None and prev_payload == dims_payload:
+        if plane_state is not None:
+            server._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
+        return
+
     state.scene_seq = int(state.scene_seq) + 1
     with server._state_lock:  # type: ignore[attr-defined]
         snapshot = server._scene.latest_state  # type: ignore[attr-defined]
