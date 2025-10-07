@@ -5,18 +5,19 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Literal, Mapping, Optional
+from typing import Deque, Literal, Optional
+
+from napari_cuda.protocol.messages import NotifyDimsPayload
 
 
 @dataclass(frozen=True)
 class WorkerSceneNotification:
     """Notification emitted by the render worker to the control loop."""
 
-    kind: Literal["dims_update", "scene_level"]
+    kind: Literal["dims_snapshot"]
     seq: int
-    step: Optional[tuple[int, ...]] = None
-    level: Optional[Mapping[str, object]] = None
-    meta: Optional[Mapping[str, object]] = None
+    payload: NotifyDimsPayload
+    timestamp: Optional[float] = None
 
 
 class WorkerSceneNotificationQueue:
@@ -38,7 +39,7 @@ class WorkerSceneNotificationQueue:
                 return
             self._items = deque(item for item in self._items if not predicate(item))
 
-    def discard_kind(self, kind: Literal["dims_update", "scene_level"]) -> None:
+    def discard_kind(self, kind: Literal["dims_snapshot"]) -> None:
         self.discard(lambda note: note.kind == kind)
 
     def drain(self) -> list[WorkerSceneNotification]:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from napari_cuda.server.app.egl_headless_server import EGLHeadlessServer
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.control import control_channel_server
+from napari_cuda.server.rendering.viewer_builder import CanonicalAxes
 
 
 class _StubWorker:
@@ -18,6 +19,15 @@ class _StubWorker:
         self._viewer = SimpleNamespace(dims=dims)
         self.requested = None
         self.force_idr_called = False
+        self._canonical_axes = CanonicalAxes(
+            ndim=3,
+            axis_labels=("z", "y", "x"),
+            order=(0, 1, 2),
+            ndisplay=3,
+            current_step=(0, 0, 0),
+            ranges=((0.0, 7.0, 1.0), (0.0, 7.0, 1.0), (0.0, 7.0, 1.0)),
+            sizes=(8, 8, 8),
+        )
 
     def request_ndisplay(self, ndisplay: int) -> None:
         self.requested = int(ndisplay)
@@ -38,8 +48,8 @@ class _StubWorker:
             "current_step": [int(x) for x in self._viewer.dims.current_step],
             "axis_labels": ["z", "y", "x"],
             "order": [0, 1, 2],
-            "sizes": [8, 8, 8],
-            "range": [[0, 7], [0, 7], [0, 7]],
+            "level_shapes": [[8, 8, 8]],
+            "current_level": 0,
         }
 
 
@@ -51,13 +61,13 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
 
     broadcast_calls: list[tuple] = []
 
-    async def _fake_broadcast(server_obj, *, current_step, meta):  # type: ignore[no-untyped-def]
-        broadcast_calls.append((tuple(current_step), meta))
+    async def _fake_broadcast(server_obj, *, payload, intent_id=None, timestamp=None, targets=None):  # type: ignore[no-untyped-def]
+        broadcast_calls.append(payload)
 
     async def _noop(*args, **kwargs):  # type: ignore[no-untyped-def]
         return None
 
-    monkeypatch.setattr(control_channel_server, '_broadcast_worker_dims', _fake_broadcast)
+    monkeypatch.setattr(control_channel_server, '_broadcast_dims_state', _fake_broadcast)
     monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 

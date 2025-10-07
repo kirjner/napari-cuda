@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
+from napari_cuda.protocol.messages import NotifyDimsPayload
+
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 
@@ -148,7 +150,7 @@ class ServerSceneData:
     last_written_decision_seq: int = 0
     policy_event_path: Path = field(default_factory=Path)
     last_scene_snapshot: Optional[Dict[str, Any]] = None
-    last_dims_payload: Optional[Dict[str, Any]] = None
+    last_dims_payload: Optional[NotifyDimsPayload] = None
     last_scene_seq: int = 0
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
@@ -268,15 +270,17 @@ def _dims_targets_from_meta(
 
     order_seq = _ensure_sequence(meta.get("order"))
     axis_seq = _ensure_sequence(meta.get("axis_labels"))
-    sizes_seq = _ensure_sequence(meta.get("sizes"))
-    range_seq = _ensure_sequence(meta.get("range"))
+    level_shapes_seq = _ensure_sequence(meta.get("level_shapes"))
 
     axis_count = 0
     try:
         axis_count = int(meta.get("ndim") or 0)
     except Exception:
         axis_count = 0
-    axis_count = max(axis_count, len(order_seq), len(axis_seq), len(sizes_seq), len(range_seq))
+    axis_count = max(axis_count, len(order_seq), len(axis_seq))
+    if level_shapes_seq:
+        first_shape = _ensure_sequence(level_shapes_seq[0])
+        axis_count = max(axis_count, len(first_shape))
     if axis_count <= 0 and current_step is not None:
         axis_count = len(list(current_step))
 

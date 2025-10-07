@@ -22,7 +22,11 @@ def _lock() -> threading.RLock:
 def test_apply_dims_delta_clamps_to_range() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(1, 2, 3))
-    meta = {"ndim": 3, "range": [(0, 5), (0, 10), (0, 4)]}
+    meta = {
+        "ndim": 3,
+        "level_shapes": [(6, 11, 5)],
+        "current_level": 0,
+    }
     step = updates.apply_dims_delta(scene, _lock(), meta, axis=1, step_delta=15, set_value=None)
     assert step == [1, 10, 3]
     assert scene.latest_state.current_step == (1, 10, 3)
@@ -31,7 +35,12 @@ def test_apply_dims_delta_clamps_to_range() -> None:
 def test_apply_dims_delta_with_label_axis() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0, 0))
-    meta = {"ndim": 3, "order": ["t", "z", "y"]}
+    meta = {
+        "ndim": 3,
+        "order": ["t", "z", "y"],
+        "level_shapes": [(1, 21, 1)],
+        "current_level": 0,
+    }
     step = updates.apply_dims_delta(scene, _lock(), meta, axis="z", step_delta=None, set_value=7)
     assert step == [0, 7, 0]
     assert scene.latest_state.current_step == (0, 7, 0)
@@ -170,8 +179,8 @@ def test_apply_dims_state_update_tracks_metadata_for_index() -> None:
         "ndim": 3,
         "order": ["z", "y", "x"],
         "axis_labels": ["z", "y", "x"],
-        "sizes": [10, 10, 10],
-        "range": [(0, 9), (0, 9), (0, 9)],
+        "level_shapes": [(10, 10, 10)],
+        "current_level": 0,
     }
 
     result = updates.apply_dims_state_update(
@@ -202,8 +211,8 @@ def test_apply_dims_state_update_handles_step_delta() -> None:
         "ndim": 3,
         "order": ["z", "y", "x"],
         "axis_labels": ["z", "y", "x"],
-        "sizes": [21, 10, 10],
-        "range": [(0, 20), (0, 9), (0, 9)],
+        "level_shapes": [(21, 10, 10)],
+        "current_level": 0,
     }
 
     before = time.time()
@@ -264,7 +273,12 @@ def test_prune_control_metadata_trims_removed_dims_axes() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0))
     lock = _lock()
-    meta = {"ndim": 2, "order": ["z", "t"], "range": [(0, 5), (0, 5)]}
+    meta = {
+        "ndim": 2,
+        "order": ["z", "t"],
+        "level_shapes": [[6, 6]],
+        "current_level": 0,
+    }
 
     updates.apply_dims_state_update(
         scene,
@@ -301,7 +315,12 @@ def test_prune_control_metadata_uses_step_fallback_when_meta_missing() -> None:
     scene = create_server_scene_data()
     scene.latest_state = ServerSceneState(current_step=(0, 0))
     lock = _lock()
-    meta = {"ndim": 2, "order": ["z", "t"], "range": [(0, 5), (0, 5)]}
+    meta = {
+        "ndim": 2,
+        "order": ["z", "t"],
+        "level_shapes": [[6, 6]],
+        "current_level": 0,
+    }
 
     updates.apply_dims_state_update(
         scene,

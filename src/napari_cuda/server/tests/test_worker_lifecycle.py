@@ -11,6 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.server.rendering.viewer_builder import CanonicalAxes
+
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotificationQueue
 from napari_cuda.server.state.server_scene import create_server_scene_data
@@ -81,15 +84,20 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
     server._scene = scene
     server._worker_notifications = notifications
-    server._scene.last_dims_payload = {
-        'ndim': 1,
-        'order': ['z'],
-        'range': [[0, 0]],
-        'current_step': [0],
-        'ndisplay': 2,
-        'mode': 'plane',
-        'volume': False,
-    }
+    server._scene.last_dims_payload = NotifyDimsPayload.from_dict(
+        {
+            'step': [0],
+            'current_step': [0],
+            'level_shapes': [[1]],
+            'axis_labels': ['z'],
+            'order': [0],
+            'displayed': [0],
+            'ndisplay': 2,
+            'mode': 'plane',
+            'levels': [{'index': 0, 'shape': [1]}],
+            'current_level': 0,
+        }
+    )
     server.processed_notifications = processed
 
     def process_worker_notifications() -> None:
@@ -121,13 +129,16 @@ class _FakeWorkerBase:
 
     _z_index = None
     default_meta = {
-        'ndim': 2,
-        'axes': ['y', 'x'],
+        'step': [0, 0],
+        'current_step': [0, 0],
+        'level_shapes': [[10, 10]],
         'axis_labels': ['y', 'x'],
         'order': [0, 1],
-        'range': [[0, 9], [0, 9]],
+        'displayed': [0, 1],
         'ndisplay': 2,
         'mode': 'plane',
+        'levels': [{'index': 0, 'shape': [10, 10]}],
+        'current_level': 0,
     }
     default_step = (0, 0)
 
@@ -138,7 +149,8 @@ class _FakeWorkerBase:
         self.applied_states: list = []
         self.camera_commands: list = []
         self.frames: list[bytes] = []
-        self._ready = False
+        self._ready = True
+        self._is_ready = True
         self._last_step = tuple(int(value) for value in self.default_step)
         self._plane_restore_state = None
         self._active_ms_level = 0
@@ -159,6 +171,43 @@ class _FakeWorkerBase:
                 enc_input_format="NV12",
             ),
             cuda=SimpleNamespace(set_force_tight_pitch=lambda enabled: None),
+        )
+        level_shapes = self._meta.get('level_shapes') or []
+        if level_shapes:
+            sizes = [max(1, int(dim)) for dim in level_shapes[0]]
+        else:
+            base_len = len(self._last_step) if self._last_step else len(self._meta.get('step', []))
+            if base_len <= 0:
+                base_len = 1
+            sizes = [1] * base_len
+        ndim = len(sizes)
+        axis_labels_meta = self._meta.get('axis_labels') or []
+        axis_labels = [str(lbl) for lbl in axis_labels_meta[:ndim]]
+        if len(axis_labels) < ndim:
+            axis_labels.extend(f"axis-{idx}" for idx in range(len(axis_labels), ndim))
+        order_meta = self._meta.get('order') or list(range(ndim))
+        order_values = [int(idx) for idx in order_meta[:ndim]]
+        if len(order_values) < ndim:
+            order_values.extend(range(len(order_values), ndim))
+        step_meta = (
+            self._meta.get('current_step')
+            or self._meta.get('step')
+            or list(self._last_step)
+            or [0] * ndim
+        )
+        current_step = [int(value) for value in step_meta[:ndim]]
+        if len(current_step) < ndim:
+            current_step.extend(0 for _ in range(ndim - len(current_step)))
+        ranges = [(0.0, float(max(0, size - 1)), 1.0) for size in sizes]
+        ndisplay_value = int(self._meta.get('ndisplay', min(2, ndim)))
+        self._canonical_axes = CanonicalAxes(
+            ndim=ndim,
+            axis_labels=tuple(axis_labels),
+            order=tuple(order_values),
+            ndisplay=ndisplay_value,
+            current_step=tuple(current_step),
+            ranges=tuple((float(lo), float(hi), float(step)) for lo, hi, step in ranges),
+            sizes=tuple(int(size) for size in sizes),
         )
 
     # --- Lifecycle hooks -------------------------------------------------
@@ -183,8 +232,12 @@ class _FakeWorkerBase:
     def _log_debug_policy_once(self) -> None:
         return
 
-    def snapshot_dims_metadata(self) -> dict[str, object]:
-        return dict(self._meta)
+    def build_notify_dims_payload(self) -> NotifyDimsPayload:
+        snapshot = dict(self._meta)
+        step = tuple(int(v) for v in self._last_step) if getattr(self, '_last_step', None) is not None else tuple()
+        snapshot['step'] = [int(value) for value in step] if step else list(snapshot.get('step', []))
+        snapshot['current_step'] = list(snapshot['step'])
+        return NotifyDimsPayload.from_dict(snapshot)
 
     @property
     def is_ready(self) -> bool:
@@ -229,7 +282,7 @@ class _FakeWorkerBase:
         self._is_ready = False
 
 
-def test_snapshot_dims_metadata_prefers_scene_shape():
+def test_build_notify_dims_payload_prefers_scene_shape():
     from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 
     dims = SimpleNamespace(
@@ -253,27 +306,37 @@ def test_snapshot_dims_metadata_prefers_scene_shape():
     worker._zarr_shape = (8, 256, 256)
     worker._active_ms_level = 0
     worker._last_step = tuple(int(v) for v in dims.current_step)
+    worker._canonical_axes = CanonicalAxes(
+        ndim=3,
+        axis_labels=("z", "y", "x"),
+        order=(0, 1, 2),
+        ndisplay=2,
+        current_step=tuple(int(v) for v in dims.current_step),
+        ranges=((0.0, 59.0, 1.0), (0.0, 255.0, 1.0), (0.0, 255.0, 1.0)),
+        sizes=(60, 256, 256),
+    )
 
-    meta = EGLRendererWorker.snapshot_dims_metadata(worker)
+    payload = EGLRendererWorker.build_notify_dims_payload(worker)
 
-    assert meta["axes"] == ["z", "y", "x"]
-    assert meta["axis_labels"] == ["z", "y", "x"]
-    assert meta["sizes"] == [8, 256, 256]
-    assert meta["range"] == [[0, 7], [0, 255], [0, 255]]
-    assert "current_step" not in meta
-    assert meta["order"] == [0, 1, 2]
+    assert payload.axis_labels == ("z", "y", "x")
+    assert payload.level_shapes == ((60, 256, 256), (8, 128, 128))
+    assert payload.level_shapes[payload.current_level] == (60, 256, 256)
+    assert payload.current_step == (5, 2, 1)
+    assert payload.order == (0, 1, 2)
 
 
 class _FakePacketWorker(_FakeWorkerBase):
     default_meta = {
-        'ndim': 1,
-        'axes': ['z'],
+        'step': [0],
+        'current_step': [0],
+        'level_shapes': [[1]],
         'axis_labels': ['z'],
         'order': [0],
-        'range': [[0, 0]],
-        'current_step': [0],
+        'displayed': [0],
         'ndisplay': 2,
         'mode': 'plane',
+        'levels': [{'index': 0, 'shape': [1]}],
+        'current_level': 0,
     }
 
 
@@ -304,9 +367,8 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
 
     assert server.processed_notifications, "expected dims notification"
     note = server.processed_notifications[-1]
-    assert note.kind == "dims_update"
-    assert note.step == (4, 5)
-    assert "current_step" not in note.meta
+    assert note.kind == "dims_snapshot"
+    assert list(note.payload.current_step) == [4, 5]
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -341,9 +403,45 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
 
     assert server.processed_notifications, "expected dims notification"
     note = server.processed_notifications[-1]
-    assert note.kind == "dims_update"
-    assert note.step == (7,)
-    assert "current_step" not in note.meta
+    assert note.kind == "dims_snapshot"
+    assert note.payload.current_step[0] == 7
+
+    stop_worker(state)
+    _run_loop_once(loop)
+    loop.close()
+    asyncio.set_event_loop(None)
+
+
+def test_scene_refresh_skips_duplicate_payload(monkeypatch, tmp_path):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    server = make_fake_server(loop, tmp_path)
+    state = WorkerLifecycleState()
+
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.EGLRendererWorker", _FakeWorkerBase)
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.pack_to_avcc", lambda *a, **k: (b"", False))
+    monkeypatch.setattr("napari_cuda.server.runtime.worker_lifecycle.build_avcc_config", lambda cache: None)
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.worker_lifecycle.pixel_channel.maybe_send_stream_config",
+        lambda *a, **k: asyncio.sleep(0),
+    )
+
+    start_worker(server, loop, state)
+    worker = _wait_for_worker(state)
+    worker._stop_event = state.stop_event  # type: ignore[attr-defined]
+
+    _run_loop_once(loop)
+    server.processed_notifications.clear()
+
+    worker._last_step = (3, 4)
+    worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
+    _run_loop_once(loop)
+    assert len(server.processed_notifications) == 1
+
+    server.processed_notifications.clear()
+    worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
+    _run_loop_once(loop)
+    assert not server.processed_notifications
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -363,15 +461,19 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
 
     class _FakeMultiscaleWorker(_FakeWorkerBase):
         default_meta = {
-            'ndim': 3,
-            'axes': ['z', 'y', 'x'],
-            'axis_labels': ['z', 'y', 'x'],
-            'order': [0, 1, 2],
-            'sizes': [60, 256, 256],
-            'range': [[0, 59], [0, 255], [0, 255]],
-            'current_step': [10, 0, 0],
-            'ndisplay': 2,
-            'mode': 'plane',
+            'step': [10, 0, 0],
+        'current_step': [10, 0, 0],
+        'level_shapes': [[60, 256, 256], [8, 128, 128]],
+        'axis_labels': ['z', 'y', 'x'],
+        'order': [0, 1, 2],
+        'displayed': [1, 2],
+        'ndisplay': 2,
+        'mode': 'plane',
+        'levels': [
+            {'index': 0, 'shape': [60, 256, 256]},
+            {'index': 1, 'shape': [8, 128, 128]},
+        ],
+        'current_level': 0,
         }
 
         def __init__(self, *, scene_refresh_cb, **kwargs):
@@ -401,27 +503,18 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     _run_loop_once(loop)
     server.processed_notifications.clear()
 
-    payload = {
-        'scene_level': {
-            'current_level': 1,
-        }
-    }
-    worker._meta['sizes'][0] = 8  # type: ignore[index]
-    worker._meta['range'][0] = [0, 7]  # type: ignore[index]
+    worker._meta['level_shapes'][0][0] = 8  # type: ignore[index]
+    worker._meta['step'][0] = 60  # type: ignore[index]
     worker._meta['current_step'][0] = 60  # type: ignore[index]
     worker._last_step = tuple(int(x) for x in worker._meta['current_step'])
-    worker._scene_refresh_cb(payload)  # type: ignore[attr-defined]
+    worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
-    cached = server._scene.last_dims_payload
-    assert cached['sizes'][0] == worker._meta['sizes'][0]
-    assert cached['range'][0] == worker._meta['range'][0]
-    assert cached['axes'] == worker._meta['axes']
-
-    assert server.processed_notifications
+    assert server.processed_notifications, 'expected dims notification'
     dims_note = server.processed_notifications[-1]
-    assert dims_note.kind == "dims_update"
-    assert dims_note.step[0] == worker._meta['current_step'][0]
+    assert dims_note.kind == 'dims_snapshot'
+    assert dims_note.payload.level_shapes[0][0] == worker._meta['level_shapes'][0][0]
+    assert dims_note.payload.current_step[0] == worker._meta['current_step'][0]
 
     stop_worker(state)
     _run_loop_once(loop)

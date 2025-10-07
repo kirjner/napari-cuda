@@ -133,17 +133,17 @@ def apply_dims_delta(
         except Exception:
             pass
 
-    try:
-        rng = meta.get("range")
-        if isinstance(rng, Sequence) and idx < len(rng):
-            bounds = rng[idx]
-            if isinstance(bounds, Sequence) and len(bounds) >= 2:
-                lo, hi = int(bounds[0]), int(bounds[1])
-                if hi < lo:
-                    lo, hi = hi, lo
-                target = max(lo, min(hi, target))
-    except Exception:
-        pass
+    shapes_raw = meta["level_shapes"]
+    assert isinstance(shapes_raw, Sequence) and shapes_raw, "dims metadata missing level_shapes"
+    level_idx_raw = meta.get("current_level", 0)
+    level_idx = int(level_idx_raw)
+    assert 0 <= level_idx < len(shapes_raw), "current_level out of bounds for level_shapes"
+    shape_raw = shapes_raw[level_idx]
+    assert isinstance(shape_raw, Sequence), "level_shapes entry must be sequence"
+    assert idx < len(shape_raw), "axis index outside level_shapes entry"
+    size_val = int(shape_raw[idx])
+    assert size_val > 0, "level_shapes entries must be positive"
+    target = max(0, min(size_val - 1, target))
 
     step[idx] = int(target)
     _update_latest_state(scene, lock, current_step=tuple(step))
@@ -393,7 +393,6 @@ def apply_layer_state_update(
         timestamp=ts,
     )
 
-
 def apply_dims_state_update(
     scene: ServerSceneData,
     lock: Lock,
@@ -436,7 +435,7 @@ def apply_dims_state_update(
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "dims apply incoming: axis=%s target=%s prop=%s value=%r step_delta=%r set_value=%r current_step=%s range=%s",
+                "dims apply incoming: axis=%s target=%s prop=%s value=%r step_delta=%r set_value=%r current_step=%s",
                 idx,
                 control_target,
                 prop,
@@ -444,7 +443,6 @@ def apply_dims_state_update(
                 step_delta,
                 set_value,
                 current,
-                meta.get("range"),
             )
 
         target = int(step[idx])
@@ -464,17 +462,17 @@ def apply_dims_state_update(
             except Exception:
                 pass
 
-        try:
-            rng = meta.get("range")
-            if isinstance(rng, Sequence) and idx < len(rng):
-                bounds = rng[idx]
-                if isinstance(bounds, Sequence) and len(bounds) >= 2:
-                    lo, hi = int(bounds[0]), int(bounds[1])
-                    if hi < lo:
-                        lo, hi = hi, lo
-                    target = max(lo, min(hi, target))
-        except Exception:
-            pass
+        shapes_raw = meta["level_shapes"]
+        assert isinstance(shapes_raw, Sequence) and shapes_raw, "dims metadata missing level_shapes"
+        level_idx_raw = meta.get("current_level", 0)
+        level_idx = int(level_idx_raw)
+        assert 0 <= level_idx < len(shapes_raw), "current_level out of bounds for level_shapes"
+        shape_raw = shapes_raw[level_idx]
+        assert isinstance(shape_raw, Sequence), "level_shapes entry must be sequence"
+        assert idx < len(shape_raw), "axis index outside level_shapes entry"
+        size_val = int(shape_raw[idx])
+        assert size_val > 0, "level_shapes entries must be positive"
+        target = max(0, min(size_val - 1, target))
 
         step[idx] = int(target)
 

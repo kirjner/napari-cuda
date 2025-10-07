@@ -17,7 +17,7 @@ from napari_cuda.protocol import (
     build_state_update,
 )
 from napari_cuda.protocol.envelopes import build_session_hello
-from napari_cuda.protocol.messages import HelloClientInfo
+from napari_cuda.protocol.messages import HelloClientInfo, NotifyDimsPayload
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
     ResumableHistoryStore,
@@ -29,6 +29,7 @@ from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
+from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.runtime_mailbox import RenderDelta
 from napari_cuda.server.state.server_scene import create_server_scene_data
 from napari_cuda.server.control.state_update_engine import apply_layer_state_update
@@ -52,6 +53,12 @@ class _CaptureWorker:
         self._plane_restore_state = None
         self._last_step = (0, 0)
         self._scene_source = None
+        self._canonical_axes = canonical_axes_from_source(
+            axes=("y", "x"),
+            shape=(self._zarr_shape[0], self._zarr_shape[1]),
+            step=(0, 0),
+            use_volume=False,
+        )
 
     def enqueue_update(self, delta: RenderDelta) -> None:
         self.deltas.append(delta)
@@ -117,7 +124,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     features = {
         "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
-        "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -138,15 +144,20 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
 
     server._state_clients = {fake_ws}
-    server._scene.last_dims_payload = {
-        'ndim': 3,
-        'order': ['z', 'y', 'x'],
-        'range': [[0, 9], [0, 9], [0, 9]],
-        'current_step': [0, 0, 0],
-        'ndisplay': 2,
-        'mode': 'plane',
-        'volume': False,
-    }
+    server._scene.last_dims_payload = NotifyDimsPayload.from_dict(
+        {
+            "step": [0, 0, 0],
+            "current_step": [0, 0, 0],
+            "level_shapes": [[10, 10, 10]],
+            "axis_labels": ["z", "y", "x"],
+            "order": [0, 1, 2],
+            "displayed": [0, 1, 2],
+            "ndisplay": 2,
+            "mode": "plane",
+            "levels": [{"index": 0, "shape": [10, 10, 10]}],
+            "current_level": 0,
+        }
+    )
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
     scheduled: list[Coroutine[Any, Any, None]] = []
@@ -170,7 +181,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._resumable_store = ResumableHistoryStore(
         {
             "notify.scene": ResumableRetention(),
-            "notify.scene.level": ResumableRetention(),
             "notify.layers": ResumableRetention(min_deltas=512, max_deltas=2048, max_age_s=300.0),
             "notify.stream": ResumableRetention(min_deltas=1, max_deltas=32),
         }
@@ -199,6 +209,26 @@ def _drain_scheduled(tasks: list[Coroutine[Any, Any, None]]) -> None:
 
 def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
     return [frame for frame in frames if frame.get("type") == frame_type]
+
+def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "step": [0, 0, 0],
+        "current_step": [0, 0, 0],
+        "axis_labels": ["z", "y", "x"],
+        "order": [0, 1, 2],
+        "displayed": [1, 2],
+        "ndisplay": 2,
+        "mode": "plane",
+        "levels": [
+            {"index": 0, "shape": [512, 256, 64]},
+            {"index": 1, "shape": [256, 128, 32]},
+        ],
+        "current_level": 0,
+        "level_shapes": [[512, 256, 64], [256, 128, 32]],
+    }
+    base.update(overrides)
+    return base
+
 
 
 def _build_state_update(payload: dict[str, Any], *, intent_id: str, frame_id: str) -> dict[str, Any]:
@@ -359,7 +389,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
 
     assert server._scene.latest_state.current_step[0] == 5
     assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload["current_step"][0] == 0
+    assert server._scene.last_dims_payload.current_step[0] == 0
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -394,8 +424,8 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert server._ndisplay_calls == [3]
     assert server.use_volume is True
     assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload["ndisplay"] == 2
-    assert server._scene.last_dims_payload["mode"] == 'plane'
+    assert server._scene.last_dims_payload.ndisplay == 2
+    assert server._scene.last_dims_payload.mode == 'plane'
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
@@ -409,26 +439,25 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
 
     assert not _frames_of_type(captured, "notify.dims")
 
-    meta = {
-        "ndim": 3,
-        "axis_labels": ["z", "y", "x"],
-        "order": [0, 1, 2],
-        "range": [[0, 7], [0, 7], [0, 7]],
-        "sizes": [8, 8, 8],
-        "current_step": [0, 0, 0],
-        "ndisplay": 3,
-        "mode": "volume",
-        "displayed": [0, 1, 2],
-    }
-
+    notify_payload = NotifyDimsPayload.from_dict(
+        _make_dims_snapshot(
+            step=[0, 0, 0],
+            current_step=[0, 0, 0],
+            level_shapes=[[512, 256, 64], [8, 8, 8]],
+            ndisplay=3,
+            mode="volume",
+            displayed=[0, 1, 2],
+            current_level=1,
+        )
+    )
     state_channel_handler.process_worker_notifications(
         server,
         [
             WorkerSceneNotification(
-                kind="dims_update",
+                kind="dims_snapshot",
                 seq=1,
-                step=(0, 0, 0),
-                meta=meta,
+                payload=notify_payload,
+                timestamp=time.time(),
             )
         ],
     )
@@ -440,92 +469,55 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert dims_payload["ndisplay"] == 3
     assert dims_payload["mode"] == "volume"
     assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload["ndisplay"] == 3
-    assert server._scene.last_dims_payload["mode"] == "volume"
+    assert server._scene.last_dims_payload.ndisplay == 3
+    assert server._scene.last_dims_payload.mode == "volume"
 
 
-def test_worker_scene_level_dims_metadata_enforced() -> None:
+
+
+def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     server, scheduled, captured = _make_server()
     captured.clear()
 
-    level_payload = {
-        "current_level": 1,
-        "downgraded": True,
-        "levels": [
-            {"index": 0, "shape": [512, 256, 64]},
-            {"index": 1, "shape": [256, 128, 32]},
-        ],
-    }
-
-    meta = {
-        "ndim": 3,
-        "axis_labels": ["z", "y", "x"],
-        "order": [0, 1, 2],
-        "sizes": [256, 128, 32],
-        "range": [[0, 255], [0, 127], [0, 31]],
-        "current_step": [0, 0, 0],
-        "ndisplay": 2,
-        "mode": "plane",
-        "displayed": [1, 2],
-    }
-
-    notifications = [
-        WorkerSceneNotification(kind="scene_level", seq=2, level=level_payload),
-        WorkerSceneNotification(kind="dims_update", seq=3, step=(0, 0, 0), meta=meta),
+    snapshot_payload = _make_dims_snapshot(
+        level_shapes=[[512, 256, 64], [256, 128, 32]],
+        displayed=[0, 1, 2],
+        current_level=1,
+        downgraded=True,
+    )
+    snapshot_payload["levels"] = [
+        {"index": 0, "shape": [512, 256, 64]},
+        {"index": 1, "shape": [256, 128, 32]},
     ]
+    notify_payload = NotifyDimsPayload.from_dict(snapshot_payload)
 
-    state_channel_handler.process_worker_notifications(server, notifications)
+    state_channel_handler.process_worker_notifications(
+        server,
+        [
+            WorkerSceneNotification(
+                kind="dims_snapshot",
+                seq=5,
+                payload=notify_payload,
+                timestamp=time.time(),
+            )
+        ],
+    )
     _drain_scheduled(scheduled)
 
-    level_frames = _frames_of_type(captured, "notify.scene.level")
-    assert level_frames, "expected scene level broadcast"
     dims_frames = _frames_of_type(captured, "notify.dims")
     assert dims_frames, "expected dims broadcast"
-    assert dims_frames[-1]["payload"]["current_step"] == [0, 0, 0]
+    payload = dims_frames[-1]["payload"]
+    assert payload["current_level"] == 1
+    assert payload.get("downgraded") is True
 
     assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload["sizes"] == [256, 128, 32]
-    assert server._scene.last_dims_payload["range"][2][1] == 31
+    assert server._scene.last_dims_payload.level_shapes[1] == (256, 128, 32)
 
     ms_state = server._scene.multiscale_state
     assert ms_state.get("current_level") == 1
-    assert "pending_worker_level" not in ms_state
+    assert ms_state.get("levels")[1]["shape"] == [256, 128, 32]
+    assert ms_state.get("downgraded") is True
 
-
-def test_worker_scene_level_dims_metadata_mismatch_raises() -> None:
-    server, scheduled, _ = _make_server()
-
-    level_payload = {
-        "current_level": 1,
-        "levels": [
-            {"index": 0, "shape": [512, 256, 64]},
-            {"index": 1, "shape": [256, 128, 32]},
-        ],
-    }
-
-    bad_meta = {
-        "ndim": 3,
-        "axis_labels": ["z", "y", "x"],
-        "order": [0, 1, 2],
-        "sizes": [512, 256, 64],
-        "range": [[0, 511], [0, 255], [0, 63]],
-        "current_step": [0, 0, 0],
-        "ndisplay": 2,
-        "mode": "plane",
-        "displayed": [1, 2],
-    }
-
-    notifications = [
-        WorkerSceneNotification(kind="scene_level", seq=4, level=level_payload),
-        WorkerSceneNotification(kind="dims_update", seq=5, step=(0, 0, 0), meta=bad_meta),
-    ]
-
-    with pytest.raises(AssertionError):
-        state_channel_handler.process_worker_notifications(server, notifications)
-
-    while scheduled:
-        coro = scheduled.pop()
-        coro.close()
 
 
 def test_volume_render_mode_update() -> None:
@@ -754,7 +746,6 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         ws._napari_cuda_session = "baseline-session"
         ws._napari_cuda_features = {
             "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
-            "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -768,9 +759,6 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         scene_frames = _frames_of_type(captured, "notify.scene")
         assert scene_frames, "expected notify.scene snapshot"
 
-        level_frames = _frames_of_type(captured, "notify.scene.level")
-        assert level_frames, "expected notify.scene.level baseline"
-
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames, "expected notify.layers baseline"
         changes = layer_frames[-1]["payload"]["changes"]
@@ -779,13 +767,14 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 
         dims_frames = _frames_of_type(captured, "notify.dims")
         assert dims_frames, "expected notify.dims baseline"
-        assert dims_frames[-1]["payload"]["source"] == "server.bootstrap"
+        dims_payload = dims_frames[-1]["payload"]
+        assert dims_payload["step"] == list(server._scene.last_dims_payload.current_step)
     finally:
         asyncio.set_event_loop(None)
         loop.close()
 
 
-def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot]:
+def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot]:
     store: ResumableHistoryStore = server._resumable_store
     scene_payload = state_channel_handler.build_notify_scene_payload(
         server._scene,
@@ -795,16 +784,6 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
     scene_snapshot = store.snapshot_envelope(
         state_channel_handler.NOTIFY_SCENE_TYPE,
         payload=scene_payload.to_dict(),
-        timestamp=time.time(),
-    )
-
-    scene_level_payload = state_channel_handler.build_notify_scene_level_payload(
-        server._scene,
-        server._scene_manager,
-    )
-    scene_level_snapshot = store.snapshot_envelope(
-        state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE,
-        payload=scene_level_payload.to_dict(),
         timestamp=time.time(),
     )
 
@@ -833,7 +812,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
         timestamp=time.time(),
     )
 
-    return scene_snapshot, scene_level_snapshot, layer_snapshot, stream_snapshot
+    return scene_snapshot, layer_snapshot, stream_snapshot
 
 
 def test_handshake_stashes_resume_plan(monkeypatch) -> None:
@@ -841,10 +820,9 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
     try:
         asyncio.set_event_loop(loop)
         server, scheduled, captured = _make_server()
-        scene_snap, scene_level_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
+        scene_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
         resume_tokens = {
             state_channel_handler.NOTIFY_SCENE_TYPE: scene_snap.delta_token,
-            state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: scene_level_snap.delta_token,
             state_channel_handler.NOTIFY_LAYERS_TYPE: layer_snap.delta_token,
             state_channel_handler.NOTIFY_STREAM_TYPE: stream_snap.delta_token,
         }
@@ -853,7 +831,6 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
             client=HelloClientInfo(name="tests", version="1.0", platform="test"),
             features={
                 state_channel_handler.NOTIFY_SCENE_TYPE: True,
-                state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: True,
                 state_channel_handler.NOTIFY_LAYERS_TYPE: True,
                 state_channel_handler.NOTIFY_STREAM_TYPE: True,
             },
@@ -885,7 +862,6 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
 
         plan = getattr(ws, "_napari_cuda_resume_plan")
         assert plan[state_channel_handler.NOTIFY_SCENE_TYPE].decision == ResumeDecision.REPLAY
-        assert plan[state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE].decision == ResumeDecision.REPLAY
         assert plan[state_channel_handler.NOTIFY_LAYERS_TYPE].decision == ResumeDecision.REPLAY
         assert plan[state_channel_handler.NOTIFY_STREAM_TYPE].decision == ResumeDecision.REPLAY
 
@@ -904,7 +880,7 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
     try:
         asyncio.set_event_loop(loop)
         server, scheduled, captured = _make_server()
-        scene_snap, scene_level_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
+        scene_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
         server._state_send = lambda _ws, text: captured.append(json.loads(text))
@@ -915,7 +891,6 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
             _napari_cuda_session="resume-session",
             _napari_cuda_features={
                 "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
-                "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -927,11 +902,6 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
                 topic=state_channel_handler.NOTIFY_SCENE_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[scene_snap],
-            ),
-            state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_SCENE_LEVEL_TYPE,
-                decision=ResumeDecision.REPLAY,
-                deltas=[scene_level_snap],
             ),
             state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
@@ -950,9 +920,6 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
 
         scene_frames = _frames_of_type(captured, "notify.scene")
         assert scene_frames and scene_frames[-1]["seq"] == scene_snap.seq
-
-        level_frames = _frames_of_type(captured, "notify.scene.level")
-        assert level_frames and level_frames[-1]["seq"] == scene_level_snap.seq
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames and layer_frames[-1]["seq"] == layer_snap.seq

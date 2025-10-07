@@ -7,7 +7,7 @@ import logging
 
 from vispy import scene  # type: ignore
 
-from napari_cuda.server.runtime.worker_runtime import perform_level_switch
+from napari_cuda.server.runtime.worker_runtime import perform_level_switch, notify_scene_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
         worker._evaluate_level_policy()
         worker._level_policy_refresh_needed = False
     worker._mark_render_tick_needed()
+    notify_scene_refresh(worker)
 
 
 def _reset_volume_step(worker, source, level: int) -> None:

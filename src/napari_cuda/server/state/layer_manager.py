@@ -12,6 +12,7 @@ from contextlib import ExitStack, suppress
 from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.protocol.axis_labels import normalize_axis_labels
+from napari_cuda.server.rendering.viewer_builder import CanonicalAxes, apply_canonical_axes
 from napari_cuda.protocol.snapshots import (
     LayerSnapshot,
     SceneSnapshot,
@@ -39,6 +40,8 @@ class _WorkerSnapshot:
     axis_labels: List[str]
     dtype: Optional[str]
     is_volume: bool
+    order: List[int]
+    canonical_axes: Optional["CanonicalAxes"]
 
 
 class ViewerSceneManager:
@@ -57,6 +60,7 @@ class ViewerSceneManager:
         self._default_layer_id = default_layer_id
         self._default_layer_name = default_layer_name
         self._snapshot: Optional[SceneSnapshot] = None
+        self._canonical_axes: Optional[CanonicalAxes] = None
 
     def update_from_sources(
         self,
@@ -77,6 +81,8 @@ class ViewerSceneManager:
             self._owns_viewer = False
 
         worker_snapshot = self._snapshot_worker(worker, ndisplay, viewer_model=viewer_model)
+        assert worker_snapshot.canonical_axes is not None, "viewer snapshot requires canonical axes"
+        self._canonical_axes = worker_snapshot.canonical_axes
 
         adapter_layer = self._adapter_layer(viewer_model)
 
@@ -96,6 +102,7 @@ class ViewerSceneManager:
 
         dims_block = self._build_dims_block(
             layer_block,
+            worker_snapshot=worker_snapshot,
             current_step=current_step,
             ndisplay=ndisplay,
             viewer_model=viewer_model,
@@ -159,7 +166,6 @@ class ViewerSceneManager:
                     if isinstance(level_shape, Sequence):
                         shape_list = [int(x) for x in level_shape]
                         meta["sizes"] = shape_list
-                        meta["range"] = [[0, max(0, s - 1)] for s in shape_list]
 
         return meta
 
@@ -218,6 +224,8 @@ class ViewerSceneManager:
         shape = [int(x) for x in worker_snapshot.shape]
         axis_labels = normalize_axis_labels(worker_snapshot.axis_labels, len(shape))
 
+        level_shapes_list: List[List[int]] = [list(shape)]
+
         block: Dict[str, Any] = {
             "layer_id": self._default_layer_id,
             "layer_type": "image",
@@ -239,16 +247,27 @@ class ViewerSceneManager:
             block["multiscale"] = multiscale_block
             levels = multiscale_block.get("levels")
             if isinstance(levels, list) and levels:
+                level_shapes_list = []
                 first_level = levels[0]
-                first_shape = first_level.get("shape") if isinstance(first_level, Mapping) else None
-                if isinstance(first_shape, Sequence) and first_shape:
-                    normalized_shape = [int(x) for x in first_shape]
-                    block["shape"] = normalized_shape
-                    block["ndim"] = len(normalized_shape)
+                for entry in levels:
+                    if isinstance(entry, Mapping):
+                        entry_shape = entry.get("shape")
+                        if isinstance(entry_shape, Sequence) and entry_shape:
+                            level_shapes_list.append([int(x) for x in entry_shape])
+                active_index = int(multiscale_block.get("current_level", 0))
+                if level_shapes_list:
+                    active_index = max(0, min(active_index, len(level_shapes_list) - 1))
+                    active_shape = level_shapes_list[active_index]
+                    block["shape"] = list(active_shape)
+                    block["ndim"] = len(active_shape)
                     block["axis_labels"] = normalize_axis_labels(
                         worker_snapshot.axis_labels,
-                        len(normalized_shape),
+                        len(active_shape),
                     )
+
+        if not level_shapes_list:
+            level_shapes_list = [list(shape)]
+        block["level_shapes"] = [list(entry) for entry in level_shapes_list]
 
         render_hints = self._build_render_hints(volume_state)
         if render_hints:
@@ -321,37 +340,46 @@ class ViewerSceneManager:
         self,
         layer_block: Dict[str, Any],
         *,
+        worker_snapshot: _WorkerSnapshot,
         current_step: Optional[Iterable[int]],
         ndisplay: Optional[int],
         viewer_model: Optional[ViewerModel],
     ) -> Dict[str, Any]:
-        if viewer_model is not None:
-            dims = viewer_model.dims
-            shape = [int(x) for x in (layer_block.get("shape") or [])]
-            ndim_val = int(dims.ndim) if dims.ndim else len(shape)
-            axis_labels = normalize_axis_labels(dims.axis_labels, max(len(shape), ndim_val))
-            order = list(dims.order)
-            displayed = list(dims.displayed)
-            current = list(dims.current_step)
-            ndisplay_val = int(dims.ndisplay)
-        else:
-            shape = [int(x) for x in (layer_block.get("shape") or [])]
-            axis_labels = normalize_axis_labels(layer_block.get("axis_labels"), len(shape))
-            order = list(axis_labels)
-            current = self._normalize_step(current_step, len(axis_labels))
-            ndisplay_val = int(ndisplay or min(2, len(axis_labels)))
-            displayed = list(range(max(0, len(axis_labels) - ndisplay_val), len(axis_labels)))
+        canonical = worker_snapshot.canonical_axes
+        assert isinstance(canonical, CanonicalAxes), "dims block requires canonical axes"
 
-        sizes = [int(x) for x in (layer_block.get("shape") or [])]
-        ranges = [[0, max(0, s - 1)] for s in sizes]
+        multiscale = layer_block.get("multiscale")
+        current_level = 0
+        if isinstance(multiscale, Mapping) and "current_level" in multiscale:
+            current_level = int(multiscale.get("current_level", 0))
+        level_shapes_raw = layer_block.get("level_shapes") or [layer_block.get("shape", [])]
+        level_shapes = [[int(x) for x in shape] for shape in level_shapes_raw if isinstance(shape, Sequence)]
+        if not level_shapes:
+            level_shapes = [[int(x) for x in (layer_block.get("shape") or [])]]
+        current_level = max(0, min(current_level, len(level_shapes) - 1))
+        active_shape = level_shapes[current_level]
+
+        axis_labels = list(canonical.axis_labels)
+        order = list(canonical.order)
+        axis_count = len(order)
+        assert axis_count == len(active_shape), "canonical axes mismatch layer shape"
+
+        if current_step is not None:
+            desired_step = self._normalize_step(current_step, axis_count)
+        else:
+            desired_step = [int(canonical.current_step[idx]) if idx < len(canonical.current_step) else 0 for idx in range(axis_count)]
+
+        ndisplay_val = int(ndisplay) if ndisplay is not None else int(canonical.ndisplay)
+        ndisplay_val = max(1, min(ndisplay_val, axis_count))
+        displayed = list(order[-ndisplay_val:])
 
         return {
-            "ndim": len(axis_labels),
+            "ndim": axis_count,
             "axis_labels": axis_labels,
             "order": order,
-            "sizes": sizes,
-            "range": ranges,
-            "current_step": current,
+            "level_shapes": level_shapes,
+            "current_level": current_level,
+            "current_step": desired_step,
             "displayed": displayed,
             "ndisplay": ndisplay_val,
         }
@@ -481,33 +509,17 @@ class ViewerSceneManager:
     ) -> _WorkerSnapshot:
         assert worker.is_ready, "worker snapshot requested before worker ready"
 
-        zarr_shape = worker._zarr_shape
-        if worker.use_volume and zarr_shape and len(zarr_shape) >= 3:
-            shape = [int(x) for x in zarr_shape[:3]]
-        elif zarr_shape and len(zarr_shape) >= 3:
-            shape = [int(zarr_shape[0]), int(zarr_shape[1]), int(zarr_shape[2])]
-        elif zarr_shape and len(zarr_shape) >= 2:
-            shape = [int(zarr_shape[-2]), int(zarr_shape[-1])]
-        else:
-            data_w, data_h = worker._data_wh
-            shape = [int(data_h), int(data_w)]
+        canonical = getattr(worker, "_canonical_axes", None)
+        assert isinstance(canonical, CanonicalAxes), "worker missing canonical axes metadata"
 
-        axes_override = getattr(worker, "_zarr_axes", None)
-        axis_labels: List[str]
-        if axes_override:
-            axis_labels = [str(axis) for axis in axes_override[: len(shape)]]
-        else:
-            if len(shape) == 3:
-                axis_labels = ["z", "y", "x"]
-            elif len(shape) == 2:
-                axis_labels = ["y", "x"]
-            else:
-                axis_labels = [f"axis {idx}" for idx in range(-len(shape), 0)]
+        shape = [int(size) for size in canonical.sizes]
+        axis_labels: List[str] = list(canonical.axis_labels)
+        order: List[int] = list(canonical.order)
 
         dtype_value = worker._zarr_dtype or worker.volume_dtype
         dtype_str = str(dtype_value) if dtype_value is not None else None
 
-        ndim = len(shape)
+        ndim = int(canonical.ndim)
         is_volume = bool(worker.use_volume or (ndisplay == 3))
 
         return _WorkerSnapshot(
@@ -516,6 +528,8 @@ class ViewerSceneManager:
             axis_labels=axis_labels,
             dtype=dtype_str,
             is_volume=is_volume,
+            order=order,
+            canonical_axes=canonical,
         )
 
     def _apply_to_viewer(
@@ -529,12 +543,9 @@ class ViewerSceneManager:
                 emitter = getattr(dims.events, attr, None)
                 if emitter is not None and hasattr(emitter, "blocker"):
                     stack.enter_context(emitter.blocker())
-            ndim = dims_block.get("ndim")
-            if ndim is not None:
-                dims.ndim = int(ndim)
-            axis_labels = dims_block.get("axis_labels")
-            if axis_labels:
-                dims.axis_labels = tuple(str(label) for label in axis_labels)
+            canonical = self._canonical_axes
+            assert isinstance(canonical, CanonicalAxes), "viewer requires canonical axes"
+            apply_canonical_axes(self._viewer, canonical)
             displayed = dims_block.get("displayed")
             if displayed:
                 with suppress(AttributeError):

@@ -683,9 +683,9 @@ class EGLHeadlessServer:
             snapshot = self._scene_manager.scene_snapshot()
             dims = snapshot.viewer.dims if snapshot is not None else {}
             logger.info(
-                "notify.scene dims: sizes=%s range=%s",
-                dims.get('sizes'),
-                dims.get('range'),
+                "notify.scene dims: level_shapes=%s current_level=%s",
+                dims.get('level_shapes'),
+                dims.get('current_level'),
             )
 
         return json_payload

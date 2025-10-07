@@ -28,7 +28,6 @@ from napari_cuda.protocol import (
     NOTIFY_ERROR_TYPE,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
     SESSION_ACK_TYPE,
@@ -45,7 +44,6 @@ from napari_cuda.protocol import (
     build_notify_error,
     build_notify_layers_delta,
     build_notify_scene_snapshot,
-    build_notify_scene_level,
     build_notify_stream,
     build_notify_telemetry,
     build_error_command,
@@ -56,12 +54,7 @@ from napari_cuda.protocol import (
     build_session_reject,
     build_session_welcome,
 )
-from napari_cuda.protocol.messages import (
-    NotifyLayersPayload,
-    NotifyScenePayload,
-    NotifySceneLevelPayload,
-    NotifyStreamPayload,
-)
+from napari_cuda.protocol.messages import NotifyDimsPayload, NotifyLayersPayload, NotifyScenePayload, NotifyStreamPayload
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
 from napari_cuda.server.control import state_update_engine as state_updates
 from napari_cuda.server.control.state_update_engine import (
@@ -80,11 +73,8 @@ from napari_cuda.server.state.server_scene import (
 )
 from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotification
 from napari_cuda.server.control.control_payload_builder import (
-    build_notify_dims_from_result,
-    build_notify_dims_payload,
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
-    build_notify_scene_level_payload,
     build_notify_scene_payload,
 )
 from napari_cuda.protocol.snapshots import LayerDelta
@@ -130,14 +120,8 @@ class CommandRejected(RuntimeError):
         self.idempotency_key = idempotency_key
 
 
-_RESUMABLE_TOPICS = (
-    NOTIFY_SCENE_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
-    NOTIFY_LAYERS_TYPE,
-    NOTIFY_STREAM_TYPE,
-)
+_RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
 _ENVELOPE_PARSER = EnvelopeParser()
-
 
 async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
     if not hasattr(server, "_ensure_keyframe"):
@@ -154,7 +138,6 @@ register_command(_COMMAND_KEYFRAME, _command_request_keyframe)
 
 _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.scene.level": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
@@ -460,13 +443,10 @@ def _layer_changes_from_result(server: Any, result: StateUpdateResult) -> tuple[
     return None, {}
 
 
-def _current_dims_meta(server: Any) -> Mapping[str, Any]:
-    meta = server._scene.last_dims_payload
-    assert meta is not None, "dims metadata not initialized"
-    meta_copy: Dict[str, Any] = dict(meta)
-    assert "ndisplay" in meta_copy, "dims metadata missing ndisplay"
-    assert "mode" in meta_copy, "dims metadata missing mode"
-    return meta_copy
+
+
+
+
 
 
 def _resolve_dims_mode_from_ndisplay(ndisplay: int) -> str:
@@ -534,43 +514,25 @@ async def _broadcast_layers_delta(
 async def _broadcast_dims_state(
     server: Any,
     *,
-    current_step: Sequence[int],
-    source: str,
-    intent_id: Optional[str],
-    timestamp: Optional[float],
+    payload: NotifyDimsPayload,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
     targets: Optional[Sequence[Any]] = None,
-    meta: Optional[Mapping[str, Any]] = None,
 ) -> None:
     clients = list(targets) if targets is not None else list(server._state_clients)
     if not clients:
         return
 
-    assert meta is not None, "notify.dims requires worker metadata"
-
-    meta_dict = dict(meta)
-
-    ndisplay_raw = meta_dict["ndisplay"]
-    mode_raw = meta_dict["mode"]
-
-    ndisplay = int(ndisplay_raw)
-    mode_text = str(mode_raw).strip().lower()
-    assert mode_text in {"volume", "plane"}, f"invalid dims mode: {raw_mode!r}"
-    mode = "volume" if mode_text == "volume" else "plane"
-
-    step_list = [int(value) for value in current_step]
-
-    meta_dict["current_step"] = list(step_list)
-    meta_dict["ndisplay"] = ndisplay
-    meta_dict["mode"] = mode
-
-    server._scene.last_dims_payload = dict(meta_dict)
-
-    payload = build_notify_dims_payload(
-        current_step=step_list,
-        ndisplay=ndisplay,
-        mode=mode,
-        source=str(source),
-    )
+    if getattr(server, "_log_dims_info", False):
+        logger.info(
+            "notify.dims: step=%s order=%s displayed=%s axis_labels=%s level_shapes=%s current_level=%s",
+            payload.current_step,
+            payload.order,
+            payload.displayed,
+            payload.axis_labels,
+            payload.level_shapes,
+            payload.current_level,
+        )
 
     tasks: list[Awaitable[None]] = []
     now = time.time() if timestamp is None else float(timestamp)
@@ -591,32 +553,6 @@ async def _broadcast_dims_state(
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def _broadcast_worker_dims(
-    server: Any,
-    *,
-    current_step: Sequence[int],
-    meta: Mapping[str, Any],
-) -> None:
-    server._update_scene_manager()
-
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "worker dims: step=%s ndisplay=%s ndim=%s",
-            [int(x) for x in current_step],
-            meta.get("ndisplay"),
-            meta.get("ndim"),
-        )
-
-    await _broadcast_dims_state(
-        server,
-        current_step=current_step,
-        source="worker",
-        intent_id=None,
-        timestamp=None,
-        meta=meta,
-    )
 
 
 def _normalize_camera_delta(value: Any) -> Any:
@@ -724,51 +660,6 @@ async def _send_stream_frame(
     return snapshot
 
 
-async def _send_scene_level_frame(
-    server: Any,
-    ws: Any,
-    *,
-    payload: NotifySceneLevelPayload | Mapping[str, Any],
-    timestamp: Optional[float],
-    snapshot: EnvelopeSnapshot | None = None,
-) -> EnvelopeSnapshot | None:
-    session_id = _state_session(ws)
-    if not session_id:
-        return snapshot
-    if not isinstance(payload, NotifySceneLevelPayload):
-        payload = NotifySceneLevelPayload.from_dict(payload)
-    now = time.time() if timestamp is None else float(timestamp)
-    store = _history_store(server)
-    if snapshot is None and store is not None:
-        snapshot = store.delta_envelope(
-            NOTIFY_SCENE_LEVEL_TYPE,
-            payload=payload.to_dict(),
-            timestamp=now,
-        )
-
-    kwargs: Dict[str, Any] = {
-        "session_id": session_id,
-        "payload": payload,
-        "timestamp": snapshot.timestamp if snapshot is not None else now,
-    }
-    sequencer = _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE)
-    if snapshot is not None:
-        kwargs["seq"] = snapshot.seq
-        kwargs["delta_token"] = snapshot.delta_token
-        kwargs["frame_id"] = snapshot.frame_id
-        sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
-    else:
-        if sequencer.seq is None:
-            cursor = sequencer.snapshot()
-            kwargs["seq"] = cursor.seq
-            kwargs["delta_token"] = cursor.delta_token
-        else:
-            kwargs["sequencer"] = sequencer
-    frame = build_notify_scene_level(**kwargs)
-    await _send_frame(server, ws, frame)
-    return snapshot
-
-
 async def _emit_scene_baseline(
     server: Any,
     ws: Any,
@@ -798,10 +689,8 @@ async def _emit_scene_baseline(
             )
             store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=timestamp)
             store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
-            store.reset_epoch(NOTIFY_SCENE_LEVEL_TYPE, timestamp=timestamp)
             _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
-            _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE).clear()
         await _send_scene_snapshot_from_cache(server, ws, snapshot)
     else:
         if payload is None:
@@ -829,55 +718,6 @@ async def _emit_scene_baseline(
         logger.info("%s: notify.scene sent", reason)
     else:
         logger.debug("%s: notify.scene sent", reason)
-
-
-async def _emit_scene_level_baseline(
-    server: Any,
-    ws: Any,
-    *,
-    plan: ResumePlan | None,
-) -> None:
-    store = _history_store(server)
-    if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
-        if plan.deltas:
-            for snapshot in plan.deltas:
-                await _send_scene_level_frame(
-                    server,
-                    ws,
-                    payload=snapshot.payload,
-                    timestamp=snapshot.timestamp,
-                    snapshot=snapshot,
-                )
-        return
-
-    timestamp = time.time()
-    payload: NotifySceneLevelPayload | None = None
-
-    if store is not None:
-        snapshot = store.current_snapshot(NOTIFY_SCENE_LEVEL_TYPE)
-        need_reset = plan is not None and plan.decision == ResumeDecision.RESET
-        if snapshot is None or need_reset:
-            payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
-            snapshot = store.snapshot_envelope(
-                NOTIFY_SCENE_LEVEL_TYPE,
-                payload=payload.to_dict(),
-                timestamp=timestamp,
-            )
-        if payload is None:
-            payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
-        await _send_scene_level_frame(
-            server,
-            ws,
-            payload=payload,
-            timestamp=snapshot.timestamp,
-            snapshot=snapshot,
-        )
-        return
-
-    if payload is None:
-        payload = build_notify_scene_level_payload(server._scene, server._scene_manager)
-    await _send_scene_level_frame(server, ws, payload=payload, timestamp=timestamp)
-
 
 async def _emit_layer_baseline(
     server: Any,
@@ -951,25 +791,21 @@ async def _emit_stream_baseline(
         pixel_channel.mark_stream_config_dirty(channel)
 
 
-async def _emit_dims_baseline(
-    server: Any,
-    ws: Any,
-    *,
-    step_list: Sequence[int],
-) -> None:
+async def _emit_dims_baseline(server: Any, ws: Any) -> None:
+    if server._scene.last_dims_payload is None:
+        logger.debug("connect: notify.dims baseline skipped (metadata unavailable)")
+        return
     await _broadcast_dims_state(
         server,
-        current_step=step_list,
-        source="server.bootstrap",
+        payload=server._scene.last_dims_payload,
         intent_id=None,
         timestamp=time.time(),
         targets=[ws],
-        meta=_current_dims_meta(server),
     )
     if server._log_dims_info:
-        logger.info("connect: notify.dims baseline -> step=%s", step_list)
+        logger.info("connect: notify.dims baseline sent")
     else:
-        logger.debug("connect: notify.dims baseline -> step=%s", step_list)
+        logger.debug("connect: notify.dims baseline sent")
 
 
 async def broadcast_stream_config(
@@ -1037,70 +873,6 @@ async def broadcast_stream_config(
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def broadcast_scene_level(
-    server: Any,
-    *,
-    payload: NotifySceneLevelPayload | Mapping[str, Any] | None = None,
-    timestamp: Optional[float] = None,
-    reason: str = "scene.level",
-) -> None:
-    clients = list(server._state_clients)
-    if not clients:
-        store = _history_store(server)
-        if store is not None:
-            payload_obj = (
-                payload
-                if isinstance(payload, NotifySceneLevelPayload)
-                else build_notify_scene_level_payload(server._scene, server._scene_manager)
-            )
-            if not isinstance(payload_obj, NotifySceneLevelPayload):
-                payload_obj = NotifySceneLevelPayload.from_dict(payload_obj)
-            store.delta_envelope(
-                NOTIFY_SCENE_LEVEL_TYPE,
-                payload=payload_obj.to_dict(),
-                timestamp=time.time() if timestamp is None else float(timestamp),
-            )
-        return
-
-    if isinstance(payload, NotifySceneLevelPayload):
-        payload_obj = payload
-    elif isinstance(payload, Mapping):
-        payload_obj = NotifySceneLevelPayload.from_dict(payload)
-    else:
-        payload_obj = build_notify_scene_level_payload(server._scene, server._scene_manager)
-
-    now = time.time() if timestamp is None else float(timestamp)
-    store = _history_store(server)
-    snapshot: EnvelopeSnapshot | None = None
-    if store is not None:
-        snapshot = store.delta_envelope(
-            NOTIFY_SCENE_LEVEL_TYPE,
-            payload=payload_obj.to_dict(),
-            timestamp=now,
-        )
-
-    tasks: list[Awaitable[EnvelopeSnapshot | None]] = []
-    for ws in clients:
-        if not _feature_enabled(ws, "notify.scene.level"):
-            continue
-        tasks.append(
-            _send_scene_level_frame(
-                server,
-                ws,
-                payload=payload_obj,
-                timestamp=now,
-                snapshot=snapshot,
-            )
-        )
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if server._log_dims_info:
-            logger.info("%s: notify.scene.level broadcast to %d clients", reason, len(tasks))
-        else:
-            logger.debug("%s: notify.scene.level broadcast to %d clients", reason, len(tasks))
 
 
 async def handle_state(server: Any, ws: Any) -> None:
@@ -1917,11 +1689,12 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
 
         meta = server._scene.last_dims_payload
         assert meta is not None, "dims metadata not initialized"
+        meta_dict = meta.to_dict()
         try:
             result = apply_dims_state_update(
                 server._scene,
                 server._state_lock,
-                dict(meta),
+                dict(meta_dict),
                 axis=target,
                 prop=norm_key,
                 value=value_obj,
@@ -2097,14 +1870,18 @@ def _ndim_from_meta(meta: Mapping[str, Any]) -> int:
         ndim = 0
 
     if ndim <= 0:
-        for key in ("order", "axes", "range", "sizes"):
+        for key in ("order", "axes", "level_shapes"):
             values = meta.get(key)
-            if isinstance(values, Sequence):
-                try:
-                    length = len(tuple(values))
-                except Exception:
-                    length = 0
-                ndim = max(ndim, length)
+            if not isinstance(values, Sequence):
+                continue
+            if key == "level_shapes":
+                assert values, "level_shapes must contain at least one entry"
+                first = values[0]
+                assert isinstance(first, Sequence), "level_shapes entries must be sequences"
+                length = len(first)
+            else:
+                length = len(values)
+            ndim = max(ndim, length)
 
     if ndim <= 0:
         current = meta.get("current_step")
@@ -2147,278 +1924,51 @@ def _baseline_state_result(
     )
 
 
-def _dims_results_from_step(
-    server: Any,
-    step_list: Sequence[int],
-    *,
-    meta: Mapping[str, Any],
-    timestamp: Optional[float] = None,
-) -> list[StateUpdateResult]:
-    results: list[StateUpdateResult] = []
-    current = [int(x) for x in step_list]
-    ts = float(timestamp) if timestamp is not None else time.time()
-    for idx, value in enumerate(current):
-        axis_label = axis_label_from_meta(meta, idx) or str(idx)
-        meta_entry = get_control_meta(server._scene, "dims", axis_label, "step")
-        server_seq = int(meta_entry.last_server_seq or 0)
-        if server_seq <= 0:
-            server_seq = increment_server_sequence(server._scene)
-            meta_entry.last_server_seq = server_seq
-        meta_entry.last_timestamp = ts
-        results.append(
-            StateUpdateResult(
-                scope="dims",
-                target=axis_label,
-                key="step",
-                value=int(value),
-                server_seq=server_seq,
-                timestamp=ts,
-                axis_index=idx,
-                current_step=tuple(current),
-            )
-        )
-    return results
-
-
-def _layer_results_from_controls(
-    server: Any,
-    layer_id: str,
-    controls: Mapping[str, Any],
-) -> list[StateUpdateResult]:
-    results: list[StateUpdateResult] = []
-    for key, value in controls.items():
-        results.append(
-            _baseline_state_result(
-                server,
-                scope="layer",
-                target=layer_id,
-                key=str(key),
-                value=value,
-            )
-        )
-    return results
-
-async def broadcast_layer_update(
-    server: Any,
-    *,
-    layer_id: str,
-    changes: Mapping[str, Any],
-    server_seq: Optional[int] = None,
-    timestamp: Optional[float] = None,
-) -> None:
-    """Broadcast state.update payloads for the given *layer_id*."""
-
-    if not changes:
-        return
-
-    ts = float(timestamp) if timestamp is not None else time.time()
-    results: list[StateUpdateResult] = []
-    for key, value in changes.items():
-        results.append(
-            _baseline_state_result(
-                server,
-                scope="layer",
-                target=layer_id,
-                key=str(key),
-                value=value,
-                server_seq_override=server_seq,
-                timestamp=ts,
-            )
-        )
-
-    await _broadcast_state_updates(server, results)
-
-
-def _normalize_scene_level_payload(level_payload: Mapping[str, Any]) -> Dict[str, Any]:
-    normalized: Dict[str, Any] = {str(key): value for key, value in level_payload.items()}
-    assert "current_level" in normalized, "scene level payload missing current_level"
-    normalized["current_level"] = int(normalized["current_level"])
-
-    if "downgraded" in normalized:
-        normalized["downgraded"] = bool(normalized["downgraded"])
-
-    if "levels" in normalized:
-        raw_levels = normalized["levels"]
-        assert type(raw_levels) in (list, tuple), "scene level levels must be a sequence"
-        level_entries: list[Dict[str, Any]] = []
-        for entry in raw_levels:
-            assert type(entry) is dict, "scene level entry must be a dict"
-            entry_normalized: Dict[str, Any] = {str(key): value for key, value in entry.items()}
-            if "index" in entry_normalized:
-                entry_normalized["index"] = int(entry_normalized["index"])
-            if "shape" in entry_normalized:
-                shape_raw = entry_normalized["shape"]
-                assert type(shape_raw) in (list, tuple), "scene level shape must be a sequence"
-                entry_normalized["shape"] = [int(value) for value in shape_raw]
-            if "downsample" in entry_normalized:
-                down_raw = entry_normalized["downsample"]
-                if type(down_raw) in (list, tuple):
-                    entry_normalized["downsample"] = [float(value) for value in down_raw]
-            level_entries.append(entry_normalized)
-        normalized["levels"] = level_entries
-
-    return normalized
-
-
-def _verify_dims_against_level(
-    meta: Dict[str, Any], level_payload: Mapping[str, Any]
-) -> tuple[list[int], list[list[int]]]:
-    levels = level_payload.get("levels")
-    assert levels, "scene level payload missing levels"
-
-    current_level = int(level_payload["current_level"])
-
-    descriptor: Optional[Mapping[str, Any]] = None
-    for entry in levels:
-        assert type(entry) is dict, "scene level entry must be a dict"
-        if "index" not in entry:
-            continue
-        if int(entry["index"]) == current_level:
-            descriptor = entry
-            break
-
-    assert descriptor is not None, "scene level descriptor missing for active level"
-    assert "shape" in descriptor, "scene level descriptor missing shape"
-
-    shape_raw = descriptor["shape"]
-    assert type(shape_raw) in (list, tuple), "scene level shape must be a sequence"
-    shape = [int(value) for value in shape_raw]
-
-    sizes_raw = meta.get("sizes")
-    assert sizes_raw, "worker dims metadata missing sizes"
-    sizes = [int(value) for value in sizes_raw]
-    assert len(sizes) >= len(shape), "worker dims sizes shorter than level shape"
-
-    ranges_raw = meta.get("range")
-    assert ranges_raw, "worker dims metadata missing range"
-    ranges: list[list[int]] = []
-    for bounds in ranges_raw:
-        assert type(bounds) in (list, tuple), "worker dims range entry must be a sequence"
-        low = int(bounds[0])
-        high = int(bounds[1])
-        ranges.append([low, high])
-    assert len(ranges) >= len(shape), "worker dims range shorter than level shape"
-
-    for idx, expected in enumerate(shape):
-        actual = sizes[idx]
-        assert actual == expected, f"worker dims size mismatch at axis {idx}"
-        low, high = ranges[idx]
-        assert low == 0, f"worker dims range lower bound mismatch at axis {idx}"
-        expected_high = max(expected - 1, 0)
-        assert high == expected_high, f"worker dims range upper bound mismatch at axis {idx}"
-
-    ndim = meta.get("ndim")
-    if ndim is not None:
-        assert int(ndim) == len(sizes), "worker dims ndim mismatch"
-    else:
-        meta["ndim"] = len(sizes)
-
-    return sizes, ranges
-
-
 def process_worker_notifications(
     server: Any, notifications: Sequence[WorkerSceneNotification]
 ) -> None:
     if not notifications:
         return
 
-    deferred: list[WorkerSceneNotification] = []
     scene_data = server._scene
-    multiscale_state = scene_data.multiscale_state
 
     for note in notifications:
         if note.seq <= scene_data.last_scene_seq:
             continue
 
-        if note.kind == "dims_update":
-            assert note.meta is not None, "worker dims notification missing metadata"
-            meta = dict(note.meta)
+        if note.kind != "dims_snapshot":
+            raise AssertionError(f"unexpected worker notification kind: {note.kind}")
 
-            assert note.step is not None, "worker dims notification missing step"
-            step_tuple = tuple(int(value) for value in note.step)
+        dims_payload = note.payload
+        step = tuple(int(value) for value in dims_payload.current_step)
 
-            ndim = _ndim_from_meta(meta)
-            assert len(step_tuple) == ndim, "worker dims step length mismatch"
+        with server._state_lock:
+            latest = server._scene.latest_state
+            server._scene.latest_state = replace(latest, current_step=step)
 
-            sizes_raw = meta["sizes"]
-            meta["sizes"] = [int(value) for value in sizes_raw]
+        scene_data.last_dims_payload = dims_payload
+        scene_data.last_scene_seq = int(note.seq)
 
-            ranges_raw = meta["range"]
-            coerced_ranges: list[list[int]] = []
-            for bounds in ranges_raw:
-                low = int(bounds[0])
-                high = int(bounds[1])
-                coerced_ranges.append([low, high])
-            meta["range"] = coerced_ranges
+        multiscale_state = scene_data.multiscale_state
+        multiscale_state["current_level"] = dims_payload.current_level
+        multiscale_state["levels"] = [dict(level) for level in dims_payload.levels]
+        if dims_payload.downgraded is not None:
+            multiscale_state["downgraded"] = bool(dims_payload.downgraded)
+        else:
+            multiscale_state.pop("downgraded", None)
 
-            pending_level = None
-            if "pending_worker_level" in multiscale_state:
-                pending_level = multiscale_state["pending_worker_level"]
+        server._scene.last_dims_payload = dims_payload
+        server._update_scene_manager()
 
-            if pending_level is not None:
-                sizes, ranges = _verify_dims_against_level(meta, pending_level)
-                meta["sizes"] = sizes
-                meta["range"] = ranges
-                multiscale_state["current_level"] = int(pending_level["current_level"])
-                multiscale_state["level"] = int(pending_level["current_level"])
-                if "downgraded" in pending_level:
-                    multiscale_state["downgraded"] = bool(pending_level["downgraded"])
-                if "levels" in pending_level:
-                    multiscale_state["levels"] = list(pending_level["levels"])
-                del multiscale_state["pending_worker_level"]
-
-            mode_text = str(meta.get("mode", "")).strip().lower()
-            if mode_text not in {"plane", "volume"}:
-                raise AssertionError(f"worker dims mode invalid: {mode_text!r}")
-            scene_mode = "volume" if bool(server._scene.use_volume) else "plane"
-            if mode_text != scene_mode:
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "worker dims ignored due to mode mismatch: worker=%s control=%s",
-                        mode_text,
-                        scene_mode,
-                    )
-                continue
-
-            with server._state_lock:
-                latest = server._scene.latest_state
-                server._scene.latest_state = replace(latest, current_step=step_tuple)
-            scene_data.last_dims_payload = dict(meta)
-            server._schedule_coro(
-                _broadcast_worker_dims(
-                    server,
-                    current_step=step_tuple,
-                    meta=meta,
-                ),
-                "dims_update-worker",
-            )
-            scene_data.last_scene_seq = note.seq
-        elif note.kind == "scene_level" and note.level is not None:
-            server._update_scene_manager()
-            level_payload = note.level
-            assert type(level_payload) is dict, "scene level payload must be a dict"
-            normalized_level = _normalize_scene_level_payload(level_payload)
-            pending_level_copy: Dict[str, Any] = {}
-            for key, value in normalized_level.items():
-                if key == "levels" and value is not None:
-                    pending_level_copy[key] = [dict(entry) for entry in value]
-                else:
-                    pending_level_copy[key] = value
-            multiscale_state["pending_worker_level"] = pending_level_copy
-            server._schedule_coro(
-                broadcast_scene_level(
-                    server,
-                    payload=normalized_level,
-                    reason="worker",
-                ),
-                "scene_level-worker",
-            )
-            scene_data.last_scene_seq = note.seq
-
-    if deferred:
-        for note in deferred:
-            server._worker_notifications.push(note)
-        asyncio.get_running_loop().call_later(0.05, server._process_worker_notifications)
+        server._schedule_coro(
+            _broadcast_dims_state(
+                server,
+                payload=dims_payload,
+                intent_id=None,
+                timestamp=float(note.timestamp or time.time()),
+            ),
+            "dims_snapshot-worker",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2781,12 +2331,10 @@ async def _send_scene_snapshot_from_cache(server: Any, ws: Any, snapshot: Envelo
 async def _send_state_baseline(server: Any, ws: Any) -> None:
     resume_map: Dict[str, ResumePlan] = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
     scene_plan = resume_map.get(NOTIFY_SCENE_TYPE)
-    scene_level_plan = resume_map.get(NOTIFY_SCENE_LEVEL_TYPE)
     layers_plan = resume_map.get(NOTIFY_LAYERS_TYPE)
     stream_plan = resume_map.get(NOTIFY_STREAM_TYPE)
 
     scene_payload: NotifyScenePayload | None = None
-    step_list: list[int] = []
     default_controls: list[tuple[str, Mapping[str, Any]]] = []
 
     try:
@@ -2798,16 +2346,8 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             logger.debug("Initial scene manager sync failed", exc_info=True)
 
         with server._state_lock:
-            current_step = server._scene.latest_state.current_step
-
-        step_list = list(current_step) if current_step is not None else []
-
-        snapshot = server._scene_manager.scene_snapshot()
+            snapshot = server._scene_manager.scene_snapshot()
         assert snapshot is not None, "scene snapshot unavailable"
-        dims_block = snapshot.viewer.dims
-        ndim = int(dims_block.get("ndim", 0) or len(dims_block.get("sizes", [])) or 3)
-        while len(step_list) < ndim:
-            step_list.append(0)
 
         scene_payload = build_notify_scene_payload(
             server._scene,
@@ -2847,15 +2387,6 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         logger.exception("Initial notify.scene send failed")
 
     try:
-        await _emit_scene_level_baseline(
-            server,
-            ws,
-            plan=scene_level_plan,
-        )
-    except Exception:
-        logger.exception("Initial scene level send failed")
-
-    try:
         await _emit_layer_baseline(
             server,
             ws,
@@ -2870,11 +2401,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
     except Exception:
         logger.exception("Initial state config send failed")
 
-    if step_list:
-        try:
-            await _emit_dims_baseline(server, ws, step_list=step_list)
-        except Exception:
-            logger.exception("Initial dims baseline send failed")
+    await _emit_dims_baseline(server, ws)
 
     assert hasattr(server, "_ensure_keyframe"), "server must expose _ensure_keyframe"
     assert hasattr(server, "_schedule_coro"), "server must expose _schedule_coro"
@@ -2941,7 +2468,6 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         )
         store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=timestamp)
         store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
-        store.reset_epoch(NOTIFY_SCENE_LEVEL_TYPE, timestamp=timestamp)
     tasks: list[Awaitable[None]] = []
     for ws in clients:
         session_id = _state_session(ws)
@@ -2950,7 +2476,6 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         if snapshot is not None:
             _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
-            _state_sequencer(ws, NOTIFY_SCENE_LEVEL_TYPE).clear()
         frame = build_notify_scene_snapshot(
             session_id=session_id,
             viewer=payload.viewer,
@@ -2969,13 +2494,6 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
         logger.info("%s: notify.scene broadcast to %d clients", reason, len(tasks))
     else:
         logger.debug("%s: notify.scene broadcast to %d clients", reason, len(tasks))
-
-    await broadcast_scene_level(
-        server,
-        payload=build_notify_scene_level_payload(server._scene, server._scene_manager),
-        timestamp=timestamp,
-        reason=reason,
-    )
 
 
 async def _send_layer_baseline(server: Any, ws: Any) -> None:

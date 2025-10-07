@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Optional, Sequence, List, Mapping, Dict, Any
 
@@ -25,43 +25,27 @@ def _handle_scene_refresh(
     loop: asyncio.AbstractEventLoop,
     step: object = None,
 ) -> None:
-    level_payload: Optional[Mapping[str, object]] = None
-    if step and type(step) is dict and "scene_level" in step:
-        raw_level = step["scene_level"]
-        assert type(raw_level) is dict, "scene level payload must be a dict"
-        level_payload = dict(raw_level)
-
     worker_ref = state.worker
     assert worker_ref is not None, "render worker missing during refresh"
     assert worker_ref.is_ready, "render worker refresh fired before bootstrap"
 
-    meta = dict(worker_ref.snapshot_dims_metadata())
-    assert meta, "render worker returned empty dims metadata"
-    meta = _normalize_dims_meta(meta)
+    dims_payload = worker_ref.build_notify_dims_payload()
 
-    assert worker_ref._last_step is not None, "worker dims step missing"
-    step_tuple = tuple(int(value) for value in worker_ref._last_step)
+    override_step: Optional[tuple[int, ...]] = None
+    override_level = dims_payload.current_level
+
+    if isinstance(step, (list, tuple)):
+        override_step = tuple(int(value) for value in step)
+
     plane_state = worker_ref._plane_restore_state
-    mode = str(meta.get("mode"))
-    if mode == "volume" and plane_state is not None:
-        step_tuple = plane_state.step
-        meta["level"] = plane_state.level
-    else:
-        meta["level"] = int(worker_ref._active_ms_level)
-    meta_copy = dict(meta)
-    meta_copy["current_step"] = [int(value) for value in step_tuple]
+    if plane_state is not None and dims_payload.mode == "volume":
+        override_step = tuple(int(value) for value in plane_state.step)
+        override_level = int(plane_state.level)
 
-    notifications: list[WorkerSceneNotification] = []
-
-    if level_payload:
-        state.scene_seq = int(state.scene_seq) + 1
-        notifications.append(
-            WorkerSceneNotification(
-                kind="scene_level",
-                seq=state.scene_seq,
-                level=level_payload,
-            )
-        )
+    if override_step is not None and override_step != dims_payload.current_step:
+        dims_payload = replace(dims_payload, current_step=override_step, current_level=override_level)
+    elif override_level != dims_payload.current_level:
+        dims_payload = replace(dims_payload, current_level=override_level)
 
     state.scene_seq = int(state.scene_seq) + 1
     with server._state_lock:  # type: ignore[attr-defined]
@@ -70,28 +54,21 @@ def _handle_scene_refresh(
             center=snapshot.center,
             zoom=snapshot.zoom,
             angles=snapshot.angles,
-            current_step=step_tuple,
+            current_step=dims_payload.current_step,
         )
-        server._scene.last_dims_payload = meta_copy  # type: ignore[attr-defined]
 
     if plane_state is not None:
         server._scene.plane_restore_state = plane_state
 
-    server._worker_notifications.discard_kind("dims_update")
-    notifications.append(
-        WorkerSceneNotification(
-            kind="dims_update",
-            seq=state.scene_seq,
-            step=step_tuple,
-            meta=meta,
-        )
+    server._scene.last_dims_payload = dims_payload
+
+    notification = WorkerSceneNotification(
+        kind="dims_snapshot",
+        seq=state.scene_seq,
+        payload=dims_payload,
+        timestamp=time.time(),
     )
-
-    if not notifications:
-        return
-
-    for note in notifications:
-        server._worker_notifications.push(note)  # type: ignore[attr-defined]
+    server._worker_notifications.push(notification)  # type: ignore[attr-defined]
 
     loop.call_soon_threadsafe(server._process_worker_notifications)  # type: ignore[attr-defined]
 
@@ -263,13 +240,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
             )
 
-            meta_init = worker.snapshot_dims_metadata()
-            assert meta_init, "render worker returned empty dims metadata during init"
-            meta_init = _normalize_dims_meta(dict(meta_init))
-            server._scene.last_dims_payload = dict(meta_init)
+            initial_payload = worker.build_notify_dims_payload()
+            init_step = initial_payload.current_step
 
-            assert worker._last_step is not None, "worker dims step missing during init"
-            init_step = tuple(int(value) for value in worker._last_step)
+            server._scene.last_dims_payload = initial_payload
 
             with server._state_lock:
                 latest = server._scene.latest_state
@@ -283,10 +257,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             state.scene_seq = int(state.scene_seq) + 1
             server._worker_notifications.push(
                 WorkerSceneNotification(
-                    kind="dims_update",
+                    kind="dims_snapshot",
                     seq=state.scene_seq,
-                    step=init_step,
-                    meta=meta_init,
+                    payload=initial_payload,
+                    timestamp=time.time(),
                 )
             )
             loop.call_soon_threadsafe(server._process_worker_notifications)
@@ -302,6 +276,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     queued = server._scene.latest_state
                     commands = list(server._scene.camera_commands)
                     server._scene.camera_commands.clear()
+                    frame_input_step = queued.current_step
                     server._scene.latest_state = ServerSceneState(
                         center=queued.center,
                         zoom=queued.zoom,
@@ -377,6 +352,20 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server.metrics.observe_ms("napari_cuda_pack_ms", timings.pack_ms)
                 server.metrics.observe_ms("napari_cuda_total_ms", timings.total_ms)
 
+                if worker._last_step is not None:
+                    applied_step = tuple(int(value) for value in worker._last_step)
+                    should_notify = False
+                    with server._state_lock:
+                        latest_snapshot = server._scene.latest_state
+                        if (
+                            latest_snapshot.current_step == frame_input_step
+                            and latest_snapshot.current_step != applied_step
+                        ):
+                            server._scene.latest_state = replace(latest_snapshot, current_step=applied_step)
+                            should_notify = True
+                    if should_notify:
+                        worker._notify_scene_refresh()
+
                 on_frame(packet, flags, timings.capture_wall_ts, seq)
 
                 server._publish_policy_metrics()
@@ -417,6 +406,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
     thread.start()
 
 
+
 def stop_worker(state: WorkerLifecycleState) -> None:
     """Signal the render worker to stop and wait for the thread to exit."""
 
@@ -427,24 +417,3 @@ def stop_worker(state: WorkerLifecycleState) -> None:
         thread.join(timeout=3.0)
     state.thread = None
     state.worker = None
-def _normalize_dims_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
-    normalized: Dict[str, Any] = {}
-    for key, value in meta.items():
-        normalized[key] = value
-
-    if "sizes" in normalized:
-        normalized["sizes"] = [int(v) for v in normalized["sizes"]]
-
-    if "range" in normalized:
-        ranges: list[list[int]] = []
-        for bounds in normalized["range"]:
-            ranges.append([int(bounds[0]), int(bounds[1])])
-        normalized["range"] = ranges
-
-    if "order" in normalized:
-        normalized["order"] = [int(v) for v in normalized["order"]]
-
-    if "displayed" in normalized:
-        normalized["displayed"] = [int(v) for v in normalized["displayed"]]
-
-    return normalized

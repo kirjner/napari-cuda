@@ -9,6 +9,7 @@ import numpy as np
 from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
+from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 
 
 class _StubWorker:
@@ -33,6 +34,30 @@ class _StubWorker:
         self._zarr_dtype = zarr_dtype
         self.volume_dtype = volume_dtype
         self._scene_source = None
+        axes_tuple: tuple[str, ...]
+        if zarr_axes:
+            axes_tuple = tuple(zarr_axes)
+        elif data_d is not None or (zarr_shape and len(zarr_shape) == 3):
+            axes_tuple = ("z", "y", "x")
+        else:
+            axes_tuple = ("y", "x")
+
+        if zarr_shape:
+            shape_tuple = tuple(int(s) for s in zarr_shape)
+        else:
+            if len(axes_tuple) == 3:
+                depth = int(data_d) if data_d is not None else 1
+                shape_tuple = (depth, int(data_wh[1]), int(data_wh[0]))
+            else:
+                shape_tuple = (int(data_wh[1]), int(data_wh[0]))
+
+        step = tuple(0 for _ in range(len(shape_tuple)))
+        self._canonical_axes = canonical_axes_from_source(
+            axes=axes_tuple,
+            shape=shape_tuple,
+            step=step,
+            use_volume=use_volume,
+        )
 
     @property
     def is_ready(self) -> bool:
@@ -99,7 +124,8 @@ def test_update_volume_scene(manager: ViewerSceneManager) -> None:
 
     meta = manager.dims_metadata()
     assert meta["ndim"] == 3
-    assert meta["sizes"] == [20, 40, 60]
+    assert meta["level_shapes"] == [[20, 40, 60], [20, 20, 30]]
+    assert meta["current_level"] == 0
     assert meta["volume"] is True
     assert meta["controls"]["visible"] is True
     assert meta["multiscale"]["current_level"] == 0
@@ -136,7 +162,8 @@ def test_update_2d_scene(manager: ViewerSceneManager) -> None:
 
     meta = manager.dims_metadata()
     assert meta["ndim"] == 2
-    assert meta["sizes"] == [256, 128]
+    assert meta["level_shapes"] == [[256, 128]]
+    assert meta["current_level"] == 0
     assert meta.get("multiscale") is None
     assert meta.get("controls") is not None
     assert meta.get("volume") is False

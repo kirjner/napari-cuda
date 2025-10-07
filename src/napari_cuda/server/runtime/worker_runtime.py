@@ -84,30 +84,6 @@ def notify_scene_refresh(worker, step_hint: Optional[Tuple[int, ...]] = None) ->
     callback(worker._last_step)
 
 
-def notify_scene_level(
-    worker,
-    *,
-    current_level: int,
-    downgraded: Optional[bool],
-    levels: Optional[Sequence[Mapping[str, Any]]] = None,
-) -> None:
-    """Notify the control loop that the worker switched multiscale levels."""
-
-    callback = getattr(worker, "_scene_refresh_cb", None)
-    if callback is None:
-        return
-    payload: Dict[str, Any] = {
-        "scene_level": {
-            "current_level": int(current_level),
-        }
-    }
-    if downgraded is not None:
-        payload["scene_level"]["downgraded"] = bool(downgraded)
-    if levels:
-        payload["scene_level"]["levels"] = [dict(entry) for entry in levels]
-    callback(payload)
-
-
 def refresh_worker_slice_if_needed(worker) -> None:
     """Refresh the napari slice layer when ROI drift warrants it."""
 
@@ -439,37 +415,6 @@ def set_level_with_budget(
     except LevelBudgetError as exc:
         raise budget_error(str(exc)) from exc
 
-    level_entries: list[Mapping[str, Any]] = []
-    try:
-        for idx, descriptor in enumerate(getattr(source, "level_descriptors", []) or []):
-            entry: Dict[str, Any] = {
-                "index": int(getattr(descriptor, "index", idx)),
-            }
-            shape = getattr(descriptor, "shape", None)
-            if shape is not None:
-                try:
-                    entry["shape"] = [int(x) for x in shape]
-                except Exception:
-                    entry["shape"] = list(shape)
-            downsample = getattr(descriptor, "downsample", None)
-            if downsample is not None:
-                try:
-                    entry["downsample"] = [float(x) for x in downsample]
-                except Exception:
-                    entry["downsample"] = list(downsample)
-            path = getattr(descriptor, "path", None)
-            if path is not None:
-                entry["path"] = str(path)
-            level_entries.append(entry)
-    except Exception:
-        level_entries = []
-
-    notify_scene_level(
-        worker,
-        current_level=int(applied_snapshot.level),
-        downgraded=bool(downgraded),
-        levels=level_entries or None,
-    )
 
     worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
     worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
@@ -524,7 +469,6 @@ def perform_level_switch(
 __all__ = [
     "ensure_scene_source",
     "notify_scene_refresh",
-    "notify_scene_level",
     "refresh_worker_slice_if_needed",
     "reset_worker_camera",
     "apply_worker_level",

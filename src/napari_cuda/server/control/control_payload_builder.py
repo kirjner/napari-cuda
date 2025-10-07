@@ -4,12 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from napari_cuda.protocol.messages import (
-    NotifyScenePayload,
-    NotifySceneLevelPayload,
-    NotifyDimsPayload,
-    NotifyLayersPayload,
-)
+from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
 from napari_cuda.server.state.server_scene import ServerSceneData, layer_controls_to_dict
 from napari_cuda.server.control.state_update_engine import StateUpdateResult
@@ -44,33 +39,6 @@ def build_notify_scene_payload(
     return payload
 
 
-def build_notify_scene_level_payload(
-    scene: ServerSceneData,
-    manager: ViewerSceneManager,
-) -> NotifySceneLevelPayload:
-    """Build a ``notify.scene.level`` payload representing active LOD metadata."""
-
-    multiscale = scene.multiscale_state or {}
-    current_level_raw = multiscale.get("current_level", multiscale.get("level", 0))
-    current_level = int(current_level_raw)
-
-    downgraded_val = multiscale.get("downgraded")
-    downgraded = None if downgraded_val is None else bool(downgraded_val)
-
-    levels_payload = multiscale.get("levels")
-    levels: list[dict[str, Any]] = []
-    if isinstance(levels_payload, Sequence):
-        for entry in levels_payload:
-            if isinstance(entry, Mapping):
-                levels.append({str(k): _normalize_value(v) for k, v in entry.items()})
-
-    return NotifySceneLevelPayload(
-        current_level=current_level,
-        downgraded=downgraded,
-        levels=tuple(levels) if levels else None,
-    )
-
-
 def build_notify_layers_delta_payload(result: StateUpdateResult) -> NotifyLayersPayload:
     """Convert a single layer result into a `notify.layers` payload."""
 
@@ -97,37 +65,6 @@ def build_layer_controls_payload(layer_id: str, state: ServerSceneData) -> Notif
     if not controls:
         return None
     return build_notify_layers_payload(layer_id=layer_id, changes=controls)
-
-
-def build_notify_dims_payload(
-    *,
-    current_step: Sequence[int],
-    ndisplay: int,
-    mode: str,
-    source: str,
-) -> NotifyDimsPayload:
-    return NotifyDimsPayload(
-        current_step=tuple(int(x) for x in current_step),
-        ndisplay=int(ndisplay),
-        mode=str(mode),
-        source=str(source),
-    )
-
-
-def build_notify_dims_from_result(
-    result: StateUpdateResult,
-    *,
-    ndisplay: int,
-    mode: str,
-    source: str,
-) -> NotifyDimsPayload:
-    step = result.current_step or tuple()
-    return build_notify_dims_payload(
-        current_step=step,
-        ndisplay=ndisplay,
-        mode=mode,
-        source=source,
-    )
 
 
 def _normalize_value(value: Any) -> Any:

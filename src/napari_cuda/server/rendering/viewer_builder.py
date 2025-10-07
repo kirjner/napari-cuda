@@ -10,7 +10,8 @@ initial scene wiring.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 from vispy import scene
@@ -20,6 +21,60 @@ from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_leve
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CanonicalAxes:
+    ndim: int
+    axis_labels: tuple[str, ...]
+    order: tuple[int, ...]
+    ndisplay: int
+    current_step: tuple[int, ...]
+    ranges: tuple[tuple[float, float, float], ...]
+    sizes: tuple[int, ...]
+
+
+def canonical_axes_from_source(
+    *,
+    axes: Sequence[str],
+    shape: Sequence[int],
+    step: Sequence[int],
+    use_volume: bool,
+) -> CanonicalAxes:
+    ndim = len(shape)
+    assert ndim > 0, "canonical axes requires at least one dimension"
+
+    labels = tuple(str(axis) for axis in axes)
+    assert len(labels) == ndim, f"source axes {labels} must match shape {shape}"
+
+    step_tuple = tuple(int(value) for value in step)
+    assert len(step_tuple) == ndim, f"step {step_tuple} must match ndim={ndim}"
+
+    sizes = tuple(int(max(1, int(size))) for size in shape)
+    ranges = tuple((0.0, float(size - 1), 1.0) for size in sizes)
+
+    ndisplay = 3 if use_volume and ndim >= 3 else min(2, ndim)
+    order = tuple(range(ndim))
+
+    return CanonicalAxes(
+        ndim=ndim,
+        axis_labels=labels,
+        order=order,
+        ndisplay=ndisplay,
+        current_step=step_tuple,
+        ranges=ranges,
+        sizes=sizes,
+    )
+
+
+def apply_canonical_axes(viewer: ViewerModel, meta: CanonicalAxes) -> None:
+    dims = viewer.dims
+    dims.ndim = meta.ndim
+    dims.axis_labels = meta.axis_labels
+    dims.order = meta.order
+    dims.ndisplay = meta.ndisplay
+    dims.range = meta.ranges
+    dims.current_step = meta.current_step
 
 
 class ViewerBuilder:
@@ -54,6 +109,7 @@ class ViewerBuilder:
 
         layer = None
         adapter = None
+        canonical_meta: Optional[CanonicalAxes] = None
 
         scene_src = "synthetic"
         scene_meta = ""
@@ -102,7 +158,8 @@ class ViewerBuilder:
             self._bridge._zarr_dtype = str(source.dtype)
             self._bridge._zarr_clim = source.ensure_contrast(level=current_level)
 
-            axes_lower = [str(ax).lower() for ax in source.axes]
+            axes_tuple = tuple(str(ax) for ax in source.axes)
+            axes_lower = [axis.lower() for axis in axes_tuple]
             if 'z' in axes_lower:
                 try:
                     self._bridge._z_index = int(step[axes_lower.index('z')])
@@ -163,6 +220,12 @@ class ViewerBuilder:
                 layer.rendering = "mip"
                 scene_src = "napari-zarr-volume"
                 scene_meta = f"level={self._bridge._zarr_level or current_level} shape={d}x{h}x{w}"
+                canonical_meta = canonical_axes_from_source(
+                    axes=axes_tuple,
+                    shape=descriptor.shape,
+                    step=step,
+                    use_volume=True,
+                )
             else:
                 z_idx = self._bridge._z_index or 0
                 # Load initial 2D slab using the worker's slice helper.
@@ -196,20 +259,12 @@ class ViewerBuilder:
                     contrast_limits=(0.0, 1.0),
                     scale=(sy, sx),
                 )
-                viewer.dims.axis_labels = tuple(source.axes)
-                viewer.dims.ndisplay = 2
-                viewer.dims.current_step = tuple(int(s) for s in step)
-                self._bridge._last_step = tuple(int(s) for s in step)
                 # Make sure layer draws fully opaque and on top for debugging
                 layer.opacity = 1.0
                 layer.blending = 'opaque'
                 layer.gamma = 1.0
                 layer.colormap = 'gray'
                 layer.interpolation = layer_interpolation
-                try:
-                    self._bridge._set_dims_range_for_level(source, current_level)
-                except Exception:
-                    logger.debug("adapter: set dims range failed", exc_info=True)
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
@@ -222,6 +277,12 @@ class ViewerBuilder:
                 view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
                 scene_src = "napari-zarr-adapter"
                 scene_meta = f"level={self._bridge._zarr_level or current_level} shape={h}x{w}"
+                canonical_meta = canonical_axes_from_source(
+                    axes=axes_tuple,
+                    shape=descriptor.shape,
+                    step=step,
+                    use_volume=False,
+                )
 
         if layer is None:
             if self._bridge.use_volume:
@@ -236,26 +297,42 @@ class ViewerBuilder:
                 self._bridge._data_d = d
                 view.camera.set_range(x=(0, w), y=(0, h), z=(0, d))
                 self._bridge._frame_volume_camera(w, h, d)
-                self._bridge._last_step = tuple(0 for _ in range(volume.ndim))
                 layer.rendering = "mip"
                 scene_src = "napari-adapter-volume"
                 scene_meta = f"synthetic shape={d}x{h}x{w}"
+                canonical_meta = canonical_axes_from_source(
+                    axes=("z", "y", "x"),
+                    shape=volume.shape,
+                    step=(0,) * volume.ndim,
+                    use_volume=True,
+                )
             else:
                 image = rng.random((self._bridge.height, self._bridge.width), dtype=np.float32)
                 layer = viewer.add_image(image, name="adapter-image")
-                viewer.dims.ndisplay = 2
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
                 h = int(image.shape[0]); w = int(image.shape[1])
                 self._bridge._data_wh = (w, h)
                 view.camera.set_range(x=(0, w), y=(0, h))
-                self._bridge._last_step = tuple(0 for _ in range(image.ndim))
                 scene_src = "napari-adapter-image"
                 scene_meta = f"synthetic shape={h}x{w}"
+                canonical_meta = canonical_axes_from_source(
+                    axes=("y", "x"),
+                    shape=image.shape,
+                    step=(0,) * image.ndim,
+                    use_volume=False,
+                )
 
         self._bridge._viewer = viewer
         self._bridge._napari_layer = layer
+
+        assert canonical_meta is not None, "canonical axes metadata unavailable"
+        apply_canonical_axes(viewer, canonical_meta)
+        self._bridge._canonical_axes = canonical_meta
+        self._bridge._last_step = canonical_meta.current_step
+        self._bridge._zarr_shape = tuple(int(size) for size in canonical_meta.sizes)
+        self._bridge._zarr_axes = ''.join(canonical_meta.axis_labels)
 
         def _ensure_node_registered() -> None:
             n = adapter.node
