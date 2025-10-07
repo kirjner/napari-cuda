@@ -11,7 +11,7 @@ from napari_cuda.server.state.scene_state_applier import (
     SceneStateApplyContext,
 )
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.runtime.runtime_mailbox import RenderMailbox
+from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
 from napari_cuda.server.state.scene_types import SliceROI
 
 
@@ -348,7 +348,7 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
         request_encoder_idr=None,
     )
 
-    queue = RenderMailbox()
+    queue = ServerCommandQueue()
     state = ServerSceneState(current_step=(1, 0, 0))
 
     result = SceneStateApplier.drain_updates(ctx, state=state, mailbox=queue)
@@ -389,7 +389,7 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
         request_encoder_idr=None,
     )
 
-    queue = RenderMailbox()
+    queue = ServerCommandQueue()
     state = ServerSceneState(
         current_step=(1, 0, 0),
         center=(5.0, 6.0, 7.0),

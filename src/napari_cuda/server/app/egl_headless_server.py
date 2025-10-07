@@ -32,10 +32,6 @@ from napari_cuda.server.state.server_scene import (
     create_server_scene_data,
     prune_control_metadata,
 )
-from napari_cuda.server.runtime.worker_notifications import (
-    WorkerSceneNotification,
-    WorkerSceneNotificationQueue,
-)
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.bitstream import ParamCache, configure_bitstream
 from napari_cuda.server.app.metrics_core import Metrics
@@ -48,6 +44,7 @@ from napari_cuda.server.app.config import (
 )
 from napari_cuda.protocol import (
     NotifyStreamPayload,
+    NotifyDimsPayload,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
@@ -58,10 +55,12 @@ from napari_cuda.server.rendering import pixel_broadcaster
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
+    _broadcast_dims_state,
     broadcast_stream_config,
     handle_state,
-    process_worker_notifications,
 )
+from napari_cuda.server.state.server_state_ledger import ServerStateLedger
+from napari_cuda.server.state.server_mirrors import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
@@ -179,7 +178,6 @@ class EGLHeadlessServer:
         self._seq = 0
         self._worker_lifecycle = WorkerLifecycleState()
         self._scene_manager = ViewerSceneManager((self.width, self.height))
-        self._worker_notifications = WorkerSceneNotificationQueue()
         self._scene: ServerSceneData = create_server_scene_data(
             policy_event_path=self._ctx.policy_event_path
         )
@@ -192,6 +190,38 @@ class EGLHeadlessServer:
         self._dump_path: Optional[str] = None
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
+        self._state_ledger = ServerStateLedger()
+        self._control_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
+            loop = self._control_loop
+            if loop is None:
+                raise RuntimeError("control loop not initialized")
+            loop.call_soon_threadsafe(self._schedule_coro, coro, label)
+
+        async def _mirror_broadcast(payload: NotifyDimsPayload) -> None:
+            await _broadcast_dims_state(self, payload=payload)
+
+        def _mirror_apply(payload: NotifyDimsPayload) -> None:
+            with self._state_lock:
+                self._scene.last_dims_payload = payload
+                multiscale_state = self._scene.multiscale_state
+                multiscale_state["current_level"] = payload.current_level
+                multiscale_state["levels"] = [dict(level) for level in payload.levels]
+                if payload.downgraded is not None:
+                    multiscale_state["downgraded"] = bool(payload.downgraded)
+                else:
+                    multiscale_state.pop("downgraded", None)
+            loop = self._control_loop
+            if loop is not None:
+                loop.call_soon_threadsafe(self._update_scene_manager)
+
+        self._dims_mirror = ServerDimsMirror(
+            ledger=self._state_ledger,
+            broadcaster=_mirror_broadcast,
+            schedule=_schedule_from_mirror,
+            on_payload=_mirror_apply,
+        )
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops
@@ -247,12 +277,6 @@ class EGLHeadlessServer:
                 queue_len,
                 cmd,
             )
-
-    def _process_worker_notifications(self) -> None:
-        notifications = self._worker_notifications.drain()
-        if not notifications:
-            return
-        process_worker_notifications(self, notifications)
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:
@@ -588,6 +612,8 @@ class EGLHeadlessServer:
             logger.debug("ServerConfig log failed", exc_info=True)
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
+        self._control_loop = loop
+        self._dims_mirror.start()
         try:
             self._update_scene_manager()
         except Exception:

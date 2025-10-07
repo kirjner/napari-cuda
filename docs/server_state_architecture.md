@@ -1,139 +1,147 @@
-# Server State Architecture (Draft)
-Offensive coding tenet: no defensive fallbacks, no silent failures.
+# Server State Architecture
 
-## Goals
-Offensive coding tenet: assertions over guards unless interfacing external systems.
+Offensive coding tenets: assert invariants, no fallback branches, surface failures the moment they occur.
 
-- Provide an authoritative server-side model that mirrors the client’s state store.
-- Decompose the monolithic control channel into transport, routing, and reducers.
-- Define provenance/version semantics for multi-client and agent scenarios.
-- Align layer/dims/camera update modules with the upcoming client helpers.
-- Document threading/concurrency boundaries for render worker vs. control loop.
-Offensive coding tenet: remove try/except scaffolding that hides bugs.
+## Objectives
 
-## Control Pipeline Overview
-Offensive coding tenet: make invariants explicit and crash on violation.
+- Align the server with the client’s “ledger + emitters + mirrors” architecture.
+- Replace the ad-hoc shared scene bag with a single authoritative `ServerStateLedger`.
+- Keep command staging separate (queue) but rename and document it using the same vocabulary.
+- Ensure render worker feedback (dims/multiscale) ingests into the ledger before any broadcasts.
+- Document the concurrency boundary between asyncio control loop and the render worker thread.
+
+## High-Level Flow
 
 ```
-WebSocket Transport → Frame Parser → Router → State Update Engine →
-Authoritative Scene Store → Broadcasters / Render Worker hooks
+Control Handlers (emit intents) ──▶ ServerCommandQueue (pending intents)
+                                   │
+                                   ▼
+Render Worker Drain               Render Worker Emits Applied State
+                                   │
+                                   ▼
+                            ServerStateLedger
+                                   │
+                            ┌──────┴──────┐
+                            ▼             ▼
+                    ServerDimsMirror   Other mirrors/broadcasters
 ```
 
-- **Transport Layer**: minimal asyncio WebSocket server handling handshake,
-  heartbeat, compression. Raises on unexpected frames.
-- **Router**: demultiplexes `state.update`, `session.*`, `notify.*` requests,
-  forwarding to reducers or command handlers. No store mutations here.
-- **State Update Engine**: validates payloads, applies to scene store, emits
-  acks/notify deltas. Mirrors client intent bridge contract.
-Offensive coding tenet: no defensive fallbacks, no silent failures.
+### Terminology
 
-## Authoritative Scene Store
-Offensive coding tenet: assertions over guards unless interfacing external systems.
+- **ServerCommandQueue** (rename of `RenderMailbox`): coalesces control intents before the render worker applies them.
+- **ServerStateLedger**: authoritative property store, mirroring the client’s `ClientStateLedger`.
+- **ServerDimsMirror**: subscriber that broadcasts dims/multiscale updates to clients (and any other consumers) once the ledger confirms them.
 
-- Stores per-property records `(scope, target, key)` with fields:
-  `confirmed_value`, `version`, `actor_id`, `origin`, `timestamp`.
-- Maintains resumable history per topic (scene, layers, dims, camera, stream).
-- Exposes APIs:
-  - `seed_snapshot(topic, payload, version)` – baseline replay.
-  - `apply_delta(topic, payload, version, actor)` – updates from reducers.
-  - `replay_since(topic, version)` – resume support.
-- Emits change notifications consumed by broadcasters (e.g., layer manager) and
-  render worker.
-Offensive coding tenet: remove try/except scaffolding that hides bugs.
+## Detailed Changes
 
-## Scene Update Modules
-Offensive coding tenet: make invariants explicit and crash on violation.
+### New Modules
 
-- **LayerUpdateServer** – owns napari layer objects on the server, applies
-  confirmed values from store, generates `LayerSnapshot` for clients.
-- **DimsUpdateServer** – controls viewer dims sliders, ensures `current_step`
-  and metadata stay consistent. Emits deltas via store.
-- **CameraUpdateServer** – handles camera state (zoom, pan, orbit) and
-  ensures render worker receives updates.
-- Each projection:
-  - Subscribes to store topics.
-  - Applies mutations without try/except; failures surface immediately.
-  - Produces notify deltas by comparing previous confirmed state vs. new.
-Offensive coding tenet: no defensive fallbacks, no silent failures.
+- `src/napari_cuda/server/state/server_state_ledger.py`
+  - Public API mirrors the client: `record_confirmed`, `batch_record_confirmed`, `subscribe`, `subscribe_all`, `snapshot`.
+  - Stores per-property tuples `(scope, target, key)` with confirmed value, origin, timestamp, optional metadata/version.
+  - Emits deterministic callbacks (offensive coding: raises if subscriber misbehaves).
 
-## Control Channel Decomposition
-Offensive coding tenet: assertions over guards unless interfacing external systems.
+- `src/napari_cuda/server/state/server_mirrors.py`
+  - Defines `ServerDimsMirror`.
+  - Subscribes to ledger keys:
+    - `('view', 'main', 'ndisplay')`
+    - `('view', 'main', 'displayed')`
+    - `('dims', 'main', 'current_step')`
+    - `('multiscale', 'main', 'level')`
+    - plus level metadata (`levels`, `downgraded`), axis labels, etc.
+  - Builds `NotifyDimsPayload` from the ledger snapshot.
+  - Invokes async broadcaster (`_broadcast_dims_state`) on the control loop via `server._schedule_coro`.
 
-1. **Transport Module** – small file handling WebSocket lifecycle, handshake,
-   ping/heartbeat, close semantics.
-2. **Session Manager** – tracks sessions, resume tokens, actor IDs. Interacts
-   with store to persist cursors.
-3. **Message Router** – pure dispatcher mapping envelope types to handlers.
-4. **Reducers** – existing logic from `state_update_engine.py`, refactored per
-   scope (layers, dims, camera, settings, volume). Each reducer updates store and
-   returns ack payload.
-5. **Broadcaster** – publishes notify frames to connected clients based on store
-   diffs.
-Offensive coding tenet: remove try/except scaffolding that hides bugs.
+### Updated Modules
 
-## Agent & Multi-Client Semantics
-Offensive coding tenet: make invariants explicit and crash on violation.
+- `src/napari_cuda/server/runtime/runtime_mailbox.py` → rename to `server_command_queue.py`.
+  - Class renamed to `ServerCommandQueue`.
+  - Method names updated (`enqueue_delta`, `drain_pending` remain but under the new class).
+  - All imports adjusted in `worker_lifecycle.py`, `control_channel_server.py`, tests.
 
-- **Actor Identity**: handshake conveys `actor_id` for clients/agents.
-- **Versioning**: each reducer increments per-scope version before seeding
-  store. Versions flow to notify frames and client stores.
-- **Conflict Resolution**: store compares incoming `state.update` version vs.
-  current confirmed. If stale, reducer rejects and emits ack error; otherwise
-  it applies and logs owning actor.
-- **Audit Log**: append-only log (JSON or structured) capturing `(actor, scope,
-  key, old_value, new_value, version)` for debugging.
-Offensive coding tenet: no defensive fallbacks, no silent failures.
+- `src/napari_cuda/server/runtime/worker_lifecycle.py`
+  - `_handle_scene_refresh` renamed to `_ingest_scene_refresh`.
+  - The routine now records worker-generated dims payloads in the ledger (ndisplay, displayed axes, current step, multiscale level metadata, axis labels) while continuing to update `server._scene.latest_state` for consumers that still read from the legacy data bag.
+  - Duplicate payload guard remains so unchanged snapshots short-circuit before touching the ledger.
+  - Post-frame sync (after `capture_and_encode_packet`) records the applied step via `ledger.record_confirmed('dims', 'main', 'current_step', worker._last_step, origin='worker_frame')`.
+  - `WorkerSceneNotificationQueue` and `_process_worker_notifications` are removed entirely; the worker no longer enqueues `WorkerSceneNotification` objects once the ledger + mirror path is live.
+  - Ledger entry points enforce thread safety with an internal re-entrant lock; render-worker writes happen on the worker thread, control-loop writes stay on the asyncio event loop, and both sides assert the expected thread affinity.
 
-## Resumable History
-Offensive coding tenet: assertions over guards unless interfacing external systems.
+- `src/napari_cuda/server/control/control_channel_server.py`
+  - `EGLHeadlessServer` now wires up a `ServerDimsMirror` that subscribes to the ledger and reuses `_broadcast_dims_state` to push confirmed dims payloads to clients.
+  - `process_worker_notifications` and the worker notification queue have been deleted; dims flow exclusively through the ledger/mirror path.
+  - Control reducers still update `server._scene` for camera/volume/layer state. Future work will migrate those scopes to the ledger once readers are refactored.
 
-- Store maintains ring buffer per topic with `(version, payload)` tuples.
-- On resume, session manager retrieves cursor from store, router streams
-  deltas in order.
-- History capped by configurable limits; when pruning, server emits
-  `notify.scene` baseline.
-Offensive coding tenet: remove try/except scaffolding that hides bugs.
+- `src/napari_cuda/server/state/server_scene.py`
+  - Documented as legacy transitional bag; dims metadata is populated from the ledger/mirror path, while camera/volume/layer state still flows through `ServerSceneState`.
+  - TODOs track removing `last_dims_payload`, `last_scene_seq`, and eventually deleting `scene_state.py` after downstream consumers migrate.
 
-## Interaction with Render Worker & Pixel Channel
-Offensive coding tenet: make invariants explicit and crash on violation.
+- Tests updated:
+  - `src/napari_cuda/server/tests/test_worker_lifecycle.py`: ledger-aware fixtures assert `_ingest_scene_refresh` emits `NotifyDimsPayload` via the mirror.
+  - `src/napari_cuda/server/tests/test_state_channel_updates.py`: instantiate `ServerStateLedger`/`ServerDimsMirror` and verify dims frames are driven by ledger snapshots.
+  - `src/napari_cuda/server/tests/test_worker_integration.py`: fixtures seed canonical axes after the refactor.
+  - Adjust fixtures to reference `ServerCommandQueue` and delete the worker notification queue scaffolding.
 
-- Render worker listens to store notifications (layers, dims, camera) via
-  projection classes.
-- Pixel broadcaster observes store for stream metadata (codec, fps) and restarts
-  pipelines as needed.
-- Worker lifecycle emits notify frames when GPU state changes (e.g., IDR,
-  resolution), seeding store to keep clients consistent.
-Offensive coding tenet: no defensive fallbacks, no silent failures.
+### Control-State Integration
 
-## Concurrency Model
-Offensive coding tenet: assertions over guards unless interfacing external systems.
+- `state_update_engine.py` still mutates `server._scene` for camera/volume/layer state. Ledger support currently covers dims metadata; migrating other scopes remains on the future roadmap.
+- Ledger records include `timestamp`/`origin`; the history store can consume these once additional scopes move over.
 
-- Event loop thread: WebSocket transport, message router, store mutations.
-- Render worker thread: GL context, frame capture, encoder.
-- Pixel broadcaster thread(s): frame distribution to clients.
-- Store access synchronized through async primitives (no cross-thread mutations
-  without explicit queues).
-Offensive coding tenet: remove try/except scaffolding that hides bugs.
+## Implementation Plan
+
+1. **Rename Command Queue**
+   - Rename module/class, fix imports, adjust tests.
+   - Touch every reference: server bootstrap, `test_worker_lifecycle`, `test_state_channel_updates`, `test_egl_headless_server`, and helper fixtures that construct the queue.
+2. **Land `ServerStateLedger`**
+   - Implement API with unit tests mirroring `ClientStateLedger` semantics (dedupe, subscription, timestamps).
+3. **Integrate Worker Ingestion**
+   - Replace `_handle_scene_refresh` with `_ingest_scene_refresh`.
+   - Update post-frame sync to use ledger rather than `_scene.latest_state`.
+4. **Introduce `ServerDimsMirror`**
+   - Wire into server init.
+   - Remove `process_worker_notifications`.
+   - Mirror subscribes to ledger, builds `NotifyDimsPayload`, uses `_broadcast_dims_state`.
+5. **Migrate Additional Scopes** *(future)*
+   - Move camera/volume/layer state into the ledger and teach reducers to emit confirmed entries.
+6. **Retire Legacy Scene Snapshots** *(future)*
+   - Drop `ServerSceneState` and the remaining fields on `ServerSceneData` once consumers are migrated.
+7. **Update Tests & Docs**
+   - Adjust server tests to use ledger.
+   - Ensure doc references match new module names.
+8. **Cleanup Legacy State Bag** *(future)*
+   - After all consumers read from the ledger, delete the transitional fields on `_scene`.
+
+## Legacy Scene Data Migration
+
+- **Current step / multiscale metadata**: ingested by `_ingest_scene_refresh` and broadcast via the dims mirror; `_scene.last_dims_payload` remains as a compatibility cache.
+- **Camera / Volume / Layer state**: still stored on `ServerSceneState`; migrating these scopes to the ledger is tracked as follow-up work.
+- **Plane restore state**: stays render-worker owned; we retain `server._scene.plane_restore_state` until the ledger exposes an equivalent worker-only stash or we move it into a dedicated worker-side structure.
+- **Command queue inputs**: rename every occurrence of `RenderMailbox` to `ServerCommandQueue`, including fixtures (`test_worker_lifecycle`, `test_state_channel_updates`, `test_egl_headless_server`) and helper factories.
+- **Thread safety**: ledger methods assert they are invoked under the ledger lock; add a short inline docstring describing the render-thread vs asyncio-thread contract so future contributors do not regress into lock-free mutations.
+
+## Naming & Symmetry with Client
+
+- `ClientStateLedger` ↔ `ServerStateLedger`.
+- `napari_dims_mirror` ↔ `ServerDimsMirror`.
+- Client intent emitters ↔ server control handlers feeding `ServerCommandQueue`.
+- Only dims currently needs a server mirror because the render worker is authoritative for multiscale switches. Camera/layer mirrors can be introduced later if the worker ever emits those scopes.
+
+## Concurrency Notes
+
+- Ledger mutations happen on their respective threads:
+  - Render worker thread ingests dims state; ledger methods must be thread-safe (explicit locks make crashes obvious rather than silently failing).
+  - Control loop thread records confirmed values for camera/layer updates.
+- Mirrors run on the control loop (async) and must schedule broadcasts via `server._schedule_coro`.
 
 ## Testing Strategy
-Offensive coding tenet: make invariants explicit and crash on violation.
 
-- Unit tests for store (seed, delta, resume, conflict rejection).
-- Reducer unit tests (dims, layers, camera) feeding store and verifying acks.
-- Session manager tests: resume cursors, heartbeat, actor identity handling.
-- Integration smoke: spin up transport + router + store with fake worker to
-  ensure notify/ack ordering.
-Offensive coding tenet: no defensive fallbacks, no silent failures.
+- **Ledger unit tests**: seed, dedupe, subscription, timestamp origins.
+- **Worker lifecycle tests**: ingest dims, confirm ledger updated, no direct `_scene` mutation.
+- **Control channel integration**: ensure ledger subscriptions trigger `notify.dims` with correct payloads.
+- **Concurrent mutation tests**: simulate worker-thread vs control-loop writes to verify the ledger locking asserts hold.
+- **Regression smoke**: run `uv run pytest src/napari_cuda/server/tests -q` before landing.
 
-## Migration Plan
-Offensive coding tenet: assertions over guards unless interfacing external systems.
+## Future Work
 
-1. *(Shipped)* Extract store/history into dedicated module with unit tests.
-2. *(In progress)* Refactor `state_update_engine` to use store API and return structured
-   results.
-3. Implement update modules for layers/camera, relocating code from layer
-   manager and scene state applier.
-4. Split `control_channel_server.py` into transport/session/router modules.
-5. Update render worker to consume store notifications (instead of direct calls).
-6. Remove legacy shims once new modules are stable.
-Offensive coding tenet: remove try/except scaffolding that hides bugs.
+- Extend ledger to camera/layer scopes if/when worker emits those updates.
+- Remove legacy `_scene` bag entirely after consumers switch to ledger snapshots.

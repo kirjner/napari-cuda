@@ -14,12 +14,11 @@ from typing import Optional, Sequence, List, Mapping, Dict, Any
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
 from napari_cuda.server.state.scene_state import ServerSceneState
-from .worker_notifications import WorkerSceneNotification
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 
 
-def _handle_scene_refresh(
+def _ingest_scene_refresh(
     server: object,
     state: WorkerLifecycleState,
     loop: asyncio.AbstractEventLoop,
@@ -28,6 +27,7 @@ def _handle_scene_refresh(
     worker_ref = state.worker
     assert worker_ref is not None, "render worker missing during refresh"
     assert worker_ref.is_ready, "render worker refresh fired before bootstrap"
+    del loop
 
     dims_payload = worker_ref.build_notify_dims_payload()
 
@@ -42,10 +42,13 @@ def _handle_scene_refresh(
         override_step = tuple(int(value) for value in plane_state.step)
         override_level = int(plane_state.level)
 
-    if override_step is not None and override_step != dims_payload.current_step:
-        dims_payload = replace(dims_payload, current_step=override_step, current_level=override_level)
-    elif override_level != dims_payload.current_level:
-        dims_payload = replace(dims_payload, current_level=override_level)
+    normalized_step = tuple(int(value) for value in override_step) if override_step is not None else None
+    normalized_level = int(override_level)
+
+    if normalized_step is not None and normalized_step != dims_payload.current_step:
+        dims_payload = replace(dims_payload, current_step=normalized_step, current_level=normalized_level)
+    elif normalized_level != dims_payload.current_level:
+        dims_payload = replace(dims_payload, current_level=normalized_level)
 
     prev_payload = server._scene.last_dims_payload  # type: ignore[attr-defined]
     if prev_payload is not None and prev_payload == dims_payload:
@@ -54,6 +57,47 @@ def _handle_scene_refresh(
         return
 
     state.scene_seq = int(state.scene_seq) + 1
+
+    displayed = (
+        tuple(int(idx) for idx in dims_payload.displayed)
+        if dims_payload.displayed is not None
+        else None
+    )
+    axis_labels = (
+        tuple(str(label) for label in dims_payload.axis_labels)
+        if dims_payload.axis_labels is not None
+        else None
+    )
+    order = (
+        tuple(int(idx) for idx in dims_payload.order)
+        if dims_payload.order is not None
+        else None
+    )
+    labels = (
+        tuple(str(label) for label in dims_payload.labels)
+        if getattr(dims_payload, "labels", None) is not None
+        else None
+    )
+    levels = tuple(dict(level) for level in dims_payload.levels)
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_payload.level_shapes)
+
+    entries = [
+        ("dims", "main", "current_step", tuple(int(v) for v in dims_payload.current_step)),
+        ("view", "main", "ndisplay", int(dims_payload.ndisplay)),
+        ("view", "main", "displayed", displayed),
+        ("dims", "main", "mode", str(dims_payload.mode)),
+        ("dims", "main", "order", order),
+        ("dims", "main", "axis_labels", axis_labels),
+        ("dims", "main", "labels", labels),
+        ("multiscale", "main", "level", int(dims_payload.current_level)),
+        ("multiscale", "main", "levels", levels),
+        ("multiscale", "main", "level_shapes", level_shapes),
+        ("multiscale", "main", "downgraded", dims_payload.downgraded),
+    ]
+
+    ledger = server._state_ledger  # type: ignore[attr-defined]
+    ledger.batch_record_confirmed(entries, origin="worker")
+
     with server._state_lock:  # type: ignore[attr-defined]
         snapshot = server._scene.latest_state  # type: ignore[attr-defined]
         server._scene.latest_state = ServerSceneState(  # type: ignore[attr-defined]
@@ -63,20 +107,10 @@ def _handle_scene_refresh(
             current_step=dims_payload.current_step,
         )
 
-    if plane_state is not None:
-        server._scene.plane_restore_state = plane_state
-
     server._scene.last_dims_payload = dims_payload
 
-    notification = WorkerSceneNotification(
-        kind="dims_snapshot",
-        seq=state.scene_seq,
-        payload=dims_payload,
-        timestamp=time.time(),
-    )
-    server._worker_notifications.push(notification)  # type: ignore[attr-defined]
-
-    loop.call_soon_threadsafe(server._process_worker_notifications)  # type: ignore[attr-defined]
+    if plane_state is not None:
+        server._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -239,39 +273,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             worker.set_scene_refresh_callback(
                 partial(
-                    _handle_scene_refresh,
+                    _ingest_scene_refresh,
                     server,
                     state,
                     loop,
                 )
             )
 
-            initial_payload = worker.build_notify_dims_payload()
-            init_step = initial_payload.current_step
-
-            server._scene.last_dims_payload = initial_payload
-
-            with server._state_lock:
-                latest = server._scene.latest_state
-                server._scene.latest_state = ServerSceneState(
-                    center=latest.center,
-                    zoom=latest.zoom,
-                    angles=latest.angles,
-                    current_step=init_step,
-                )
-
-            state.scene_seq = int(state.scene_seq) + 1
-            server._worker_notifications.push(
-                WorkerSceneNotification(
-                    kind="dims_snapshot",
-                    seq=state.scene_seq,
-                    payload=initial_payload,
-                    timestamp=time.time(),
-                )
-            )
-            loop.call_soon_threadsafe(server._process_worker_notifications)
-
             worker._is_ready = True
+            _ingest_scene_refresh(server, state, loop)
+
             state.ready_event.set()
 
             tick = 1.0 / max(1, server.cfg.fps)
@@ -360,6 +371,14 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
                 if worker._last_step is not None:
                     applied_step = tuple(int(value) for value in worker._last_step)
+                    ledger = server._state_ledger  # type: ignore[attr-defined]
+                    ledger.record_confirmed(
+                        "dims",
+                        "main",
+                        "current_step",
+                        applied_step,
+                        origin="worker_frame",
+                    )
                     should_notify = False
                     with server._state_lock:
                         latest_snapshot = server._scene.latest_state

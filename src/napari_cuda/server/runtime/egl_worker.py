@@ -4,7 +4,7 @@
 the neutral module name reflects its broader responsibilities:
 
 * bootstrap the napari Viewer/VisPy canvas and keep it on the worker thread,
-* drain `RenderMailbox` updates and apply them through `SceneStateApplier`,
+* drain `ServerCommandQueue` updates and apply them through `SceneStateApplier`,
 * drive the render loop, including camera animation and policy evaluation,
 * capture frames via `CaptureFacade`, hand them to the encoder, and surface
   timing metadata for downstream metrics.
@@ -77,10 +77,10 @@ from napari_cuda.server.state.camera_controller import process_commands
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.server_scene import ServerSceneCommand
 from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
-from napari_cuda.server.runtime.runtime_mailbox import (
+from napari_cuda.server.runtime.server_command_queue import (
     PendingRenderUpdate,
     RenderDelta,
-    RenderMailbox,
+    ServerCommandQueue,
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
@@ -489,7 +489,7 @@ class EGLRendererWorker:
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.RLock()
-        self._render_mailbox = RenderMailbox()
+        self._render_mailbox = ServerCommandQueue()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0
         self._ensure_log_interval_s = 1.0

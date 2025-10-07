@@ -8,6 +8,7 @@ import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Awaitable
 
 import pytest
 
@@ -15,8 +16,9 @@ from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.rendering.viewer_builder import CanonicalAxes
 
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotificationQueue
 from napari_cuda.server.state.server_scene import create_server_scene_data
+from napari_cuda.server.state.server_state_ledger import ServerStateLedger
+from napari_cuda.server.state.server_mirrors import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker
 from napari_cuda.server.rendering.debug_tools import DebugConfig
 
@@ -31,13 +33,11 @@ class DummyMetrics:
 
 def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     metrics = DummyMetrics()
-    notifications = WorkerSceneNotificationQueue()
-    processed: list = []
-
     async def broadcast_stream_config(payload):
         broadcasts.append(payload)
 
     broadcasts: list = []
+    dims_broadcasts: list[NotifyDimsPayload] = []
 
     class FakeServer:
         pass
@@ -76,6 +76,7 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     server._log_cam_debug = False
     server._publish_policy_metrics = lambda: None
     server._state_lock = threading.RLock()
+    server._state_ledger = ServerStateLedger()
     scene = create_server_scene_data(policy_event_path=tmp_path / "policy_events.jsonl")
     scene.latest_state = ServerSceneState(current_step=(0,))
     scene.camera_commands = deque()
@@ -83,7 +84,6 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     scene.multiscale_state = {}
     scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
     server._scene = scene
-    server._worker_notifications = notifications
     server._scene.last_dims_payload = NotifyDimsPayload.from_dict(
         {
             'step': [0],
@@ -98,16 +98,42 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
             'current_level': 0,
         }
     )
-    server.processed_notifications = processed
-
-    def process_worker_notifications() -> None:
-        drained = server._worker_notifications.drain()
-        if drained:
-            processed.extend(drained)
-
-    server._process_worker_notifications = process_worker_notifications
     server.broadcasts = broadcasts
+    server.broadcasted_dims = dims_broadcasts
     server.loop = loop
+
+    def _mirror_schedule(coro: Awaitable[None], label: str) -> None:
+        def _create_task() -> None:
+            task = loop.create_task(coro)  # type: ignore[arg-type]
+            def _on_done(t: asyncio.Task) -> None:
+                try:
+                    t.result()
+                except Exception as exc:  # pragma: no cover - propagate loudly
+                    raise RuntimeError(f"mirror task {label} failed") from exc
+            task.add_done_callback(_on_done)
+        loop.call_soon_threadsafe(_create_task)
+
+    async def _mirror_broadcast(payload: NotifyDimsPayload) -> None:
+        dims_broadcasts.append(payload)
+
+    def _mirror_apply(payload: NotifyDimsPayload) -> None:
+        with server._state_lock:
+            server._scene.last_dims_payload = payload
+            multiscale_state = server._scene.multiscale_state
+            multiscale_state["current_level"] = payload.current_level
+            multiscale_state["levels"] = [dict(level) for level in payload.levels]
+            if payload.downgraded is not None:
+                multiscale_state["downgraded"] = bool(payload.downgraded)
+            else:
+                multiscale_state.pop("downgraded", None)
+
+    server._dims_mirror = ServerDimsMirror(
+        ledger=server._state_ledger,
+        broadcaster=_mirror_broadcast,
+        schedule=_mirror_schedule,
+        on_payload=_mirror_apply,
+    )
+    server._dims_mirror.start()
 
     return server
 
@@ -363,16 +389,16 @@ def test_scene_refresh_pushes_dims_notification(monkeypatch, tmp_path):
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
     _run_loop_once(loop)
-    server.processed_notifications.clear()
+    server.broadcasted_dims.clear()
 
     worker._last_step = (4, 5)
     worker._scene_refresh_cb([4, 5])  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
-    assert server.processed_notifications, "expected dims notification"
-    note = server.processed_notifications[-1]
-    assert note.kind == "dims_snapshot"
-    assert list(note.payload.current_step) == [4, 5]
+    assert server.broadcasted_dims, "expected dims notification"
+    note = server.broadcasted_dims[-1]
+    assert isinstance(note, NotifyDimsPayload)
+    assert list(note.current_step) == [4, 5]
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -398,16 +424,16 @@ def test_scene_refresh_pushes_meta_notification(monkeypatch, tmp_path):
     worker = _wait_for_worker(state)
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
     _run_loop_once(loop)
-    server.processed_notifications.clear()
+    server.broadcasted_dims.clear()
 
     worker._last_step = (7,)
     worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
-    assert server.processed_notifications, "expected dims notification"
-    note = server.processed_notifications[-1]
-    assert note.kind == "dims_snapshot"
-    assert note.payload.current_step[0] == 7
+    assert server.broadcasted_dims, "expected dims notification"
+    note = server.broadcasted_dims[-1]
+    assert isinstance(note, NotifyDimsPayload)
+    assert note.current_step[0] == 7
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -434,17 +460,17 @@ def test_scene_refresh_skips_duplicate_payload(monkeypatch, tmp_path):
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
 
     _run_loop_once(loop)
-    server.processed_notifications.clear()
+    server.broadcasted_dims.clear()
 
     worker._last_step = (3, 4)
     worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
-    assert len(server.processed_notifications) == 1
+    assert len(server.broadcasted_dims) == 1
 
-    server.processed_notifications.clear()
+    server.broadcasted_dims.clear()
     worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
-    assert not server.processed_notifications
+    assert not server.broadcasted_dims
 
     stop_worker(state)
     _run_loop_once(loop)
@@ -504,7 +530,7 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     worker._stop_event = state.stop_event  # type: ignore[attr-defined]
 
     _run_loop_once(loop)
-    server.processed_notifications.clear()
+    server.broadcasted_dims.clear()
 
     worker._meta['level_shapes'][0][0] = 8  # type: ignore[index]
     worker._meta['step'][0] = 60  # type: ignore[index]
@@ -513,11 +539,11 @@ def test_scene_refresh_remaps_z_axis_only(monkeypatch, tmp_path):
     worker._scene_refresh_cb(None)  # type: ignore[attr-defined]
     _run_loop_once(loop)
 
-    assert server.processed_notifications, 'expected dims notification'
-    dims_note = server.processed_notifications[-1]
-    assert dims_note.kind == 'dims_snapshot'
-    assert dims_note.payload.level_shapes[0][0] == worker._meta['level_shapes'][0][0]
-    assert dims_note.payload.current_step[0] == worker._meta['current_step'][0]
+    assert server.broadcasted_dims, 'expected dims notification'
+    dims_note = server.broadcasted_dims[-1]
+    assert isinstance(dims_note, NotifyDimsPayload)
+    assert dims_note.level_shapes[0][0] == worker._meta['level_shapes'][0][0]
+    assert dims_note.current_step[0] == worker._meta['current_step'][0]
 
     stop_worker(state)
     _run_loop_once(loop)

@@ -63,7 +63,7 @@ from napari_cuda.server.control.state_update_engine import (
     apply_layer_state_update,
     axis_label_from_meta,
 )
-from napari_cuda.server.runtime.runtime_mailbox import RenderDelta
+from napari_cuda.server.runtime.server_command_queue import RenderDelta
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.server_scene import (
     ServerSceneCommand,
@@ -71,7 +71,6 @@ from napari_cuda.server.state.server_scene import (
     increment_server_sequence,
     layer_controls_to_dict,
 )
-from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotification
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -1922,53 +1921,6 @@ def _baseline_state_result(
         intent_id=intent_id,
         timestamp=ts,
     )
-
-
-def process_worker_notifications(
-    server: Any, notifications: Sequence[WorkerSceneNotification]
-) -> None:
-    if not notifications:
-        return
-
-    scene_data = server._scene
-
-    for note in notifications:
-        if note.seq <= scene_data.last_scene_seq:
-            continue
-
-        if note.kind != "dims_snapshot":
-            raise AssertionError(f"unexpected worker notification kind: {note.kind}")
-
-        dims_payload = note.payload
-        step = tuple(int(value) for value in dims_payload.current_step)
-
-        with server._state_lock:
-            latest = server._scene.latest_state
-            server._scene.latest_state = replace(latest, current_step=step)
-
-        scene_data.last_dims_payload = dims_payload
-        scene_data.last_scene_seq = int(note.seq)
-
-        multiscale_state = scene_data.multiscale_state
-        multiscale_state["current_level"] = dims_payload.current_level
-        multiscale_state["levels"] = [dict(level) for level in dims_payload.levels]
-        if dims_payload.downgraded is not None:
-            multiscale_state["downgraded"] = bool(dims_payload.downgraded)
-        else:
-            multiscale_state.pop("downgraded", None)
-
-        server._scene.last_dims_payload = dims_payload
-        server._update_scene_manager()
-
-        server._schedule_coro(
-            _broadcast_dims_state(
-                server,
-                payload=dims_payload,
-                intent_id=None,
-                timestamp=float(note.timestamp or time.time()),
-            ),
-            "dims_snapshot-worker",
-        )
 
 
 # ---------------------------------------------------------------------------

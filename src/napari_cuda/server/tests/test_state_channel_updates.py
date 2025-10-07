@@ -30,10 +30,11 @@ from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
-from napari_cuda.server.runtime.runtime_mailbox import RenderDelta
+from napari_cuda.server.runtime.server_command_queue import RenderDelta
 from napari_cuda.server.state.server_scene import create_server_scene_data
 from napari_cuda.server.control.state_update_engine import apply_layer_state_update
-from napari_cuda.server.runtime.worker_notifications import WorkerSceneNotification
+from napari_cuda.server.state.server_state_ledger import ServerStateLedger
+from napari_cuda.server.state.server_mirrors import ServerDimsMirror
 
 
 class _CaptureWorker:
@@ -115,6 +116,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server.height = 480
     server.cfg = SimpleNamespace(fps=60.0)
     server.use_volume = False
+    scheduled: list[Coroutine[Any, Any, None]] = []
     captured: list[dict[str, Any]] = []
 
     async def _state_send(_ws: Any, text: str) -> None:
@@ -160,8 +162,36 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
-    scheduled: list[Coroutine[Any, Any, None]] = []
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)
+    server._state_ledger = ServerStateLedger()
+
+    def _mirror_schedule(coro: Coroutine[Any, Any, None], _label: str) -> None:
+        scheduled.append(coro)
+
+    async def _mirror_broadcast(payload: NotifyDimsPayload) -> None:
+        await state_channel_handler._broadcast_dims_state(server, payload=payload)
+
+    def _mirror_apply(payload: NotifyDimsPayload) -> None:
+        with server._state_lock:
+            server._scene.last_dims_payload = payload
+            multiscale_state = server._scene.multiscale_state
+            multiscale_state["current_level"] = payload.current_level
+            multiscale_state["levels"] = [dict(level) for level in payload.levels]
+            if payload.downgraded is not None:
+                multiscale_state["downgraded"] = bool(payload.downgraded)
+            else:
+                multiscale_state.pop("downgraded", None)
+
+    server._dims_mirror = ServerDimsMirror(
+        ledger=server._state_ledger,
+        broadcaster=_mirror_broadcast,
+        schedule=_mirror_schedule,
+        on_payload=_mirror_apply,
+    )
+
+    initial_payload = server._scene.last_dims_payload
+    _record_dims_to_ledger(server, initial_payload, origin="bootstrap")
+    server._dims_mirror.start()
 
     def _update_scene_manager() -> None:
         return
@@ -205,6 +235,53 @@ def _drain_scheduled(tasks: list[Coroutine[Any, Any, None]]) -> None:
     while tasks:
         coro = tasks.pop(0)
         asyncio.run(coro)
+
+
+def _record_dims_to_ledger(
+    server: Any,
+    payload: NotifyDimsPayload,
+    *,
+    origin: str = "worker",
+) -> None:
+    entries = [
+        ("view", "main", "ndisplay", int(payload.ndisplay)),
+        (
+            "view",
+            "main",
+            "displayed",
+            tuple(int(idx) for idx in payload.displayed) if payload.displayed is not None else None,
+        ),
+        ("dims", "main", "current_step", tuple(int(v) for v in payload.current_step)),
+        ("dims", "main", "mode", str(payload.mode)),
+        (
+            "dims",
+            "main",
+            "order",
+            tuple(int(idx) for idx in payload.order) if payload.order is not None else None,
+        ),
+        (
+            "dims",
+            "main",
+            "axis_labels",
+            tuple(str(label) for label in payload.axis_labels) if payload.axis_labels is not None else None,
+        ),
+        (
+            "dims",
+            "main",
+            "labels",
+            tuple(str(label) for label in payload.labels) if getattr(payload, "labels", None) is not None else None,
+        ),
+        ("multiscale", "main", "level", int(payload.current_level)),
+        ("multiscale", "main", "levels", tuple(dict(level) for level in payload.levels)),
+        (
+            "multiscale",
+            "main",
+            "level_shapes",
+            tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
+        ),
+        ("multiscale", "main", "downgraded", payload.downgraded),
+    ]
+    server._state_ledger.batch_record_confirmed(entries, origin=origin)
 
 
 def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
@@ -450,17 +527,7 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
             current_level=1,
         )
     )
-    state_channel_handler.process_worker_notifications(
-        server,
-        [
-            WorkerSceneNotification(
-                kind="dims_snapshot",
-                seq=1,
-                payload=notify_payload,
-                timestamp=time.time(),
-            )
-        ],
-    )
+    _record_dims_to_ledger(server, notify_payload)
     _drain_scheduled(scheduled)
 
     dims_frames = _frames_of_type(captured, "notify.dims")
@@ -491,17 +558,7 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     ]
     notify_payload = NotifyDimsPayload.from_dict(snapshot_payload)
 
-    state_channel_handler.process_worker_notifications(
-        server,
-        [
-            WorkerSceneNotification(
-                kind="dims_snapshot",
-                seq=5,
-                payload=notify_payload,
-                timestamp=time.time(),
-            )
-        ],
-    )
+    _record_dims_to_ledger(server, notify_payload)
     _drain_scheduled(scheduled)
 
     dims_frames = _frames_of_type(captured, "notify.dims")

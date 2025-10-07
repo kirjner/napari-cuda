@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.runtime.runtime_mailbox import RenderMailbox
+from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
 
 
 class _FakeClock:
@@ -22,7 +22,7 @@ class _FakeClock:
 
 def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
-    mailbox = RenderMailbox(time_fn=clock)
+    mailbox = ServerCommandQueue(time_fn=clock)
 
     mailbox.enqueue_display_mode(2)
     mailbox.enqueue_display_mode(3)
@@ -47,7 +47,7 @@ def test_drain_pending_updates_returns_last_values() -> None:
 
 def test_zoom_hint_recent_then_stale() -> None:
     clock = _FakeClock()
-    mailbox = RenderMailbox(time_fn=clock)
+    mailbox = ServerCommandQueue(time_fn=clock)
 
     mailbox.record_zoom_hint(1.2)
     zoom = mailbox.consume_zoom_hint(max_age=0.5)
@@ -67,7 +67,7 @@ def test_zoom_hint_recent_then_stale() -> None:
 
 
 def test_update_state_signature_detects_changes() -> None:
-    mailbox = RenderMailbox()
+    mailbox = ServerCommandQueue()
 
     base = ServerSceneState(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
     assert mailbox.update_state_signature(base)

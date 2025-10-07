@@ -21,7 +21,7 @@ from napari.layers.image._image_constants import ImageRendering as NapariImageRe
 from napari_cuda.server.state.scene_types import SliceROI
 from napari_cuda.server.data.roi_applier import SliceDataApplier
 from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.runtime.runtime_mailbox import RenderMailbox
+from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
 
 from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.utils.colormaps.colormap_utils import ensure_colormap
@@ -349,8 +349,8 @@ class SceneStateApplier:
         ctx: SceneStateApplyContext,
         *,
         state: ServerSceneState,
-        mailbox: Optional[RenderMailbox] = None,
-        queue: Optional[RenderMailbox] = None,
+        mailbox: Optional[ServerCommandQueue] = None,
+        queue: Optional[ServerCommandQueue] = None,
     ) -> SceneDrainResult:
         """Apply pending scene state updates and report side effects."""
 
@@ -366,7 +366,7 @@ class SceneStateApplier:
 
         render_mailbox = mailbox or queue
         if render_mailbox is None:
-            raise ValueError("RenderMailbox instance required")
+            raise ValueError("ServerCommandQueue instance required")
 
         z_index = ctx.z_index
         data_wh = ctx.data_wh

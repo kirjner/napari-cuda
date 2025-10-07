@@ -1,5 +1,5 @@
 
-"""Render-thread mailbox for coalescing scene updates before each frame."""
+"""Render-thread command queue for coalescing scene updates before each frame."""
 
 from __future__ import annotations
 
@@ -45,8 +45,8 @@ class RenderZoomHint:
     timestamp: float
 
 
-class RenderMailbox:
-    """Thread-safe mailbox that coalesces render updates for the worker."""
+class ServerCommandQueue:
+    """Thread-safe queue that coalesces render updates for the worker."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
@@ -134,7 +134,7 @@ class RenderMailbox:
 __all__ = [
     "RenderDelta",
     "RenderLevelRequest",
-    "RenderMailbox",
+    "ServerCommandQueue",
     "RenderZoomHint",
     "PendingRenderUpdate",
 ]

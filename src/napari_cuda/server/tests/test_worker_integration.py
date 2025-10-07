@@ -12,6 +12,7 @@ from napari_cuda.server.app.config import LevelPolicySettings, ServerConfig, Ser
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.rendering.display_mode import apply_ndisplay_switch
 from napari_cuda.server.state.server_scene import ServerSceneCommand
+from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source, CanonicalAxes
 
 
 class _IdentityTransform:
@@ -391,6 +392,14 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker
     worker._lock_level = None
     worker._active_ms_level = 1
     worker._last_level_switch_ts = 0.0
+
+    canonical_meta = canonical_axes_from_source(
+        axes=worker._scene_source.axes,
+        shape=worker._scene_source.level_descriptors[worker._active_ms_level].shape,
+        step=worker._scene_source.current_step,
+        use_volume=False,
+    )
+    worker._canonical_axes = canonical_meta
 
     def _fake_ensure_scene_source(self):  # type: ignore[no-untyped-def]
         return self._scene_source
