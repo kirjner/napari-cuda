@@ -634,7 +634,7 @@ class NotifyStreamPayload:
 @dataclass(slots=True)
 class NotifyDimsPayload:
     current_step: Tuple[int, ...]
-    dims_range: Tuple[Tuple[int, int], ...]
+    level_shapes: Tuple[Tuple[int, ...], ...] | None
     sizes: Tuple[int, ...] | None
     levels: Tuple[Dict[str, Any], ...]
     current_level: int
@@ -650,12 +650,14 @@ class NotifyDimsPayload:
         payload: Dict[str, Any] = {
             "step": [int(v) for v in self.current_step],
             "current_step": [int(v) for v in self.current_step],
-            "range": [[int(lo), int(hi)] for lo, hi in self.dims_range],
             "levels": [dict(level) for level in self.levels],
             "current_level": int(self.current_level),
             "mode": str(self.mode),
             "ndisplay": int(self.ndisplay),
         }
+
+        if self.level_shapes is not None:
+            payload["level_shapes"] = [[int(v) for v in shape] for shape in self.level_shapes]
 
         if self.sizes is not None:
             payload["sizes"] = [int(v) for v in self.sizes]
@@ -676,14 +678,13 @@ class NotifyDimsPayload:
         mapping = _as_mapping(data, "notify.dims payload")
         _ensure_keyset(
             mapping,
-            required=("step", "range", "levels", "current_level", "mode", "ndisplay"),
-            optional=("sizes", "downgraded", "axis_labels", "order", "displayed", "labels", "current_step"),
+            required=("step", "levels", "current_level", "mode", "ndisplay"),
+            optional=("sizes", "downgraded", "axis_labels", "order", "displayed", "labels", "current_step", "level_shapes"),
             context="notify.dims payload",
         )
 
         step_seq = _as_sequence(mapping["step"], "notify.dims payload.step")
         current_step_seq = _as_sequence(mapping.get("current_step", step_seq), "notify.dims payload.current_step")
-        range_seq = _as_sequence(mapping["range"], "notify.dims payload.range")
         levels_seq = _as_sequence(mapping["levels"], "notify.dims payload.levels")
 
         sizes_value = mapping.get("sizes")
@@ -723,12 +724,16 @@ class NotifyDimsPayload:
             else None
         )
 
-        dims_range: list[tuple[int, int]] = []
-        for idx, entry in enumerate(range_seq):
-            pair = _as_sequence(entry, f"notify.dims payload.range[{idx}]")
-            if len(pair) < 2:
-                raise ValueError("notify.dims range entries must contain at least two values")
-            dims_range.append((int(pair[0]), int(pair[1])))
+        level_shapes_value = mapping.get("level_shapes")
+        if level_shapes_value is None:
+            level_shapes = None
+        else:
+            level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
+            parsed_shapes: list[tuple[int, ...]] = []
+            for idx, entry in enumerate(level_shapes_seq):
+                shape_seq = _as_sequence(entry, f"notify.dims payload.level_shapes[{idx}]")
+                parsed_shapes.append(tuple(int(dim) for dim in shape_seq))
+            level_shapes = tuple(parsed_shapes)
 
         levels: list[Dict[str, Any]] = []
         for idx, entry in enumerate(levels_seq):
@@ -736,7 +741,7 @@ class NotifyDimsPayload:
 
         return cls(
             current_step=tuple(int(v) for v in current_step_seq),
-            dims_range=tuple(dims_range),
+            level_shapes=level_shapes,
             sizes=sizes,
             levels=tuple(levels),
             current_level=int(mapping["current_level"]),
