@@ -2,7 +2,7 @@
 
 ## 1. Baseline Audit *(dims analogue: none – dims already migrated)*
 - Read `src/napari_cuda/client/state/bridges/layer_state_bridge.py` end-to-end to catalogue responsibilities (layer property wiring, state.update dispatch, presenter sync, registry maintenance, ACK handling). Dims parity: we previously performed this audit for `NapariDimsMirror` and `NapariDimsIntentEmitter` when they replaced the legacy dims bridge.
-- Inventory runtime entry points that currently call the bridge (`_handle_scene_snapshot`, `_handle_scene_level`, `_handle_layer_delta`, `_handle_ack_state`, `_abort_pending_commands`). Dims counterpart: `_initialize_mirrors_and_emitters()` and `_replay_last_dims_payload()` already route through the dims mirror.
+- Inventory runtime entry points that currently call the bridge (`_ingest_notify_scene_snapshot`, `_ingest_notify_layers`, `_ingest_ack_state`, `_abort_pending_commands`). Dims counterpart: `_initialize_mirrors_and_emitters()` and `_replay_last_dims_payload()` already route through the dims mirror, and multiscale data now arrives with the enriched `notify.dims` frame.
 - Record how the bridge interacts with the ledger (confirmed vs pending values) so the new mirror/emitter keep the same projections—mirroring dims behaviour where `_record_dims_snapshot` and `_record_dims_delta` manage confirmed entries.
 
 ## 2. NapariLayerIntentEmitter *(dims analogue: `NapariDimsIntentEmitter`)*
@@ -19,10 +19,10 @@
 - Add `src/napari_cuda/client/control/mirrors/napari_layer_mirror.py` with constructor parameters parallel to dims but extended for layer specifics: `ledger`, `state`, `loop_state`, `registry`, `presenter`, optional `viewer_ref`, `ui_call`, `log_layers_info`.
 - Subscribe to ledger events via `ledger.subscribe_all`, just as dims mirror does, but handle scopes:
   - `layer`/`layers`: update `RemoteLayerRegistry`, notify presenter façade, and apply confirmed state to the viewer within `with emitter.suppressing()` (dims mirror’s `_mirror_confirmed_dims`).
-  - `scene` notifications (`notify.scene`, `notify.scene_level`) should update registry snapshots, enrich control-state metadata, and record confirmed values (dims uses `_record_dims_snapshot` and `_record_multiscale_metadata`).
+  - `scene` notifications (`notify.scene`) should update registry snapshots, enrich control-state metadata, and record confirmed values (dims uses `_record_dims_snapshot` and `_record_multiscale_metadata`). Multiscale level changes now piggyback on the dims snapshot instead of `notify.scene.level`.
 - Implement runtime ingest methods mirroring dims’ `ingest_dims_notify`:
   - `ingest_scene_snapshot(frame: NotifySceneFrame)` – adapt existing bridge logic to populate ledger and registry before mirroring.
-  - `ingest_scene_level(payload: NotifySceneLevelPayload)` – align with dims’ volume/multiscale metadata updates.
+  - Record multiscale metadata triggered by dims snapshots (see `NapariDimsMirror.ingest_dims_notify`) so layer HUDs stay consistent without a separate `notify.scene.level` frame.
   - `ingest_layer_delta(frame: NotifyLayersFrame)` – handle incremental updates using registry helpers.
 - Provide `replay_last_payload()` similar to dims mirror to seed a newly attached viewer; leverage cached registry data to reconstruct layer state.
 - Add `attach_emitter(napari_layer_intent_emitter)` so the mirror can suppress emitter callbacks during remote apply, matching dims’ `attach_emitter` contract.
@@ -44,7 +44,7 @@
 - Relocate shared utilities (debug logging toggles, value coercion helpers) from the bridge into the new emitter/mirror modules, keeping parity with dims’ helper placement.
 
 ## 6. Cleanup Legacy Bridge *(dims analogue: removal of old dims bridge)*
-- Once runtime paths, tests, and presenter integration use the new mirror/emitter, remove `src/napari_cuda/client/state/bridges/layer_state_bridge.py` and related imports.
+- Layer mirrors and emitters now replace the legacy bridge; `LayerStateBridge` and its package have been removed.
 - Update fixtures/tests to instantiate `NapariLayerMirror` and `NapariLayerIntentEmitter` directly.
 
 ## 7. Testing Roadmap *(dims analogue: `test_napari_dims_intent_emitter.py`, `test_stream_runtime.py`)*

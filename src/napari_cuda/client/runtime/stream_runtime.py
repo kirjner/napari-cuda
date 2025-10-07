@@ -41,8 +41,16 @@ from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFa
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.runtime.client_loop import warmup, camera, loop_lifecycle
 from napari_cuda.client.control import state_update_actions as control_actions
-from napari_cuda.client.control.emitters import NapariDimsIntentEmitter, NapariLayerIntentEmitter
-from napari_cuda.client.control.mirrors import NapariLayerMirror, napari_dims_mirror
+from napari_cuda.client.control.emitters import (
+    NapariCameraIntentEmitter,
+    NapariDimsIntentEmitter,
+    NapariLayerIntentEmitter,
+)
+from napari_cuda.client.control.mirrors import (
+    NapariCameraMirror,
+    NapariLayerMirror,
+    napari_dims_mirror,
+)
 from napari_cuda.client.runtime.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
@@ -56,10 +64,9 @@ from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
     NotifySceneFrame,
-    NotifySceneLevelPayload,
     NotifyStreamFrame,
 )
-from napari_cuda.protocol import AckState, build_call_command, build_state_update
+from napari_cuda.protocol import AckState, NotifyCamera, build_call_command, build_state_update
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
@@ -226,6 +233,8 @@ class ClientStreamLoop:
         self._dims_emitter: NapariDimsIntentEmitter | None = None
         self._layer_mirror: NapariLayerMirror | None = None
         self._layer_emitter: NapariLayerIntentEmitter | None = None
+        self._camera_mirror: NapariCameraMirror | None = None
+        self._camera_emitter: NapariCameraIntentEmitter | None = None
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         self._state_session_metadata: "SessionMetadata | None" = None
@@ -555,7 +564,7 @@ class ClientStreamLoop:
         logger.info("VideoToolbox live decoder initialized: %dx%d", width, height)
 
     # Extracted helpers
-    def _handle_notify_stream(self, frame: NotifyStreamFrame) -> None:
+    def _ingest_notify_stream(self, frame: NotifyStreamFrame) -> None:
         payload = frame.payload
         fps = float(payload.fps)
         if fps > 0:
@@ -573,20 +582,15 @@ class ClientStreamLoop:
             # Cache video dimensions for input mapping and prime VT decode
             self._init_vt_from_avcc(avcc_b64, int(width), int(height))
 
-    def _handle_notify_camera(self, frame: Any) -> None:
-        result = control_actions.handle_notify_camera(
-            self._control_state,
-            self._state_ledger,
-            frame,
-            log_debug=logger.isEnabledFor(logging.DEBUG),
-        )
-        if result is None:
+    def _ingest_notify_camera(self, frame: NotifyCamera) -> None:
+        mirror = self._camera_mirror
+        if mirror is None:
             return
-        mode, delta = result
-        try:
-            self._presenter_facade.apply_camera_update(mode=mode, delta=delta)
-        except Exception:
-            logger.debug('apply_camera_update failed', exc_info=True)
+
+        def _apply() -> None:
+            mirror.ingest_notify_camera(frame)
+
+        self._run_on_ui(_apply)
 
     def _log_keyframe_skip(self, reason: str) -> None:
         now = time.time()
@@ -608,6 +612,18 @@ class ClientStreamLoop:
         self._first_dims_notified = True
         self._run_on_ui(_invoke)
 
+    def _ingest_notify_dims(self, frame: NotifyDimsFrame) -> None:
+        mirror = self._dims_mirror
+        if mirror is None:
+            return
+
+        def _apply() -> None:
+            mirror = self._dims_mirror
+            if mirror is not None:
+                mirror.ingest_dims_notify(frame)
+
+        self._run_on_ui(_apply)
+
     def _replay_last_dims_payload(self) -> None:
         mirror = self._dims_mirror
         if mirror is None:
@@ -625,41 +641,6 @@ class ClientStreamLoop:
 
         self._run_on_ui(_apply)
 
-    def _handle_scene_policies(self, policies: Mapping[str, object]) -> None:
-        try:
-            control_actions.apply_scene_policies(self._control_state, policies)
-        except Exception:
-            logger.debug("apply_scene_policies failed", exc_info=True)
-            return
-        if logger.isEnabledFor(logging.DEBUG):
-            multiscale = policies.get('multiscale') if isinstance(policies, Mapping) else None
-            if multiscale is not None:
-                logger.debug("scene policies updated: multiscale keys=%s", list(multiscale.keys()) if isinstance(multiscale, Mapping) else type(multiscale))
-
-    def _ingest_notify_scene_level(self, payload: NotifySceneLevelPayload) -> None:
-        multiscale: Dict[str, Any] = {
-            'current_level': int(payload.current_level),
-            'active_level': int(payload.current_level),
-        }
-        if payload.downgraded is not None:
-            multiscale['downgraded'] = bool(payload.downgraded)
-        if payload.levels:
-            multiscale['levels'] = [dict(entry) for entry in payload.levels]
-        try:
-            control_actions.apply_scene_policies(
-                self._control_state,
-                {'multiscale': multiscale},
-            )
-        except Exception:
-            logger.debug("apply_scene_policies (scene level) failed", exc_info=True)
-            return
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "scene level update: level=%s downgraded=%s",
-                multiscale['current_level'],
-                multiscale.get('downgraded'),
-            )
-
     def _ingest_notify_layers(self, frame: NotifyLayersFrame) -> None:
         if self._layer_mirror is None:
             return
@@ -676,7 +657,7 @@ class ClientStreamLoop:
 
         return self._issue_command(_KEYFRAME_COMMAND, origin=origin)
 
-    def _handle_session_ready(self, metadata: "SessionMetadata") -> None:
+    def _on_state_session_ready(self, metadata: "SessionMetadata") -> None:
         self._state_session_metadata = metadata
         self._control_state.session_id = metadata.session_id
         self._control_state.ack_timeout_ms = metadata.ack_timeout_ms
@@ -696,7 +677,7 @@ class ClientStreamLoop:
         if commands:
             logger.info("State session command catalogue: %s", ", ".join(commands))
 
-    def _handle_ack_state(self, frame: AckState) -> None:
+    def _ingest_ack_state(self, frame: AckState) -> None:
         outcome = self._state_ledger.apply_ack(frame)
         logger.debug(
             "ack.state outcome: status=%s intent=%s in_reply_to=%s pending=%d was_pending=%s",
@@ -713,6 +694,10 @@ class ClientStreamLoop:
                 if self._layer_emitter is not None:
                     self._layer_emitter.handle_ack(outcome)
                 return
+            if scope == "camera":
+                if self._camera_emitter is not None:
+                    self._camera_emitter.handle_ack(outcome)
+                return
             if scope == "dims":
                 control_actions.handle_dims_ack(
                     self._control_state,
@@ -728,7 +713,7 @@ class ClientStreamLoop:
 
         self._run_on_ui(_apply)
 
-    def _handle_reply_command(self, frame: "ReplyCommand") -> None:
+    def _ingest_reply_command(self, frame: "ReplyCommand") -> None:
         payload = frame.payload
         logger.info(
             "reply.command received in_reply_to=%s result=%s",
@@ -744,7 +729,7 @@ class ClientStreamLoop:
                 payload.in_reply_to,
             )
 
-    def _handle_error_command(self, frame: "ErrorCommand") -> None:
+    def _ingest_error_command(self, frame: "ErrorCommand") -> None:
         payload = frame.payload
         logger.warning(
             "error.command received in_reply_to=%s code=%s message=%s",
@@ -1005,12 +990,13 @@ class ClientStreamLoop:
         return (float(xv), clamped)
 
     def _zoom_steps_at_center(self, steps: int) -> None:
+        emitter = self._camera_emitter
+        if emitter is None:
+            logger.debug("zoom_steps_at_center skipped: camera emitter unavailable")
+            return
         camera.zoom_steps_at_center(
-            self._control_state,
+            emitter,
             self._camera_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
             steps,
             widget_to_video=self._widget_to_video,
             server_anchor_from_video=self._server_anchor_from_video,
@@ -1019,13 +1005,11 @@ class ClientStreamLoop:
         )
 
     def _reset_camera(self) -> None:
-        camera.reset_camera(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            origin='keys',
-        )
+        emitter = self._camera_emitter
+        if emitter is None:
+            logger.debug("camera.reset skipped: camera emitter unavailable")
+            return
+        camera.reset_camera(emitter, origin='keys')
 
     def _on_key_event(self, data: dict) -> bool:
         return control_actions.handle_key_event(
@@ -1097,6 +1081,30 @@ class ClientStreamLoop:
         self._layer_emitter.set_logging(self._log_dims_info)
         self._layer_mirror.attach_emitter(self._layer_emitter)
 
+        if self._camera_emitter is None:
+            self._camera_emitter = NapariCameraIntentEmitter(
+                ledger=self._state_ledger,
+                state=self._control_state,
+                loop_state=self._loop_state,
+                dispatch_state_update=self._dispatch_state_update,
+                ui_call=self._ui_call,
+                log_camera_info=self._log_dims_info,
+            )
+        else:
+            self._camera_emitter.set_logging(self._log_dims_info)
+
+        if self._camera_mirror is None:
+            self._camera_mirror = NapariCameraMirror(
+                ledger=self._state_ledger,
+                state=self._control_state,
+                loop_state=self._loop_state,
+                presenter=self._presenter_facade,
+                ui_call=self._ui_call,
+                log_camera_info=self._log_dims_info,
+            )
+        self._camera_mirror.set_logging(self._log_dims_info)
+        self._camera_mirror.attach_emitter(self._camera_emitter)
+
     # --- Public UI/state bridge methods -------------------------------------------
     def attach_viewer_proxy(self, viewer: object) -> None:
         """Attach the viewer proxy the runtime mirrors state into.
@@ -1113,6 +1121,8 @@ class ClientStreamLoop:
         self._replay_last_dims_payload()
         if self._layer_mirror is not None:
             self._layer_mirror.replay_last_payload()
+        if self._camera_mirror is not None:
+            self._camera_mirror.replay_last_payload()
 
     @property
     def presenter_facade(self) -> PresenterFacade:
@@ -1132,13 +1142,11 @@ class ClientStreamLoop:
 
     def reset_camera(self, origin: str = 'ui') -> bool:
         """Send a camera.reset to the server (used by UI bindings)."""
-        return camera.reset_camera(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            origin=origin,
-        )
+        emitter = self._camera_emitter
+        if emitter is None:
+            logger.debug("camera.reset skipped: camera emitter unavailable")
+            return False
+        return camera.reset_camera(emitter, origin=origin)
 
     def set_camera(self, *, center=None, zoom=None, angles=None, origin: str = 'ui') -> bool:
         """Send absolute camera fields when provided.
@@ -1146,11 +1154,12 @@ class ClientStreamLoop:
         Prefer using zoom_at/pan_px/reset ops for interactions; this is
         intended for explicit UI actions that set a known state.
         """
+        emitter = self._camera_emitter
+        if emitter is None:
+            logger.debug("camera.set skipped: camera emitter unavailable")
+            return False
         return camera.set_camera(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
+            emitter,
             center=center,
             zoom=zoom,
             angles=angles,
@@ -1289,12 +1298,13 @@ class ClientStreamLoop:
         return emitter.toggle_ndisplay(origin=origin)
 
     def _on_wheel_for_zoom(self, data: dict) -> None:
+        emitter = self._camera_emitter
+        if emitter is None:
+            logger.debug("wheel zoom skipped: camera emitter unavailable")
+            return
         camera.handle_wheel_zoom(
-            self._control_state,
+            emitter,
             self._camera_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
             data,
             widget_to_video=self._widget_to_video,
             server_anchor_from_video=self._server_anchor_from_video,
@@ -1304,6 +1314,10 @@ class ClientStreamLoop:
     def _on_pointer(self, data: dict) -> None:
         if not self._control_state.dims_ready:
             return
+        emitter = self._camera_emitter
+        if emitter is None:
+            logger.debug("pointer event skipped: camera emitter unavailable")
+            return
         dims_meta = self._control_state.dims_meta
         mode_obj = dims_meta.get('mode')
         ndisplay_obj = dims_meta.get('ndisplay')
@@ -1312,11 +1326,8 @@ class ClientStreamLoop:
         else:
             in_vol3d = False
         camera.handle_pointer(
-            self._control_state,
+            emitter,
             self._camera_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
             data,
             widget_to_video=self._widget_to_video,
             video_delta_to_canvas=self._video_delta_to_canvas,

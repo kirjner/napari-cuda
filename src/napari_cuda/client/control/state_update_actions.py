@@ -32,21 +32,12 @@ def _default_dims_meta() -> dict[str, object | None]:
         'order': None,
         'axis_labels': None,
         'range': None,
-        'sizes': None,
         'ndisplay': None,
         'mode': None,
         'volume': None,
         'render': None,
         'multiscale': None,
     }
-
-
-def _normalize_policy_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _normalize_policy_value(v) for k, v in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_normalize_policy_value(v) for v in value]
-    return value
 
 
 def _normalize_camera_delta_value(value: Any) -> Any:
@@ -83,7 +74,6 @@ class ControlStateContext:
     view_state: Dict[str, Any] = field(default_factory=dict)
     volume_state: Dict[str, Any] = field(default_factory=dict)
     multiscale_state: Dict[str, Any] = field(default_factory=dict)
-    scene_policies: Dict[str, Any] = field(default_factory=dict)
     camera_state: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -112,85 +102,6 @@ class ControlStateContext:
         return intent_id, frame_id
 
 
-def apply_scene_policies(state: ControlStateContext, policies: Mapping[str, Any]) -> None:
-    normalized = {str(k): _normalize_policy_value(v) for k, v in policies.items()}
-    state.scene_policies = normalized
-
-    multiscale = normalized.get('multiscale') if isinstance(normalized.get('multiscale'), Mapping) else None
-    if isinstance(multiscale, Mapping):
-        meta_obj = state.dims_meta.get('multiscale')
-        if not isinstance(meta_obj, dict):
-            meta_obj = {}
-            state.dims_meta['multiscale'] = meta_obj
-        meta = meta_obj
-
-        policy_name = multiscale.get('policy')
-        if policy_name is not None:
-            meta['policy'] = str(policy_name)
-            state.multiscale_state['policy'] = str(policy_name)
-
-        level_value = multiscale.get('active_level')
-        if level_value is None:
-            level_value = multiscale.get('current_level')
-        if level_value is not None:
-            try:
-                level_int = int(level_value)
-            except Exception:
-                level_int = level_value
-            meta['current_level'] = level_int
-            meta['level'] = level_int
-            state.multiscale_state['level'] = level_int
-
-        if 'downgraded' in multiscale:
-            meta['downgraded'] = bool(multiscale.get('downgraded'))
-
-        if 'index_space' in multiscale:
-            meta['index_space'] = str(multiscale.get('index_space'))
-
-        sizes: list[int] | None = None
-        ranges: list[list[int]] | None = None
-
-        levels_obj = multiscale.get('levels')
-        if isinstance(levels_obj, Sequence) and not isinstance(levels_obj, (str, bytes, bytearray)):
-            level_entries: list[dict[str, Any]] = []
-            for entry in levels_obj:
-                if isinstance(entry, Mapping):
-                    level_entries.append({str(k): _normalize_policy_value(v) for k, v in entry.items()})
-            if level_entries:
-                meta['levels'] = level_entries
-                if isinstance(level_int, int) and 0 <= level_int < len(level_entries):
-                    active_entry = level_entries[level_int]
-                    shape_obj = active_entry.get('shape')
-                    if isinstance(shape_obj, Sequence) and not isinstance(shape_obj, (str, bytes, bytearray)):
-                        try:
-                            sizes = [max(1, int(x)) for x in shape_obj]
-                        except Exception:
-                            sizes = None
-                    if sizes:
-                        ranges = [[0, max(0, s - 1)] for s in sizes]
-
-        if sizes:
-            meta_root = state.dims_meta
-            meta_root['sizes'] = sizes
-            meta_root['ndim'] = len(sizes)
-            if ranges:
-                meta_root['range'] = ranges
-
-            prev_sizes = meta_root.get('sizes_prev') if False else None
-        if ranges is None and 'sizes' not in state.dims_meta:
-            meta_root = state.dims_meta
-            meta_root.pop('range', None)
-
-        if logger.isEnabledFor(logging.DEBUG):
-            levels_data = meta.get('levels') if isinstance(meta.get('levels'), list) else []
-            logger.debug(
-                "apply_scene_policies: multiscale policy=%s level=%s levels=%s",
-                meta.get('policy'),
-                meta.get('current_level'),
-                len(levels_data),
-            )
-    elif logger.isEnabledFor(logging.DEBUG):
-        logger.debug("apply_scene_policies: no multiscale section present")
 
 
 @dataclass
@@ -385,13 +296,6 @@ def _sync_dims_payload_from_meta(
     else:
         payload_axis_labels = None
 
-    sizes = meta.get('sizes')
-    if sizes is not None:
-        assert isinstance(sizes, Sequence)
-        payload_sizes = list(sizes)
-    else:
-        payload_sizes = None
-
     displayed = meta.get('displayed')
     if displayed is not None:
         assert isinstance(displayed, Sequence)
@@ -406,7 +310,7 @@ def _sync_dims_payload_from_meta(
         'dims_range': payload_range,
         'order': payload_order,
         'axis_labels': payload_axis_labels,
-        'sizes': payload_sizes,
+        'level_shapes': meta.get('level_shapes'),
         'displayed': payload_displayed,
         'mode': meta.get('mode'),
         'volume': meta.get('volume'),
@@ -532,7 +436,7 @@ def _apply_dims_meta_snapshot(
         assert isinstance(value, int)
         meta['ndisplay'] = value
 
-    for key in ('order', 'axis_labels', 'range', 'sizes', 'displayed', 'current_step'):
+    for key in ('order', 'axis_labels', 'range', 'displayed', 'current_step'):
         if key in snapshot:
             value = snapshot[key]
             assert isinstance(value, Sequence)
@@ -565,7 +469,6 @@ def mirror_dims_to_viewer(
     dims_range,
     order,
     axis_labels,
-    sizes,
     displayed,
 ) -> None:
     if viewer_obj is None or not hasattr(viewer_obj, '_apply_remote_dims_update'):
@@ -580,7 +483,6 @@ def mirror_dims_to_viewer(
             dims_range=dims_range,
             order=order,
             axis_labels=axis_labels,
-            sizes=sizes,
             displayed=displayed,
         )
 
@@ -681,12 +583,6 @@ def handle_generic_ack(
 
     _update_runtime_from_ack_outcome(state, outcome)
 
-    if outcome.status == "accepted" and outcome.scope == "camera" and outcome.key is not None:
-        applied = outcome.applied_value
-        if applied is None:
-            applied = outcome.confirmed_value or outcome.pending_value
-        if applied is not None:
-            state.camera_state[str(outcome.key)] = applied
 
     if outcome.status != "accepted":
         error = outcome.error or {}
@@ -765,18 +661,17 @@ def handle_generic_ack(
 
                 viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
                 if viewer_obj is not None:
-                    mirror_dims_to_viewer(
-                        viewer_obj,
-                        ui_call,
-                        current_step=payload.get('current_step'),
-                        ndisplay=payload.get('ndisplay'),
-                        ndim=payload.get('ndim'),
-                        dims_range=payload.get('dims_range'),
-                        order=payload.get('order'),
-                        axis_labels=payload.get('axis_labels'),
-                        sizes=payload.get('sizes'),
-                        displayed=payload.get('displayed'),
-                    )
+                        mirror_dims_to_viewer(
+                            viewer_obj,
+                            ui_call,
+                            current_step=payload.get('current_step'),
+                            ndisplay=payload.get('ndisplay'),
+                            ndim=payload.get('ndim'),
+                            dims_range=payload.get('dims_range'),
+                            order=payload.get('order'),
+                            axis_labels=payload.get('axis_labels'),
+                            displayed=payload.get('displayed'),
+                        )
             return
 
         logger.warning(

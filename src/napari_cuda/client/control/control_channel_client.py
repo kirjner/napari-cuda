@@ -24,7 +24,6 @@ from napari_cuda.protocol import (
     NOTIFY_DIMS_TYPE,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
     NOTIFY_STREAM_TYPE,
     REPLY_COMMAND_TYPE,
     SESSION_HEARTBEAT_TYPE,
@@ -45,7 +44,6 @@ from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
     NotifySceneFrame,
-    NotifySceneLevelPayload,
     NotifyStreamFrame,
 )
 
@@ -88,25 +86,15 @@ _STATE_DEBUG = _maybe_enable_debug_logger()
 _ENVELOPE_PARSER = EnvelopeParser()
 
 _HANDSHAKE_TIMEOUT_S = 5.0
-_RESUMABLE_TOPICS = ("notify.scene", "notify.scene.level", "notify.layers", "notify.stream")
+
+_RESUMABLE_TOPICS = ("notify.scene", "notify.layers", "notify.stream")
 _REQUIRED_FEATURES = {
     "notify.scene": True,
-    "notify.scene.level": True,
     "notify.layers": True,
     "notify.stream": True,
     "notify.dims": True,
     "notify.camera": True,
 }
-
-
-def _normalize_level_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _normalize_level_value(v) for k, v in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_normalize_level_value(v) for v in value]
-    return value
-
-
 @dataclass(frozen=True)
 class ResumeCursor:
     seq: int
@@ -133,35 +121,31 @@ class StateChannel:
         self,
         host: str,
         port: int,
-        handle_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
+        ingest_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
         ingest_dims_notify: Optional[Callable[[NotifyDimsFrame], None]] = None,
         ingest_notify_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
-        ingest_notify_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
         ingest_notify_layers: Optional[Callable[[NotifyLayersFrame], None]] = None,
-        handle_notify_camera: Optional[Callable[[Any], None]] = None,
-        handle_ack_state: Optional[Callable[[AckState], None]] = None,
-        handle_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
-        handle_error_command: Optional[Callable[[ErrorCommand], None]] = None,
-        handle_session_ready: Optional[Callable[[SessionMetadata], None]] = None,
-        handle_connected: Optional[Callable[[], None]] = None,
-        handle_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
-        handle_scene_policies: Optional[Callable[[Mapping[str, Any]], None]] = None,
+        ingest_notify_camera: Optional[Callable[[Any], None]] = None,
+        ingest_ack_state: Optional[Callable[[AckState], None]] = None,
+        ingest_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
+        ingest_error_command: Optional[Callable[[ErrorCommand], None]] = None,
+        on_session_ready: Optional[Callable[[SessionMetadata], None]] = None,
+        on_connected: Optional[Callable[[], None]] = None,
+        on_disconnect: Optional[Callable[[Optional[Exception]], None]] = None,
     ) -> None:
         self.host = host
         self.port = int(port)
-        self.handle_notify_stream = handle_notify_stream
+        self.ingest_notify_stream = ingest_notify_stream
         self.ingest_dims_notify = ingest_dims_notify
         self.ingest_notify_scene_snapshot = ingest_notify_scene_snapshot
-        self.ingest_notify_scene_level = ingest_notify_scene_level
         self.ingest_notify_layers = ingest_notify_layers
-        self.handle_notify_camera = handle_notify_camera
-        self.handle_ack_state = handle_ack_state
-        self.handle_reply_command = handle_reply_command
-        self.handle_error_command = handle_error_command
-        self.handle_session_ready = handle_session_ready
-        self.handle_connected = handle_connected
-        self.handle_disconnect = handle_disconnect
-        self.handle_scene_policies = handle_scene_policies
+        self.ingest_notify_camera = ingest_notify_camera
+        self.ingest_ack_state = ingest_ack_state
+        self.ingest_reply_command = ingest_reply_command
+        self.ingest_error_command = ingest_error_command
+        self.on_session_ready = on_session_ready
+        self.on_connected = on_connected
+        self.on_disconnect = on_disconnect
         self._loop_state = StateChannelLoop()
         self._session_metadata: SessionMetadata | None = None
         self._resume_tokens: Dict[str, ResumeCursor | None] = {topic: None for topic in _RESUMABLE_TOPICS}
@@ -225,11 +209,11 @@ class StateChannel:
                     logger.info("Connected to state channel")
                     retry_delay = 5.0
                     loop_state.websocket = ws
-                    if self.handle_connected:
+                    if self.on_connected:
                         try:
-                            self.handle_connected()
+                            self.on_connected()
                         except Exception:
-                            logger.debug("handle_connected callback failed (state)", exc_info=True)
+                            logger.debug("on_connected callback failed (state)", exc_info=True)
                     loop_state.outbox = asyncio.Queue()
 
                     await self._perform_handshake(ws)
@@ -303,11 +287,11 @@ class StateChannel:
                         loop_state.outbox = None
                     if heartbeat_exc is not None:
                         raise heartbeat_exc
-                    if self.handle_disconnect:
+                    if self.on_disconnect:
                         try:
-                            self.handle_disconnect(None)
+                            self.on_disconnect(None)
                         except Exception:
-                            logger.debug("handle_disconnect callback failed (state)", exc_info=True)
+                            logger.debug("on_disconnect callback failed (state)", exc_info=True)
             except Exception as e:
                 msg = str(e) or e.__class__.__name__
                 try:
@@ -326,11 +310,11 @@ class StateChannel:
                     logger.exception("State channel error")
                 loop_state.websocket = None
                 loop_state.outbox = None
-                if self.handle_disconnect:
+                if self.on_disconnect:
                     try:
-                        self.handle_disconnect(e)
+                        self.on_disconnect(e)
                     except Exception:
-                        logger.debug("handle_disconnect callback failed (state-exc)", exc_info=True)
+                        logger.debug("on_disconnect callback failed (state-exc)", exc_info=True)
                 if loop_state.stop_requested:
                     break
                 await asyncio.sleep(retry_delay)
@@ -370,6 +354,7 @@ class StateChannel:
             loop.call_soon_threadsafe(_schedule_shutdown)
         except Exception:
             logger.debug("StateChannel.stop: loop notify failed", exc_info=True)
+
     def _handle_message(self, data: Mapping[str, object]) -> None:
         """Dispatch a single decoded message to registered callbacks."""
 
@@ -381,39 +366,35 @@ class StateChannel:
             return
 
         if msg_type == ACK_STATE_TYPE:
-            self._handle_ack_state(data)
+            self._ingest_ack_state(data)
             return
 
         if msg_type == REPLY_COMMAND_TYPE:
-            self._handle_reply_command(data)
+            self._ingest_reply_command(data)
             return
 
         if msg_type == ERROR_COMMAND_TYPE:
-            self._handle_error_command(data)
+            self._ingest_error_command(data)
             return
 
         if msg_type == NOTIFY_SCENE_TYPE:
-            self._handle_notify_scene(data)
-            return
-
-        if msg_type == NOTIFY_SCENE_LEVEL_TYPE:
-            self._handle_scene_level(data)
+            self._ingest_notify_scene(data)
             return
 
         if msg_type == NOTIFY_LAYERS_TYPE:
-            self._handle_notify_layers(data)
+            self._ingest_notify_layers(data)
             return
 
         if msg_type == NOTIFY_STREAM_TYPE:
-            self._handle_notify_stream(data)
+            self._ingest_notify_stream(data)
             return
 
         if msg_type == NOTIFY_DIMS_TYPE:
-            self._handle_notify_dims(data)
+            self._ingest_notify_dims(data)
             return
 
         if msg_type == NOTIFY_CAMERA_TYPE:
-            self._handle_notify_camera(data)
+            self._ingest_notify_camera(data)
             return
 
         if msg_type in (SESSION_WELCOME_TYPE, SESSION_REJECT_TYPE):
@@ -480,7 +461,7 @@ class StateChannel:
 
         raise RuntimeError(f"unexpected handshake response type: {msg_type or 'unknown'}")
 
-    def _handle_notify_scene(self, data: Mapping[str, object]) -> None:
+    def _ingest_notify_scene(self, data: Mapping[str, object]) -> None:
         try:
             frame = _ENVELOPE_PARSER.parse_notify_scene(data)
             self._store_resume_cursor(NOTIFY_SCENE_TYPE, frame.envelope)
@@ -489,14 +470,6 @@ class StateChannel:
             return
 
         payload = frame.payload
-        policies_block = payload.policies
-        if self.handle_scene_policies and policies_block is not None:
-            policies_payload = {str(key): _normalize_level_value(value) for key, value in policies_block.items()}
-            try:
-                self.handle_scene_policies(policies_payload)
-            except Exception:
-                logger.debug("handle_scene_policies callback failed", exc_info=True)
-
         if not self.ingest_notify_scene_snapshot:
             return
 
@@ -511,22 +484,7 @@ class StateChannel:
         except Exception:
             logger.debug("ingest_notify_scene_snapshot callback failed", exc_info=True)
 
-    def _handle_scene_level(self, data: Mapping[str, object]) -> None:
-        if not self.ingest_notify_scene_level:
-            return
-        try:
-            frame = _ENVELOPE_PARSER.parse_notify_scene_level(data)
-            self._store_resume_cursor(NOTIFY_SCENE_LEVEL_TYPE, frame.envelope)
-        except Exception:
-            logger.debug("notify.scene.level dispatch failed", exc_info=True)
-            return
-
-        try:
-            self.ingest_notify_scene_level(frame.payload)
-        except Exception:
-            logger.debug("ingest_notify_scene_level callback failed", exc_info=True)
-
-    def _handle_notify_layers(self, data: Mapping[str, object]) -> None:
+    def _ingest_notify_layers(self, data: Mapping[str, object]) -> None:
         if not self.ingest_notify_layers:
             return
         try:
@@ -549,15 +507,11 @@ class StateChannel:
         except Exception:
             logger.debug("ingest_notify_layers callback failed", exc_info=True)
 
-    def _handle_notify_stream(self, data: Mapping[str, object]) -> None:
-        try:
-            frame = _ENVELOPE_PARSER.parse_notify_stream(data)
-            self._store_resume_cursor(NOTIFY_STREAM_TYPE, frame.envelope)
-        except Exception:
-            logger.debug("notify.stream dispatch failed", exc_info=True)
-            return
+    def _ingest_notify_stream(self, data: Mapping[str, object]) -> None:
+        frame = _ENVELOPE_PARSER.parse_notify_stream(data)
+        self._store_resume_cursor(NOTIFY_STREAM_TYPE, frame.envelope)
 
-        if not self.handle_notify_stream:
+        if not self.ingest_notify_stream:
             return
 
         if _STATE_DEBUG:
@@ -569,28 +523,26 @@ class StateChannel:
                 payload.frame_size[0],
                 payload.frame_size[1],
             )
-        self.handle_notify_stream(frame)
+        self.ingest_notify_stream(frame)
 
-    def _handle_notify_dims(self, data: Mapping[str, object]) -> None:
+    def _ingest_notify_dims(self, data: Mapping[str, object]) -> None:
         if not self.ingest_dims_notify:
             return
-        try:
-            frame = _ENVELOPE_PARSER.parse_notify_dims(data)
-            if _STATE_DEBUG:
-                payload = frame.payload
-                logger.debug(
-                    "received notify.dims: frame=%s step=%s ndisplay=%s mode=%s",
-                    frame.envelope.frame_id,
-                    payload.current_step,
-                    payload.ndisplay,
-                    payload.mode,
-                )
-            self.ingest_dims_notify(frame)
-        except Exception:
-            logger.debug("notify.dims dispatch failed", exc_info=True)
 
-    def _handle_notify_camera(self, data: Mapping[str, object]) -> None:
-        if not self.handle_notify_camera:
+        frame = _ENVELOPE_PARSER.parse_notify_dims(data)
+        payload = frame.payload
+        if _STATE_DEBUG:
+            logger.debug(
+                "received notify.dims: frame=%s step=%s level=%s level_shapes=%s",
+                frame.envelope.frame_id,
+                payload.current_step,
+                payload.current_level,
+                payload.level_shapes,
+            )
+        self.ingest_dims_notify(frame)
+
+    def _ingest_notify_camera(self, data: Mapping[str, object]) -> None:
+        if not self.ingest_notify_camera:
             return
         try:
             frame = _ENVELOPE_PARSER.parse_notify_camera(data)
@@ -602,7 +554,7 @@ class StateChannel:
                     payload.origin,
                     frame.envelope.intent_id,
                 )
-            self.handle_notify_camera(frame)
+            self.ingest_notify_camera(frame)
         except Exception:
             logger.debug("notify.camera dispatch failed", exc_info=True)
 
@@ -628,11 +580,11 @@ class StateChannel:
         for topic in _RESUMABLE_TOPICS:
             self._resume_tokens[topic] = resume_tokens.get(topic)
         self._last_heartbeat_ts = time.time()
-        if self.handle_session_ready:
+        if self.on_session_ready:
             try:
-                self.handle_session_ready(metadata)
+                self.on_session_ready(metadata)
             except Exception:
-                logger.debug("handle_session_ready callback failed", exc_info=True)
+                logger.debug("on_session_ready callback failed", exc_info=True)
         return metadata
 
     def _handle_session_heartbeat(self, data: Mapping[str, object]) -> None:
@@ -650,7 +602,7 @@ class StateChannel:
                 frame.envelope.frame_id,
             )
 
-    def _handle_ack_state(self, data: Mapping[str, object]) -> None:
+    def _ingest_ack_state(self, data: Mapping[str, object]) -> None:
         try:
             frame = _ENVELOPE_PARSER.parse_ack_state(data)
         except Exception:
@@ -671,11 +623,11 @@ class StateChannel:
                 payload.in_reply_to,
                 payload.applied_value,
             )
-        if self.handle_ack_state:
+        if self.ingest_ack_state:
             try:
-                self.handle_ack_state(frame)
+                self.ingest_ack_state(frame)
             except Exception:
-                logger.debug("handle_ack_state callback failed", exc_info=True)
+                logger.debug("ingest_ack_state callback failed", exc_info=True)
 
     def _store_resume_cursor(self, topic: str, envelope: Any) -> None:
         if topic not in _RESUMABLE_TOPICS:
@@ -734,7 +686,7 @@ class StateChannel:
                     await ws.close(code=1011, reason="heartbeat timeout")
                 raise HeartbeatAckError("heartbeat timeout")
 
-    def _handle_reply_command(self, data: Mapping[str, object]) -> None:
+    def _ingest_reply_command(self, data: Mapping[str, object]) -> None:
         try:
             frame = _ENVELOPE_PARSER.parse_reply_command(data)
         except Exception:
@@ -747,13 +699,13 @@ class StateChannel:
             payload.in_reply_to,
             payload.idempotency_key,
         )
-        if self.handle_reply_command:
+        if self.ingest_reply_command:
             try:
-                self.handle_reply_command(frame)
+                self.ingest_reply_command(frame)
             except Exception:
-                logger.debug("handle_reply_command callback failed", exc_info=True)
+                logger.debug("ingest_reply_command callback failed", exc_info=True)
 
-    def _handle_error_command(self, data: Mapping[str, object]) -> None:
+    def _ingest_error_command(self, data: Mapping[str, object]) -> None:
         try:
             frame = _ENVELOPE_PARSER.parse_error_command(data)
         except Exception:
@@ -769,11 +721,11 @@ class StateChannel:
             error.code,
             error.message,
         )
-        if self.handle_error_command:
+        if self.ingest_error_command:
             try:
-                self.handle_error_command(frame)
+                self.ingest_error_command(frame)
             except Exception:
-                logger.debug("handle_error_command callback failed", exc_info=True)
+                logger.debug("ingest_error_command callback failed", exc_info=True)
 
     # --- Generic outbound messaging -------------------------------------------------
     def post(self, obj: Mapping[str, Any]) -> bool:

@@ -24,7 +24,7 @@ Other single-module entry points:
 | --- | ---:| --- | --- |
 | `control_channel_client.py` | 820 | Async state-channel client (websockets, resume tokens, message dispatch). | Monolithic; mixes networking, logging, heartbeats, and callbacks wiring. |
 | `state_update_actions.py` | 1 687 | All state intent helpers (dims, camera, layers, volume, HUD). | Largest single file; contains rate limiting, ack handling, viewer mirroring, policy application. |
-| `state/bridges/layer_state_bridge.py` | 549 | Layer bridge between napari events and `state.update`. | Recently gained mute guard; still handles store seeding, projection, ack reconciliation. |
+| `control/mirrors/napari_layer_mirror.py`<br>`control/emitters/napari_layer_intent_emitter.py` | ~520 combined | Layer mirror/emitter pair replacing the legacy bridge. | Own registry sync, per-property intents, and ack reconciliation; keeps `ProxyViewer` passive. |
 | `client_state_ledger.py` | 308 | Tracks confirmed/pending values and ack reconciliation. | Clean but still lacks provenance metadata. |
 
 ## Runtime Package (`client/runtime`)
@@ -97,16 +97,16 @@ Other single-module entry points:
 3. **Projection logic scattered** – layer projection lives inside
    `RemoteImageLayer`; dims projection is in `ProxyViewer`; camera projection is
    mixed into `state_update_actions`. There is no unified interface.
-4. **Control flow duplication** – `LayerStateBridge` now shepherds both
-   registry sync and per-property intent handling. We still need to spin a
-   dedicated layer projection to keep ProxyViewer fully passive and let the
-   bridge focus on intent dispatch + ack reconciliation.
+4. **Layer projection alignment** – `NapariLayerMirror` and
+   `NapariLayerIntentEmitter` now own registry sync and per-property intents. We
+   should keep `ProxyViewer` passive by routing all layer mutations through these
+   components.
 5. **Event wiring** – `ProxyViewer` manually inspects napari internals
    (`_qt_viewer`, play state) and probes `_state_sender` with `getattr`. This
    should move into a dedicated projection/bridge layer.
-6. **Testing gaps** – unit tests focus on legacy streaming helpers; there are no
-   integration tests covering `stream_runtime.py` or the new `LayerStateBridge`
-   mute behavior.
+6. **Testing gaps** – unit tests now cover the dims/layer/camera mirrors,
+   but we still lack integration coverage for `stream_runtime.py` wiring the
+   new emitters/mirrors end-to-end.
 
 ## Immediate Hygiene Candidates
 

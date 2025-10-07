@@ -37,19 +37,17 @@ def start_loop(loop: "ClientStreamLoop") -> None:
     state_controller = StateController(
         loop.server_host,
         loop.state_port,
-        handle_notify_stream=loop._handle_notify_stream,  # noqa: SLF001
-        ingest_dims_notify=loop._dims_mirror.ingest_dims_notify,  # noqa: SLF001
+        ingest_notify_stream=loop._ingest_notify_stream,  # noqa: SLF001
+        ingest_dims_notify=loop._ingest_notify_dims,  # noqa: SLF001
         ingest_notify_scene_snapshot=loop._ingest_notify_scene_snapshot,  # noqa: SLF001
-        ingest_notify_scene_level=loop._ingest_notify_scene_level,  # noqa: SLF001
         ingest_notify_layers=loop._ingest_notify_layers,  # noqa: SLF001
-        handle_notify_camera=loop._handle_notify_camera,  # noqa: SLF001
-        handle_ack_state=loop._handle_ack_state,  # noqa: SLF001
-        handle_reply_command=loop._handle_reply_command,  # noqa: SLF001
-        handle_error_command=loop._handle_error_command,  # noqa: SLF001
-        handle_session_ready=loop._handle_session_ready,  # noqa: SLF001
-        handle_connected=loop._on_state_connected,  # noqa: SLF001
-        handle_disconnect=loop._on_state_disconnect,  # noqa: SLF001
-        handle_scene_policies=loop._handle_scene_policies,  # noqa: SLF001
+        ingest_notify_camera=loop._ingest_notify_camera,  # noqa: SLF001
+        ingest_ack_state=loop._ingest_ack_state,  # noqa: SLF001
+        ingest_reply_command=loop._ingest_reply_command,  # noqa: SLF001
+        ingest_error_command=loop._ingest_error_command,  # noqa: SLF001
+        on_session_ready=loop._on_state_session_ready,  # noqa: SLF001
+        on_connected=loop._on_state_connected,  # noqa: SLF001
+        on_disconnect=loop._on_state_disconnect,  # noqa: SLF001
     )
     state_channel, t_state = state_controller.start()
     loop._loop_state.state_channel = state_channel  # noqa: SLF001
@@ -64,6 +62,10 @@ def start_loop(loop: "ClientStreamLoop") -> None:
         loop._layer_mirror.set_logging(loop._log_dims_info)  # type: ignore[attr-defined]
     if getattr(loop, "_layer_emitter", None) is not None:  # noqa: SLF001
         loop._layer_emitter.set_logging(loop._log_dims_info)  # type: ignore[attr-defined]
+    if getattr(loop, "_camera_mirror", None) is not None:  # noqa: SLF001
+        loop._camera_mirror.set_logging(loop._log_dims_info)  # type: ignore[attr-defined]
+    if getattr(loop, "_camera_emitter", None) is not None:  # noqa: SLF001
+        loop._camera_emitter.set_logging(loop._log_dims_info)  # type: ignore[attr-defined]
     attach_input_sender(loop)
     bind_shortcuts(loop)
 

@@ -155,6 +155,13 @@ class ProxyViewer(ViewerModel):
         prev_flag = self._suppress_forward_flag
         self._suppress_forward_flag = True
         try:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "ProxyViewer dims update: step=%s sizes=%s range=%s",
+                    current_step,
+                    sizes,
+                    dims_range,
+                )
             if ndim is not None:
                 dims.ndim = int(ndim)
             if dims_range is not None:

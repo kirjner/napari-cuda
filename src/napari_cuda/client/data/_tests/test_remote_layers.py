@@ -20,7 +20,12 @@ except Exception as exc:  # pragma: no cover - environment dependent import guar
     LayerDelta = LayerSnapshot = SceneSnapshot = ViewerSnapshot = object  # type: ignore[assignment]
 
 if NAPARI_AVAILABLE:
-    from napari_cuda.client.state import LayerStateBridge
+    from qtpy import QtCore
+
+    from napari_cuda.client.control.mirrors import NapariLayerMirror
+    from napari_cuda.client.control.state_update_actions import ControlStateContext
+    from napari_cuda.client.control.client_state_ledger import ClientStateLedger
+    from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 
 def make_layer_block(**overrides) -> dict:
     base: dict[str, object] = {
@@ -158,22 +163,7 @@ def test_remote_layer_registry_lifecycle():
     assert not registry.snapshot().layers
 
 
-def test_proxy_viewer_sync_layers():
-    pytest.importorskip("qtpy")
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from napari_cuda.client.app.proxy_viewer import ProxyViewer
 
-    viewer = ProxyViewer(offline=True)
-    block = make_layer_block()
-    layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
-    snapshot = RegistrySnapshot(layers=(LayerRecord(layer_id=block["layer_id"], block=dict(block), layer=layer),))
-    LayerStateBridge.sync_viewer_layers(viewer, snapshot)
-    assert len(viewer.layers) == 1
-    assert viewer.layers[0] is layer
-    assert layer.visible is True
-    empty_snapshot = RegistrySnapshot(layers=tuple())
-    LayerStateBridge.sync_viewer_layers(viewer, empty_snapshot)
-    assert len(viewer.layers) == 0
 
 
 def test_proxy_viewer_applies_displayed_axes():
@@ -189,7 +179,6 @@ def test_proxy_viewer_applies_displayed_axes():
         dims_range=[(0.0, 3.0, 1.0), (0.0, 31.0, 1.0), (0.0, 47.0, 1.0)],
         order=[0, 1, 2],
         axis_labels=["z", "y", "x"],
-        sizes=[4, 32, 48],
         displayed=[0, 1, 2],
     )
     assert viewer.dims.ndisplay == 3

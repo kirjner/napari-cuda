@@ -15,6 +15,10 @@ from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
+@pytest.fixture(autouse=True)
+def _ensure_qapp(qtbot):  # noqa: D401
+    """Guarantee a Qt application instance for mirror tests."""
+    yield
 
 class FakeDispatch:
     def __init__(self) -> None:
@@ -28,9 +32,13 @@ class FakeDispatch:
 class PresenterStub:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.multiscale_calls: list[dict[str, Any]] = []
 
     def apply_dims_update(self, payload: dict[str, Any]) -> None:
         self.calls.append(dict(payload))
+
+    def apply_multiscale_policy(self, payload: dict[str, Any]) -> None:
+        self.multiscale_calls.append(dict(payload))
 
 
 class ViewerStub:
@@ -45,23 +53,58 @@ def _make_notify_dims_frame(
     *,
     current_step: Sequence[int],
     ndisplay: int,
+    level_shapes: Sequence[Sequence[int]],
     mode: str = 'plane',
-    source: str = 'test-suite',
     session_id: str = 'session-test',
     frame_id: str = 'dims-test',
     timestamp: float = 1.5,
+    levels: Sequence[dict[str, Any]] | None = None,
+    current_level: int = 0,
+    downgraded: bool | None = None,
+    axis_labels: Sequence[str] | None = None,
+    order: Sequence[int] | None = None,
+    displayed: Sequence[int] | None = None,
 ) -> NotifyDimsFrame:
+    step_values = [int(value) for value in current_step]
+
+    if levels is None:
+        level_entries = [
+            {
+                'index': idx,
+                'shape': list(shape),
+            }
+            for idx, shape in enumerate(level_shapes)
+        ]
+    else:
+        level_entries = [dict(entry) for entry in levels]
+
+    payload: dict[str, Any] = {
+        'step': step_values,
+        'levels': level_entries,
+        'level_shapes': [list(shape) for shape in level_shapes],
+        'current_level': int(current_level),
+        'mode': mode,
+        'ndisplay': int(ndisplay),
+    }
+
+    if downgraded is not None:
+        payload['downgraded'] = bool(downgraded)
+    if axis_labels is not None:
+        payload['axis_labels'] = [str(label) for label in axis_labels]
+    if order is not None:
+        payload['order'] = [int(index) for index in order]
+    if displayed is not None:
+        payload['displayed'] = [int(index) for index in displayed]
+
     return build_notify_dims(
         session_id=session_id,
-        payload={
-            'current_step': tuple(current_step),
-            'ndisplay': int(ndisplay),
-            'mode': mode,
-            'source': source,
-        },
+        payload=payload,
         timestamp=timestamp,
         frame_id=frame_id,
     )
+
+
+
 
 
 def _make_state() -> tuple[
@@ -117,12 +160,18 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
             'order': [0, 1, 2],
             'axis_labels': ['z', 'y', 'x'],
             'range': [(0, 10), (0, 5), (0, 3)],
-            'sizes': [11, 6, 4],
-            'displayed': [1, 2],
+                'displayed': [1, 2],
         }
     )
 
-    frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=2)
+    frame = _make_notify_dims_frame(
+        current_step=[1, 2, 3],
+        ndisplay=2,
+        level_shapes=[[11, 6, 4]],
+        axis_labels=['z', 'y', 'x'],
+        order=[0, 1, 2],
+        displayed=[1, 2],
+    )
 
     mirror = NapariDimsMirror(
         ledger=ledger,
@@ -155,11 +204,10 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         'dims_range': [[0, 10], [0, 5], [0, 3]],
         'order': [0, 1, 2],
         'axis_labels': ['z', 'y', 'x'],
-        'sizes': [11, 6, 4],
         'displayed': [1, 2],
         'mode': 'plane',
         'volume': False,
-        'source': 'test-suite',
+        'source': None,
     }
     assert presenter.calls
     debug = ledger.dump_debug()
@@ -171,7 +219,12 @@ def test_handle_dims_update_modes_volume_flag() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     presenter = PresenterStub()
 
-    frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=3, mode='volume')
+    frame = _make_notify_dims_frame(
+        current_step=[0, 0, 0],
+        ndisplay=3,
+        level_shapes=[[32, 32, 32]],
+        mode='volume',
+    )
 
     mirror = NapariDimsMirror(
         ledger=ledger,
@@ -245,11 +298,15 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
             'axis_labels': ['z', 'y', 'x'],
             'order': [0, 1, 2],
             'range': [[0, 5], [0, 5], [0, 5]],
-            'sizes': [6, 6, 6],
         }
     )
 
-    frame = _make_notify_dims_frame(current_step=[1, 2, 3], ndisplay=3, mode='volume')
+    frame = _make_notify_dims_frame(
+        current_step=[1, 2, 3],
+        ndisplay=3,
+        level_shapes=[[32, 32, 32]],
+        mode='volume',
+    )
 
     mirror.ingest_dims_notify(frame)
 
@@ -296,39 +353,27 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
             'ndim': 3,
             'axis_labels': ['z', 'y', 'x'],
             'order': [0, 1, 2],
-            'sizes': [512, 256, 64],
             'range': [[0, 511], [0, 255], [0, 63]],
         }
     )
 
-    policies = {
-        'multiscale': {
-            'current_level': 1,
-            'active_level': 1,
-            'levels': [
-                {'index': 0, 'shape': [512, 256, 64]},
-                {'index': 1, 'shape': [256, 128, 32]},
-            ],
-        }
-    }
-
-    control_actions.apply_scene_policies(state, policies)
-
-    frame = _make_notify_dims_frame(current_step=[0, 0, 0], ndisplay=2)
+    frame = _make_notify_dims_frame(
+        current_step=[0, 0, 0],
+        ndisplay=2,
+        level_shapes=[[512, 256, 64], [256, 128, 32], [128, 64, 16]],
+        current_level=1,
+        downgraded=True,
+    )
 
     mirror.ingest_dims_notify(frame)
 
-    sizes = state.dims_meta['sizes']
-    assert sizes == [256, 128, 32]
     dims_range = state.dims_meta['range']
     assert dims_range and dims_range[2][1] == 31
 
     assert viewer.calls, 'viewer should receive updated dims metadata'
     payload = viewer.calls[-1]
-    assert payload['sizes'][2] == 32
     assert payload['dims_range'][2][1] == 31
 
-    assert loop_state.last_dims_payload['sizes'][2] == 32
 
 
 def test_hud_snapshot_carries_volume_state() -> None:
@@ -347,34 +392,106 @@ def test_hud_snapshot_carries_volume_state() -> None:
     assert snap['vol_mode'] is True
 
 
-def test_apply_scene_policies_populates_multiscale_state() -> None:
-    state, _, _, _ = _make_state()
-    policies = {
-        'multiscale': {
-            'policy': 'oversampling',
-            'active_level': 3,
-            'downgraded': True,
-            'index_space': 'zyx',
-            'levels': [
-                {'index': 0, 'path': 'level_00'},
-                {'index': 1, 'path': 'level_01'},
-            ],
+
+def test_dims_notify_preserves_optional_metadata() -> None:
+    state, loop_state, ledger, dispatch = _make_state()
+    state.dims_meta.update(
+        {
+            'ndim': 3,
+            'axis_labels': ['z', 'y', 'x'],
+            'order': [0, 1, 2],
+            'displayed': [1, 2],
+            'range': [[0, 255], [0, 127], [0, 63]],
         }
-    }
+    )
 
-    control_actions.apply_scene_policies(state, policies)
+    mirror = NapariDimsMirror(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        viewer_ref=lambda: None,
+        ui_call=None,
+        presenter=None,
+        log_dims_info=False,
+    )
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
 
-    assert state.scene_policies['multiscale']['policy'] == 'oversampling'
-    assert state.multiscale_state['policy'] == 'oversampling'
-    assert state.multiscale_state['level'] == 3
+    frame = _make_notify_dims_frame(
+        current_step=[10, 20, 30],
+        ndisplay=2,
+        level_shapes=[[256, 128, 64]],
+    )
+
+    mirror.ingest_dims_notify(frame)
+
+    assert state.dims_meta['axis_labels'] == ['z', 'y', 'x']
+    assert state.dims_meta['order'] == [0, 1, 2]
+    assert state.dims_meta['displayed'] == [1, 2]
+
+
+def test_dims_notify_populates_multiscale_state() -> None:
+    state, loop_state, ledger, _dispatch = _make_state()
+    viewer = ViewerStub()
+    presenter = PresenterStub()
+
+    mirror = NapariDimsMirror(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        viewer_ref=lambda: viewer,
+        ui_call=None,
+        presenter=presenter,
+        log_dims_info=False,
+    )
+    emitter = NapariDimsIntentEmitter(
+        ledger=ledger,
+        state=state,
+        loop_state=loop_state,
+        dispatch_state_update=_dispatch,
+        ui_call=None,
+        log_dims_info=False,
+        tx_interval_ms=0,
+    )
+    mirror.attach_emitter(emitter)
+
+    frame = _make_notify_dims_frame(
+        current_step=[0, 0, 0],
+        ndisplay=2,
+        level_shapes=[[512, 256, 64], [256, 128, 32], [128, 64, 16]],
+        current_level=1,
+        levels=[
+            {'index': 0, 'path': 'level_00', 'shape': [512, 256, 64]},
+            {'index': 1, 'path': 'level_01', 'shape': [256, 128, 32]},
+            {'index': 2, 'path': 'level_02', 'shape': [128, 64, 16]},
+        ],
+        downgraded=True,
+    )
+
+    mirror.ingest_dims_notify(frame)
+
+    ms_state = state.multiscale_state
+    assert ms_state['level'] == 1
+    assert ms_state['current_level'] == 1
+    assert ms_state['downgraded'] is True
+    assert len(ms_state['levels']) == 3
     meta = state.dims_meta.get('multiscale')
     assert isinstance(meta, dict)
-    assert meta['current_level'] == 3
+    assert meta['current_level'] == 1
     assert meta['downgraded'] is True
-    assert meta['index_space'] == 'zyx'
-    levels = meta['levels']
-    assert isinstance(levels, list)
-    assert levels[0]['path'] == 'level_00'
+    assert len(meta['levels']) == 3
+    assert presenter.multiscale_calls, 'presenter should receive multiscale snapshot'
+    last_payload = presenter.multiscale_calls[-1]
+    assert last_payload['current_level'] == 1
+    assert len(last_payload['levels']) == 3
 
 
 def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
@@ -514,7 +631,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
             'order': [0],
             'axis_labels': ['z'],
             'range': [(0, 8)],
-            'sizes': [9],
+            'range': [[0, 8]],
             'displayed': [0],
         }
     )
@@ -548,7 +665,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
     )
     mirror.attach_emitter(emitter)
 
-    frame = _make_notify_dims_frame(current_step=[4], ndisplay=2)
+    frame = _make_notify_dims_frame(current_step=[4], ndisplay=2, level_shapes=[[9]])
 
     mirror.ingest_dims_notify(frame)
 

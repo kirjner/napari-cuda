@@ -71,6 +71,7 @@ class PresenterFacade:
         self._intent_dispatcher: Optional[Callable[[str, dict[str, Any]], None]] = None
         self._camera_summaries: dict[str, Any] = {}
         self._hud_camera_snapshot: dict[str, Any] = {}
+        self._multiscale_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ lifecycle
     def start_presenting(
@@ -204,6 +205,11 @@ class PresenterFacade:
         if mode_key == 'main' or 'main' not in self._camera_summaries:
             self._hud_camera_snapshot = dict(normalized)
 
+    def apply_multiscale_policy(self, payload: Mapping[str, Any]) -> None:
+        """Cache multiscale policy snapshots for HUD consumers."""
+
+        self._multiscale_snapshot = {str(k): v for k, v in dict(payload).items()}
+
     def set_viewer_mirror(self, viewer: object) -> None:
         """Record a weakref to the viewer mirror for future mirroring work."""
 
@@ -225,6 +231,9 @@ class PresenterFacade:
 
     def cached_dims_payload(self) -> Optional[dict[str, Any]]:
         return dict(self._last_dims_payload) if self._last_dims_payload is not None else None
+
+    def cached_multiscale_policy(self) -> Optional[dict[str, Any]]:
+        return dict(self._multiscale_snapshot) if self._multiscale_snapshot is not None else None
 
     def current_viewer(self) -> Optional[object]:
         return self._viewer_ref() if self._viewer_ref is not None else None

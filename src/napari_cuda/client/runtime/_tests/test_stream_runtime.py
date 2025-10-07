@@ -6,6 +6,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from qtpy import QtCore
+
+pytestmark = pytest.mark.usefixtures("qtbot")
+
+
+class _UiCallStub:
+    class _Emitter:
+        def emit(self, func):
+            func()
+
+    def __init__(self) -> None:
+        self.call = self._Emitter()
 
 from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
@@ -14,7 +26,7 @@ from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import SessionMetadata, ResumeCursor
 from napari_cuda.client.runtime.stream_runtime import CommandError
 from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command, build_error_command
-from napari_cuda.protocol.messages import NotifyDimsFrame, NotifySceneLevelPayload
+from napari_cuda.protocol.messages import NotifyDimsFrame
 from napari_cuda.client.data.registry import RemoteLayerRegistry
 
 
@@ -49,6 +61,9 @@ class _PresenterStub:
     def apply_layer_delta(self, message: Any) -> None:
         self.layer_updates.append(message)
 
+    def apply_multiscale_policy(self, payload: dict[str, Any]) -> None:
+        self.calls.append(dict(payload))
+
 
 def _make_loop() -> ClientStreamLoop:
     loop = ClientStreamLoop.__new__(ClientStreamLoop)
@@ -58,7 +73,8 @@ def _make_loop() -> ClientStreamLoop:
     loop._loop_state.state_channel = _StateChannelStub()
     loop._state_channel_stub = loop._loop_state.state_channel
     loop._viewer_mirror = lambda: None
-    loop._ui_call = None
+    loop._ui_call = _UiCallStub()
+    loop._ui_thread = QtCore.QThread.currentThread()
     loop._first_dims_ready_cb = None
     loop._first_dims_notified = False
 
@@ -88,6 +104,9 @@ def _make_loop() -> ClientStreamLoop:
     loop._dims_emitter = None
     loop._layer_mirror = None
     loop._layer_emitter = None
+    loop._camera_mirror = None
+    loop._camera_emitter = None
+    loop._multiscale_mirror = None
     loop._slider_tx_interval_ms = 10
 
     loop._initialize_mirrors_and_emitters()
@@ -138,14 +157,23 @@ def test_handle_dims_update_caches_payload() -> None:
             'order': [0, 1, 2],
             'axis_labels': ['z', 'y', 'x'],
             'range': [(0, 10), (0, 5), (0, 3)],
-            'sizes': [11, 6, 4],
             'displayed': [1, 2],
         }
     )
 
     frame = build_notify_dims(
         session_id='session-test',
-        payload={'current_step': (1, 2), 'ndisplay': 2, 'mode': 'plane', 'source': 'test-suite'},
+        payload={
+            'step': [1, 2, 0],
+            'levels': [{'index': 0, 'shape': [11, 6, 4]}],
+            'level_shapes': [[11, 6, 4]],
+            'current_level': 0,
+            'mode': 'plane',
+            'ndisplay': 2,
+            'axis_labels': ['z', 'y', 'x'],
+            'order': [0, 1, 2],
+            'displayed': [1, 2],
+        },
         timestamp=1.5,
         frame_id='dims-1',
     )
@@ -153,17 +181,16 @@ def test_handle_dims_update_caches_payload() -> None:
     loop._dims_mirror.ingest_dims_notify(frame)
 
     assert loop._loop_state.last_dims_payload == {
-        'current_step': [1, 2],
+        'current_step': [1, 2, 0],
         'ndisplay': 2,
         'ndim': 3,
         'dims_range': [[0, 10], [0, 5], [0, 3]],
         'order': [0, 1, 2],
         'axis_labels': ['z', 'y', 'x'],
-        'sizes': [11, 6, 4],
         'displayed': [1, 2],
         'mode': 'plane',
         'volume': False,
-        'source': 'test-suite',
+        'source': None,
     }
     assert loop._control_state.dims_ready is True
     assert loop._presenter_facade.calls
@@ -189,7 +216,6 @@ def test_replay_last_dims_payload_forwards_to_viewer() -> None:
         'dims_range': [(0, 8), (0, 4), (0, 2)],
         'order': [0, 2, 1],
         'axis_labels': ['z', 'x', 'y'],
-        'sizes': [9, 5, 3],
         'displayed': [2, 1],
     }
 
@@ -203,9 +229,8 @@ def test_replay_last_dims_payload_forwards_to_viewer() -> None:
             'dims_range': [(0, 8), (0, 4), (0, 2)],
             'order': [0, 2, 1],
             'axis_labels': ['z', 'x', 'y'],
-            'sizes': [9, 5, 3],
             'displayed': [2, 1],
-        }
+            }
     ]
 
 
@@ -237,17 +262,15 @@ def test_session_metadata_propagated_to_loop_state() -> None:
         ack_timeout_ms=250,
         resume_tokens={
             'notify.scene': ResumeCursor(seq=1, delta_token='scene-a'),
-            'notify.scene.level': None,
             'notify.layers': None,
             'notify.stream': None,
         },
         features={
             'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
-            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
         },
     )
 
-    loop._handle_session_ready(metadata)
+    loop._on_state_session_ready(metadata)
     assert loop._loop_state.state_session_metadata is metadata
     assert loop._command_catalog == ('napari.pixel.request_keyframe',)
 
@@ -263,16 +286,14 @@ def test_request_keyframe_command_future_resolves() -> None:
         ack_timeout_ms=250,
         resume_tokens={
             'notify.scene': None,
-            'notify.scene.level': None,
             'notify.layers': None,
             'notify.stream': None,
         },
         features={
             'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
-            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
         },
     )
-    loop._handle_session_ready(metadata)
+    loop._on_state_session_ready(metadata)
 
     future = loop.request_keyframe(origin='test')
     assert future is not None
@@ -290,7 +311,7 @@ def test_request_keyframe_command_future_resolves() -> None:
         },
     )
 
-    loop._handle_reply_command(reply)
+    loop._ingest_reply_command(reply)
     assert future.done()
     payload = future.result()
     assert payload.status == 'ok'
@@ -305,16 +326,14 @@ def test_request_keyframe_command_future_errors() -> None:
         ack_timeout_ms=250,
         resume_tokens={
             'notify.scene': None,
-            'notify.scene.level': None,
             'notify.layers': None,
             'notify.stream': None,
         },
         features={
             'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
-            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
         },
     )
-    loop._handle_session_ready(metadata)
+    loop._on_state_session_ready(metadata)
 
     future = loop.request_keyframe(origin='test')
     assert future is not None
@@ -334,7 +353,7 @@ def test_request_keyframe_command_future_errors() -> None:
         },
     )
 
-    loop._handle_error_command(error)
+    loop._ingest_error_command(error)
 
     assert future.done()
     with pytest.raises(CommandError) as excinfo:
@@ -352,16 +371,14 @@ def test_state_disconnect_aborts_pending_commands() -> None:
         ack_timeout_ms=250,
         resume_tokens={
             'notify.scene': None,
-            'notify.scene.level': None,
             'notify.layers': None,
             'notify.stream': None,
         },
         features={
             'call.command': FeatureToggle(enabled=True, version=1, commands=('napari.pixel.request_keyframe',)),
-            'notify.scene.level': FeatureToggle(enabled=True, version=1, resume=True),
         },
     )
-    loop._handle_session_ready(metadata)
+    loop._on_state_session_ready(metadata)
 
     future = loop.request_keyframe(origin='test')
     assert future is not None
@@ -373,22 +390,3 @@ def test_state_disconnect_aborts_pending_commands() -> None:
     with pytest.raises(CommandError) as excinfo:
         future.result()
     assert excinfo.value.code == 'command.session_closed'
-
-
-def test_scene_level_payload_updates_control_state() -> None:
-    loop = _make_loop()
-    payload = NotifySceneLevelPayload(
-        current_level=3,
-        downgraded=False,
-        levels=(
-            {'index': 0, 'shape': [64, 64]},
-            {'index': 1, 'shape': [32, 32]},
-        ),
-    )
-
-    loop._ingest_notify_scene_level(payload)
-
-    assert loop._control_state.multiscale_state['level'] == 3
-    multiscale_meta = loop._control_state.dims_meta.get('multiscale')
-    assert isinstance(multiscale_meta, dict)
-    assert multiscale_meta.get('current_level') == 3

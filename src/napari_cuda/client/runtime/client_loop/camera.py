@@ -6,14 +6,9 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence, TYPE_CHECKING
+from typing import Callable, Optional, Sequence
 
-from napari_cuda.client.control import state_update_actions
-
-if TYPE_CHECKING:  # pragma: no cover
-    from napari_cuda.client.control.state_update_actions import ControlStateContext
-    from napari_cuda.client.control.client_state_ledger import IntentRecord, ClientStateLedger
-    from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
 
@@ -60,11 +55,8 @@ class CameraState:
 
 
 def handle_wheel_zoom(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     data: dict,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -89,11 +81,7 @@ def handle_wheel_zoom(
     state.last_zoom_widget_px = (float(xw), float(yw))
     state.last_zoom_video_px = (float(xv), float(yv))
     state.last_zoom_anchor_px = (float(ax), float(ay_server))
-    ok = state_update_actions.camera_zoom(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch_state_update,
+    ok = camera_emitter.zoom(
         factor=float(factor),
         anchor_px=(float(ax), float(ay_server)),
         origin='wheel',
@@ -111,11 +99,8 @@ def handle_wheel_zoom(
 
 
 def handle_pointer(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     data: dict,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -167,11 +152,8 @@ def handle_pointer(
         else:
             if state.orbit_dragging:
                 flush_orbit(
-                    control_state,
+                    camera_emitter,
                     state,
-                    loop_state,
-                    state_ledger,
-                    dispatch_state_update,
                     force=True,
                     origin='pointer.move',
                     log_dims_info=log_dims_info,
@@ -183,20 +165,14 @@ def handle_pointer(
         state.last_wy = yw
         if state.orbit_dragging:
             flush_orbit_if_due(
-                control_state,
+                camera_emitter,
                 state,
-                loop_state,
-                state_ledger,
-                dispatch_state_update,
                 log_dims_info=log_dims_info,
             )
         else:
             flush_pan_if_due(
-                control_state,
+                camera_emitter,
                 state,
-                loop_state,
-                state_ledger,
-                dispatch_state_update,
                 log_dims_info=log_dims_info,
             )
         return
@@ -205,11 +181,8 @@ def handle_pointer(
         state.dragging = False
         if state.orbit_dragging:
             flush_orbit(
-                control_state,
+                camera_emitter,
                 state,
-                loop_state,
-                state_ledger,
-                dispatch_state_update,
                 force=True,
                 origin='pointer.up',
                 log_dims_info=log_dims_info,
@@ -217,11 +190,8 @@ def handle_pointer(
             state.orbit_dragging = False
         else:
             flush_pan(
-                control_state,
+                camera_emitter,
                 state,
-                loop_state,
-                state_ledger,
-                dispatch_state_update,
                 force=True,
                 origin='pointer.up',
                 log_dims_info=log_dims_info,
@@ -229,22 +199,16 @@ def handle_pointer(
 
 
 def flush_pan_if_due(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     log_dims_info: bool,
 ) -> None:
     now = time.perf_counter()
     if (now - float(state.last_cam_send or 0.0)) >= state.cam_min_dt:
         flush_pan(
-            control_state,
+            camera_emitter,
             state,
-            loop_state,
-            state_ledger,
-            dispatch_state_update,
             force=False,
             origin='pointer.drag',
             log_dims_info=log_dims_info,
@@ -252,11 +216,8 @@ def flush_pan_if_due(
 
 
 def flush_pan(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     force: bool,
     origin: str,
@@ -266,15 +227,7 @@ def flush_pan(
     dy = float(state.pan_dy_accum or 0.0)
     if not force and abs(dx) < 1e-3 and abs(dy) < 1e-3:
         return
-    ok = state_update_actions.camera_pan(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch_state_update,
-        dx_px=float(dx),
-        dy_px=float(dy),
-        origin=origin,
-    )
+    ok = camera_emitter.pan(dx_px=float(dx), dy_px=float(dy), origin=origin)
     if ok:
         state.last_pan_dx_sent = float(dx)
         state.last_pan_dy_sent = float(dy)
@@ -291,22 +244,16 @@ def flush_pan(
 
 
 def flush_orbit_if_due(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     log_dims_info: bool,
 ) -> None:
     now = time.perf_counter()
     if (now - float(state.last_cam_send or 0.0)) >= state.cam_min_dt:
         flush_orbit(
-            control_state,
+            camera_emitter,
             state,
-            loop_state,
-            state_ledger,
-            dispatch_state_update,
             force=False,
             origin='pointer.drag',
             log_dims_info=log_dims_info,
@@ -314,11 +261,8 @@ def flush_orbit_if_due(
 
 
 def flush_orbit(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     *,
     force: bool,
     origin: str,
@@ -328,15 +272,7 @@ def flush_orbit(
     delv = float(state.orbit_del_accum or 0.0)
     if not force and abs(daz) < 1e-2 and abs(delv) < 1e-2:
         return
-    ok = state_update_actions.camera_orbit(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch_state_update,
-        d_az_deg=float(daz),
-        d_el_deg=float(delv),
-        origin=origin,
-    )
+    ok = camera_emitter.orbit(d_az_deg=float(daz), d_el_deg=float(delv), origin=origin)
     if ok:
         state.last_cam_send = time.perf_counter()
     state.orbit_daz_accum = 0.0
@@ -351,11 +287,8 @@ def flush_orbit(
 
 
 def zoom_steps_at_center(
-    control_state: "ControlStateContext",
+    camera_emitter: NapariCameraIntentEmitter,
     state: CameraState,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
     steps: int,
     *,
     widget_to_video: Callable[[float, float], tuple[float, float]],
@@ -377,11 +310,7 @@ def zoom_steps_at_center(
         xv = float(vw or 0) / 2.0
         yv = float(vh or 0) / 2.0
     ax_s, ay_s = server_anchor_from_video(xv, yv)
-    ok = state_update_actions.camera_zoom(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch_state_update,
+    ok = camera_emitter.zoom(
         factor=float(factor),
         anchor_px=(float(ax_s), float(ay_s)),
         origin='keys',
@@ -398,32 +327,15 @@ def zoom_steps_at_center(
         )
 
 
-def reset_camera(
-    control_state: "ControlStateContext",
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
-    *,
-    origin: str,
-) -> bool:
+def reset_camera(camera_emitter: NapariCameraIntentEmitter, *, origin: str) -> bool:
     logger.info("%s->camera.reset (sending)", origin)
-    ok = state_update_actions.camera_reset(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch_state_update,
-        reason=origin,
-        origin=origin,
-    )
+    ok = camera_emitter.reset(reason=origin, origin=origin)
     logger.info("%s->camera.reset sent=%s", origin, bool(ok))
     return bool(ok)
 
 
 def set_camera(
-    control_state: "ControlStateContext",
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    camera_emitter: NapariCameraIntentEmitter,
     *,
     center: Optional[Sequence[float]] = None,
     zoom: Optional[float] = None,
@@ -440,11 +352,7 @@ def set_camera(
     if not payload_preview:
         return False
     logger.info("%s->camera.set %s", origin, payload_preview)
-    ok = state_update_actions.camera_set(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch_state_update,
+    ok = camera_emitter.set(
         center=center,
         zoom=zoom,
         angles=angles,

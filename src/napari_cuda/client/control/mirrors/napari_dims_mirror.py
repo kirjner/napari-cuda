@@ -1,10 +1,12 @@
-"""Mirror confirmed dims state from the client ledger into napari."""
+"""Mirror consumer dims (and multiscale) state from the client ledger into napari."""
 
 from __future__ import annotations
 
 import logging
 from typing import Any, Callable, Mapping, Optional, Sequence, TYPE_CHECKING
 from numbers import Integral, Real
+
+from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger, MirrorEvent
 from napari_cuda.protocol.messages import NotifyDimsFrame
@@ -16,6 +18,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import NapariDimsIntentEmitter
 
 logger = logging.getLogger(__name__)
+
 
 
 class NapariDimsMirror:
@@ -33,6 +36,8 @@ class NapariDimsMirror:
         log_dims_info: bool,
         notify_first_ready: Optional[Callable[[], None]] = None,
     ) -> None:
+        app = QtCore.QCoreApplication.instance()
+        assert app is not None, "Qt application instance must exist"
         self._ledger = ledger
         self._state = state
         self._loop_state = loop_state
@@ -42,6 +47,8 @@ class NapariDimsMirror:
         self._log_dims_info = bool(log_dims_info)
         self._notify_first_ready = notify_first_ready
         self._emitter: Optional["NapariDimsIntentEmitter"] = None
+        self._ui_thread = app.thread()
+        self._last_multiscale_snapshot: Mapping[str, Any] | None = None
         ledger.subscribe_all(self._handle_ledger_update)
 
     def set_logging(self, enabled: bool) -> None:
@@ -53,20 +60,64 @@ class NapariDimsMirror:
     def ingest_dims_notify(self, frame: NotifyDimsFrame) -> None:
         """Record a ``notify.dims`` snapshot and mirror it into napari."""
 
+        self._assert_gui_thread()
         state = self._state
         meta = state.dims_meta
         was_ready = bool(state.dims_ready)
-
         payload = frame.payload
-        current_step = tuple(int(value) for value in payload.current_step)
-        meta['current_step'] = list(current_step)
+
+        storage_step = [int(value) for value in payload.current_step]
+        meta['current_step'] = storage_step
         meta['ndisplay'] = int(payload.ndisplay)
         mode_text = str(payload.mode)
         meta['mode'] = mode_text
-        meta['volume'] = bool(mode_text.lower() == 'volume')
-        meta['source'] = payload.source
+        meta['volume'] = mode_text.lower() == 'volume'
 
-        snapshot_payload = _build_confirmed_dims_payload(state, self._loop_state)
+        raw_level_shapes = payload.level_shapes
+        assert raw_level_shapes is not None, 'notify.dims requires level_shapes'
+        level_shapes = [[int(dim) for dim in shape] for shape in raw_level_shapes]
+        meta['level_shapes'] = level_shapes
+
+        active_level = int(payload.current_level)
+        assert 0 <= active_level < len(level_shapes), 'active level out of bounds for level_shapes'
+        active_shape = [int(dim) for dim in level_shapes[active_level]]
+        meta['active_level_shape'] = active_shape
+        meta['range'] = [[0, max(0, dim - 1)] for dim in active_shape]
+        meta['ndim'] = len(active_shape)
+
+        order = payload.order
+        if order is not None:
+            meta['order'] = [int(idx) for idx in order]
+        else:
+            meta['order'] = list(range(len(active_shape)))
+
+        axis_labels = payload.axis_labels
+        if axis_labels is not None:
+            meta['axis_labels'] = [str(label) for label in axis_labels]
+
+        displayed = payload.displayed
+        if displayed is not None:
+            meta['displayed'] = [int(idx) for idx in displayed]
+
+        if 'sizes' in meta:
+            meta.pop('sizes', None)
+
+        multiscale_snapshot = _build_multiscale_snapshot(payload)
+        if multiscale_snapshot is not None:
+            meta['multiscale'] = multiscale_snapshot
+            state.multiscale_state = {
+                'level': multiscale_snapshot['level'],
+                'current_level': multiscale_snapshot['current_level'],
+                'levels': [dict(entry) for entry in multiscale_snapshot['levels']],
+            }
+            if 'downgraded' in multiscale_snapshot:
+                state.multiscale_state['downgraded'] = multiscale_snapshot['downgraded']
+        else:
+            meta['multiscale'] = None
+            state.multiscale_state = {}
+        self._apply_multiscale_to_presenter(multiscale_snapshot)
+
+        snapshot_payload = _build_consumer_dims_payload(state, self._loop_state)
 
         if not was_ready:
             _record_dims_snapshot(state, self._ledger, snapshot_payload)
@@ -75,47 +126,45 @@ class NapariDimsMirror:
 
         if not state.dims_ready:
             state.dims_ready = True
-            logger.info("notify.dims: metadata received; client intents enabled")
+            logger.info('notify.dims: metadata received; client intents enabled')
             if self._notify_first_ready is not None:
                 self._notify_first_ready()
 
         state.primary_axis_index = _compute_primary_axis_index(meta)
 
-        if current_step and self._log_dims_info:
+        if logger.isEnabledFor(logging.DEBUG):
+            level_val = multiscale_snapshot['current_level'] if multiscale_snapshot else None
+            logger.debug(
+                'ingest_dims_notify: frame=%s step=%s level=%s shape=%s',
+                frame.envelope.frame_id,
+                storage_step,
+                level_val,
+                active_shape,
+            )
+        if storage_step and self._log_dims_info:
             logger.info(
-                "notify.dims: step=%s ndisplay=%s order=%s labels=%s",
-                list(current_step),
+                'notify.dims: step=%s ndisplay=%s order=%s labels=%s',
+                storage_step,
                 meta.get('ndisplay'),
                 meta.get('order'),
                 meta.get('axis_labels'),
             )
 
-        self._mirror_confirmed_dims(reason="notify", payload=snapshot_payload)
+        self._mirror_confirmed_dims(reason='notify', payload=snapshot_payload)
+
 
     def replay_last_payload(self) -> None:
-        """Replay the last confirmed dims payload into the viewer."""
+        """Replay the last consumer dims payload into the viewer."""
 
         payload = self._loop_state.last_dims_payload
         if not payload:
             return
-        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
-        if viewer_obj is None:
-            return
-        emitter = self._emitter
-        assert emitter is not None, "mirror requires a dims emitter"
-        with emitter.suppressing():
-            mirror_dims_to_viewer(
-                viewer_obj,
-                self._ui_call,
-                current_step=payload.get('current_step'),
-                ndisplay=payload.get('ndisplay'),
-                ndim=payload.get('ndim'),
-                dims_range=payload.get('dims_range'),
-                order=payload.get('order'),
-                axis_labels=payload.get('axis_labels'),
-                sizes=payload.get('sizes'),
-                displayed=payload.get('displayed'),
-            )
+        self._mirror_confirmed_dims(reason="replay", payload=payload)
+
+    def refresh_from_state(self, *, reason: str) -> None:
+        """Mirror the current consumer dims payload into the viewer."""
+
+        self._mirror_confirmed_dims(reason=reason)
 
     # ------------------------------------------------------------------
     def _handle_ledger_update(self, update: MirrorEvent) -> None:
@@ -181,8 +230,18 @@ class NapariDimsMirror:
         confirmed_payload = (
             dict(payload)
             if payload is not None
-            else _build_confirmed_dims_payload(self._state, self._loop_state)
+            else _build_consumer_dims_payload(self._state, self._loop_state)
         )
+
+        # Multiscale snapshot already applied during ingest_dims_notify.
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "dims mirror (%s): payload step=%s range=%s",
+                reason,
+                confirmed_payload.get('current_step'),
+                confirmed_payload.get('dims_range'),
+            )
 
         if self._log_dims_info and confirmed_payload.get('current_step') is not None:
             logger.info(
@@ -198,19 +257,29 @@ class NapariDimsMirror:
             if self._presenter is not None:
                 self._presenter.apply_dims_update(dict(confirmed_payload))
 
-            viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
-            mirror_dims_to_viewer(
-                viewer_obj,
-                self._ui_call,
-                current_step=confirmed_payload.get('current_step'),
-                ndisplay=confirmed_payload.get('ndisplay'),
-                ndim=confirmed_payload.get('ndim'),
-                dims_range=confirmed_payload.get('dims_range'),
-                order=confirmed_payload.get('order'),
-                axis_labels=confirmed_payload.get('axis_labels'),
-                sizes=confirmed_payload.get('sizes'),
-                displayed=confirmed_payload.get('displayed'),
-            )
+        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
+        mirror_dims_to_viewer(
+            viewer_obj,
+            self._ui_call,
+            current_step=confirmed_payload.get('current_step'),
+            ndisplay=confirmed_payload.get('ndisplay'),
+            ndim=confirmed_payload.get('ndim'),
+            dims_range=confirmed_payload.get('dims_range'),
+            order=confirmed_payload.get('order'),
+            axis_labels=confirmed_payload.get('axis_labels'),
+            displayed=confirmed_payload.get('displayed'),
+        )
+
+    def _apply_multiscale_to_presenter(self, multiscale: Mapping[str, Any] | None) -> None:
+        self._last_multiscale_snapshot = dict(multiscale) if multiscale is not None else None
+        presenter = self._presenter
+        if presenter is None or multiscale is None:
+            return
+        presenter.apply_multiscale_policy(dict(multiscale))
+
+    def _assert_gui_thread(self) -> None:
+        current = QtCore.QThread.currentThread()
+        assert current is self._ui_thread, "NapariDimsMirror methods must run on the Qt GUI thread"
 
 
 # Shared helpers (lifted from the legacy state_update_actions module)
@@ -229,6 +298,23 @@ def _record_dims_snapshot(
 
     _record_multiscale_metadata(state, ledger)
     _record_volume_metadata(state, ledger)
+
+
+def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
+    levels_source = getattr(payload, 'levels', None)
+    if not levels_source:
+        return None
+    levels = [dict(entry) for entry in levels_source]
+    level_value = int(getattr(payload, 'current_level'))
+    snapshot: dict[str, Any] = {
+        'levels': levels,
+        'current_level': level_value,
+        'level': level_value,
+    }
+    downgraded = getattr(payload, 'downgraded', None)
+    if downgraded is not None:
+        snapshot['downgraded'] = bool(downgraded)
+    return snapshot
 
 
 def _record_dims_delta(
@@ -256,7 +342,7 @@ def _record_dims_delta(
         ledger.record_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
 
 
-def _build_confirmed_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
+def _build_consumer_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
     meta = state.dims_meta
     payload: dict[str, Any] = {}
 
@@ -289,12 +375,6 @@ def _build_confirmed_dims_payload(state: "ControlStateContext", loop_state: "Cli
         payload['axis_labels'] = [str(label) for label in labels]
     else:
         payload['axis_labels'] = None
-
-    sizes = meta.get('sizes')
-    if isinstance(sizes, Sequence):
-        payload['sizes'] = [int(size) for size in sizes]
-    else:
-        payload['sizes'] = None
 
     displayed = meta.get('displayed')
     if isinstance(displayed, Sequence):
@@ -423,7 +503,6 @@ def mirror_dims_to_viewer(
     dims_range,
     order,
     axis_labels,
-    sizes,
     displayed,
 ) -> None:
     if viewer_obj is None or not hasattr(viewer_obj, '_apply_remote_dims_update'):
@@ -438,7 +517,6 @@ def mirror_dims_to_viewer(
             dims_range=dims_range,
             order=order,
             axis_labels=axis_labels,
-            sizes=sizes,
             displayed=displayed,
         )
 
@@ -446,6 +524,7 @@ def mirror_dims_to_viewer(
         ui_call.call.emit(_apply)
         return
     _apply()
+
 
 
 __all__ = [

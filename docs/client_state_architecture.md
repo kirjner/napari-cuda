@@ -20,6 +20,7 @@ notify.scene / notify.layers / notify.dims → Client State Ledger → Napari Mi
 Napari objects
 Napari events (user input) → Intent Emitters → Client State Ledger pending → state.update
 ack.state → Client State Ledger → Napari Mirrors (confirm) → Napari
+
 ```
 
 ### Core Components

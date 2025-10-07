@@ -17,23 +17,19 @@ from napari_cuda.client.control.control_channel_client import (
 from napari_cuda.protocol import (
     FeatureResumeState,
     FeatureToggle,
-    ResumableTopicSequencer,
     build_ack_state,
     build_notify_layers_delta,
     build_notify_dims,
     build_notify_scene_snapshot,
-    build_notify_scene_level,
     build_notify_stream,
     build_session_heartbeat,
     build_session_reject,
     build_session_welcome,
 )
-from napari_cuda.protocol.envelopes import NOTIFY_SCENE_LEVEL_TYPE
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
     NotifySceneFrame,
-    NotifySceneLevelPayload,
     NotifyStreamFrame,
 )
 
@@ -124,7 +120,14 @@ def test_state_channel_dims_update_dispatch() -> None:
     sc = StateChannel('localhost', 8081, ingest_dims_notify=frames.append)
     frame = build_notify_dims(
         session_id='session-42',
-        payload={'current_step': (12, 3, 4), 'ndisplay': 2, 'mode': 'slice', 'source': 'test'},
+        payload={
+            'step': [12, 3, 4],
+            'levels': [{'index': 0, 'shape': [16, 8, 4]}],
+            'level_shapes': [[16, 8, 4]],
+            'current_level': 0,
+            'mode': 'slice',
+            'ndisplay': 2,
+        },
         timestamp=9.5,
         frame_id='dims-007',
     )
@@ -139,12 +142,12 @@ def test_state_channel_dims_update_dispatch() -> None:
     assert received.payload.current_step == (12, 3, 4)
     assert received.payload.ndisplay == 2
     assert received.payload.mode == 'slice'
-    assert received.payload.source == 'test'
+    assert received.payload.level_shapes == ((16, 8, 4),)
 
 
 def test_state_channel_ack_dispatch() -> None:
     received = []
-    sc = StateChannel('localhost', 8081, handle_ack_state=received.append)
+    sc = StateChannel('localhost', 8081, ingest_ack_state=received.append)
 
     frame = build_ack_state(
         session_id='session-5',
@@ -195,14 +198,12 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
     assert frame.payload.layers[0]['layer_id'] == 'layer-10'
 
 
-def test_state_channel_notify_scene_policies_callback() -> None:
+def test_state_channel_notify_scene_includes_policies() -> None:
     frames: list[NotifySceneFrame] = []
-    policies_received: list[dict[str, object]] = []
     sc = StateChannel(
         'localhost',
         8081,
         ingest_notify_scene_snapshot=frames.append,
-        handle_scene_policies=policies_received.append,
     )
 
     layer_block = {
@@ -243,10 +244,8 @@ def test_state_channel_notify_scene_policies_callback() -> None:
     frame = frames[0]
     assert isinstance(frame, NotifySceneFrame)
     scene_payload = frame.payload
-    assert scene_payload.metadata is None or 'multiscale' not in scene_payload.metadata
-
-    assert policies_received, "policies callback should be invoked"
-    multiscale = policies_received[0]['multiscale']
+    assert scene_payload.policies is not None
+    multiscale = scene_payload.policies['multiscale']
     assert isinstance(multiscale, dict)
     assert multiscale['policy'] == 'oversampling'
     assert multiscale['active_level'] == 2
@@ -256,33 +255,10 @@ def test_state_channel_notify_scene_policies_callback() -> None:
     assert levels[0]['path'] == 'level_00'
 
 
-def test_state_channel_notify_scene_level_callback() -> None:
-    received: list[NotifySceneLevelPayload] = []
-    sc = StateChannel(
-        'localhost',
-        8081,
-        ingest_notify_scene_level=received.append,
-    )
-
-    sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_LEVEL_TYPE)
-    sequencer.snapshot()
-    frame = build_notify_scene_level(
-        session_id='session-level',
-        payload={'current_level': 4, 'downgraded': True},
-        sequencer=sequencer,
-    )
-
-    sc._handle_message(frame.to_dict())
-
-    assert received
-    payload = received[0]
-    assert payload.current_level == 4
-    assert payload.downgraded is True
-
 
 def test_state_channel_notify_stream_dispatch() -> None:
     frames: list[NotifyStreamFrame] = []
-    sc = StateChannel('localhost', 8081, handle_notify_stream=frames.append)
+    sc = StateChannel('localhost', 8081, ingest_notify_stream=frames.append)
 
     stream_payload = {
         'codec': 'h264',
@@ -313,7 +289,6 @@ def _welcome_with_features(session_id: str, resume_tokens: Dict[str, str]) -> ob
     features: Dict[str, FeatureToggle] = {}
     for name, token in (
         ("notify.scene", resume_tokens.get("notify.scene")),
-        ("notify.scene.level", resume_tokens.get("notify.scene.level")),
         ("notify.layers", resume_tokens.get("notify.layers")),
         ("notify.stream", resume_tokens.get("notify.stream")),
     ):
@@ -339,7 +314,6 @@ def test_session_welcome_records_resume_tokens() -> None:
         session_id='sess-1',
         resume_tokens={
             'notify.scene': 'scene-token',
-            'notify.scene.level': 'level-token',
             'notify.layers': 'layers-token',
             'notify.stream': 'stream-token',
         },
@@ -349,13 +323,11 @@ def test_session_welcome_records_resume_tokens() -> None:
 
     assert metadata.session_id == 'sess-1'
     assert metadata.resume_tokens['notify.scene'] == ResumeCursor(seq=1, delta_token='scene-token')
-    assert metadata.resume_tokens['notify.scene.level'] == ResumeCursor(seq=1, delta_token='level-token')
     assert metadata.resume_tokens['notify.layers'] == ResumeCursor(seq=1, delta_token='layers-token')
     assert metadata.resume_tokens['notify.stream'] == ResumeCursor(seq=1, delta_token='stream-token')
 
     payload = channel._resume_token_payload()
     assert payload['notify.scene'] == 'scene-token'
-    assert payload['notify.scene.level'] == 'level-token'
     assert payload['notify.layers'] == 'layers-token'
     assert payload['notify.stream'] == 'stream-token'
 
@@ -363,7 +335,6 @@ def test_session_welcome_records_resume_tokens() -> None:
 def test_handshake_reject_resets_invalid_resume_token() -> None:
     channel = StateChannel('localhost', 8081)
     channel._resume_tokens['notify.scene'] = ResumeCursor(seq=4, delta_token='old-scene')
-    channel._resume_tokens['notify.scene.level'] = ResumeCursor(seq=3, delta_token='old-level')
     channel._resume_tokens['notify.layers'] = ResumeCursor(seq=2, delta_token='keep-me')
 
     reject = build_session_reject(
@@ -377,15 +348,14 @@ def test_handshake_reject_resets_invalid_resume_token() -> None:
         channel._handle_handshake_reject(reject)
 
     assert channel._resume_tokens['notify.scene'] is None
-    assert channel._resume_tokens['notify.scene.level'] == ResumeCursor(seq=3, delta_token='old-level')
     assert channel._resume_tokens['notify.layers'] == ResumeCursor(seq=2, delta_token='keep-me')
 
 
 def test_handshake_reject_without_topic_resets_all_tokens() -> None:
     channel = StateChannel('localhost', 8081)
     channel._resume_tokens['notify.scene'] = ResumeCursor(seq=5, delta_token='scene-old')
-    channel._resume_tokens['notify.scene.level'] = ResumeCursor(seq=7, delta_token='level-old')
     channel._resume_tokens['notify.layers'] = ResumeCursor(seq=6, delta_token='layers-old')
+    channel._resume_tokens['notify.stream'] = ResumeCursor(seq=4, delta_token='stream-old')
 
     reject = build_session_reject(
         code='invalid_resume_token',
@@ -398,8 +368,8 @@ def test_handshake_reject_without_topic_resets_all_tokens() -> None:
         channel._handle_handshake_reject(reject)
 
     assert channel._resume_tokens['notify.scene'] is None
-    assert channel._resume_tokens['notify.scene.level'] is None
     assert channel._resume_tokens['notify.layers'] is None
+    assert channel._resume_tokens['notify.stream'] is None
 
 
 def test_handle_session_heartbeat_sends_ack(monkeypatch) -> None:
@@ -408,7 +378,6 @@ def test_handle_session_heartbeat_sends_ack(monkeypatch) -> None:
         session_id='sess-heartbeat',
         resume_tokens={
             'notify.scene': 's1',
-            'notify.scene.level': 'lvl1',
             'notify.layers': 'l1',
             'notify.stream': 't1',
         },
@@ -439,7 +408,7 @@ def test_handle_session_heartbeat_propagates_send_failure() -> None:
     channel = StateChannel('localhost', 8081)
     welcome = _welcome_with_features(
         session_id='sess-fail',
-        resume_tokens={'notify.scene': None, 'notify.scene.level': None, 'notify.layers': None, 'notify.stream': None},
+        resume_tokens={'notify.scene': None, 'notify.layers': None, 'notify.stream': None},
     )
     channel._record_session_metadata(welcome)
 

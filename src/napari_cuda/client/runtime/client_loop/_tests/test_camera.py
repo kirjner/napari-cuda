@@ -4,21 +4,20 @@ from types import SimpleNamespace
 from typing import Any, Callable, List, Tuple
 
 import pytest
+from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import IntentRecord, ClientStateLedger
+from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop import camera
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 
 
-def _make_state(
-) -> tuple[
+def _make_state(qtbot: Any) -> tuple[
     ControlStateContext,
     camera.CameraState,
-    ClientLoopState,
-    ClientStateLedger,
+    NapariCameraIntentEmitter,
     List[Tuple[IntentRecord, str]],
-    Callable[[IntentRecord, str], bool],
 ]:
     cam_env = SimpleNamespace(
         zoom_base=1.2,
@@ -30,6 +29,7 @@ def _make_state(
     control_state = ControlStateContext.from_env(ctrl_env)
     cam_state = camera.CameraState.from_env(cam_env)
     loop_state = ClientLoopState()
+    loop_state.gui_thread = QtCore.QThread.currentThread()
     state_ledger = ClientStateLedger()
     cam_state.cam_min_dt = 0.0
     dispatched: List[Tuple[IntentRecord, str]] = []
@@ -38,18 +38,23 @@ def _make_state(
         dispatched.append((pending_update, origin))
         return True
 
-    return control_state, cam_state, loop_state, state_ledger, dispatched, dispatch
+    emitter = NapariCameraIntentEmitter(
+        ledger=state_ledger,
+        state=control_state,
+        loop_state=loop_state,
+        dispatch_state_update=dispatch,
+        ui_call=None,
+        log_camera_info=False,
+    )
+    return control_state, cam_state, emitter, dispatched
 
 
-def test_handle_wheel_zoom_posts_camera_zoom() -> None:
-    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
+def test_handle_wheel_zoom_posts_camera_zoom(qtbot) -> None:
+    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
 
     camera.handle_wheel_zoom(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'angle_y': 120, 'x_px': 10, 'y_px': 20},
         widget_to_video=lambda x, y: (x, y),
         server_anchor_from_video=lambda x, y: (x, y),
@@ -66,15 +71,12 @@ def test_handle_wheel_zoom_posts_camera_zoom() -> None:
     assert cam_state.last_zoom_widget_px == (10.0, 20.0)
 
 
-def test_handle_pointer_pan_posts_delta() -> None:
-    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
+def test_handle_pointer_pan_posts_delta(qtbot) -> None:
+    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
 
     camera.handle_pointer(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'phase': 'down', 'x_px': 0, 'y_px': 0, 'mods': 0},
         widget_to_video=lambda x, y: (x, y),
         video_delta_to_canvas=lambda dx, dy: (dx, dy),
@@ -84,11 +86,8 @@ def test_handle_pointer_pan_posts_delta() -> None:
     )
 
     camera.handle_pointer(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'phase': 'move', 'x_px': 5, 'y_px': 3, 'mods': 0},
         widget_to_video=lambda x, y: (x, y),
         video_delta_to_canvas=lambda dx, dy: (dx, dy),
@@ -98,11 +97,8 @@ def test_handle_pointer_pan_posts_delta() -> None:
     )
 
     camera.handle_pointer(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'phase': 'up', 'x_px': 5, 'y_px': 3, 'mods': 0},
         widget_to_video=lambda x, y: (x, y),
         video_delta_to_canvas=lambda dx, dy: (dx, dy),
@@ -120,18 +116,15 @@ def test_handle_pointer_pan_posts_delta() -> None:
     ), "expected pan delta to carry accumulated values"
 
 
-def test_handle_pointer_orbit_posts_delta() -> None:
-    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
+def test_handle_pointer_orbit_posts_delta(qtbot) -> None:
+    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
     control_state.dims_ready = True
     control_state.dims_meta['mode'] = 'volume'
     control_state.dims_meta['ndisplay'] = 3
 
     camera.handle_pointer(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'phase': 'down', 'x_px': 0, 'y_px': 0, 'mods': 0x2000},
         widget_to_video=lambda x, y: (x, y),
         video_delta_to_canvas=lambda dx, dy: (dx, dy),
@@ -141,11 +134,8 @@ def test_handle_pointer_orbit_posts_delta() -> None:
     )
 
     camera.handle_pointer(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'phase': 'move', 'x_px': 4, 'y_px': 2, 'mods': 0x2000},
         widget_to_video=lambda x, y: (x, y),
         video_delta_to_canvas=lambda dx, dy: (dx, dy),
@@ -155,11 +145,8 @@ def test_handle_pointer_orbit_posts_delta() -> None:
     )
 
     camera.handle_pointer(
-        control_state,
+        emitter,
         cam_state,
-        loop_state,
-        state_ledger,
-        dispatch,
         {'phase': 'up', 'x_px': 4, 'y_px': 2, 'mods': 0x2000},
         widget_to_video=lambda x, y: (x, y),
         video_delta_to_canvas=lambda dx, dy: (dx, dy),
@@ -177,14 +164,11 @@ def test_handle_pointer_orbit_posts_delta() -> None:
     assert pending.metadata['mode'] == 'orbit'
 
 
-def test_reset_and_set_camera_send_payloads() -> None:
-    control_state, cam_state, loop_state, state_ledger, dispatched, dispatch = _make_state()
+def test_reset_and_set_camera_send_payloads(qtbot) -> None:
+    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
 
     assert camera.reset_camera(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch,
+        emitter,
         origin='ui',
     ) is True
     assert dispatched, "expected reset dispatch"
@@ -195,10 +179,7 @@ def test_reset_and_set_camera_send_payloads() -> None:
     assert reset_pending.value == {'reason': 'ui'}
 
     assert camera.set_camera(
-        control_state,
-        loop_state,
-        state_ledger,
-        dispatch,
+        emitter,
         center=(1, 2, 3),
         zoom=2.5,
         angles=(0.1, 0.2, 0.3),
