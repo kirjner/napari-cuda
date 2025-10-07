@@ -634,32 +634,105 @@ class NotifyStreamPayload:
 @dataclass(slots=True)
 class NotifyDimsPayload:
     current_step: Tuple[int, ...]
-    ndisplay: int
+    dims_range: Tuple[Tuple[int, int], ...]
+    sizes: Tuple[int, ...] | None
+    levels: Tuple[Dict[str, Any], ...]
+    current_level: int
+    downgraded: bool | None
     mode: str
-    source: str
+    ndisplay: int
+    axis_labels: Tuple[str, ...] | None
+    order: Tuple[int, ...] | None
+    displayed: Tuple[int, ...] | None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "current_step": [int(value) for value in self.current_step],
+        payload: Dict[str, Any] = {
+            "step": [int(v) for v in self.current_step],
+            "range": [[int(lo), int(hi)] for lo, hi in self.dims_range],
+            "levels": [dict(level) for level in self.levels],
+            "current_level": int(self.current_level),
+            "mode": str(self.mode),
             "ndisplay": int(self.ndisplay),
-            "mode": self.mode,
-            "source": self.source,
         }
+
+        if self.sizes is not None:
+            payload["sizes"] = [int(v) for v in self.sizes]
+        if self.downgraded is not None:
+            payload["downgraded"] = bool(self.downgraded)
+        if self.axis_labels is not None:
+            payload["axis_labels"] = [str(lbl) for lbl in self.axis_labels]
+        if self.order is not None:
+            payload["order"] = [int(idx) for idx in self.order]
+        if self.displayed is not None:
+            payload["displayed"] = [int(idx) for idx in self.displayed]
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "NotifyDimsPayload":
         mapping = _as_mapping(data, "notify.dims payload")
         _ensure_keyset(
             mapping,
-            required=("current_step", "ndisplay", "mode", "source"),
+            required=("step", "range", "levels", "current_level", "mode", "ndisplay"),
             context="notify.dims payload",
         )
-        steps_seq = _as_sequence(mapping["current_step"], "notify.dims payload.current_step")
+
+        step_seq = _as_sequence(mapping["step"], "notify.dims payload.step")
+        range_seq = _as_sequence(mapping["range"], "notify.dims payload.range")
+        levels_seq = _as_sequence(mapping["levels"], "notify.dims payload.levels")
+
+        sizes_value = mapping.get("sizes")
+        if sizes_value is not None:
+            sizes = tuple(int(v) for v in _as_sequence(sizes_value, "notify.dims payload.sizes"))
+        else:
+            sizes = None
+
+        downgraded_value = mapping.get("downgraded")
+        downgraded = bool(downgraded_value) if downgraded_value is not None else None
+
+        axis_labels_value = mapping.get("axis_labels")
+        axis_labels = (
+            tuple(str(lbl) for lbl in _as_sequence(axis_labels_value, "notify.dims payload.axis_labels"))
+            if axis_labels_value is not None
+            else None
+        )
+
+        order_value = mapping.get("order")
+        order = (
+            tuple(int(idx) for idx in _as_sequence(order_value, "notify.dims payload.order"))
+            if order_value is not None
+            else None
+        )
+
+        displayed_value = mapping.get("displayed")
+        displayed = (
+            tuple(int(idx) for idx in _as_sequence(displayed_value, "notify.dims payload.displayed"))
+            if displayed_value is not None
+            else None
+        )
+
+        dims_range: list[tuple[int, int]] = []
+        for idx, entry in enumerate(range_seq):
+            pair = _as_sequence(entry, f"notify.dims payload.range[{idx}]")
+            if len(pair) < 2:
+                raise ValueError("notify.dims range entries must contain at least two values")
+            dims_range.append((int(pair[0]), int(pair[1])))
+
+        levels: list[Dict[str, Any]] = []
+        for idx, entry in enumerate(levels_seq):
+            levels.append(dict(_as_mapping(entry, f"notify.dims payload.levels[{idx}]")))
+
         return cls(
-            current_step=tuple(int(value) for value in steps_seq),
-            ndisplay=int(mapping["ndisplay"]),
+            current_step=tuple(int(v) for v in step_seq),
+            dims_range=tuple(dims_range),
+            sizes=sizes,
+            levels=tuple(levels),
+            current_level=int(mapping["current_level"]),
+            downgraded=downgraded,
             mode=str(mapping["mode"]),
-            source=str(mapping["source"]),
+            ndisplay=int(mapping["ndisplay"]),
+            axis_labels=axis_labels,
+            order=order,
+            displayed=displayed,
         )
 
 
