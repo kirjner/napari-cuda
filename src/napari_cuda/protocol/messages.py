@@ -644,10 +644,12 @@ class NotifyDimsPayload:
     axis_labels: Tuple[str, ...] | None
     order: Tuple[int, ...] | None
     displayed: Tuple[int, ...] | None
+    labels: Tuple[str, ...] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "step": [int(v) for v in self.current_step],
+            "current_step": [int(v) for v in self.current_step],
             "range": [[int(lo), int(hi)] for lo, hi in self.dims_range],
             "levels": [dict(level) for level in self.levels],
             "current_level": int(self.current_level),
@@ -665,6 +667,8 @@ class NotifyDimsPayload:
             payload["order"] = [int(idx) for idx in self.order]
         if self.displayed is not None:
             payload["displayed"] = [int(idx) for idx in self.displayed]
+        if self.labels is not None:
+            payload["labels"] = [str(label) for label in self.labels]
         return payload
 
     @classmethod
@@ -673,11 +677,12 @@ class NotifyDimsPayload:
         _ensure_keyset(
             mapping,
             required=("step", "range", "levels", "current_level", "mode", "ndisplay"),
-            optional=("sizes", "downgraded", "axis_labels", "order", "displayed"),
+            optional=("sizes", "downgraded", "axis_labels", "order", "displayed", "labels", "current_step"),
             context="notify.dims payload",
         )
 
         step_seq = _as_sequence(mapping["step"], "notify.dims payload.step")
+        current_step_seq = _as_sequence(mapping.get("current_step", step_seq), "notify.dims payload.current_step")
         range_seq = _as_sequence(mapping["range"], "notify.dims payload.range")
         levels_seq = _as_sequence(mapping["levels"], "notify.dims payload.levels")
 
@@ -711,6 +716,13 @@ class NotifyDimsPayload:
             else None
         )
 
+        labels_value = mapping.get("labels")
+        labels = (
+            tuple(str(lbl) for lbl in _as_sequence(labels_value, "notify.dims payload.labels"))
+            if labels_value is not None
+            else None
+        )
+
         dims_range: list[tuple[int, int]] = []
         for idx, entry in enumerate(range_seq):
             pair = _as_sequence(entry, f"notify.dims payload.range[{idx}]")
@@ -723,7 +735,7 @@ class NotifyDimsPayload:
             levels.append(dict(_as_mapping(entry, f"notify.dims payload.levels[{idx}]")))
 
         return cls(
-            current_step=tuple(int(v) for v in step_seq),
+            current_step=tuple(int(v) for v in current_step_seq),
             dims_range=tuple(dims_range),
             sizes=sizes,
             levels=tuple(levels),
@@ -734,6 +746,7 @@ class NotifyDimsPayload:
             axis_labels=axis_labels,
             order=order,
             displayed=displayed,
+            labels=labels,
         )
 
 
