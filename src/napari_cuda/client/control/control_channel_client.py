@@ -135,9 +135,9 @@ class StateChannel:
         port: int,
         handle_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None,
         ingest_dims_notify: Optional[Callable[[NotifyDimsFrame], None]] = None,
-        handle_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
-        handle_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
-        handle_layer_delta: Optional[Callable[[NotifyLayersFrame], None]] = None,
+        ingest_notify_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
+        ingest_notify_scene_level: Optional[Callable[[NotifySceneLevelPayload], None]] = None,
+        ingest_notify_layers: Optional[Callable[[NotifyLayersFrame], None]] = None,
         handle_notify_camera: Optional[Callable[[Any], None]] = None,
         handle_ack_state: Optional[Callable[[AckState], None]] = None,
         handle_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
@@ -151,9 +151,9 @@ class StateChannel:
         self.port = int(port)
         self.handle_notify_stream = handle_notify_stream
         self.ingest_dims_notify = ingest_dims_notify
-        self.handle_scene_snapshot = handle_scene_snapshot
-        self.handle_scene_level = handle_scene_level
-        self.handle_layer_delta = handle_layer_delta
+        self.ingest_notify_scene_snapshot = ingest_notify_scene_snapshot
+        self.ingest_notify_scene_level = ingest_notify_scene_level
+        self.ingest_notify_layers = ingest_notify_layers
         self.handle_notify_camera = handle_notify_camera
         self.handle_ack_state = handle_ack_state
         self.handle_reply_command = handle_reply_command
@@ -497,7 +497,7 @@ class StateChannel:
             except Exception:
                 logger.debug("handle_scene_policies callback failed", exc_info=True)
 
-        if not self.handle_scene_snapshot:
+        if not self.ingest_notify_scene_snapshot:
             return
 
         if _STATE_DEBUG:
@@ -507,12 +507,12 @@ class StateChannel:
                 list(payload.viewer.keys()),
             )
         try:
-            self.handle_scene_snapshot(frame)
+            self.ingest_notify_scene_snapshot(frame)
         except Exception:
-            logger.debug("handle_scene_snapshot callback failed", exc_info=True)
+            logger.debug("ingest_notify_scene_snapshot callback failed", exc_info=True)
 
     def _handle_scene_level(self, data: Mapping[str, object]) -> None:
-        if not self.handle_scene_level:
+        if not self.ingest_notify_scene_level:
             return
         try:
             frame = _ENVELOPE_PARSER.parse_notify_scene_level(data)
@@ -522,12 +522,12 @@ class StateChannel:
             return
 
         try:
-            self.handle_scene_level(frame.payload)
+            self.ingest_notify_scene_level(frame.payload)
         except Exception:
-            logger.debug("handle_scene_level callback failed", exc_info=True)
+            logger.debug("ingest_notify_scene_level callback failed", exc_info=True)
 
     def _handle_notify_layers(self, data: Mapping[str, object]) -> None:
-        if not self.handle_layer_delta:
+        if not self.ingest_notify_layers:
             return
         try:
             frame = _ENVELOPE_PARSER.parse_notify_layers(data)
@@ -545,9 +545,9 @@ class StateChannel:
             )
 
         try:
-            self.handle_layer_delta(frame)
+            self.ingest_notify_layers(frame)
         except Exception:
-            logger.debug("handle_layer_delta callback failed", exc_info=True)
+            logger.debug("ingest_notify_layers callback failed", exc_info=True)
 
     def _handle_notify_stream(self, data: Mapping[str, object]) -> None:
         try:

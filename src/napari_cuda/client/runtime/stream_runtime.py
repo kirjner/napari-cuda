@@ -41,8 +41,8 @@ from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFa
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.runtime.client_loop import warmup, camera, loop_lifecycle
 from napari_cuda.client.control import state_update_actions as control_actions
-from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
-from napari_cuda.client.control.mirrors import napari_dims_mirror
+from napari_cuda.client.control.emitters import NapariDimsIntentEmitter, NapariLayerIntentEmitter
+from napari_cuda.client.control.mirrors import NapariLayerMirror, napari_dims_mirror
 from napari_cuda.client.runtime.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
@@ -51,7 +51,7 @@ from napari_cuda.client.runtime.client_loop.telemetry import (
     create_metrics,
 )
 from napari_cuda.client.runtime.client_loop.client_loop_config import load_client_loop_config
-from napari_cuda.client.data import RemoteLayerRegistry, RegistrySnapshot
+from napari_cuda.client.data import RemoteLayerRegistry
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
@@ -60,11 +60,6 @@ from napari_cuda.protocol.messages import (
     NotifyStreamFrame,
 )
 from napari_cuda.protocol import AckState, build_call_command, build_state_update
-from napari_cuda.protocol.snapshots import (
-    layer_delta_from_payload,
-    scene_snapshot_from_payload,
-)
-from napari_cuda.client.state import LayerStateBridge
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
@@ -195,8 +190,9 @@ class ClientStreamLoop:
         # Optional weakref to a ViewerModel mirror (e.g., ProxyViewer)
         self._viewer_mirror = None  # type: ignore[var-annotated]
         # UI call proxy to marshal updates to the GUI thread
-        self._ui_call: CallProxy | None
-        self._ui_call = CallProxy(self._canvas_native) if self._canvas_native is not None else None
+        self._ui_thread = QtCore.QThread.currentThread()
+        self._ui_call = CallProxy(self._canvas_native)
+        self._loop_state.gui_thread = self._ui_thread
 
         # Presenter + source mux (server timestamps only)
         # Single preview guard (ms)
@@ -226,9 +222,10 @@ class ClientStreamLoop:
         self._loop_state.control_state = self._control_state
         self._state_ledger = ClientStateLedger(clock=time.time)
         self._layer_registry = RemoteLayerRegistry()
-        self._layer_registry.add_listener(self._on_registry_snapshot)
         self._dims_mirror: napari_dims_mirror.NapariDimsMirror | None = None
         self._dims_emitter: NapariDimsIntentEmitter | None = None
+        self._layer_mirror: NapariLayerMirror | None = None
+        self._layer_emitter: NapariLayerIntentEmitter | None = None
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
         self._state_session_metadata: "SessionMetadata | None" = None
@@ -246,15 +243,6 @@ class ClientStreamLoop:
         # Renderer
         self._renderer = GLRenderer(self._scene_canvas)
         self._presenter_facade = PresenterFacade()
-
-        self._layer_bridge = LayerStateBridge(
-            self,
-            self._presenter_facade,
-            self._layer_registry,
-            control_state=self._control_state,
-            loop_state=self._loop_state,
-            state_ledger=self._state_ledger,
-        )
 
         # Decoders
         self.decoder: Optional[PyAVDecoder] = None
@@ -345,10 +333,13 @@ class ClientStreamLoop:
         self._camera_state.zoom_base = float(self._env_cfg.zoom_base)
     # --- Thread-safe scheduling helpers --------------------------------------
     def _on_gui_thread(self) -> bool:
-        gui_thr = self._loop_state.gui_thread
-        if gui_thr is None:
-            return True
-        return QtCore.QThread.currentThread() == gui_thr
+        return QtCore.QThread.currentThread() is self._ui_thread
+
+    def _run_on_ui(self, fn: Callable[[], None]) -> None:
+        if self._on_gui_thread():
+            fn()
+            return
+        self._ui_call.call.emit(fn)
 
     def schedule_next_wake_threadsafe(self) -> None:
         """Ensure wake scheduling runs on the GUI thread.
@@ -363,11 +354,7 @@ class ClientStreamLoop:
             self._loop_state.wake_proxy.trigger.emit()
             return
 
-        if self._ui_call is not None:
-            self._ui_call.call.emit(self._schedule_next_wake)
-            return
-
-        logger.debug("threadsafe schedule: no proxy available; skipping")
+        self._ui_call.call.emit(self._schedule_next_wake)
 
     def _scene_canvas_update(self) -> None:
         if self._canvas_native is not None:
@@ -619,10 +606,7 @@ class ClientStreamLoop:
             cb()
 
         self._first_dims_notified = True
-        if self._ui_call is not None:
-            self._ui_call.call.emit(_invoke)
-            return
-        _invoke()
+        self._run_on_ui(_invoke)
 
     def _replay_last_dims_payload(self) -> None:
         mirror = self._dims_mirror
@@ -630,21 +614,16 @@ class ClientStreamLoop:
             return
         mirror.replay_last_payload()
 
-    def _handle_scene_snapshot(self, frame: NotifySceneFrame) -> None:
-        """Cache latest notify.scene frame and forward to registry."""
-        with self._scene_lock:
-            self._latest_scene_frame = frame
-        snapshot = scene_snapshot_from_payload(frame.payload)
-        with self._layer_bridge.remote_sync():
-            self._layer_registry.apply_snapshot(snapshot)
-            for layer_snapshot in snapshot.layers:
-                if isinstance(layer_snapshot.block, Mapping):
-                    self._layer_bridge.seed_snapshot_block(layer_snapshot.layer_id, layer_snapshot.block)
-        logger.debug(
-            "notify.scene received: layers=%d policies=%s",
-            len(snapshot.layers),
-            tuple(snapshot.policies.keys()) if snapshot.policies else (),
-        )
+    def _ingest_notify_scene_snapshot(self, frame: NotifySceneFrame) -> None:
+        """Cache notify.scene frame and delegate to layer mirror."""
+        def _apply() -> None:
+            with self._scene_lock:
+                self._latest_scene_frame = frame
+            mirror = self._layer_mirror
+            if mirror is not None:
+                mirror.ingest_scene_snapshot(frame)
+
+        self._run_on_ui(_apply)
 
     def _handle_scene_policies(self, policies: Mapping[str, object]) -> None:
         try:
@@ -657,7 +636,7 @@ class ClientStreamLoop:
             if multiscale is not None:
                 logger.debug("scene policies updated: multiscale keys=%s", list(multiscale.keys()) if isinstance(multiscale, Mapping) else type(multiscale))
 
-    def _handle_scene_level(self, payload: NotifySceneLevelPayload) -> None:
+    def _ingest_notify_scene_level(self, payload: NotifySceneLevelPayload) -> None:
         multiscale: Dict[str, Any] = {
             'current_level': int(payload.current_level),
             'active_level': int(payload.current_level),
@@ -681,17 +660,16 @@ class ClientStreamLoop:
                 multiscale.get('downgraded'),
             )
 
-    def _handle_layer_delta(self, frame: NotifyLayersFrame) -> None:
-        delta = layer_delta_from_payload(frame.payload)
-        with self._layer_bridge.remote_sync():
-            self._layer_registry.apply_delta(delta)
-        self._layer_bridge.seed_remote_values(delta.layer_id, delta.changes)
-        logger.debug(
-            "notify.layers: id=%s keys=%s",
-            delta.layer_id,
-            tuple(delta.changes.keys()),
-        )
-        self._presenter_facade.apply_layer_delta(delta)
+    def _ingest_notify_layers(self, frame: NotifyLayersFrame) -> None:
+        if self._layer_mirror is None:
+            return
+
+        def _apply() -> None:
+            mirror = self._layer_mirror
+            if mirror is not None:
+                mirror.ingest_layer_delta(frame)
+
+        self._run_on_ui(_apply)
 
     def request_keyframe(self, origin: str = "ui") -> Future | None:
         """Expose a best-effort keyframe command for external callers."""
@@ -728,22 +706,27 @@ class ClientStreamLoop:
             outcome.pending_len,
             outcome.was_pending,
         )
-        scope = outcome.scope
-        if scope == "layer":
-            self._layer_bridge.handle_ack(outcome)
-            return
-        if scope == "dims":
-            control_actions.handle_dims_ack(
-                self._control_state,
-                self._loop_state,
-                outcome,
-                presenter=self._presenter_facade,
-                viewer_ref=self._viewer_mirror,
-                ui_call=self._ui_call,
-                log_dims_info=self._log_dims_info,
-            )
-            return
-        control_actions.handle_generic_ack(self._control_state, self._loop_state, outcome)
+
+        def _apply() -> None:
+            scope = outcome.scope
+            if scope == "layer":
+                if self._layer_emitter is not None:
+                    self._layer_emitter.handle_ack(outcome)
+                return
+            if scope == "dims":
+                control_actions.handle_dims_ack(
+                    self._control_state,
+                    self._loop_state,
+                    outcome,
+                    presenter=self._presenter_facade,
+                    viewer_ref=self._viewer_mirror,
+                    ui_call=self._ui_call,
+                    log_dims_info=self._log_dims_info,
+                )
+                return
+            control_actions.handle_generic_ack(self._control_state, self._loop_state, outcome)
+
+        self._run_on_ui(_apply)
 
     def _handle_reply_command(self, frame: "ReplyCommand") -> None:
         payload = frame.payload
@@ -897,22 +880,6 @@ class ClientStreamLoop:
 
         future.add_done_callback(_log_result)
 
-    def _on_registry_snapshot(self, snapshot: RegistrySnapshot) -> None:
-        def _apply() -> None:
-            self._sync_remote_layers(snapshot)
-            self._replay_last_dims_payload()
-            self._replay_last_dims_payload()
-        if self._ui_call is not None:
-            self._ui_call.call.emit(_apply)
-            return
-        _apply()
-
-    def _sync_remote_layers(self, snapshot: RegistrySnapshot) -> None:
-        vm_ref = self._viewer_mirror() if callable(self._viewer_mirror) else None  # type: ignore[misc]
-        if vm_ref is None:
-            return
-        self._layer_bridge.sync_viewer_layers(vm_ref, snapshot)
-
     def _handle_connected(self) -> None:
         self._loop_state.sync.reset_sequence()
         self._init_decoder()
@@ -930,7 +897,6 @@ class ClientStreamLoop:
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
         control_actions.on_state_disconnected(self._loop_state, self._control_state)
-        self._layer_bridge.clear_pending_on_reconnect()
         self._state_ledger.clear_pending_on_reconnect()
         self._loop_state.state_session_metadata = None
         self._command_catalog = ()
@@ -1102,6 +1068,35 @@ class ClientStreamLoop:
         self._dims_emitter.set_logging(self._log_dims_info)
         self._dims_mirror.attach_emitter(self._dims_emitter)
 
+        if self._layer_mirror is None:
+            self._layer_mirror = NapariLayerMirror(
+                ledger=self._state_ledger,
+                state=self._control_state,
+                loop_state=self._loop_state,
+                registry=self._layer_registry,
+                presenter=self._presenter_facade,
+                viewer_ref=self._current_viewer,
+                ui_call=self._ui_call,
+                log_layers_info=self._log_dims_info,
+            )
+
+        if self._layer_emitter is None:
+            self._layer_emitter = NapariLayerIntentEmitter(
+                ledger=self._state_ledger,
+                state=self._control_state,
+                loop_state=self._loop_state,
+                dispatch_state_update=self._dispatch_state_update,
+                ui_call=self._ui_call,
+                log_layers_info=self._log_dims_info,
+                tx_interval_ms=tx_interval,
+            )
+        else:
+            self._layer_emitter.set_tx_interval_ms(tx_interval)
+
+        self._layer_mirror.set_logging(self._log_dims_info)
+        self._layer_emitter.set_logging(self._log_dims_info)
+        self._layer_mirror.attach_emitter(self._layer_emitter)
+
     # --- Public UI/state bridge methods -------------------------------------------
     def attach_viewer_proxy(self, viewer: object) -> None:
         """Attach the viewer proxy the runtime mirrors state into.
@@ -1116,6 +1111,8 @@ class ClientStreamLoop:
         if self._dims_emitter is not None:
             self._dims_emitter.attach_viewer(viewer)
         self._replay_last_dims_payload()
+        if self._layer_mirror is not None:
+            self._layer_mirror.replay_last_payload()
 
     @property
     def presenter_facade(self) -> PresenterFacade:

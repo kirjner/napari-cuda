@@ -39,9 +39,9 @@ def start_loop(loop: "ClientStreamLoop") -> None:
         loop.state_port,
         handle_notify_stream=loop._handle_notify_stream,  # noqa: SLF001
         ingest_dims_notify=loop._dims_mirror.ingest_dims_notify,  # noqa: SLF001
-        handle_scene_snapshot=loop._handle_scene_snapshot,  # noqa: SLF001
-        handle_scene_level=loop._handle_scene_level,  # noqa: SLF001
-        handle_layer_delta=loop._handle_layer_delta,  # noqa: SLF001
+        ingest_notify_scene_snapshot=loop._ingest_notify_scene_snapshot,  # noqa: SLF001
+        ingest_notify_scene_level=loop._ingest_notify_scene_level,  # noqa: SLF001
+        ingest_notify_layers=loop._ingest_notify_layers,  # noqa: SLF001
         handle_notify_camera=loop._handle_notify_camera,  # noqa: SLF001
         handle_ack_state=loop._handle_ack_state,  # noqa: SLF001
         handle_reply_command=loop._handle_reply_command,  # noqa: SLF001
@@ -60,6 +60,10 @@ def start_loop(loop: "ClientStreamLoop") -> None:
     loop._log_dims_info = bool(loop._env_cfg.input_log)  # type: ignore[attr-defined]  # noqa: SLF001
     loop._dims_mirror.set_logging(loop._log_dims_info)  # noqa: SLF001
     loop._dims_emitter.set_logging(loop._log_dims_info)  # noqa: SLF001
+    if getattr(loop, "_layer_mirror", None) is not None:  # noqa: SLF001
+        loop._layer_mirror.set_logging(loop._log_dims_info)  # type: ignore[attr-defined]
+    if getattr(loop, "_layer_emitter", None) is not None:  # noqa: SLF001
+        loop._layer_emitter.set_logging(loop._log_dims_info)  # type: ignore[attr-defined]
     attach_input_sender(loop)
     bind_shortcuts(loop)
 
@@ -160,12 +164,6 @@ def stop_loop(loop: "ClientStreamLoop") -> None:
     loop._loop_state.evloop_monitor = None
 
     # Presenter + fallback cleanup
-    if getattr(loop, "_layer_bridge", None) is not None:  # noqa: SLF001
-        try:
-            loop._layer_bridge.shutdown()  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - defensive guard
-            logger.debug('LayerStateBridge shutdown failed', exc_info=True)
-
     if loop._warmup_policy is not None:  # noqa: SLF001
         from . import warmup  # local import to avoid cycle
 

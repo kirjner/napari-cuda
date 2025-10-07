@@ -45,7 +45,7 @@ def state_channel() -> StateChannel:
 
 def test_state_channel_scene_callback(state_channel):
     received = []
-    state_channel.handle_scene_snapshot = received.append
+    state_channel.ingest_notify_scene_snapshot = received.append
 
     layer_block = {
         "layer_id": "a",
@@ -79,7 +79,7 @@ def test_state_channel_scene_callback(state_channel):
 
 def test_state_channel_layer_delta_callback(state_channel):
     received = []
-    state_channel.handle_layer_delta = received.append
+    state_channel.ingest_notify_layers = received.append
 
     frame = build_notify_layers_delta(
         session_id='session-4',
@@ -100,7 +100,7 @@ def test_state_channel_layer_delta_callback(state_channel):
 
 def test_state_channel_layer_remove_callback(state_channel):
     received = []
-    state_channel.handle_layer_delta = received.append
+    state_channel.ingest_notify_layers = received.append
 
     frame = build_notify_layers_delta(
         session_id='session-5',
@@ -169,7 +169,7 @@ def test_state_channel_ack_dispatch() -> None:
 
 def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> None:
     received: list[NotifySceneFrame] = []
-    state_channel.handle_scene_snapshot = received.append
+    state_channel.ingest_notify_scene_snapshot = received.append
 
     layer_block = {
         "layer_id": "layer-10",
@@ -201,7 +201,7 @@ def test_state_channel_notify_scene_policies_callback() -> None:
     sc = StateChannel(
         'localhost',
         8081,
-        handle_scene_snapshot=frames.append,
+        ingest_notify_scene_snapshot=frames.append,
         handle_scene_policies=policies_received.append,
     )
 
@@ -261,7 +261,7 @@ def test_state_channel_notify_scene_level_callback() -> None:
     sc = StateChannel(
         'localhost',
         8081,
-        handle_scene_level=received.append,
+        ingest_notify_scene_level=received.append,
     )
 
     sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_LEVEL_TYPE)

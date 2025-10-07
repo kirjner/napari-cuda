@@ -21,7 +21,6 @@ from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
     MirrorEvent,
 )
-from napari_cuda.client.control.mirrors import napari_dims_mirror
 
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")

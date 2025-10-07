@@ -31,9 +31,9 @@ class StateController:
     port: int
     handle_notify_stream: Optional[Callable[["NotifyStreamFrame"], None]] = None
     ingest_dims_notify: Optional[Callable[["NotifyDimsFrame"], None]] = None
-    handle_scene_snapshot: Optional[Callable[["NotifySceneFrame"], None]] = None
-    handle_scene_level: Optional[Callable[["NotifySceneLevelPayload"], None]] = None
-    handle_layer_delta: Optional[Callable[["NotifyLayersFrame"], None]] = None
+    ingest_notify_scene_snapshot: Optional[Callable[["NotifySceneFrame"], None]] = None
+    ingest_notify_scene_level: Optional[Callable[["NotifySceneLevelPayload"], None]] = None
+    ingest_notify_layers: Optional[Callable[["NotifyLayersFrame"], None]] = None
     handle_notify_camera: Optional[Callable[[Any], None]] = None
     handle_ack_state: Optional[Callable[["AckState"], None]] = None
     handle_reply_command: Optional[Callable[["ReplyCommand"], None]] = None
@@ -51,9 +51,9 @@ class StateController:
             int(self.port),
             handle_notify_stream=self.handle_notify_stream,
             ingest_dims_notify=self.ingest_dims_notify,
-            handle_scene_snapshot=self.handle_scene_snapshot,
-            handle_scene_level=self.handle_scene_level,
-            handle_layer_delta=self.handle_layer_delta,
+            ingest_notify_scene_snapshot=self.ingest_notify_scene_snapshot,
+            ingest_notify_scene_level=self.ingest_notify_scene_level,
+            ingest_notify_layers=self.ingest_notify_layers,
             handle_notify_camera=self.handle_notify_camera,
             handle_ack_state=self.handle_ack_state,
             handle_reply_command=self.handle_reply_command,

@@ -15,6 +15,7 @@ from napari_cuda.client.control.control_channel_client import SessionMetadata, R
 from napari_cuda.client.runtime.stream_runtime import CommandError
 from napari_cuda.protocol import FeatureToggle, build_notify_dims, build_reply_command, build_error_command
 from napari_cuda.protocol.messages import NotifyDimsFrame, NotifySceneLevelPayload
+from napari_cuda.client.data.registry import RemoteLayerRegistry
 
 
 class _StateChannelStub:
@@ -37,12 +38,16 @@ class _StateChannelStub:
 class _PresenterStub:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.layer_updates: list[Any] = []
 
     def apply_dims_update(self, payload: dict[str, Any]) -> None:
         self.calls.append(dict(payload))
 
     def set_viewer_mirror(self, _viewer: Any) -> None:  # pragma: no cover - simple stub
         return None
+
+    def apply_layer_delta(self, message: Any) -> None:
+        self.layer_updates.append(message)
 
 
 def _make_loop() -> ClientStreamLoop:
@@ -76,18 +81,13 @@ def _make_loop() -> ClientStreamLoop:
     loop._state_ledger = ClientStateLedger(clock=lambda: float(next(clock_counter)))
 
     loop._presenter_facade = _PresenterStub()
-    loop._layer_bridge = SimpleNamespace(
-        handle_ack=lambda outcome: None,
-        clear_pending_on_reconnect=lambda: None,
-    )
-    loop._layer_registry = SimpleNamespace(
-        apply_snapshot=lambda snapshot: None,
-        apply_delta=lambda delta: None,
-    )
+    loop._layer_registry = RemoteLayerRegistry()
     loop._widget_to_video = lambda x, y: (float(x), float(y))
     loop._video_delta_to_canvas = lambda dx, dy: (float(dx), float(dy))
     loop._dims_mirror = None
     loop._dims_emitter = None
+    loop._layer_mirror = None
+    loop._layer_emitter = None
     loop._slider_tx_interval_ms = 10
 
     loop._initialize_mirrors_and_emitters()
@@ -386,7 +386,7 @@ def test_scene_level_payload_updates_control_state() -> None:
         ),
     )
 
-    loop._handle_scene_level(payload)
+    loop._ingest_notify_scene_level(payload)
 
     assert loop._control_state.multiscale_state['level'] == 3
     multiscale_meta = loop._control_state.dims_meta.get('multiscale')
