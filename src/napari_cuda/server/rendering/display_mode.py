@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 import logging
 
@@ -165,6 +166,16 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     updated_step = tuple(int(value) for value in steps)
     viewer_dims.current_step = updated_step
     worker._last_step = updated_step
+    canonical = getattr(worker, "_canonical_axes", None)
+    assert canonical is not None, "worker missing canonical axes during ndisplay switch"
+    order_tuple = tuple(int(axis) for axis in viewer_dims.order)
+    target_step = tuple(int(updated_step[idx]) for idx in range(canonical.ndim))
+    worker._canonical_axes = replace(
+        canonical,
+        ndisplay=int(viewer_dims.ndisplay),
+        order=order_tuple[: canonical.ndim],
+        current_step=target_step,
+    )
 
 
 def _coarsest_level_index(source) -> Optional[int]:
