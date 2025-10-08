@@ -7,7 +7,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
 from napari_cuda.server.state.layer_manager import ViewerSceneManager
 from napari_cuda.server.state.server_scene import ServerSceneData, layer_controls_to_dict
-from napari_cuda.server.control.state_update_engine import StateUpdateResult
+from napari_cuda.server.control.state_reducers import StateUpdateResult
 
 
 # ---------------------------------------------------------------------------

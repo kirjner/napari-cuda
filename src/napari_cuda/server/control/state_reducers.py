@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from threading import Lock
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Tuple
 import logging
 import time
 
@@ -99,17 +99,20 @@ def apply_dims_delta(
     axis: object,
     step_delta: Optional[int],
     set_value: Optional[int],
-) -> Optional[list[int]]:
-    """Apply a dims step delta and return the updated step list (or ``None``)."""
+) -> list[int]:
+    """Apply a dims step delta and return the updated step list."""
 
     with lock:
         current = scene.latest_state.current_step
-    try:
-        ndim = int(meta.get("ndim") or (len(current) if current is not None else 0))
-    except Exception:
-        ndim = len(current) if current is not None else 0
-    if ndim <= 0:
-        ndim = len(current) if current is not None else 1
+
+    ndim_value = meta.get("ndim")
+    if ndim_value is None:
+        assert current is not None, "dims metadata missing ndim and current_step fallback"
+        ndim = len(current)
+    else:
+        assert isinstance(ndim_value, (int, float, str)), "ndim metadata must be numeric"
+        ndim = int(ndim_value)
+    assert ndim > 0, "dims metadata must declare positive ndim"
 
     step = list(int(x) for x in (current or (0,) * int(ndim)))
     if len(step) < int(ndim):
@@ -117,21 +120,13 @@ def apply_dims_delta(
 
     idx = resolve_axis_index(axis, meta, len(step))
     if idx is None:
-        idx = 0 if step else None
-    if idx is None:
-        return None
+        raise ValueError("unable to resolve axis index for dims delta")
 
     target = int(step[idx])
     if step_delta is not None:
-        try:
-            target = target + int(step_delta)
-        except Exception:
-            pass
+        target += int(step_delta)
     if set_value is not None:
-        try:
-            target = int(set_value)
-        except Exception:
-            pass
+        target = int(set_value)
 
     shapes_raw = meta["level_shapes"]
     assert isinstance(shapes_raw, Sequence) and shapes_raw, "dims metadata missing level_shapes"
@@ -154,38 +149,36 @@ def is_valid_render_mode(mode: str, allowed_modes: Sequence[str]) -> bool:
     return str(mode or "").lower() in {str(m).lower() for m in allowed_modes}
 
 
-def normalize_clim(lo: object, hi: object) -> Optional[tuple[float, float]]:
-    try:
-        lo_f = float(lo)
-        hi_f = float(hi)
-    except Exception:
-        return None
+def normalize_clim(lo: object, hi: object) -> Tuple[float, float]:
+    lo_f = float(lo)
+    hi_f = float(hi)
     if hi_f < lo_f:
         lo_f, hi_f = hi_f, lo_f
     return (lo_f, hi_f)
 
 
-def clamp_opacity(alpha: object) -> Optional[float]:
-    try:
-        val = float(alpha)
-    except Exception:
-        return None
+def clamp_opacity(alpha: object) -> float:
+    val = float(alpha)
     return max(0.0, min(1.0, val))
 
 
-def clamp_sample_step(rel: object) -> Optional[float]:
-    try:
-        val = float(rel)
-    except Exception:
-        return None
+def clamp_sample_step(rel: object) -> float:
+    val = float(rel)
     return max(0.1, min(4.0, val))
 
 
-def clamp_level(level: object, levels: Sequence[Mapping[str, Any]]) -> Optional[int]:
-    try:
-        idx = int(level)
-    except Exception:
-        return None
+def clamp_level(level: object, levels: Sequence[Mapping[str, Any]]) -> int:
+    if isinstance(level, int):
+        idx = level
+    elif isinstance(level, str):
+        stripped = level.strip()
+        if not stripped:
+            raise ValueError("level string may not be empty")
+        if not stripped.lstrip("-").isdigit():
+            raise ValueError(f"level '{level}' is not an integer")
+        idx = int(stripped)
+    else:
+        raise TypeError(f"level must be int or str, got {type(level)!r}")
     count = len(levels)
     if count > 0:
         return max(0, min(count - 1, idx))
@@ -405,17 +398,20 @@ def apply_dims_state_update(
     set_value: Optional[int] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
-) -> Optional[StateUpdateResult]:
+) -> StateUpdateResult:
     """Apply a dims state update returning the updated step list."""
 
     with lock:
         current = scene.latest_state.current_step
-    try:
-        ndim = int(meta.get("ndim") or (len(current) if current is not None else 0))
-    except Exception:
-        ndim = len(current) if current is not None else 0
-    if ndim <= 0:
-        ndim = len(current) if current is not None else 1
+
+    ndim_value = meta.get("ndim")
+    if ndim_value is None:
+        assert current is not None, "dims metadata missing ndim and current_step fallback"
+        ndim = len(current)
+    else:
+        assert isinstance(ndim_value, (int, float, str)), "ndim metadata must be numeric"
+        ndim = int(ndim_value)
+    assert ndim > 0, "dims metadata must declare positive ndim"
 
     step = list(int(x) for x in (current or (0,) * int(ndim)))
     if len(step) < int(ndim):
@@ -423,9 +419,7 @@ def apply_dims_state_update(
 
     idx = resolve_axis_index(axis, meta, len(step))
     if idx is None:
-        idx = 0 if step else None
-    if idx is None:
-        return None
+        raise ValueError("unable to resolve axis index for dims update")
 
     axis_label = axis_label_from_meta(meta, idx)
     control_target = axis_label or str(idx)
@@ -447,20 +441,11 @@ def apply_dims_state_update(
 
         target = int(step[idx])
         if value is not None:
-            try:
-                target = int(value)
-            except Exception:
-                pass
+            target = int(value)
         if step_delta is not None:
-            try:
-                target = target + int(step_delta)
-            except Exception:
-                pass
+            target += int(step_delta)
         if set_value is not None:
-            try:
-                target = int(set_value)
-            except Exception:
-                pass
+            target = int(set_value)
 
         shapes_raw = meta["level_shapes"]
         assert isinstance(shapes_raw, Sequence) and shapes_raw, "dims metadata missing level_shapes"
@@ -511,17 +496,16 @@ def apply_dims_state_update(
 def axis_label_from_meta(meta: Mapping[str, Any], idx: int) -> Optional[str]:
     """Resolve the preferred axis label for *idx*, if available."""
 
-    try:
-        order = meta.get("order")
-        if isinstance(order, Sequence) and idx < len(order):
-            label = order[idx]
-            if isinstance(label, str) and label.strip():
-                return str(label)
-        labels = meta.get("axis_labels")
-        if isinstance(labels, Sequence) and idx < len(labels):
-            label = labels[idx]
-            if isinstance(label, str) and label.strip():
-                return str(label)
-    except Exception:
-        return None
+    order = meta.get("order")
+    if isinstance(order, Sequence) and idx < len(order):
+        candidate = order[idx]
+        if isinstance(candidate, str) and candidate.strip():
+            return str(candidate)
+
+    labels = meta.get("axis_labels")
+    if isinstance(labels, Sequence) and idx < len(labels):
+        candidate = labels[idx]
+        if isinstance(candidate, str) and candidate.strip():
+            return str(candidate)
+
     return None

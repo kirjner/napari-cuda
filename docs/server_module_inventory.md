@@ -22,7 +22,7 @@ state in `server/state`, data helpers in `server/data`, rendering pipeline in
 | Module | Lines | Purpose |
 | --- | ---:| --- |
 | `control_channel_server.py` | 3 012 | WebSocket server handling state.update, notify.*, resume tokens, command execution. |
-| `state_update_engine.py` | 505 | Reducers that apply state.update payloads to server state/scene. |
+| `state_reducers.py` | 511 | Reducers that apply `state.update` payloads and emit ledger-backed results. |
 | `resumable_history_store.py` | 249 | Maintains topic history for resume/replay. |
 | `control_payload_builder.py` | 194 | Builds ack/notify payloads from `ServerScene`. |
 | `command_registry.py` | 54 | Maps greenfield command names to callables (e.g., `napari.pixel.request_keyframe`). |

@@ -84,7 +84,7 @@ Render Worker Drain               Render Worker Emits Applied State
 
 ### Control-State Integration
 
-- `state_update_engine.py` still mutates `server._scene` for camera/volume/layer state. Ledger support currently covers dims metadata; migrating other scopes remains on the future roadmap.
+- `state_reducers.py` still mutates `server._scene` for camera/volume/layer state. Ledger support currently covers dims metadata; migrating other scopes remains on the future roadmap.
 - Ledger records include `timestamp`/`origin`; the history store can consume these once additional scopes move over.
 
 ## Implementation Plan
@@ -102,13 +102,13 @@ Render Worker Drain               Render Worker Emits Applied State
    - Remove `process_worker_notifications`.
    - Mirror subscribes to ledger, builds `NotifyDimsPayload`, uses `_broadcast_dims_state`.
 5. **Land `control/state_reducers`**
-   - Move all reducer logic out of `state_update_engine.py` into a new `control/state_reducers.py` that writes to the ledger and returns `StateUpdateResult`.
+   - Move all reducer logic out of `state_update_engine.py` into `control/state_reducers.py` so all control updates flow through the ledger.
    - Rename `server/state/server_state_ledger.py` to `control/state_ledger.py` and update imports/tests.
 6. **Drive render ingest from the ledger**
    - Add `runtime/scene_ingest.py` to build the render snapshot from the ledger.
    - Update worker lifecycle / `_enqueue_latest_state_for_worker` to call the new helper rather than reading `_scene.latest_state`.
 7. **Delete legacy scene bag**
-   - Remove `ServerSceneState`/`ServerSceneData.latest_state` access, drop `state_update_engine.py`, `server_state_updates.py`, and the `state/` package once all callers use the ledger.
+   - Remove `ServerSceneState`/`ServerSceneData.latest_state` access, drop `server_state_updates.py`, and the `state/` package once all callers use the ledger.
    - Relocate any remaining helpers (plane restore, camera ops) into `runtime/` or focused modules.
 8. **Update Tests & Docs**
    - Adjust server tests to use ledger.

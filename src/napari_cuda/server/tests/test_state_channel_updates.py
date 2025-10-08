@@ -32,8 +32,8 @@ from napari_cuda.server.state.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.server_command_queue import RenderDelta
 from napari_cuda.server.state.server_scene import create_server_scene_data
-from napari_cuda.server.control.state_update_engine import apply_layer_state_update
-from napari_cuda.server.state.server_state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_reducers import apply_layer_state_update
+from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.state.server_mirrors import ServerDimsMirror
 
 

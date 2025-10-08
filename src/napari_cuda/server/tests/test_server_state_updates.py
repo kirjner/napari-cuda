@@ -93,7 +93,8 @@ def test_clamp_level_uses_level_count() -> None:
     assert updates.clamp_level(5, levels) == 1
     assert updates.clamp_level(-2, levels) == 0
     assert updates.clamp_level("1", levels) == 1
-    assert updates.clamp_level("bad", levels) is None
+    with pytest.raises(ValueError):
+        updates.clamp_level("bad", levels)
 
 
 def test_apply_layer_state_update_updates_state() -> None:

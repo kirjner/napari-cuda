@@ -1,4 +1,3 @@
-"""Compatibility shim forwarding to the server state update engine."""
+"""Compatibility shim forwarding to the server state reducers."""
 
-from napari_cuda.server.control.state_update_engine import *  # noqa: F401,F403
-
+from napari_cuda.server.control.state_reducers import *  # noqa: F401,F403

@@ -59,7 +59,7 @@ from napari_cuda.server.control.control_channel_server import (
     broadcast_stream_config,
     handle_state,
 )
-from napari_cuda.server.state.server_state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.state.server_mirrors import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,

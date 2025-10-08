@@ -19,7 +19,7 @@ from napari.layers.image._image_constants import Interpolation as NapariInterpol
 
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
-from napari_cuda.server.state.server_state_ledger import ServerStateLedger, LedgerEntry
+from napari_cuda.server.control.state_ledger import ServerStateLedger, LedgerEntry
 
 
 CONTROL_KEYS: tuple[str, ...] = (

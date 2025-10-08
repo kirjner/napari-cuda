@@ -131,7 +131,7 @@ Cross-reference these items when planning migration work; each future change sho
 - `server/control/control_channel_server.py` handles the state lane and command
   registry directly (legacy `server/state_channel_handler.py` shim removed
   2025-10-03), dispatching via `MESSAGE_HANDLERS` for the remaining verbs.
-- `server/control/state_update_engine.py` and
+- `server/control/state_reducers.py` and
   `server/control/control_payload_builder.py` (archive:
   `server/state/server_state_updates.py` (with former `server/server_scene_spec.py` now deleted) serialize
   authoritative `state.update` payloads before they reach the bridge.
@@ -184,7 +184,7 @@ Cross-reference these items when planning migration work; each future change sho
 | `client/streaming/client_stream_loop.py` | `client/runtime/stream_runtime.py` | Marks the orchestrator that binds control + pixel paths. |
 | ~~`client/streaming/client_loop/control.py`~~ | `client/control/state_update_actions.py` | Legacy shim deleted; reducer helpers now live solely in `ControlStateContext` and friends. |
 | ~~`server/state_channel_handler.py`~~ | — *(removed 2025-10-03; callers use `server/control/control_channel_server.py` directly)* | Legacy compatibility shim no longer required. |
-| `server/state/server_state_updates.py` | `server/control/state_update_engine.py` | Makes the mutation responsibility explicit. |
+| `server/state/server_state_updates.py` | `server/control/state_reducers.py` | Makes the mutation responsibility explicit. |
 | *(removed)* | `server/control/control_payload_builder.py` | Communicates “baseline snapshot” job. |
 | — *(removed)* | — *(removed)* | Legacy dual-emission bridge deleted once stream lane went greenfield-only. |
 | `server/rendering/pixel_channel.py` | `server/control/pixel_channel.py` | Aligns with the pixel-lane nomenclature. |
@@ -240,7 +240,7 @@ translating to legacy formats.
    `server/control/control_channel_server.py` that encapsulate the handshake,
    feature advertisement, and heartbeat loop using only greenfield envelopes.
 2. Replace `MESSAGE_HANDLERS` dispatch with:
-   - `state.update` handler → `state_update_engine.apply_*` (still returns
+- `state.update` handler → `state_reducers.apply_*` (still returns
      `StateUpdateResult`).
    - `call.command` handler → new command registry that calls into AppModel.
 3. Emit `ack.state` after successful mutations (populate `applied_value` or

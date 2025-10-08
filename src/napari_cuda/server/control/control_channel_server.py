@@ -56,8 +56,8 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.messages import NotifyDimsPayload, NotifyLayersPayload, NotifyScenePayload, NotifyStreamPayload
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
-from napari_cuda.server.control import state_update_engine as state_updates
-from napari_cuda.server.control.state_update_engine import (
+from napari_cuda.server.control import state_reducers as state_updates
+from napari_cuda.server.control.state_reducers import (
     StateUpdateResult,
     apply_dims_state_update,
     apply_layer_state_update,
@@ -1498,12 +1498,12 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 logger.debug("state.update volume ignored invalid contrast_limits=%r", pair)
                 await _reject("state.invalid", "contrast_limits requires [lo, hi]", details={"scope": scope, "key": key})
                 return True
-            norm = state_updates.normalize_clim(pair[0], pair[1])
-            if norm is None:
+            try:
+                lo, hi = state_updates.normalize_clim(pair[0], pair[1])
+            except (TypeError, ValueError):
                 logger.debug("state.update volume ignored invalid clim=%r", pair)
                 await _reject("state.invalid", "contrast_limits invalid", details={"scope": scope, "key": key})
                 return True
-            lo, hi = norm
             state_updates.update_volume_clim(server._scene, server._state_lock, lo, hi)
             normalized_value = (float(lo), float(hi))
             rebroadcast_tag = 'rebroadcast-volume-clim'
@@ -1602,8 +1602,9 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     logger.exception("worker set_policy failed for %s", policy)
         elif key == 'level':
             levels = server._scene.multiscale_state.get('levels') or []
-            level = state_updates.clamp_level(value, levels)
-            if level is None:
+            try:
+                level = state_updates.clamp_level(value, levels)
+            except (TypeError, ValueError):
                 logger.debug("state.update multiscale ignored invalid level=%r", value)
                 await _reject("state.invalid", "level out of range", details={"scope": scope, "key": key})
                 return True
@@ -1706,11 +1707,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             logger.debug("state.update dims failed axis=%s key=%s", target, key, exc_info=True)
             await _reject("state.error", "dims update failed", details={"scope": scope, "key": key, "target": target})
             return True
-        if result is None:
-            logger.debug("state.update dims invalid axis=%s key=%s", target, key)
-            await _reject("state.invalid", "dims update invalid", details={"scope": scope, "key": key, "target": target})
-            return True
-
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "state.update dims applied: axis=%s key=%s step_delta=%s set_value=%s current_step=%s",
