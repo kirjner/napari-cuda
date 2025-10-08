@@ -70,6 +70,33 @@ def build_notify_stream_payload(config: PixelChannelConfig, avcc: bytes) -> Noti
     )
 
 
+def prepare_client_attach(state: PixelChannelState) -> None:
+    """Flush encoder buffers so the next client starts from a clean slate."""
+
+    # If another client is already connected, leave the queue alone; the stream is live.
+    if state.broadcast.clients:
+        return
+
+    queue = state.broadcast.frame_queue
+    try:
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+    except Exception:
+        logger.debug("Pixel queue flush failed during client attach prep", exc_info=True)
+
+    broadcast = state.broadcast
+    broadcast.bypass_until_key = True
+    broadcast.waiting_for_keyframe = True
+    broadcast.last_key_seq = None
+    broadcast.last_key_ts = None
+    broadcast.last_send_ts = None
+    broadcast.send_count = 0
+    state.needs_stream_config = True
+
+
 async def handle_client(
     state: PixelChannelState,
     ws: websockets.WebSocketServerProtocol,
@@ -79,6 +106,7 @@ async def handle_client(
     reset_encoder: Callable[[], bool],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
     on_clients_change: Callable[[], None],
+    on_client_join: Optional[Callable[[], None]] = None,
 ) -> None:
     """Handle a pixel-channel websocket connection."""
 
@@ -88,13 +116,21 @@ async def handle_client(
     state.needs_stream_config = True
 
     state.broadcast.bypass_until_key = True
+    state.broadcast.waiting_for_keyframe = True
     state.needs_stream_config = True
+    if on_client_join is not None:
+        try:
+            on_client_join()
+        except Exception:
+            logger.debug("pixel client join hook failed", exc_info=True)
 
     try:
         await ws.wait_closed()
     finally:
         state.broadcast.clients.discard(ws)
         on_clients_change()
+        if not state.broadcast.clients:
+            prepare_client_attach(state)
 
 
 async def ensure_keyframe(

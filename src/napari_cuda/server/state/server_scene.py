@@ -19,6 +19,7 @@ from napari.layers.image._image_constants import Interpolation as NapariInterpol
 
 from napari_cuda.server.state.scene_state import ServerSceneState
 from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
+from napari_cuda.server.state.server_state_ledger import ServerStateLedger, LedgerEntry
 
 
 CONTROL_KEYS: tuple[str, ...] = (
@@ -66,6 +67,7 @@ __all__ = [
     "clear_control_meta",
     "prune_control_metadata",
     "layer_controls_to_dict",
+    "build_render_scene_state",
 ]
 
 
@@ -155,15 +157,130 @@ class ServerSceneData:
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
     plane_restore_state: Optional[PlaneRestoreState] = None
+    pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    state_ledger: Optional[ServerStateLedger] = None
 
 
-def create_server_scene_data(*, policy_event_path: Optional[str | Path] = None) -> ServerSceneData:
+def create_server_scene_data(
+    *,
+    policy_event_path: Optional[str | Path] = None,
+    state_ledger: Optional[ServerStateLedger] = None,
+) -> ServerSceneData:
     """Instantiate :class:`ServerSceneData` with an optional policy log path."""
 
-    data = ServerSceneData()
+    data = ServerSceneData(state_ledger=state_ledger)
     if policy_event_path is not None:
         data.policy_event_path = Path(policy_event_path)
     return data
+
+
+def _canonical_tuple(value: Any, *, mapper) -> Optional[tuple]:
+    if value is None:
+        return None
+    try:
+        return tuple(mapper(v) for v in value)
+    except Exception:
+        return None
+
+
+def _ledger_value(
+    snapshot: Dict[tuple[str, str, str], LedgerEntry],
+    scope: str,
+    target: str,
+    key: str,
+) -> Any:
+    entry = snapshot.get((scope, target, key))
+    return entry.value if entry is not None else None
+
+
+def build_render_scene_state(
+    ledger: ServerStateLedger,
+    scene: ServerSceneData,
+    *,
+    center: Any = None,
+    zoom: Any = None,
+    angles: Any = None,
+    current_step: Any = None,
+    volume_mode: Any = None,
+    volume_colormap: Any = None,
+    volume_clim: Any = None,
+    volume_opacity: Any = None,
+    volume_sample_step: Any = None,
+    layer_updates: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> ServerSceneState:
+    """Build a render-scene snapshot from the ledger with optional overrides."""
+
+    snapshot = ledger.snapshot()
+
+    center_val = center if center is not None else _ledger_value(snapshot, "camera", "main", "center")
+    center_tuple = _canonical_tuple(center_val, mapper=float)
+
+    zoom_val = zoom if zoom is not None else _ledger_value(snapshot, "camera", "main", "zoom")
+    try:
+        zoom_float = float(zoom_val) if zoom_val is not None else None
+    except Exception:
+        zoom_float = None
+
+    angles_val = angles if angles is not None else _ledger_value(snapshot, "camera", "main", "angles")
+    angles_tuple = _canonical_tuple(angles_val, mapper=float)
+
+    current_step_val = current_step if current_step is not None else _ledger_value(snapshot, "dims", "main", "current_step")
+    current_step_tuple = _canonical_tuple(current_step_val, mapper=int)
+
+    volume_mode_val = volume_mode if volume_mode is not None else _ledger_value(snapshot, "volume", "main", "render_mode")
+    if volume_mode_val is None:
+        volume_mode_val = scene.volume_state.get("mode")
+    volume_mode_str = str(volume_mode_val) if volume_mode_val is not None else None
+
+    volume_colormap_val = volume_colormap if volume_colormap is not None else _ledger_value(snapshot, "volume", "main", "colormap")
+    if volume_colormap_val is None:
+        volume_colormap_val = scene.volume_state.get("colormap")
+    volume_colormap_str = str(volume_colormap_val) if volume_colormap_val is not None else None
+
+    volume_clim_val = volume_clim if volume_clim is not None else _ledger_value(snapshot, "volume", "main", "contrast_limits")
+    if volume_clim_val is None:
+        volume_clim_val = scene.volume_state.get("clim")
+    volume_clim_tuple = _canonical_tuple(volume_clim_val, mapper=float)
+
+    volume_opacity_val = volume_opacity if volume_opacity is not None else _ledger_value(snapshot, "volume", "main", "opacity")
+    if volume_opacity_val is None:
+        volume_opacity_val = scene.volume_state.get("opacity")
+    try:
+        volume_opacity_float = float(volume_opacity_val) if volume_opacity_val is not None else None
+    except Exception:
+        volume_opacity_float = None
+
+    volume_sample_val = volume_sample_step if volume_sample_step is not None else _ledger_value(snapshot, "volume", "main", "sample_step")
+    if volume_sample_val is None:
+        volume_sample_val = scene.volume_state.get("sample_step")
+    try:
+        volume_sample_float = float(volume_sample_val) if volume_sample_val is not None else None
+    except Exception:
+        volume_sample_float = None
+
+    resolved_updates: Dict[str, Dict[str, Any]] = {}
+    if layer_updates is not None:
+        for layer_id, props in layer_updates.items():
+            resolved_updates[str(layer_id)] = {str(key): value for key, value in props.items()}
+    elif scene.pending_layer_updates:
+        for layer_id, props in scene.pending_layer_updates.items():
+            resolved_updates[str(layer_id)] = {str(key): value for key, value in props.items()}
+        scene.pending_layer_updates.clear()
+
+    layer_delta = resolved_updates or None
+
+    return ServerSceneState(
+        center=center_tuple,
+        zoom=zoom_float,
+        angles=angles_tuple,
+        current_step=current_step_tuple,
+        volume_mode=volume_mode_str,
+        volume_colormap=volume_colormap_str,
+        volume_clim=volume_clim_tuple,
+        volume_opacity=volume_opacity_float,
+        volume_sample_step=volume_sample_float,
+        layer_updates=layer_delta,
+    )
 
 
 def _meta_key(scope: str, target: str, key: str) -> tuple[str, str, str]:

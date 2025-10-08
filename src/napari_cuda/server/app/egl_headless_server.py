@@ -178,8 +178,10 @@ class EGLHeadlessServer:
         self._seq = 0
         self._worker_lifecycle = WorkerLifecycleState()
         self._scene_manager = ViewerSceneManager((self.width, self.height))
+        self._state_ledger = ServerStateLedger()
         self._scene: ServerSceneData = create_server_scene_data(
-            policy_event_path=self._ctx.policy_event_path
+            policy_event_path=self._ctx.policy_event_path,
+            state_ledger=self._state_ledger,
         )
         self._scene.use_volume = bool(self.use_volume)
         # Bitstream parameter cache and config tracking (server-side)
@@ -190,7 +192,6 @@ class EGLHeadlessServer:
         self._dump_path: Optional[str] = None
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
-        self._state_ledger = ServerStateLedger()
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
@@ -671,6 +672,7 @@ class EGLHeadlessServer:
         lifecycle_stop_worker(self._worker_lifecycle)
 
     async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
+        pixel_channel.prepare_client_attach(self._pixel_channel)
         await pixel_channel.handle_client(
             self._pixel_channel,
             ws,
@@ -679,6 +681,9 @@ class EGLHeadlessServer:
             reset_encoder=self._try_reset_encoder,
             send_stream=self._broadcast_stream_config,
             on_clients_change=self._update_client_gauges,
+            on_client_join=lambda: self._schedule_coro(
+                self._ensure_keyframe(), "pixel-connect-keyframe"
+            ),
         )
 
     async def _broadcast_loop(self) -> None:

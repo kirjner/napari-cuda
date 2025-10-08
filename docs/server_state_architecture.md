@@ -101,15 +101,18 @@ Render Worker Drain               Render Worker Emits Applied State
    - Wire into server init.
    - Remove `process_worker_notifications`.
    - Mirror subscribes to ledger, builds `NotifyDimsPayload`, uses `_broadcast_dims_state`.
-5. **Migrate Additional Scopes** *(future)*
-   - Move camera/volume/layer state into the ledger and teach reducers to emit confirmed entries.
-6. **Retire Legacy Scene Snapshots** *(future)*
-   - Drop `ServerSceneState` and the remaining fields on `ServerSceneData` once consumers are migrated.
-7. **Update Tests & Docs**
+5. **Land `control/state_reducers`**
+   - Move all reducer logic out of `state_update_engine.py` into a new `control/state_reducers.py` that writes to the ledger and returns `StateUpdateResult`.
+   - Rename `server/state/server_state_ledger.py` to `control/state_ledger.py` and update imports/tests.
+6. **Drive render ingest from the ledger**
+   - Add `runtime/scene_ingest.py` to build the render snapshot from the ledger.
+   - Update worker lifecycle / `_enqueue_latest_state_for_worker` to call the new helper rather than reading `_scene.latest_state`.
+7. **Delete legacy scene bag**
+   - Remove `ServerSceneState`/`ServerSceneData.latest_state` access, drop `state_update_engine.py`, `server_state_updates.py`, and the `state/` package once all callers use the ledger.
+   - Relocate any remaining helpers (plane restore, camera ops) into `runtime/` or focused modules.
+8. **Update Tests & Docs**
    - Adjust server tests to use ledger.
    - Ensure doc references match new module names.
-8. **Cleanup Legacy State Bag** *(future)*
-   - After all consumers read from the ledger, delete the transitional fields on `_scene`.
 
 ## Legacy Scene Data Migration
 

@@ -128,3 +128,43 @@ def test_start_watchdog_respects_cooldown() -> None:
         assert calls[-1] == pytest.approx(first_call)
 
     asyncio.run(runner())
+
+
+def test_prepare_client_attach_flushes_queue() -> None:
+    queue: asyncio.Queue[pixel_broadcaster.FramePacket] = asyncio.Queue(maxsize=4)
+    for idx in range(3):
+        queue.put_nowait((b"x", 0, idx, 0.0))
+    broadcast = pixel_broadcaster.PixelBroadcastState(
+        frame_queue=queue,
+        clients=set(),
+        log_sends=False,
+    )
+    state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
+    state.needs_stream_config = False
+
+    pixel_channel.prepare_client_attach(state)
+
+    assert queue.empty()
+    assert state.broadcast.bypass_until_key
+    assert state.broadcast.waiting_for_keyframe
+    assert state.needs_stream_config
+
+
+def test_prepare_client_attach_skips_when_clients_present() -> None:
+    queue: asyncio.Queue[pixel_broadcaster.FramePacket] = asyncio.Queue()
+    queue.put_nowait((b"a", 0, 0, 0.0))
+    ws = object()
+    broadcast = pixel_broadcaster.PixelBroadcastState(
+        frame_queue=queue,
+        clients={ws},  # Existing client should suppress flush
+        log_sends=False,
+    )
+    state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
+    state.needs_stream_config = False
+
+    pixel_channel.prepare_client_attach(state)
+
+    assert queue.qsize() == 1
+    assert not state.broadcast.bypass_until_key
+    assert not state.broadcast.waiting_for_keyframe
+    assert not state.needs_stream_config

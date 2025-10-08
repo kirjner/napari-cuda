@@ -32,23 +32,14 @@ def _ingest_scene_refresh(
     dims_payload = worker_ref.build_notify_dims_payload()
 
     override_step: Optional[tuple[int, ...]] = None
-    override_level = dims_payload.current_level
 
     if isinstance(step, (list, tuple)):
         override_step = tuple(int(value) for value in step)
 
+    if override_step is not None and override_step != dims_payload.current_step:
+        dims_payload = replace(dims_payload, current_step=override_step)
+
     plane_state = worker_ref._plane_restore_state
-    if plane_state is not None and dims_payload.mode == "volume":
-        override_step = tuple(int(value) for value in plane_state.step)
-        override_level = int(plane_state.level)
-
-    normalized_step = tuple(int(value) for value in override_step) if override_step is not None else None
-    normalized_level = int(override_level)
-
-    if normalized_step is not None and normalized_step != dims_payload.current_step:
-        dims_payload = replace(dims_payload, current_step=normalized_step, current_level=normalized_level)
-    elif normalized_level != dims_payload.current_level:
-        dims_payload = replace(dims_payload, current_level=normalized_level)
 
     prev_payload = server._scene.last_dims_payload  # type: ignore[attr-defined]
     if prev_payload is not None and prev_payload == dims_payload:
