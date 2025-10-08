@@ -13,7 +13,7 @@ from typing import Optional, Sequence, List, Mapping, Dict, Any
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
-from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot, build_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 
@@ -40,12 +40,6 @@ def _ingest_scene_refresh(
         dims_payload = replace(dims_payload, current_step=override_step)
 
     plane_state = worker_ref._plane_restore_state
-
-    prev_payload = server._scene.last_dims_payload  # type: ignore[attr-defined]
-    if prev_payload is not None and prev_payload == dims_payload:
-        if plane_state is not None:
-            server._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
-        return
 
     state.scene_seq = int(state.scene_seq) + 1
 
@@ -90,15 +84,12 @@ def _ingest_scene_refresh(
     ledger.batch_record_confirmed(entries, origin="worker")
 
     with server._state_lock:  # type: ignore[attr-defined]
-        snapshot = server._scene.latest_state  # type: ignore[attr-defined]
-        server._scene.latest_state = ServerSceneState(  # type: ignore[attr-defined]
-            center=snapshot.center,
-            zoom=snapshot.zoom,
-            angles=snapshot.angles,
-            current_step=dims_payload.current_step,
+        snapshot: RenderSceneSnapshot = server._scene.latest_state  # type: ignore[attr-defined]
+        current_step_tuple = tuple(int(v) for v in dims_payload.current_step)
+        server._scene.latest_state = replace(
+            snapshot,
+            current_step=current_step_tuple,
         )
-
-    server._scene.last_dims_payload = dims_payload
 
     if plane_state is not None:
         server._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
@@ -281,33 +272,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             while not state.stop_event.is_set():
                 with server._state_lock:
-                    queued = server._scene.latest_state
+                    snapshot = build_render_snapshot(server._state_ledger, server._scene)
+                    server._scene.latest_state = snapshot
                     commands = list(server._scene.camera_commands)
                     server._scene.camera_commands.clear()
-                    frame_input_step = queued.current_step
-                    server._scene.latest_state = ServerSceneState(
-                        center=queued.center,
-                        zoom=queued.zoom,
-                        angles=queued.angles,
-                        current_step=queued.current_step,
-                        layer_updates=None,
-                    )
+                    frame_input_step = snapshot.current_step
 
                 if commands and server._log_state_traces:
                     logger.info("frame commands snapshot count=%d", len(commands))
 
-                frame_state = ServerSceneState(
-                    center=queued.center,
-                    zoom=queued.zoom,
-                    angles=queued.angles,
-                    current_step=queued.current_step,
-                    volume_mode=queued.volume_mode,
-                    volume_colormap=queued.volume_colormap,
-                    volume_clim=queued.volume_clim,
-                    volume_opacity=queued.volume_opacity,
-                    volume_sample_step=queued.volume_sample_step,
-                    layer_updates=queued.layer_updates,
-                )
+                frame_state = snapshot
 
                 if commands and (server._log_cam_info or server._log_cam_debug):
                     summaries: List[str] = []

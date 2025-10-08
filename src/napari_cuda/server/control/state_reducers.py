@@ -1,27 +1,20 @@
-"""Shared helpers for server-side state update handling.
-
-These utilities keep the state-channel dispatcher and future MCP surfaces
-consistent by encapsulating all mutations of ``ServerSceneData`` associated
-with control updates. They operate purely on the data bag plus simple
-parameters so the websocket loop, worker bridge, or tests can invoke them
-without reaching into the ``EGLHeadlessServer`` implementation.
-"""
+"""Ledger-backed reducers for server control updates."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from threading import Lock
-from typing import Any, Mapping, Optional, Sequence, Tuple
 import logging
 import time
+from dataclasses import dataclass
+from threading import Lock
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
-from napari.layers.image._image_constants import Interpolation as NapariInterpolation
-
-from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.state.server_scene import (
+from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.scene import (
     LayerControlState,
     ServerSceneData,
     default_layer_controls,
@@ -29,13 +22,12 @@ from napari_cuda.server.state.server_scene import (
     increment_server_sequence,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class StateUpdateResult:
-    """Authoritative result from applying a state update."""
+    """Authoritative result from applying a control update."""
 
     scope: str
     target: str
@@ -48,108 +40,41 @@ class StateUpdateResult:
     current_step: Optional[tuple[int, ...]] = None
 
 
-def _update_latest_state(scene: ServerSceneData, lock: Lock, **updates: Any) -> ServerSceneState:
-    """Apply ``updates`` to ``scene.latest_state`` under the given lock."""
+_BOOL_TRUE = {"1", "true", "yes", "on"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
 
-    with lock:
-        scene.latest_state = replace(scene.latest_state, **updates)
-        if logging.getLogger(__name__).isEnabledFor(logging.INFO) and "current_step" in updates:
-            logging.getLogger(__name__).info(
-                "latest_state updated: current_step=%s",
-                updates["current_step"],
-            )
-        return scene.latest_state
+_ALLOWED_INTERPOLATIONS = {mode.value for mode in NapariInterpolation}
 
+_ALLOWED_BLENDING = {
+    "opaque",
+    "translucent",
+    "additive",
+    "minimum",
+    "maximum",
+    "average",
+}
 
-def resolve_axis_index(axis: object, meta: Mapping[str, Any], cur_len: int) -> Optional[int]:
-    """Resolve *axis* (index or label) to an integer position."""
+_ALLOWED_DEPICTION = {"volume", "plane"}
 
-    try:
-        if isinstance(axis, int):
-            idx = int(axis)
-            return idx if 0 <= idx < max(0, cur_len) else None
-        if isinstance(axis, str):
-            stripped = axis.strip()
-            if stripped.isdigit():
-                idx2 = int(stripped)
-                return idx2 if 0 <= idx2 < max(0, cur_len) else None
-            lowered = stripped.lower()
-            order = meta.get("order") or []
-            if isinstance(order, Sequence):
-                lowered_order = [str(x).lower() for x in order]
-                if lowered in lowered_order:
-                    pos = lowered_order.index(lowered)
-                    return pos if 0 <= pos < max(0, cur_len) else None
-            labels = meta.get("axis_labels") or []
-            if isinstance(labels, Sequence):
-                lowered_labels = [str(x).lower() for x in labels]
-                if lowered in lowered_labels:
-                    pos = lowered_labels.index(lowered)
-                    return pos if 0 <= pos < max(0, cur_len) else None
-    except Exception:
-        return None
-    return None
+_ALLOWED_RENDERING = {
+    "mip",
+    "attenuated_mip",
+    "translucent",
+    "iso",
+    "additive",
+    "average",
+}
 
 
-def apply_dims_delta(
-    scene: ServerSceneData,
-    lock: Lock,
-    meta: Mapping[str, Any],
-    *,
-    axis: object,
-    step_delta: Optional[int],
-    set_value: Optional[int],
-) -> list[int]:
-    """Apply a dims step delta and return the updated step list."""
-
-    with lock:
-        current = scene.latest_state.current_step
-
-    ndim_value = meta.get("ndim")
-    if ndim_value is None:
-        assert current is not None, "dims metadata missing ndim and current_step fallback"
-        ndim = len(current)
-    else:
-        assert isinstance(ndim_value, (int, float, str)), "ndim metadata must be numeric"
-        ndim = int(ndim_value)
-    assert ndim > 0, "dims metadata must declare positive ndim"
-
-    step = list(int(x) for x in (current or (0,) * int(ndim)))
-    if len(step) < int(ndim):
-        step.extend([0] * (int(ndim) - len(step)))
-
-    idx = resolve_axis_index(axis, meta, len(step))
-    if idx is None:
-        raise ValueError("unable to resolve axis index for dims delta")
-
-    target = int(step[idx])
-    if step_delta is not None:
-        target += int(step_delta)
-    if set_value is not None:
-        target = int(set_value)
-
-    shapes_raw = meta["level_shapes"]
-    assert isinstance(shapes_raw, Sequence) and shapes_raw, "dims metadata missing level_shapes"
-    level_idx_raw = meta.get("current_level", 0)
-    level_idx = int(level_idx_raw)
-    assert 0 <= level_idx < len(shapes_raw), "current_level out of bounds for level_shapes"
-    shape_raw = shapes_raw[level_idx]
-    assert isinstance(shape_raw, Sequence), "level_shapes entry must be sequence"
-    assert idx < len(shape_raw), "axis index outside level_shapes entry"
-    size_val = int(shape_raw[idx])
-    assert size_val > 0, "level_shapes entries must be positive"
-    target = max(0, min(size_val - 1, target))
-
-    step[idx] = int(target)
-    _update_latest_state(scene, lock, current_step=tuple(step))
-    return step
+def _now(timestamp: Optional[float]) -> float:
+    return float(timestamp) if timestamp is not None else time.time()
 
 
 def is_valid_render_mode(mode: str, allowed_modes: Sequence[str]) -> bool:
     return str(mode or "").lower() in {str(m).lower() for m in allowed_modes}
 
 
-def normalize_clim(lo: object, hi: object) -> Tuple[float, float]:
+def normalize_clim(lo: object, hi: object) -> tuple[float, float]:
     lo_f = float(lo)
     hi_f = float(hi)
     if hi_f < lo_f:
@@ -185,55 +110,32 @@ def clamp_level(level: object, levels: Sequence[Mapping[str, Any]]) -> int:
     return max(0, idx)
 
 
-def update_volume_mode(scene: ServerSceneData, lock: Lock, mode: str) -> None:
-    scene.volume_state["mode"] = mode
-    _update_latest_state(scene, lock, volume_mode=str(mode))
-
-
-def update_volume_clim(scene: ServerSceneData, lock: Lock, lo: float, hi: float) -> None:
-    scene.volume_state["clim"] = [float(lo), float(hi)]
-    _update_latest_state(scene, lock, volume_clim=(float(lo), float(hi)))
-
-
-def update_volume_colormap(scene: ServerSceneData, lock: Lock, name: str) -> None:
-    scene.volume_state["colormap"] = name
-    _update_latest_state(scene, lock, volume_colormap=str(name))
-
-
-def update_volume_opacity(scene: ServerSceneData, lock: Lock, alpha: float) -> None:
-    scene.volume_state["opacity"] = float(alpha)
-    _update_latest_state(scene, lock, volume_opacity=float(alpha))
-
-
-def update_volume_sample_step(scene: ServerSceneData, lock: Lock, rel: float) -> None:
-    scene.volume_state["sample_step"] = float(rel)
-    _update_latest_state(scene, lock, volume_sample_step=float(rel))
-
-
-_BOOL_TRUE = {"1", "true", "yes", "on"}
-_BOOL_FALSE = {"0", "false", "no", "off"}
-
-_ALLOWED_INTERPOLATIONS = {mode.value for mode in NapariInterpolation}
-
-_ALLOWED_BLENDING = {
-    "opaque",
-    "translucent",
-    "additive",
-    "minimum",
-    "maximum",
-    "average",
-}
-
-_ALLOWED_DEPICTION = {"volume", "plane"}
-
-_ALLOWED_RENDERING = {
-    "mip",
-    "attenuated_mip",
-    "translucent",
-    "iso",
-    "additive",
-    "average",
-}
+def resolve_axis_index(
+    axis: object,
+    *,
+    order: Sequence[Any] | None,
+    axis_labels: Sequence[Any] | None,
+    ndim: int,
+) -> Optional[int]:
+    if isinstance(axis, int):
+        return axis if 0 <= axis < max(0, ndim) else None
+    if isinstance(axis, str):
+        stripped = axis.strip()
+        if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
+            idx = int(stripped)
+            return idx if 0 <= idx < max(0, ndim) else None
+        lowered = stripped.lower()
+        if order is not None:
+            lowered_order = [str(x).lower() for x in order]
+            if lowered in lowered_order:
+                position = lowered_order.index(lowered)
+                return position if 0 <= position < max(0, ndim) else None
+        if axis_labels is not None:
+            lowered_labels = [str(x).lower() for x in axis_labels]
+            if lowered in lowered_labels:
+                position = lowered_labels.index(lowered)
+                return position if 0 <= position < max(0, ndim) else None
+    return None
 
 
 def _normalize_bool(value: object) -> bool:
@@ -257,7 +159,7 @@ def _normalize_opacity(value: object) -> float:
 
 def _normalize_gamma(value: object) -> float:
     val = float(value)
-    if not val > 0.0:
+    if val <= 0.0:
         raise ValueError("gamma must be positive")
     return val
 
@@ -266,7 +168,7 @@ def _normalize_string(value: object, *, allowed: Optional[set[str]] = None) -> s
     if isinstance(value, str):
         lowered = value.strip()
     elif isinstance(value, Mapping):
-        name = value.get("name")  # type: ignore[arg-type]
+        name = value.get("name")
         if not isinstance(name, str):
             raise ValueError("mapping requires a 'name' field")
         lowered = name.strip()
@@ -285,17 +187,15 @@ def _normalize_colormap(value: object) -> str:
         stripped = value.strip()
         if stripped in AVAILABLE_COLORMAPS:
             return ensure_colormap(stripped).name
-
         lowered = stripped.lower()
         for key in AVAILABLE_COLORMAPS:
             if key.lower() == lowered:
                 return ensure_colormap(key).name
-
     cmap = ensure_colormap(value)
     return cmap.name
 
 
-def _normalize_contrast_limits(value: object) -> list[float]:
+def _normalize_contrast_limits(value: object) -> tuple[float, float]:
     if isinstance(value, Mapping):
         low = value.get("lo")
         high = value.get("hi")
@@ -305,11 +205,8 @@ def _normalize_contrast_limits(value: object) -> list[float]:
         low, high = value[0], value[1]
     else:
         raise ValueError("contrast_limits requires a sequence or mapping")
-
-    pair = normalize_clim(low, high)
-    if pair is None:
-        raise ValueError("contrast_limits failed normalization")
-    return [float(pair[0]), float(pair[1])]
+    lo, hi = normalize_clim(low, high)
+    return (float(lo), float(hi))
 
 
 def _normalize_layer_property(prop: str, value: object) -> Any:
@@ -342,8 +239,9 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
     raise KeyError(f"unsupported layer property '{prop}'")
 
 
-def apply_layer_state_update(
-    scene: ServerSceneData,
+def reduce_layer_property(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
     lock: Lock,
     *,
     layer_id: str,
@@ -351,30 +249,61 @@ def apply_layer_state_update(
     value: object,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
+    origin: str = "control.layer",
 ) -> StateUpdateResult:
-    """Normalize a layer update and persist it in the scene snapshot."""
-
     canonical = _normalize_layer_property(prop, value)
+    ts = _now(timestamp)
 
     with lock:
-        control = scene.layer_controls.setdefault(layer_id, default_layer_controls())
-
+        control = store.layer_controls.setdefault(layer_id, default_layer_controls())
         setattr(control, prop, canonical)
 
-        latest = scene.latest_state
-        pending = dict(latest.layer_updates or {})
-        layer_updates = dict(pending.get(layer_id, {}))
-        layer_updates[prop] = canonical
-        pending[layer_id] = layer_updates
-        scene.latest_state = replace(latest, layer_updates=pending)
+        pending = store.pending_layer_updates.setdefault(layer_id, {})
+        pending[prop] = canonical
 
-        server_seq = increment_server_sequence(scene)
+        server_seq = increment_server_sequence(store)
 
-        meta = get_control_meta(scene, "layer", layer_id, prop)
+        meta = get_control_meta(store, "layer", layer_id, prop)
         meta.last_server_seq = server_seq
-        meta.last_timestamp = float(timestamp) if timestamp is not None else time.time()
+        meta.last_timestamp = ts
 
-    ts = float(timestamp) if timestamp is not None else time.time()
+    ledger.record_confirmed(
+        "layer",
+        layer_id,
+        prop,
+        canonical,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    volume_sync: list[tuple[str, Any]] = []
+    if prop == "colormap":
+        volume_state = store.volume_state
+        if volume_state.get("colormap") != canonical:
+            volume_state["colormap"] = canonical
+            volume_sync.append(("colormap", canonical))
+    elif prop == "contrast_limits":
+        lo, hi = float(canonical[0]), float(canonical[1])
+        volume_state = store.volume_state
+        if volume_state.get("clim") != [lo, hi]:
+            volume_state["clim"] = [lo, hi]
+            volume_sync.append(("contrast_limits", (lo, hi)))
+    elif prop == "opacity":
+        alpha = float(canonical)
+        volume_state = store.volume_state
+        if volume_state.get("opacity") != alpha:
+            volume_state["opacity"] = alpha
+            volume_sync.append(("opacity", alpha))
+
+    for volume_key, volume_value in volume_sync:
+        ledger.record_confirmed(
+            "volume",
+            "main",
+            volume_key,
+            volume_value,
+            origin=f"{origin}.volume",
+            timestamp=ts,
+        )
 
     return StateUpdateResult(
         scope="layer",
@@ -386,10 +315,353 @@ def apply_layer_state_update(
         timestamp=ts,
     )
 
-def apply_dims_state_update(
-    scene: ServerSceneData,
+
+def reduce_volume_render_mode(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
     lock: Lock,
-    meta: Mapping[str, Any],
+    mode: str,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.volume",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    normalized = str(mode)
+
+    with lock:
+        store.volume_state["mode"] = normalized
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "volume", "main", "render_mode")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
+
+    ledger.record_confirmed(
+        "volume",
+        "main",
+        "render_mode",
+        normalized,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    return StateUpdateResult(
+        scope="volume",
+        target="main",
+        key="render_mode",
+        value=normalized,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def reduce_volume_contrast_limits(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    lo: float,
+    hi: float,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.volume",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    pair = (float(lo), float(hi))
+
+    with lock:
+        store.volume_state["clim"] = [pair[0], pair[1]]
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "volume", "main", "contrast_limits")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
+
+    ledger.record_confirmed(
+        "volume",
+        "main",
+        "contrast_limits",
+        pair,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    return StateUpdateResult(
+        scope="volume",
+        target="main",
+        key="contrast_limits",
+        value=pair,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def reduce_volume_colormap(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    name: str,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.volume",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    normalized = str(name)
+
+    with lock:
+        store.volume_state["colormap"] = normalized
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "volume", "main", "colormap")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
+
+    ledger.record_confirmed(
+        "volume",
+        "main",
+        "colormap",
+        normalized,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    return StateUpdateResult(
+        scope="volume",
+        target="main",
+        key="colormap",
+        value=normalized,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def reduce_volume_opacity(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    alpha: float,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.volume",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    value = float(alpha)
+
+    with lock:
+        store.volume_state["opacity"] = value
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "volume", "main", "opacity")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
+
+    ledger.record_confirmed(
+        "volume",
+        "main",
+        "opacity",
+        value,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    return StateUpdateResult(
+        scope="volume",
+        target="main",
+        key="opacity",
+        value=value,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def reduce_volume_sample_step(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    sample_step: float,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.volume",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    value = float(sample_step)
+
+    with lock:
+        store.volume_state["sample_step"] = value
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "volume", "main", "sample_step")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
+
+    ledger.record_confirmed(
+        "volume",
+        "main",
+        "sample_step",
+        value,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    return StateUpdateResult(
+        scope="volume",
+        target="main",
+        key="sample_step",
+        value=value,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def _axis_label_from_axes(
+    order: Sequence[Any] | None,
+    axis_labels: Sequence[Any] | None,
+    idx: int,
+) -> Optional[str]:
+    if isinstance(order, Sequence) and idx < len(order):
+        candidate = order[idx]
+        if isinstance(candidate, str) and candidate.strip():
+            return str(candidate)
+
+    if isinstance(axis_labels, Sequence) and idx < len(axis_labels):
+        candidate = axis_labels[idx]
+        if isinstance(candidate, str) and candidate.strip():
+            return str(candidate)
+
+    return None
+
+
+def _dims_entries_from_payload(
+    payload: NotifyDimsPayload,
+    *,
+    axis_index: int,
+    axis_target: str,
+) -> list[tuple[Any, ...]]:
+    entries: list[tuple[Any, ...]] = []
+
+    entries.append(("view", "main", "ndisplay", int(payload.ndisplay)))
+    if payload.displayed is not None:
+        entries.append(("view", "main", "displayed", tuple(int(idx) for idx in payload.displayed)))
+
+    current_step = tuple(int(v) for v in payload.current_step)
+    entries.append(
+        (
+            "dims",
+            "main",
+            "current_step",
+            current_step,
+            {"axis_index": axis_index, "axis_target": axis_target},
+        )
+    )
+
+    entries.append(("dims", "main", "mode", str(payload.mode)))
+    if payload.order is not None:
+        entries.append(("dims", "main", "order", tuple(int(idx) for idx in payload.order)))
+    if payload.axis_labels is not None:
+        entries.append(("dims", "main", "axis_labels", tuple(str(label) for label in payload.axis_labels)))
+    if getattr(payload, "labels", None) is not None:
+        entries.append(("dims", "main", "labels", tuple(str(label) for label in payload.labels)))
+
+    entries.append(("multiscale", "main", "level", int(payload.current_level)))
+    entries.append(
+        (
+            "multiscale",
+            "main",
+            "levels",
+            tuple(dict(level) for level in payload.levels),
+        )
+    )
+    entries.append(
+        (
+            "multiscale",
+            "main",
+            "level_shapes",
+            tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
+        )
+    )
+    entries.append(("multiscale", "main", "downgraded", payload.downgraded))
+
+    return entries
+
+
+def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
+    snapshot = ledger.snapshot()
+
+    def require(scope: str, key: str) -> Any:
+        entry = snapshot.get((scope, "main", key))
+        if entry is None:
+            raise AssertionError(f"ledger missing {scope}/{key}")
+        return entry.value
+
+    def optional(scope: str, key: str) -> Any:
+        entry = snapshot.get((scope, "main", key))
+        return None if entry is None else entry.value
+
+    current_step_raw = require("dims", "current_step")
+    current_step = tuple(int(v) for v in current_step_raw)
+    level_shapes_raw = require("multiscale", "level_shapes")
+    level_shapes = tuple(
+        tuple(int(dim) for dim in shape) for shape in level_shapes_raw
+    )
+    levels_raw = require("multiscale", "levels")
+    levels = tuple(dict(level) for level in levels_raw)
+    current_level = int(require("multiscale", "level"))
+    downgraded_raw = optional("multiscale", "downgraded")
+    downgraded = None if downgraded_raw is None else bool(downgraded_raw)
+    mode = str(require("dims", "mode"))
+    ndisplay = int(require("view", "ndisplay"))
+
+    axis_labels_raw = optional("dims", "axis_labels")
+    axis_labels = (
+        tuple(str(label) for label in axis_labels_raw)
+        if axis_labels_raw is not None
+        else None
+    )
+
+    order_raw = optional("dims", "order")
+    order = (
+        tuple(int(idx) for idx in order_raw)
+        if order_raw is not None
+        else None
+    )
+
+    displayed_raw = optional("view", "displayed")
+    displayed = (
+        tuple(int(idx) for idx in displayed_raw)
+        if displayed_raw is not None
+        else None
+    )
+
+    labels_raw = optional("dims", "labels")
+    labels = (
+        tuple(str(label) for label in labels_raw)
+        if labels_raw is not None
+        else None
+    )
+
+    return NotifyDimsPayload(
+        current_step=current_step,
+        level_shapes=level_shapes,
+        levels=levels,
+        current_level=current_level,
+        downgraded=downgraded,
+        mode=mode,
+        ndisplay=ndisplay,
+        axis_labels=axis_labels,
+        order=order,
+        displayed=displayed,
+        labels=labels,
+    )
+
+
+def reduce_dims_update(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
     *,
     axis: object,
     prop: str,
@@ -398,94 +670,77 @@ def apply_dims_state_update(
     set_value: Optional[int] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
+    origin: str = "control.dims",
 ) -> StateUpdateResult:
-    """Apply a dims state update returning the updated step list."""
+    ts = _now(timestamp)
 
-    with lock:
-        current = scene.latest_state.current_step
+    payload = _ledger_dims_payload(ledger)
 
-    ndim_value = meta.get("ndim")
-    if ndim_value is None:
-        assert current is not None, "dims metadata missing ndim and current_step fallback"
-        ndim = len(current)
-    else:
-        assert isinstance(ndim_value, (int, float, str)), "ndim metadata must be numeric"
-        ndim = int(ndim_value)
-    assert ndim > 0, "dims metadata must declare positive ndim"
+    step = [int(v) for v in payload.current_step]
+    ndim = len(step)
+    assert ndim > 0, "ledger dims metadata missing dimensions"
 
-    step = list(int(x) for x in (current or (0,) * int(ndim)))
-    if len(step) < int(ndim):
-        step.extend([0] * (int(ndim) - len(step)))
+    if len(step) < ndim:
+        step.extend([0] * (ndim - len(step)))
 
-    idx = resolve_axis_index(axis, meta, len(step))
+    idx = resolve_axis_index(
+        axis,
+        order=payload.order,
+        axis_labels=payload.axis_labels,
+        ndim=len(step),
+    )
     if idx is None:
         raise ValueError("unable to resolve axis index for dims update")
 
-    axis_label = axis_label_from_meta(meta, idx)
+    axis_label = _axis_label_from_axes(payload.order, payload.axis_labels, idx)
     control_target = axis_label or str(idx)
 
+    target = int(step[idx])
+    if value is not None:
+        target = int(value)
+    if step_delta is not None:
+        target += int(step_delta)
+    if set_value is not None:
+        target = int(set_value)
+
+    shapes_raw = payload.level_shapes
+    assert shapes_raw, "ledger dims metadata missing level_shapes"
+    level_idx = int(payload.current_level)
+    assert 0 <= level_idx < len(shapes_raw), "current_level out of bounds for level_shapes"
+    shape_raw = shapes_raw[level_idx]
+    assert isinstance(shape_raw, Sequence), "level_shapes entry must be sequence"
+    assert idx < len(shape_raw), "axis index outside level_shapes entry"
+    size_val = int(shape_raw[idx])
+    assert size_val > 0, "level_shapes entries must be positive"
+    target = max(0, min(size_val - 1, target))
+
+    step[idx] = int(target)
+
+    payload_dict = payload.to_dict()
+    step_list = [int(v) for v in step]
+    payload_dict["step"] = step_list
+    payload_dict["current_step"] = step_list
+    payload_dict["current_level"] = int(payload.current_level)
+    payload = NotifyDimsPayload.from_dict(payload_dict)
+
     with lock:
-        meta_entry = get_control_meta(scene, "dims", control_target, prop)
+        store.last_scene_seq = increment_server_sequence(store)
+        meta_entry = get_control_meta(store, "dims", control_target, prop)
+        meta_entry.last_server_seq = store.last_scene_seq
+        meta_entry.last_timestamp = ts
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "dims apply incoming: axis=%s target=%s prop=%s value=%r step_delta=%r set_value=%r current_step=%s",
-                idx,
-                control_target,
-                prop,
-                value,
-                step_delta,
-                set_value,
-                current,
-            )
-
-        target = int(step[idx])
-        if value is not None:
-            target = int(value)
-        if step_delta is not None:
-            target += int(step_delta)
-        if set_value is not None:
-            target = int(set_value)
-
-        shapes_raw = meta["level_shapes"]
-        assert isinstance(shapes_raw, Sequence) and shapes_raw, "dims metadata missing level_shapes"
-        level_idx_raw = meta.get("current_level", 0)
-        level_idx = int(level_idx_raw)
-        assert 0 <= level_idx < len(shapes_raw), "current_level out of bounds for level_shapes"
-        shape_raw = shapes_raw[level_idx]
-        assert isinstance(shape_raw, Sequence), "level_shapes entry must be sequence"
-        assert idx < len(shape_raw), "axis index outside level_shapes entry"
-        size_val = int(shape_raw[idx])
-        assert size_val > 0, "level_shapes entries must be positive"
-        target = max(0, min(size_val - 1, target))
-
-        step[idx] = int(target)
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "dims apply result: axis=%s target=%s prop=%s stored=%s step=%s",
-                idx,
-                control_target,
-                prop,
-                step[idx],
-                tuple(step),
-            )
-
-        latest = replace(scene.latest_state, current_step=tuple(step))
-        scene.latest_state = latest
-
-        server_seq = increment_server_sequence(scene)
-        meta_entry.last_server_seq = server_seq
-        meta_entry.last_timestamp = float(timestamp) if timestamp is not None else time.time()
-
-    ts = float(timestamp) if timestamp is not None else time.time()
+    ledger.batch_record_confirmed(
+        _dims_entries_from_payload(payload, axis_index=idx, axis_target=control_target),
+        origin=origin,
+        timestamp=ts,
+    )
 
     return StateUpdateResult(
         scope="dims",
         target=control_target,
         key=prop,
         value=int(step[idx]),
-        server_seq=server_seq,
+        server_seq=store.last_scene_seq,
         intent_id=intent_id,
         timestamp=ts,
         axis_index=idx,
@@ -493,19 +748,147 @@ def apply_dims_state_update(
     )
 
 
-def axis_label_from_meta(meta: Mapping[str, Any], idx: int) -> Optional[str]:
-    """Resolve the preferred axis label for *idx*, if available."""
+def reduce_multiscale_policy(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    policy: str,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.multiscale",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    normalized = str(policy)
 
-    order = meta.get("order")
-    if isinstance(order, Sequence) and idx < len(order):
-        candidate = order[idx]
-        if isinstance(candidate, str) and candidate.strip():
-            return str(candidate)
+    with lock:
+        store.multiscale_state["policy"] = normalized
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "multiscale", "main", "policy")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
 
-    labels = meta.get("axis_labels")
-    if isinstance(labels, Sequence) and idx < len(labels):
-        candidate = labels[idx]
-        if isinstance(candidate, str) and candidate.strip():
-            return str(candidate)
+    ledger.record_confirmed(
+        "multiscale",
+        "main",
+        "policy",
+        normalized,
+        origin=origin,
+        timestamp=ts,
+    )
 
-    return None
+    return StateUpdateResult(
+        scope="multiscale",
+        target="main",
+        key="policy",
+        value=normalized,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def reduce_multiscale_level(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    level: int,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.multiscale",
+) -> StateUpdateResult:
+    ts = _now(timestamp)
+    value = int(level)
+
+    with lock:
+        store.multiscale_state["current_level"] = value
+        server_seq = increment_server_sequence(store)
+        meta = get_control_meta(store, "multiscale", "main", "level")
+        meta.last_server_seq = server_seq
+        meta.last_timestamp = ts
+
+    ledger.record_confirmed(
+        "multiscale",
+        "main",
+        "level",
+        value,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    return StateUpdateResult(
+        scope="multiscale",
+        target="main",
+        key="level",
+        value=value,
+        server_seq=server_seq,
+        intent_id=intent_id,
+        timestamp=ts,
+    )
+
+
+def reduce_camera_state(
+    ledger: ServerStateLedger,
+    *,
+    center: Optional[Sequence[float]] = None,
+    zoom: Optional[float] = None,
+    angles: Optional[Sequence[float]] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.camera",
+) -> Dict[str, Any]:
+    if center is None and zoom is None and angles is None:
+        raise ValueError("camera reducer requires at least one property")
+
+    ts = _now(timestamp)
+    ack: Dict[str, Any] = {}
+
+    pending: list[tuple[str, str, str, Any]] = []
+
+    if center is not None:
+        normalized_center = tuple(float(c) for c in center)
+        pending.append(("camera", "main", "center", normalized_center))
+        ack["center"] = [float(c) for c in normalized_center]
+
+    if zoom is not None:
+        zoom_value = float(zoom)
+        pending.append(("camera", "main", "zoom", zoom_value))
+        ack["zoom"] = zoom_value
+
+    if angles is not None:
+        if len(angles) < 3:
+            raise ValueError("camera angles require three components")
+        normalized_angles = (
+            float(angles[0]),
+            float(angles[1]),
+            float(angles[2]),
+        )
+        pending.append(("camera", "main", "angles", normalized_angles))
+        ack["angles"] = [float(a) for a in normalized_angles]
+
+    for scope, target, key, value in pending:
+        ledger.record_confirmed(scope, target, key, value, origin=origin, timestamp=ts)
+
+    return ack
+
+
+__all__ = [
+    "StateUpdateResult",
+    "clamp_level",
+    "clamp_opacity",
+    "clamp_sample_step",
+    "is_valid_render_mode",
+    "normalize_clim",
+    "reduce_camera_state",
+    "reduce_dims_update",
+    "reduce_layer_property",
+    "reduce_multiscale_level",
+    "reduce_multiscale_policy",
+    "reduce_volume_colormap",
+    "reduce_volume_contrast_limits",
+    "reduce_volume_opacity",
+    "reduce_volume_render_mode",
+    "reduce_volume_sample_step",
+    "resolve_axis_index",
+    "is_valid_render_mode",
+]

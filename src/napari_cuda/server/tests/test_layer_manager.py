@@ -8,7 +8,7 @@ import numpy as np
 
 from napari.components.viewer_model import ViewerModel
 
-from napari_cuda.server.state.layer_manager import ViewerSceneManager
+from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 
 

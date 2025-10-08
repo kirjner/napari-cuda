@@ -15,10 +15,11 @@ import pytest
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.rendering.viewer_builder import CanonicalAxes
 
-from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.state.server_scene import create_server_scene_data
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.scene import create_server_scene_data
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.state.server_mirrors import ServerDimsMirror
+from napari_cuda.server.control.state_reducers import _dims_entries_from_payload
+from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker
 from napari_cuda.server.rendering.debug_tools import DebugConfig
 
@@ -78,13 +79,13 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     server._state_lock = threading.RLock()
     server._state_ledger = ServerStateLedger()
     scene = create_server_scene_data(policy_event_path=tmp_path / "policy_events.jsonl")
-    scene.latest_state = ServerSceneState(current_step=(0,))
+    scene.latest_state = RenderSceneSnapshot(current_step=(0,))
     scene.camera_commands = deque()
     scene.policy_metrics_snapshot = {}
     scene.multiscale_state = {}
     scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
     server._scene = scene
-    server._scene.last_dims_payload = NotifyDimsPayload.from_dict(
+    baseline_dims = NotifyDimsPayload.from_dict(
         {
             'step': [0],
             'current_step': [0],
@@ -98,6 +99,12 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
             'current_level': 0,
         }
     )
+    server._state_ledger.batch_record_confirmed(
+        _dims_entries_from_payload(baseline_dims, axis_index=0, axis_target='z'),
+        origin="test.bootstrap",
+    )
+    scene.multiscale_state["current_level"] = 0
+    scene.multiscale_state["levels"] = [{'index': 0, 'shape': [1]}]
     server.broadcasts = broadcasts
     server.broadcasted_dims = dims_broadcasts
     server.loop = loop
@@ -118,7 +125,6 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
 
     def _mirror_apply(payload: NotifyDimsPayload) -> None:
         with server._state_lock:
-            server._scene.last_dims_payload = payload
             multiscale_state = server._scene.multiscale_state
             multiscale_state["current_level"] = payload.current_level
             multiscale_state["levels"] = [dict(level) for level in payload.levels]

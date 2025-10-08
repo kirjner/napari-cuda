@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
 
 
@@ -28,7 +28,7 @@ def test_drain_pending_updates_returns_last_values() -> None:
     mailbox.enqueue_display_mode(3)
     mailbox.enqueue_multiscale(1, "coarse")
     mailbox.enqueue_multiscale(2, None)
-    snapshot = ServerSceneState(center=(1.0, 2.0, 3.0), zoom=1.25)
+    snapshot = RenderSceneSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25)
     mailbox.enqueue_scene_state(snapshot)
 
     updates = mailbox.drain()
@@ -69,7 +69,7 @@ def test_zoom_hint_recent_then_stale() -> None:
 def test_update_state_signature_detects_changes() -> None:
     mailbox = ServerCommandQueue()
 
-    base = ServerSceneState(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
+    base = RenderSceneSnapshot(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
     assert mailbox.update_state_signature(base)
     # Identical state should not trigger a change
     assert not mailbox.update_state_signature(base)

@@ -14,7 +14,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING
+from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any
 
 import websockets
 import importlib.resources as ilr
@@ -24,15 +24,16 @@ from websockets.exceptions import ConnectionClosed
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 
 
-from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
-from napari_cuda.server.state.server_scene import (
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
+from napari_cuda.server.scene import (
     ServerSceneCommand,
     ServerSceneData,
     create_server_scene_data,
+    layer_controls_from_ledger,
     prune_control_metadata,
 )
-from napari_cuda.server.state.layer_manager import ViewerSceneManager
+from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.bitstream import ParamCache, configure_bitstream
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.utils.env import env_bool
@@ -57,10 +58,10 @@ from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
     _broadcast_dims_state,
     broadcast_stream_config,
-    handle_state,
+    ingest_state,
 )
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.state.server_mirrors import ServerDimsMirror
+from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
@@ -205,7 +206,6 @@ class EGLHeadlessServer:
 
         def _mirror_apply(payload: NotifyDimsPayload) -> None:
             with self._state_lock:
-                self._scene.last_dims_payload = payload
                 multiscale_state = self._scene.multiscale_state
                 multiscale_state["current_level"] = payload.current_level
                 multiscale_state["levels"] = [dict(level) for level in payload.levels]
@@ -404,7 +404,54 @@ class EGLHeadlessServer:
             except Exception:
                 logger.debug("ensure_keyframe: request_idr failed", exc_info=True)
 
-    async def _handle_set_ndisplay(self, ndisplay: int) -> None:
+    def _stage_layer_controls_from_ledger(self) -> None:
+        controls = layer_controls_from_ledger(self._state_ledger.snapshot())
+        if not controls:
+            return
+
+        ledger_sync: list[tuple[str, Any]] = []
+        with self._state_lock:
+            pending = self._scene.pending_layer_updates
+            for layer_id, props in controls.items():
+                layer_pending = pending.setdefault(layer_id, {})
+                for key, value in props.items():
+                    layer_pending[str(key)] = value
+
+            primary_props = next((props for props in controls.values() if props), None)
+            if primary_props:
+                volume_state = self._scene.volume_state
+
+                colormap = primary_props.get("colormap")
+                if colormap is not None:
+                    name = str(colormap)
+                    if volume_state.get("colormap") != name:
+                        volume_state["colormap"] = name
+                        ledger_sync.append(("colormap", name))
+
+                clim = primary_props.get("contrast_limits")
+                if clim is not None:
+                    lo, hi = (float(clim[0]), float(clim[1]))
+                    if volume_state.get("clim") != [lo, hi]:
+                        volume_state["clim"] = [lo, hi]
+                        ledger_sync.append(("contrast_limits", (lo, hi)))
+
+                opacity = primary_props.get("opacity")
+                if opacity is not None:
+                    alpha = float(opacity)
+                    if volume_state.get("opacity") != alpha:
+                        volume_state["opacity"] = alpha
+                        ledger_sync.append(("opacity", alpha))
+
+        for key, value in ledger_sync:
+            self._state_ledger.record_confirmed(
+                "volume",
+                "main",
+                key,
+                value,
+                origin="control.layer_sync",
+            )
+
+    async def _ingest_set_ndisplay(self, ndisplay: int) -> None:
         """Apply a 2D/3D view toggle request.
 
         - Normalizes `ndisplay` to 2 or 3.
@@ -432,6 +479,7 @@ class EGLHeadlessServer:
                         step=tuple(current_step),
                         level=int(level),
                     )
+            self._stage_layer_controls_from_ledger()
         else:
             restore_state = self._scene.plane_restore_state
             if restore_state is not None:
@@ -439,6 +487,35 @@ class EGLHeadlessServer:
                     latest = self._scene.latest_state
                     self._scene.latest_state = replace(latest, current_step=restore_state.step)
                     self._scene.multiscale_state["current_level"] = int(restore_state.level)
+                self._state_ledger.record_confirmed(
+                    "dims",
+                    "main",
+                    "current_step",
+                    tuple(int(v) for v in restore_state.step),
+                    origin="control.ndisplay_restore",
+                )
+                self._state_ledger.record_confirmed(
+                    "multiscale",
+                    "main",
+                    "level",
+                    int(restore_state.level),
+                    origin="control.ndisplay_restore",
+                )
+                self._state_ledger.record_confirmed(
+                    "view",
+                    "main",
+                    "ndisplay",
+                    2,
+                    origin="control.ndisplay_restore",
+                )
+                self._state_ledger.record_confirmed(
+                    "dims",
+                    "main",
+                    "mode",
+                    "plane",
+                    origin="control.ndisplay_restore",
+                )
+            self._stage_layer_controls_from_ledger()
         # Ask worker to apply the mode switch on the render thread
         if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
             try:
@@ -622,7 +699,7 @@ class EGLHeadlessServer:
         self._start_worker(loop)
         # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
         async def state_handler(ws: websockets.WebSocketServerProtocol) -> None:
-            await handle_state(self, ws)
+            await ingest_state(self, ws)
 
         state_server = await websockets.serve(
             state_handler,
@@ -632,7 +709,7 @@ class EGLHeadlessServer:
             max_size=None,
         )
         pixel_server = await websockets.serve(
-            self._handle_pixel,
+            self._ingest_pixel,
             self.host,
             self.pixel_port,
             compression=None,
@@ -671,9 +748,9 @@ class EGLHeadlessServer:
     def _stop_worker(self) -> None:
         lifecycle_stop_worker(self._worker_lifecycle)
 
-    async def _handle_pixel(self, ws: websockets.WebSocketServerProtocol):
+    async def _ingest_pixel(self, ws: websockets.WebSocketServerProtocol):
         pixel_channel.prepare_client_attach(self._pixel_channel)
-        await pixel_channel.handle_client(
+        await pixel_channel.ingest_client(
             self._pixel_channel,
             ws,
             config=self._pixel_config,
@@ -703,6 +780,7 @@ class EGLHeadlessServer:
             payload = build_notify_scene_payload(
                 self._scene,
                 self._scene_manager,
+                ledger_snapshot=self._state_ledger.snapshot(),
                 timestamp=time.time(),
             )
             json_payload = json.dumps(payload.to_dict())

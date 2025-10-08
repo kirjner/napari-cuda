@@ -97,7 +97,7 @@ def prepare_client_attach(state: PixelChannelState) -> None:
     state.needs_stream_config = True
 
 
-async def handle_client(
+async def ingest_client(
     state: PixelChannelState,
     ws: websockets.WebSocketServerProtocol,
     *,
@@ -108,7 +108,7 @@ async def handle_client(
     on_clients_change: Callable[[], None],
     on_client_join: Optional[Callable[[], None]] = None,
 ) -> None:
-    """Handle a pixel-channel websocket connection."""
+    """Ingest a pixel-channel websocket connection."""
 
     state.broadcast.clients.add(ws)
     on_clients_change()

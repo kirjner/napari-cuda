@@ -1,7 +1,7 @@
 graph LR
     %% Async control loop components
     subgraph AsyncLoop["EGLHeadlessServer (async loop)"]
-        SSC["control_channel_server\n(handle_state, dims/spec)"]
+        SSC["control_channel_server\n(ingest_state, dims/spec)"]
         PCH["pixel_channel\n(client lifecycle, keyframe)"]
         SceneBag["ServerSceneData\n(mutable state bag)"]
         PixelBag["PixelBroadcastState\n(frame queue + metrics)"]

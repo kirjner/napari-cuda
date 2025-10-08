@@ -20,7 +20,7 @@ from napari_cuda.protocol.snapshots import (
     scene_snapshot,
     viewer_snapshot_from_blocks,
 )
-from napari_cuda.server.state.server_scene import (
+from napari_cuda.server.scene import (
     LayerControlState,
     default_layer_controls,
     layer_controls_to_dict,

@@ -4,15 +4,17 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
+from napari._vispy.layers.image import _napari_cmap_to_vispy
+from napari.utils.colormaps.colormap_utils import ensure_colormap
 
-from napari_cuda.server.state.scene_state_applier import (
+from napari_cuda.server.runtime.scene_state_applier import (
     SceneDrainResult,
     SceneStateApplier,
     SceneStateApplyContext,
 )
-from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
-from napari_cuda.server.state.scene_types import SliceROI
+from napari_cuda.server.runtime.scene_types import SliceROI
 
 
 class _StubViewer:
@@ -205,7 +207,7 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
 
 def test_apply_volume_params_sets_visual_fields() -> None:
     viewer = _StubViewer()
-    visual = SimpleNamespace(method="", cmap="", clim=None, opacity=0.0, relative_step_size=1.0)
+    visual = SimpleNamespace(method="", cmap=None, clim=None, opacity=0.0, relative_step_size=1.0)
 
     ctx = SceneStateApplyContext(
         use_volume=True,
@@ -239,10 +241,45 @@ def test_apply_volume_params_sets_visual_fields() -> None:
     )
 
     assert visual.method == "mip"
-    assert visual.cmap == "grays"
+    expected_gray = _napari_cmap_to_vispy(ensure_colormap("gray"))
+    assert hasattr(visual.cmap, "colors")
+    assert np.allclose(np.asarray(visual.cmap.colors), np.asarray(expected_gray.colors))
     assert visual.clim == (1.0, 2.0)
     assert visual.opacity == 0.7
     assert visual.relative_step_size == 0.2
+
+
+def test_apply_volume_params_accepts_named_colormap() -> None:
+    viewer = _StubViewer()
+    visual = SimpleNamespace(method="", cmap=None, clim=None, opacity=0.0, relative_step_size=1.0)
+
+    ctx = SceneStateApplyContext(
+        use_volume=True,
+        viewer=viewer,
+        camera=None,
+        visual=visual,
+        layer=None,
+        scene_source=None,
+        active_ms_level=0,
+        z_index=None,
+        last_roi=None,
+        preserve_view_on_switch=True,
+        sticky_contrast=True,
+        idr_on_z=False,
+        data_wh=(0, 0),
+        state_lock=threading.Lock(),
+        ensure_scene_source=lambda: None,
+        plane_scale_for_level=lambda *_: (1.0, 1.0),
+        load_slice=lambda *_: None,
+        mark_render_tick_needed=lambda: None,
+        request_encoder_idr=None,
+    )
+
+    SceneStateApplier.apply_volume_params(ctx, colormap="green")
+
+    expected_green = _napari_cmap_to_vispy(ensure_colormap("green"))
+    assert hasattr(visual.cmap, "colors")
+    assert np.allclose(np.asarray(visual.cmap.colors), np.asarray(expected_green.colors))
 
 
 def test_apply_layer_updates_sets_gamma_on_visual() -> None:
@@ -349,7 +386,7 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
     )
 
     queue = ServerCommandQueue()
-    state = ServerSceneState(current_step=(1, 0, 0))
+    state = RenderSceneSnapshot(current_step=(1, 0, 0))
 
     result = SceneStateApplier.drain_updates(ctx, state=state, mailbox=queue)
 
@@ -390,7 +427,7 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
     )
 
     queue = ServerCommandQueue()
-    state = ServerSceneState(
+    state = RenderSceneSnapshot(
         current_step=(1, 0, 0),
         center=(5.0, 6.0, 7.0),
         zoom=0.5,

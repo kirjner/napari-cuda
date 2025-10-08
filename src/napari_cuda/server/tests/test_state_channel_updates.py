@@ -28,18 +28,17 @@ from napari_cuda.server.control.resumable_history_store import (
 from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
-from napari_cuda.server.state.layer_manager import ViewerSceneManager
+from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
-from napari_cuda.server.runtime.server_command_queue import RenderDelta
-from napari_cuda.server.state.server_scene import create_server_scene_data
-from napari_cuda.server.control.state_reducers import apply_layer_state_update
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.scene import create_server_scene_data
+from napari_cuda.server.control.state_reducers import reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.state.server_mirrors import ServerDimsMirror
+from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 
 
 class _CaptureWorker:
     def __init__(self) -> None:
-        self.deltas: list[RenderDelta] = []
         self.policy_calls: list[str] = []
         self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
@@ -60,9 +59,6 @@ class _CaptureWorker:
             step=(0, 0),
             use_volume=False,
         )
-
-    def enqueue_update(self, delta: RenderDelta) -> None:
-        self.deltas.append(delta)
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -146,7 +142,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
 
     server._state_clients = {fake_ws}
-    server._scene.last_dims_payload = NotifyDimsPayload.from_dict(
+    baseline_dims = NotifyDimsPayload.from_dict(
         {
             "step": [0, 0, 0],
             "current_step": [0, 0, 0],
@@ -160,6 +156,8 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
             "current_level": 0,
         }
     )
+    server._scene.multiscale_state["current_level"] = 0
+    server._scene.multiscale_state["levels"] = [{"index": 0, "shape": [10, 10, 10]}]
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)
@@ -173,7 +171,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     def _mirror_apply(payload: NotifyDimsPayload) -> None:
         with server._state_lock:
-            server._scene.last_dims_payload = payload
             multiscale_state = server._scene.multiscale_state
             multiscale_state["current_level"] = payload.current_level
             multiscale_state["levels"] = [dict(level) for level in payload.levels]
@@ -189,7 +186,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         on_payload=_mirror_apply,
     )
 
-    initial_payload = server._scene.last_dims_payload
+    initial_payload = baseline_dims
     _record_dims_to_ledger(server, initial_payload, origin="bootstrap")
     server._dims_mirror.start()
 
@@ -200,13 +197,13 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._ndisplay_calls: list[int] = []
 
-    async def _handle_set_ndisplay(ndisplay: int) -> None:
+    async def _ingest_set_ndisplay(ndisplay: int) -> None:
         value = 3 if int(ndisplay) >= 3 else 2
         server._ndisplay_calls.append(value)
         server.use_volume = bool(value == 3)
         server._scene.use_volume = bool(value == 3)
 
-    server._handle_set_ndisplay = _handle_set_ndisplay
+    server._ingest_set_ndisplay = _ingest_set_ndisplay
 
     server._resumable_store = ResumableHistoryStore(
         {
@@ -330,13 +327,12 @@ def test_layer_update_emits_ack_and_notify() -> None:
 
     frame = _build_state_update(payload, intent_id="layer-intent", frame_id="state-layer-1")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    assert server._worker.deltas, "expected worker delta"
-    snapshot = server._worker.deltas[-1].scene_state
-    assert snapshot is not None
-    assert snapshot.layer_updates == {"layer-0": {"colormap": "red"}}
+    entry = server._state_ledger.get("layer", "layer-0", "colormap")
+    assert entry is not None
+    assert entry.value == "red"
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -365,7 +361,7 @@ def test_call_command_requests_keyframe() -> None:
         payload={"command": "napari.pixel.request_keyframe"},
     )
 
-    asyncio.run(state_channel_handler._handle_call_command(server, frame.to_dict(), fake_ws))
+    asyncio.run(state_channel_handler._ingest_call_command(server, frame.to_dict(), fake_ws))
 
     assert server._ensure_keyframe_calls == 1
     replies = _frames_of_type(captured, "reply.command")
@@ -385,7 +381,7 @@ def test_call_command_unknown_command_errors() -> None:
         payload={"command": "napari.pixel.unknown"},
     )
 
-    asyncio.run(state_channel_handler._handle_call_command(server, frame.to_dict(), fake_ws))
+    asyncio.run(state_channel_handler._ingest_call_command(server, frame.to_dict(), fake_ws))
 
     errors = _frames_of_type(captured, "error.command")
     assert errors, "expected error.command frame"
@@ -414,7 +410,7 @@ def test_call_command_rejection_propagates_error() -> None:
         payload={"command": "napari.pixel.request_keyframe"},
     )
 
-    asyncio.run(state_channel_handler._handle_call_command(server, frame.to_dict(), fake_ws))
+    asyncio.run(state_channel_handler._ingest_call_command(server, frame.to_dict(), fake_ws))
 
     errors = _frames_of_type(captured, "error.command")
     assert errors, "expected error.command frame"
@@ -437,7 +433,7 @@ def test_layer_update_rejects_unknown_key() -> None:
 
     frame = _build_state_update(payload, intent_id="bad-layer", frame_id="state-layer-err")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
     acks = _frames_of_type(captured, "ack.state")
@@ -461,12 +457,12 @@ def test_dims_update_emits_ack_and_notify() -> None:
 
     frame = _build_state_update(payload, intent_id="dims-intent", frame_id="state-dims-1")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    assert server._scene.latest_state.current_step[0] == 5
-    assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload.current_step[0] == 0
+    current_step_entry = server._state_ledger.get("dims", "main", "current_step")
+    assert current_step_entry is not None
+    assert tuple(current_step_entry.value) == (5, 0, 0)
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -478,7 +474,10 @@ def test_dims_update_emits_ack_and_notify() -> None:
         "applied_value": 5,
     }
 
-    assert not _frames_of_type(captured, "notify.dims")
+    dims_frames = _frames_of_type(captured, "notify.dims")
+    assert dims_frames
+    dims_payload = dims_frames[-1]["payload"]
+    assert dims_payload["current_step"][0] == 5
 
 
 def test_view_ndisplay_update_ack_is_immediate() -> None:
@@ -495,14 +494,11 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
 
     frame = _build_state_update(payload, intent_id="view-intent", frame_id="state-view-1")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
     assert server._ndisplay_calls == [3]
     assert server.use_volume is True
-    assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload.ndisplay == 2
-    assert server._scene.last_dims_payload.mode == 'plane'
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
@@ -535,9 +531,6 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     dims_payload = dims_frames[-1]["payload"]
     assert dims_payload["ndisplay"] == 3
     assert dims_payload["mode"] == "volume"
-    assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload.ndisplay == 3
-    assert server._scene.last_dims_payload.mode == "volume"
 
 
 
@@ -567,9 +560,6 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     assert payload["current_level"] == 1
     assert payload.get("downgraded") is True
 
-    assert server._scene.last_dims_payload is not None
-    assert server._scene.last_dims_payload.level_shapes[1] == (256, 128, 32)
-
     ms_state = server._scene.multiscale_state
     assert ms_state.get("current_level") == 1
     assert ms_state.get("levels")[1]["shape"] == [256, 128, 32]
@@ -590,7 +580,7 @@ def test_volume_render_mode_update() -> None:
 
     frame = _build_state_update(payload, intent_id="volume-intent", frame_id="state-volume-1")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
     assert server._scene.volume_state.get("mode") == "iso"
@@ -623,7 +613,7 @@ def test_camera_zoom_update_emits_notify() -> None:
 
     frame = _build_state_update(payload, intent_id="cam-zoom", frame_id="state-cam-1")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
     commands = server._scene.camera_commands
@@ -664,7 +654,7 @@ def test_camera_reset_triggers_keyframe() -> None:
 
     frame = _build_state_update(payload, intent_id="cam-reset", frame_id="state-cam-2")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
     commands = server._scene.camera_commands
@@ -700,13 +690,16 @@ def test_camera_set_updates_latest_state() -> None:
 
     frame = _build_state_update(payload, intent_id="cam-set", frame_id="state-cam-3")
 
-    asyncio.run(state_channel_handler._handle_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    latest = server._scene.latest_state
-    assert latest.center == (1.0, 2.0, 3.0)
-    assert latest.zoom == 2.5
-    assert latest.angles == (0.1, 0.2, 0.3)
+    center_entry = server._state_ledger.get("camera", "main", "center")
+    zoom_entry = server._state_ledger.get("camera", "main", "zoom")
+    angles_entry = server._state_ledger.get("camera", "main", "angles")
+
+    assert center_entry is not None and center_entry.value == (1.0, 2.0, 3.0)
+    assert zoom_entry is not None and zoom_entry.value == 2.5
+    assert angles_entry is not None and angles_entry.value == (0.1, 0.2, 0.3)
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks
@@ -737,7 +730,7 @@ def test_parse_failure_emits_rejection_ack() -> None:
         "payload": {"scope": "layer", "key": "opacity"},
     }
 
-    asyncio.run(state_channel_handler._handle_state_update(server, bad_frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, bad_frame, None))
     _drain_scheduled(scheduled)
 
     acks = _frames_of_type(captured, "ack.state")
@@ -756,20 +749,24 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 
         server, scheduled, captured = _make_server()
         server._scene.use_volume = False
-        apply_layer_state_update(
+        reduce_layer_property(
             server._scene,
+            server._state_ledger,
             server._state_lock,
             layer_id="layer-0",
             prop="opacity",
             value=0.25,
         )
-        apply_layer_state_update(
+        reduce_layer_property(
             server._scene,
+            server._state_ledger,
             server._state_lock,
             layer_id="layer-0",
             prop="colormap",
             value="viridis",
         )
+
+        server._scene.latest_state = RenderSceneSnapshot(layer_updates=server._scene.pending_layer_updates.copy())
 
         server._scene_manager.update_from_sources(
             worker=server._worker,
@@ -825,7 +822,9 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         dims_frames = _frames_of_type(captured, "notify.dims")
         assert dims_frames, "expected notify.dims baseline"
         dims_payload = dims_frames[-1]["payload"]
-        assert dims_payload["step"] == list(server._scene.last_dims_payload.current_step)
+        entry = server._state_ledger.get("dims", "main", "current_step")
+        assert entry is not None
+        assert dims_payload["step"] == list(entry.value)
     finally:
         asyncio.set_event_loop(None)
         loop.close()

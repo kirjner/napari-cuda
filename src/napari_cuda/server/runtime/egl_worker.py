@@ -48,9 +48,9 @@ from napari_cuda.server.rendering.patterns import make_rgba_image
 from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.state.scene_types import SliceROI
+from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
-from napari_cuda.server.state.camera_animator import animate_if_enabled
+from napari_cuda.server.runtime.camera_animator import animate_if_enabled
 import napari_cuda.server.data.policy as level_policy
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.lod import apply_level
@@ -68,15 +68,15 @@ from napari_cuda.server.data.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
 )
-from napari_cuda.server.state.scene_state_applier import (
+from napari_cuda.server.runtime.scene_state_applier import (
     SceneStateApplier,
     SceneStateApplyContext,
     SceneDrainResult,
 )
-from napari_cuda.server.state.camera_controller import process_commands
-from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.state.server_scene import ServerSceneCommand
-from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
+from napari_cuda.server.runtime.camera_controller import process_commands
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.scene import ServerSceneCommand
+from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.runtime.server_command_queue import (
     PendingRenderUpdate,
     RenderDelta,
@@ -111,7 +111,7 @@ def _rect_to_tuple(rect: Rect) -> tuple[float, float, float, float]:
 # Back-compat for tests patching the selector directly
 select_level = lod.select_level
 
-## Camera ops now live in napari_cuda.server.state.camera_ops as free functions.
+## Camera ops now live in napari_cuda.server.runtime.camera_ops as free functions.
 
 class _LevelBudgetError(RuntimeError):
     """Raised when a multiscale level exceeds memory/voxel budgets."""
@@ -1032,7 +1032,7 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def _normalize_scene_state(self, state: ServerSceneState) -> ServerSceneState:
+    def _normalize_scene_state(self, state: RenderSceneSnapshot) -> RenderSceneSnapshot:
         """Return the render-thread-friendly copy of *state*."""
 
         layer_updates = None
@@ -1045,7 +1045,7 @@ class EGLRendererWorker:
             if updates:
                 layer_updates = updates
 
-        return ServerSceneState(
+        return RenderSceneSnapshot(
             center=(tuple(float(c) for c in state.center) if state.center is not None else None),
             zoom=(float(state.zoom) if state.zoom is not None else None),
             angles=(tuple(float(a) for a in state.angles) if state.angles is not None else None),
@@ -1098,7 +1098,7 @@ class EGLRendererWorker:
         self._render_mailbox.enqueue(normalized)
         self._mark_render_tick_needed()
 
-    def apply_state(self, state: ServerSceneState) -> None:
+    def apply_state(self, state: RenderSceneSnapshot) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
         self.enqueue_update(RenderDelta(scene_state=state))

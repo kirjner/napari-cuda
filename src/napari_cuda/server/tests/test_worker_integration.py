@@ -9,9 +9,9 @@ import pytest
 from vispy.geometry import Rect
 
 from napari_cuda.server.app.config import LevelPolicySettings, ServerConfig, ServerCtx
-from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.rendering.display_mode import apply_ndisplay_switch
-from napari_cuda.server.state.server_scene import ServerSceneCommand
+from napari_cuda.server.scene import ServerSceneCommand
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source, CanonicalAxes
 
 
@@ -226,7 +226,7 @@ class _FakeSceneSource:
 @pytest.fixture()
 def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker.EGLRendererWorker":
     from napari_cuda.server.runtime import egl_worker as rw
-    from napari_cuda.server.state import scene_state_applier as ssa
+    from napari_cuda.server.runtime import scene_state_applier as ssa
 
     class _DummyEglContext:
         def __init__(self, width: int, height: int) -> None:
@@ -452,7 +452,7 @@ def test_preserve_view_switch_keeps_camera_range(render_worker_fixture):
     camera.set_range_calls.clear()
     worker._render_tick_required = False
 
-    worker._render_mailbox.enqueue_scene_state(ServerSceneState(current_step=(2, 0, 0)))
+    worker._render_mailbox.enqueue_scene_state(RenderSceneSnapshot(current_step=(2, 0, 0)))
     worker.drain_scene_updates()
 
     assert camera.set_range_calls == []
@@ -469,7 +469,7 @@ def test_preserve_view_disabled_resets_camera(render_worker_fixture):
     camera.set_range_calls.clear()
     worker._render_tick_required = False
 
-    worker._render_mailbox.enqueue_scene_state(ServerSceneState(current_step=(1, 0, 0)))
+    worker._render_mailbox.enqueue_scene_state(RenderSceneSnapshot(current_step=(1, 0, 0)))
     worker.drain_scene_updates()
 
     assert camera.set_range_calls, "camera.set_range should be invoked when preserve-view is disabled"
@@ -480,7 +480,7 @@ def test_layer_updates_drive_napari_layer(render_worker_fixture):
     worker._render_tick_required = False
 
     worker.apply_state(
-        ServerSceneState(
+        RenderSceneSnapshot(
             layer_updates={
                 "layer-0": {
                     "colormap": "red",
@@ -605,7 +605,7 @@ def test_ndisplay_switch_notifies_scene_refresh(render_worker_fixture):
 
     assert worker._render_tick_required is True
     assert captured_steps, "Scene refresh callback was not invoked"
-    from napari_cuda.server.state.plane_restore_state import PlaneRestoreState
+    from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 
     resolved_steps: list[tuple[int, ...]] = []
     for entry in captured_steps:

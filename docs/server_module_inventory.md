@@ -1,10 +1,10 @@
 # Server Module Inventory
 
 Deep-dive catalogue of the server-side code base (Oct 2025). The tree now
-matches the target layout: entry points under `server/app`, authoritative
-state in `server/state`, data helpers in `server/data`, rendering pipeline in
-`server/rendering`, transport in `server/control`, and colocated tests in
-`server/tests`.
+matches the target layout: entry points under `server/app`, ledger + scene
+helpers in `server/scene`, runtime utilities in `server/runtime`, data helpers
+in `server/data`, rendering pipeline in `server/rendering`, transport in
+`server/control`, and colocated tests in `server/tests`.
 
 ## App Package (`server/app`)
 
@@ -24,23 +24,28 @@ state in `server/state`, data helpers in `server/data`, rendering pipeline in
 | `control_channel_server.py` | 3 012 | WebSocket server handling state.update, notify.*, resume tokens, command execution. |
 | `state_reducers.py` | 511 | Reducers that apply `state.update` payloads and emit ledger-backed results. |
 | `resumable_history_store.py` | 249 | Maintains topic history for resume/replay. |
-| `control_payload_builder.py` | 194 | Builds ack/notify payloads from `ServerScene`. |
+| `control_payload_builder.py` | 194 | Builds ack/notify payloads from `ServerSceneData` snapshots + ledger state. |
+| `mirrors/dims_mirror.py` | 118 | Subscribes to the ledger and broadcasts `notify.dims` payloads. |
 | `command_registry.py` | 54 | Maps greenfield command names to callables (e.g., `napari.pixel.request_keyframe`). |
 
-## State Package (`server/state`)
+## Scene Package (`server/scene`)
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas. |
-| `scene_state_applier.py` | 444 | Applies reducer outputs to napari viewer/layer manager. |
+| `data.py` | 318 | Owns `ServerSceneData`, camera command queues, compatibility caches, and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`). |
+| `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas for control baselines. |
+| `plane_restore_state.py` | 23 | Captures plane widget state during 2D/3D transitions (render-thread only metadata). |
+
+## Runtime Helpers (`server/runtime`)
+
+| Module | Lines | Purpose |
+| --- | ---:| --- |
+| `scene_ingest.py` | 196 | Builds immutable `RenderSceneSnapshot` objects from the ledger plus transitional caches. |
+| `scene_state_applier.py` | 444 | Applies `RenderSceneSnapshot` values to the worker’s napari/VisPy objects. |
+| `scene_types.py` | 87 | Typed helpers describing ROI and slice payload structures. |
 | `camera_controller.py` | 287 | Interprets camera intents and delegates to `camera_ops`. |
-| `server_scene.py` | 297 | Aggregates viewer state, metrics snapshots, policy metadata. |
-| `scene_types.py` | 87 | Typed helpers describing scene payload structures. |
-| `camera_ops.py` | 167 | Low-level napari camera mutations. |
+| `camera_ops.py` | 167 | Low-level napari camera mutations for 2D/3D. |
 | `camera_animator.py` | 37 | Optional auto-rotation animation hooks. |
-| `plane_restore_state.py` | 23 | Stores plane widget state during transitions. |
-| `scene_state.py` | 23 | Lightweight container for dims/camera metadata. |
-| `server_state_updates.py` | 4 | Shims for legacy imports (to be removed once callsites migrate). |
 
 ## Data Package (`server/data`)
 

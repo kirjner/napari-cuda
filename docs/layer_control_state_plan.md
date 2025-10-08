@@ -11,14 +11,14 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 ## Proposed structure
 
 1. **LayerControlState dataclass** ✅
-   - Lives in `server_scene.py` and captures canonical properties (`visible`, `opacity`, `blending`, `interpolation`, `gamma`, `colormap`, `contrast_limits`, etc.).
+   - Lives in `server/scene/data.py` and captures canonical properties (`visible`, `opacity`, `blending`, `interpolation`, `gamma`, `colormap`, `contrast_limits`, etc.).
    - `ServerSceneData` stores `layer_controls: dict[layer_id, LayerControlState]`.
 
 2. **Intent helpers** ✅
-   - `server_state_updates.apply_layer_state_update` mutates `layer_controls` (instead of raw dicts) and records deltas in `ServerSceneState.layer_updates`.
+   - `control/state_reducers.py` mutates `layer_controls` (instead of raw dicts) and records deltas in `ServerSceneData.pending_layer_updates` for the worker ingest path.
 
 3. **Worker application** ✅
-   - `SceneStateApplier` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.
+   - `runtime/scene_state_applier.py` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.
 
 4. **Snapshot emission** ✅
    - Layer snapshot blocks (the payload of `notify.scene`) now include a dedicated `controls` map plus a lean `source` section; transport metadata (source path, volume flags, policy metrics) lives under the scene-level `metadata` block.

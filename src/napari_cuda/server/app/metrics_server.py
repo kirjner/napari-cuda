@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from .metrics_core import Metrics
-from napari_cuda.server.state.server_scene import ServerSceneData
+from napari_cuda.server.scene import ServerSceneData
 
 
 def start_metrics_dashboard(

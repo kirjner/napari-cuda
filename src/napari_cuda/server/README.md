@@ -16,7 +16,7 @@ snapshots. When a state websocket client connects:
    - dims metadata → `notify.dims`
 
 `ViewerSceneManager.dims_metadata()` still underpins the HUD, and the latest dims
-snapshot is cached on `ServerSceneData.last_dims_payload` for diagnostics.
+snapshot is pulled directly from the server ledger via `ServerDimsMirror`.
 
 A typical `notify.scene` payload looks like:
 

@@ -56,19 +56,27 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.messages import NotifyDimsPayload, NotifyLayersPayload, NotifyScenePayload, NotifyStreamPayload
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
-from napari_cuda.server.control import state_reducers as state_updates
 from napari_cuda.server.control.state_reducers import (
     StateUpdateResult,
-    apply_dims_state_update,
-    apply_layer_state_update,
-    axis_label_from_meta,
+    clamp_level,
+    clamp_opacity,
+    clamp_sample_step,
+    is_valid_render_mode,
+    normalize_clim,
+    reduce_camera_state,
+    reduce_dims_update,
+    reduce_layer_property,
+    reduce_multiscale_level,
+    reduce_multiscale_policy,
+    reduce_volume_colormap,
+    reduce_volume_contrast_limits,
+    reduce_volume_opacity,
+    reduce_volume_render_mode,
+    reduce_volume_sample_step,
 )
-from napari_cuda.server.runtime.server_command_queue import RenderDelta
-from napari_cuda.server.state.scene_state import ServerSceneState
-from napari_cuda.server.state.server_scene import (
+from napari_cuda.server.scene import (
     ServerSceneCommand,
-    get_control_meta,
-    increment_server_sequence,
+    layer_controls_from_ledger,
     layer_controls_to_dict,
 )
 from napari_cuda.server.control.control_payload_builder import (
@@ -180,7 +188,7 @@ async def _send_command_error(
     await _send_frame(server, ws, frame)
 
 
-async def _handle_call_command(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+async def _ingest_call_command(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     session_id = _state_session(ws)
     if not session_id:
         logger.debug("call.command ignored: missing session id")
@@ -679,6 +687,7 @@ async def _emit_scene_baseline(
                 payload = build_notify_scene_payload(
                     server._scene,
                     server._scene_manager,
+                    ledger_snapshot=server._state_ledger.snapshot(),
                     viewer_settings=_viewer_settings(server),
                 )
             snapshot = store.snapshot_envelope(
@@ -696,6 +705,7 @@ async def _emit_scene_baseline(
             payload = build_notify_scene_payload(
                 server._scene,
                 server._scene_manager,
+                ledger_snapshot=server._state_ledger.snapshot(),
                 viewer_settings=_viewer_settings(server),
             )
         session_id = _state_session(ws)
@@ -791,16 +801,14 @@ async def _emit_stream_baseline(
 
 
 async def _emit_dims_baseline(server: Any, ws: Any) -> None:
-    if server._scene.last_dims_payload is None:
+    mirror = getattr(server, "_dims_mirror", None)
+    if mirror is None:
+        raise AssertionError("dims mirror not initialized")
+    payload = mirror.latest_payload()
+    if payload is None:
         logger.debug("connect: notify.dims baseline skipped (metadata unavailable)")
         return
-    await _broadcast_dims_state(
-        server,
-        payload=server._scene.last_dims_payload,
-        intent_id=None,
-        timestamp=time.time(),
-        targets=[ws],
-    )
+    await _broadcast_dims_state(server, payload=payload, intent_id=None, timestamp=time.time(), targets=[ws])
     if server._log_dims_info:
         logger.info("connect: notify.dims baseline sent")
     else:
@@ -874,8 +882,8 @@ async def broadcast_stream_config(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def handle_state(server: Any, ws: Any) -> None:
-    """Handle a state-channel websocket connection."""
+async def ingest_state(server: Any, ws: Any) -> None:
+    """Ingest a state-channel websocket connection."""
 
     heartbeat_task: asyncio.Task[Any] | None = None
     try:
@@ -945,12 +953,12 @@ async def handle_state(server: Any, ws: Any) -> None:
 
 
 
-async def _handle_session_ack(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+async def _ingest_session_ack(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     _ENVELOPE_PARSER.parse_ack(data)
     return True
 
 
-async def _handle_session_goodbye(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+async def _ingest_session_goodbye(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     reason = None
     code = None
     message = "client requested shutdown"
@@ -982,7 +990,7 @@ async def _handle_session_goodbye(server: Any, data: Mapping[str, Any], ws: Any)
     return True
 
 
-async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
+async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) -> bool:
     try:
         frame = _ENVELOPE_PARSER.parse_state_update(data)
     except Exception:
@@ -1050,7 +1058,7 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             return True
         ndisplay = 3 if int(raw_value) >= 3 else 2
         try:
-            await server._handle_set_ndisplay(ndisplay)
+            await server._ingest_set_ndisplay(ndisplay)
         except Exception:
             logger.debug("state.update view.set_ndisplay failed", exc_info=True)
             await _reject("state.error", "failed to apply ndisplay")
@@ -1380,24 +1388,13 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     )
                     return True
 
-            with server._state_lock:
-                latest = server._scene.latest_state
-                server._scene.latest_state = replace(
-                    latest,
-                    center=center_tuple if center_tuple is not None else latest.center,
-                    zoom=zoom_float if zoom_float is not None else latest.zoom,
-                    angles=angles_tuple if angles_tuple is not None else latest.angles,
-                )
-
-            _enqueue_latest_state_for_worker(server)
-
-            ack_components: Dict[str, Any] = {}
-            if center_tuple is not None:
-                ack_components['center'] = [float(c) for c in center_tuple]
-            if zoom_float is not None:
-                ack_components['zoom'] = float(zoom_float)
-            if angles_tuple is not None:
-                ack_components['angles'] = [float(a) for a in angles_tuple]
+            ack_components = reduce_camera_state(
+                server._state_ledger,
+                center=center_tuple,
+                zoom=zoom_float,
+                angles=angles_tuple,
+                timestamp=timestamp,
+            )
 
             await _ack_camera(ack_components)
 
@@ -1435,8 +1432,9 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     if scope == 'layer':
         layer_id = target
         try:
-            result = apply_layer_state_update(
+            result = reduce_layer_property(
                 server._scene,
+                server._state_ledger,
                 server._state_lock,
                 layer_id=layer_id,
                 prop=key,
@@ -1473,7 +1471,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             result.server_seq,
         )
 
-        _enqueue_latest_state_for_worker(server)
         server._schedule_coro(
             _broadcast_state_update(server, result),
             f'state-layer-{key}',
@@ -1485,12 +1482,18 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         ts = time.time()
         if key == 'render_mode':
             mode = str(value or '').lower().strip()
-            if not state_updates.is_valid_render_mode(mode, server._allowed_render_modes):
+            if not is_valid_render_mode(mode, server._allowed_render_modes):
                 logger.debug("state.update volume ignored invalid render_mode=%r", value)
                 await _reject("state.invalid", "unknown render_mode", details={"scope": scope, "key": key, "value": value})
                 return True
-            state_updates.update_volume_mode(server._scene, server._state_lock, mode)
-            normalized_value: Any = mode
+            result = reduce_volume_render_mode(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                mode=mode,
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-volume-mode'
         elif key == 'contrast_limits':
             pair = value
@@ -1499,13 +1502,20 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "contrast_limits requires [lo, hi]", details={"scope": scope, "key": key})
                 return True
             try:
-                lo, hi = state_updates.normalize_clim(pair[0], pair[1])
+                lo, hi = normalize_clim(pair[0], pair[1])
             except (TypeError, ValueError):
                 logger.debug("state.update volume ignored invalid clim=%r", pair)
                 await _reject("state.invalid", "contrast_limits invalid", details={"scope": scope, "key": key})
                 return True
-            state_updates.update_volume_clim(server._scene, server._state_lock, lo, hi)
-            normalized_value = (float(lo), float(hi))
+            result = reduce_volume_contrast_limits(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                lo=lo,
+                hi=hi,
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-volume-clim'
         elif key == 'colormap':
             name = value
@@ -1513,31 +1523,48 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 logger.debug("state.update volume ignored invalid colormap=%r", name)
                 await _reject("state.invalid", "colormap must be non-empty", details={"scope": scope, "key": key})
                 return True
-            cmap = str(name)
-            state_updates.update_volume_colormap(server._scene, server._state_lock, cmap)
-            normalized_value = cmap
+            result = reduce_volume_colormap(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                name=str(name),
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-volume-colormap'
         elif key == 'opacity':
             alpha = value
             try:
-                norm_alpha = state_updates.clamp_opacity(alpha)
+                norm_alpha = clamp_opacity(alpha)
             except Exception:
                 logger.debug("state.update volume ignored invalid opacity=%r", alpha)
                 await _reject("state.invalid", "opacity must be float", details={"scope": scope, "key": key})
                 return True
-            state_updates.update_volume_opacity(server._scene, server._state_lock, norm_alpha)
-            normalized_value = float(norm_alpha)
+            result = reduce_volume_opacity(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                alpha=float(norm_alpha),
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-volume-opacity'
         elif key == 'sample_step':
             rel = value
             try:
-                norm_step = state_updates.clamp_sample_step(rel)
+                norm_step = clamp_sample_step(rel)
             except Exception:
                 logger.debug("state.update volume ignored invalid sample_step=%r", rel)
                 await _reject("state.invalid", "sample_step must be float", details={"scope": scope, "key": key})
                 return True
-            state_updates.update_volume_sample_step(server._scene, server._state_lock, norm_step)
-            normalized_value = float(norm_step)
+            result = reduce_volume_sample_step(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                sample_step=float(norm_step),
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-volume-sample-step'
         else:
             logger.debug("state.update volume ignored key=%s", key)
@@ -1551,7 +1578,7 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             intent_id=intent_id,
             in_reply_to=frame_id,
             status="accepted",
-            applied_value=normalized_value,
+            applied_value=result.value,
         )
 
         logger.debug(
@@ -1559,19 +1586,9 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             intent_id,
             frame_id,
             key,
-            normalized_value,
+            result.value,
         )
 
-        _enqueue_latest_state_for_worker(server)
-        result = _baseline_state_result(
-            server,
-            scope='volume',
-            target=target,
-            key=key,
-            value=normalized_value,
-            intent_id=intent_id,
-            timestamp=ts,
-        )
         server._schedule_coro(
             _broadcast_state_update(server, result),
             f'state-volume-{key}',
@@ -1590,8 +1607,14 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 logger.debug("state.update multiscale ignored invalid policy=%r", value)
                 await _reject("state.invalid", "unknown multiscale policy", details={"scope": scope, "key": key})
                 return True
-            server._scene.multiscale_state['policy'] = policy
-            normalized_value = policy
+            result = reduce_multiscale_policy(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                policy=policy,
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-policy'
             if server._worker is not None:
                 try:
@@ -1603,13 +1626,19 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         elif key == 'level':
             levels = server._scene.multiscale_state.get('levels') or []
             try:
-                level = state_updates.clamp_level(value, levels)
+                level = clamp_level(value, levels)
             except (TypeError, ValueError):
                 logger.debug("state.update multiscale ignored invalid level=%r", value)
                 await _reject("state.invalid", "level out of range", details={"scope": scope, "key": key})
                 return True
-            server._scene.multiscale_state['current_level'] = int(level)
-            normalized_value = int(level)
+            result = reduce_multiscale_level(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                level=int(level),
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
             rebroadcast_tag = 'rebroadcast-ms-level'
             if server._worker is not None:
                 try:
@@ -1640,18 +1669,9 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             intent_id=intent_id,
             in_reply_to=frame_id,
             status="accepted",
-            applied_value=normalized_value,
+            applied_value=result.value,
         )
 
-        result = _baseline_state_result(
-            server,
-            scope='multiscale',
-            target=target,
-            key=key,
-            value=normalized_value,
-            intent_id=intent_id,
-            timestamp=timestamp or ts,
-        )
         server._schedule_coro(
             _broadcast_state_update(server, result),
             f'state-multiscale-{key}',
@@ -1687,14 +1707,11 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.invalid", f"unsupported dims key {key}", details={"scope": scope, "key": key, "target": target})
             return True
 
-        meta = server._scene.last_dims_payload
-        assert meta is not None, "dims metadata not initialized"
-        meta_dict = meta.to_dict()
         try:
-            result = apply_dims_state_update(
+            result = reduce_dims_update(
                 server._scene,
+                server._state_ledger,
                 server._state_lock,
-                dict(meta_dict),
                 axis=target,
                 prop=norm_key,
                 value=value_obj,
@@ -1727,8 +1744,6 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             applied_value=result.value,
         )
 
-        _enqueue_latest_state_for_worker(server)
-
         server._schedule_coro(
             _broadcast_state_update(server, result),
             f'state-dims-{key}',
@@ -1740,10 +1755,10 @@ async def _handle_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     return True
 
 MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
-    STATE_UPDATE_TYPE: _handle_state_update,
-    'call.command': _handle_call_command,
-    SESSION_ACK_TYPE: _handle_session_ack,
-    SESSION_GOODBYE_TYPE: _handle_session_goodbye,
+    STATE_UPDATE_TYPE: _ingest_state_update,
+    'call.command': _ingest_call_command,
+    SESSION_ACK_TYPE: _ingest_session_ack,
+    SESSION_GOODBYE_TYPE: _ingest_session_goodbye,
 }
 
 
@@ -1767,26 +1782,6 @@ async def process_state_message(server: Any, data: dict, ws: Any) -> None:
     finally:
         if server._log_state_traces:
             logger.info("state message end type=%s frame=%s handled=%s", msg_type, frame_id, handled)
-
-
-def _enqueue_latest_state_for_worker(server: Any) -> None:
-    """Snapshot the current scene state and push it into the render mailbox."""
-
-    worker = getattr(server, "_worker", None)
-    if worker is None or not hasattr(worker, "enqueue_update"):
-        return
-
-    try:
-        with server._state_lock:
-            snapshot = server._scene.latest_state
-    except Exception:
-        logger.debug("state: failed to snapshot latest scene state", exc_info=True)
-        return
-
-    try:
-        worker.enqueue_update(RenderDelta(scene_state=snapshot))
-    except Exception:
-        logger.debug("state: worker enqueue_update failed", exc_info=True)
 
 
 def _log_volume_event(server: Any, fmt: str, *args: Any) -> None:
@@ -1887,36 +1882,6 @@ def _ndim_from_meta(meta: Mapping[str, Any]) -> int:
                 ndim = max(ndim, 0)
 
     return max(1, int(ndim))
-
-
-def _baseline_state_result(
-    server: Any,
-    *,
-    scope: str,
-    target: str,
-    key: str,
-    value: Any,
-    server_seq_override: Optional[int] = None,
-    intent_id: Optional[str] = None,
-    timestamp: Optional[float] = None,
-) -> StateUpdateResult:
-    meta = get_control_meta(server._scene, scope, target, key)
-    server_seq = int(server_seq_override or meta.last_server_seq or 0)
-    if server_seq <= 0:
-        server_seq = increment_server_sequence(server._scene)
-    meta.last_server_seq = server_seq
-    ts = float(timestamp) if timestamp is not None else time.time()
-    meta.last_timestamp = ts
-
-    return StateUpdateResult(
-        scope=scope,
-        target=target,
-        key=key,
-        value=value,
-        server_seq=server_seq,
-        intent_id=intent_id,
-        timestamp=ts,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2297,20 +2262,24 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             snapshot = server._scene_manager.scene_snapshot()
         assert snapshot is not None, "scene snapshot unavailable"
 
+        ledger_snapshot = server._state_ledger.snapshot()
         scene_payload = build_notify_scene_payload(
             server._scene,
             server._scene_manager,
+            ledger_snapshot=ledger_snapshot,
             viewer_settings=_viewer_settings(server),
         )
 
         scene_data = server._scene
-        latest_updates = scene_data.latest_state.layer_updates or {}
+        latest_updates = scene_data.pending_layer_updates
+        ledger_controls = layer_controls_from_ledger(ledger_snapshot)
         for layer_snapshot in snapshot.layers:
             layer_id = layer_snapshot.layer_id
-            controls: Dict[str, Any] = {}
+            controls: Dict[str, Any] = dict(ledger_controls.get(layer_id, {}))
             control_state = scene_data.layer_controls.get(layer_id)
             if control_state is not None:
-                controls.update(layer_controls_to_dict(control_state))
+                for key, value in layer_controls_to_dict(control_state).items():
+                    controls.setdefault(key, value)
             pending = latest_updates.get(layer_id, {})
             for key, value in pending.items():
                 controls[str(key)] = value
@@ -2368,6 +2337,7 @@ async def _send_scene_snapshot_direct(server: Any, ws: Any, *, reason: str) -> N
     payload = build_notify_scene_payload(
         server._scene,
         server._scene_manager,
+        ledger_snapshot=server._state_ledger.snapshot(),
         viewer_settings=_viewer_settings(server),
     )
     timestamp = time.time()

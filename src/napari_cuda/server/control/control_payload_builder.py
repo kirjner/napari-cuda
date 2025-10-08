@@ -5,8 +5,13 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
-from napari_cuda.server.state.layer_manager import ViewerSceneManager
-from napari_cuda.server.state.server_scene import ServerSceneData, layer_controls_to_dict
+from napari_cuda.server.scene.layer_manager import ViewerSceneManager
+from napari_cuda.server.scene import (
+    ServerSceneData,
+    layer_controls_to_dict,
+    volume_state_from_ledger,
+)
+from napari_cuda.server.control.state_ledger import LedgerEntry
 from napari_cuda.server.control.state_reducers import StateUpdateResult
 
 
@@ -18,6 +23,7 @@ def build_notify_scene_payload(
     scene: ServerSceneData,
     manager: ViewerSceneManager,
     *,
+    ledger_snapshot: Optional[Mapping[tuple[str, str, str], LedgerEntry]] = None,
     timestamp: Optional[float] = None,
     viewer_settings: Optional[Mapping[str, Any]] = None,
 ) -> NotifyScenePayload:
@@ -33,7 +39,7 @@ def build_notify_scene_payload(
         settings.update({str(key): _normalize_value(value) for key, value in viewer_settings.items()})
 
     payload.policies = _build_policies_block(scene)
-    payload.metadata = _merge_scene_metadata(snapshot.metadata, scene)
+    payload.metadata = _merge_scene_metadata(snapshot.metadata, scene, ledger_snapshot)
 
     scene.last_scene_snapshot = payload.to_dict()
     return payload
@@ -114,10 +120,18 @@ def _build_policies_block(scene: ServerSceneData) -> Optional[Dict[str, Any]]:
 def _merge_scene_metadata(
     snapshot_metadata: Mapping[str, Any],
     scene: ServerSceneData,
+    ledger_snapshot: Optional[Mapping[tuple[str, str, str], LedgerEntry]] = None,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = dict(snapshot_metadata)
 
-    if scene.volume_state:
+    ledger_volume_state: Dict[str, Any] = {}
+    if ledger_snapshot is not None:
+        ledger_volume_state = volume_state_from_ledger(ledger_snapshot)
+
+    if ledger_volume_state:
+        metadata.setdefault("volume_state", {})
+        metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in ledger_volume_state.items()})
+    elif scene.volume_state:
         metadata.setdefault("volume_state", {})
         metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in scene.volume_state.items()})
 

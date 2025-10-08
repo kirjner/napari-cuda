@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from napari_cuda.server.app.egl_headless_server import EGLHeadlessServer
-from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.control import control_channel_server
 from napari_cuda.server.rendering.viewer_builder import CanonicalAxes
 
@@ -55,7 +55,7 @@ class _StubWorker:
 
 def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     server = EGLHeadlessServer()
-    server._scene.latest_state = ServerSceneState(current_step=(136, 0, 0))
+    server._scene.latest_state = RenderSceneSnapshot(current_step=(136, 0, 0))
     worker = _StubWorker()
     server._worker = worker
 
@@ -71,7 +71,7 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 
-    asyncio.run(server._handle_set_ndisplay(3))
+    asyncio.run(server._ingest_set_ndisplay(3))
 
     assert server.use_volume is True
     assert server._scene.latest_state.current_step == (136, 0, 0)

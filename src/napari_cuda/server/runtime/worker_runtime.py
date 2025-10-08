@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.state.scene_state_applier import SceneStateApplier
+from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.data.roi import (
@@ -19,7 +19,7 @@ from napari_cuda.server.data.roi import (
     viewport_debug_snapshot,
     resolve_worker_viewport_roi,
 )
-from napari_cuda.server.state.scene_types import SliceROI
+from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.roi_applier import refresh_slice_for_worker
 
 logger = logging.getLogger(__name__)

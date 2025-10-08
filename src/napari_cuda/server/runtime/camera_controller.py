@@ -14,8 +14,8 @@ import time
 
 from vispy import scene  # type: ignore
 
-from napari_cuda.server.state import camera_ops as camops
-from napari_cuda.server.state.server_scene import ServerSceneCommand
+from napari_cuda.server.runtime import camera_ops as camops
+from napari_cuda.server.scene import ServerSceneCommand
 
 
 logger = logging.getLogger(__name__)

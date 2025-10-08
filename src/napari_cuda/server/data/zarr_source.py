@@ -19,7 +19,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import dask.array as da
 import numpy as np
 
-from napari_cuda.server.state.scene_types import SliceROI, SliceIOMetrics
+from napari_cuda.server.runtime.scene_types import SliceROI, SliceIOMetrics
 
 logger = logging.getLogger(__name__)
 

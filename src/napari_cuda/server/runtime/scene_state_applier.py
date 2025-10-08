@@ -18,9 +18,9 @@ import numpy as np
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
 
-from napari_cuda.server.state.scene_types import SliceROI
+from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.roi_applier import SliceDataApplier
-from napari_cuda.server.state.scene_state import ServerSceneState
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
 
 from napari._vispy.layers.image import _napari_cmap_to_vispy
@@ -270,11 +270,9 @@ class SceneStateApplier:
             token = str(mode).strip().lower()
             mm = NapariImageRendering(token).value
             vis.method = mm  # type: ignore[attr-defined]
-        if colormap:
-            name = str(colormap).lower()
-            if name == "gray":
-                name = "grays"
-            vis.cmap = name  # type: ignore[attr-defined]
+        if colormap is not None:
+            cmap = ensure_colormap(colormap)
+            vis.cmap = _napari_cmap_to_vispy(cmap)  # type: ignore[attr-defined]
         if isinstance(clim, tuple) and len(clim) >= 2:
             lo = float(clim[0]); hi = float(clim[1])
             if hi < lo:
@@ -348,7 +346,7 @@ class SceneStateApplier:
     def drain_updates(
         ctx: SceneStateApplyContext,
         *,
-        state: ServerSceneState,
+        state: RenderSceneSnapshot,
         mailbox: Optional[ServerCommandQueue] = None,
         queue: Optional[ServerCommandQueue] = None,
     ) -> SceneDrainResult:

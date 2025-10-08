@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Any, Callable
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
-from napari_cuda.server.state.scene_types import SliceROI
+from napari_cuda.server.runtime.scene_types import SliceROI
 
 
 @dataclass(frozen=True)
