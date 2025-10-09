@@ -11,6 +11,7 @@ from napari.layers.image._image_constants import Interpolation as NapariInterpol
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
+# ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -707,24 +708,12 @@ def reduce_dims_update(
 
     step[idx] = int(target)
 
-    payload_dict = payload.to_dict()
-    step_list = [int(v) for v in step]
-    payload_dict["step"] = step_list
-    payload_dict["current_step"] = step_list
-    payload_dict["current_level"] = int(payload.current_level)
-    payload = NotifyDimsPayload.from_dict(payload_dict)
-
     with lock:
         store.last_scene_seq = increment_server_sequence(store)
         meta_entry = get_control_meta(store, "dims", control_target, prop)
         meta_entry.last_server_seq = store.last_scene_seq
         meta_entry.last_timestamp = ts
-
-    ledger.batch_record_confirmed(
-        _dims_entries_from_payload(payload, axis_index=idx, axis_target=control_target),
-        origin=origin,
-        timestamp=ts,
-    )
+        store.pending_dims_step = tuple(step)
 
     return ServerLedgerUpdate(
         scope="dims",

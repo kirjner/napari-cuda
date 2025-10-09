@@ -8,7 +8,7 @@ import time
 from collections import deque
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import Awaitable, Sequence
+from typing import Awaitable, Sequence, Mapping
 
 import pytest
 
@@ -208,9 +208,15 @@ def _make_confirmation(
     order: tuple[int, ...] | None = (0,),
     labels: tuple[str, ...] | None = None,
     metadata: dict[str, object] | None = None,
+    current_level: int = 0,
+    levels: tuple[Mapping[str, Any], ...] | None = None,
+    level_shapes: tuple[tuple[int, ...], ...] | None = None,
+    downgraded: bool | None = None,
 ) -> WorkerStateUpdateConfirmation:
-    levels = ({"index": 0, "shape": [1]},)
-    level_shapes = ((1,),)
+    if levels is None:
+        levels = ({"index": int(current_level), "shape": [1]},)
+    if level_shapes is None:
+        level_shapes = ((1,),)
     return WorkerStateUpdateConfirmation(
         scope="dims",
         target="main",
@@ -222,10 +228,10 @@ def _make_confirmation(
         order=tuple(int(v) for v in order) if order is not None else None,
         axis_labels=tuple(str(v) for v in axis_labels) if axis_labels is not None else None,
         labels=tuple(str(v) for v in labels) if labels is not None else None,
-        current_level=0,
+        current_level=int(current_level),
         levels=tuple(dict(level) for level in levels),
         level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
-        downgraded=None,
+        downgraded=downgraded,
         timestamp=time.time(),
         metadata=metadata,
     )
@@ -639,6 +645,48 @@ def test_worker_confirmation_handles_missing_optional_fields(tmp_path):
     assert payload.displayed is None
     assert payload.axis_labels is None
     assert payload.current_step == (2,)
+
+    _shutdown_fake_server(server, loop)
+    loop.close()
+    asyncio.set_event_loop(None)
+
+
+def test_worker_confirmation_allows_step_regression_on_level_change(tmp_path):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    server = make_fake_server(loop, tmp_path)
+    server.broadcasted_dims.clear()
+
+    coarse_levels = ({"index": 1, "shape": [1000]},)
+    coarse_shapes = ((1000,),)
+    confirm_high = _make_confirmation(
+        (322,),
+        current_level=1,
+        levels=coarse_levels,
+        level_shapes=coarse_shapes,
+    )
+    server._submit_worker_confirmation(confirm_high)  # type: ignore[attr-defined]
+    _await_condition(loop, lambda: server.broadcasted_dims)
+
+    assert server.broadcasted_dims
+    assert server._state_ledger.get("dims", "main", "current_step").value == (322,)
+
+    finer_levels = ({"index": 2, "shape": [200]},)
+    finer_shapes = ((200,),)
+    confirm_low = _make_confirmation(
+        (129,),
+        current_level=2,
+        levels=finer_levels,
+        level_shapes=finer_shapes,
+    )
+    server.broadcasted_dims.clear()
+    server._submit_worker_confirmation(confirm_low)  # type: ignore[attr-defined]
+    _await_condition(loop, lambda: server.broadcasted_dims)
+
+    entry = server._state_ledger.get("dims", "main", "current_step")
+    assert entry is not None
+    assert tuple(entry.value) == (129,)
+    assert server.broadcasted_dims[-1].current_step == (129,)
 
     _shutdown_fake_server(server, loop)
     loop.close()

@@ -158,6 +158,7 @@ class ServerSceneData:
     plane_restore_state: Optional[PlaneRestoreState] = None
     pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
+    pending_dims_step: Optional[tuple[int, ...]] = None
 
 
 def create_server_scene_data(

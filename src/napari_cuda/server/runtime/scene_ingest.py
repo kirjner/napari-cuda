@@ -55,6 +55,13 @@ def build_render_snapshot(
     angles_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "angles"), float)
 
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
+    pending_dims = getattr(scene, "pending_dims_step", None)
+    if pending_dims is not None:
+        try:
+            current_step = tuple(int(v) for v in pending_dims)
+        except Exception:
+            current_step = current_step
+        scene.pending_dims_step = None
 
     volume_mode = _string_or_none(
         _ledger_value(snapshot, "volume", "main", "render_mode"),

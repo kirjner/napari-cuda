@@ -846,6 +846,12 @@ class EGLHeadlessServer:
         level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in confirmation.level_shapes)
 
         existing_step_entry = ledger.get("dims", "main", "current_step")
+        existing_level_entry = ledger.get("multiscale", "main", "level")
+        existing_level = (
+            int(existing_level_entry.value)
+            if existing_level_entry is not None and isinstance(existing_level_entry.value, (int, float))
+            else None
+        )
         metadata = confirmation.metadata or {}
         plane_state = metadata.get("plane_state")
 
@@ -855,7 +861,12 @@ class EGLHeadlessServer:
                 existing_step = tuple(int(val) for val in existing_value)
             else:
                 existing_step = tuple()
-            if existing_step >= current_step and plane_state is None:
+            level_changed = (
+                existing_level is not None
+                and int(existing_level) != int(confirmation.current_level)
+            )
+            allow_regression = plane_state is not None or level_changed or bool(confirmation.downgraded)
+            if existing_step >= current_step and not allow_regression:
                 if existing_step > current_step:
                     logger.debug(
                         "skip worker confirmation: stale step=%s (ledger=%s)",
