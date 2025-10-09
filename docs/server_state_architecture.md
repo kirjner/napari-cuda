@@ -13,17 +13,17 @@ Offensive coding tenets: assert invariants, no fallback branches, surface failur
 ## High-Level Flow
 
 ```
-Control Handlers (emit intents) ──▶ ServerCommandQueue (pending intents)
-                                   │
-                                   ▼
-Render Worker Drain               Render Worker Emits Applied State
-                                   │
-                                   ▼
-                            ServerStateLedger
-                                   │
-                            ┌──────┴──────┐
-                            ▼             ▼
-                    ServerDimsMirror   Other mirrors/broadcasters
+Intent Emitters ──▶ Reducers ──▶ ServerLedgerUpdate ──▶ Confirmation Queue
+      │                         │                              │
+      │                         ▼                              │
+      └─────────────▶ ServerCommandQueue ◀─── Render Worker ───┘
+                                     │
+                                     ▼
+                             ServerStateLedger
+                                     │
+                             ┌───────┴───────┐
+                             ▼               ▼
+                     ServerDimsMirror   (future mirrors)
 ```
 
 ### Terminology
@@ -75,17 +75,44 @@ Render Worker Drain               Render Worker Emits Applied State
   - State reducers schedule broadcasts via `ServerDimsMirror` or the existing notify helpers instead of mutating a legacy scene bag.
 
 - `src/napari_cuda/server/control/state_reducers.py`
+  - Reducers normalise intents into `ServerLedgerUpdate` objects that the confirmation queue drains into the ledger.
   - Continues to manage per-layer control metadata but records every confirmed value in the ledger.
   - Future work will inline the remaining `_scene` fallbacks once consumers switch to ledger-only reads.
 
 - Test suite
   - Worker, control, and integration tests now import helpers from `server/scene`, `server/runtime`, and `control/mirrors`.
   - All fixtures operate on `RenderSceneSnapshot` objects, matching the runtime behavior.
+  - Confirmation queue drains, mirror broadcasts, and stale acknowledgement guards have dedicated regression coverage.
 
 ### Control-State Integration
 
 - `state_reducers.py` still mutates `server._scene` for camera/volume/layer state. Ledger support currently covers dims metadata; migrating other scopes remains on the future roadmap.
 - Ledger records include `timestamp`/`origin`; the history store can consume these once additional scopes move over.
+
+## Reducer → Ledger → Mirror Lifecycle
+
+1. **Reducers produce ledger updates**
+   - Control handlers route intents through reducers that emit `ServerLedgerUpdate` instances. Only dims metadata uses this path today; camera, volume, and layer scopes still rely on transitional `_scene` mutations.
+2. **Updates queue for confirmation**
+   - Each reducer result enqueues into the worker confirmation queue. The render worker drains the queue, applies the state, and replays authoritative metadata back into the queue for the ledger to commit.
+   - Stale confirmations (e.g., submitting step 0 after step 1) are dropped; the queue maintains the highest monotonic step per axis.
+3. **Ledger commits and mirrors broadcast**
+   - Confirmed entries land in `ServerStateLedger`. Mirrors observe ledger commits and broadcast payloads once per mutation. `ServerDimsMirror` is the first producer; additional mirrors will follow as more scopes migrate.
+
+### Worker confirmation queue
+
+- The confirmation queue captures render-thread feedback and ensures ledger commits reflect the worker’s last applied state.
+- Queue guards prevent regressions:
+  - Step regression guard retains the latest confirmed step and ignores lower values.
+  - `relative_step_size` remains clamped until we refactor the volume state machine.
+  - Plane restore metadata still flows outside the confirmation payload; ledger entries currently omit restore metadata.
+
+### Current limitations
+
+- 2D↔3D transitions briefly reset the step index to 0 before stabilising on the stored plane step. A smoke test asserts that we recover to the mirror’s final state without crashing.
+- Volume transitions still rely on an attribute guard that blocks stale `relative_step_size` until the worker-side volume pipeline is rewritten.
+- Plane restore metadata is not yet transported through `WorkerStateUpdateConfirmation`; future work will extend the confirmation payload.
+- All reducers eventually target the ledger, but today only dims flows complete the reducer → confirmation → ledger pipeline.
 
 ## Event-Driven Ingest Roadmap
 
@@ -93,7 +120,7 @@ Render Worker Drain               Render Worker Emits Applied State
 - **Ledger becomes the worker’s source of truth**: on every confirmed control-side update (dims step, camera restore), push the confirmed values back into the worker before the next render tick so `_last_step` (and related fields) always match the ledger.
 - **Skip payload construction for no-ops**: once the worker mirrors the ledger, `ingest_scene_refresh` can return immediately if the worker hasn’t changed state—no duplicate payloads hit the ledger or mirror.
 - **Mirror broadcasts only ledger mutations**: with the above in place, `ServerDimsMirror` receives exactly one event per real mutation, eliminating dim “snap back” behaviour entirely.
-- **Remove transitional guards and caches**: delete the temporary worker-side dedupe cache and leftover compatibility scaffolding once the event-driven path owns the flow.
+- **Remove transitional guards and caches**: delete the temporary worker-side dedupe cache and leftover compatibility scaffolding once the event-driven path owns the flow. Revisit `relative_step_size` guards when the volume transition path ships.
 
 ## Implementation Plan
 

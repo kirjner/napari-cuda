@@ -47,7 +47,7 @@ Recent reorganisations landed the top-level split called out in the future-struc
 
 - **Collapse dormant packages.** `src/napari_cuda/cuda` currently contains only `__pycache__`; remove or repurpose once CUDA helpers move under rendering/runtime modules.
 - **Document ownership of platform shims.** Clarify in this doc where `_vt/`, `cpu/`, and `web/` fit into the architecture, and whether they should gain subpackages (e.g., `_vt/shim/`, `cpu/capture/`).
-- **Ensure tests mirror the final layout.** As packages move, migrate test modules (e.g., `server/tests/test_worker_lifecycle.py`) to new `_tests` packages inside the destination modules to keep co-location consistent with the guiding principles.
+- **Ensure tests mirror the final layout.** As packages move, migrate test modules (e.g., `server/tests/test_worker_confirmations.py`) to new `_tests` packages inside the destination modules to keep co-location consistent with the guiding principles.
 
 ## Next Steps
 

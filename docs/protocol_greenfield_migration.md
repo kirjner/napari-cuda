@@ -252,6 +252,7 @@ translating to legacy formats.
    `docs/protocol_greenfield/schemas/notify.scene.v1.schema.json`,
    `notify.dims.v1.schema.json`, `notify.camera.v1.schema.json`, and
    `notify.layers.v1.schema.json`; remove plain `dims.update` emission.
+   - ⚠️ Outstanding gaps: the 2D↔3D toggle still emits a transient `step=0` before stabilising, the volume transition keeps a `relative_step_size` guard, and plane-restoration metadata is not yet carried on `WorkerStateUpdateConfirmation`.
 5. Keep the legacy WebSocket handler behind a feature flag (`LEGACY_STATE_WS`);
    route current deployments through the new handler in mirrored mode (emit
    both legacy + greenfield) until clients catch up. **Status: greenfield-only;

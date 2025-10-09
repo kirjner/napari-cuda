@@ -238,7 +238,7 @@ def _record_dims_to_ledger(
     server: Any,
     payload: NotifyDimsPayload,
     *,
-    origin: str = "worker",
+    origin: str = "worker.state.dims",
 ) -> None:
     entries = [
         ("view", "main", "ndisplay", int(payload.ndisplay)),
@@ -473,6 +473,15 @@ def test_dims_update_emits_ack_and_notify() -> None:
         "status": "accepted",
         "applied_value": 5,
     }
+
+    notify_payload = NotifyDimsPayload.from_dict(
+        _make_dims_snapshot(
+            step=[5, 0, 0],
+            current_step=[5, 0, 0],
+        )
+    )
+    _record_dims_to_ledger(server, notify_payload)
+    _drain_scheduled(scheduled)
 
     dims_frames = _frames_of_type(captured, "notify.dims")
     assert dims_frames

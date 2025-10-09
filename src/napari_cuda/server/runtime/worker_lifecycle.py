@@ -34,12 +34,65 @@ def _ingest_scene_refresh(
     if isinstance(step, (list, tuple)):
         step_hint = tuple(int(value) for value in step)
 
-    dims_payload = worker_ref.build_notify_dims_payload(step=step_hint)
-
-    plane_state = worker_ref._plane_restore_state
+    confirmation = _build_dims_confirmation(worker_ref, step_hint)
 
     state.scene_seq = int(state.scene_seq) + 1
 
+    server._submit_worker_confirmation(confirmation)  # type: ignore[attr-defined]
+
+logger = logging.getLogger(__name__)
+
+
+def _build_dims_confirmation(
+    worker: "EGLRendererWorker", step_hint: Optional[Sequence[int]]
+) -> WorkerStateUpdateConfirmation:
+    canonical = getattr(worker, "_canonical_axes", None)
+    assert canonical is not None, "worker missing canonical axes"
+
+    if step_hint is not None:
+        current_step = tuple(int(v) for v in step_hint)
+    elif getattr(worker, "_last_step", None) is not None:
+        current_step = tuple(int(v) for v in worker._last_step)
+    else:
+        current_step = tuple(int(v) for v in canonical.current_step)
+
+    axis_labels = tuple(str(label) for label in canonical.axis_labels)
+    order = tuple(int(idx) for idx in canonical.order)
+    ndisplay = int(canonical.ndisplay)
+    displayed = order[-ndisplay:] if order else tuple()
+
+    source = getattr(worker, "_scene_source", None)
+    levels: List[Dict[str, Any]] = []
+    level_shapes: List[tuple[int, ...]] = []
+    if source is not None and getattr(source, "level_descriptors", None):
+        for descriptor in source.level_descriptors:
+            shape = tuple(int(s) for s in descriptor.shape)
+            level_shapes.append(shape)
+            entry: Dict[str, Any] = {
+                "index": int(getattr(descriptor, "index", len(level_shapes) - 1)),
+                "shape": [int(s) for s in descriptor.shape],
+            }
+            downsample = getattr(descriptor, "downsample", None)
+            if downsample is not None:
+                entry["downsample"] = [float(x) for x in downsample]
+            path = getattr(descriptor, "path", None)
+            if path is not None:
+                entry["path"] = str(path)
+            levels.append(entry)
+    if not level_shapes:
+        fallback_shape = tuple(int(s) for s in canonical.sizes)
+        level_shapes.append(fallback_shape)
+        levels.append(
+            {
+                "index": int(getattr(worker, "_active_ms_level", 0)),
+                "shape": [int(s) for s in fallback_shape],
+            }
+        )
+
+    mode = "volume" if ndisplay >= 3 else "plane"
+    downgraded_attr = getattr(worker, "_level_downgraded", None)
+
+    plane_state = getattr(worker, "_plane_restore_state", None)
     metadata: Dict[str, Any] = {}
     if plane_state is not None:
         metadata["plane_state"] = plane_state
@@ -48,23 +101,22 @@ def _ingest_scene_refresh(
         scope="dims",
         target="main",
         key="snapshot",
-        step=tuple(int(v) for v in dims_payload.current_step),
-        ndisplay=int(dims_payload.ndisplay),
-        mode=str(dims_payload.mode),
-        displayed=(tuple(int(idx) for idx in dims_payload.displayed) if dims_payload.displayed is not None else None),
-        order=(tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None),
-        axis_labels=(tuple(str(label) for label in dims_payload.axis_labels) if dims_payload.axis_labels is not None else None),
-        labels=(tuple(str(label) for label in dims_payload.labels) if getattr(dims_payload, "labels", None) is not None else None),
-        current_level=int(dims_payload.current_level),
-        levels=tuple(dict(level) for level in dims_payload.levels),
-        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in dims_payload.level_shapes),
-        downgraded=dims_payload.downgraded,
+        step=current_step,
+        ndisplay=ndisplay,
+        mode=mode,
+        displayed=tuple(displayed) if displayed else None,
+        order=order if order else None,
+        axis_labels=axis_labels if axis_labels else None,
+        labels=None,
+        current_level=int(getattr(worker, "_active_ms_level", 0)),
+        levels=tuple(levels),
+        level_shapes=tuple(level_shapes),
+        downgraded=bool(downgraded_attr) if downgraded_attr is not None else None,
         timestamp=time.time(),
         metadata=metadata or None,
     )
-    server._submit_worker_confirmation(confirmation)  # type: ignore[attr-defined]
-
-logger = logging.getLogger(__name__)
+    worker._last_step = current_step
+    return confirmation
 
 
 @dataclass

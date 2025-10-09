@@ -39,7 +39,6 @@ from vispy import scene  # type: ignore
 from vispy.geometry import Rect
 
 from napari.components.viewer_model import ViewerModel
-from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari._vispy.layers.image import VispyImageLayer, _napari_cmap_to_vispy
 
 import pycuda.driver as cuda  # type: ignore
@@ -568,83 +567,6 @@ class EGLRendererWorker:
         self._slice_max_bytes = int(max(0, getattr(cfg, 'max_slice_bytes', 0)))
         self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
-
-    def build_notify_dims_payload(self, *, step: Optional[Sequence[int]] = None) -> NotifyDimsPayload:
-        canonical = getattr(self, "_canonical_axes", None)
-        assert canonical is not None, "worker missing canonical axes"
-        viewer = self._viewer
-        assert viewer is not None, "Viewer unavailable for dims payload"
-        dims = getattr(viewer, "dims", None)
-        assert dims is not None, "Viewer dims unavailable for payload"
-
-        ndim = int(canonical.ndim)
-        order = tuple(int(idx) for idx in canonical.order)
-        axis_labels = tuple(str(label) for label in canonical.axis_labels)
-
-        ndisplay = int(canonical.ndisplay)
-        ndisplay = max(1, min(ndisplay, ndim))
-        displayed = tuple(order[-ndisplay:]) if order else tuple(range(ndim - ndisplay, ndim))
-
-        if step is not None:
-            current_step_source = tuple(int(v) for v in step)
-        else:
-            ledger_step = self._ledger_step()
-            if ledger_step is not None:
-                current_step_source = ledger_step
-            elif self._last_step is not None:
-                current_step_source = tuple(int(value) for value in self._last_step)
-            else:
-                current_step_source = tuple(int(value) for value in canonical.current_step)
-        current_step = tuple(int(value) for value in current_step_source[:ndim])
-
-        source = self._scene_source
-        level_shapes: list[tuple[int, ...]] = []
-        levels: list[Dict[str, Any]] = []
-        if source is not None:
-            descriptors = source.level_descriptors or []
-            for descriptor in descriptors:
-                shape = tuple(int(s) for s in descriptor.shape)
-                level_shapes.append(shape)
-                entry: Dict[str, Any] = {
-                    "index": int(getattr(descriptor, "index", len(level_shapes) - 1)),
-                    "shape": [int(s) for s in descriptor.shape],
-                }
-                downsample = getattr(descriptor, "downsample", None)
-                if downsample is not None:
-                    entry["downsample"] = [float(x) for x in downsample]
-                path = getattr(descriptor, "path", None)
-                if path is not None:
-                    entry["path"] = str(path)
-                levels.append(entry)
-
-        if not level_shapes:
-            shape = tuple(int(s) for s in canonical.sizes)
-            level_shapes.append(shape)
-            levels.append(
-                {
-                    "index": int(getattr(self, "_active_ms_level", 0)),
-                    "shape": [int(s) for s in shape],
-                }
-            )
-
-        current_level = int(getattr(self, "_active_ms_level", 0))
-        downgraded_attr = getattr(self, "_level_downgraded", None)
-        downgraded_flag = None if downgraded_attr is None else bool(downgraded_attr)
-
-        payload = NotifyDimsPayload(
-            current_step=current_step,
-            level_shapes=tuple(level_shapes),
-            levels=tuple(levels),
-            current_level=current_level,
-            downgraded=downgraded_flag,
-            mode="volume" if ndisplay >= 3 else "plane",
-            ndisplay=ndisplay,
-            axis_labels=axis_labels,
-            order=order,
-            displayed=displayed,
-        )
-        self._last_step = current_step
-        return payload
 
     def snapshot_dims_metadata(self) -> Dict[str, Any]:
         viewer = self._viewer
