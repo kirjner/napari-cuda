@@ -714,6 +714,7 @@ def reduce_dims_update(
         meta_entry.last_server_seq = store.last_scene_seq
         meta_entry.last_timestamp = ts
         store.pending_dims_step = tuple(step)
+        store.last_requested_dims_step = tuple(step)
 
     return ServerLedgerUpdate(
         scope="dims",

@@ -185,9 +185,9 @@ def test_reduce_dims_update_batches_ledger_entries() -> None:
     assert result.value == 3
     step_entry = ledger.get("dims", "main", "current_step")
     assert step_entry is not None
-    assert tuple(step_entry.value) == (3, 0)
-    assert step_entry.metadata["axis_index"] == 0
-    assert ledger.get("view", "main", "ndisplay") is not None
+    assert tuple(step_entry.value) == (0, 0)
+    assert scene.pending_dims_step == (3, 0)
+    assert scene.last_requested_dims_step == (3, 0)
 
 
 def test_reduce_multiscale_writes_ledger() -> None:

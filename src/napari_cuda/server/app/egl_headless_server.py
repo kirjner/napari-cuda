@@ -854,6 +854,7 @@ class EGLHeadlessServer:
         )
         metadata = confirmation.metadata or {}
         plane_state = metadata.get("plane_state")
+        last_requested = getattr(self._scene, "last_requested_dims_step", None)
 
         if existing_step_entry is not None:
             existing_value = existing_step_entry.value
@@ -865,7 +866,15 @@ class EGLHeadlessServer:
                 existing_level is not None
                 and int(existing_level) != int(confirmation.current_level)
             )
-            allow_regression = plane_state is not None or level_changed or bool(confirmation.downgraded)
+            allow_regression = (
+                plane_state is not None
+                or level_changed
+                or bool(confirmation.downgraded)
+                or (
+                    last_requested is not None
+                    and tuple(int(v) for v in last_requested) == current_step
+                )
+            )
             if existing_step >= current_step and not allow_regression:
                 if existing_step > current_step:
                     logger.debug(
@@ -911,6 +920,7 @@ class EGLHeadlessServer:
             snapshot = self._scene.latest_state
             if snapshot.current_step != current_step:
                 self._scene.latest_state = replace(snapshot, current_step=current_step)
+            self._scene.last_requested_dims_step = current_step
             metadata = confirmation.metadata or {}
             plane_state = metadata.get("plane_state")
             if plane_state is not None:

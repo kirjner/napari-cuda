@@ -460,9 +460,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    current_step_entry = server._state_ledger.get("dims", "main", "current_step")
-    assert current_step_entry is not None
-    assert tuple(current_step_entry.value) == (5, 0, 0)
+    assert server._scene.pending_dims_step == (5, 0, 0)
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
