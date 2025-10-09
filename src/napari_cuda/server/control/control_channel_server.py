@@ -56,8 +56,8 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.messages import NotifyDimsPayload, NotifyLayersPayload, NotifyScenePayload, NotifyStreamPayload
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
+from napari_cuda.server.control.state_models import ClientStateUpdateRequest, ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import (
-    StateUpdateResult,
     clamp_level,
     clamp_opacity,
     clamp_sample_step,
@@ -437,7 +437,7 @@ def _default_layer_id(server: Any) -> Optional[str]:
     return snapshot.layers[0].layer_id
 
 
-def _layer_changes_from_result(server: Any, result: StateUpdateResult) -> tuple[str | None, Dict[str, Any]]:
+def _layer_changes_from_result(server: Any, result: ServerLedgerUpdate) -> tuple[str | None, Dict[str, Any]]:
     key = str(result.key)
     if result.scope == "layer":
         return str(result.target), {key: result.value}
@@ -1707,21 +1707,38 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.invalid", f"unsupported dims key {key}", details={"scope": scope, "key": key, "target": target})
             return True
 
+        metadata: Dict[str, Any] = {}
+        if step_delta is not None:
+            metadata["step_delta"] = step_delta
+        if set_value is not None:
+            metadata["set_value"] = set_value
+
+        request = ClientStateUpdateRequest(
+            scope="dims",
+            target=str(target),
+            key=str(norm_key),
+            value=value_obj,
+            intent_id=intent_id,
+            timestamp=timestamp,
+            metadata=metadata or None,
+        )
+
         try:
             result = reduce_dims_update(
                 server._scene,
                 server._state_ledger,
                 server._state_lock,
-                axis=target,
-                prop=norm_key,
-                value=value_obj,
-                step_delta=step_delta,
-                set_value=set_value,
-                intent_id=intent_id,
-                timestamp=timestamp,
+                axis=request.target,
+                prop=request.key,
+                value=request.value,
+                step_delta=metadata.get("step_delta"),
+                set_value=metadata.get("set_value"),
+                intent_id=request.intent_id,
+                timestamp=request.timestamp,
+                origin="client.state.dims",
             )
         except Exception:
-            logger.debug("state.update dims failed axis=%s key=%s", target, key, exc_info=True)
+            logger.exception("state.update dims failed axis=%s key=%s", target, key)
             await _reject("state.error", "dims update failed", details={"scope": scope, "key": key, "target": target})
             return True
         if logger.isEnabledFor(logging.INFO):
@@ -1744,10 +1761,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             applied_value=result.value,
         )
 
-        server._schedule_coro(
-            _broadcast_state_update(server, result),
-            f'state-dims-{key}',
-        )
         return True
 
     logger.debug("state.update unknown scope=%s", scope)
@@ -1800,7 +1813,7 @@ def _log_volume_event(server: Any, fmt: str, *args: Any) -> None:
 
 async def _broadcast_state_update(
     server: Any,
-    result: StateUpdateResult,
+    result: ServerLedgerUpdate,
     *,
     include_control_versions: bool = True,
 ) -> None:
@@ -1841,7 +1854,7 @@ async def _broadcast_state_update(
 
 async def _broadcast_state_updates(
     server: Any,
-    results: Sequence[StateUpdateResult],
+    results: Sequence[ServerLedgerUpdate],
     *,
     include_control_versions: bool = True,
 ) -> None:

@@ -75,7 +75,7 @@ class ServerDimsMirror:
             self._last_signature = signature
 
     # ------------------------------------------------------------------
-    def _on_ledger_event(self, _: LedgerEvent) -> None:
+    def _on_ledger_event(self, event: LedgerEvent) -> None:
         try:
             payload = self._build_payload()
         except ValueError:
@@ -87,10 +87,12 @@ class ServerDimsMirror:
                 return
             self._last_signature = signature
             self._latest_payload = payload
+            origin = str(getattr(event, "origin", "") or "")
 
         if self._on_payload is not None:
             self._on_payload(payload)
-        self._schedule(self._broadcaster(payload), "mirror-dims")
+        if origin.startswith("worker."):
+            self._schedule(self._broadcaster(payload), "mirror-dims")
 
     # ------------------------------------------------------------------
     def latest_payload(self) -> Optional[NotifyDimsPayload]:

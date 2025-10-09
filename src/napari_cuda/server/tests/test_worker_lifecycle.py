@@ -189,6 +189,7 @@ class _FakeWorkerBase:
         self._scene_source = None
         self._zarr_axes = kwargs.get('zarr_axes')
         self._zarr_path = kwargs.get('zarr_path')
+        self._ledger = kwargs.get('ledger', ServerStateLedger())
         self.width = int(kwargs.get('width', 640))
         self.height = int(kwargs.get('height', 480))
         self.fps = int(kwargs.get('fps', 60))
@@ -285,6 +286,21 @@ class _FakeWorkerBase:
     def set_scene_refresh_callback(self, callback) -> None:  # noqa: ANN001 - test stub
         self._scene_refresh_cb = callback
 
+    def attach_ledger(self, ledger) -> None:
+        self._ledger = ledger
+
+    def _record_step_in_ledger(self, step, *, origin: str = "test.stub") -> None:
+        ledger = getattr(self, "_ledger", None)
+        if ledger is None:
+            return
+        ledger.record_confirmed(
+            "dims",
+            "main",
+            "current_step",
+            tuple(int(v) for v in step),
+            origin=str(origin),
+        )
+
     def viewer_model(self):  # noqa: ANN001
         return None
 
@@ -343,6 +359,7 @@ def test_build_notify_dims_payload_prefers_scene_shape():
     worker._zarr_shape = (8, 256, 256)
     worker._active_ms_level = 0
     worker._last_step = tuple(int(v) for v in dims.current_step)
+    worker._ledger = None
     worker._canonical_axes = CanonicalAxes(
         ndim=3,
         axis_labels=("z", "y", "x"),

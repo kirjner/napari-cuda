@@ -84,6 +84,7 @@ from napari_cuda.server.runtime.server_command_queue import (
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
+from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.worker_runtime import (
     apply_worker_level,
     apply_worker_volume_level,
@@ -175,6 +176,7 @@ class EGLRendererWorker:
         self._is_ready = False
         self._debug: Optional[DebugDumper] = None
         self._debug_config = DebugConfig.from_policy(self._debug_policy.dumps)
+        self._ledger: ServerStateLedger = ServerStateLedger()
 
     @property
     def is_ready(self) -> bool:
@@ -302,8 +304,12 @@ class EGLRendererWorker:
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
-    def _notify_scene_refresh(self) -> None:
-        notify_scene_refresh(self)
+    def _notify_scene_refresh(self, step: Optional[Sequence[int]] = None) -> None:
+        import inspect
+        step_tuple = None if step is None else tuple(int(v) for v in step)
+        caller = inspect.stack()[1].function
+        logger.info("notify_scene_refresh invoked by %s step=%s", caller, step_tuple)
+        notify_scene_refresh(self, step_hint=step_tuple)
 
     # --- Plane restore helpers -------------------------------------------------
 
@@ -398,7 +404,19 @@ class EGLRendererWorker:
             self._data_wh = (int(state.data_wh[0]), int(state.data_wh[1]))
 
         if self._viewer is not None:
-            self._viewer.dims.current_step = tuple(int(v) for v in state.step)
+            viewer_dims = self._viewer.dims
+            displayed = tuple(int(ax) for ax in viewer_dims.displayed)
+            ndisplay = int(viewer_dims.ndisplay)
+            ndim = int(viewer_dims.ndim or len(state.step))
+            if len(displayed) != ndisplay:
+                viewer_dims.displayed = tuple(range(max(0, ndim - ndisplay), ndim))
+            step_seq = list(int(v) for v in state.step)
+            if len(step_seq) < ndim:
+                step_seq.extend(0 for _ in range(ndim - len(step_seq)))
+            elif len(step_seq) > ndim:
+                step_seq = step_seq[:ndim]
+            viewer_dims.current_step = tuple(step_seq)
+        self._notify_scene_refresh(state.step)
 
         if self.view is not None:
             camera = self.view.camera
@@ -430,7 +448,7 @@ class EGLRendererWorker:
             )
 
         # Notify clients with the restored step metadata.
-        self._notify_scene_refresh()
+        self._notify_scene_refresh(state.step)
 
     def _mark_render_tick_needed(self) -> None:
         self._render_tick_required = True
@@ -551,7 +569,7 @@ class EGLRendererWorker:
         self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
 
-    def build_notify_dims_payload(self) -> NotifyDimsPayload:
+    def build_notify_dims_payload(self, *, step: Optional[Sequence[int]] = None) -> NotifyDimsPayload:
         canonical = getattr(self, "_canonical_axes", None)
         assert canonical is not None, "worker missing canonical axes"
         viewer = self._viewer
@@ -567,7 +585,16 @@ class EGLRendererWorker:
         ndisplay = max(1, min(ndisplay, ndim))
         displayed = tuple(order[-ndisplay:]) if order else tuple(range(ndim - ndisplay, ndim))
 
-        current_step_source = self._last_step or tuple(int(v) for v in canonical.current_step)
+        if step is not None:
+            current_step_source = tuple(int(v) for v in step)
+        else:
+            ledger_step = self._ledger_step()
+            if ledger_step is not None:
+                current_step_source = ledger_step
+            elif self._last_step is not None:
+                current_step_source = tuple(int(value) for value in self._last_step)
+            else:
+                current_step_source = tuple(int(value) for value in canonical.current_step)
         current_step = tuple(int(value) for value in current_step_source[:ndim])
 
         source = self._scene_source
@@ -1143,7 +1170,7 @@ class EGLRendererWorker:
             if not previous_volume and self.use_volume:
                 # entering volume: render loop is the only place that can
                 # broadcast updated dims metadata.
-                self._notify_scene_refresh()
+                self._notify_scene_refresh(self._ledger_step())
 
         if not self.use_volume:
             self._apply_pending_plane_restore()
@@ -1175,7 +1202,7 @@ class EGLRendererWorker:
         if drain_res.last_step is not None:
             self._last_step = tuple(int(x) for x in drain_res.last_step)
             if not self.use_volume:
-                self._notify_scene_refresh()
+                self._notify_scene_refresh(drain_res.last_step)
 
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
@@ -1333,3 +1360,18 @@ class EGLRendererWorker:
         return self._viewer
 
     # Adapter is always used; legacy path removed
+    def attach_ledger(self, ledger: ServerStateLedger) -> None:
+        self._ledger = ledger
+
+    def _ledger_step(self) -> Optional[tuple[int, ...]]:
+        entry = self._ledger.get("dims", "main", "current_step")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, (list, tuple)):
+            return tuple(int(v) for v in value)
+        return None
+
+    def _record_step_in_ledger(self, step: Sequence[int], *, origin: str = "worker.render") -> None:
+        """Legacy hook retained for callers; now proxies to notify pipeline."""
+        self._notify_scene_refresh(step)

@@ -7,12 +7,13 @@ import os
 import threading
 import time
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Optional, Sequence, List, Mapping, Dict, Any
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
+from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
 from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot, build_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
@@ -29,70 +30,39 @@ def _ingest_scene_refresh(
     assert worker_ref.is_ready, "render worker refresh fired before bootstrap"
     del loop
 
-    dims_payload = worker_ref.build_notify_dims_payload()
-
-    override_step: Optional[tuple[int, ...]] = None
-
+    step_hint: Optional[tuple[int, ...]] = None
     if isinstance(step, (list, tuple)):
-        override_step = tuple(int(value) for value in step)
+        step_hint = tuple(int(value) for value in step)
 
-    if override_step is not None and override_step != dims_payload.current_step:
-        dims_payload = replace(dims_payload, current_step=override_step)
+    dims_payload = worker_ref.build_notify_dims_payload(step=step_hint)
 
     plane_state = worker_ref._plane_restore_state
 
     state.scene_seq = int(state.scene_seq) + 1
 
-    displayed = (
-        tuple(int(idx) for idx in dims_payload.displayed)
-        if dims_payload.displayed is not None
-        else None
-    )
-    axis_labels = (
-        tuple(str(label) for label in dims_payload.axis_labels)
-        if dims_payload.axis_labels is not None
-        else None
-    )
-    order = (
-        tuple(int(idx) for idx in dims_payload.order)
-        if dims_payload.order is not None
-        else None
-    )
-    labels = (
-        tuple(str(label) for label in dims_payload.labels)
-        if getattr(dims_payload, "labels", None) is not None
-        else None
-    )
-    levels = tuple(dict(level) for level in dims_payload.levels)
-    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_payload.level_shapes)
-
-    entries = [
-        ("dims", "main", "current_step", tuple(int(v) for v in dims_payload.current_step)),
-        ("view", "main", "ndisplay", int(dims_payload.ndisplay)),
-        ("view", "main", "displayed", displayed),
-        ("dims", "main", "mode", str(dims_payload.mode)),
-        ("dims", "main", "order", order),
-        ("dims", "main", "axis_labels", axis_labels),
-        ("dims", "main", "labels", labels),
-        ("multiscale", "main", "level", int(dims_payload.current_level)),
-        ("multiscale", "main", "levels", levels),
-        ("multiscale", "main", "level_shapes", level_shapes),
-        ("multiscale", "main", "downgraded", dims_payload.downgraded),
-    ]
-
-    ledger = server._state_ledger  # type: ignore[attr-defined]
-    ledger.batch_record_confirmed(entries, origin="worker")
-
-    with server._state_lock:  # type: ignore[attr-defined]
-        snapshot: RenderSceneSnapshot = server._scene.latest_state  # type: ignore[attr-defined]
-        current_step_tuple = tuple(int(v) for v in dims_payload.current_step)
-        server._scene.latest_state = replace(
-            snapshot,
-            current_step=current_step_tuple,
-        )
-
+    metadata: Dict[str, Any] = {}
     if plane_state is not None:
-        server._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
+        metadata["plane_state"] = plane_state
+
+    confirmation = WorkerStateUpdateConfirmation(
+        scope="dims",
+        target="main",
+        key="snapshot",
+        step=tuple(int(v) for v in dims_payload.current_step),
+        ndisplay=int(dims_payload.ndisplay),
+        mode=str(dims_payload.mode),
+        displayed=(tuple(int(idx) for idx in dims_payload.displayed) if dims_payload.displayed is not None else None),
+        order=(tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None),
+        axis_labels=(tuple(str(label) for label in dims_payload.axis_labels) if dims_payload.axis_labels is not None else None),
+        labels=(tuple(str(label) for label in dims_payload.labels) if getattr(dims_payload, "labels", None) is not None else None),
+        current_level=int(dims_payload.current_level),
+        levels=tuple(dict(level) for level in dims_payload.levels),
+        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in dims_payload.level_shapes),
+        downgraded=dims_payload.downgraded,
+        timestamp=time.time(),
+        metadata=metadata or None,
+    )
+    server._submit_worker_confirmation(confirmation)  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +197,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 env=server._ctx_env,
             )
             state.worker = worker
+            worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
 
             worker._init_cuda()
             worker._init_vispy_scene()
@@ -336,25 +307,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
                 if worker._last_step is not None:
                     applied_step = tuple(int(value) for value in worker._last_step)
-                    ledger = server._state_ledger  # type: ignore[attr-defined]
-                    ledger.record_confirmed(
-                        "dims",
-                        "main",
-                        "current_step",
-                        applied_step,
-                        origin="worker_frame",
-                    )
-                    should_notify = False
-                    with server._state_lock:
-                        latest_snapshot = server._scene.latest_state
-                        if (
-                            latest_snapshot.current_step == frame_input_step
-                            and latest_snapshot.current_step != applied_step
-                        ):
-                            server._scene.latest_state = replace(latest_snapshot, current_step=applied_step)
-                            should_notify = True
-                    if should_notify:
-                        worker._notify_scene_refresh()
+                    if applied_step != frame_input_step:
+                        worker._notify_scene_refresh(applied_step)
 
                 on_frame(packet, flags, timings.capture_wall_ts, seq)
 

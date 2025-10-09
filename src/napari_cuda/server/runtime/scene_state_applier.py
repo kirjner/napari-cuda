@@ -281,7 +281,13 @@ class SceneStateApplier:
         if opacity is not None:
             vis.opacity = float(max(0.0, min(1.0, float(opacity))))  # type: ignore[attr-defined]
         if sample_step is not None:
-            vis.relative_step_size = float(max(0.1, min(4.0, float(sample_step))))  # type: ignore[attr-defined]
+            if hasattr(vis, "relative_step_size"):
+                vis.relative_step_size = float(max(0.1, min(4.0, float(sample_step))))  # type: ignore[attr-defined]
+            else:
+                logger.debug(
+                    "volume params: visual %s missing relative_step_size; skipping sample_step update",
+                    type(vis).__name__,
+                )
 
     @staticmethod
     def apply_layer_updates(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -13,6 +12,7 @@ from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import (
     LayerControlState,
@@ -23,21 +23,6 @@ from napari_cuda.server.scene import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class StateUpdateResult:
-    """Authoritative result from applying a control update."""
-
-    scope: str
-    target: str
-    key: str
-    value: Any
-    server_seq: int
-    intent_id: Optional[str] = None
-    timestamp: Optional[float] = None
-    axis_index: Optional[int] = None
-    current_step: Optional[tuple[int, ...]] = None
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}
@@ -250,7 +235,7 @@ def reduce_layer_property(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.layer",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     canonical = _normalize_layer_property(prop, value)
     ts = _now(timestamp)
 
@@ -305,7 +290,7 @@ def reduce_layer_property(
             timestamp=ts,
         )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="layer",
         target=layer_id,
         key=prop,
@@ -313,6 +298,7 @@ def reduce_layer_property(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -325,7 +311,7 @@ def reduce_volume_render_mode(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.volume",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     normalized = str(mode)
 
@@ -345,7 +331,7 @@ def reduce_volume_render_mode(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="render_mode",
@@ -353,6 +339,7 @@ def reduce_volume_render_mode(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -366,7 +353,7 @@ def reduce_volume_contrast_limits(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.volume",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     pair = (float(lo), float(hi))
 
@@ -386,7 +373,7 @@ def reduce_volume_contrast_limits(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="contrast_limits",
@@ -394,6 +381,7 @@ def reduce_volume_contrast_limits(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -406,7 +394,7 @@ def reduce_volume_colormap(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.volume",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     normalized = str(name)
 
@@ -426,7 +414,7 @@ def reduce_volume_colormap(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="colormap",
@@ -434,6 +422,7 @@ def reduce_volume_colormap(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -446,7 +435,7 @@ def reduce_volume_opacity(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.volume",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     value = float(alpha)
 
@@ -466,7 +455,7 @@ def reduce_volume_opacity(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="opacity",
@@ -474,6 +463,7 @@ def reduce_volume_opacity(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -486,7 +476,7 @@ def reduce_volume_sample_step(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.volume",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     value = float(sample_step)
 
@@ -506,7 +496,7 @@ def reduce_volume_sample_step(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="sample_step",
@@ -514,6 +504,7 @@ def reduce_volume_sample_step(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -671,7 +662,7 @@ def reduce_dims_update(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.dims",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
 
     payload = _ledger_dims_payload(ledger)
@@ -735,7 +726,7 @@ def reduce_dims_update(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
         key=prop,
@@ -745,6 +736,7 @@ def reduce_dims_update(
         timestamp=ts,
         axis_index=idx,
         current_step=tuple(step),
+        origin=origin,
     )
 
 
@@ -757,7 +749,7 @@ def reduce_multiscale_policy(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.multiscale",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     normalized = str(policy)
 
@@ -777,7 +769,7 @@ def reduce_multiscale_policy(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
         key="policy",
@@ -785,6 +777,7 @@ def reduce_multiscale_policy(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -797,7 +790,7 @@ def reduce_multiscale_level(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.multiscale",
-) -> StateUpdateResult:
+) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     value = int(level)
 
@@ -817,7 +810,7 @@ def reduce_multiscale_level(
         timestamp=ts,
     )
 
-    return StateUpdateResult(
+    return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
         key="level",
@@ -825,6 +818,7 @@ def reduce_multiscale_level(
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
+        origin=origin,
     )
 
 
@@ -872,7 +866,10 @@ def reduce_camera_state(
     return ack
 
 
+StateUpdateResult = ServerLedgerUpdate
+
 __all__ = [
+    "ServerLedgerUpdate",
     "StateUpdateResult",
     "clamp_level",
     "clamp_opacity",
@@ -890,5 +887,4 @@ __all__ = [
     "reduce_volume_render_mode",
     "reduce_volume_sample_step",
     "resolve_axis_index",
-    "is_valid_render_mode",
 ]

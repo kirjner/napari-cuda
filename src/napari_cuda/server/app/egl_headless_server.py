@@ -22,6 +22,7 @@ import socket
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
+from asyncio import QueueEmpty, QueueFull
 
 
 from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
@@ -61,6 +62,7 @@ from napari_cuda.server.control.control_channel_server import (
     ingest_state,
 )
 from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
@@ -194,6 +196,8 @@ class EGLHeadlessServer:
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_updates: Optional[asyncio.Queue[WorkerStateUpdateConfirmation]] = None
+        self._worker_dispatch_task: Optional[asyncio.Task[None]] = None
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -691,7 +695,9 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._control_loop = loop
+        self._worker_updates = asyncio.Queue(maxsize=64)
         self._dims_mirror.start()
+        self._worker_dispatch_task = loop.create_task(self._dispatch_worker_updates())
         try:
             self._update_scene_manager()
         except Exception:
@@ -737,8 +743,15 @@ class EGLHeadlessServer:
             await asyncio.Future()
         finally:
             broadcaster.cancel()
-            state_server.close(); await state_server.wait_closed()
-            pixel_server.close(); await pixel_server.wait_closed()
+            self._worker_dispatch_task.cancel()
+            try:
+                await self._worker_dispatch_task
+            except asyncio.CancelledError:
+                pass
+            state_server.close()
+            await state_server.wait_closed()
+            pixel_server.close()
+            await pixel_server.wait_closed()
             metrics_server.stop_metrics_dashboard(self._metrics_runner)
             self._stop_worker()
 
@@ -769,6 +782,128 @@ class EGLHeadlessServer:
             config=self._pixel_config,
             metrics=self.metrics,
         )
+
+    def _submit_worker_confirmation(self, confirmation: WorkerStateUpdateConfirmation) -> None:
+        loop = self._control_loop
+        queue = self._worker_updates
+        if loop is None or queue is None:
+            return
+
+        def _enqueue() -> None:
+            try:
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except QueueEmpty:
+                        pass
+                queue.put_nowait(confirmation)
+            except QueueFull:
+                logger.debug("worker update queue overflow; dropping confirmation")
+
+        loop.call_soon_threadsafe(_enqueue)
+
+    async def _dispatch_worker_updates(self) -> None:
+        queue = self._worker_updates
+        if queue is None:
+            return
+        while True:
+            confirmation = await queue.get()
+            try:
+                self._apply_worker_confirmation(confirmation)
+            except Exception:
+                logger.exception("worker confirmation processing failed")
+            finally:
+                queue.task_done()
+
+    def _apply_worker_confirmation(self, confirmation: WorkerStateUpdateConfirmation) -> None:
+        if confirmation.scope != "dims":
+            return
+
+        ledger = self._state_ledger
+
+        current_step = tuple(int(v) for v in confirmation.step)
+        displayed = (
+            tuple(int(idx) for idx in confirmation.displayed)
+            if confirmation.displayed is not None
+            else None
+        )
+        axis_labels = (
+            tuple(str(label) for label in confirmation.axis_labels)
+            if confirmation.axis_labels is not None
+            else None
+        )
+        order = (
+            tuple(int(idx) for idx in confirmation.order)
+            if confirmation.order is not None
+            else None
+        )
+        labels = (
+            tuple(str(label) for label in confirmation.labels)
+            if confirmation.labels is not None
+            else None
+        )
+        levels = tuple(dict(level) for level in confirmation.levels)
+        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in confirmation.level_shapes)
+
+        existing_step_entry = ledger.get("dims", "main", "current_step")
+        metadata = confirmation.metadata or {}
+        plane_state = metadata.get("plane_state")
+
+        if existing_step_entry is not None:
+            existing_value = existing_step_entry.value
+            if isinstance(existing_value, (list, tuple)):
+                existing_step = tuple(int(val) for val in existing_value)
+            else:
+                existing_step = tuple()
+            if existing_step >= current_step and plane_state is None:
+                if existing_step > current_step:
+                    logger.debug(
+                        "skip worker confirmation: stale step=%s (ledger=%s)",
+                        current_step,
+                        existing_step,
+                    )
+                return
+            step_metadata = dict(existing_step_entry.metadata or {})
+        else:
+            axis_index = 0
+            if axis_labels is not None and len(axis_labels) > axis_index:
+                axis_target = str(axis_labels[axis_index])
+            else:
+                axis_target = str(axis_index)
+            step_metadata = {"axis_index": axis_index, "axis_target": axis_target}
+
+        logger.info(
+            "worker dims confirmation: step=%s axis_labels=%s order=%s ndisplay=%s",
+            confirmation.step,
+            confirmation.axis_labels,
+            confirmation.order,
+            confirmation.ndisplay,
+        )
+
+        entries: list[tuple[Any, ...]] = [
+            ("dims", "main", "current_step", current_step, step_metadata),
+            ("view", "main", "ndisplay", int(confirmation.ndisplay)),
+            ("view", "main", "displayed", displayed),
+            ("dims", "main", "mode", str(confirmation.mode)),
+            ("dims", "main", "order", order),
+            ("dims", "main", "axis_labels", axis_labels),
+            ("dims", "main", "labels", labels),
+            ("multiscale", "main", "level", int(confirmation.current_level)),
+            ("multiscale", "main", "levels", levels),
+            ("multiscale", "main", "level_shapes", level_shapes),
+            ("multiscale", "main", "downgraded", confirmation.downgraded),
+        ]
+
+        ledger.batch_record_confirmed(entries, origin="worker.state.dims")
+
+        with self._state_lock:
+            snapshot = self._scene.latest_state
+            if snapshot.current_step != current_step:
+                self._scene.latest_state = replace(snapshot, current_step=current_step)
+            metadata = confirmation.metadata or {}
+            plane_state = metadata.get("plane_state")
+            if plane_state is not None:
+                self._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
 
     def _scene_snapshot_json(self) -> Optional[str]:
         try:

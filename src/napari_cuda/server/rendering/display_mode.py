@@ -91,6 +91,7 @@ def _reset_volume_step(worker, source, level: int) -> None:
         source.set_current_slice(tuple(clamped), level)
     worker._z_index = 0
     worker._last_step = tuple(clamped)
+    worker._notify_scene_refresh(clamped)
 
 
 def _configure_camera_for_mode(worker) -> None:
@@ -138,7 +139,11 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
         order.extend(displayed)
     viewer_dims.order = tuple(order)
 
-    steps = list(viewer_dims.current_step)
+    ledger_step = worker._ledger_step()
+    if ledger_step is not None:
+        steps = list(ledger_step)
+    else:
+        steps = list(viewer_dims.current_step)
     if len(steps) < ndim:
         steps.extend([0] * (ndim - len(steps)))
     elif len(steps) > ndim:
@@ -166,6 +171,7 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     updated_step = tuple(int(value) for value in steps)
     viewer_dims.current_step = updated_step
     worker._last_step = updated_step
+    worker._notify_scene_refresh(updated_step)
     canonical = getattr(worker, "_canonical_axes", None)
     assert canonical is not None, "worker missing canonical axes during ndisplay switch"
     order_tuple = tuple(int(axis) for axis in viewer_dims.order)

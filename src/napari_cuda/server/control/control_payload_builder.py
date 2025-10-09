@@ -12,7 +12,7 @@ from napari_cuda.server.scene import (
     volume_state_from_ledger,
 )
 from napari_cuda.server.control.state_ledger import LedgerEntry
-from napari_cuda.server.control.state_reducers import StateUpdateResult
+from napari_cuda.server.control.state_models import ServerLedgerUpdate
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ def build_notify_scene_payload(
     return payload
 
 
-def build_notify_layers_delta_payload(result: StateUpdateResult) -> NotifyLayersPayload:
+def build_notify_layers_delta_payload(result: ServerLedgerUpdate) -> NotifyLayersPayload:
     """Convert a single layer result into a `notify.layers` payload."""
 
     return build_notify_layers_payload(

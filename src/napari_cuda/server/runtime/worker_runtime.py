@@ -49,7 +49,8 @@ def ensure_scene_source(worker) -> ZarrSceneSource:
             worker._last_ensure_log_ts = time.perf_counter()
 
     if worker._last_step is None:
-        worker._last_step = source.initial_step(level=target_level)
+        initial_step = source.initial_step(level=target_level)
+        worker._last_step = tuple(int(v) for v in initial_step)
 
     with worker._state_lock:
         step = source.set_current_slice(worker._last_step, int(target_level))
@@ -76,12 +77,24 @@ def notify_scene_refresh(worker, step_hint: Optional[Tuple[int, ...]] = None) ->
     if callback is None:
         return
 
-    if step_hint is not None:
-        callback(step_hint)
+    if step_hint is None:
+        ledger = getattr(worker, "_ledger", None)
+        if ledger is not None:
+            entry = ledger.get("dims", "main", "current_step")
+            if entry is not None:
+                value = entry.value
+                if isinstance(value, (list, tuple)):
+                    step_hint = tuple(int(v) for v in value)
+                else:
+                    logger.debug("notify_scene_refresh: ledger current_step not sequence (type=%s)", type(value).__name__)
+    if step_hint is None:
+        cached = getattr(worker, "_last_step", None)
+        if cached is not None:
+            step_hint = tuple(int(v) for v in cached)
+    if step_hint is None:
+        logger.debug("notify_scene_refresh skipped: missing step hint")
         return
-
-    assert worker._last_step is not None, "Worker missing last_step for scene refresh"
-    callback(worker._last_step)
+    callback(step_hint)
 
 
 def refresh_worker_slice_if_needed(worker) -> None:

@@ -10,8 +10,8 @@ import pytest
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import (
-    StateUpdateResult,
     _dims_entries_from_payload,
     clamp_level,
     clamp_opacity,
@@ -54,7 +54,7 @@ def test_reduce_layer_property_records_ledger() -> None:
         value=0.4,
     )
 
-    assert isinstance(result, StateUpdateResult)
+    assert isinstance(result, ServerLedgerUpdate)
     assert result.scope == "layer"
     assert result.value == 0.4
     entry = ledger.get("layer", "layer-0", "opacity")

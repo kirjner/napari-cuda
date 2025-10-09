@@ -192,6 +192,7 @@ class ViewerBuilder:
                             logger.debug("adapter volume: resetting source step to 0 failed", exc_info=True)
                 viewer.dims.current_step = tuple(int(s) for s in step)
                 self._bridge._last_step = tuple(int(s) for s in step)
+                self._bridge._notify_scene_refresh(step)
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
@@ -331,6 +332,7 @@ class ViewerBuilder:
         apply_canonical_axes(viewer, canonical_meta)
         self._bridge._canonical_axes = canonical_meta
         self._bridge._last_step = canonical_meta.current_step
+        self._bridge._notify_scene_refresh(canonical_meta.current_step)
         self._bridge._zarr_shape = tuple(int(size) for size in canonical_meta.sizes)
         self._bridge._zarr_axes = ''.join(canonical_meta.axis_labels)
 

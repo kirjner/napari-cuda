@@ -227,6 +227,7 @@ class _FakeSceneSource:
 def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker.EGLRendererWorker":
     from napari_cuda.server.runtime import egl_worker as rw
     from napari_cuda.server.runtime import scene_state_applier as ssa
+    from napari_cuda.server.control.state_ledger import ServerStateLedger
 
     class _DummyEglContext:
         def __init__(self, width: int, height: int) -> None:
@@ -370,6 +371,7 @@ def render_worker_fixture(monkeypatch) -> "napari_cuda.server.runtime.egl_worker
     )
 
     worker = rw.EGLRendererWorker(width=320, height=180, ctx=ctx)
+    worker.attach_ledger(ServerStateLedger())
     worker._init_cuda()
     worker._init_vispy_scene()
     worker._init_egl()

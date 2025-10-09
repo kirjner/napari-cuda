@@ -241,7 +241,7 @@ translating to legacy formats.
    feature advertisement, and heartbeat loop using only greenfield envelopes.
 2. Replace `MESSAGE_HANDLERS` dispatch with:
 - `state.update` handler → `state_reducers.apply_*` (still returns
-     `StateUpdateResult`).
+     `ServerLedgerUpdate`).
    - `call.command` handler → new command registry that calls into AppModel.
 3. Emit `ack.state` after successful mutations (populate `applied_value` or
    rejection payloads). **Status: complete — the server now parses greenfield
