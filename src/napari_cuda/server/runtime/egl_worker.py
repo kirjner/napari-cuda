@@ -58,6 +58,7 @@ from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.rendering.capture import CaptureFacade, FrameTimings, encode_frame
+from napari_cuda.server.control.intent_queue import make_server_intent
 from napari_cuda.server.runtime.runtime_loop import run_render_tick
 from napari_cuda.server.data.roi_applier import (
     SliceUpdatePlanner,
@@ -408,7 +409,8 @@ class EGLRendererWorker:
             ndisplay = int(viewer_dims.ndisplay)
             ndim = int(viewer_dims.ndim or len(state.step))
             if len(displayed) != ndisplay:
-                viewer_dims.displayed = tuple(range(max(0, ndim - ndisplay), ndim))
+                viewer_dims.order = tuple(range(ndim))
+                displayed = tuple(int(ax) for ax in viewer_dims.displayed)
             step_seq = list(int(v) for v in state.step)
             if len(step_seq) < ndim:
                 step_seq.extend(0 for _ in range(ndim - len(step_seq)))

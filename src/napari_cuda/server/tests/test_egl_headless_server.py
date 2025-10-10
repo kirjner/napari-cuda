@@ -71,10 +71,12 @@ def test_set_ndisplay_switches_without_immediate_broadcast(monkeypatch) -> None:
     monkeypatch.setattr(server, '_broadcast_stream_config', _noop)
     monkeypatch.setattr(server, '_broadcast_state_binary', _noop, raising=False)
 
-    asyncio.run(server._ingest_set_ndisplay(3))
+    result = asyncio.run(server._ingest_set_ndisplay(3, intent_id="test-view"))
 
+    assert result.scope == "view"
+    assert result.value == 3
     assert server.use_volume is True
     assert server._scene.latest_state.current_step == (136, 0, 0)
-    assert worker.requested == 3
-    assert worker.force_idr_called is True
+    assert worker.requested is None
+    assert worker.force_idr_called is False
     assert broadcast_calls == []

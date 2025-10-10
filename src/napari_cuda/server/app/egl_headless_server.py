@@ -8,13 +8,12 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 import struct
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any
+from typing import Awaitable, Dict, Optional, Sequence, Set, Mapping, TYPE_CHECKING, Any
 
 import websockets
 import importlib.resources as ilr
@@ -22,9 +21,6 @@ import socket
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
-from asyncio import QueueEmpty, QueueFull
-
-
 from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.scene import (
@@ -62,8 +58,16 @@ from napari_cuda.server.control.control_channel_server import (
     ingest_state,
 )
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
+from napari_cuda.server.control.state_models import (
+    BootstrapSceneMetadata,
+    WorkerStateUpdateConfirmation,
+)
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.intent_queue import (
+    ReducerIntentQueue,
+    WorkerConfirmationQueue,
+)
+from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_view_set_ndisplay
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
@@ -85,9 +89,6 @@ class EncodeConfig:
     codec: int = 1  # 1=h264, 2=hevc, 3=av1
     bitrate: int = 12_000_000
     keyint: int = 120
-
-
- 
 
 
 class EGLHeadlessServer:
@@ -196,8 +197,9 @@ class EGLHeadlessServer:
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._worker_updates: Optional[asyncio.Queue[WorkerStateUpdateConfirmation]] = None
+        self._worker_updates: Optional[WorkerConfirmationQueue] = None
         self._worker_dispatch_task: Optional[asyncio.Task[None]] = None
+        self._reducer_intents = ReducerIntentQueue(maxsize=64)
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -336,53 +338,11 @@ class EGLHeadlessServer:
         task.add_done_callback(_log_task_result)
 
     async def _await_worker_bootstrap(self, timeout_s: float = 0.5) -> None:
-        """Wait for the worker to signal readiness and the multiscale level to stabilize."""
-        deadline = time.perf_counter() + max(0.0, float(timeout_s))
-        last: tuple[int | None, tuple[int, ...] | None] | None = None
+        """Wait for the worker to signal readiness and publish bootstrap metadata."""
+        del timeout_s
         lifecycle = self._worker_lifecycle
-        ready_event = lifecycle.ready_event
-
-        if not ready_event.is_set():
-            remaining = deadline - time.perf_counter()
-            if remaining <= 0:
-                return
-            loop = asyncio.get_running_loop()
-            try:
-                await asyncio.wait_for(loop.run_in_executor(None, ready_event.wait), remaining)
-            except asyncio.TimeoutError:
-                return
-
-        while time.perf_counter() < deadline:
-            try:
-                if self._worker is None:
-                    await asyncio.sleep(0.01)
-                    continue
-                src = getattr(self._worker, '_scene_source', None)
-                if src is None:
-                    await asyncio.sleep(0.01)
-                    continue
-                lvl = None
-                try:
-                    lvl = int(getattr(src, 'current_level', 0))
-                except Exception:
-                    lvl = None
-                shp: tuple[int, ...] | None = None
-                try:
-                    descs = getattr(src, 'level_descriptors', [])
-                    if isinstance(descs, list) and descs and lvl is not None and 0 <= lvl < len(descs):
-                        s = getattr(descs[int(lvl)], 'shape', None)
-                        if isinstance(s, (list, tuple)):
-                            shp = tuple(int(x) for x in s)
-                except Exception:
-                    shp = None
-                cur: tuple[int | None, tuple[int, ...] | None] = (lvl, shp)
-                if last is not None and cur == last:
-                    return
-                last = cur
-            except Exception:
-                break
-            await asyncio.sleep(0.01)
-        return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lifecycle.ready_event.wait)
 
     async def _ensure_keyframe(self) -> None:
         """Request a clean keyframe and arrange for watchdog + config resend."""
@@ -455,14 +415,15 @@ class EGLHeadlessServer:
                 origin="control.layer_sync",
             )
 
-    async def _ingest_set_ndisplay(self, ndisplay: int) -> None:
-        """Apply a 2D/3D view toggle request.
-
-        - Normalizes `ndisplay` to 2 or 3.
-        - Requests the worker to switch pipelines if supported.
-        - Forces a keyframe for immediate visual change.
-        - Rebroadcasts dims meta to keep clients synchronized.
-        """
+    async def _ingest_set_ndisplay(
+        self,
+        ndisplay: int,
+        *,
+        intent_id: Optional[str] = None,
+        timestamp: Optional[float] = None,
+        origin: str = "control.view.ndisplay",
+    ) -> ServerLedgerUpdate:
+        """Queue a 2D/3D view toggle intent and prepare server state."""
         try:
             ndisp = 3 if int(ndisplay) >= 3 else 2
         except Exception:
@@ -471,66 +432,28 @@ class EGLHeadlessServer:
             logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
         else:
             logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
-        self.use_volume = bool(ndisp == 3)
-        self._scene.use_volume = self.use_volume
 
-        if self.use_volume:
-            with self._state_lock:
-                current_step = self._scene.latest_state.current_step
-                level = self._scene.multiscale_state.get("current_level")
-                if current_step is not None and level is not None:
-                    self._scene.plane_restore_state = PlaneRestoreState(
-                        step=tuple(current_step),
-                        level=int(level),
-                    )
-            self._stage_layer_controls_from_ledger()
-        else:
-            restore_state = self._scene.plane_restore_state
-            if restore_state is not None:
-                with self._state_lock:
-                    latest = self._scene.latest_state
-                    self._scene.latest_state = replace(latest, current_step=restore_state.step)
-                    self._scene.multiscale_state["current_level"] = int(restore_state.level)
-                self._state_ledger.record_confirmed(
-                    "dims",
-                    "main",
-                    "current_step",
-                    tuple(int(v) for v in restore_state.step),
-                    origin="control.ndisplay_restore",
-                )
-                self._state_ledger.record_confirmed(
-                    "multiscale",
-                    "main",
-                    "level",
-                    int(restore_state.level),
-                    origin="control.ndisplay_restore",
-                )
-                self._state_ledger.record_confirmed(
-                    "view",
-                    "main",
-                    "ndisplay",
-                    2,
-                    origin="control.ndisplay_restore",
-                )
-                self._state_ledger.record_confirmed(
-                    "dims",
-                    "main",
-                    "mode",
-                    "plane",
-                    origin="control.ndisplay_restore",
-                )
-            self._stage_layer_controls_from_ledger()
-        # Ask worker to apply the mode switch on the render thread
-        if self._worker is not None and hasattr(self._worker, 'request_ndisplay'):
-            try:
-                self._worker.request_ndisplay(int(ndisp))  # type: ignore[attr-defined]
-                self._pixel_channel.broadcast.bypass_until_key = True
-                self._pixel_channel.broadcast.waiting_for_keyframe = True
-                pixel_channel.mark_stream_config_dirty(self._pixel_channel)
-                self._schedule_coro(self._ensure_keyframe(), "ndisplay-keyframe")
-            except Exception:
-                logger.exception("view.set_ndisplay: worker request failed")
-        # Let the worker-driven scene refresh broadcast updated dims once the toggle completes
+        result = reduce_view_set_ndisplay(
+            self._scene,
+            self._state_ledger,
+            self._state_lock,
+            self._reducer_intents,
+            ndisplay=ndisp,
+            intent_id=intent_id,
+            timestamp=timestamp,
+            origin=origin,
+        )
+
+        self.use_volume = bool(result.value == 3)
+        self._scene.use_volume = self.use_volume
+        self._stage_layer_controls_from_ledger()
+
+        self._pixel_channel.broadcast.bypass_until_key = True
+        self._pixel_channel.broadcast.waiting_for_keyframe = True
+        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
+        self._schedule_coro(self._ensure_keyframe(), "ndisplay-keyframe")
+
+        return result
 
     def _start_kf_watchdog(self) -> None:
         return
@@ -574,6 +497,24 @@ class EGLHeadlessServer:
             current_desc = source.level_descriptors[source.current_level]
             if current_desc.path:
                 self._zarr_level = current_desc.path
+
+    def _bootstrap_control_pipeline(self) -> None:
+        lifecycle_meta = self._worker_lifecycle.bootstrap_meta
+        meta = lifecycle_meta
+        assert meta is not None, "worker bootstrap metadata missing"
+        reduce_bootstrap_state(
+            self._scene,
+            self._state_lock,
+            self._reducer_intents,
+            step=meta.step,
+            axis_labels=meta.axis_labels,
+            order=meta.order,
+            level_shapes=meta.level_shapes,
+            levels=meta.levels,
+            current_level=meta.current_level,
+            ndisplay=meta.ndisplay,
+            origin="server.bootstrap",
+        )
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
@@ -695,14 +636,16 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._control_loop = loop
-        self._worker_updates = asyncio.Queue(maxsize=64)
+        self._worker_updates = WorkerConfirmationQueue(loop, maxsize=64)
         self._dims_mirror.start()
         self._worker_dispatch_task = loop.create_task(self._dispatch_worker_updates())
+        self._start_worker(loop)
+        await self._await_worker_bootstrap(0.5)
+        self._bootstrap_control_pipeline()
         try:
             self._update_scene_manager()
         except Exception:
             logger.debug("Initial scene manager sync failed", exc_info=True)
-        self._start_worker(loop)
         # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
         async def state_handler(ws: websockets.WebSocketServerProtocol) -> None:
             await ingest_state(self, ws)
@@ -784,30 +727,18 @@ class EGLHeadlessServer:
         )
 
     def _submit_worker_confirmation(self, confirmation: WorkerStateUpdateConfirmation) -> None:
-        loop = self._control_loop
         queue = self._worker_updates
-        if loop is None or queue is None:
+        if queue is None:
             return
 
-        def _enqueue() -> None:
-            try:
-                if queue.full():
-                    try:
-                        queue.get_nowait()
-                    except QueueEmpty:
-                        pass
-                queue.put_nowait(confirmation)
-            except QueueFull:
-                logger.debug("worker update queue overflow; dropping confirmation")
-
-        loop.call_soon_threadsafe(_enqueue)
+        queue.push(confirmation)
 
     async def _dispatch_worker_updates(self) -> None:
         queue = self._worker_updates
         if queue is None:
             return
         while True:
-            confirmation = await queue.get()
+            confirmation = await queue.pull()
             try:
                 self._apply_worker_confirmation(confirmation)
             except Exception:
@@ -816,8 +747,22 @@ class EGLHeadlessServer:
                 queue.task_done()
 
     def _apply_worker_confirmation(self, confirmation: WorkerStateUpdateConfirmation) -> None:
-        if confirmation.scope != "dims":
+        intents = self._reducer_intents
+
+        if confirmation.intent_id is None:
+            logger.debug("skip worker confirmation without intent id scope=%s", confirmation.scope)
             return
+
+        head_intent = intents.peek()
+        if head_intent is None or head_intent.intent_id != confirmation.intent_id:
+            logger.debug(
+                "skip worker confirmation: unmatched intent id=%s",
+                confirmation.intent_id,
+            )
+            return
+
+        matched_intent = head_intent
+        matched_scope = matched_intent.scope
 
         ledger = self._state_ledger
 
@@ -845,66 +790,47 @@ class EGLHeadlessServer:
         levels = tuple(dict(level) for level in confirmation.levels)
         level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in confirmation.level_shapes)
 
-        existing_step_entry = ledger.get("dims", "main", "current_step")
-        existing_level_entry = ledger.get("multiscale", "main", "level")
-        existing_level = (
-            int(existing_level_entry.value)
-            if existing_level_entry is not None and isinstance(existing_level_entry.value, (int, float))
-            else None
-        )
         metadata = confirmation.metadata or {}
         plane_state = metadata.get("plane_state")
-        last_requested = getattr(self._scene, "last_requested_dims_step", None)
+        intent_payload = matched_intent.payload if matched_intent is not None else {}
+        raw_meta = matched_intent.metadata if matched_intent is not None else None
+        intent_meta = dict(raw_meta) if raw_meta is not None else {}
 
-        if existing_step_entry is not None:
-            existing_value = existing_step_entry.value
-            if isinstance(existing_value, (list, tuple)):
-                existing_step = tuple(int(val) for val in existing_value)
-            else:
-                existing_step = tuple()
-            level_changed = (
-                existing_level is not None
-                and int(existing_level) != int(confirmation.current_level)
-            )
-            allow_regression = (
-                plane_state is not None
-                or level_changed
-                or bool(confirmation.downgraded)
-                or (
-                    last_requested is not None
-                    and tuple(int(v) for v in last_requested) == current_step
-                )
-            )
-            if existing_step >= current_step and not allow_regression:
-                if existing_step > current_step:
-                    logger.debug(
-                        "skip worker confirmation: stale step=%s (ledger=%s)",
-                        current_step,
-                        existing_step,
-                    )
-                return
-            step_metadata = dict(existing_step_entry.metadata or {})
-        else:
-            axis_index = 0
-            if axis_labels is not None and len(axis_labels) > axis_index:
-                axis_target = str(axis_labels[axis_index])
-            else:
-                axis_target = str(axis_index)
-            step_metadata = {"axis_index": axis_index, "axis_target": axis_target}
+        axis_index = int(intent_payload.get("axis_index", 0))
+        axis_target = str(intent_meta.get("axis_label", axis_index))
+        step_metadata = {
+            "axis_index": axis_index,
+            "axis_target": axis_target,
+            "intent_id": confirmation.intent_id,
+        }
+        if "step" in intent_payload:
+            step_metadata["requested_step"] = tuple(int(v) for v in intent_payload["step"])  # type: ignore[arg-type]
 
         logger.info(
-            "worker dims confirmation: step=%s axis_labels=%s order=%s ndisplay=%s",
+            "worker %s confirmation: step=%s axis_labels=%s order=%s ndisplay=%s intent=%s",
+            matched_scope,
             confirmation.step,
             confirmation.axis_labels,
             confirmation.order,
             confirmation.ndisplay,
+            confirmation.intent_id,
         )
+
+        ndisplay_value = int(confirmation.ndisplay)
+        mode_value = str(confirmation.mode)
+
+        if matched_scope == "view":
+            ndisplay_value = int(intent_payload.get("ndisplay", ndisplay_value))
+            mode_value = "volume" if ndisplay_value >= 3 else "plane"
+            ledger_origin = "worker.state.view"
+        else:
+            ledger_origin = "worker.state.dims"
 
         entries: list[tuple[Any, ...]] = [
             ("dims", "main", "current_step", current_step, step_metadata),
-            ("view", "main", "ndisplay", int(confirmation.ndisplay)),
+            ("view", "main", "ndisplay", ndisplay_value),
             ("view", "main", "displayed", displayed),
-            ("dims", "main", "mode", str(confirmation.mode)),
+            ("dims", "main", "mode", mode_value),
             ("dims", "main", "order", order),
             ("dims", "main", "axis_labels", axis_labels),
             ("dims", "main", "labels", labels),
@@ -914,7 +840,9 @@ class EGLHeadlessServer:
             ("multiscale", "main", "downgraded", confirmation.downgraded),
         ]
 
-        ledger.batch_record_confirmed(entries, origin="worker.state.dims")
+        ledger.batch_record_confirmed(entries, origin=ledger_origin)
+
+        intents.pop(confirmation.intent_id)
 
         with self._state_lock:
             snapshot = self._scene.latest_state

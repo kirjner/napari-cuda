@@ -32,7 +32,9 @@ from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.scene import create_server_scene_data
-from napari_cuda.server.control.state_reducers import reduce_layer_property
+from napari_cuda.server.control.intent_queue import ReducerIntentQueue
+from napari_cuda.server.control.state_models import ServerLedgerUpdate
+from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 
@@ -162,6 +164,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)
     server._state_ledger = ServerStateLedger()
+    server._reducer_intents = ReducerIntentQueue(maxsize=16)
 
     def _mirror_schedule(coro: Coroutine[Any, Any, None], _label: str) -> None:
         scheduled.append(coro)
@@ -190,6 +193,24 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     _record_dims_to_ledger(server, initial_payload, origin="bootstrap")
     server._dims_mirror.start()
 
+    axis_labels = tuple(str(lbl) for lbl in (baseline_dims.axis_labels or ("z", "y", "x")))
+    order = tuple(int(idx) for idx in (baseline_dims.order or (0, 1, 2)))
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in baseline_dims.level_shapes)
+    levels_payload = tuple(dict(level) for level in baseline_dims.levels)
+    reduce_bootstrap_state(
+        server._scene,
+        server._state_lock,
+        server._reducer_intents,
+        step=tuple(int(v) for v in baseline_dims.current_step),
+        axis_labels=axis_labels,
+        order=order,
+        level_shapes=level_shapes,
+        levels=levels_payload,
+        current_level=int(baseline_dims.current_level),
+        ndisplay=int(baseline_dims.ndisplay),
+        origin="test.bootstrap",
+    )
+
     def _update_scene_manager() -> None:
         return
 
@@ -197,11 +218,27 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._ndisplay_calls: list[int] = []
 
-    async def _ingest_set_ndisplay(ndisplay: int) -> None:
+    async def _ingest_set_ndisplay(
+        ndisplay: int,
+        *,
+        intent_id: str | None = None,
+        timestamp: float | None = None,
+        origin: str = "control.view.ndisplay",
+    ) -> ServerLedgerUpdate:
         value = 3 if int(ndisplay) >= 3 else 2
         server._ndisplay_calls.append(value)
         server.use_volume = bool(value == 3)
         server._scene.use_volume = bool(value == 3)
+        return ServerLedgerUpdate(
+            scope="view",
+            target="main",
+            key="ndisplay",
+            value=value,
+            server_seq=server._scene.next_server_seq,
+            intent_id=intent_id,
+            timestamp=timestamp,
+            origin=origin,
+        )
 
     server._ingest_set_ndisplay = _ingest_set_ndisplay
 

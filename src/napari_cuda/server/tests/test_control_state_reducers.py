@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.server.control.intent_queue import ReducerIntentQueue
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate, WorkerStateUpdateConfirmation
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
@@ -29,6 +30,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_opacity,
     reduce_volume_render_mode,
     reduce_volume_sample_step,
+    reduce_bootstrap_state,
 )
 from napari_cuda.server.scene import create_server_scene_data
 
@@ -42,6 +44,55 @@ def _scene_and_ledger() -> tuple[Any, ServerStateLedger, threading.RLock]:
     scene = create_server_scene_data()
     lock = _lock()
     return scene, ledger, lock
+
+
+def test_reduce_bootstrap_state_enqueues_intents() -> None:
+    scene, ledger, lock = _scene_and_ledger()
+    queue = ReducerIntentQueue(maxsize=4)
+
+    step = (5, 0, 0)
+    axis_labels = ("z", "y", "x")
+    order = (0, 1, 2)
+    level_shapes = ((100, 50, 25), (25, 12, 6))
+    levels = (
+        {"index": 0, "shape": [100, 50, 25], "downsample": [1.0, 1.0, 1.0], "path": "level_0"},
+        {"index": 1, "shape": [25, 12, 6], "downsample": [4.0, 4.0, 4.0], "path": "level_1"},
+    )
+
+    updates = reduce_bootstrap_state(
+        scene,
+        lock,
+        queue,
+        step=step,
+        axis_labels=axis_labels,
+        order=order,
+        level_shapes=level_shapes,
+        levels=levels,
+        current_level=0,
+        ndisplay=2,
+    )
+
+    intents = list(queue.items())
+    assert len(intents) == 2
+    dims_intent = intents[0]
+    view_intent = intents[1]
+
+    assert dims_intent.scope == "dims"
+    assert dims_intent.payload["step"] == step
+    assert dims_intent.metadata["axis_label"] == "z"
+    assert view_intent.scope == "view"
+    assert view_intent.payload["ndisplay"] == 2
+
+    assert scene.pending_dims_step == step
+    assert scene.last_requested_dims_step == step
+    assert scene.multiscale_state["current_level"] == 0
+
+    assert len(updates) == 2
+    dims_update, view_update = updates
+    assert dims_update.scope == "dims"
+    assert dims_update.current_step == step
+    assert view_update.scope == "view"
+    assert view_update.value == 2
 
 
 def test_reduce_layer_property_records_ledger() -> None:
@@ -176,6 +227,7 @@ def test_reduce_dims_update_batches_ledger_entries() -> None:
         scene,
         ledger,
         lock,
+        ReducerIntentQueue(),
         axis="z",
         prop="index",
         value=3,
@@ -183,9 +235,6 @@ def test_reduce_dims_update_batches_ledger_entries() -> None:
 
     assert result.scope == "dims"
     assert result.value == 3
-    step_entry = ledger.get("dims", "main", "current_step")
-    assert step_entry is not None
-    assert tuple(step_entry.value) == (0, 0)
     assert scene.pending_dims_step == (3, 0)
     assert scene.last_requested_dims_step == (3, 0)
 

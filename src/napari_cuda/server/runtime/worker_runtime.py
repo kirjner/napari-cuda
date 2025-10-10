@@ -11,6 +11,7 @@ import numpy as np
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
+from napari_cuda.server.control.intent_queue import make_server_intent
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.data.roi import (
@@ -432,6 +433,56 @@ def set_level_with_budget(
     worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
     worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
 
+    # If this was a policy-driven switch (not an explicit request enqueued via _apply_multiscale_switch),
+    # enqueue a server policy dims intent reflecting the applied step/level so the confirmation pipeline updates the ledger.
+    if reason in {"zoom-in", "zoom-out", "heuristic", "policy"}:
+        canonical = worker._canonical_axes  # type: ignore[attr-defined]
+        assert canonical is not None, "worker missing canonical axes"
+        with worker._state_lock:  # type: ignore[attr-defined]
+            applied = source.current_step
+        assert applied is not None, "scene source must expose current_step after level switch"
+        step_tuple = tuple(int(v) for v in applied)
+        current_level = int(worker._active_ms_level)  # type: ignore[attr-defined]
+        axis_labels = tuple(str(a) for a in canonical.axis_labels)
+        order = tuple(int(i) for i in canonical.order)
+        ndisplay = int(canonical.ndisplay)
+        displayed = order[-ndisplay:] if order else tuple()
+        levels_payload: list[dict[str, object]] = []
+        level_shapes: list[tuple[int, ...]] = []
+        for desc in source.level_descriptors:
+            level_shapes.append(tuple(int(d) for d in desc.shape))
+            entry: dict[str, object] = {
+                "index": int(desc.index),
+                "shape": [int(v) for v in desc.shape],
+                "downsample": [float(v) for v in desc.downsample],
+            }
+            if desc.path:
+                entry["path"] = str(desc.path)
+            levels_payload.append(entry)
+
+        dims_payload: dict[str, object] = {
+            "step": step_tuple,
+            "axis_index": 0,
+            "axis_target": axis_labels[0] if axis_labels else "0",
+            "mode": ("volume" if ndisplay >= 3 else "plane"),
+            "ndisplay": ndisplay,
+            "current_level": current_level,
+            "order": order,
+            "axis_labels": axis_labels,
+            "displayed": tuple(displayed) if displayed else None,
+            "level_shapes": tuple(level_shapes),
+            "levels": tuple(levels_payload),
+            "downgraded": bool(getattr(worker, "_level_downgraded", False)),
+        }
+        from napari_cuda.server.control.intent_queue import make_server_intent
+        intent = make_server_intent(
+            intent_id=f"policy-{int(time.time()*1000):x}",
+            scope="dims",
+            origin="server.policy",
+            payload=dims_payload,
+        )
+        worker._enqueue_server_intent(intent)  # type: ignore[attr-defined]
+
 
 def perform_level_switch(
     worker: object,
@@ -477,6 +528,8 @@ def perform_level_switch(
         downgraded=bool(getattr(worker, "_level_downgraded", False)),
         from_level=prev,
     )
+
+    # (policy intent moved to EGL worker after switch; no synthesis here)
 
 
 __all__ = [

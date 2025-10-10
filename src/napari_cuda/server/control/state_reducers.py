@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 import time
 from threading import Lock
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -13,6 +14,7 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 # ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.server.control.intent_queue import ReducerIntentQueue, make_server_intent
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import (
@@ -22,6 +24,7 @@ from napari_cuda.server.scene import (
     get_control_meta,
     increment_server_sequence,
 )
+from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 
 logger = logging.getLogger(__name__)
 
@@ -650,10 +653,148 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     )
 
 
+def reduce_bootstrap_state(
+    store: ServerSceneData,
+    lock: Lock,
+    intent_queue: ReducerIntentQueue,
+    *,
+    step: Sequence[int],
+    axis_labels: Sequence[str],
+    order: Sequence[int],
+    level_shapes: Sequence[Sequence[int]],
+    levels: Sequence[Mapping[str, Any]],
+    current_level: int,
+    ndisplay: int,
+    origin: str = "server.bootstrap",
+    timestamp: Optional[float] = None,
+) -> list[ServerLedgerUpdate]:
+    """Seed reducer intents from a bootstrap scene snapshot."""
+
+    ts = _now(timestamp)
+    resolved_step = tuple(int(v) for v in step)
+    resolved_axis_labels = tuple(str(label) for label in axis_labels)
+    resolved_order = tuple(int(v) for v in order)
+    resolved_level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in level_shapes)
+    resolved_levels = tuple(dict(level) for level in levels)
+    resolved_current_level = int(current_level)
+    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
+    mode_value = "volume" if resolved_ndisplay >= 3 else "plane"
+
+    ndim = max(len(resolved_axis_labels), len(resolved_step), len(resolved_order), len(resolved_level_shapes[resolved_current_level]) if resolved_level_shapes else 0)
+    if ndim == 0:
+        ndim = 1
+
+    if not resolved_order:
+        resolved_order = tuple(range(ndim))
+
+    axis_index = 0 if resolved_step else 0
+    axis_target = (
+        resolved_axis_labels[axis_index]
+        if resolved_axis_labels and axis_index < len(resolved_axis_labels)
+        else str(axis_index)
+    )
+
+    displayed = resolved_order[-resolved_ndisplay:] if resolved_order else tuple(range(max(ndim - resolved_ndisplay, 0), ndim))
+    displayed_tuple = tuple(int(v) for v in displayed)
+
+    with lock:
+        store.last_scene_seq = increment_server_sequence(store)
+        dims_seq = store.last_scene_seq
+        dims_meta = get_control_meta(store, "dims", axis_target, "index")
+        dims_meta.last_server_seq = dims_seq
+        dims_meta.last_timestamp = ts
+
+        store.pending_dims_step = resolved_step
+        store.last_requested_dims_step = resolved_step
+        store.multiscale_state["current_level"] = resolved_current_level
+        store.multiscale_state["levels"] = [dict(level) for level in levels]
+        store.multiscale_state["level_shapes"] = [list(shape) for shape in resolved_level_shapes]
+        if "downgraded" in store.multiscale_state:
+            store.multiscale_state["downgraded"] = False
+
+        store.last_scene_seq = increment_server_sequence(store)
+        view_seq = store.last_scene_seq
+        view_meta = get_control_meta(store, "view", "main", "ndisplay")
+        view_meta.last_server_seq = view_seq
+        view_meta.last_timestamp = ts
+        store.use_volume = bool(mode_value == "volume")
+
+    dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
+    dims_payload: Dict[str, object] = {
+        "step": resolved_step,
+        "axis_index": axis_index,
+        "axis_target": axis_target,
+        "mode": mode_value,
+        "ndisplay": resolved_ndisplay,
+        "current_level": resolved_current_level,
+        "order": resolved_order,
+        "axis_labels": resolved_axis_labels if resolved_axis_labels else None,
+        "displayed": displayed_tuple if displayed_tuple else None,
+        "level_shapes": resolved_level_shapes,
+        "levels": resolved_levels,
+        "downgraded": False,
+    }
+    dims_intent_meta = {"axis_label": axis_target, "server_seq": dims_seq}
+    intent_queue.push(
+        make_server_intent(
+            intent_id=dims_intent_id,
+            scope="dims",
+            origin=origin,
+            payload=dims_payload,
+            metadata=dims_intent_meta,
+            timestamp=ts,
+        )
+    )
+
+    view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
+    view_payload: Dict[str, object] = {
+        "ndisplay": resolved_ndisplay,
+        "step": resolved_step,
+        "current_level": resolved_current_level,
+    }
+    view_intent_meta = {"ndisplay": resolved_ndisplay}
+    intent_queue.push(
+        make_server_intent(
+            intent_id=view_intent_id,
+            scope="view",
+            origin=origin,
+            payload=view_payload,
+            metadata=view_intent_meta,
+            timestamp=ts,
+        )
+    )
+
+    dims_update = ServerLedgerUpdate(
+        scope="dims",
+        target=axis_target,
+        key="index",
+        value=int(resolved_step[axis_index]) if resolved_step else 0,
+        server_seq=dims_seq,
+        intent_id=dims_intent_id,
+        timestamp=ts,
+        axis_index=axis_index,
+        current_step=resolved_step,
+        origin=origin,
+    )
+    view_update = ServerLedgerUpdate(
+        scope="view",
+        target="main",
+        key="ndisplay",
+        value=resolved_ndisplay,
+        server_seq=view_seq,
+        intent_id=view_intent_id,
+        timestamp=ts,
+        origin=origin,
+    )
+
+    return [dims_update, view_update]
+
+
 def reduce_dims_update(
     store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
+    intent_queue: Optional[ReducerIntentQueue] = None,
     *,
     axis: object,
     prop: str,
@@ -707,25 +848,125 @@ def reduce_dims_update(
     target = max(0, min(size_val - 1, target))
 
     step[idx] = int(target)
+    requested_step = tuple(int(v) for v in step)
+    resolved_intent_id = intent_id or f"dims-{uuid.uuid4().hex}"
 
     with lock:
         store.last_scene_seq = increment_server_sequence(store)
         meta_entry = get_control_meta(store, "dims", control_target, prop)
         meta_entry.last_server_seq = store.last_scene_seq
         meta_entry.last_timestamp = ts
-        store.pending_dims_step = tuple(step)
-        store.last_requested_dims_step = tuple(step)
+        store.pending_dims_step = requested_step
+        store.last_requested_dims_step = requested_step
+        server_seq = store.last_scene_seq
+
+    if intent_queue is not None:
+        intent_payload: Dict[str, object] = {
+            "step": requested_step,
+            "axis_index": idx,
+            "axis_target": control_target,
+            "mode": payload.mode,
+            "ndisplay": payload.ndisplay,
+            "current_level": payload.current_level,
+        }
+        if payload.order is not None:
+            intent_payload["order"] = tuple(int(i) for i in payload.order)
+        if payload.displayed is not None:
+            intent_payload["displayed"] = tuple(int(i) for i in payload.displayed)
+        if payload.axis_labels is not None:
+            intent_payload["axis_labels"] = tuple(str(label) for label in payload.axis_labels)
+        if payload.level_shapes is not None:
+            intent_payload["level_shapes"] = tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes)
+        if payload.levels is not None:
+            intent_payload["levels"] = tuple(dict(level) for level in payload.levels)
+        if payload.downgraded is not None:
+            intent_payload["downgraded"] = bool(payload.downgraded)
+
+        intent_meta: Dict[str, object] = {
+            "axis_label": axis_label if axis_label is not None else str(idx),
+            "server_seq": server_seq,
+        }
+
+        server_intent = make_server_intent(
+            intent_id=resolved_intent_id,
+            scope="dims",
+            origin=origin,
+            payload=intent_payload,
+            metadata=intent_meta,
+            timestamp=ts,
+        )
+        intent_queue.push(server_intent)
 
     return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
         key=prop,
         value=int(step[idx]),
-        server_seq=store.last_scene_seq,
-        intent_id=intent_id,
+        server_seq=server_seq,
+        intent_id=resolved_intent_id,
         timestamp=ts,
         axis_index=idx,
-        current_step=tuple(step),
+        current_step=requested_step,
+        origin=origin,
+    )
+
+
+def reduce_view_set_ndisplay(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    intent_queue: ReducerIntentQueue,
+    ndisplay: int,
+    *,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.view.ndisplay",
+) -> ServerLedgerUpdate:
+    ts = _now(timestamp)
+    target_ndisplay = 3 if int(ndisplay) >= 3 else 2
+    resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
+
+    with lock:
+        store.last_scene_seq = increment_server_sequence(store)
+        server_seq = store.last_scene_seq
+        meta_entry = get_control_meta(store, "view", "main", "ndisplay")
+        meta_entry.last_server_seq = server_seq
+        meta_entry.last_timestamp = ts
+
+        store.use_volume = bool(target_ndisplay == 3)
+        latest_step = store.latest_state.current_step
+        current_level = store.multiscale_state.get("current_level")
+        if store.use_volume and latest_step is not None and current_level is not None:
+            store.plane_restore_state = PlaneRestoreState(
+                step=tuple(int(v) for v in latest_step),
+                level=int(current_level),
+            )
+
+        intent_payload: Dict[str, object] = {"ndisplay": int(target_ndisplay)}
+        if latest_step is not None:
+            intent_payload["step"] = tuple(int(v) for v in latest_step)
+        if current_level is not None:
+            intent_payload["current_level"] = int(current_level)
+
+        intent_meta = {"ndisplay": int(target_ndisplay)}
+        server_intent = make_server_intent(
+            intent_id=resolved_intent_id,
+            scope="view",
+            origin=origin,
+            payload=intent_payload,
+            metadata=intent_meta,
+            timestamp=ts,
+        )
+        intent_queue.push(server_intent)
+
+    return ServerLedgerUpdate(
+        scope="view",
+        target="main",
+        key="ndisplay",
+        value=int(target_ndisplay),
+        server_seq=server_seq,
+        intent_id=resolved_intent_id,
+        timestamp=ts,
         origin=origin,
     )
 
@@ -867,6 +1108,7 @@ __all__ = [
     "is_valid_render_mode",
     "normalize_clim",
     "reduce_camera_state",
+    "reduce_bootstrap_state",
     "reduce_dims_update",
     "reduce_layer_property",
     "reduce_multiscale_level",
@@ -876,5 +1118,6 @@ __all__ = [
     "reduce_volume_opacity",
     "reduce_volume_render_mode",
     "reduce_volume_sample_step",
+    "reduce_view_set_ndisplay",
     "resolve_axis_index",
 ]

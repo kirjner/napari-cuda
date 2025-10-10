@@ -1058,7 +1058,12 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             return True
         ndisplay = 3 if int(raw_value) >= 3 else 2
         try:
-            await server._ingest_set_ndisplay(ndisplay)
+            result = await server._ingest_set_ndisplay(
+                ndisplay,
+                intent_id=intent_id,
+                timestamp=timestamp,
+                origin="client.state.view",
+            )
         except Exception:
             logger.debug("state.update view.set_ndisplay failed", exc_info=True)
             await _reject("state.error", "failed to apply ndisplay")
@@ -1071,7 +1076,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             intent_id=intent_id,
             in_reply_to=frame_id,
             status="accepted",
-            applied_value=int(ndisplay),
+            applied_value=int(result.value),
         )
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -1728,6 +1733,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 server._scene,
                 server._state_ledger,
                 server._state_lock,
+                server._reducer_intents,
                 axis=request.target,
                 prop=request.key,
                 value=request.value,

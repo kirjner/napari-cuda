@@ -7,6 +7,19 @@ from typing import Any, Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
+class BootstrapSceneMetadata:
+    """Snapshot of worker bootstrap state for seeding reducer intents."""
+
+    step: tuple[int, ...]
+    axis_labels: tuple[str, ...]
+    order: tuple[int, ...]
+    level_shapes: tuple[tuple[int, ...], ...]
+    levels: tuple[dict[str, Any], ...]
+    current_level: int
+    ndisplay: int
+
+
+@dataclass(frozen=True)
 class ClientStateUpdateRequest:
     """Normalised state update submitted by a control-channel client."""
 
@@ -39,6 +52,7 @@ class WorkerStateUpdateConfirmation:
     downgraded: Optional[bool] = None
     timestamp: Optional[float] = None
     metadata: Optional[Mapping[str, Any]] = None
+    intent_id: Optional[str] = None
 
 
 @dataclass(frozen=True)

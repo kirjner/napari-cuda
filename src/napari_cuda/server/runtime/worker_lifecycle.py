@@ -7,13 +7,17 @@ import os
 import threading
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Optional, Sequence, List, Mapping, Dict, Any
+from typing import Optional, Sequence, List, Mapping, Dict, Any, Tuple
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
-from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
+from napari_cuda.server.control.intent_queue import ReducerIntentQueue, make_server_intent
+from napari_cuda.server.control.state_models import (
+    BootstrapSceneMetadata,
+    WorkerStateUpdateConfirmation,
+)
 from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot, build_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
@@ -30,11 +34,25 @@ def _ingest_scene_refresh(
     assert worker_ref.is_ready, "render worker refresh fired before bootstrap"
     del loop
 
+    head = server._reducer_intents.peek()
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "ingest_scene_refresh: head_intent=%s step_arg=%s worker_last=%s active_level=%s",
+            (head.intent_id if head else None),
+            step,
+            tuple(int(v) for v in worker_ref._last_step) if getattr(worker_ref, "_last_step", None) is not None else None,
+            int(worker_ref._active_ms_level),
+        )
+    if head is None:
+        return
+
     step_hint: Optional[tuple[int, ...]] = None
     if isinstance(step, (list, tuple)):
         step_hint = tuple(int(value) for value in step)
 
-    confirmation = _build_dims_confirmation(worker_ref, step_hint)
+    confirmation = _build_intent_confirmation(worker_ref, step_hint, server._reducer_intents)
+    if confirmation is None:
+        return
 
     state.scene_seq = int(state.scene_seq) + 1
 
@@ -43,13 +61,30 @@ def _ingest_scene_refresh(
 logger = logging.getLogger(__name__)
 
 
-def _build_dims_confirmation(
-    worker: "EGLRendererWorker", step_hint: Optional[Sequence[int]]
-) -> WorkerStateUpdateConfirmation:
+def _build_intent_confirmation(
+    worker: "EGLRendererWorker",
+    step_hint: Optional[Sequence[int]],
+    intents: ReducerIntentQueue,
+) -> Optional[WorkerStateUpdateConfirmation]:
+    pending_intent = intents.peek()
+    if pending_intent is None:
+        return None
+
+    intent_id: Optional[str] = None
+    intent_payload: Dict[str, Any] = {}
+    if pending_intent.intent_id is not None:
+        intent_id = pending_intent.intent_id
+        intent_payload = dict(pending_intent.payload)
+
     canonical = getattr(worker, "_canonical_axes", None)
     assert canonical is not None, "worker missing canonical axes"
 
-    if step_hint is not None:
+    intent_step = intent_payload.get("step") if intent_payload else None
+    current_step: Tuple[int, ...]
+    if intent_step is not None:
+        assert isinstance(intent_step, Sequence), "intent step must be sequence"
+        current_step = tuple(int(v) for v in intent_step)  # type: ignore[arg-type]
+    elif step_hint is not None:
         current_step = tuple(int(v) for v in step_hint)
     elif getattr(worker, "_last_step", None) is not None:
         current_step = tuple(int(v) for v in worker._last_step)
@@ -58,7 +93,12 @@ def _build_dims_confirmation(
 
     axis_labels = tuple(str(label) for label in canonical.axis_labels)
     order = tuple(int(idx) for idx in canonical.order)
-    ndisplay = int(canonical.ndisplay)
+
+    if pending_intent.scope == "view":
+        ndisplay = int(intent_payload.get("ndisplay", canonical.ndisplay))
+    else:
+        ndisplay = int(canonical.ndisplay)
+
     displayed = order[-ndisplay:] if order else tuple()
 
     source = getattr(worker, "_scene_source", None)
@@ -97,8 +137,19 @@ def _build_dims_confirmation(
     if plane_state is not None:
         metadata["plane_state"] = plane_state
 
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "build_confirmation: intent_id=%s intent_step=%s step_hint=%s worker_last=%s chosen_step=%s level=%d",
+            intent_id,
+            tuple(int(v) for v in intent_step) if isinstance(intent_step, Sequence) else None,
+            tuple(int(v) for v in step_hint) if isinstance(step_hint, Sequence) else None,
+            tuple(int(v) for v in getattr(worker, "_last_step", ())) if getattr(worker, "_last_step", None) is not None else None,
+            current_step,
+            int(getattr(worker, "_active_ms_level", 0)),
+        )
+
     confirmation = WorkerStateUpdateConfirmation(
-        scope="dims",
+        scope=pending_intent.scope,
         target="main",
         key="snapshot",
         step=current_step,
@@ -114,9 +165,62 @@ def _build_dims_confirmation(
         downgraded=bool(downgraded_attr) if downgraded_attr is not None else None,
         timestamp=time.time(),
         metadata=metadata or None,
+        intent_id=intent_id,
     )
     worker._last_step = current_step
     return confirmation
+
+
+def capture_bootstrap_state(worker: "EGLRendererWorker") -> BootstrapSceneMetadata:
+    canonical = worker._canonical_axes
+    assert canonical is not None, "worker missing canonical axes for bootstrap capture"
+
+    axis_labels = tuple(str(label) for label in canonical.axis_labels)
+    order = tuple(int(idx) for idx in canonical.order)
+    if worker._last_step is not None:
+        step_values = tuple(int(value) for value in worker._last_step)
+    else:
+        step_values = tuple(int(value) for value in canonical.current_step)
+
+    source = worker._scene_source
+    level_shapes_list: List[tuple[int, ...]] = []
+    levels_payload: List[Dict[str, Any]] = []
+    if source is not None:
+        descriptors = source.level_descriptors
+        for descriptor in descriptors:
+            shape_tuple = tuple(int(dim) for dim in descriptor.shape)
+            level_shapes_list.append(shape_tuple)
+            entry: Dict[str, Any] = {
+                "index": int(descriptor.index),
+                "shape": [int(dim) for dim in descriptor.shape],
+                "downsample": [float(value) for value in descriptor.downsample],
+            }
+            if descriptor.path:
+                entry["path"] = str(descriptor.path)
+            levels_payload.append(entry)
+
+    if not level_shapes_list:
+        fallback_shape = tuple(int(size) for size in canonical.sizes)
+        level_shapes_list.append(fallback_shape)
+        levels_payload.append(
+            {
+                "index": int(worker._active_ms_level),
+                "shape": [int(dim) for dim in fallback_shape],
+            }
+        )
+
+    ndisplay_value = int(canonical.ndisplay)
+    current_level = int(worker._active_ms_level)
+
+    return BootstrapSceneMetadata(
+        step=step_values,
+        axis_labels=axis_labels,
+        order=order,
+        level_shapes=tuple(level_shapes_list),
+        levels=tuple(levels_payload),
+        current_level=current_level,
+        ndisplay=ndisplay_value,
+    )
 
 
 @dataclass
@@ -128,6 +232,10 @@ class WorkerLifecycleState:
     stop_event: threading.Event = field(default_factory=threading.Event)
     ready_event: threading.Event = field(default_factory=threading.Event)
     scene_seq: int = 0
+    bootstrap_meta: Optional[BootstrapSceneMetadata] = None
+    bootstrap_event: threading.Event = field(default_factory=threading.Event)
+    ready_async_event: Optional[asyncio.Event] = None
+    bootstrap_async_event: Optional[asyncio.Event] = None
 
 
 def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerLifecycleState) -> None:
@@ -139,6 +247,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
     state.stop_event.clear()
     state.ready_event.clear()
     state.scene_seq = int(server._scene.last_scene_seq)
+    state.bootstrap_meta = None
+    state.bootstrap_event.clear()
+    state.ready_async_event = asyncio.Event()
+    state.bootstrap_async_event = asyncio.Event()
 
     def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
         worker = state.worker
@@ -250,6 +362,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             )
             state.worker = worker
             worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
+            # Provide a server-side intent enqueue hook for worker policy events
+            worker._enqueue_server_intent = lambda intent: server._reducer_intents.push(intent)
 
             worker._init_cuda()
             worker._init_vispy_scene()
@@ -285,17 +399,41 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
             )
 
+            state.bootstrap_meta = capture_bootstrap_state(worker)
+            state.bootstrap_event.set()
+            bootstrap_async = state.bootstrap_async_event
+            if bootstrap_async is not None:
+                loop.call_soon_threadsafe(bootstrap_async.set)
+
+            # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
+            state.ready_event.set()
+            ready_async = state.ready_async_event
+            if ready_async is not None:
+                loop.call_soon_threadsafe(ready_async.set)
+
+            # Now flip worker ready and push first refresh
             worker._is_ready = True
             _ingest_scene_refresh(server, state, loop)
-
-            state.ready_event.set()
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
 
             while not state.stop_event.is_set():
+                intent_head = server._reducer_intents.peek()
+                if intent_head is not None and intent_head.scope == "view":
+                    target_ndisplay = int(intent_head.payload.get("ndisplay", 2))
+                    worker.request_ndisplay(target_ndisplay)
+
                 with server._state_lock:
                     snapshot = build_render_snapshot(server._state_ledger, server._scene)
+                    intent = server._reducer_intents.peek()
+                    optimistic_step: Optional[Tuple[int, ...]] = snapshot.current_step
+                    if intent is not None and intent.scope == "dims":
+                        step_payload = intent.payload.get("step")
+                        if isinstance(step_payload, Sequence):
+                            optimistic_step = tuple(int(v) for v in step_payload)
+                    if optimistic_step is not None and snapshot.current_step != optimistic_step:
+                        snapshot = replace(snapshot, current_step=optimistic_step)
                     server._scene.latest_state = snapshot
                     commands = list(server._scene.camera_commands)
                     server._scene.camera_commands.clear()
@@ -357,10 +495,9 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server.metrics.observe_ms("napari_cuda_pack_ms", timings.pack_ms)
                 server.metrics.observe_ms("napari_cuda_total_ms", timings.total_ms)
 
-                if worker._last_step is not None:
+                if worker._last_step is not None and server._reducer_intents.peek() is not None:
                     applied_step = tuple(int(value) for value in worker._last_step)
-                    if applied_step != frame_input_step:
-                        worker._notify_scene_refresh(applied_step)
+                    worker._notify_scene_refresh(applied_step)
 
                 on_frame(packet, flags, timings.capture_wall_ts, seq)
 
@@ -396,6 +533,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     logger.debug("Worker cleanup error: %s", cleanup_exc)
             state.worker = None
             state.ready_event.clear()
+            state.bootstrap_meta = None
+            state.bootstrap_event.clear()
+            state.ready_async_event = None
+            state.bootstrap_async_event = None
 
     thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
     state.thread = thread
@@ -408,6 +549,9 @@ def stop_worker(state: WorkerLifecycleState) -> None:
 
     state.stop_event.set()
     state.ready_event.clear()
+    state.bootstrap_event.clear()
+    state.ready_async_event = None
+    state.bootstrap_async_event = None
     thread = state.thread
     if thread and thread.is_alive():
         thread.join(timeout=3.0)

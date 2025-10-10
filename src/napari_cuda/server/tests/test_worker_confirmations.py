@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 import threading
 import time
 from collections import deque
@@ -20,14 +21,10 @@ from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
 from napari_cuda.server.scene import create_server_scene_data
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
-from napari_cuda.server.control.state_reducers import _dims_entries_from_payload
+from napari_cuda.server.control.state_reducers import _dims_entries_from_payload, reduce_bootstrap_state
+from napari_cuda.server.control.intent_queue import ReducerIntentQueue, WorkerConfirmationQueue, make_server_intent
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
-from napari_cuda.server.runtime.worker_lifecycle import (
-    WorkerLifecycleState,
-    start_worker,
-    stop_worker,
-    _build_dims_confirmation,
-)
+from napari_cuda.server.runtime.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker, _build_intent_confirmation
 from napari_cuda.server.rendering.debug_tools import DebugConfig
 
 
@@ -37,6 +34,38 @@ class DummyMetrics:
 
     def observe_ms(self, name: str, value: float) -> None:
         self.samples.append((name, value))
+
+
+def _enqueue_dims_intent(
+    queue: ReducerIntentQueue,
+    step: Sequence[int],
+    *,
+    axis_label: str = "z",
+    axis_index: int = 0,
+    ndisplay: int = 2,
+    current_level: int = 0,
+    intent_id: str | None = None,
+) -> str:
+    resolved_id = intent_id or f"dims-test-{uuid.uuid4().hex}"
+    payload = {
+        "step": tuple(int(v) for v in step),
+        "axis_index": int(axis_index),
+        "axis_target": axis_label,
+        "mode": "volume" if int(ndisplay) >= 3 else "plane",
+        "ndisplay": int(ndisplay),
+        "current_level": int(current_level),
+    }
+    metadata = {"axis_label": axis_label, "server_seq": 0}
+    queue.push(
+        make_server_intent(
+            intent_id=resolved_id,
+            scope="dims",
+            origin="test.seed",
+            payload=payload,
+            metadata=metadata,
+        )
+    )
+    return resolved_id
 
 
 def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
@@ -116,7 +145,8 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     server.broadcasted_dims = dims_broadcasts
     server.loop = loop
     server._control_loop = loop
-    server._worker_updates = asyncio.Queue(maxsize=8)
+    server._reducer_intents = ReducerIntentQueue(maxsize=8)
+    server._worker_updates = WorkerConfirmationQueue(loop, maxsize=8)
     server._submit_worker_confirmation = MethodType(EGLHeadlessServer._submit_worker_confirmation, server)
     server._apply_worker_confirmation = MethodType(EGLHeadlessServer._apply_worker_confirmation, server)
     server._dispatch_worker_updates = MethodType(EGLHeadlessServer._dispatch_worker_updates, server)
@@ -154,6 +184,24 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
         on_payload=_mirror_apply,
     )
     server._dims_mirror.start()
+
+    axis_labels = tuple(str(lbl) for lbl in (baseline_dims.axis_labels or ("z",)))
+    order = tuple(int(idx) for idx in (baseline_dims.order or (0,)))
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in baseline_dims.level_shapes)
+    levels_payload = tuple(dict(level) for level in baseline_dims.levels)
+    reduce_bootstrap_state(
+        scene,
+        server._state_lock,
+        server._reducer_intents,
+        step=tuple(int(v) for v in baseline_dims.current_step),
+        axis_labels=axis_labels,
+        order=order,
+        level_shapes=level_shapes,
+        levels=levels_payload,
+        current_level=int(baseline_dims.current_level),
+        ndisplay=int(baseline_dims.ndisplay),
+        origin="test.bootstrap",
+    )
 
     return server
 
@@ -212,18 +260,34 @@ def _make_confirmation(
     levels: tuple[Mapping[str, Any], ...] | None = None,
     level_shapes: tuple[tuple[int, ...], ...] | None = None,
     downgraded: bool | None = None,
+    queue: ReducerIntentQueue | None = None,
+    intent_id: str | None = None,
+    axis_label: str = "z",
+    axis_index: int = 0,
+    ndisplay: int = 2,
 ) -> WorkerStateUpdateConfirmation:
     if levels is None:
         levels = ({"index": int(current_level), "shape": [1]},)
     if level_shapes is None:
         level_shapes = ((1,),)
+    resolved_intent = intent_id or f"dims-test-{uuid.uuid4().hex}"
+    if queue is not None:
+        _enqueue_dims_intent(
+            queue,
+            step,
+            axis_label=axis_label,
+            axis_index=axis_index,
+            ndisplay=ndisplay,
+            current_level=current_level,
+            intent_id=resolved_intent,
+        )
     return WorkerStateUpdateConfirmation(
         scope="dims",
         target="main",
         key="snapshot",
         step=tuple(int(v) for v in step),
-        ndisplay=2,
-        mode="plane",
+        ndisplay=int(ndisplay),
+        mode="volume" if int(ndisplay) >= 3 else "plane",
         displayed=tuple(int(v) for v in displayed) if displayed is not None else None,
         order=tuple(int(v) for v in order) if order is not None else None,
         axis_labels=tuple(str(v) for v in axis_labels) if axis_labels is not None else None,
@@ -234,6 +298,7 @@ def _make_confirmation(
         downgraded=downgraded,
         timestamp=time.time(),
         metadata=metadata,
+        intent_id=resolved_intent,
     )
 
 
@@ -429,8 +494,9 @@ def test_dims_confirmation_prefers_scene_source_shape():
             SimpleNamespace(shape=(8, 128, 128), index=1),
         ]
     )
-
-    confirmation = _build_dims_confirmation(worker, None)
+    queue = ReducerIntentQueue(maxsize=4)
+    _enqueue_dims_intent(queue, worker._last_step, axis_label="z", axis_index=0, ndisplay=2, current_level=0)
+    confirmation = _build_intent_confirmation(worker, None, queue)
 
     assert confirmation.level_shapes == ((60, 256, 256), (8, 128, 128))
     assert confirmation.levels[0]["shape"] == [60, 256, 256]
@@ -461,7 +527,9 @@ def test_scene_refresh_pushes_dims_notification(tmp_path):
 
     worker = _FakeWorkerBase(scene_refresh_cb=lambda _: None)
     worker._last_step = (4, 5)
-    confirmation = _build_dims_confirmation(worker, (4, 5))
+    server._reducer_intents.clear()
+    _enqueue_dims_intent(server._reducer_intents, worker._last_step, axis_label="z", axis_index=0)
+    confirmation = _build_intent_confirmation(worker, (4, 5), server._reducer_intents)
     server._apply_worker_confirmation(confirmation)  # type: ignore[attr-defined]
     _await_condition(loop, lambda: server.broadcasted_dims)
 
@@ -483,7 +551,9 @@ def test_scene_refresh_pushes_meta_notification(tmp_path):
 
     worker = _FakeWorkerBase(scene_refresh_cb=lambda _: None)
     worker._last_step = (7,)
-    confirmation = _build_dims_confirmation(worker, (7,))
+    server._reducer_intents.clear()
+    _enqueue_dims_intent(server._reducer_intents, worker._last_step, axis_label="z", axis_index=0)
+    confirmation = _build_intent_confirmation(worker, (7,), server._reducer_intents)
     server._apply_worker_confirmation(confirmation)  # type: ignore[attr-defined]
     _await_condition(loop, lambda: server.broadcasted_dims)
 
@@ -505,7 +575,9 @@ def test_scene_refresh_skips_duplicate_payload(tmp_path):
 
     worker = _FakeWorkerBase(scene_refresh_cb=lambda _: None)
     worker._last_step = (3, 4)
-    confirmation = _build_dims_confirmation(worker, (3, 4))
+    server._reducer_intents.clear()
+    _enqueue_dims_intent(server._reducer_intents, worker._last_step, axis_label="z", axis_index=0)
+    confirmation = _build_intent_confirmation(worker, (3, 4), server._reducer_intents)
     server._apply_worker_confirmation(confirmation)  # type: ignore[attr-defined]
     _await_condition(loop, lambda: server.broadcasted_dims)
     assert server.broadcasted_dims
@@ -570,8 +642,16 @@ def test_scene_refresh_remaps_z_axis_only(tmp_path):
     worker._scene_source = _DummySource()
     worker._scene_source.level_descriptors[0].shape = (8, 256, 256)
     worker._last_step = (60, 0, 0)
-
-    confirmation = _build_dims_confirmation(worker, worker._last_step)
+    server._reducer_intents.clear()
+    _enqueue_dims_intent(
+        server._reducer_intents,
+        worker._last_step,
+        axis_label="z",
+        axis_index=0,
+        ndisplay=2,
+        current_level=0,
+    )
+    confirmation = _build_intent_confirmation(worker, worker._last_step, server._reducer_intents)
     server._apply_worker_confirmation(confirmation)  # type: ignore[attr-defined]
     _await_condition(loop, lambda: server.broadcasted_dims)
 
@@ -592,8 +672,9 @@ def test_worker_confirmation_queue_guard_drops_stale(tmp_path):
     server = make_fake_server(loop, tmp_path)
     server.broadcasted_dims.clear()
 
-    fresh = _make_confirmation((1,))
-    stale = _make_confirmation((0,))
+    server._reducer_intents.clear()
+    fresh = _make_confirmation((1,), queue=server._reducer_intents)
+    stale = _make_confirmation((0,), intent_id=None)
 
     server._submit_worker_confirmation(fresh)  # type: ignore[attr-defined]
     _await_condition(loop, lambda: server.broadcasted_dims)
@@ -624,12 +705,14 @@ def test_worker_confirmation_handles_missing_optional_fields(tmp_path):
     server = make_fake_server(loop, tmp_path)
     server.broadcasted_dims.clear()
 
+    server._reducer_intents.clear()
     confirmation = _make_confirmation(
         (2,),
         displayed=None,
         axis_labels=None,
         order=None,
         labels=None,
+        queue=server._reducer_intents,
     )
 
     server._submit_worker_confirmation(confirmation)  # type: ignore[attr-defined]
@@ -659,11 +742,13 @@ def test_worker_confirmation_allows_step_regression_on_level_change(tmp_path):
 
     coarse_levels = ({"index": 1, "shape": [1000]},)
     coarse_shapes = ((1000,),)
+    server._reducer_intents.clear()
     confirm_high = _make_confirmation(
         (322,),
         current_level=1,
         levels=coarse_levels,
         level_shapes=coarse_shapes,
+        queue=server._reducer_intents,
     )
     server._submit_worker_confirmation(confirm_high)  # type: ignore[attr-defined]
     _await_condition(loop, lambda: server.broadcasted_dims)
@@ -673,11 +758,13 @@ def test_worker_confirmation_allows_step_regression_on_level_change(tmp_path):
 
     finer_levels = ({"index": 2, "shape": [200]},)
     finer_shapes = ((200,),)
+    server._reducer_intents.clear()
     confirm_low = _make_confirmation(
         (129,),
         current_level=2,
         levels=finer_levels,
         level_shapes=finer_shapes,
+        queue=server._reducer_intents,
     )
     server.broadcasted_dims.clear()
     server._submit_worker_confirmation(confirm_low)  # type: ignore[attr-defined]
