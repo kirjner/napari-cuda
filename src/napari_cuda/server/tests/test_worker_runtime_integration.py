@@ -471,7 +471,7 @@ def test_preserve_view_disabled_resets_camera(render_worker_fixture):
     camera.set_range_calls.clear()
     worker._render_tick_required = False
 
-    worker._render_mailbox.enqueue_scene_state(RenderLedgerSnapshot(current_step=(1, 0, 0)))
+    worker._consume_render_snapshot(RenderLedgerSnapshot(current_step=(1, 0, 0)))
     worker.drain_scene_updates()
 
     assert camera.set_range_calls, "camera.set_range should be invoked when preserve-view is disabled"
@@ -481,7 +481,7 @@ def test_layer_updates_drive_napari_layer(render_worker_fixture):
     worker = render_worker_fixture
     worker._render_tick_required = False
 
-    worker.apply_state(
+    worker._consume_render_snapshot(
         RenderLedgerSnapshot(
             layer_updates={
                 "layer-0": {

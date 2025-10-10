@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 import time
+from dataclasses import replace
 from threading import Lock
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -874,12 +875,29 @@ def reduce_dims_update(
     requested_step = tuple(int(v) for v in step)
     resolved_intent_id = intent_id or f"dims-{uuid.uuid4().hex}"
 
+    step_metadata = {
+        "axis_index": int(idx),
+        "axis_target": control_target,
+    }
+
     with lock:
         store.last_scene_seq = increment_server_sequence(store)
         meta_entry = get_control_meta(store, "dims", control_target, prop)
         meta_entry.last_server_seq = store.last_scene_seq
         meta_entry.last_timestamp = ts
         server_seq = store.last_scene_seq
+        snapshot = store.latest_state
+        store.latest_state = replace(snapshot, current_step=requested_step)
+
+    ledger.record_confirmed(
+        "dims",
+        "main",
+        "current_step",
+        requested_step,
+        origin=origin,
+        timestamp=ts,
+        metadata=step_metadata,
+    )
 
     latest_set_intent("dims", control_target, requested_step, int(server_seq))
     logger.debug(

@@ -110,6 +110,14 @@ class ServerStateLedger:
             per_key = list(self._subscribers.get(property_key, ()))
             globals_copy = list(self._global_subscribers)
 
+        logger.info(
+            "ledger write: scope=%s target=%s key=%s origin=%s value=%r",
+            scope,
+            target,
+            key,
+            origin,
+            value,
+        )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "ledger record_confirmed: scope=%s target=%s key=%s origin=%s",
@@ -194,6 +202,14 @@ class ServerStateLedger:
                 globals_copy = list(self._global_subscribers)
                 notifications.append((event, per_key, globals_copy))
 
+                logger.info(
+                    "ledger write: scope=%s target=%s key=%s origin=%s value=%r",
+                    scope,
+                    target,
+                    key,
+                    origin,
+                    value,
+                )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "ledger batch record_confirmed: scope=%s target=%s key=%s origin=%s",

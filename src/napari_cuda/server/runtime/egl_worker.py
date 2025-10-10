@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import time
 import logging
+from dataclasses import replace
 
 from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple, List
 import threading
@@ -504,6 +505,8 @@ class EGLRendererWorker:
         self._switch_logger = LevelSwitchLogger(logger)
         self._plane_restore_state: Optional[PlaneRestoreState] = None
         self._pending_plane_restore: Optional[PlaneRestoreState] = None
+        self._last_dims_log_step: Optional[tuple[int, ...]] = None
+        self._last_dims_log_ndisplay: Optional[int] = None
 
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
@@ -983,6 +986,81 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
+    def _refresh_canonical_axes_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
+        axes = getattr(self, "_canonical_axes", None)
+        if axes is None:
+            return
+
+        order_src = list(snapshot.order or axes.order)
+        order_list: list[int] = []
+        for value in order_src:
+            idx = int(value)
+            if 0 <= idx < axes.ndim and idx not in order_list:
+                order_list.append(idx)
+        for idx in range(axes.ndim):
+            if idx not in order_list:
+                order_list.append(idx)
+        order_tuple = tuple(order_list[: axes.ndim])
+
+        raw_step = list(snapshot.current_step or axes.current_step)
+        step_list: list[int] = []
+        for idx in range(axes.ndim):
+            if idx < len(raw_step):
+                step_list.append(int(raw_step[idx]))
+            elif idx < len(axes.current_step):
+                step_list.append(int(axes.current_step[idx]))
+            else:
+                step_list.append(0)
+        step_tuple = tuple(step_list[: axes.ndim])
+
+        labels_source = list(snapshot.axis_labels or axes.axis_labels)
+        default_labels = list(axes.axis_labels)
+        label_list: list[str] = []
+        for idx in range(axes.ndim):
+            if idx < len(labels_source):
+                label_list.append(str(labels_source[idx]))
+            elif idx < len(default_labels):
+                label_list.append(str(default_labels[idx]))
+            else:
+                label_list.append(f"axis-{idx}")
+        label_tuple = tuple(label_list[: axes.ndim])
+
+        ndisplay = int(snapshot.ndisplay) if snapshot.ndisplay is not None else int(axes.ndisplay)
+        ndisplay = max(1, min(ndisplay, axes.ndim))
+
+        self._canonical_axes = replace(
+            axes,
+            axis_labels=label_tuple,
+            order=order_tuple,
+            ndisplay=ndisplay,
+            current_step=step_tuple,
+        )
+        if logger.isEnabledFor(logging.INFO):
+            if (
+                step_tuple != self._last_dims_log_step
+                or int(ndisplay) != int(self._last_dims_log_ndisplay or -1)
+            ):
+                logger.info(
+                    "worker adopting ledger dims: step=%s ndisplay=%d order=%s labels=%s",
+                    step_tuple,
+                    ndisplay,
+                    order_tuple,
+                    label_tuple,
+                )
+                self._last_dims_log_step = step_tuple
+                self._last_dims_log_ndisplay = int(ndisplay)
+        self._last_step = step_tuple
+
+    def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
+        if snapshot.axis_labels is None or snapshot.current_step is None:
+            return
+        labels = [str(label).lower() for label in snapshot.axis_labels]
+        if "z" not in labels:
+            return
+        idx = labels.index("z")
+        if idx < len(snapshot.current_step):
+            self._z_index = int(snapshot.current_step[idx])
+
     def _normalize_scene_state(self, state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
         """Return the render-thread-friendly copy of *state*."""
 
@@ -1052,7 +1130,8 @@ class EGLRendererWorker:
     def _consume_render_snapshot(self, state: RenderLedgerSnapshot) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
-        self.enqueue_update(RenderDelta(scene_state=state))
+        self._refresh_canonical_axes_from_snapshot(state)
+        self._render_mailbox.enqueue_scene_state(state)
 
     def process_camera_commands(self, commands: Sequence[ServerSceneCommand]) -> None:
         process_commands(self, commands)

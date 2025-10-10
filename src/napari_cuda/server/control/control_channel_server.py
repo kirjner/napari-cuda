@@ -1756,6 +1756,8 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 result.current_step,
             )
 
+        server._applied_seqs["dims"] = int(result.server_seq)
+
         await _send_state_ack(
             server,
             ws,

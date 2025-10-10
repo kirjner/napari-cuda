@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
@@ -203,29 +203,6 @@ def _shape_sequence(value: Any) -> Optional[tuple[tuple[int, ...], ...]]:
 __all__ = ["RenderLedgerSnapshot", "build_ledger_snapshot"]
 
 
-def _clamp_step(
-    step: Sequence[int],
-    level_shapes: Sequence[Sequence[int]] | None,
-    current_level: Optional[int],
-) -> Tuple[int, ...]:
-    values = [int(v) for v in step]
-    if level_shapes is None or current_level is None:
-        return tuple(values)
-    li = int(current_level)
-    if li < 0 or li >= len(level_shapes):
-        return tuple(values)
-    shape = level_shapes[li]
-    for i in range(min(len(values), len(shape))):
-        size = int(shape[i])
-        if size <= 0:
-            continue
-        if values[i] < 0:
-            values[i] = 0
-        elif values[i] >= size:
-            values[i] = size - 1
-    return tuple(values)
-
-
 def pull_render_snapshot(
     server: Any,
 ) -> tuple[RenderLedgerSnapshot, Dict[str, int], Optional[int]]:
@@ -233,21 +210,13 @@ def pull_render_snapshot(
 
     with server._state_lock:
         snapshot = build_ledger_snapshot(server._state_ledger, server._scene)
-        level_shapes = snapshot.level_shapes
-        current_level = snapshot.current_level
 
         desired_dims_seq = -1
-        desired_step: Optional[Tuple[int, ...]] = None
         latest_dims = latest_get_all("dims")
         for _key, (seq, value) in latest_dims.items():
             seq_int = int(seq)
             if seq_int >= desired_dims_seq and isinstance(value, (list, tuple)):
-                desired_step = tuple(int(v) for v in value)
                 desired_dims_seq = seq_int
-        if desired_step is not None:
-            clamped = _clamp_step(desired_step, level_shapes, current_level)
-            if snapshot.current_step != clamped:
-                snapshot = replace(snapshot, current_step=clamped)
 
         desired_view_seq = -1
         desired_ndisplay: Optional[int] = None
@@ -258,14 +227,21 @@ def pull_render_snapshot(
                 desired_view_seq = seq_int
                 desired_ndisplay = 3 if int(value) >= 3 else 2
 
+    if desired_ndisplay is not None:
+        current_nd = snapshot.ndisplay
+        if current_nd is not None and int(current_nd) == int(desired_ndisplay):
+            desired_ndisplay = None
+
     desired_seqs = {"dims": int(desired_dims_seq), "view": int(desired_view_seq)}
-    logger.info(
-        "render snapshot pulled step=%s desired_seqs=%s desired_ndisplay=%s",
-        snapshot.current_step,
-        desired_seqs,
-        desired_ndisplay,
-    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "render snapshot pulled step=%s ndisplay=%s desired_seqs=%s desired_ndisplay=%s",
+            snapshot.current_step,
+            snapshot.ndisplay,
+            desired_seqs,
+            desired_ndisplay,
+        )
     return snapshot, desired_seqs, desired_ndisplay
 
 
-__all__.extend(["pull_render_snapshot", "_clamp_step"])
+__all__.append("pull_render_snapshot")

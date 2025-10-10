@@ -445,8 +445,11 @@ class _FakeWorkerBase:
     def viewer_model(self):  # noqa: ANN001
         return None
 
-    def apply_state(self, state) -> None:  # noqa: ANN001 - signature mirrors concrete worker
+    def _consume_render_snapshot(self, state) -> None:  # noqa: ANN001 - mirrors worker
         self.applied_states.append(state)
+
+    def apply_state(self, state) -> None:  # noqa: ANN001 - back-compat shim
+        self._consume_render_snapshot(state)
 
     def process_camera_commands(self, commands) -> None:  # noqa: ANN001
         if commands:
