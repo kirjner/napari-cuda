@@ -40,8 +40,8 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `scene_ingest.py` | 196 | Builds immutable `RenderSceneSnapshot` objects from the ledger plus transitional caches. |
-| `scene_state_applier.py` | 444 | Applies `RenderSceneSnapshot` values to the worker’s napari/VisPy objects. |
+| `render_ledger_snapshot.py` | 196 | Builds immutable `RenderLedgerSnapshot` objects from the ledger plus transitional caches. |
+| `scene_state_applier.py` | 444 | Applies `RenderLedgerSnapshot` values to the worker’s napari/VisPy objects. |
 | `scene_types.py` | 87 | Typed helpers describing ROI and slice payload structures. |
 | `camera_controller.py` | 287 | Interprets camera intents and delegates to `camera_ops`. |
 | `camera_ops.py` | 167 | Low-level napari camera mutations for 2D/3D. |
@@ -74,7 +74,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | `display_mode.py` | 175 | Applies napari ndisplay transitions (2D↔3D). |
 | `debug_tools.py` | 176 | Dumps renderer state / GL buffers for diagnostics. |
 | `patterns.py` | 206 | Generates test patterns for validation runs. |
-| `runtime/server_command_queue.py` | 140 | Thread-safe command queue for frame hand-off. |
+| `runtime/render_update_queue.py` | 140 | Thread-safe command queue for frame hand-off. |
 | `runtime/runtime_loop.py` | 33 | Legacy helper (largely superseded by worker). |
 | `frame_pipeline.py` / `gl_capture.py` | 152 / 177 | Capture helpers (GPU copy, staging). |
 | `vispy_intercept.py` | 267 | Hooks vispy GL calls to integrate with the worker. |

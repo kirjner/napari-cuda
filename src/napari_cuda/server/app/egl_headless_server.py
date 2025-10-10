@@ -21,7 +21,7 @@ import socket
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.scene import (
     ServerSceneCommand,
@@ -440,7 +440,6 @@ class EGLHeadlessServer:
             self._scene,
             self._state_ledger,
             self._state_lock,
-            self._reducer_intents,
             ndisplay=ndisp,
             intent_id=intent_id,
             timestamp=timestamp,
@@ -507,8 +506,8 @@ class EGLHeadlessServer:
         assert meta is not None, "worker bootstrap metadata missing"
         reduce_bootstrap_state(
             self._scene,
+            self._state_ledger,
             self._state_lock,
-            self._reducer_intents,
             step=meta.step,
             axis_labels=meta.axis_labels,
             order=meta.order,
@@ -518,6 +517,11 @@ class EGLHeadlessServer:
             ndisplay=meta.ndisplay,
             origin="server.bootstrap",
         )
+        self.use_volume = bool(self._scene.use_volume)
+        self._pixel_channel.broadcast.bypass_until_key = True
+        self._pixel_channel.broadcast.waiting_for_keyframe = True
+        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
+        self._schedule_coro(self._ensure_keyframe(), "bootstrap-keyframe")
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.

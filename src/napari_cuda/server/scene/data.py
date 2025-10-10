@@ -15,7 +15,7 @@ from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Seque
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot, build_render_snapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
 from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.control.state_ledger import LedgerEntry, ServerStateLedger
 
@@ -142,7 +142,7 @@ def default_layer_controls() -> LayerControlState:
 class ServerSceneData:
     """Mutable scene metadata owned by the headless server."""
 
-    latest_state: RenderSceneSnapshot = field(default_factory=RenderSceneSnapshot)
+    latest_state: RenderLedgerSnapshot = field(default_factory=RenderLedgerSnapshot)
     use_volume: bool = False
     camera_commands: Deque[ServerSceneCommand] = field(default_factory=deque)
     next_server_seq: int = 0
@@ -188,10 +188,10 @@ def build_render_scene_state(
     volume_opacity: Any = None,
     volume_sample_step: Any = None,
     layer_updates: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> RenderSceneSnapshot:
+) -> RenderLedgerSnapshot:
     """Build a render-scene snapshot from the ledger with optional overrides."""
 
-    base = build_render_snapshot(
+    base = build_ledger_snapshot(
         ledger,
         scene,
         layer_updates=layer_updates,
@@ -200,10 +200,10 @@ def build_render_scene_state(
 
     chosen_layer_updates = base.layer_updates
     if layer_updates is not None:
-        # build_render_snapshot handles normalisation when overrides provided
+        # build_ledger_snapshot handles normalisation when overrides provided
         chosen_layer_updates = base.layer_updates
 
-    return RenderSceneSnapshot(
+    return RenderLedgerSnapshot(
         center=_coalesce_tuple(center, base.center, float),
         zoom=_coalesce_float(zoom, base.zoom),
         angles=_coalesce_tuple(angles, base.angles, float),

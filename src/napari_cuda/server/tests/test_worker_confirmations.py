@@ -17,11 +17,12 @@ from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.app.egl_headless_server import EGLHeadlessServer
 from napari_cuda.server.rendering.viewer_builder import CanonicalAxes
 
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import create_server_scene_data
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
 from napari_cuda.server.control.state_reducers import _dims_entries_from_payload, reduce_bootstrap_state
+from napari_cuda.server.control import latest_intent
 from napari_cuda.server.control.intent_queue import ReducerIntentQueue, WorkerConfirmationQueue, make_server_intent
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.runtime.worker_lifecycle import WorkerLifecycleState, start_worker, stop_worker, _build_intent_confirmation
@@ -115,7 +116,7 @@ def make_fake_server(loop: asyncio.AbstractEventLoop, tmp_path: Path):
     server._state_lock = threading.RLock()
     server._state_ledger = ServerStateLedger()
     scene = create_server_scene_data(policy_event_path=tmp_path / "policy_events.jsonl")
-    scene.latest_state = RenderSceneSnapshot(current_step=(0,))
+    scene.latest_state = RenderLedgerSnapshot(current_step=(0,))
     scene.camera_commands = deque()
     scene.policy_metrics_snapshot = {}
     scene.multiscale_state = {}

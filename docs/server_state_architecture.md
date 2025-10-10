@@ -38,23 +38,23 @@ Mirrors (e.g., ServerDimsMirror)
 
 ### Terminology
 
-- **ServerCommandQueue** (rename of `RenderMailbox`): queues discrete commands before the render worker applies them.
+- **RenderUpdateQueue** (rename of `RenderMailbox`): queues discrete commands before the render worker applies them.
 - **ServerStateLedger**: authoritative property store, mirroring the client’s `ClientStateLedger`.
 - **ServerDimsMirror**: subscriber that broadcasts dims/multiscale updates to clients (and any other consumers) once the ledger confirms them.
-- **RenderSceneSnapshot**: immutable render-thread input built from the ledger; replaces the legacy `ServerSceneState` bag.
+- **RenderLedgerSnapshot**: immutable render-thread input built from the ledger; replaces the legacy `ServerSceneState` bag.
 - **AppliedSeqs**: small per-scope counters on the server that record the last applied confirmation sequence (e.g., `dims`, `view`, later `camera`, `layers`). Used only for skip decisions.
 
 ## Detailed Changes
 
 ### New (or Relocated) Modules
 
-- `src/napari_cuda/server/runtime/scene_ingest.py`
-  - Builds immutable `RenderSceneSnapshot` objects from the ledger plus transitional caches on `ServerSceneData`.
+- `src/napari_cuda/server/runtime/render_ledger_snapshot.py`
+  - Builds immutable `RenderLedgerSnapshot` objects from the ledger plus transitional caches on `ServerSceneData`.
   - Normalises layer deltas and drains them so the worker sees each update once.
 
 - `src/napari_cuda/server/runtime/scene_state_applier.py`
   - Migrated from the deleted `server/state` package.
-  - Applies a `RenderSceneSnapshot` to the VisPy view/camera and reports the resulting metadata back to the worker loop.
+  - Applies a `RenderLedgerSnapshot` to the VisPy view/camera and reports the resulting metadata back to the worker loop.
 
 - `src/napari_cuda/server/control/state_ledger.py`
   - Houses `ServerStateLedger`, mirroring the client module and providing thread-safe mutation/observer APIs.
@@ -73,8 +73,8 @@ Mirrors (e.g., ServerDimsMirror)
 
 ### Updated Modules
 
-- `src/napari_cuda/server/runtime/server_command_queue.py`
-  - Renamed from the legacy mailbox and now stores `RenderSceneSnapshot` values.
+- `src/napari_cuda/server/runtime/render_update_queue.py`
+  - Renamed from the legacy mailbox and now stores `RenderLedgerSnapshot` values.
   - Signature tracking ensures the worker only triggers expensive policy refreshes when the snapshot actually changes.
 
 - `src/napari_cuda/server/runtime/worker_lifecycle.py`
@@ -95,8 +95,8 @@ Mirrors (e.g., ServerDimsMirror)
   - Level switches no longer synthesise policy dims intents; the worker emits confirmations after applied state.
   - Helper utilities now lean on `LatestIntent` and snapshots instead of pending-step caches.
 
-- `src/napari_cuda/server/runtime/frame_input.py`
-  - Replaces the legacy optimistic merge logic with a dedicated builder that clamps desired steps and merges `LatestIntent` onto the applied snapshot.
+- `src/napari_cuda/server/runtime/render_ledger_snapshot.py`
+  - Provides helpers to build ledger-backed render snapshots and overlay in-flight `LatestIntent` values for dims/view before the worker consumes them.
 
 - `src/napari_cuda/server/control/pixel_channel.py`
   - Tracks avcC broadcasts separately from frame enqueueing; publishes stream configs immediately when available and caches the last snapshot for reconnects.
@@ -105,7 +105,7 @@ Mirrors (e.g., ServerDimsMirror)
 
 - No more `pending_dims_step`, optimistic ledger mutations, or synthetic policy intents.
 - Legacy `RenderMailbox` renamed/repurposed; doubled caching removed in favour of the new snapshot builder.
-- The worker no longer reaches into the scene bag directly; everything flows through the ledger and confirmations.
+- The worker no longer reaches into the scene bag directly; everything flows through the ledger snapshot consumed each tick.
 
 ## Concurrency Boundary
 
@@ -116,7 +116,7 @@ Mirrors (e.g., ServerDimsMirror)
   - Receives worker confirmations, writes them into the ledger, and drives mirrors (`notify.dims`, `notify.scene`, etc.).
 
 - **Render worker thread**:
-  - Builds a `RenderSceneSnapshot` from the ledger each tick via `frame_input.build_frame_input`.
+  - Pulls a `RenderLedgerSnapshot` from the ledger each tick via `render_ledger_snapshot.pull_render_snapshot`.
   - Reads `LatestIntent` to determine desired dims/view/camera/layer targets.
   - Applies state, renders, and emits applied-first confirmations (dims step, level metadata, view, camera).
   - Pushes encoded frames to the pixel channel and avcC snapshots when available.
@@ -143,7 +143,7 @@ Reducers write desired targets using `LatestIntent.set(...)`. They no longer sta
 
 On the render thread, each frame:
 
-1. `frame_input.build_frame_input` constructs a baseline snapshot from the ledger and merges clamped desired dims/view targets from `LatestIntent`.
+1. `render_ledger_snapshot.pull_render_snapshot` constructs a baseline snapshot from the ledger and merges clamped desired dims/view targets from `LatestIntent`.
 2. The worker applies the snapshot, renders, and emits confirmations reflecting the applied state.
 3. The server writes confirmations to the ledger, updates `AppliedSeqs`, and drives mirrors.
 

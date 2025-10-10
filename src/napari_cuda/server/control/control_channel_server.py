@@ -1733,7 +1733,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 server._scene,
                 server._state_ledger,
                 server._state_lock,
-                server._reducer_intents,
                 axis=request.target,
                 prop=request.key,
                 value=request.value,

@@ -122,8 +122,12 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     layer_ndim = layer.ndim if layer is not None else 0
     data = layer.data if layer is not None else None
     data_ndim = data.ndim if data is not None else 0
+    canonical = getattr(worker, "_canonical_axes", None)
+    canonical_ndim = int(canonical.ndim) if canonical is not None else None
     current_ndim = viewer_dims.ndim
-    ndim = max(layer_ndim, data_ndim, current_ndim, target)
+    ndim = canonical_ndim if canonical_ndim is not None else max(layer_ndim, data_ndim, current_ndim, target)
+    if ndim <= 0:
+        ndim = target
     if current_ndim != ndim:
         viewer_dims.ndim = ndim
 
@@ -175,7 +179,10 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     canonical = getattr(worker, "_canonical_axes", None)
     assert canonical is not None, "worker missing canonical axes during ndisplay switch"
     order_tuple = tuple(int(axis) for axis in viewer_dims.order)
-    target_step = tuple(int(updated_step[idx]) for idx in range(canonical.ndim))
+    target_step = tuple(
+        int(updated_step[idx]) if idx < len(updated_step) else 0
+        for idx in range(canonical.ndim)
+    )
     worker._canonical_axes = replace(
         canonical,
         ndisplay=int(viewer_dims.ndisplay),

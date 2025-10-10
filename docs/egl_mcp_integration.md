@@ -2,18 +2,18 @@
 
 ## Goals
 - Embed the FastMCP tool surface directly into the EGL headless server so agents can automate layer and camera workflows without a GUI napari viewer.
-- Reuse existing headless primitives (`ViewerSceneManager`, the ledger-backed `RenderSceneSnapshot`, `ServerCommandQueue`) instead of instantiating Qt objects.
+- Reuse existing headless primitives (`ViewerSceneManager`, the ledger-backed `RenderLedgerSnapshot`, `RenderUpdateQueue`) instead of instantiating Qt objects.
 - Provide a secure, minimal tool set (layer CRUD, camera/dims controls, code execution hook) suitable for research automation.
 - Leave screenshots and other GUI-only behaviors out of scope for this phase.
 
 ## Deployment Model
 - **Process**: run the MCP service inside the `EGLHeadlessServer` process; the server already owns the asyncio loop that coordinates WebSocket traffic.
 - **Event loop**: attach the FastMCP application to the main asyncio loop during `EGLHeadlessServer.start()` and keep it running until shutdown.
-- **Threading**: continue to run the EGL renderer in its dedicated worker thread; the MCP handlers operate on ledger-backed scene snapshots (`RenderSceneSnapshot`, `ViewerSceneManager`) through existing locks.
+- **Threading**: continue to run the EGL renderer in its dedicated worker thread; the MCP handlers operate on ledger-backed scene snapshots (`RenderLedgerSnapshot`, `ViewerSceneManager`) through existing locks.
 - **Ports**: expose MCP on a configurable HTTP port (default disabled) to avoid interfering with existing state/pixel sockets.
 
 ## Architectural Touchpoints
-- **Scene state**: the authoritative scene lives in the server state ledger + `RenderSceneSnapshot` plus the worker viewer model. MCP commands should apply mutations through the same queues (`ServerCommandQueue` and camera command deque) that the WebSocket state channel uses.
+- **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should apply mutations through the same queues (`RenderUpdateQueue` and camera command deque) that the WebSocket state channel uses.
 - **Scene metadata**: `ViewerSceneManager` can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into it instead of reading napari Viewer objects.
 - **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation functions in `layer_manager.py` or a new helper module that create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
 - **Camera/dims controls**: reuse `_enqueue_camera_command` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.
@@ -26,7 +26,7 @@
   - `init_viewer`: return metadata about the headless viewer model (canvas size, layer names) and ensure the worker thread is running; avoid creating a Qt application.
   - `add_image`/`add_labels`: accept either file paths or serialized numpy arrays. For on-server data, hand off to the `ZarrSceneSource` helper; for ad-hoc uploads, register temporary assets inside the server cache.
   - `install_packages`: optional; gate behind a feature flag because production deployments might forbid runtime package installs.
-- `execute_code`: expose a curated set of bindings such as `snapshot=RenderSceneSnapshot`, `metrics=Metrics`, `ctx=ServerCtx` to keep behavior predictable.
+- `execute_code`: expose a curated set of bindings such as `snapshot=RenderLedgerSnapshot`, `metrics=Metrics`, `ctx=ServerCtx` to keep behavior predictable.
 
 ## Implementation Steps
 1. **Service scaffolding**

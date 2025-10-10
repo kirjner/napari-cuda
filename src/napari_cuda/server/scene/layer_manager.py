@@ -359,15 +359,25 @@ class ViewerSceneManager:
         current_level = max(0, min(current_level, len(level_shapes) - 1))
         active_shape = level_shapes[current_level]
 
-        axis_labels = list(canonical.axis_labels)
+        axis_labels_source = list(layer_block.get("axis_labels") or canonical.axis_labels)
+        axis_count = len(active_shape)
+        axis_labels = axis_labels_source[:axis_count]
+        if len(axis_labels) < axis_count:
+            axis_labels.extend(
+                [f"axis-{idx}" for idx in range(len(axis_labels), axis_count)]
+            )
         order = list(canonical.order)
-        axis_count = len(order)
-        assert axis_count == len(active_shape), "canonical axes mismatch layer shape"
+        order = [idx for idx in order if idx < axis_count]
+        missing = [idx for idx in range(axis_count) if idx not in order]
+        order.extend(missing)
 
         if current_step is not None:
             desired_step = self._normalize_step(current_step, axis_count)
         else:
-            desired_step = [int(canonical.current_step[idx]) if idx < len(canonical.current_step) else 0 for idx in range(axis_count)]
+            desired_step = [
+                int(canonical.current_step[idx]) if idx < len(canonical.current_step) else 0
+                for idx in range(axis_count)
+            ]
 
         ndisplay_val = int(ndisplay) if ndisplay is not None else int(canonical.ndisplay)
         ndisplay_val = max(1, min(ndisplay_val, axis_count))

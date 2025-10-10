@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class RenderDelta:
 
     display_mode: Optional[int] = None
     multiscale: Optional[RenderLevelRequest] = None
-    scene_state: Optional[RenderSceneSnapshot] = None
+    scene_state: Optional[RenderLedgerSnapshot] = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class PendingRenderUpdate:
 
     display_mode: Optional[int] = None
     multiscale: Optional[RenderLevelRequest] = None
-    scene_state: Optional[RenderSceneSnapshot] = None
+    scene_state: Optional[RenderLedgerSnapshot] = None
 
 
 @dataclass(frozen=True)
@@ -45,14 +45,14 @@ class RenderZoomHint:
     timestamp: float
 
 
-class ServerCommandQueue:
+class RenderUpdateQueue:
     """Thread-safe queue that coalesces render updates for the worker."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
         self._display_mode: Optional[int] = None
         self._multiscale: Optional[RenderLevelRequest] = None
-        self._scene_state: Optional[RenderSceneSnapshot] = None
+        self._scene_state: Optional[RenderLedgerSnapshot] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
         self._last_signature: Optional[tuple] = None
         self._lock = threading.Lock()
@@ -75,7 +75,7 @@ class ServerCommandQueue:
     def enqueue_multiscale(self, level: int, path: Optional[str]) -> None:
         self.enqueue(RenderDelta(multiscale=RenderLevelRequest(int(level), str(path) if path else None)))
 
-    def enqueue_scene_state(self, state: RenderSceneSnapshot) -> None:
+    def enqueue_scene_state(self, state: RenderLedgerSnapshot) -> None:
         self.enqueue(RenderDelta(scene_state=state))
 
     def drain(self) -> PendingRenderUpdate:
@@ -110,7 +110,7 @@ class ServerCommandQueue:
             self._zoom_hint = None
             return zoom
 
-    def update_state_signature(self, state: RenderSceneSnapshot) -> bool:
+    def update_state_signature(self, state: RenderLedgerSnapshot) -> bool:
         signature = self._build_signature(state)
         with self._lock:
             if signature == self._last_signature:
@@ -119,7 +119,7 @@ class ServerCommandQueue:
             return True
 
     @staticmethod
-    def _build_signature(state: RenderSceneSnapshot) -> tuple:
+    def _build_signature(state: RenderLedgerSnapshot) -> tuple:
         center = tuple(float(c) for c in state.center) if state.center is not None else None
         zoom = float(state.zoom) if state.zoom is not None else None
         angles = tuple(float(a) for a in state.angles) if state.angles is not None else None
@@ -134,7 +134,7 @@ class ServerCommandQueue:
 __all__ = [
     "RenderDelta",
     "RenderLevelRequest",
-    "ServerCommandQueue",
+    "RenderUpdateQueue",
     "RenderZoomHint",
     "PendingRenderUpdate",
 ]

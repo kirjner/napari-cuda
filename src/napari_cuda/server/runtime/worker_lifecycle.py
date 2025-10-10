@@ -18,8 +18,8 @@ from napari_cuda.server.control.state_models import (
     BootstrapSceneMetadata,
     WorkerStateUpdateConfirmation,
 )
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
-from napari_cuda.server.runtime.frame_input import build_frame_input
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 
@@ -426,7 +426,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             next_tick = time.perf_counter()
 
             while not state.stop_event.is_set():
-                snapshot, desired_seqs, desired_ndisplay = build_frame_input(server)
+                snapshot, desired_seqs, desired_ndisplay = pull_render_snapshot(server)
                 with server._state_lock:
                     server._scene.latest_state = snapshot
                     commands = list(server._scene.camera_commands)
@@ -477,22 +477,41 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 desired_view_seq = int(desired_seqs.get("view", -1))
                 dims_satisfied = (desired_dims_seq >= 0 and desired_dims_seq <= applied_dims_seq)
                 view_satisfied = (desired_view_seq >= 0 and desired_view_seq <= applied_view_seq)
-                if (
-                    dims_satisfied
-                    and view_satisfied
-                    and not commands
-                    and not server._animate
-                    and not getattr(worker, "_render_tick_required", False)
-                ):
-                    next_tick += tick
-                    sleep_duration = next_tick - time.perf_counter()
-                    if sleep_duration > 0:
-                        time.sleep(sleep_duration)
-                    else:
-                        next_tick = time.perf_counter()
-                    continue
+                broadcast_state = getattr(server, "_pixel_channel", None)
+                broadcast = getattr(broadcast_state, "broadcast", None)
+                clients_connected = bool(getattr(broadcast, "clients", set()))
+                waiting_for_keyframe = bool(getattr(broadcast, "waiting_for_keyframe", False))
+                logger.debug(
+                    "frame desire seqs dims=%d view=%d applied dims=%d view=%d satisfied(dims=%s view=%s) clients=%d waiting_for_key=%s",
+                    desired_dims_seq,
+                    desired_view_seq,
+                    applied_dims_seq,
+                    applied_view_seq,
+                    dims_satisfied,
+                    view_satisfied,
+                    len(getattr(broadcast, "clients", set())),
+                    waiting_for_keyframe,
+                )
+                if not clients_connected:
+                    if (
+                        dims_satisfied
+                        and view_satisfied
+                        and not commands
+                        and not server._animate
+                        and not getattr(worker, "_render_tick_required", False)
+                        and not waiting_for_keyframe
+                    ):
+                        logger.debug("frame skip tick: desires satisfied and idle (no clients)")
+                        next_tick += tick
+                        sleep_duration = next_tick - time.perf_counter()
+                        if sleep_duration > 0:
+                            time.sleep(sleep_duration)
+                        else:
+                            next_tick = time.perf_counter()
+                        continue
 
-                worker.apply_state(frame_state)
+                logger.debug("frame apply proceeding commands=%d animate=%s", len(commands), server._animate)
+                worker._consume_render_snapshot(frame_state)
                 if commands:
                     worker.process_camera_commands(commands)
 

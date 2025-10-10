@@ -4,7 +4,7 @@
 the neutral module name reflects its broader responsibilities:
 
 * bootstrap the napari Viewer/VisPy canvas and keep it on the worker thread,
-* drain `ServerCommandQueue` updates and apply them through `SceneStateApplier`,
+* drain `RenderUpdateQueue` updates and apply them through `SceneStateApplier`,
 * drive the render loop, including camera animation and policy evaluation,
 * capture frames via `CaptureFacade`, hand them to the encoder, and surface
   timing metadata for downstream metrics.
@@ -74,13 +74,13 @@ from napari_cuda.server.runtime.scene_state_applier import (
     SceneDrainResult,
 )
 from napari_cuda.server.runtime.camera_controller import process_commands
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import ServerSceneCommand
 from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
-from napari_cuda.server.runtime.server_command_queue import (
+from napari_cuda.server.runtime.render_update_queue import (
     PendingRenderUpdate,
     RenderDelta,
-    ServerCommandQueue,
+    RenderUpdateQueue,
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
@@ -508,7 +508,7 @@ class EGLRendererWorker:
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.RLock()
-        self._render_mailbox = ServerCommandQueue()
+        self._render_mailbox = RenderUpdateQueue()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0
         self._ensure_log_interval_s = 1.0
@@ -983,7 +983,7 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def _normalize_scene_state(self, state: RenderSceneSnapshot) -> RenderSceneSnapshot:
+    def _normalize_scene_state(self, state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
         """Return the render-thread-friendly copy of *state*."""
 
         layer_updates = None
@@ -996,7 +996,7 @@ class EGLRendererWorker:
             if updates:
                 layer_updates = updates
 
-        return RenderSceneSnapshot(
+        return RenderLedgerSnapshot(
             center=(tuple(float(c) for c in state.center) if state.center is not None else None),
             zoom=(float(state.zoom) if state.zoom is not None else None),
             angles=(tuple(float(a) for a in state.angles) if state.angles is not None else None),
@@ -1049,7 +1049,7 @@ class EGLRendererWorker:
         self._render_mailbox.enqueue(normalized)
         self._mark_render_tick_needed()
 
-    def apply_state(self, state: RenderSceneSnapshot) -> None:
+    def _consume_render_snapshot(self, state: RenderLedgerSnapshot) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
         self.enqueue_update(RenderDelta(scene_state=state))

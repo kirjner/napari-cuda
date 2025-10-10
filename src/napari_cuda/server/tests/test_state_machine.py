@@ -5,8 +5,8 @@ from dataclasses import replace
 
 import pytest
 
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
-from napari_cuda.server.runtime.server_command_queue import ServerCommandQueue
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_update_queue import RenderUpdateQueue
 
 
 class _FakeClock:
@@ -22,13 +22,13 @@ class _FakeClock:
 
 def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
-    mailbox = ServerCommandQueue(time_fn=clock)
+    mailbox = RenderUpdateQueue(time_fn=clock)
 
     mailbox.enqueue_display_mode(2)
     mailbox.enqueue_display_mode(3)
     mailbox.enqueue_multiscale(1, "coarse")
     mailbox.enqueue_multiscale(2, None)
-    snapshot = RenderSceneSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25)
+    snapshot = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25)
     mailbox.enqueue_scene_state(snapshot)
 
     updates = mailbox.drain()
@@ -47,7 +47,7 @@ def test_drain_pending_updates_returns_last_values() -> None:
 
 def test_zoom_hint_recent_then_stale() -> None:
     clock = _FakeClock()
-    mailbox = ServerCommandQueue(time_fn=clock)
+    mailbox = RenderUpdateQueue(time_fn=clock)
 
     mailbox.record_zoom_hint(1.2)
     zoom = mailbox.consume_zoom_hint(max_age=0.5)
@@ -67,9 +67,9 @@ def test_zoom_hint_recent_then_stale() -> None:
 
 
 def test_update_state_signature_detects_changes() -> None:
-    mailbox = ServerCommandQueue()
+    mailbox = RenderUpdateQueue()
 
-    base = RenderSceneSnapshot(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
+    base = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
     assert mailbox.update_state_signature(base)
     # Identical state should not trigger a change
     assert not mailbox.update_state_signature(base)

@@ -11,7 +11,7 @@ graph LR
     %% Worker thread + helpers
     subgraph WorkerThread["EGLRendererWorker (render thread)"]
         Worker["Render loop"]
-        SceneQueue["ServerCommandQueue\n(camera + intents)"]
+        SceneQueue["RenderUpdateQueue\n(camera + intents)"]
     end
 
     %% Clients

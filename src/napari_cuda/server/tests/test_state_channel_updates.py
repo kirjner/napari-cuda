@@ -30,9 +30,9 @@ from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import create_server_scene_data
-from napari_cuda.server.control.intent_queue import ReducerIntentQueue
+from napari_cuda.server.control import latest_intent
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -84,6 +84,7 @@ class _FakeWS(SimpleNamespace):
 
 
 def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
+    latest_intent.clear_all()
     scene = create_server_scene_data()
     manager = ViewerSceneManager((640, 480))
     worker = _CaptureWorker()
@@ -164,7 +165,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)
     server._state_ledger = ServerStateLedger()
-    server._reducer_intents = ReducerIntentQueue(maxsize=16)
 
     def _mirror_schedule(coro: Coroutine[Any, Any, None], _label: str) -> None:
         scheduled.append(coro)
@@ -199,8 +199,8 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     levels_payload = tuple(dict(level) for level in baseline_dims.levels)
     reduce_bootstrap_state(
         server._scene,
+        server._state_ledger,
         server._state_lock,
-        server._reducer_intents,
         step=tuple(int(v) for v in baseline_dims.current_step),
         axis_labels=axis_labels,
         order=order,
@@ -497,7 +497,11 @@ def test_dims_update_emits_ack_and_notify() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    assert server._scene.pending_dims_step == (5, 0, 0)
+    intent_entry = latest_intent.get_intent("dims", "z")
+    assert intent_entry is not None
+    intent_seq, intent_value = intent_entry
+    assert intent_seq > 0
+    assert tuple(int(v) for v in intent_value) == (5, 0, 0)
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -542,6 +546,10 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     _drain_scheduled(scheduled)
 
     assert server._ndisplay_calls == [3]
+    view_intent = latest_intent.get_intent("view", "ndisplay")
+    assert view_intent is not None
+    _, desired_ndisplay = view_intent
+    assert int(desired_ndisplay) == 3
     assert server.use_volume is True
 
     acks = _frames_of_type(captured, "ack.state")
@@ -810,7 +818,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             value="viridis",
         )
 
-        server._scene.latest_state = RenderSceneSnapshot(layer_updates=server._scene.pending_layer_updates.copy())
+        server._scene.latest_state = RenderLedgerSnapshot(layer_updates=server._scene.pending_layer_updates.copy())
 
         server._scene_manager.update_from_sources(
             worker=server._worker,
