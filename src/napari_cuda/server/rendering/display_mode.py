@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Optional
 import logging
 
@@ -122,10 +121,8 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     layer_ndim = layer.ndim if layer is not None else 0
     data = layer.data if layer is not None else None
     data_ndim = data.ndim if data is not None else 0
-    canonical = getattr(worker, "_canonical_axes", None)
-    canonical_ndim = int(canonical.ndim) if canonical is not None else None
     current_ndim = viewer_dims.ndim
-    ndim = canonical_ndim if canonical_ndim is not None else max(layer_ndim, data_ndim, current_ndim, target)
+    ndim = max(layer_ndim, data_ndim, current_ndim, target)
     if ndim <= 0:
         ndim = target
     if current_ndim != ndim:
@@ -171,24 +168,10 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
             anchor_axis = ndim - displayed_count - 1
             worker._z_index = int(steps[anchor_axis])
 
-    viewer_dims.ndisplay = target
     updated_step = tuple(int(value) for value in steps)
     viewer_dims.current_step = updated_step
     worker._last_step = updated_step
     worker._notify_scene_refresh(updated_step)
-    canonical = getattr(worker, "_canonical_axes", None)
-    assert canonical is not None, "worker missing canonical axes during ndisplay switch"
-    order_tuple = tuple(int(axis) for axis in viewer_dims.order)
-    target_step = tuple(
-        int(updated_step[idx]) if idx < len(updated_step) else 0
-        for idx in range(canonical.ndim)
-    )
-    worker._canonical_axes = replace(
-        canonical,
-        ndisplay=int(viewer_dims.ndisplay),
-        order=order_tuple[: canonical.ndim],
-        current_step=target_step,
-    )
 
 
 def _coarsest_level_index(source) -> Optional[int]:

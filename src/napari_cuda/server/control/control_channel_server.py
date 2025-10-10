@@ -2271,7 +2271,6 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
     default_controls: list[tuple[str, Mapping[str, Any]]] = []
 
     try:
-        await server._await_worker_bootstrap(0.5)
         try:
             if hasattr(server, "_update_scene_manager"):
                 server._update_scene_manager()

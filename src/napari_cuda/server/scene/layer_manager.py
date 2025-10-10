@@ -12,7 +12,6 @@ from contextlib import ExitStack, suppress
 from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.protocol.axis_labels import normalize_axis_labels
-from napari_cuda.server.rendering.viewer_builder import CanonicalAxes, apply_canonical_axes
 from napari_cuda.protocol.snapshots import (
     LayerSnapshot,
     SceneSnapshot,
@@ -35,13 +34,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _WorkerSnapshot:
-    ndim: int
     shape: List[int]
     axis_labels: List[str]
+    order: List[int]
+    current_step: List[int]
+    displayed: List[int]
+    ndisplay: int
     dtype: Optional[str]
     is_volume: bool
-    order: List[int]
-    canonical_axes: Optional["CanonicalAxes"]
 
 
 class ViewerSceneManager:
@@ -60,7 +60,6 @@ class ViewerSceneManager:
         self._default_layer_id = default_layer_id
         self._default_layer_name = default_layer_name
         self._snapshot: Optional[SceneSnapshot] = None
-        self._canonical_axes: Optional[CanonicalAxes] = None
 
     def update_from_sources(
         self,
@@ -81,9 +80,6 @@ class ViewerSceneManager:
             self._owns_viewer = False
 
         worker_snapshot = self._snapshot_worker(worker, ndisplay, viewer_model=viewer_model)
-        assert worker_snapshot.canonical_axes is not None, "viewer snapshot requires canonical axes"
-        self._canonical_axes = worker_snapshot.canonical_axes
-
         adapter_layer = self._adapter_layer(viewer_model)
 
         controls_state = self._resolve_controls(layer_controls)
@@ -345,9 +341,6 @@ class ViewerSceneManager:
         ndisplay: Optional[int],
         viewer_model: Optional[ViewerModel],
     ) -> Dict[str, Any]:
-        canonical = worker_snapshot.canonical_axes
-        assert isinstance(canonical, CanonicalAxes), "dims block requires canonical axes"
-
         multiscale = layer_block.get("multiscale")
         current_level = 0
         if isinstance(multiscale, Mapping) and "current_level" in multiscale:
@@ -359,14 +352,15 @@ class ViewerSceneManager:
         current_level = max(0, min(current_level, len(level_shapes) - 1))
         active_shape = level_shapes[current_level]
 
-        axis_labels_source = list(layer_block.get("axis_labels") or canonical.axis_labels)
+        axis_labels_source = list(layer_block.get("axis_labels") or worker_snapshot.axis_labels)
         axis_count = len(active_shape)
         axis_labels = axis_labels_source[:axis_count]
         if len(axis_labels) < axis_count:
             axis_labels.extend(
                 [f"axis-{idx}" for idx in range(len(axis_labels), axis_count)]
             )
-        order = list(canonical.order)
+        order_source = worker_snapshot.order or list(range(axis_count))
+        order = list(order_source)
         order = [idx for idx in order if idx < axis_count]
         missing = [idx for idx in range(axis_count) if idx not in order]
         order.extend(missing)
@@ -374,14 +368,18 @@ class ViewerSceneManager:
         if current_step is not None:
             desired_step = self._normalize_step(current_step, axis_count)
         else:
-            desired_step = [
-                int(canonical.current_step[idx]) if idx < len(canonical.current_step) else 0
-                for idx in range(axis_count)
-            ]
+            desired_step = worker_snapshot.current_step[:axis_count]
+            if len(desired_step) < axis_count:
+                desired_step.extend(0 for _ in range(axis_count - len(desired_step)))
 
-        ndisplay_val = int(ndisplay) if ndisplay is not None else int(canonical.ndisplay)
+        ndisplay_val = int(ndisplay) if ndisplay is not None else int(worker_snapshot.ndisplay)
         ndisplay_val = max(1, min(ndisplay_val, axis_count))
-        displayed = list(order[-ndisplay_val:])
+        displayed_source = worker_snapshot.displayed or order[-ndisplay_val:]
+        displayed = [idx for idx in displayed_source if 0 <= idx < axis_count]
+        if len(displayed) < ndisplay_val:
+            extras = [idx for idx in order if idx not in displayed]
+            displayed.extend(extras[: ndisplay_val - len(displayed)])
+        displayed = displayed[:ndisplay_val]
 
         return {
             "ndim": axis_count,
@@ -519,27 +517,52 @@ class ViewerSceneManager:
     ) -> _WorkerSnapshot:
         assert worker.is_ready, "worker snapshot requested before worker ready"
 
-        canonical = getattr(worker, "_canonical_axes", None)
-        assert isinstance(canonical, CanonicalAxes), "worker missing canonical axes metadata"
+        ledger_labels = worker._ledger_axis_labels()
+        assert ledger_labels is not None and len(ledger_labels) > 0, "ledger missing axis labels"
+        axis_labels = [str(label) for label in ledger_labels]
 
-        shape = [int(size) for size in canonical.sizes]
-        axis_labels: List[str] = list(canonical.axis_labels)
-        order: List[int] = list(canonical.order)
+        ledger_order = worker._ledger_order()
+        assert ledger_order is not None and len(ledger_order) > 0, "ledger missing axis order"
+        order = [int(idx) for idx in ledger_order]
+
+        ledger_step = worker._ledger_step()
+        assert ledger_step is not None and len(ledger_step) > 0, "ledger missing current step"
+        current_step = [int(val) for val in ledger_step]
+
+        ledger_displayed = worker._ledger_displayed()
+        assert ledger_displayed is not None and len(ledger_displayed) > 0, "ledger missing displayed axes"
+        displayed = [int(idx) for idx in ledger_displayed]
+
+        ledger_ndisplay = worker._ledger_ndisplay()
+        assert ledger_ndisplay is not None, "ledger missing ndisplay"
+        ndisplay_val = int(ledger_ndisplay)
+
+        ledger_shapes = worker._ledger_level_shapes()
+        assert ledger_shapes is not None and len(ledger_shapes) > 0, "ledger missing multiscale level shapes"
+        active_index = worker._active_ms_level
+        assert active_index is not None, "worker missing active multiscale level"
+        assert 0 <= int(active_index) < len(ledger_shapes), "active multiscale level out of range"
+        shape = [int(s) for s in ledger_shapes[int(active_index)]]
+
+        assert len(shape) == len(axis_labels), "ledger axis labels mismatch shape"
+        assert len(order) == len(axis_labels), "ledger axis order mismatch axis labels"
+        assert len(current_step) == len(axis_labels), "ledger current step mismatch axis labels"
+        assert len(displayed) == ndisplay_val, "ledger displayed axes mismatch ndisplay"
 
         dtype_value = worker._zarr_dtype or worker.volume_dtype
         dtype_str = str(dtype_value) if dtype_value is not None else None
 
-        ndim = int(canonical.ndim)
         is_volume = bool(worker.use_volume or (ndisplay == 3))
 
         return _WorkerSnapshot(
-            ndim=ndim,
             shape=shape,
             axis_labels=axis_labels,
+            order=order,
+            current_step=current_step,
+            displayed=displayed,
+            ndisplay=ndisplay_val,
             dtype=dtype_str,
             is_volume=is_volume,
-            order=order,
-            canonical_axes=canonical,
         )
 
     def _apply_to_viewer(
@@ -549,23 +572,35 @@ class ViewerSceneManager:
     ) -> None:
         dims = self._viewer.dims
         with ExitStack() as stack:
-            for attr in ("ndisplay", "current_step", "displayed"):
+            for attr in ("ndisplay", "current_step", "displayed", "order", "axis_labels", "ndim"):
                 emitter = getattr(dims.events, attr, None)
                 if emitter is not None and hasattr(emitter, "blocker"):
                     stack.enter_context(emitter.blocker())
-            canonical = self._canonical_axes
-            assert isinstance(canonical, CanonicalAxes), "viewer requires canonical axes"
-            apply_canonical_axes(self._viewer, canonical)
-            displayed = dims_block.get("displayed")
-            if displayed:
-                with suppress(AttributeError):
-                    dims.displayed = tuple(int(idx) for idx in displayed)  # type: ignore[attr-defined]
-            current_step = dims_block.get("current_step")
-            if current_step:
-                dims.current_step = tuple(int(val) for val in current_step)
-            ndisplay = dims_block.get("ndisplay")
-            if ndisplay is not None:
-                dims.ndisplay = int(ndisplay)
+
+            required_keys = ("ndim", "axis_labels", "order", "current_step", "displayed", "ndisplay")
+            for key in required_keys:
+                assert key in dims_block, f"dims block missing {key}"
+                assert dims_block[key] is not None, f"dims block null {key}"
+
+            ndim_value = int(dims_block["ndim"])
+            axis_labels_seq = tuple(str(val) for val in dims_block["axis_labels"])
+            order_seq = tuple(int(val) for val in dims_block["order"])
+            current_step_seq = tuple(int(val) for val in dims_block["current_step"])
+            displayed_seq = tuple(int(idx) for idx in dims_block["displayed"])
+            ndisplay_value = int(dims_block["ndisplay"])
+
+            assert len(axis_labels_seq) == ndim_value, "axis labels length mismatch ndim"
+            assert len(order_seq) == ndim_value, "order length mismatch ndim"
+            assert len(current_step_seq) == ndim_value, "current step length mismatch ndim"
+            assert len(displayed_seq) == ndisplay_value, "displayed length mismatch ndisplay"
+
+            dims.ndim = ndim_value
+            dims.axis_labels = axis_labels_seq  # type: ignore[assignment]
+            dims.order = order_seq  # type: ignore[assignment]
+            dims.ndisplay = ndisplay_value
+            expected_displayed = tuple(order_seq[-ndisplay_value:]) if order_seq else tuple(range(ndisplay_value))
+            assert expected_displayed == displayed_seq, "displayed axes must align with order and ndisplay"
+            dims.current_step = current_step_seq
 
         if not camera_block:
             return

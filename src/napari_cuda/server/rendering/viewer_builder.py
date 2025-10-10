@@ -83,7 +83,16 @@ class ViewerBuilder:
     def __init__(self, bridge) -> None:
         self._bridge = bridge
 
-    def build(self, source: Optional[ZarrSceneSource]) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
+    def build(
+        self,
+        source: Optional[ZarrSceneSource],
+        *,
+        level: Optional[int] = None,
+        step: Optional[Sequence[int]] = None,
+        axis_labels: Optional[Sequence[str]] = None,
+        order: Optional[Sequence[int]] = None,
+        ndisplay: Optional[int] = None,
+    ) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
         worker_policy = self._bridge._debug_policy  # type: ignore[attr-defined]
         worker_debug = worker_policy.worker
         debug_bg = bool(worker_debug.debug_bg_overlay)
@@ -109,90 +118,60 @@ class ViewerBuilder:
 
         layer = None
         adapter = None
-        canonical_meta: Optional[CanonicalAxes] = None
-
         scene_src = "synthetic"
         scene_meta = ""
+        applied_step: Optional[tuple[int, ...]] = None
 
         if source is not None:
             levels = source.level_descriptors
-            chosen_level = (len(levels) - 1) if levels else 0
-            if levels:
-                found = None
-                if self._bridge.use_volume:
-                    for li in range(len(levels) - 1, -1, -1):
-                        try:
-                            self._bridge._volume_budget_allows(source, li)
-                            found = li
-                            break
-                        except Exception:
-                            if self._bridge._log_layer_debug:
-                                logger.info("init budget reject (volume): level=%d", li)
-                else:
-                    for li in range(len(levels) - 1, -1, -1):
-                        try:
-                            self._bridge._slice_budget_allows(source, li)
-                            found = li
-                            break
-                        except Exception:
-                            if self._bridge._log_layer_debug:
-                                logger.info("init budget reject (slice): level=%d", li)
-                chosen_level = found if found is not None else (len(levels) - 1)
-            current_level = int(chosen_level)
-            if self._bridge._log_layer_debug:
-                logger.info("adapter init: nlevels=%d chosen=%d use_volume=%s", len(levels), int(current_level), bool(self._bridge.use_volume))
-                for li, desc in enumerate(levels):
-                    h, w = plane_wh_for_level(source, li)
-                    dtype_size = int(np.dtype(source.dtype).itemsize)
-                    bytes_est = int(h) * int(w) * dtype_size
-                    logger.info("adapter levels: idx=%d shape=%s plane=%dx%d dtype=%s slice_bytes=%d", int(li), 'x'.join(str(int(x)) for x in desc.shape), int(h), int(w), str(source.dtype), bytes_est)
+            level_count = len(levels)
+            selected_level = int(level) if level is not None else int(source.current_level)
+            if level_count > 0:
+                max_index = level_count - 1
+                selected_level = max(0, min(selected_level, max_index))
+                descriptor = levels[selected_level]
+            else:
+                selected_level = 0
+                descriptor = None
 
-            init_step = source.initial_step(step_or_z=self._bridge._zarr_init_z, level=current_level)
-            step = source.set_current_slice(init_step, current_level)
-            descriptor = source.level_descriptors[current_level]
+            step_hint = tuple(int(v) for v in step) if step is not None else source.initial_step(
+                step_or_z=self._bridge._zarr_init_z,
+                level=selected_level,
+            )
+            applied_step = source.set_current_slice(step_hint, selected_level)
+
             self._bridge._scene_source = source
-            self._bridge._active_ms_level = current_level
-            self._bridge._zarr_level = descriptor.path or None
+            self._bridge._active_ms_level = selected_level
+            self._bridge._zarr_level = descriptor.path if descriptor is not None and descriptor.path else None  # type: ignore[union-attr]
             self._bridge._zarr_axes = ''.join(source.axes)
-            self._bridge._zarr_shape = descriptor.shape
+            self._bridge._zarr_shape = tuple(int(dim) for dim in descriptor.shape) if descriptor is not None else None  # type: ignore[union-attr]
             self._bridge._zarr_dtype = str(source.dtype)
-            self._bridge._zarr_clim = source.ensure_contrast(level=current_level)
+            self._bridge._zarr_clim = source.ensure_contrast(level=selected_level)
 
             axes_tuple = tuple(str(ax) for ax in source.axes)
             axes_lower = [axis.lower() for axis in axes_tuple]
-            if 'z' in axes_lower:
-                try:
-                    self._bridge._z_index = int(step[axes_lower.index('z')])
-                except Exception:
-                    self._bridge._z_index = None
+            z_index = 0
+            if applied_step is not None and 'z' in axes_lower:
+                z_pos = axes_lower.index('z')
+                if 0 <= z_pos < len(applied_step):
+                    z_index = int(applied_step[z_pos])
+            self._bridge._z_index = int(z_index)
 
             if self._bridge.use_volume:
-                data = self._bridge._get_level_volume(source, current_level)
-                level_scale = source.level_scale(current_level)
-                try:
-                    scale_vals = [float(s) for s in level_scale]
-                except Exception:
-                    scale_vals = []
+                data = self._bridge._get_level_volume(source, selected_level)
+                level_scale = source.level_scale(selected_level)
+                scale_vals = [float(s) for s in level_scale]
                 while len(scale_vals) < 3:
                     scale_vals.insert(0, 1.0)
                 sz, sy, sx = scale_vals[-3], scale_vals[-2], scale_vals[-1]
                 self._bridge._volume_scale = (float(sz), float(sy), float(sx))
                 layer = viewer.add_image(data, name="zarr-volume", scale=level_scale)
-                viewer.dims.axis_labels = tuple(source.axes)
+                if axis_labels:
+                    viewer.dims.axis_labels = tuple(str(a) for a in axis_labels)
+                else:
+                    viewer.dims.axis_labels = tuple(source.axes)
                 viewer.dims.ndisplay = 3
-                step_seq = list(step)
-                axes_lower = [str(ax).lower() for ax in source.axes]
-                if 'z' in axes_lower:
-                    z_pos = axes_lower.index('z')
-                    if z_pos < len(step_seq) and step_seq[z_pos] != 0:
-                        step_seq[z_pos] = 0
-                        try:
-                            step = source.set_current_slice(tuple(step_seq), current_level)
-                        except Exception:
-                            logger.debug("adapter volume: resetting source step to 0 failed", exc_info=True)
-                viewer.dims.current_step = tuple(int(s) for s in step)
-                self._bridge._last_step = tuple(int(s) for s in step)
-                self._bridge._notify_scene_refresh(step)
+                viewer.dims.current_step = tuple(int(v) for v in applied_step) if applied_step is not None else tuple()
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
@@ -214,45 +193,30 @@ class ViewerBuilder:
                         world_h,
                         world_d,
                         getattr(layer, 'translate', None),
-                        getattr(layer, 'scale', None),
-                    )
+                    getattr(layer, 'scale', None),
+                )
                 self._bridge._frame_volume_camera(world_w, world_h, world_d)
-                self._bridge._z_index = 0
                 layer.rendering = "mip"
                 scene_src = "napari-zarr-volume"
-                scene_meta = f"level={self._bridge._zarr_level or current_level} shape={d}x{h}x{w}"
-                canonical_meta = canonical_axes_from_source(
-                    axes=axes_tuple,
-                    shape=descriptor.shape,
-                    step=step,
-                    use_volume=True,
-                )
+                scene_meta = f"level={self._bridge._zarr_level or selected_level} shape={d}x{h}x{w}"
             else:
-                z_idx = self._bridge._z_index or 0
-                # Load initial 2D slab using the worker's slice helper.
-                # Metrics plumbing was removed; we no longer return a metrics tuple here.
-                slice_array = self._bridge._load_slice(source, current_level, int(z_idx))
+                slice_array = self._bridge._load_slice(source, selected_level, int(z_index))
                 if self._bridge._log_layer_debug:
-                    try:
-                        smin = float(np.nanmin(slice_array)) if hasattr(np, 'nanmin') else float(np.min(slice_array))
-                        smax = float(np.nanmax(slice_array)) if hasattr(np, 'nanmax') else float(np.max(slice_array))
-                        smea = float(np.mean(slice_array))
-                        logger.info(
-                            "init slab: level=%d z=%d shape=%sx%s dtype=%s min=%.6f max=%.6f mean=%.6f",
-                            int(current_level),
-                            int(z_idx),
-                            int(slice_array.shape[0]),
-                            int(slice_array.shape[1]),
-                            str(getattr(slice_array, 'dtype', 'na')),
-                            smin,
-                            smax,
-                            smea,
-                        )
-                    except Exception:
-                        logger.debug("init slab stats failed", exc_info=True)
-                # slice_array is normalized to [0,1] by ZarrSceneSource.slice(compute=True),
-                # so use fixed contrast_limits=(0,1) to avoid black output from raw-domain clims.
-                sy, sx = plane_scale_for_level(source, current_level)
+                    smin = float(np.nanmin(slice_array))
+                    smax = float(np.nanmax(slice_array))
+                    smea = float(np.mean(slice_array))
+                    logger.info(
+                        "init slab: level=%d z=%d shape=%sx%s dtype=%s min=%.6f max=%.6f mean=%.6f",
+                        int(selected_level),
+                        int(z_index),
+                        int(slice_array.shape[0]),
+                        int(slice_array.shape[1]),
+                        str(getattr(slice_array, 'dtype', 'na')),
+                        smin,
+                        smax,
+                        smea,
+                    )
+                sy, sx = plane_scale_for_level(source, selected_level)
                 layer = viewer.add_image(
                     slice_array,
                     name="zarr-image",
@@ -269,21 +233,16 @@ class ViewerBuilder:
                 from napari._vispy.layers.image import VispyImageLayer  # type: ignore
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-                h, w = plane_wh_for_level(source, current_level)
-                sy, sx = plane_scale_for_level(source, current_level)
+                h, w = plane_wh_for_level(source, selected_level)
                 self._bridge._data_wh = (w, h)
-                # Use world extents (shape * scale) so the image falls within the view frustum
                 world_w = float(w) * float(sx)
                 world_h = float(h) * float(sy)
                 view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
                 scene_src = "napari-zarr-adapter"
-                scene_meta = f"level={self._bridge._zarr_level or current_level} shape={h}x{w}"
-                canonical_meta = canonical_axes_from_source(
-                    axes=axes_tuple,
-                    shape=descriptor.shape,
-                    step=step,
-                    use_volume=False,
-                )
+                scene_meta = f"level={self._bridge._zarr_level or selected_level} shape={h}x{w}"
+                if axis_labels:
+                    viewer.dims.axis_labels = tuple(str(a) for a in axis_labels)
+                viewer.dims.current_step = tuple(int(v) for v in applied_step) if applied_step is not None else tuple()
 
         if layer is None:
             if self._bridge.use_volume:
@@ -325,16 +284,15 @@ class ViewerBuilder:
                     use_volume=False,
                 )
 
+        if axis_labels:
+            viewer.dims.axis_labels = tuple(str(a) for a in axis_labels)
+        if order:
+            viewer.dims.order = tuple(int(v) for v in order)
+        if ndisplay is not None:
+            viewer.dims.ndisplay = int(ndisplay)
+
         self._bridge._viewer = viewer
         self._bridge._napari_layer = layer
-
-        assert canonical_meta is not None, "canonical axes metadata unavailable"
-        apply_canonical_axes(viewer, canonical_meta)
-        self._bridge._canonical_axes = canonical_meta
-        self._bridge._last_step = canonical_meta.current_step
-        self._bridge._notify_scene_refresh(canonical_meta.current_step)
-        self._bridge._zarr_shape = tuple(int(size) for size in canonical_meta.sizes)
-        self._bridge._zarr_axes = ''.join(canonical_meta.axis_labels)
 
         def _ensure_node_registered() -> None:
             n = adapter.node
@@ -409,8 +367,6 @@ class ViewerBuilder:
                 logger.info("debug overlay created (red square) order=%s", getattr(overlay, 'order', 'n/a'))
             except Exception:
                 logger.debug("debug overlay creation failed (Rectangle unavailable)", exc_info=True)
-
-        self._bridge._notify_scene_refresh()
 
         logger.info("Scene init: source=%s %s", scene_src, scene_meta)
         logger.info("Camera class: %s", type(view.camera).__name__)

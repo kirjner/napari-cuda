@@ -68,6 +68,7 @@ from napari_cuda.server.control.intent_queue import (
     WorkerConfirmationQueue,
 )
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_view_set_ndisplay
+from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
@@ -340,13 +341,6 @@ class EGLHeadlessServer:
 
         task.add_done_callback(_log_task_result)
 
-    async def _await_worker_bootstrap(self, timeout_s: float = 0.5) -> None:
-        """Wait for the worker to signal readiness and publish bootstrap metadata."""
-        del timeout_s
-        lifecycle = self._worker_lifecycle
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lifecycle.ready_event.wait)
-
     async def _ensure_keyframe(self) -> None:
         """Request a clean keyframe and arrange for watchdog + config resend."""
 
@@ -500,29 +494,6 @@ class EGLHeadlessServer:
             if current_desc.path:
                 self._zarr_level = current_desc.path
 
-    def _bootstrap_control_pipeline(self) -> None:
-        lifecycle_meta = self._worker_lifecycle.bootstrap_meta
-        meta = lifecycle_meta
-        assert meta is not None, "worker bootstrap metadata missing"
-        reduce_bootstrap_state(
-            self._scene,
-            self._state_ledger,
-            self._state_lock,
-            step=meta.step,
-            axis_labels=meta.axis_labels,
-            order=meta.order,
-            level_shapes=meta.level_shapes,
-            levels=meta.levels,
-            current_level=meta.current_level,
-            ndisplay=meta.ndisplay,
-            origin="server.bootstrap",
-        )
-        self.use_volume = bool(self._scene.use_volume)
-        self._pixel_channel.broadcast.bypass_until_key = True
-        self._pixel_channel.broadcast.waiting_for_keyframe = True
-        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
-        self._schedule_coro(self._ensure_keyframe(), "bootstrap-keyframe")
-
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
 
@@ -646,9 +617,38 @@ class EGLHeadlessServer:
         self._worker_updates = WorkerConfirmationQueue(loop, maxsize=64)
         self._dims_mirror.start()
         self._worker_dispatch_task = loop.create_task(self._dispatch_worker_updates())
+        if self._zarr_path is None:
+            raise RuntimeError("bootstrap requires zarr_path")
+        bootstrap_meta = probe_scene_bootstrap(
+            path=self._zarr_path,
+            use_volume=self.use_volume,
+            preferred_level=self._zarr_level,
+            axes_override=tuple(self._zarr_axes) if self._zarr_axes is not None else None,
+            z_override=self._zarr_z,
+            canvas_size=(self.width, self.height),
+            oversampling_thresholds=self._ctx.policy.oversampling_thresholds,
+            oversampling_hysteresis=self._ctx.policy.oversampling_hysteresis,
+            threshold_in=self._ctx.policy.threshold_in,
+            threshold_out=self._ctx.policy.threshold_out,
+            fine_threshold=self._ctx.policy.fine_threshold,
+            policy_hysteresis=self._ctx.policy.hysteresis,
+            cooldown_ms=self._ctx.policy.cooldown_ms,
+        )
+        with self._state_lock:
+            reduce_bootstrap_state(
+                self._scene,
+                self._state_ledger,
+                self._state_lock,
+                step=bootstrap_meta.step,
+                axis_labels=bootstrap_meta.axis_labels,
+                order=bootstrap_meta.order,
+                level_shapes=bootstrap_meta.level_shapes,
+                levels=bootstrap_meta.levels,
+                current_level=bootstrap_meta.current_level,
+                ndisplay=bootstrap_meta.ndisplay,
+                origin="server.bootstrap",
+            )
         self._start_worker(loop)
-        await self._await_worker_bootstrap(0.5)
-        self._bootstrap_control_pipeline()
         try:
             self._update_scene_manager()
         except Exception:

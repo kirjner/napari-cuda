@@ -7,17 +7,14 @@ import os
 import threading
 import time
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
-from typing import Optional, Sequence, List, Dict, Any, Tuple
+from typing import Optional, Sequence, List, Dict, Any, Tuple, Mapping
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
 from napari_cuda.server.control.intent_queue import ReducerIntentQueue
-from napari_cuda.server.control.state_models import (
-    BootstrapSceneMetadata,
-    WorkerStateUpdateConfirmation,
-)
+from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
@@ -78,49 +75,65 @@ def _build_applied_confirmation(
     # Ignore intent payload for continuous dims/view confirmations (applied-first)
     intent_payload: Dict[str, Any] = {}
 
-    canonical = worker._canonical_axes
-    assert canonical is not None, "worker missing canonical axes"
+    assert worker._ledger is not None, "worker ledger not attached"
 
-    current_step: Tuple[int, ...]
+    axis_labels_raw = worker._ledger_axis_labels()
+    assert axis_labels_raw is not None and len(axis_labels_raw) > 0, "ledger missing axis labels"
+    axis_labels: Tuple[str, ...] = tuple(str(label) for label in axis_labels_raw)
+
+    order_raw = worker._ledger_order()
+    assert order_raw is not None and len(order_raw) > 0, "ledger missing axis order"
+    order: Tuple[int, ...] = tuple(int(idx) for idx in order_raw)
+
     if step_hint is not None:
         current_step = tuple(int(v) for v in step_hint)
-    elif worker._last_step is not None:
-        current_step = tuple(int(v) for v in worker._last_step)
     else:
-        current_step = tuple(int(v) for v in canonical.current_step)
+        ledger_step = worker._ledger_step()
+        assert ledger_step is not None and len(ledger_step) > 0, "ledger missing current step"
+        current_step = tuple(int(v) for v in ledger_step)
 
-    axis_labels = tuple(str(label) for label in canonical.axis_labels)
-    order = tuple(int(idx) for idx in canonical.order)
+    ledger_ndisplay = worker._ledger_ndisplay()
+    assert ledger_ndisplay is not None, "ledger missing ndisplay"
+    ndisplay = int(ledger_ndisplay)
 
-    # Applied-first: always use canonical ndisplay for confirmations
-    ndisplay = int(canonical.ndisplay)
+    ledger_displayed = worker._ledger_displayed()
+    assert ledger_displayed is not None and len(ledger_displayed) > 0, "ledger missing displayed axes"
+    displayed = tuple(int(idx) for idx in ledger_displayed)
 
-    displayed = order[-ndisplay:] if order else tuple()
+    level_shapes_raw = worker._ledger_level_shapes()
+    assert level_shapes_raw is not None and len(level_shapes_raw) > 0, "ledger missing level shapes"
+    level_shapes: List[tuple[int, ...]] = [tuple(int(s) for s in shape) for shape in level_shapes_raw]
 
-    source = worker._scene_source
+    levels_entry = worker._ledger.get("multiscale", "main", "levels")
+    assert levels_entry is not None, "ledger missing multiscale levels"
+    levels_value = levels_entry.value
+    assert isinstance(levels_value, (list, tuple)) and len(levels_value) > 0, "invalid ledger multiscale levels"
     levels: List[Dict[str, Any]] = []
-    level_shapes: List[tuple[int, ...]] = []
-    if source is not None and source.level_descriptors:
-        for descriptor in source.level_descriptors:
-            shape = tuple(int(s) for s in descriptor.shape)
-            level_shapes.append(shape)
-            entry: Dict[str, Any] = {
-                "index": int(descriptor.index),
-                "shape": [int(s) for s in descriptor.shape],
-            }
-            entry["downsample"] = [float(x) for x in descriptor.downsample]
-            if descriptor.path:
-                entry["path"] = str(descriptor.path)
-            levels.append(entry)
-    if not level_shapes:
-        fallback_shape = tuple(int(s) for s in canonical.sizes)
-        level_shapes.append(fallback_shape)
-        levels.append(
-            {
-                "index": int(worker._active_ms_level),
-                "shape": [int(s) for s in fallback_shape],
-            }
-        )
+    for entry in levels_value:
+        assert isinstance(entry, Mapping), "ledger multiscale level must be mapping"
+        level_dict: Dict[str, Any] = {
+            "index": int(entry.get("index")),
+            "shape": [int(s) for s in entry.get("shape", [])],
+        }
+        downsample = entry.get("downsample")
+        if isinstance(downsample, (list, tuple)):
+            level_dict["downsample"] = [float(x) for x in downsample]
+        path_value = entry.get("path")
+        if path_value is not None:
+            level_dict["path"] = str(path_value)
+        levels.append(level_dict)
+
+    active_level = worker._active_ms_level
+    if active_level is None:
+        ledger_level = worker._ledger_level()
+        assert ledger_level is not None, "ledger missing current level"
+        current_level = int(ledger_level)
+    else:
+        current_level = int(active_level)
+
+    assert len(axis_labels) == len(order), "ledger axis order mismatch axis labels"
+    assert len(current_step) == len(axis_labels), "ledger current step mismatch axis labels"
+    assert len(displayed) == ndisplay, "ledger displayed axes mismatch ndisplay"
 
     mode = "volume" if ndisplay >= 3 else "plane"
     downgraded_attr = worker._level_downgraded
@@ -136,7 +149,7 @@ def _build_applied_confirmation(
             tuple(int(v) for v in step_hint) if isinstance(step_hint, Sequence) else None,
             tuple(int(v) for v in worker._last_step) if worker._last_step is not None else None,
             current_step,
-            int(worker._active_ms_level),
+            current_level,
         )
 
     confirmation = WorkerStateUpdateConfirmation(
@@ -146,11 +159,11 @@ def _build_applied_confirmation(
         step=current_step,
         ndisplay=ndisplay,
         mode=mode,
-        displayed=tuple(displayed) if displayed else None,
-        order=order if order else None,
-        axis_labels=axis_labels if axis_labels else None,
+        displayed=tuple(displayed),
+        order=order,
+        axis_labels=axis_labels,
         labels=None,
-        current_level=int(worker._active_ms_level),
+        current_level=current_level,
         levels=tuple(levels),
         level_shapes=tuple(level_shapes),
         downgraded=bool(downgraded_attr) if downgraded_attr is not None else None,
@@ -161,59 +174,6 @@ def _build_applied_confirmation(
     worker._last_step = current_step
     return confirmation
 
-
-def capture_bootstrap_state(worker: "EGLRendererWorker") -> BootstrapSceneMetadata:
-    canonical = worker._canonical_axes
-    assert canonical is not None, "worker missing canonical axes for bootstrap capture"
-
-    axis_labels = tuple(str(label) for label in canonical.axis_labels)
-    order = tuple(int(idx) for idx in canonical.order)
-    if worker._last_step is not None:
-        step_values = tuple(int(value) for value in worker._last_step)
-    else:
-        step_values = tuple(int(value) for value in canonical.current_step)
-
-    source = worker._scene_source
-    level_shapes_list: List[tuple[int, ...]] = []
-    levels_payload: List[Dict[str, Any]] = []
-    if source is not None:
-        descriptors = source.level_descriptors
-        for descriptor in descriptors:
-            shape_tuple = tuple(int(dim) for dim in descriptor.shape)
-            level_shapes_list.append(shape_tuple)
-            entry: Dict[str, Any] = {
-                "index": int(descriptor.index),
-                "shape": [int(dim) for dim in descriptor.shape],
-                "downsample": [float(value) for value in descriptor.downsample],
-            }
-            if descriptor.path:
-                entry["path"] = str(descriptor.path)
-            levels_payload.append(entry)
-    if not level_shapes_list:
-        fallback_shape = tuple(int(value) for value in canonical.sizes)
-        level_shapes_list.append(fallback_shape)
-        levels_payload.append(
-            {
-                "index": int(worker._active_ms_level),
-                "shape": [int(value) for value in fallback_shape],
-                "downsample": [1.0 for _ in fallback_shape],
-            }
-        )
-
-    ndisplay_value = int(canonical.ndisplay)
-    current_level = int(worker._active_ms_level)
-
-    return BootstrapSceneMetadata(
-        step=step_values,
-        axis_labels=axis_labels,
-        order=order,
-        level_shapes=tuple(level_shapes_list),
-        levels=tuple(levels_payload),
-        current_level=current_level,
-        ndisplay=ndisplay_value,
-    )
-
-
 @dataclass
 class WorkerLifecycleState:
     """Track the worker thread and its stop signal."""
@@ -223,10 +183,7 @@ class WorkerLifecycleState:
     stop_event: threading.Event = field(default_factory=threading.Event)
     ready_event: threading.Event = field(default_factory=threading.Event)
     scene_seq: int = 0
-    bootstrap_meta: Optional[BootstrapSceneMetadata] = None
-    bootstrap_event: threading.Event = field(default_factory=threading.Event)
     ready_async_event: Optional[asyncio.Event] = None
-    bootstrap_async_event: Optional[asyncio.Event] = None
 
 
 def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerLifecycleState) -> None:
@@ -238,10 +195,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
     state.stop_event.clear()
     state.ready_event.clear()
     state.scene_seq = int(server._scene.last_scene_seq)
-    state.bootstrap_meta = None
-    state.bootstrap_event.clear()
     state.ready_async_event = asyncio.Event()
-    state.bootstrap_async_event = asyncio.Event()
 
     def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
         worker = state.worker
@@ -381,6 +335,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 bool(worker._zarr_path),
             )
 
+            initial_snapshot, initial_seqs, initial_ndisplay = pull_render_snapshot(server)
+            with server._state_lock:
+                server._scene.latest_state = initial_snapshot
+                server._scene.camera_commands.clear()
+            worker._consume_render_snapshot(initial_snapshot)
+            worker.drain_scene_updates()
+            if initial_ndisplay is not None:
+                worker.request_ndisplay(int(initial_ndisplay))
+            worker._last_step = tuple(int(v) for v in (initial_snapshot.current_step or ()))
+
             worker.set_scene_refresh_callback(
                 partial(
                     _ingest_scene_refresh,
@@ -389,12 +353,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     loop,
                 )
             )
-
-            state.bootstrap_meta = capture_bootstrap_state(worker)
-            state.bootstrap_event.set()
-            bootstrap_async = state.bootstrap_async_event
-            if bootstrap_async is not None:
-                loop.call_soon_threadsafe(bootstrap_async.set)
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -580,10 +538,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     logger.debug("Worker cleanup error: %s", cleanup_exc)
             state.worker = None
             state.ready_event.clear()
-            state.bootstrap_meta = None
-            state.bootstrap_event.clear()
             state.ready_async_event = None
-            state.bootstrap_async_event = None
 
     thread = threading.Thread(target=worker_loop, name="egl-render", daemon=True)
     state.thread = thread
@@ -596,9 +551,7 @@ def stop_worker(state: WorkerLifecycleState) -> None:
 
     state.stop_event.set()
     state.ready_event.clear()
-    state.bootstrap_event.clear()
     state.ready_async_event = None
-    state.bootstrap_async_event = None
     thread = state.thread
     if thread and thread.is_alive():
         thread.join(timeout=3.0)

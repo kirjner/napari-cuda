@@ -19,8 +19,6 @@ from __future__ import annotations
 import os
 import time
 import logging
-from dataclasses import replace
-
 from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple, List
 import threading
 import math
@@ -213,7 +211,19 @@ class EGLRendererWorker:
 
     def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
         builder = ViewerBuilder(self)
-        canvas, view, viewer = builder.build(source)
+        step_hint = self._ledger_step()
+        level_hint = self._ledger_level()
+        axis_labels = self._ledger_axis_labels()
+        order = self._ledger_order()
+        ndisplay = self._ledger_ndisplay()
+        canvas, view, viewer = builder.build(
+            source,
+            level=level_hint,
+            step=step_hint,
+            axis_labels=axis_labels,
+            order=order,
+            ndisplay=ndisplay,
+        )
         # Mirror attributes for call sites expecting them
         self.canvas = canvas
         self.view = view
@@ -986,70 +996,82 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def _refresh_canonical_axes_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
-        axes = getattr(self, "_canonical_axes", None)
-        if axes is None:
+    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
+        viewer = self._viewer
+        if viewer is None:
             return
 
-        order_src = list(snapshot.order or axes.order)
-        order_list: list[int] = []
-        for value in order_src:
-            idx = int(value)
-            if 0 <= idx < axes.ndim and idx not in order_list:
-                order_list.append(idx)
-        for idx in range(axes.ndim):
-            if idx not in order_list:
-                order_list.append(idx)
-        order_tuple = tuple(order_list[: axes.ndim])
+        dims = viewer.dims
+        ndim = int(getattr(dims, "ndim", 0) or 0)
 
-        raw_step = list(snapshot.current_step or axes.current_step)
-        step_list: list[int] = []
-        for idx in range(axes.ndim):
-            if idx < len(raw_step):
-                step_list.append(int(raw_step[idx]))
-            elif idx < len(axes.current_step):
-                step_list.append(int(axes.current_step[idx]))
-            else:
-                step_list.append(0)
-        step_tuple = tuple(step_list[: axes.ndim])
+        axis_labels_src = snapshot.axis_labels
+        if axis_labels_src:
+            labels = tuple(str(v) for v in axis_labels_src)
+            dims.axis_labels = labels
+            ndim = max(ndim, len(labels))
 
-        labels_source = list(snapshot.axis_labels or axes.axis_labels)
-        default_labels = list(axes.axis_labels)
-        label_list: list[str] = []
-        for idx in range(axes.ndim):
-            if idx < len(labels_source):
-                label_list.append(str(labels_source[idx]))
-            elif idx < len(default_labels):
-                label_list.append(str(default_labels[idx]))
-            else:
-                label_list.append(f"axis-{idx}")
-        label_tuple = tuple(label_list[: axes.ndim])
+        order_src = snapshot.order
+        if order_src:
+            order_tuple = tuple(int(v) for v in order_src)
+            dims.order = order_tuple
+            ndim = max(ndim, len(order_tuple))
 
-        ndisplay = int(snapshot.ndisplay) if snapshot.ndisplay is not None else int(axes.ndisplay)
-        ndisplay = max(1, min(ndisplay, axes.ndim))
+        if snapshot.ndisplay is not None:
+            dims.ndisplay = max(1, int(snapshot.ndisplay))
 
-        self._canonical_axes = replace(
-            axes,
-            axis_labels=label_tuple,
-            order=order_tuple,
-            ndisplay=ndisplay,
-            current_step=step_tuple,
-        )
+        if snapshot.level_shapes and snapshot.current_level is not None:
+            level_shapes = snapshot.level_shapes
+            level_idx = int(snapshot.current_level)
+            if level_shapes and 0 <= level_idx < len(level_shapes):
+                ndim = max(ndim, len(level_shapes[level_idx]))
+
+        if ndim <= 0:
+            ndim = max(len(dims.current_step), len(dims.axis_labels)) or 1
+        if dims.ndim != ndim:
+            dims.ndim = ndim
+
+        if snapshot.current_step is not None:
+            step_tuple = tuple(int(v) for v in snapshot.current_step)
+            if len(step_tuple) < ndim:
+                step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))
+            elif len(step_tuple) > ndim:
+                step_tuple = step_tuple[:ndim]
+            dims.current_step = step_tuple
+            self._last_step = step_tuple
+        else:
+            current = tuple(int(v) for v in getattr(dims, "current_step", ()))
+            if len(current) >= ndim:
+                self._last_step = current[:ndim]
+        if snapshot.current_level is not None:
+            self._active_ms_level = int(snapshot.current_level)
+
+        if snapshot.order is None:
+            order = tuple(int(v) for v in getattr(dims, "order", tuple(range(ndim))))
+            dims.order = order
+        order_values = tuple(int(v) for v in getattr(dims, "order", ()))
+        ndisplay_value = int(getattr(dims, "ndisplay", 2))
+        displayed_src = snapshot.displayed
+        if displayed_src is not None:
+            displayed_tuple = tuple(int(v) for v in displayed_src)
+            expected_displayed = order_values[-ndisplay_value:] if order_values else tuple(range(ndisplay_value))
+            assert displayed_tuple == tuple(expected_displayed), "ledger displayed mismatch order/ndisplay"
+
         if logger.isEnabledFor(logging.INFO):
+            step_log = tuple(int(v) for v in getattr(dims, "current_step", ()))
+            ndisplay_log = int(getattr(dims, "ndisplay", 2))
             if (
-                step_tuple != self._last_dims_log_step
-                or int(ndisplay) != int(self._last_dims_log_ndisplay or -1)
+                step_log != self._last_dims_log_step
+                or ndisplay_log != int(self._last_dims_log_ndisplay or -1)
             ):
                 logger.info(
                     "worker adopting ledger dims: step=%s ndisplay=%d order=%s labels=%s",
-                    step_tuple,
-                    ndisplay,
-                    order_tuple,
-                    label_tuple,
+                    step_log,
+                    ndisplay_log,
+                    tuple(int(v) for v in getattr(dims, "order", ())),
+                    tuple(str(v) for v in getattr(dims, "axis_labels", ())),
                 )
-                self._last_dims_log_step = step_tuple
-                self._last_dims_log_ndisplay = int(ndisplay)
-        self._last_step = step_tuple
+                self._last_dims_log_step = step_log
+                self._last_dims_log_ndisplay = ndisplay_log
 
     def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
         if snapshot.axis_labels is None or snapshot.current_step is None:
@@ -1130,7 +1152,7 @@ class EGLRendererWorker:
     def _consume_render_snapshot(self, state: RenderLedgerSnapshot) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
-        self._refresh_canonical_axes_from_snapshot(state)
+        self._apply_dims_from_snapshot(state)
         self._render_mailbox.enqueue_scene_state(state)
 
     def process_camera_commands(self, commands: Sequence[ServerSceneCommand]) -> None:
@@ -1373,6 +1395,65 @@ class EGLRendererWorker:
         value = entry.value
         if isinstance(value, (list, tuple)):
             return tuple(int(v) for v in value)
+        return None
+
+    def _ledger_level(self) -> Optional[int]:
+        entry = self._ledger.get("multiscale", "main", "level")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, int):
+            return int(value)
+        return None
+
+    def _ledger_axis_labels(self) -> Optional[tuple[str, ...]]:
+        entry = self._ledger.get("dims", "main", "axis_labels")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, (list, tuple)):
+            return tuple(str(v) for v in value)
+        return None
+
+    def _ledger_order(self) -> Optional[tuple[int, ...]]:
+        entry = self._ledger.get("dims", "main", "order")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, (list, tuple)):
+            return tuple(int(v) for v in value)
+        return None
+
+    def _ledger_ndisplay(self) -> Optional[int]:
+        entry = self._ledger.get("view", "main", "ndisplay")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, int):
+            return int(value)
+        return None
+
+    def _ledger_displayed(self) -> Optional[tuple[int, ...]]:
+        entry = self._ledger.get("view", "main", "displayed")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, (list, tuple)):
+            return tuple(int(v) for v in value)
+        return None
+
+    def _ledger_level_shapes(self) -> Optional[tuple[tuple[int, ...], ...]]:
+        entry = self._ledger.get("multiscale", "main", "level_shapes")
+        if entry is None:
+            return None
+        value = entry.value
+        if isinstance(value, (list, tuple)):
+            shapes: list[tuple[int, ...]] = []
+            for shape in value:
+                if isinstance(shape, (list, tuple)):
+                    shapes.append(tuple(int(v) for v in shape))
+            if shapes:
+                return tuple(shapes)
         return None
 
     def _record_step_in_ledger(self, step: Sequence[int], *, origin: str = "worker.render") -> None:
