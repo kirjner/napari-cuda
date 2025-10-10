@@ -13,25 +13,36 @@ Offensive coding tenets: assert invariants, no fallback branches, surface failur
 ## High-Level Flow
 
 ```
-Intent Emitters ──▶ Reducers ──▶ ServerLedgerUpdate ──▶ Confirmation Queue
-      │                         │                              │
-      │                         ▼                              │
-      └─────────────▶ ServerCommandQueue ◀─── Render Worker ───┘
-                                     │
-                                     ▼
-                             ServerStateLedger
-                                     │
-                             ┌───────┴───────┐
-                             ▼               ▼
-                     ServerDimsMirror   (future mirrors)
+Client (state.update)
+   │
+   ▼
+Reducers (control handlers)
+   │                 ┌───────────────────────────────────────────────┐
+   │                 │                                               │
+   │                 ▼                                               │
+   │        LatestIntent (continuous, latest‑wins)           ControlCommandQueue
+   │        (dims/camera/view/layers per‑key latest)         (discrete, FIFO)
+   │                 │                                               │
+   │                 ▼                                               │
+   │        Render Worker (applied‑first): consumes LatestIntent,    │
+   │        renders from applied snapshot only, then confirms        │
+   │        applied state (dims/level/view/camera/layers).           │
+   │                 │                                               │
+   ▼                 ▼                                               ▼
+ServerStateLedger ◀── Confirmations (applied)                 Command acks/results
+   │
+   ├─────────▶ notify.dims / notify.scene / notify.layers / notify.camera
+   ▼
+Mirrors (e.g., ServerDimsMirror)
 ```
 
 ### Terminology
 
-- **ServerCommandQueue** (rename of `RenderMailbox`): coalesces control intents before the render worker applies them.
+- **ServerCommandQueue** (rename of `RenderMailbox`): queues discrete commands before the render worker applies them.
 - **ServerStateLedger**: authoritative property store, mirroring the client’s `ClientStateLedger`.
 - **ServerDimsMirror**: subscriber that broadcasts dims/multiscale updates to clients (and any other consumers) once the ledger confirms them.
 - **RenderSceneSnapshot**: immutable render-thread input built from the ledger; replaces the legacy `ServerSceneState` bag.
+- **AppliedSeqs**: small per-scope counters on the server that record the last applied confirmation sequence (e.g., `dims`, `view`, later `camera`, `layers`). Used only for skip decisions.
 
 ## Detailed Changes
 
@@ -67,111 +78,118 @@ Intent Emitters ──▶ Reducers ──▶ ServerLedgerUpdate ──▶ Confir
   - Signature tracking ensures the worker only triggers expensive policy refreshes when the snapshot actually changes.
 
 - `src/napari_cuda/server/runtime/worker_lifecycle.py`
-  - The render loop acquires the state lock, calls `build_render_snapshot`, and hands the immutable snapshot to the worker.
-  - Post-frame acknowledgements keep the ledger in sync without mutating ad-hoc bags.
+  - The render loop calls a single frame input builder to merge `LatestIntent` onto the baseline snapshot per tick.
+  - After applying, the worker emits applied-first confirmations; the server commits these to the ledger without requiring a matching id for continuous scopes.
+  - The loop can skip an entire tick when no new desires exist (latest desired seq per scope ≤ last applied seq per scope), there are no discrete commands, and no animation/diagnostics are active.
 
 - `src/napari_cuda/server/control/control_channel_server.py`
   - Baseline responses compose payloads from the ledger snapshot plus `ServerSceneData` control metadata.
-  - State reducers schedule broadcasts via `ServerDimsMirror` or the existing notify helpers instead of mutating a legacy scene bag.
+  - State reducers write continuous updates to `LatestIntent` (dims/camera/view/layers) and schedule command acks; they do not mutate legacy scene bags nor push continuous updates into FIFO queues.
 
 - `src/napari_cuda/server/control/state_reducers.py`
-  - Reducers normalise intents into `ServerLedgerUpdate` objects that the confirmation queue drains into the ledger.
-  - Continues to manage per-layer control metadata but records every confirmed value in the ledger.
-  - Future work will inline the remaining `_scene` fallbacks once consumers switch to ledger-only reads.
+  - For continuous domains (dims/camera/view/layers), reducers normalise and store desired targets in `LatestIntent` with per-key monotonic `seq` tracking.
+  - Discrete commands continue to queue via `ControlCommandQueue`.
+  - `ServerStateLedger` remains authoritative; reducers no longer optimistically project into worker snapshots.
 
-- Test suite
-  - Worker, control, and integration tests now import helpers from `server/scene`, `server/runtime`, and `control/mirrors`.
-  - All fixtures operate on `RenderSceneSnapshot` objects, matching the runtime behavior.
-  - Confirmation queue drains, mirror broadcasts, and stale acknowledgement guards have dedicated regression coverage.
+- `src/napari_cuda/server/runtime/worker_runtime.py`
+  - Level switches no longer synthesise policy dims intents; the worker emits confirmations after applied state.
+  - Helper utilities now lean on `LatestIntent` and snapshots instead of pending-step caches.
 
-### Control-State Integration
+- `src/napari_cuda/server/runtime/frame_input.py`
+  - Replaces the legacy optimistic merge logic with a dedicated builder that clamps desired steps and merges `LatestIntent` onto the applied snapshot.
 
-- `state_reducers.py` still mutates `server._scene` for camera/volume/layer state. Ledger support currently covers dims metadata; migrating other scopes remains on the future roadmap.
-- Ledger records include `timestamp`/`origin`; the history store can consume these once additional scopes move over.
+- `src/napari_cuda/server/control/pixel_channel.py`
+  - Tracks avcC broadcasts separately from frame enqueueing; publishes stream configs immediately when available and caches the last snapshot for reconnects.
 
-## Reducer → Ledger → Mirror Lifecycle
+### Removed / Simplified
 
-1. **Reducers produce ledger updates**
-   - Control handlers route intents through reducers that emit `ServerLedgerUpdate` instances. Only dims metadata uses this path today; camera, volume, and layer scopes still rely on transitional `_scene` mutations.
-2. **Updates queue for confirmation**
-   - Each reducer result enqueues into the worker confirmation queue. The render worker drains the queue, applies the state, and replays authoritative metadata back into the queue for the ledger to commit.
-   - Stale confirmations (e.g., submitting step 0 after step 1) are dropped; the queue maintains the highest monotonic step per axis.
-3. **Ledger commits and mirrors broadcast**
-   - Confirmed entries land in `ServerStateLedger`. Mirrors observe ledger commits and broadcast payloads once per mutation. `ServerDimsMirror` is the first producer; additional mirrors will follow as more scopes migrate.
+- No more `pending_dims_step`, optimistic ledger mutations, or synthetic policy intents.
+- Legacy `RenderMailbox` renamed/repurposed; doubled caching removed in favour of the new snapshot builder.
+- The worker no longer reaches into the scene bag directly; everything flows through the ledger and confirmations.
 
-### Worker confirmation queue
+## Concurrency Boundary
 
-- The confirmation queue captures render-thread feedback and ensures ledger commits reflect the worker’s last applied state.
-- Queue guards prevent regressions:
-  - Step regression guard retains the latest confirmed step and ignores lower values.
-  - `relative_step_size` remains clamped until we refactor the volume state machine.
-  - Plane restore metadata still flows outside the confirmation payload; ledger entries currently omit restore metadata.
+- **Async control loop (main thread)**:
+  - Receives state updates and commands from clients.
+  - Writes desired targets into `LatestIntent` for continuous scopes.
+  - Enqueues discrete commands into `ControlCommandQueue`.
+  - Receives worker confirmations, writes them into the ledger, and drives mirrors (`notify.dims`, `notify.scene`, etc.).
 
-### Current limitations
+- **Render worker thread**:
+  - Builds a `RenderSceneSnapshot` from the ledger each tick via `frame_input.build_frame_input`.
+  - Reads `LatestIntent` to determine desired dims/view/camera/layer targets.
+  - Applies state, renders, and emits applied-first confirmations (dims step, level metadata, view, camera).
+  - Pushes encoded frames to the pixel channel and avcC snapshots when available.
 
-- 2D↔3D transitions briefly reset the step index to 0 before stabilising on the stored plane step. A smoke test asserts that we recover to the mirror’s final state without crashing.
-- Volume transitions still rely on an attribute guard that blocks stale `relative_step_size` until the worker-side volume pipeline is rewritten.
-- Plane restore metadata is not yet transported through `WorkerStateUpdateConfirmation`; future work will extend the confirmation payload.
-- All reducers eventually target the ledger, but today only dims flows complete the reducer → confirmation → ledger pipeline.
-
-## Event-Driven Ingest Roadmap
-
-- **Render loop emits explicit state events**: decouple the render tick from state ingestion so the worker only schedules `ingest_scene_refresh` when it mutates slice/camera/volume state. Pixel streaming and policy evaluation keep their own cadence.
-- **Ledger becomes the worker’s source of truth**: on every confirmed control-side update (dims step, camera restore), push the confirmed values back into the worker before the next render tick so `_last_step` (and related fields) always match the ledger.
-- **Skip payload construction for no-ops**: once the worker mirrors the ledger, `ingest_scene_refresh` can return immediately if the worker hasn’t changed state—no duplicate payloads hit the ledger or mirror.
-- **Mirror broadcasts only ledger mutations**: with the above in place, `ServerDimsMirror` receives exactly one event per real mutation, eliminating dim “snap back” behaviour entirely.
-- **Remove transitional guards and caches**: delete the temporary worker-side dedupe cache and leftover compatibility scaffolding once the event-driven path owns the flow. Revisit `relative_step_size` guards when the volume transition path ships.
-
-## Implementation Plan
-
-1. **Extend ledger coverage**
-   - Push camera, volume, and layer reducers to write authoritative values into the ledger and drop redundant `_scene` mutations.
-   - Update acknowledgements and mirrors once the ledger is the only source of truth.
-2. **Ledger-driven baselines**
-   - Rework control-channel baseline helpers to compose `notify.scene` / `notify.layers` payloads directly from the ledger snapshot.
-   - Remove `pending_layer_updates` after all paths drain through the ledger.
-3. **Prune compatibility caches**
-   - ✅ `last_dims_payload` removed; dims baselines now come from the ledger via `ServerDimsMirror`.
-   - Cull `last_scene_snapshot` and other transitional fields once remaining consumers migrate.
-   - Decide whether plane-restore metadata should stay render-thread only or move into the ledger.
-4. **Protocol alignment**
-   - Document that `notify.scene` and `notify.layers` originate from ledger reads.
-   - Plan any protocol adjustments (if needed) alongside client updates so both sides remain in lockstep.
-5. **Observability & docs**
-   - Ensure dashboards, diagrams, and onboarding docs reflect the new module layout (`server/scene`, `server/runtime`, `control/mirrors`).
-   - Keep test guidance focused on `RenderSceneSnapshot` to discourage regressions back to mutable bags.
-
-## Legacy Data Migration Status
-
-- **Render snapshot**: `ServerSceneData.latest_state` now stores a `RenderSceneSnapshot`; the old `ServerSceneState` dataclass is gone.
-- **Layer deltas**: reducers still stage pending layer updates in `ServerSceneData.pending_layer_updates`. These remain until baselines broadcast purely from the ledger.
-- **Dims cache**: Removed. `ServerDimsMirror` now owns the dedupe signature and the ledger acts as the single source of truth.
-- **Plane restore**: `PlaneRestoreState` stays render-thread owned for now. Revisit once we confirm whether the ledger should encode the metadata.
-- **Thread safety**: the ledger continues to assert thread affinity. New call sites must keep that contract explicit (render worker vs asyncio loop).
+The ledger is the only authoritative store for applied state. Mirrors subscribe to ledger updates and broadcast from there. There are no “fast paths” that bypass ledger writes.
 
 ## Naming & Symmetry with Client
 
 - `ClientStateLedger` ↔ `ServerStateLedger`.
 - `napari_dims_mirror` ↔ `ServerDimsMirror`.
-- Client intent emitters ↔ server control handlers feeding `ServerCommandQueue`.
-- Only dims currently needs a server mirror because the render worker is authoritative for multiscale switches. Camera/layer mirrors can be introduced later if the worker ever emits those scopes.
+- Client intent emitters ↔ server control handlers writing to `LatestIntent` (continuous) or `ControlCommandQueue` (discrete).
+- Mirrors broadcast from the ledger after applied confirmations; render worker remains authoritative for multiscale switches and applied camera/layer state.
+
+## LatestIntent: Continuous Control State
+
+`LatestIntent` is a thread-safe store keyed by (scope, key) with monotonic `seq` tracking per key. Continuous domains use it instead of FIFO queues:
+
+- `dims`: key = axis identifier, value = absolute step tuple, `seq` per axis.
+- `view`: key = `"ndisplay"`, value ∈ {2, 3}, `seq`.
+- `camera`: keys for pose components (center/zoom/angles), values are absolute targets, `seq`.
+- `layers`: key = `(layer_id, prop)`, value = typed update (opacity, visibility, colormap, etc.), `seq`.
+
+Reducers write desired targets using `LatestIntent.set(...)`. They no longer stash pending steps or mutate the worker snapshot directly. Discrete operations (e.g., reset, export) still enqueue commands.
+
+On the render thread, each frame:
+
+1. `frame_input.build_frame_input` constructs a baseline snapshot from the ledger and merges clamped desired dims/view targets from `LatestIntent`.
+2. The worker applies the snapshot, renders, and emits confirmations reflecting the applied state.
+3. The server writes confirmations to the ledger, updates `AppliedSeqs`, and drives mirrors.
+
+This removes races between optimistic projections and applied state. Skip logic now compares desired/apply `seq` rather than tuples.
+
+## ControlCommandQueue: Discrete, Order-Sensitive Actions
+
+Discrete operations retain a FIFO queue:
+
+- Reducers enqueue commands (with ids) and return acknowledgements.
+- The worker executes commands serially and produces command result confirmations when necessary.
+- IDs remain required for discrete intents so the server can correlate acks/results.
+
+Continuous updates never enter this queue.
+
+## Invariants & Eliminations
+
+- No optimistic writes to the render snapshot.
+- Applied state (worker confirmations) is the single source of truth for dims/view/camera/layers.
+- `LatestIntent` holds desired state only; applied truth is tracked in the ledger and `AppliedSeqs`.
+- Discrete commands remain FIFO and must produce responses/acks tied to their ids.
+
+## Migration Plan (Dims First)
+
+1. Route dims reducers through `LatestIntent` with per-axis `seq` tracking.
+2. Remove optimistic scene bag writes and the `pending_dims_step` cache.
+3. Have the worker merge desired dims from `LatestIntent`, apply, and confirm applied step/level.
+4. Accept applied-first dims confirmations; update the ledger and mirrors.
+5. Extend the same pattern to view, camera, layers.
 
 ## Concurrency Notes
 
-- Ledger mutations happen on their respective threads:
-  - Render worker thread ingests dims state; ledger methods must be thread-safe (explicit locks make crashes obvious rather than silently failing).
-  - Control loop thread records confirmed values for camera/layer updates.
-- Mirrors run on the control loop (async) and must schedule broadcasts via `server._schedule_coro`.
+- Ledger writes happen under explicit locks; worker thread writes must assert thread affinity where necessary.
+- Mirrors run on the asyncio loop; broadcasts are scheduled via `_schedule_coro`.
+- The render loop is responsible for pushing avcC snapshots via `pixel_channel.publish_avcc` so reconnects have immediate stream metadata.
 
 ## Testing Strategy
 
-- **Ledger unit tests**: seed, dedupe, subscription, timestamp origins.
-- **Worker lifecycle tests**: ingest dims, confirm ledger updated, no direct `_scene` mutation.
-- **Control channel integration**: ensure ledger subscriptions trigger `notify.dims` with correct payloads.
-- **Concurrent mutation tests**: simulate worker-thread vs control-loop writes to verify the ledger locking asserts hold.
-- **Regression smoke**: run `uv run pytest src/napari_cuda/server/tests -q` before landing.
+- **Ledger tests**: subscription, duplication, timestamp origins.
+- **Worker lifecycle tests**: merge latest intents, confirm ledger writes, ensure no direct `_scene` mutation.
+- **Control integration**: confirm `notify.dims` broadcasts follow ledger updates.
+- **Concurrency regression**: simulate worker vs control loop writes to exercise locking.
+- **End-to-end smoke**: `uv run pytest -q` across server tests before landing changes.
 
 ## Future Work
 
-- Extend ledger to camera/layer scopes if/when worker emits those updates.
-- Remove legacy `_scene` bag entirely after consumers switch to ledger snapshots.
+- Apply the applied-first + LatestIntent model to camera and layer scopes.
+- Consider renaming protocol `intent_id` to `command_id` for clarity (dims no longer rely on it).
+- Remove remaining legacy scene bag usage once all consumers switch to ledger snapshots.

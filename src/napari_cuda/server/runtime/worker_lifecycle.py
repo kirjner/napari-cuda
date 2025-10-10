@@ -9,16 +9,17 @@ import time
 import logging
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Optional, Sequence, List, Mapping, Dict, Any, Tuple
+from typing import Optional, Sequence, List, Dict, Any, Tuple
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
-from napari_cuda.server.control.intent_queue import ReducerIntentQueue, make_server_intent
+from napari_cuda.server.control.intent_queue import ReducerIntentQueue
 from napari_cuda.server.control.state_models import (
     BootstrapSceneMetadata,
     WorkerStateUpdateConfirmation,
 )
-from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot, build_render_snapshot
+from napari_cuda.server.runtime.scene_ingest import RenderSceneSnapshot
+from napari_cuda.server.runtime.frame_input import build_frame_input
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 
@@ -40,53 +41,50 @@ def _ingest_scene_refresh(
             "ingest_scene_refresh: head_intent=%s step_arg=%s worker_last=%s active_level=%s",
             (head.intent_id if head else None),
             step,
-            tuple(int(v) for v in worker_ref._last_step) if getattr(worker_ref, "_last_step", None) is not None else None,
+            tuple(int(v) for v in worker_ref._last_step) if worker_ref._last_step is not None else None,
             int(worker_ref._active_ms_level),
         )
-    if head is None:
-        return
+    # Allow confirmations even without a head intent for continuous dims
 
     step_hint: Optional[tuple[int, ...]] = None
     if isinstance(step, (list, tuple)):
         step_hint = tuple(int(value) for value in step)
 
-    confirmation = _build_intent_confirmation(worker_ref, step_hint, server._reducer_intents)
+    confirmation = _build_applied_confirmation(worker_ref, step_hint, server._reducer_intents)
     if confirmation is None:
+        logger.info("ingest_scene_refresh: no confirmation generated (step_hint=%s)", step_hint)
         return
 
     state.scene_seq = int(state.scene_seq) + 1
 
     server._submit_worker_confirmation(confirmation)  # type: ignore[attr-defined]
+    logger.info(
+        "ingest_scene_refresh: submitted confirmation scope=%s intent_id=%s step=%s",
+        confirmation.scope,
+        confirmation.intent_id,
+        confirmation.step,
+    )
 
 logger = logging.getLogger(__name__)
 
 
-def _build_intent_confirmation(
+def _build_applied_confirmation(
     worker: "EGLRendererWorker",
     step_hint: Optional[Sequence[int]],
     intents: ReducerIntentQueue,
 ) -> Optional[WorkerStateUpdateConfirmation]:
     pending_intent = intents.peek()
-    if pending_intent is None:
-        return None
-
-    intent_id: Optional[str] = None
+    intent_id: Optional[str] = pending_intent.intent_id if pending_intent is not None else None
+    # Ignore intent payload for continuous dims/view confirmations (applied-first)
     intent_payload: Dict[str, Any] = {}
-    if pending_intent.intent_id is not None:
-        intent_id = pending_intent.intent_id
-        intent_payload = dict(pending_intent.payload)
 
-    canonical = getattr(worker, "_canonical_axes", None)
+    canonical = worker._canonical_axes
     assert canonical is not None, "worker missing canonical axes"
 
-    intent_step = intent_payload.get("step") if intent_payload else None
     current_step: Tuple[int, ...]
-    if intent_step is not None:
-        assert isinstance(intent_step, Sequence), "intent step must be sequence"
-        current_step = tuple(int(v) for v in intent_step)  # type: ignore[arg-type]
-    elif step_hint is not None:
+    if step_hint is not None:
         current_step = tuple(int(v) for v in step_hint)
-    elif getattr(worker, "_last_step", None) is not None:
+    elif worker._last_step is not None:
         current_step = tuple(int(v) for v in worker._last_step)
     else:
         current_step = tuple(int(v) for v in canonical.current_step)
@@ -94,62 +92,55 @@ def _build_intent_confirmation(
     axis_labels = tuple(str(label) for label in canonical.axis_labels)
     order = tuple(int(idx) for idx in canonical.order)
 
-    if pending_intent.scope == "view":
-        ndisplay = int(intent_payload.get("ndisplay", canonical.ndisplay))
-    else:
-        ndisplay = int(canonical.ndisplay)
+    # Applied-first: always use canonical ndisplay for confirmations
+    ndisplay = int(canonical.ndisplay)
 
     displayed = order[-ndisplay:] if order else tuple()
 
-    source = getattr(worker, "_scene_source", None)
+    source = worker._scene_source
     levels: List[Dict[str, Any]] = []
     level_shapes: List[tuple[int, ...]] = []
-    if source is not None and getattr(source, "level_descriptors", None):
+    if source is not None and source.level_descriptors:
         for descriptor in source.level_descriptors:
             shape = tuple(int(s) for s in descriptor.shape)
             level_shapes.append(shape)
             entry: Dict[str, Any] = {
-                "index": int(getattr(descriptor, "index", len(level_shapes) - 1)),
+                "index": int(descriptor.index),
                 "shape": [int(s) for s in descriptor.shape],
             }
-            downsample = getattr(descriptor, "downsample", None)
-            if downsample is not None:
-                entry["downsample"] = [float(x) for x in downsample]
-            path = getattr(descriptor, "path", None)
-            if path is not None:
-                entry["path"] = str(path)
+            entry["downsample"] = [float(x) for x in descriptor.downsample]
+            if descriptor.path:
+                entry["path"] = str(descriptor.path)
             levels.append(entry)
     if not level_shapes:
         fallback_shape = tuple(int(s) for s in canonical.sizes)
         level_shapes.append(fallback_shape)
         levels.append(
             {
-                "index": int(getattr(worker, "_active_ms_level", 0)),
+                "index": int(worker._active_ms_level),
                 "shape": [int(s) for s in fallback_shape],
             }
         )
 
     mode = "volume" if ndisplay >= 3 else "plane"
-    downgraded_attr = getattr(worker, "_level_downgraded", None)
+    downgraded_attr = worker._level_downgraded
 
-    plane_state = getattr(worker, "_plane_restore_state", None)
+    plane_state = worker._plane_restore_state
     metadata: Dict[str, Any] = {}
     if plane_state is not None:
         metadata["plane_state"] = plane_state
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
-            "build_confirmation: intent_id=%s intent_step=%s step_hint=%s worker_last=%s chosen_step=%s level=%d",
-            intent_id,
-            tuple(int(v) for v in intent_step) if isinstance(intent_step, Sequence) else None,
+            "build_confirmation: step_hint=%s worker_last=%s chosen_step=%s level=%d",
             tuple(int(v) for v in step_hint) if isinstance(step_hint, Sequence) else None,
-            tuple(int(v) for v in getattr(worker, "_last_step", ())) if getattr(worker, "_last_step", None) is not None else None,
+            tuple(int(v) for v in worker._last_step) if worker._last_step is not None else None,
             current_step,
-            int(getattr(worker, "_active_ms_level", 0)),
+            int(worker._active_ms_level),
         )
 
     confirmation = WorkerStateUpdateConfirmation(
-        scope=pending_intent.scope,
+        scope="dims" if intent_id is None else pending_intent.scope,  # type: ignore[union-attr]
         target="main",
         key="snapshot",
         step=current_step,
@@ -159,7 +150,7 @@ def _build_intent_confirmation(
         order=order if order else None,
         axis_labels=axis_labels if axis_labels else None,
         labels=None,
-        current_level=int(getattr(worker, "_active_ms_level", 0)),
+        current_level=int(worker._active_ms_level),
         levels=tuple(levels),
         level_shapes=tuple(level_shapes),
         downgraded=bool(downgraded_attr) if downgraded_attr is not None else None,
@@ -198,14 +189,14 @@ def capture_bootstrap_state(worker: "EGLRendererWorker") -> BootstrapSceneMetada
             if descriptor.path:
                 entry["path"] = str(descriptor.path)
             levels_payload.append(entry)
-
     if not level_shapes_list:
-        fallback_shape = tuple(int(size) for size in canonical.sizes)
+        fallback_shape = tuple(int(value) for value in canonical.sizes)
         level_shapes_list.append(fallback_shape)
         levels_payload.append(
             {
                 "index": int(worker._active_ms_level),
-                "shape": [int(dim) for dim in fallback_shape],
+                "shape": [int(value) for value in fallback_shape],
+                "downsample": [1.0 for _ in fallback_shape],
             }
         )
 
@@ -296,9 +287,9 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
         avcc_cfg = build_avcc_config(server._param_cache)
         if avcc_cfg is not None:
-            def _send_config(avcc_bytes: bytes) -> None:
+            def _publish_config(avcc_bytes: bytes) -> None:
                 server._schedule_coro(
-                    pixel_channel.maybe_send_stream_config(
+                    pixel_channel.publish_avcc(
                         server._pixel_channel,
                         config=server._pixel_config,
                         metrics=server.metrics,
@@ -308,7 +299,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     "notify_stream",
                 )
 
-            loop.call_soon_threadsafe(_send_config, avcc_cfg)
+            loop.call_soon_threadsafe(_publish_config, avcc_cfg)
 
         if server._dump_remaining > 0:
             try:
@@ -411,6 +402,22 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             if ready_async is not None:
                 loop.call_soon_threadsafe(ready_async.set)
 
+            # Publish initial avcC if available, then flip worker ready and push first refresh
+            avcc_cfg = build_avcc_config(server._param_cache)
+            if avcc_cfg is not None:
+                def _publish_start_config(avcc_bytes: bytes) -> None:
+                    server._schedule_coro(
+                        pixel_channel.publish_avcc(
+                            server._pixel_channel,
+                            config=server._pixel_config,
+                            metrics=server.metrics,
+                            avcc=avcc_bytes,
+                            send_stream=server._broadcast_stream_config,
+                        ),
+                        "notify_stream_bootstrap",
+                    )
+                loop.call_soon_threadsafe(_publish_start_config, avcc_cfg)
+
             # Now flip worker ready and push first refresh
             worker._is_ready = True
             _ingest_scene_refresh(server, state, loop)
@@ -419,25 +426,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             next_tick = time.perf_counter()
 
             while not state.stop_event.is_set():
-                intent_head = server._reducer_intents.peek()
-                if intent_head is not None and intent_head.scope == "view":
-                    target_ndisplay = int(intent_head.payload.get("ndisplay", 2))
-                    worker.request_ndisplay(target_ndisplay)
-
+                snapshot, desired_seqs, desired_ndisplay = build_frame_input(server)
                 with server._state_lock:
-                    snapshot = build_render_snapshot(server._state_ledger, server._scene)
-                    intent = server._reducer_intents.peek()
-                    optimistic_step: Optional[Tuple[int, ...]] = snapshot.current_step
-                    if intent is not None and intent.scope == "dims":
-                        step_payload = intent.payload.get("step")
-                        if isinstance(step_payload, Sequence):
-                            optimistic_step = tuple(int(v) for v in step_payload)
-                    if optimistic_step is not None and snapshot.current_step != optimistic_step:
-                        snapshot = replace(snapshot, current_step=optimistic_step)
                     server._scene.latest_state = snapshot
                     commands = list(server._scene.camera_commands)
                     server._scene.camera_commands.clear()
-                    frame_input_step = snapshot.current_step
+                frame_input_step = snapshot.current_step
+
+                # Request view ndisplay if provided by LatestIntent
+                if desired_ndisplay is not None:
+                    worker.request_ndisplay(int(desired_ndisplay))
 
                 if commands and server._log_state_traces:
                     logger.info("frame commands snapshot count=%d", len(commands))
@@ -472,6 +470,28 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     else:
                         logger.debug(message)
 
+                # Skip entire pipeline if no new desires, no animation/commands, and no explicit render tick
+                applied_dims_seq = int(getattr(server, "_applied_seqs", {}).get("dims", -1))
+                applied_view_seq = int(getattr(server, "_applied_seqs", {}).get("view", -1))
+                desired_dims_seq = int(desired_seqs.get("dims", -1))
+                desired_view_seq = int(desired_seqs.get("view", -1))
+                dims_satisfied = (desired_dims_seq >= 0 and desired_dims_seq <= applied_dims_seq)
+                view_satisfied = (desired_view_seq >= 0 and desired_view_seq <= applied_view_seq)
+                if (
+                    dims_satisfied
+                    and view_satisfied
+                    and not commands
+                    and not server._animate
+                    and not getattr(worker, "_render_tick_required", False)
+                ):
+                    next_tick += tick
+                    sleep_duration = next_tick - time.perf_counter()
+                    if sleep_duration > 0:
+                        time.sleep(sleep_duration)
+                    else:
+                        next_tick = time.perf_counter()
+                    continue
+
                 worker.apply_state(frame_state)
                 if commands:
                     worker.process_camera_commands(commands)
@@ -495,9 +515,17 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server.metrics.observe_ms("napari_cuda_pack_ms", timings.pack_ms)
                 server.metrics.observe_ms("napari_cuda_total_ms", timings.total_ms)
 
-                if worker._last_step is not None and server._reducer_intents.peek() is not None:
+                # Emit confirmation when applied differs from frame input (applied-first for dims)
+                if worker._last_step is not None:
                     applied_step = tuple(int(value) for value in worker._last_step)
-                    worker._notify_scene_refresh(applied_step)
+                    if frame_input_step is None or tuple(int(v) for v in frame_input_step) != applied_step:
+                        worker._notify_scene_refresh(applied_step)
+
+                # Clear one-shot render tick requirement if set
+                if getattr(worker, "_render_tick_required", False):
+                    worker._mark_render_tick_complete()
+
+                # No local seq tracking; server._applied_seqs updated on confirmation write
 
                 on_frame(packet, flags, timings.capture_wall_ts, seq)
 

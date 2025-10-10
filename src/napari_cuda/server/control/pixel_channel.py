@@ -182,7 +182,6 @@ async def ensure_keyframe(
     state.broadcast.bypass_until_key = True
     state.broadcast.waiting_for_keyframe = True
     state.needs_stream_config = True
-
     try:
         metrics.inc("napari_cuda_encoder_resets")
     except Exception:  # pragma: no cover - defensive metrics guard
@@ -279,6 +278,44 @@ async def maybe_send_stream_config(
         metrics.inc("napari_cuda_stream_config_sends")
     except Exception:  # pragma: no cover - defensive metrics guard
         logger.debug("metrics inc napari_cuda_stream_config_sends failed", exc_info=True)
+
+
+async def publish_avcc(
+    state: PixelChannelState,
+    *,
+    config: PixelChannelConfig,
+    metrics: "Metrics",
+    avcc: Optional[bytes],
+    send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
+) -> None:
+    """Publish a cached avcC block and broadcast ``notify.stream`` when needed."""
+
+    if avcc is None:
+        state.needs_stream_config = True
+        return
+    if isinstance(avcc, memoryview):
+        avcc = avcc.tobytes()
+    elif isinstance(avcc, bytearray):
+        avcc = bytes(avcc)
+    elif not isinstance(avcc, bytes):
+        raise AssertionError("publish_avcc requires bytes-like avcc payload")
+
+    if state.last_avcc == avcc and not state.needs_stream_config:
+        return
+
+    state.last_avcc = avcc
+    if state.needs_stream_config:
+        payload = build_notify_stream_payload(config, avcc)
+        try:
+            await send_stream(payload)
+        except Exception:
+            logger.debug("publish_avcc notify.stream failed", exc_info=True)
+            return
+        state.needs_stream_config = False
+        try:
+            metrics.inc("napari_cuda_stream_config_sends")
+        except Exception:  # pragma: no cover - defensive metrics guard
+            logger.debug("metrics inc napari_cuda_stream_config_sends failed", exc_info=True)
 
 
 def enqueue_frame(

@@ -15,6 +15,7 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 # ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.intent_queue import ReducerIntentQueue, make_server_intent
+from napari_cuda.server.control.latest_intent import set_intent as latest_set_intent
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import (
@@ -704,8 +705,6 @@ def reduce_bootstrap_state(
         dims_meta.last_server_seq = dims_seq
         dims_meta.last_timestamp = ts
 
-        store.pending_dims_step = resolved_step
-        store.last_requested_dims_step = resolved_step
         store.multiscale_state["current_level"] = resolved_current_level
         store.multiscale_state["levels"] = [dict(level) for level in levels]
         store.multiscale_state["level_shapes"] = [list(shape) for shape in resolved_level_shapes]
@@ -856,46 +855,9 @@ def reduce_dims_update(
         meta_entry = get_control_meta(store, "dims", control_target, prop)
         meta_entry.last_server_seq = store.last_scene_seq
         meta_entry.last_timestamp = ts
-        store.pending_dims_step = requested_step
-        store.last_requested_dims_step = requested_step
         server_seq = store.last_scene_seq
 
-    if intent_queue is not None:
-        intent_payload: Dict[str, object] = {
-            "step": requested_step,
-            "axis_index": idx,
-            "axis_target": control_target,
-            "mode": payload.mode,
-            "ndisplay": payload.ndisplay,
-            "current_level": payload.current_level,
-        }
-        if payload.order is not None:
-            intent_payload["order"] = tuple(int(i) for i in payload.order)
-        if payload.displayed is not None:
-            intent_payload["displayed"] = tuple(int(i) for i in payload.displayed)
-        if payload.axis_labels is not None:
-            intent_payload["axis_labels"] = tuple(str(label) for label in payload.axis_labels)
-        if payload.level_shapes is not None:
-            intent_payload["level_shapes"] = tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes)
-        if payload.levels is not None:
-            intent_payload["levels"] = tuple(dict(level) for level in payload.levels)
-        if payload.downgraded is not None:
-            intent_payload["downgraded"] = bool(payload.downgraded)
-
-        intent_meta: Dict[str, object] = {
-            "axis_label": axis_label if axis_label is not None else str(idx),
-            "server_seq": server_seq,
-        }
-
-        server_intent = make_server_intent(
-            intent_id=resolved_intent_id,
-            scope="dims",
-            origin=origin,
-            payload=intent_payload,
-            metadata=intent_meta,
-            timestamp=ts,
-        )
-        intent_queue.push(server_intent)
+    latest_set_intent("dims", control_target, requested_step, int(server_seq))
 
     return ServerLedgerUpdate(
         scope="dims",

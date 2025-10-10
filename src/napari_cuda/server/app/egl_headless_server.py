@@ -200,6 +200,8 @@ class EGLHeadlessServer:
         self._worker_updates: Optional[WorkerConfirmationQueue] = None
         self._worker_dispatch_task: Optional[asyncio.Task[None]] = None
         self._reducer_intents = ReducerIntentQueue(maxsize=64)
+        # Per-scope last applied seqs to help the worker skip idle ticks
+        self._applied_seqs: Dict[str, int] = {}
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -300,6 +302,7 @@ class EGLHeadlessServer:
             return False
         logger.info("Encoder reset requested (reason=%s)", reason)
         worker.reset_encoder()
+        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
         return True
 
     def _try_force_idr(self) -> bool:
@@ -740,29 +743,34 @@ class EGLHeadlessServer:
         while True:
             confirmation = await queue.pull()
             try:
-                self._apply_worker_confirmation(confirmation)
+                self.write_confirmation_to_ledger(confirmation)
             except Exception:
                 logger.exception("worker confirmation processing failed")
             finally:
                 queue.task_done()
 
-    def _apply_worker_confirmation(self, confirmation: WorkerStateUpdateConfirmation) -> None:
+    def write_confirmation_to_ledger(self, confirmation: WorkerStateUpdateConfirmation) -> None:
         intents = self._reducer_intents
 
-        if confirmation.intent_id is None:
-            logger.debug("skip worker confirmation without intent id scope=%s", confirmation.scope)
-            return
-
         head_intent = intents.peek()
-        if head_intent is None or head_intent.intent_id != confirmation.intent_id:
-            logger.debug(
-                "skip worker confirmation: unmatched intent id=%s",
-                confirmation.intent_id,
-            )
-            return
+        continuous_scopes = {"dims", "view"}
+        accept_applied_first = (
+            confirmation.intent_id is None and confirmation.scope in continuous_scopes
+        )
 
-        matched_intent = head_intent
-        matched_scope = matched_intent.scope
+        if not accept_applied_first:
+            if confirmation.intent_id is None:
+                logger.debug("skip worker confirmation without intent id scope=%s", confirmation.scope)
+                return
+            if head_intent is None or head_intent.intent_id != confirmation.intent_id:
+                logger.debug(
+                    "skip worker confirmation: unmatched intent id=%s",
+                    confirmation.intent_id,
+                )
+                return
+
+        matched_intent = head_intent if not accept_applied_first else None
+        matched_scope = matched_intent.scope if matched_intent is not None else confirmation.scope
 
         ledger = self._state_ledger
 
@@ -796,15 +804,18 @@ class EGLHeadlessServer:
         raw_meta = matched_intent.metadata if matched_intent is not None else None
         intent_meta = dict(raw_meta) if raw_meta is not None else {}
 
-        axis_index = int(intent_payload.get("axis_index", 0))
-        axis_target = str(intent_meta.get("axis_label", axis_index))
-        step_metadata = {
-            "axis_index": axis_index,
-            "axis_target": axis_target,
-            "intent_id": confirmation.intent_id,
-        }
-        if "step" in intent_payload:
-            step_metadata["requested_step"] = tuple(int(v) for v in intent_payload["step"])  # type: ignore[arg-type]
+        step_metadata: dict[str, object] = {}
+        if matched_scope == "dims":
+            axis_index = int(intent_payload.get("axis_index", 0)) if intent_payload else 0
+            axis_target = (
+                str(intent_meta.get("axis_label", axis_index)) if intent_meta else str(axis_index)
+            )
+            step_metadata["axis_index"] = axis_index
+            step_metadata["axis_target"] = axis_target
+            if "step" in intent_payload:
+                step_metadata["requested_step"] = tuple(int(v) for v in intent_payload["step"])  # type: ignore[arg-type]
+        if confirmation.intent_id is not None:
+            step_metadata["intent_id"] = confirmation.intent_id
 
         logger.info(
             "worker %s confirmation: step=%s axis_labels=%s order=%s ndisplay=%s intent=%s",
@@ -842,17 +853,24 @@ class EGLHeadlessServer:
 
         ledger.batch_record_confirmed(entries, origin=ledger_origin)
 
-        intents.pop(confirmation.intent_id)
+        if matched_intent is not None and confirmation.intent_id is not None:
+            intents.pop(confirmation.intent_id)
 
         with self._state_lock:
             snapshot = self._scene.latest_state
             if snapshot.current_step != current_step:
                 self._scene.latest_state = replace(snapshot, current_step=current_step)
-            self._scene.last_requested_dims_step = current_step
             metadata = confirmation.metadata or {}
             plane_state = metadata.get("plane_state")
             if plane_state is not None:
                 self._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
+
+        with self._state_lock:
+            seq_val = int(self._scene.last_scene_seq)
+            if seq_val <= 0:
+                seq_val = int(time.time() * 1000)
+            self._applied_seqs["dims"] = seq_val
+            self._applied_seqs["view"] = seq_val
 
     def _scene_snapshot_json(self) -> Optional[str]:
         try:
