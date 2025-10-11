@@ -16,7 +16,6 @@ from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
-from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.control.state_ledger import LedgerEntry, ServerStateLedger
 
 
@@ -155,7 +154,6 @@ class ServerSceneData:
     last_scene_seq: int = 0
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
-    plane_restore_state: Optional[PlaneRestoreState] = None
     pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
     # Removed optimistic dims caches; LatestIntent carries desired state now

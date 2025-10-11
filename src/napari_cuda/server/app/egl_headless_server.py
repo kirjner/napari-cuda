@@ -22,7 +22,6 @@ from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.scene import (
     ServerSceneCommand,
     ServerSceneData,
@@ -584,11 +583,15 @@ class EGLHeadlessServer:
         )
 
     def _current_ndisplay(self) -> int:
-        if self._worker is not None and bool(getattr(self._worker, 'use_volume', False)):
-            return 3
-        if bool(self.use_volume):
-            return 3
-        return 2
+        ledger = self._state_ledger
+        assert ledger is not None, "state ledger unavailable"
+
+        entry = ledger.get("view", "main", "ndisplay")
+        assert entry is not None, "ledger missing view/ndisplay"
+
+        value = entry.value
+        assert isinstance(value, int), "ledger ndisplay must be int"
+        return 3 if value >= 3 else 2
 
     # --- Validation helpers -------------------------------------------------------
     async def start(self) -> None:
@@ -865,9 +868,6 @@ class EGLHeadlessServer:
             if snapshot.current_step != current_step:
                 self._scene.latest_state = replace(snapshot, current_step=current_step)
             metadata = confirmation.metadata or {}
-            plane_state = metadata.get("plane_state")
-            if plane_state is not None:
-                self._scene.plane_restore_state = plane_state  # type: ignore[attr-defined]
 
         with self._state_lock:
             seq_val = int(self._scene.last_scene_seq)

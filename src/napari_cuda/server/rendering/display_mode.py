@@ -20,10 +20,6 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
     target = 3 if int(ndisplay) >= 3 else 2
     previous_volume = worker.use_volume
 
-    plane_state = None
-    if target == 3 and not previous_volume:
-        plane_state = worker.snapshot_plane_state()
-
     worker.use_volume = target == 3
 
     viewer_model = worker._viewer
@@ -42,17 +38,11 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
             selected_level=level,
             source=source,
             budget_error=worker._budget_error_cls,
-            restoring_plane_state=plane_state is not None,
+            restoring_plane_state=False,
         )
-        _reset_volume_step(worker, source, level)
         worker._level_policy_refresh_needed = False
     else:
         if previous_volume:
-            restore_state = worker._plane_restore_state
-            if restore_state is not None:
-                worker._active_ms_level = restore_state.level
-                worker.request_multiscale_level(restore_state.level)
-                worker.schedule_plane_restore(restore_state)
             worker._level_policy_refresh_needed = True
             worker._mark_render_tick_needed()
 
@@ -68,29 +58,6 @@ def apply_ndisplay_switch(worker, ndisplay: int) -> None:
         worker._level_policy_refresh_needed = False
     worker._mark_render_tick_needed()
     notify_scene_refresh(worker)
-
-
-def _reset_volume_step(worker, source, level: int) -> None:
-    descriptor = source.level_descriptors[level]
-    axes = [axis.lower() for axis in source.axes]
-    current_step = list(source.current_step)
-    shape = list(descriptor.shape)
-    dims = max(len(current_step), len(shape), 3)
-    while len(current_step) < dims:
-        current_step.append(0)
-    while len(shape) < dims:
-        shape.append(1)
-    z_axis = axes.index("z") if "z" in axes else 0
-    current_step[z_axis] = 0
-    clamped: list[int] = []
-    for idx in range(dims):
-        size = max(1, int(shape[idx]))
-        clamped.append(int(max(0, min(current_step[idx], size - 1))))
-    with worker._state_lock:
-        source.set_current_slice(tuple(clamped), level)
-    worker._z_index = 0
-    worker._last_step = tuple(clamped)
-    worker._notify_scene_refresh(clamped)
 
 
 def _configure_camera_for_mode(worker) -> None:
@@ -155,11 +122,6 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
         steps[anchor_axis] = int(worker._z_index)
 
     if target == 2:
-        restore_state = worker._plane_restore_state
-        if restore_state is not None:
-            restore_values = list(restore_state.step)
-            for idx in range(min(len(steps), len(restore_values))):
-                steps[idx] = restore_values[idx]
         nsteps = list(viewer_dims.nsteps)
         for idx in range(min(len(steps), len(nsteps))):
             max_index = max(0, int(nsteps[idx]) - 1)
@@ -171,7 +133,6 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
     updated_step = tuple(int(value) for value in steps)
     viewer_dims.current_step = updated_step
     worker._last_step = updated_step
-    worker._notify_scene_refresh(updated_step)
 
 
 def _coarsest_level_index(source) -> Optional[int]:

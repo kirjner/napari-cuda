@@ -52,7 +52,6 @@ class _CaptureWorker:
         self._zarr_dtype = "float32"
         self.volume_dtype = "float32"
         self._active_ms_level = 0
-        self._plane_restore_state = None
         self._last_step = (0, 0)
         self._scene_source = None
         self._canonical_axes = canonical_axes_from_source(

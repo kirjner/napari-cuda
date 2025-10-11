@@ -75,7 +75,6 @@ from napari_cuda.server.runtime.scene_state_applier import (
 from napari_cuda.server.runtime.camera_controller import process_commands
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import ServerSceneCommand
-from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 from napari_cuda.server.runtime.render_update_queue import (
     PendingRenderUpdate,
     RenderDelta,
@@ -97,8 +96,6 @@ from napari_cuda.server.runtime.worker_runtime import (
     refresh_worker_slice_if_needed,
     reset_worker_camera,
 )
-from napari_cuda.server.rendering.display_mode import apply_ndisplay_switch
-
 logger = logging.getLogger(__name__)
 
 

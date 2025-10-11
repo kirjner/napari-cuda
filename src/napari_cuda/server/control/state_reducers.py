@@ -26,8 +26,6 @@ from napari_cuda.server.scene import (
     get_control_meta,
     increment_server_sequence,
 )
-from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
-
 logger = logging.getLogger(__name__)
 
 
@@ -937,21 +935,15 @@ def reduce_view_set_ndisplay(
     target_ndisplay = 3 if int(ndisplay) >= 3 else 2
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
 
+    dims_payload = _ledger_dims_payload(ledger)
+
     with lock:
         store.last_scene_seq = increment_server_sequence(store)
         server_seq = store.last_scene_seq
         meta_entry = get_control_meta(store, "view", "main", "ndisplay")
         meta_entry.last_server_seq = server_seq
         meta_entry.last_timestamp = ts
-
         store.use_volume = bool(target_ndisplay == 3)
-        latest_step = store.latest_state.current_step
-        current_level = store.multiscale_state.get("current_level")
-        if store.use_volume and latest_step is not None and current_level is not None:
-            store.plane_restore_state = PlaneRestoreState(
-                step=tuple(int(v) for v in latest_step),
-                level=int(current_level),
-            )
 
     latest_set_intent("view", "ndisplay", target_ndisplay, int(server_seq))
     logger.debug(
@@ -960,6 +952,58 @@ def reduce_view_set_ndisplay(
         server_seq,
         origin,
     )
+
+    ledger.record_confirmed(
+        "view",
+        "main",
+        "ndisplay",
+        int(target_ndisplay),
+        origin=origin,
+        timestamp=ts,
+    )
+
+    order_value = (
+        tuple(int(idx) for idx in dims_payload.order)
+        if dims_payload.order is not None
+        else tuple(range(len(dims_payload.current_step)))
+    )
+    displayed_value = order_value[-target_ndisplay:] if order_value else tuple(range(target_ndisplay))
+    mode_value = "volume" if target_ndisplay == 3 else "plane"
+
+    ledger.record_confirmed(
+        "dims",
+        "main",
+        "order",
+        order_value,
+        origin=origin,
+        timestamp=ts,
+    )
+    ledger.record_confirmed(
+        "dims",
+        "main",
+        "mode",
+        mode_value,
+        origin=origin,
+        timestamp=ts,
+    )
+    ledger.record_confirmed(
+        "view",
+        "main",
+        "displayed",
+        displayed_value,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    with lock:
+        snapshot = store.latest_state
+        store.latest_state = replace(
+            snapshot,
+            ndisplay=int(target_ndisplay),
+            order=order_value,
+            displayed=displayed_value,
+            dims_mode=mode_value,
+        )
 
     return ServerLedgerUpdate(
         scope="view",
@@ -1051,6 +1095,14 @@ def reduce_multiscale_level(
         timestamp=ts,
     )
 
+    with lock:
+        snapshot = store.latest_state
+        store.latest_state = replace(
+            snapshot,
+            current_level=value,
+        )
+        store.multiscale_state["current_level"] = value
+
     return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
@@ -1062,6 +1114,8 @@ def reduce_multiscale_level(
         origin=origin,
     )
 
+
+# camera reducers -------------------------------------------------------------
 
 def reduce_camera_state(
     ledger: ServerStateLedger,

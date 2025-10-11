@@ -331,7 +331,6 @@ class _FakeWorkerBase:
         self._ready = True
         self._is_ready = True
         self._last_step = tuple(int(value) for value in self.default_step)
-        self._plane_restore_state = None
         self._active_ms_level = 0
         self._scene_source = None
         self._level_downgraded = None
@@ -491,7 +490,6 @@ def test_dims_confirmation_prefers_scene_source_shape():
     worker._last_step = (5, 2, 1)
     worker._active_ms_level = 0
     worker._level_downgraded = None
-    worker._plane_restore_state = None
     worker._scene_source = SimpleNamespace(
         level_descriptors=[
             SimpleNamespace(shape=(60, 256, 256), index=0),

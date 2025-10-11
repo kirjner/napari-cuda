@@ -374,8 +374,7 @@ class ViewerSceneManager:
 
         ndisplay_val = int(ndisplay) if ndisplay is not None else int(worker_snapshot.ndisplay)
         ndisplay_val = max(1, min(ndisplay_val, axis_count))
-        displayed_source = worker_snapshot.displayed or order[-ndisplay_val:]
-        displayed = [idx for idx in displayed_source if 0 <= idx < axis_count]
+        displayed = [idx for idx in order[-ndisplay_val:] if 0 <= idx < axis_count]
         if len(displayed) < ndisplay_val:
             extras = [idx for idx in order if idx not in displayed]
             displayed.extend(extras[: ndisplay_val - len(displayed)])
@@ -529,10 +528,6 @@ class ViewerSceneManager:
         assert ledger_step is not None and len(ledger_step) > 0, "ledger missing current step"
         current_step = [int(val) for val in ledger_step]
 
-        ledger_displayed = worker._ledger_displayed()
-        assert ledger_displayed is not None and len(ledger_displayed) > 0, "ledger missing displayed axes"
-        displayed = [int(idx) for idx in ledger_displayed]
-
         ledger_ndisplay = worker._ledger_ndisplay()
         assert ledger_ndisplay is not None, "ledger missing ndisplay"
         ndisplay_val = int(ledger_ndisplay)
@@ -547,7 +542,9 @@ class ViewerSceneManager:
         assert len(shape) == len(axis_labels), "ledger axis labels mismatch shape"
         assert len(order) == len(axis_labels), "ledger axis order mismatch axis labels"
         assert len(current_step) == len(axis_labels), "ledger current step mismatch axis labels"
-        assert len(displayed) == ndisplay_val, "ledger displayed axes mismatch ndisplay"
+        ledger_displayed = worker._ledger_displayed()
+        assert ledger_displayed is not None and len(ledger_displayed) == ndisplay_val, "ledger displayed axes mismatch ndisplay"
+        displayed = order[-ndisplay_val:] if order else list(range(ndisplay_val))
 
         dtype_value = worker._zarr_dtype or worker.volume_dtype
         dtype_str = str(dtype_value) if dtype_value is not None else None

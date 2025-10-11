@@ -1065,7 +1065,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 origin="client.state.view",
             )
         except Exception:
-            logger.debug("state.update view.set_ndisplay failed", exc_info=True)
+            logger.info("state.update view.set_ndisplay failed", exc_info=True)
             await _reject("state.error", "failed to apply ndisplay")
             return True
 

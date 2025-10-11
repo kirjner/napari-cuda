@@ -205,7 +205,7 @@ __all__ = ["RenderLedgerSnapshot", "build_ledger_snapshot"]
 
 def pull_render_snapshot(
     server: Any,
-) -> tuple[RenderLedgerSnapshot, Dict[str, int], Optional[int]]:
+) -> tuple[RenderLedgerSnapshot, Dict[str, int]]:
     """Return the current render snapshot plus latest intent metadata."""
 
     with server._state_lock:
@@ -219,29 +219,22 @@ def pull_render_snapshot(
                 desired_dims_seq = seq_int
 
         desired_view_seq = -1
-        desired_ndisplay: Optional[int] = None
         latest_view = latest_get_all("view")
         for _key, (seq, value) in latest_view.items():
             seq_int = int(seq)
-            if seq_int >= desired_view_seq and isinstance(value, (int, float)):
+            # Retain latest sequence for applied comparison even if worker no longer consumes desired ndisplay.
+            if seq_int >= desired_view_seq:
                 desired_view_seq = seq_int
-                desired_ndisplay = 3 if int(value) >= 3 else 2
-
-    if desired_ndisplay is not None:
-        current_nd = snapshot.ndisplay
-        if current_nd is not None and int(current_nd) == int(desired_ndisplay):
-            desired_ndisplay = None
 
     desired_seqs = {"dims": int(desired_dims_seq), "view": int(desired_view_seq)}
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            "render snapshot pulled step=%s ndisplay=%s desired_seqs=%s desired_ndisplay=%s",
+            "render snapshot pulled step=%s ndisplay=%s desired_seqs=%s",
             snapshot.current_step,
             snapshot.ndisplay,
             desired_seqs,
-            desired_ndisplay,
         )
-    return snapshot, desired_seqs, desired_ndisplay
+    return snapshot, desired_seqs
 
 
 __all__.append("pull_render_snapshot")

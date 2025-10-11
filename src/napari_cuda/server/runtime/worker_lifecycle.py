@@ -138,10 +138,7 @@ def _build_applied_confirmation(
     mode = "volume" if ndisplay >= 3 else "plane"
     downgraded_attr = worker._level_downgraded
 
-    plane_state = worker._plane_restore_state
     metadata: Dict[str, Any] = {}
-    if plane_state is not None:
-        metadata["plane_state"] = plane_state
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
@@ -335,14 +332,12 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 bool(worker._zarr_path),
             )
 
-            initial_snapshot, initial_seqs, initial_ndisplay = pull_render_snapshot(server)
+            initial_snapshot, initial_seqs = pull_render_snapshot(server)
             with server._state_lock:
                 server._scene.latest_state = initial_snapshot
                 server._scene.camera_commands.clear()
             worker._consume_render_snapshot(initial_snapshot)
             worker.drain_scene_updates()
-            if initial_ndisplay is not None:
-                worker.request_ndisplay(int(initial_ndisplay))
             worker._last_step = tuple(int(v) for v in (initial_snapshot.current_step or ()))
 
             worker.set_scene_refresh_callback(
@@ -384,7 +379,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             next_tick = time.perf_counter()
 
             while not state.stop_event.is_set():
-                snapshot, desired_seqs, desired_ndisplay = pull_render_snapshot(server)
+                snapshot, desired_seqs = pull_render_snapshot(server)
                 with server._state_lock:
                     server._scene.latest_state = snapshot
                     commands = list(server._scene.camera_commands)
@@ -392,9 +387,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 frame_input_step = snapshot.current_step
 
                 # Request view ndisplay if provided by LatestIntent
-                if desired_ndisplay is not None:
-                    worker.request_ndisplay(int(desired_ndisplay))
-
                 if commands and server._log_state_traces:
                     logger.info("frame commands snapshot count=%d", len(commands))
 

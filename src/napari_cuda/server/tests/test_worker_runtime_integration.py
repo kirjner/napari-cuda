@@ -607,33 +607,19 @@ def test_ndisplay_switch_notifies_scene_refresh(render_worker_fixture):
 
     assert worker._render_tick_required is True
     assert captured_steps, "Scene refresh callback was not invoked"
-    from napari_cuda.server.scene.plane_restore_state import PlaneRestoreState
 
-    resolved_steps: list[tuple[int, ...]] = []
-    for entry in captured_steps:
-        if isinstance(entry, tuple):
-            resolved_steps.append(entry)
-        elif isinstance(entry, PlaneRestoreState):
-            resolved_steps.append(entry.step)
-    if resolved_steps:
-        assert resolved_steps[-1] == worker._last_step
-    else:
-        assert worker._plane_restore_state is not None
-
+    resolved_steps = [entry for entry in captured_steps if isinstance(entry, tuple)]
+    assert resolved_steps, "Scene refresh callback captured no steps"
+    assert resolved_steps[-1] == worker._last_step
 
 def test_ndisplay_toggle_restores_plane_step(render_worker_fixture):
     worker = render_worker_fixture
     worker._viewer.dims.current_step = (4, 0, 0)
     worker._last_step = (4, 0, 0)
     worker._active_ms_level = 2
-    worker._plane_restore_state = None
-    worker._pending_plane_restore = None
 
     apply_ndisplay_switch(worker, 3)
     assert worker.use_volume is True
-    assert worker._plane_restore_state is not None
-    assert worker._plane_restore_state.step == (4, 0, 0)
-    assert worker._plane_restore_state.level == 2
 
     worker._render_tick_required = False
     worker._last_step = (0, 0, 0)
@@ -665,7 +651,6 @@ def test_ndisplay_toggle_smoke_preserves_plane_state(render_worker_fixture):
     worker._scene_refresh_cb = _capture  # type: ignore[assignment]
 
     apply_ndisplay_switch(worker, 3)
-    plane_state = worker._plane_restore_state
     assert plane_state is not None, "Plane state should be captured when entering 3D"
 
     worker._render_tick_required = False
