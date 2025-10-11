@@ -235,7 +235,7 @@ def reduce_layer_property(
     *,
     layer_id: str,
     prop: str,
-    value: object,
+    value: object | None = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.layer",
@@ -820,13 +820,15 @@ def reduce_dims_update(
     *,
     axis: object,
     prop: str,
-    value: object,
+    value: object | None = None,
     step_delta: Optional[int] = None,
-    set_value: Optional[int] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.dims",
 ) -> ServerLedgerUpdate:
+    if value is None and step_delta is None:
+        raise ValueError("dims update requires value or step_delta")
+
     ts = _now(timestamp)
 
     payload = _ledger_dims_payload(ledger)
@@ -855,8 +857,6 @@ def reduce_dims_update(
         target = int(value)
     if step_delta is not None:
         target += int(step_delta)
-    if set_value is not None:
-        target = int(set_value)
 
     shapes_raw = payload.level_shapes
     assert shapes_raw, "ledger dims metadata missing level_shapes"
@@ -921,21 +921,34 @@ def reduce_dims_update(
     )
 
 
-def reduce_view_set_ndisplay(
+def reduce_view_update(
     store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
-    ndisplay: int,
     *,
+    ndisplay: Optional[int] = None,
+    order: Optional[Sequence[int]] = None,
+    displayed: Optional[Sequence[int]] = None,
+    mode: Optional[str] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
-    origin: str = "control.view.ndisplay",
+    origin: str = "control.view",
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
-    target_ndisplay = 3 if int(ndisplay) >= 3 else 2
-    resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
-
     dims_payload = _ledger_dims_payload(ledger)
+
+    resolved_ndisplay: Optional[int] = None
+    if ndisplay is not None:
+        resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
+    else:
+        entry = ledger.get("view", "main", "ndisplay")
+        if entry is not None and isinstance(entry.value, int):
+            resolved_ndisplay = int(entry.value)
+    if resolved_ndisplay is None:
+        resolved_ndisplay = 2
+
+    target_ndisplay = resolved_ndisplay
+    resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
 
     with lock:
         store.last_scene_seq = increment_server_sequence(store)
@@ -962,10 +975,8 @@ def reduce_view_set_ndisplay(
         timestamp=ts,
     )
 
-    existing_order = (
-        tuple(int(idx) for idx in dims_payload.order)
-        if dims_payload.order is not None
-        else tuple()
+    existing_order = tuple(int(idx) for idx in order) if order is not None else (
+        tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else tuple()
     )
     ndim = len(dims_payload.current_step) if dims_payload.current_step else 0
     if ndim <= 0:
@@ -989,9 +1000,16 @@ def reduce_view_set_ndisplay(
         normalized_order = list(range(ndim))
 
     order_value = tuple(normalized_order)
-    displayed_count = min(len(order_value), max(1, int(target_ndisplay)))
-    displayed_value = tuple(order_value[-displayed_count:]) if displayed_count > 0 else tuple()
-    mode_value = "volume" if target_ndisplay == 3 else "plane"
+    if displayed is not None:
+        displayed_value = tuple(int(idx) for idx in displayed)
+    else:
+        displayed_count = min(len(order_value), max(1, int(target_ndisplay)))
+        displayed_value = tuple(order_value[-displayed_count:]) if displayed_count > 0 else tuple()
+
+    if mode is not None:
+        mode_value = str(mode)
+    else:
+        mode_value = "volume" if target_ndisplay == 3 else "plane"
 
     ledger.record_confirmed(
         "dims",
@@ -1081,30 +1099,93 @@ def reduce_multiscale_policy(
     )
 
 
-def reduce_multiscale_level(
+def reduce_level_update(
     store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
-    level: int,
     *,
+    applied: Mapping[str, Any] | object,
+    downgraded: Optional[bool] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.multiscale",
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
-    value = int(level)
+
+    def _applied_value(attr: str, default: Any = None) -> Any:
+        if hasattr(applied, attr):
+            return getattr(applied, attr)
+        if isinstance(applied, Mapping):
+            return applied.get(attr, default)
+        return default
+
+    level_raw = _applied_value("level")
+    if level_raw is None:
+        entry = ledger.get("multiscale", "main", "level")
+        if entry is not None and isinstance(entry.value, int):
+            level_raw = entry.value
+    if level_raw is None:
+        raise ValueError("level update requires a level index")
+    level = int(level_raw)
+
+    step_raw = _applied_value("step")
+    step_tuple: Optional[tuple[int, ...]] = None
+    if step_raw is not None:
+        step_tuple = tuple(int(v) for v in step_raw)
+
+    shape_raw = _applied_value("shape")
+    shape_tuple: Optional[tuple[int, ...]] = None
+    if shape_raw is not None:
+        shape_tuple = tuple(int(v) for v in shape_raw)
+
+    dims_payload = _ledger_dims_payload(ledger)
+    current_step = tuple(int(v) for v in dims_payload.current_step)
+    if step_tuple is None:
+        step_tuple = current_step
+
+    level_shapes_payload: list[tuple[int, ...]] = []
+    if dims_payload.level_shapes:
+        level_shapes_payload = [tuple(int(v) for v in shape) for shape in dims_payload.level_shapes]
+    if shape_tuple is not None:
+        while len(level_shapes_payload) <= level:
+            level_shapes_payload.append(shape_tuple)
+        level_shapes_payload[level] = shape_tuple
+    updated_level_shapes = tuple(level_shapes_payload) if level_shapes_payload else tuple()
 
     with lock:
-        store.multiscale_state["current_level"] = value
-        server_seq = increment_server_sequence(store)
+        store.last_scene_seq = increment_server_sequence(store)
+        server_seq = store.last_scene_seq
         meta = get_control_meta(store, "multiscale", "main", "level")
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
-    latest_set_intent("multiscale", "level", value, int(server_seq))
+        snapshot = store.latest_state
+        store.latest_state = replace(
+            snapshot,
+            current_level=level,
+            current_step=step_tuple,
+            level_shapes=updated_level_shapes or snapshot.level_shapes,
+        )
+
+        store.multiscale_state["current_level"] = level
+        if updated_level_shapes:
+            store.multiscale_state["level_shapes"] = [
+                [int(dim) for dim in shape]
+                for shape in updated_level_shapes
+            ]
+        levels_state = store.multiscale_state.get("levels")
+        if isinstance(levels_state, list) and 0 <= level < len(levels_state):
+            entry = dict(levels_state[level])
+            if shape_tuple is not None:
+                entry["shape"] = [int(v) for v in shape_tuple]
+            levels_state[level] = entry
+        if downgraded is not None:
+            store.multiscale_state["downgraded"] = bool(downgraded)
+
+    latest_set_intent("multiscale", "level", level, int(server_seq))
     logger.debug(
         "multiscale intent updated level=%d seq=%d origin=%s",
-        value,
+        level,
         server_seq,
         origin,
     )
@@ -1113,28 +1194,50 @@ def reduce_multiscale_level(
         "multiscale",
         "main",
         "level",
-        value,
+        level,
         origin=origin,
         timestamp=ts,
     )
-
-    with lock:
-        snapshot = store.latest_state
-        store.latest_state = replace(
-            snapshot,
-            current_level=value,
+    if updated_level_shapes:
+        ledger.record_confirmed(
+            "multiscale",
+            "main",
+            "level_shapes",
+            updated_level_shapes,
+            origin=origin,
+            timestamp=ts,
         )
-        store.multiscale_state["current_level"] = value
+    if downgraded is not None:
+        ledger.record_confirmed(
+            "multiscale",
+            "main",
+            "downgraded",
+            bool(downgraded),
+            origin=origin,
+            timestamp=ts,
+        )
+
+    step_metadata = {"source": "worker.level_update", "level": level}
+    ledger.record_confirmed(
+        "dims",
+        "main",
+        "current_step",
+        step_tuple,
+        origin=origin,
+        timestamp=ts,
+        metadata=step_metadata,
+    )
 
     return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
         key="level",
-        value=value,
+        value=level,
         server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        current_step=step_tuple,
     )
 
 
@@ -1198,13 +1301,13 @@ __all__ = [
     "reduce_bootstrap_state",
     "reduce_dims_update",
     "reduce_layer_property",
-    "reduce_multiscale_level",
+    "reduce_level_update",
     "reduce_multiscale_policy",
     "reduce_volume_colormap",
     "reduce_volume_contrast_limits",
     "reduce_volume_opacity",
     "reduce_volume_render_mode",
     "reduce_volume_sample_step",
-    "reduce_view_set_ndisplay",
+    "reduce_view_update",
     "resolve_axis_index",
 ]

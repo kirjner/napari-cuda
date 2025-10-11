@@ -132,7 +132,6 @@ def _update_viewer_dims(worker, viewer_dims, target: int) -> None:
 
     updated_step = tuple(int(value) for value in steps)
     viewer_dims.current_step = updated_step
-    worker._last_step = updated_step
 
 
 def _coarsest_level_index(source) -> Optional[int]:

@@ -48,12 +48,17 @@ def ensure_scene_source(worker) -> ZarrSceneSource:
             worker._last_ensure_log = key
             worker._last_ensure_log_ts = time.perf_counter()
 
-    if worker._last_step is None:
-        initial_step = source.initial_step(level=target_level)
-        worker._last_step = tuple(int(v) for v in initial_step)
-
     with worker._state_lock:
-        step = source.set_current_slice(worker._last_step, int(target_level))
+        ledger_step = None
+        ledger = worker._ledger
+        assert ledger is not None, "state ledger must be attached before ensure_scene_source"
+        entry = ledger.get("dims", "main", "current_step")
+        if entry is not None and isinstance(entry.value, (list, tuple)):
+            ledger_step = tuple(int(v) for v in entry.value)
+        if ledger_step is None:
+            initial_step = source.initial_step(level=target_level)
+            ledger_step = tuple(int(v) for v in initial_step)
+        step = source.set_current_slice(ledger_step, int(target_level))
 
     descriptor = source.level_descriptors[source.current_level]
     worker._active_ms_level = int(source.current_level)  # type: ignore[attr-defined]
@@ -68,33 +73,6 @@ def ensure_scene_source(worker) -> ZarrSceneSource:
         worker._z_index = int(step[z_index_pos])  # type: ignore[attr-defined]
 
     return source
-
-
-def notify_scene_refresh(worker, step_hint: Optional[Tuple[int, ...]] = None) -> None:
-    """Invoke the worker's scene refresh callback with the best step hint."""
-
-    callback = worker._scene_refresh_cb
-    if callback is None:
-        return
-
-    if step_hint is None:
-        ledger = getattr(worker, "_ledger", None)
-        if ledger is not None:
-            entry = ledger.get("dims", "main", "current_step")
-            if entry is not None:
-                value = entry.value
-                if isinstance(value, (list, tuple)):
-                    step_hint = tuple(int(v) for v in value)
-                else:
-                    logger.debug("notify_scene_refresh: ledger current_step not sequence (type=%s)", type(value).__name__)
-    if step_hint is None:
-        cached = getattr(worker, "_last_step", None)
-        if cached is not None:
-            step_hint = tuple(int(v) for v in cached)
-    if step_hint is None:
-        logger.debug("notify_scene_refresh skipped: missing step hint")
-        return
-    callback(step_hint)
 
 
 def refresh_worker_slice_if_needed(worker) -> None:
@@ -179,14 +157,20 @@ def apply_worker_level(
     *,
     prev_level: Optional[int] = None,
     restoring_plane_state: bool = False,
+    step_override: Optional[Sequence[int]] = None,
 ) -> lod.AppliedLevel:
     """Apply ``level`` through the worker's existing helpers and return the snapshot."""
+
+    if step_override is not None:
+        step_hint = tuple(int(v) for v in step_override)
+    else:
+        step_hint = worker._ledger_step()
 
     applied = lod.apply_level(
         source=source,
         target_level=int(level),
         prev_level=prev_level,
-        last_step=getattr(worker, "_last_step", None),
+        last_step=step_hint,
         viewer=getattr(worker, "_viewer", None),
         restoring_plane_state=restoring_plane_state,
     )
@@ -379,6 +363,7 @@ def set_level_with_budget(
     reason: str,
     budget_error: type[Exception],
     restoring_plane_state: bool = False,
+    step_override: Optional[Sequence[int]] = None,
 ) -> None:
     source = worker._ensure_scene_source()  # type: ignore[attr-defined]
 
@@ -398,6 +383,7 @@ def set_level_with_budget(
             level,
             prev_level=prev_level,
             restoring_plane_state=restoring_plane_state,
+            step_override=step_override,
         )
 
     def _on_switch(prev_level: int, applied: int, elapsed_ms: float) -> None:
@@ -431,6 +417,12 @@ def set_level_with_budget(
 
     worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
     worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
+    callback = getattr(worker, "_state_update_cb", None)
+    if callback is not None:
+        try:
+            callback(applied_snapshot, bool(downgraded))  # type: ignore[operator]
+        except Exception:
+            logger.debug("state_update callback after level apply failed", exc_info=True)
 
 
 def perform_level_switch(

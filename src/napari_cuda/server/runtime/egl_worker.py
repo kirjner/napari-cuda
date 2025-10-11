@@ -57,7 +57,6 @@ from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.rendering.capture import CaptureFacade, FrameTimings, encode_frame
-from napari_cuda.server.control.intent_queue import make_server_intent
 from napari_cuda.server.runtime.runtime_loop import run_render_tick
 from napari_cuda.server.data.roi_applier import (
     SliceUpdatePlanner,
@@ -92,7 +91,6 @@ from napari_cuda.server.runtime.worker_runtime import (
     set_level_with_budget,
     perform_level_switch,
     ensure_scene_source,
-    notify_scene_refresh,
     refresh_worker_slice_if_needed,
     reset_worker_camera,
 )
@@ -130,7 +128,7 @@ class EGLRendererWorker:
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 scene_refresh_cb: Optional[Callable[[], None]] = None,
+                 state_update_cb: Optional[Callable[[lod.AppliedLevel, bool], None]] = None,
                  policy_name: Optional[str] = None,
                  *,
                  ctx: ServerCtx,
@@ -151,7 +149,7 @@ class EGLRendererWorker:
 
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
-        self._init_scene_state(scene_refresh_cb)
+        self._init_scene_state(state_update_cb)
         self._init_locks()
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
@@ -185,8 +183,11 @@ class EGLRendererWorker:
     def is_ready(self) -> bool:
         return self._is_ready
 
-    def set_scene_refresh_callback(self, callback: Optional[Callable[[object], None]]) -> None:
-        self._scene_refresh_cb = callback
+    def set_state_update_callback(
+        self,
+        callback: Optional[Callable[[lod.AppliedLevel, bool], None]],
+    ) -> None:
+        self._state_update_cb = callback
 
     def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
         """Choose stable initial center and distance for TurntableCamera.
@@ -319,13 +320,6 @@ class EGLRendererWorker:
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
-    def _notify_scene_refresh(self, step: Optional[Sequence[int]] = None) -> None:
-        import inspect
-        step_tuple = None if step is None else tuple(int(v) for v in step)
-        caller = inspect.stack()[1].function
-        logger.info("notify_scene_refresh invoked by %s step=%s", caller, step_tuple)
-        notify_scene_refresh(self, step_hint=step_tuple)
-
     def _cache_plane_camera(self) -> None:
         if self.use_volume:
             self._plane_resume_camera_state = None
@@ -376,6 +370,12 @@ class EGLRendererWorker:
         if self.use_volume:
             return
         self._cache_plane_camera()
+        restore_level = self._ledger_level()
+        assert restore_level is not None, "ledger must provide current level before entering volume"
+        step_entry = self._ledger_step()
+        assert step_entry is not None, "ledger must provide current step before entering volume"
+        self._plane_restore_level = int(restore_level)
+        self._plane_restore_step = tuple(int(v) for v in step_entry)
         self.use_volume = True
         self._last_roi = None
         source = self._ensure_scene_source()
@@ -393,10 +393,6 @@ class EGLRendererWorker:
         )
         self._level_policy_refresh_needed = False
         self._configure_camera_for_mode()
-        source_step = source.current_step
-        if source_step is not None:
-            step_tuple = tuple(int(v) for v in source_step)
-            self._record_step_in_ledger(step_tuple, origin="worker.state.volume-entry")
         self._request_encoder_idr()
         self._mark_render_tick_needed()
 
@@ -405,7 +401,22 @@ class EGLRendererWorker:
             return
         self.use_volume = False
         self._restore_plane_camera()
-        self._level_policy_refresh_needed = True
+        restore_level = self._plane_restore_level
+        restore_step = self._plane_restore_step
+        self._plane_restore_level = None
+        self._plane_restore_step = None
+        if restore_level is not None:
+            set_level_with_budget(
+                self,
+                int(restore_level),
+                reason="plane-restore",
+                budget_error=self._budget_error_cls,
+                restoring_plane_state=True,
+                step_override=restore_step,
+            )
+            self._level_policy_refresh_needed = False
+        else:
+            self._level_policy_refresh_needed = True
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -443,14 +454,16 @@ class EGLRendererWorker:
         self._capture = CaptureFacade(width=self.width, height=self.height)
         self._encoder: Optional[Encoder] = None
 
-    def _init_scene_state(self, scene_refresh_cb: Optional[Callable[[], None]]) -> None:
+    def _init_scene_state(
+        self,
+        state_update_cb: Optional[Callable[[lod.AppliedLevel, bool], None]],
+    ) -> None:
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
         self._scene_source: Optional[ZarrSceneSource] = None
         self._active_ms_level = 0
         self._level_downgraded = False
-        self._scene_refresh_cb = scene_refresh_cb
-        self._zoom_accumulator = 0.0
+        self._state_update_cb = state_update_cb
         self._last_zoom_hint_ts = 0.0
         self._zoom_hint_hold_s = 0.35
         self._data_wh = (int(self.width), int(self.height))
@@ -460,8 +473,8 @@ class EGLRendererWorker:
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
         self._plane_resume_camera_state: Optional[dict[str, object]] = None
-        self._last_dims_log_step: Optional[tuple[int, ...]] = None
-        self._last_dims_log_ndisplay: Optional[int] = None
+        self._plane_restore_level: Optional[int] = None
+        self._plane_restore_step: Optional[tuple[int, ...]] = None
 
     def _init_locks(self) -> None:
         self._enc_lock = threading.Lock()
@@ -469,7 +482,6 @@ class EGLRendererWorker:
         self._render_mailbox = RenderUpdateQueue()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0
-        self._ensure_log_interval_s = 1.0
         self._render_tick_required = False
         self._render_loop_started = False
         self._level_policy_refresh_needed = False
@@ -491,7 +503,6 @@ class EGLRendererWorker:
         policy_logging = self._debug_policy.logging
         worker_dbg = self._debug_policy.worker
         self._log_layer_debug = bool(policy_logging.log_layer_debug)
-        self._log_roi_anchor = bool(policy_logging.log_roi_anchor)
         self._log_policy_eval = bool(policy_cfg.log_policy_eval)
         self._lock_level = worker_dbg.lock_level
         self._level_threshold_in = float(policy_cfg.threshold_in)
@@ -500,7 +511,6 @@ class EGLRendererWorker:
         self._level_fine_threshold = float(policy_cfg.fine_threshold)
         self._preserve_view_on_switch = bool(policy_cfg.preserve_view_on_switch)
         self._sticky_contrast = bool(policy_cfg.sticky_contrast)
-        self._last_step: Optional[tuple[int, ...]] = None
         self._level_switch_cooldown_ms = float(policy_cfg.cooldown_ms)
         self._last_level_switch_ts = 0.0
         self._oversampling_thresholds = (
@@ -513,7 +523,6 @@ class EGLRendererWorker:
     def _configure_roi_settings(self) -> None:
         self._roi_cache: Dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
         self._roi_log_state: Dict[int, tuple[SliceROI, float]] = {}
-        self._roi_log_interval = 0.25
         worker_dbg = self._debug_policy.worker
         self._roi_edge_threshold = int(worker_dbg.roi_edge_threshold)
         self._roi_align_chunks = bool(worker_dbg.roi_align_chunks)
@@ -529,84 +538,57 @@ class EGLRendererWorker:
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
 
     def snapshot_dims_metadata(self) -> Dict[str, Any]:
-        viewer = self._viewer
-        if viewer is None:
-            return {}
-        dims = getattr(viewer, "dims", None)
-        if dims is None:
-            return {}
-
         meta: Dict[str, Any] = {}
 
-        source = self._scene_source
-        if source is not None and source.axes:
-            axes_sequence = tuple(str(axis) for axis in source.axes)
-        elif self._zarr_axes:
-            axes_sequence = tuple(self._zarr_axes)
-        else:
-            axes_sequence = ()
-        if axes_sequence:
-            meta["axes"] = list(axes_sequence)
+        axes = self._ledger_axis_labels()
+        if axes:
+            meta["axis_labels"] = list(axes)
+            meta["axes"] = list(axes)
 
-        if self._zarr_shape:
-            level_shape = tuple(int(size) for size in self._zarr_shape)
-        elif source is not None and source.level_descriptors:
-            idx = int(self._active_ms_level)
-            descriptors = source.level_descriptors
-            if idx < 0 or idx >= len(descriptors):
-                idx = 0
-            level_shape = tuple(int(size) for size in descriptors[idx].shape)
-        else:
-            level_shape = ()
+        order = self._ledger_order()
+        if order:
+            meta["order"] = list(order)
 
-        # napari's ViewerModel may report transient steps during bootstrap/level flips;
-        # rely on the worker's tracked step instead so metadata reflects what we applied.
-        last_step = self._last_step
-        raw_step = tuple(int(value) for value in last_step) if last_step else ()
+        displayed = self._ledger_displayed()
+        if displayed:
+            meta["displayed"] = list(displayed)
+
+        ndisplay = self._ledger_ndisplay()
+        if ndisplay is not None:
+            meta["ndisplay"] = int(ndisplay)
+            meta["mode"] = "volume" if int(ndisplay) >= 3 else "plane"
+
+        current_step = self._ledger_step()
+        if current_step:
+            meta["current_step"] = list(current_step)
+
+        level_shapes = self._ledger_level_shapes()
+        if level_shapes:
+            meta["level_shapes"] = [list(shape) for shape in level_shapes]
+        level_idx = self._ledger_level()
+        if level_shapes and level_idx is not None and 0 <= level_idx < len(level_shapes):
+            current_shape = level_shapes[level_idx]
+            meta["sizes"] = [int(size) for size in current_shape]
 
         ndim_candidates: list[int] = []
-        if dims.ndim:
-            ndim_candidates.append(int(dims.ndim))
-        if axes_sequence:
-            ndim_candidates.append(len(axes_sequence))
-        if level_shape:
-            ndim_candidates.append(len(level_shape))
-        if raw_step:
-            ndim_candidates.append(len(raw_step))
-        dims_nsteps = getattr(dims, "nsteps", None)
-        if isinstance(dims_nsteps, (list, tuple)) and dims_nsteps:
-            ndim_candidates.append(len(dims_nsteps))
+        if axes:
+            ndim_candidates.append(len(axes))
+        if order:
+            ndim_candidates.append(len(order))
+        if current_step:
+            ndim_candidates.append(len(current_step))
+        if level_shapes:
+            ndim_candidates.extend(len(shape) for shape in level_shapes if shape)
+        if displayed:
+            ndim_candidates.append(len(displayed))
 
         ndim = max(ndim_candidates) if ndim_candidates else 1
         meta["ndim"] = ndim
 
-        ndisplay = int(dims.ndisplay) if dims.ndisplay else 2
-        meta["ndisplay"] = ndisplay
-        meta["mode"] = "volume" if ndisplay >= 3 else "plane"
+        if "sizes" not in meta:
+            meta["sizes"] = [1] * ndim
 
-        order_list = [int(value) for value in dims.order]
-        if len(order_list) != ndim:
-            order_list = list(range(ndim))
-        meta["order"] = order_list
-
-        axis_labels = [str(text) for text in dims.axis_labels if str(text)]
-        if len(axis_labels) < ndim:
-            for idx in range(len(axis_labels), ndim):
-                axis_labels.append(str(axes_sequence[idx]) if idx < len(axes_sequence) else f"axis-{idx}")
-        else:
-            axis_labels = axis_labels[:ndim]
-        meta["axis_labels"] = axis_labels
-
-        if dims.displayed:
-            meta["displayed"] = [int(value) for value in dims.displayed]
-
-        if level_shape:
-            sizes = [level_shape[idx] if idx < len(level_shape) else 1 for idx in range(ndim)]
-        else:
-            sizes = [max(1, int(value)) for value in dims.nsteps[:ndim]] if dims.nsteps else [1] * ndim
-        meta["sizes"] = sizes
-
-        meta["range"] = [[0, max(0, size - 1)] for size in sizes]
+        meta["range"] = [[0, max(0, size - 1)] for size in meta["sizes"]]
 
         return meta
 
@@ -621,7 +603,6 @@ class EGLRendererWorker:
 
     def _update_level_metadata(self, descriptor, applied) -> None:
         self._active_ms_level = applied.level
-        self._last_step = applied.step
         self._z_index = applied.z_index
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
@@ -990,11 +971,6 @@ class EGLRendererWorker:
             elif len(step_tuple) > ndim:
                 step_tuple = step_tuple[:ndim]
             dims.current_step = step_tuple
-            self._last_step = step_tuple
-        else:
-            current = tuple(int(v) for v in getattr(dims, "current_step", ()))
-            if len(current) >= ndim:
-                self._last_step = current[:ndim]
         if snapshot.current_level is not None:
             self._active_ms_level = int(snapshot.current_level)
 
@@ -1009,15 +985,6 @@ class EGLRendererWorker:
         expected_displayed = tuple(order_values[-len(displayed_tuple):])
         assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
 
-        if logger.isEnabledFor(logging.INFO):
-            step_log = tuple(int(v) for v in getattr(dims, "current_step", ()))
-            ndisplay_log = int(getattr(dims, "ndisplay", 2))
-            if (
-                step_log != self._last_dims_log_step
-                or ndisplay_log != int(self._last_dims_log_ndisplay or -1)
-            ):
-                self._last_dims_log_step = step_log
-                self._last_dims_log_ndisplay = ndisplay_log
 
     def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
         if snapshot.axis_labels is None or snapshot.current_step is None:
@@ -1158,11 +1125,6 @@ class EGLRendererWorker:
             self._z_index = int(drain_res.z_index)
         if drain_res.data_wh is not None:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
-        if drain_res.last_step is not None:
-            self._last_step = tuple(int(x) for x in drain_res.last_step)
-            if not self.use_volume:
-                self._notify_scene_refresh(drain_res.last_step)
-
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
 
@@ -1384,7 +1346,3 @@ class EGLRendererWorker:
             if shapes:
                 return tuple(shapes)
         return None
-
-    def _record_step_in_ledger(self, step: Sequence[int], *, origin: str = "worker.render") -> None:
-        """Legacy hook retained for callers; now proxies to notify pipeline."""
-        self._notify_scene_refresh(step)

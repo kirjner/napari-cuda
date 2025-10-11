@@ -8,169 +8,18 @@ import threading
 import time
 import logging
 from dataclasses import dataclass, field
-from functools import partial
-from typing import Optional, Sequence, List, Dict, Any, Tuple, Mapping
+from typing import Optional
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
-from napari_cuda.server.control.intent_queue import ReducerIntentQueue
-from napari_cuda.server.control.state_models import WorkerStateUpdateConfirmation
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.rendering.debug_tools import DebugDumper
+from napari_cuda.server.data.lod import AppliedLevel
 
-
-def _ingest_scene_refresh(
-    server: object,
-    state: WorkerLifecycleState,
-    loop: asyncio.AbstractEventLoop,
-    step: object = None,
-) -> None:
-    worker_ref = state.worker
-    assert worker_ref is not None, "render worker missing during refresh"
-    assert worker_ref.is_ready, "render worker refresh fired before bootstrap"
-    del loop
-
-    head = server._reducer_intents.peek()
-    if logger.isEnabledFor(logging.INFO):
-        logger.info(
-            "ingest_scene_refresh: head_intent=%s step_arg=%s worker_last=%s active_level=%s",
-            (head.intent_id if head else None),
-            step,
-            tuple(int(v) for v in worker_ref._last_step) if worker_ref._last_step is not None else None,
-            int(worker_ref._active_ms_level),
-        )
-    # Allow confirmations even without a head intent for continuous dims
-
-    step_hint: Optional[tuple[int, ...]] = None
-    if isinstance(step, (list, tuple)):
-        step_hint = tuple(int(value) for value in step)
-
-    confirmation = _build_applied_confirmation(worker_ref, step_hint, server._reducer_intents)
-    if confirmation is None:
-        logger.info("ingest_scene_refresh: no confirmation generated (step_hint=%s)", step_hint)
-        return
-
-    state.scene_seq = int(state.scene_seq) + 1
-
-    server._submit_worker_confirmation(confirmation)  # type: ignore[attr-defined]
-    logger.info(
-        "ingest_scene_refresh: submitted confirmation scope=%s intent_id=%s step=%s",
-        confirmation.scope,
-        confirmation.intent_id,
-        confirmation.step,
-    )
 
 logger = logging.getLogger(__name__)
-
-
-def _build_applied_confirmation(
-    worker: "EGLRendererWorker",
-    step_hint: Optional[Sequence[int]],
-    intents: ReducerIntentQueue,
-) -> Optional[WorkerStateUpdateConfirmation]:
-    pending_intent = intents.peek()
-    intent_id: Optional[str] = pending_intent.intent_id if pending_intent is not None else None
-    # Ignore intent payload for continuous dims/view confirmations (applied-first)
-    intent_payload: Dict[str, Any] = {}
-
-    assert worker._ledger is not None, "worker ledger not attached"
-
-    axis_labels_raw = worker._ledger_axis_labels()
-    assert axis_labels_raw is not None and len(axis_labels_raw) > 0, "ledger missing axis labels"
-    axis_labels: Tuple[str, ...] = tuple(str(label) for label in axis_labels_raw)
-
-    order_raw = worker._ledger_order()
-    assert order_raw is not None and len(order_raw) > 0, "ledger missing axis order"
-    order: Tuple[int, ...] = tuple(int(idx) for idx in order_raw)
-
-    if step_hint is not None:
-        current_step = tuple(int(v) for v in step_hint)
-    else:
-        ledger_step = worker._ledger_step()
-        assert ledger_step is not None and len(ledger_step) > 0, "ledger missing current step"
-        current_step = tuple(int(v) for v in ledger_step)
-
-    ledger_ndisplay = worker._ledger_ndisplay()
-    assert ledger_ndisplay is not None, "ledger missing ndisplay"
-    ndisplay = int(ledger_ndisplay)
-
-    ledger_displayed = worker._ledger_displayed()
-    assert ledger_displayed is not None and len(ledger_displayed) > 0, "ledger missing displayed axes"
-    displayed = tuple(int(idx) for idx in ledger_displayed)
-
-    level_shapes_raw = worker._ledger_level_shapes()
-    assert level_shapes_raw is not None and len(level_shapes_raw) > 0, "ledger missing level shapes"
-    level_shapes: List[tuple[int, ...]] = [tuple(int(s) for s in shape) for shape in level_shapes_raw]
-
-    levels_entry = worker._ledger.get("multiscale", "main", "levels")
-    assert levels_entry is not None, "ledger missing multiscale levels"
-    levels_value = levels_entry.value
-    assert isinstance(levels_value, (list, tuple)) and len(levels_value) > 0, "invalid ledger multiscale levels"
-    levels: List[Dict[str, Any]] = []
-    for entry in levels_value:
-        assert isinstance(entry, Mapping), "ledger multiscale level must be mapping"
-        level_dict: Dict[str, Any] = {
-            "index": int(entry.get("index")),
-            "shape": [int(s) for s in entry.get("shape", [])],
-        }
-        downsample = entry.get("downsample")
-        if isinstance(downsample, (list, tuple)):
-            level_dict["downsample"] = [float(x) for x in downsample]
-        path_value = entry.get("path")
-        if path_value is not None:
-            level_dict["path"] = str(path_value)
-        levels.append(level_dict)
-
-    active_level = worker._active_ms_level
-    if active_level is None:
-        ledger_level = worker._ledger_level()
-        assert ledger_level is not None, "ledger missing current level"
-        current_level = int(ledger_level)
-    else:
-        current_level = int(active_level)
-
-    assert len(axis_labels) == len(order), "ledger axis order mismatch axis labels"
-    assert len(current_step) == len(axis_labels), "ledger current step mismatch axis labels"
-    assert len(displayed) == ndisplay, "ledger displayed axes mismatch ndisplay"
-
-    mode = "volume" if ndisplay >= 3 else "plane"
-    downgraded_attr = worker._level_downgraded
-
-    metadata: Dict[str, Any] = {}
-
-    if logger.isEnabledFor(logging.INFO):
-        logger.info(
-            "build_confirmation: step_hint=%s worker_last=%s chosen_step=%s level=%d",
-            tuple(int(v) for v in step_hint) if isinstance(step_hint, Sequence) else None,
-            tuple(int(v) for v in worker._last_step) if worker._last_step is not None else None,
-            current_step,
-            current_level,
-        )
-
-    confirmation = WorkerStateUpdateConfirmation(
-        scope="dims" if intent_id is None else pending_intent.scope,  # type: ignore[union-attr]
-        target="main",
-        key="snapshot",
-        step=current_step,
-        ndisplay=ndisplay,
-        mode=mode,
-        displayed=tuple(displayed),
-        order=order,
-        axis_labels=axis_labels,
-        labels=None,
-        current_level=current_level,
-        levels=tuple(levels),
-        level_shapes=tuple(level_shapes),
-        downgraded=bool(downgraded_attr) if downgraded_attr is not None else None,
-        timestamp=time.time(),
-        metadata=metadata or None,
-        intent_id=intent_id,
-    )
-    worker._last_step = current_step
-    return confirmation
-
 @dataclass
 class WorkerLifecycleState:
     """Track the worker thread and its stop signal."""
@@ -179,7 +28,6 @@ class WorkerLifecycleState:
     thread: Optional[threading.Thread] = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     ready_event: threading.Event = field(default_factory=threading.Event)
-    scene_seq: int = 0
     ready_async_event: Optional[asyncio.Event] = None
 
 
@@ -191,7 +39,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
     state.stop_event.clear()
     state.ready_event.clear()
-    state.scene_seq = int(server._scene.last_scene_seq)
     state.ready_async_event = asyncio.Event()
 
     def on_frame(payload_obj, _flags: int, capture_wall_ts: Optional[float] = None, seq: Optional[int] = None) -> None:
@@ -286,6 +133,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
     def worker_loop() -> None:
         try:
+            control_loop = loop
+
             worker = EGLRendererWorker(
                 width=server.width,
                 height=server.height,
@@ -298,14 +147,12 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 zarr_axes=server._zarr_axes,
                 zarr_z=server._zarr_z,
                 policy_name=server._scene.multiscale_state.get("policy"),
-                scene_refresh_cb=None,
+                state_update_cb=None,
                 ctx=server._ctx,
                 env=server._ctx_env,
             )
             state.worker = worker
             worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
-            # Provide a server-side intent enqueue hook for worker policy events
-            worker._enqueue_server_intent = lambda intent: server._reducer_intents.push(intent)
 
             worker._init_cuda()
             worker._init_vispy_scene()
@@ -332,28 +179,27 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 bool(worker._zarr_path),
             )
 
-            initial_snapshot, initial_seqs = pull_render_snapshot(server)
+            initial_snapshot, _ = pull_render_snapshot(server)
             with server._state_lock:
                 server._scene.latest_state = initial_snapshot
                 server._scene.camera_commands.clear()
             worker._consume_render_snapshot(initial_snapshot)
             worker.drain_scene_updates()
-            worker._last_step = tuple(int(v) for v in (initial_snapshot.current_step or ()))
 
-            worker.set_scene_refresh_callback(
-                partial(
-                    _ingest_scene_refresh,
-                    server,
-                    state,
-                    loop,
+            def _forward_level(applied: AppliedLevel, downgraded: bool) -> None:
+                control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
+                    server._commit_applied_level,  # type: ignore[attr-defined]
+                    applied,
+                    downgraded,
                 )
-            )
+
+            worker.set_state_update_callback(_forward_level)
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
             ready_async = state.ready_async_event
             if ready_async is not None:
-                loop.call_soon_threadsafe(ready_async.set)
+                control_loop.call_soon_threadsafe(ready_async.set)
 
             # Publish initial avcC if available, then flip worker ready and push first refresh
             avcc_cfg = build_avcc_config(server._param_cache)
@@ -369,11 +215,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         ),
                         "notify_stream_bootstrap",
                     )
-                loop.call_soon_threadsafe(_publish_start_config, avcc_cfg)
+                control_loop.call_soon_threadsafe(_publish_start_config, avcc_cfg)
 
-            # Now flip worker ready and push first refresh
+            # Now flip worker ready
             worker._is_ready = True
-            _ingest_scene_refresh(server, state, loop)
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
@@ -393,7 +238,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 frame_state = snapshot
 
                 if commands and (server._log_cam_info or server._log_cam_debug):
-                    summaries: List[str] = []
+                    summaries: list[str] = []
                     for cmd in commands:
                         if cmd.kind == "zoom":
                             factor = cmd.factor if cmd.factor is not None else 0.0
@@ -483,12 +328,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server.metrics.observe_ms("napari_cuda_encode_ms", timings.encode_ms)
                 server.metrics.observe_ms("napari_cuda_pack_ms", timings.pack_ms)
                 server.metrics.observe_ms("napari_cuda_total_ms", timings.total_ms)
-
-                # Emit confirmation when applied differs from frame input (applied-first for dims)
-                if worker._last_step is not None:
-                    applied_step = tuple(int(value) for value in worker._last_step)
-                    if frame_input_step is None or tuple(int(v) for v in frame_input_step) != applied_step:
-                        worker._notify_scene_refresh(applied_step)
 
                 # Clear one-shot render tick requirement if set
                 if getattr(worker, "_render_tick_required", False):

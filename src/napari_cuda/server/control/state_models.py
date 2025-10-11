@@ -33,29 +33,6 @@ class ClientStateUpdateRequest:
 
 
 @dataclass(frozen=True)
-class WorkerStateUpdateConfirmation:
-    """State feedback originating from the render/worker pipeline."""
-
-    scope: str
-    target: str
-    key: str
-    step: Tuple[int, ...]
-    ndisplay: int
-    mode: str
-    displayed: Optional[Tuple[int, ...]]
-    order: Optional[Tuple[int, ...]]
-    axis_labels: Optional[Tuple[str, ...]]
-    labels: Optional[Tuple[str, ...]]
-    current_level: int
-    levels: Tuple[Mapping[str, Any], ...]
-    level_shapes: Tuple[Tuple[int, ...], ...]
-    downgraded: Optional[bool] = None
-    timestamp: Optional[float] = None
-    metadata: Optional[Mapping[str, Any]] = None
-    intent_id: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class ServerLedgerUpdate:
     """Authoritative state committed to the server ledger."""
 

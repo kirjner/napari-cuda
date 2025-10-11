@@ -57,16 +57,14 @@ from napari_cuda.server.control.control_channel_server import (
     ingest_state,
 )
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.control.state_models import (
-    BootstrapSceneMetadata,
-    WorkerStateUpdateConfirmation,
-)
+from napari_cuda.server.control.state_models import BootstrapSceneMetadata
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
-from napari_cuda.server.control.intent_queue import (
-    ReducerIntentQueue,
-    WorkerConfirmationQueue,
+from napari_cuda.server.control.state_reducers import (
+    reduce_bootstrap_state,
+    reduce_dims_update,
+    reduce_level_update,
 )
-from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_view_set_ndisplay
+from napari_cuda.server.data.lod import AppliedLevel
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
@@ -197,9 +195,6 @@ class EGLHeadlessServer:
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._worker_updates: Optional[WorkerConfirmationQueue] = None
-        self._worker_dispatch_task: Optional[asyncio.Task[None]] = None
-        self._reducer_intents = ReducerIntentQueue(maxsize=64)
         # Per-scope last applied seqs to help the worker skip idle ticks
         self._applied_seqs: Dict[str, int] = {}
 
@@ -411,45 +406,6 @@ class EGLHeadlessServer:
                 origin="control.layer_sync",
             )
 
-    async def _ingest_set_ndisplay(
-        self,
-        ndisplay: int,
-        *,
-        intent_id: Optional[str] = None,
-        timestamp: Optional[float] = None,
-        origin: str = "control.view.ndisplay",
-    ) -> ServerLedgerUpdate:
-        """Queue a 2D/3D view toggle intent and prepare server state."""
-        try:
-            ndisp = 3 if int(ndisplay) >= 3 else 2
-        except Exception:
-            ndisp = 2
-        if self._log_dims_info:
-            logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
-        else:
-            logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisp))
-
-        result = reduce_view_set_ndisplay(
-            self._scene,
-            self._state_ledger,
-            self._state_lock,
-            ndisplay=ndisp,
-            intent_id=intent_id,
-            timestamp=timestamp,
-            origin=origin,
-        )
-
-        self.use_volume = bool(result.value == 3)
-        self._scene.use_volume = self.use_volume
-        self._stage_layer_controls_from_ledger()
-
-        self._pixel_channel.broadcast.bypass_until_key = True
-        self._pixel_channel.broadcast.waiting_for_keyframe = True
-        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
-        self._schedule_coro(self._ensure_keyframe(), "ndisplay-keyframe")
-
-        return result
-
     def _start_kf_watchdog(self) -> None:
         return
 
@@ -617,9 +573,7 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._control_loop = loop
-        self._worker_updates = WorkerConfirmationQueue(loop, maxsize=64)
         self._dims_mirror.start()
-        self._worker_dispatch_task = loop.create_task(self._dispatch_worker_updates())
         if self._zarr_path is None:
             raise RuntimeError("bootstrap requires zarr_path")
         bootstrap_meta = probe_scene_bootstrap(
@@ -696,11 +650,6 @@ class EGLHeadlessServer:
             await asyncio.Future()
         finally:
             broadcaster.cancel()
-            self._worker_dispatch_task.cancel()
-            try:
-                await self._worker_dispatch_task
-            except asyncio.CancelledError:
-                pass
             state_server.close()
             await state_server.wait_closed()
             pixel_server.close()
@@ -736,145 +685,22 @@ class EGLHeadlessServer:
             metrics=self.metrics,
         )
 
-    def _submit_worker_confirmation(self, confirmation: WorkerStateUpdateConfirmation) -> None:
-        queue = self._worker_updates
-        if queue is None:
-            return
-
-        queue.push(confirmation)
-
-    async def _dispatch_worker_updates(self) -> None:
-        queue = self._worker_updates
-        if queue is None:
-            return
-        while True:
-            confirmation = await queue.pull()
-            try:
-                self.write_confirmation_to_ledger(confirmation)
-            except Exception:
-                logger.exception("worker confirmation processing failed")
-            finally:
-                queue.task_done()
-
-    def write_confirmation_to_ledger(self, confirmation: WorkerStateUpdateConfirmation) -> None:
-        intents = self._reducer_intents
-
-        head_intent = intents.peek()
-        continuous_scopes = {"dims", "view"}
-        accept_applied_first = (
-            confirmation.intent_id is None and confirmation.scope in continuous_scopes
+    def _commit_applied_level(
+        self,
+        applied: AppliedLevel,
+        downgraded: bool,
+    ) -> None:
+        level_update = reduce_level_update(
+            self._scene,
+            self._state_ledger,
+            self._state_lock,
+            applied=applied,
+            downgraded=bool(downgraded),
+            origin="worker.state.level",
         )
-
-        if not accept_applied_first:
-            if confirmation.intent_id is None:
-                logger.debug("skip worker confirmation without intent id scope=%s", confirmation.scope)
-                return
-            if head_intent is None or head_intent.intent_id != confirmation.intent_id:
-                logger.debug(
-                    "skip worker confirmation: unmatched intent id=%s",
-                    confirmation.intent_id,
-                )
-                return
-
-        matched_intent = head_intent if not accept_applied_first else None
-        matched_scope = matched_intent.scope if matched_intent is not None else confirmation.scope
-
-        ledger = self._state_ledger
-
-        current_step = tuple(int(v) for v in confirmation.step)
-        displayed = (
-            tuple(int(idx) for idx in confirmation.displayed)
-            if confirmation.displayed is not None
-            else None
-        )
-        axis_labels = (
-            tuple(str(label) for label in confirmation.axis_labels)
-            if confirmation.axis_labels is not None
-            else None
-        )
-        order = (
-            tuple(int(idx) for idx in confirmation.order)
-            if confirmation.order is not None
-            else None
-        )
-        labels = (
-            tuple(str(label) for label in confirmation.labels)
-            if confirmation.labels is not None
-            else None
-        )
-        levels = tuple(dict(level) for level in confirmation.levels)
-        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in confirmation.level_shapes)
-
-        metadata = confirmation.metadata or {}
-        plane_state = metadata.get("plane_state")
-        intent_payload = matched_intent.payload if matched_intent is not None else {}
-        raw_meta = matched_intent.metadata if matched_intent is not None else None
-        intent_meta = dict(raw_meta) if raw_meta is not None else {}
-
-        step_metadata: dict[str, object] = {}
-        if matched_scope == "dims":
-            axis_index = int(intent_payload.get("axis_index", 0)) if intent_payload else 0
-            axis_target = (
-                str(intent_meta.get("axis_label", axis_index)) if intent_meta else str(axis_index)
-            )
-            step_metadata["axis_index"] = axis_index
-            step_metadata["axis_target"] = axis_target
-            if "step" in intent_payload:
-                step_metadata["requested_step"] = tuple(int(v) for v in intent_payload["step"])  # type: ignore[arg-type]
-        if confirmation.intent_id is not None:
-            step_metadata["intent_id"] = confirmation.intent_id
-
-        logger.info(
-            "worker %s confirmation: step=%s axis_labels=%s order=%s ndisplay=%s intent=%s",
-            matched_scope,
-            confirmation.step,
-            confirmation.axis_labels,
-            confirmation.order,
-            confirmation.ndisplay,
-            confirmation.intent_id,
-        )
-
-        ndisplay_value = int(confirmation.ndisplay)
-        mode_value = str(confirmation.mode)
-
-        if matched_scope == "view":
-            ndisplay_value = int(intent_payload.get("ndisplay", ndisplay_value))
-            mode_value = "volume" if ndisplay_value >= 3 else "plane"
-            ledger_origin = "worker.state.view"
-        else:
-            ledger_origin = "worker.state.dims"
-
-        entries: list[tuple[Any, ...]] = [
-            ("dims", "main", "current_step", current_step, step_metadata),
-            ("view", "main", "ndisplay", ndisplay_value),
-            ("view", "main", "displayed", displayed),
-            ("dims", "main", "mode", mode_value),
-            ("dims", "main", "order", order),
-            ("dims", "main", "axis_labels", axis_labels),
-            ("dims", "main", "labels", labels),
-            ("multiscale", "main", "level", int(confirmation.current_level)),
-            ("multiscale", "main", "levels", levels),
-            ("multiscale", "main", "level_shapes", level_shapes),
-            ("multiscale", "main", "downgraded", confirmation.downgraded),
-        ]
-
-        ledger.batch_record_confirmed(entries, origin=ledger_origin)
-
-        if matched_intent is not None and confirmation.intent_id is not None:
-            intents.pop(confirmation.intent_id)
-
-        with self._state_lock:
-            snapshot = self._scene.latest_state
-            if snapshot.current_step != current_step:
-                self._scene.latest_state = replace(snapshot, current_step=current_step)
-            metadata = confirmation.metadata or {}
-
-        with self._state_lock:
-            seq_val = int(self._scene.last_scene_seq)
-            if seq_val <= 0:
-                seq_val = int(time.time() * 1000)
-            self._applied_seqs["dims"] = seq_val
-            self._applied_seqs["view"] = seq_val
+        seq_value = int(level_update.server_seq)
+        self._applied_seqs["multiscale"] = seq_value
+        self._applied_seqs["dims"] = seq_value
 
     def _scene_snapshot_json(self) -> Optional[str]:
         try:

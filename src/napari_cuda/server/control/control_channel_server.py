@@ -66,13 +66,14 @@ from napari_cuda.server.control.state_reducers import (
     reduce_camera_state,
     reduce_dims_update,
     reduce_layer_property,
-    reduce_multiscale_level,
+    reduce_level_update,
     reduce_multiscale_policy,
     reduce_volume_colormap,
     reduce_volume_contrast_limits,
     reduce_volume_opacity,
     reduce_volume_render_mode,
     reduce_volume_sample_step,
+    reduce_view_update,
 )
 from napari_cuda.server.scene import (
     ServerSceneCommand,
@@ -1058,12 +1059,29 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             return True
         ndisplay = 3 if int(raw_value) >= 3 else 2
         try:
-            result = await server._ingest_set_ndisplay(
-                ndisplay,
+            if server._log_dims_info:
+                logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
+            else:
+                logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
+
+            result = reduce_view_update(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                ndisplay=int(ndisplay),
                 intent_id=intent_id,
                 timestamp=timestamp,
                 origin="client.state.view",
             )
+            server.use_volume = bool(result.value == 3)
+            server._scene.use_volume = server.use_volume
+            server._stage_layer_controls_from_ledger()
+
+            server._pixel_channel.broadcast.bypass_until_key = True
+            server._pixel_channel.broadcast.waiting_for_keyframe = True
+            pixel_channel.mark_stream_config_dirty(server._pixel_channel)
+            server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
+            server._applied_seqs["view"] = int(result.server_seq)
         except Exception:
             logger.info("state.update view.set_ndisplay failed", exc_info=True)
             await _reject("state.error", "failed to apply ndisplay")
@@ -1636,13 +1654,14 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 logger.debug("state.update multiscale ignored invalid level=%r", value)
                 await _reject("state.invalid", "level out of range", details={"scope": scope, "key": key})
                 return True
-            result = reduce_multiscale_level(
+            result = reduce_level_update(
                 server._scene,
                 server._state_ledger,
                 server._state_lock,
-                level=int(level),
+                applied={"level": int(level)},
                 intent_id=intent_id,
                 timestamp=timestamp,
+                origin="client.state.multiscale",
             )
             rebroadcast_tag = 'rebroadcast-ms-level'
             if server._worker is not None:
@@ -1686,25 +1705,22 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     # ----- dims scope ---------------------------------------------------
     if scope == 'dims':
         step_delta: Optional[int] = None
-        set_value: Optional[int] = None
+        value_arg: Optional[int] = None
         norm_key = key
-        value_obj = value
         if key == 'index':
             norm_key = 'index'
-            if isinstance(value_obj, Integral):
-                set_value = int(value_obj)
-                value_obj = None
+            if isinstance(value, Integral):
+                value_arg = int(value)
             else:
-                logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, value_obj)
+                logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, value)
                 await _reject("state.invalid", "index must be integer", details={"scope": scope, "key": key, "target": target})
                 return True
         elif key == 'step':
             norm_key = 'step'
-            if isinstance(value_obj, Integral):
-                step_delta = int(value_obj)
-                value_obj = None
+            if isinstance(value, Integral):
+                step_delta = int(value)
             else:
-                logger.debug("state.update dims ignored (non-integer step delta) axis=%s value=%r", target, value_obj)
+                logger.debug("state.update dims ignored (non-integer step delta) axis=%s value=%r", target, value)
                 await _reject("state.invalid", "step delta must be integer", details={"scope": scope, "key": key, "target": target})
                 return True
         else:
@@ -1715,14 +1731,14 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         metadata: Dict[str, Any] = {}
         if step_delta is not None:
             metadata["step_delta"] = step_delta
-        if set_value is not None:
-            metadata["set_value"] = set_value
+        if value_arg is not None:
+            metadata["value"] = value_arg
 
         request = ClientStateUpdateRequest(
             scope="dims",
             target=str(target),
             key=str(norm_key),
-            value=value_obj,
+            value=value_arg,
             intent_id=intent_id,
             timestamp=timestamp,
             metadata=metadata or None,
@@ -1737,7 +1753,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 prop=request.key,
                 value=request.value,
                 step_delta=metadata.get("step_delta"),
-                set_value=metadata.get("set_value"),
                 intent_id=request.intent_id,
                 timestamp=request.timestamp,
                 origin="client.state.dims",
@@ -1748,11 +1763,11 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             return True
         if logger.isEnabledFor(logging.INFO):
             logger.info(
-                "state.update dims applied: axis=%s key=%s step_delta=%s set_value=%s current_step=%s",
+                "state.update dims applied: axis=%s key=%s step_delta=%s value=%s current_step=%s",
                 target,
                 key,
                 step_delta,
-                set_value,
+                value_arg,
                 result.current_step,
             )
 
