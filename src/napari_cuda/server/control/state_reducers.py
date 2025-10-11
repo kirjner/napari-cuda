@@ -736,25 +736,26 @@ def reduce_bootstrap_state(
             axis_index=axis_index,
             axis_target=axis_target,
         )
+        axis_index_metadata = {
+            "axis_index": axis_index,
+            "axis_target": axis_target,
+            "server_seq": dims_seq,
+        }
+        axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
+        entries.append(
+            (
+                "dims",
+                axis_target,
+                "index",
+                axis_index_value,
+                axis_index_metadata,
+            )
+        )
 
     ledger.batch_record_confirmed(
         entries,
         origin=origin,
         timestamp=ts,
-        dedupe=False,
-    )
-    ledger.record_confirmed(
-        "dims",
-        axis_target,
-        "index",
-        int(resolved_step[axis_index]) if resolved_step else 0,
-        origin=origin,
-        timestamp=ts,
-        metadata={
-            "axis_index": axis_index,
-            "axis_target": axis_target,
-            "server_seq": dims_seq,
-        },
         dedupe=False,
     )
 
@@ -1190,42 +1191,43 @@ def reduce_level_update(
         origin,
     )
 
-    ledger.record_confirmed(
-        "multiscale",
-        "main",
-        "level",
-        level,
-        origin=origin,
-        timestamp=ts,
-    )
+    batch_entries: list[tuple[Any, ...]] = [
+        ("multiscale", "main", "level", level),
+    ]
     if updated_level_shapes:
-        ledger.record_confirmed(
-            "multiscale",
-            "main",
-            "level_shapes",
-            updated_level_shapes,
-            origin=origin,
-            timestamp=ts,
+        batch_entries.append(
+            (
+                "multiscale",
+                "main",
+                "level_shapes",
+                updated_level_shapes,
+            )
         )
     if downgraded is not None:
-        ledger.record_confirmed(
-            "multiscale",
-            "main",
-            "downgraded",
-            bool(downgraded),
-            origin=origin,
-            timestamp=ts,
+        batch_entries.append(
+            (
+                "multiscale",
+                "main",
+                "downgraded",
+                bool(downgraded),
+            )
         )
 
     step_metadata = {"source": "worker.level_update", "level": level}
-    ledger.record_confirmed(
-        "dims",
-        "main",
-        "current_step",
-        step_tuple,
+    batch_entries.append(
+        (
+            "dims",
+            "main",
+            "current_step",
+            step_tuple,
+            step_metadata,
+        )
+    )
+
+    ledger.batch_record_confirmed(
+        batch_entries,
         origin=origin,
         timestamp=ts,
-        metadata=step_metadata,
     )
 
     return ServerLedgerUpdate(
