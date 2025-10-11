@@ -40,11 +40,11 @@ def _default_dims_meta() -> dict[str, object | None]:
     }
 
 
-def _normalize_camera_delta_value(value: Any) -> Any:
+def _normalize_camera_state_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(k): _normalize_camera_delta_value(v) for k, v in value.items()}
+        return {str(k): _normalize_camera_state_value(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_normalize_camera_delta_value(v) for v in value]
+        return [_normalize_camera_state_value(v) for v in value]
     if isinstance(value, (int, float)):
         return float(value)
     return value
@@ -134,29 +134,29 @@ def handle_notify_camera(
 ) -> tuple[str, dict[str, Any]] | None:
     payload = frame.payload
     mode = str(payload.mode or "")
-    normalized_delta = _normalize_camera_delta_value(payload.delta)
+    normalized_state = _normalize_camera_state_value(payload.state)
     mode_key = mode or 'main'
-    state.camera_state[mode_key] = normalized_delta
+    state.camera_state[mode_key] = normalized_state
 
     timestamp = frame.envelope.timestamp
     state_ledger.record_confirmed(
         'camera',
         'main',
         mode_key,
-        normalized_delta,
+        normalized_state,
         timestamp=timestamp,
     )
 
     if log_debug:
         logger.debug(
-            "notify.camera mode=%s origin=%s intent=%s delta=%s",
+            "notify.camera mode=%s origin=%s intent=%s state=%s",
             mode,
             payload.origin,
             frame.envelope.intent_id,
-            normalized_delta,
+            normalized_state,
         )
 
-    return mode_key, normalized_delta
+    return mode_key, normalized_state
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
@@ -795,7 +795,7 @@ def camera_zoom(
     metadata = {
         "mode": "zoom",
         "origin": origin,
-        "delta": dict(sanitized),
+        "state": dict(sanitized),
         "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
@@ -829,7 +829,7 @@ def camera_pan(
     metadata = {
         "mode": "pan",
         "origin": origin,
-        "delta": dict(sanitized),
+        "state": dict(sanitized),
         "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
@@ -863,7 +863,7 @@ def camera_orbit(
     metadata = {
         "mode": "orbit",
         "origin": origin,
-        "delta": dict(sanitized),
+        "state": dict(sanitized),
         "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
@@ -896,7 +896,7 @@ def camera_reset(
     metadata = {
         "mode": "reset",
         "origin": origin,
-        "delta": dict(sanitized),
+        "state": dict(sanitized),
         "update_kind": "delta",
     }
     ok, _ = _emit_state_update(
@@ -939,7 +939,7 @@ def camera_set(
     metadata = {
         "mode": "set",
         "origin": origin,
-        "delta": dict(payload),
+        "state": dict(payload),
     }
     ok, _ = _emit_state_update(
         state,

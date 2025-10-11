@@ -294,7 +294,7 @@ def test_notify_dims_short_frame_id_when_no_intent() -> None:
 def test_notify_camera_respects_intent_id() -> None:
     frame = build_notify_camera(
         session_id="sess",
-        payload={"mode": "3d", "delta": {"zoom": 1.0}, "origin": "server"},
+        payload={"mode": "3d", "state": {"zoom": 1.0}, "origin": "server"},
         intent_id="intent-1",
         frame_id="camera-frame-long",
     )

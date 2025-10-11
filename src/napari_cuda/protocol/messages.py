@@ -744,23 +744,23 @@ class NotifyDimsPayload:
 @dataclass(slots=True)
 class NotifyCameraPayload:
     mode: str
-    delta: Dict[str, Any]
+    state: Dict[str, Any]
     origin: str
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"mode": self.mode, "delta": dict(self.delta), "origin": self.origin}
+        return {"mode": self.mode, "state": dict(self.state), "origin": self.origin}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "NotifyCameraPayload":
         mapping = _as_mapping(data, "notify.camera payload")
         _ensure_keyset(
             mapping,
-            required=("mode", "delta", "origin"),
+            required=("mode", "state", "origin"),
             context="notify.camera payload",
         )
         return cls(
             mode=str(mapping["mode"]),
-            delta=_as_mutable_mapping(mapping["delta"], "notify.camera payload.delta"),
+            state=_as_mutable_mapping(mapping["state"], "notify.camera payload.state"),
             origin=str(mapping["origin"]),
         )
 

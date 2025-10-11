@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Callable, List, Tuple
+from typing import Any, List, Tuple
 
 import pytest
 from qtpy import QtCore
 
-from napari_cuda.client.control.client_state_ledger import IntentRecord, ClientStateLedger
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
 from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop import camera
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+
+
+class DummyCamera:
+    def __init__(self) -> None:
+        self.center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.zoom: float = 1.0
+        self.angles: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+class DummyViewer:
+    def __init__(self) -> None:
+        self.camera = DummyCamera()
 
 
 def _make_state(qtbot: Any) -> tuple[
@@ -22,8 +34,6 @@ def _make_state(qtbot: Any) -> tuple[
     cam_env = SimpleNamespace(
         zoom_base=1.2,
         camera_rate_hz=120.0,
-        orbit_deg_per_px_x=0.5,
-        orbit_deg_per_px_y=0.25,
     )
     ctrl_env = SimpleNamespace(dims_rate_hz=60.0, wheel_step=1.0, settings_rate_hz=30.0)
     control_state = ControlStateContext.from_env(ctrl_env)
@@ -49,8 +59,64 @@ def _make_state(qtbot: Any) -> tuple[
     return control_state, cam_state, emitter, dispatched
 
 
-def test_handle_wheel_zoom_posts_camera_zoom(qtbot) -> None:
-    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+def test_emit_camera_set_from_viewer_posts_absolute(qtbot) -> None:
+    _control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    viewer = DummyViewer()
+    viewer.camera.center = (1.0, 2.0, 3.0)
+    viewer.camera.zoom = 2.5
+    viewer.camera.angles = (0.1, 0.2, 0.3)
+
+    sent = camera.emit_camera_set_from_viewer(
+        emitter,
+        cam_state,
+        viewer,
+        origin='test',
+        force=True,
+    )
+
+    assert sent is True
+    assert dispatched, "expected state.update dispatch"
+    pending, origin = dispatched[-1]
+    assert origin == 'test'
+    assert pending.scope == 'camera'
+    assert pending.key == 'set'
+    assert pending.value == {
+        'center': [1.0, 2.0, 3.0],
+        'zoom': 2.5,
+        'angles': [0.1, 0.2, 0.3],
+    }
+
+
+def test_emit_camera_set_from_viewer_throttles_identical_payload(qtbot) -> None:
+    _control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    viewer = DummyViewer()
+    viewer.camera.center = (1.0, 2.0, 3.0)
+    viewer.camera.zoom = 2.0
+
+    assert camera.emit_camera_set_from_viewer(
+        emitter,
+        cam_state,
+        viewer,
+        origin='first',
+        force=False,
+    )
+    assert len(dispatched) == 1
+
+    # Second call with identical payload should be suppressed when not forced
+    assert camera.emit_camera_set_from_viewer(
+        emitter,
+        cam_state,
+        viewer,
+        origin='second',
+        force=False,
+    ) is False
+    assert len(dispatched) == 1
+
+
+def test_handle_wheel_zoom_emits_absolute_update(qtbot) -> None:
+    _control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    viewer = DummyViewer()
+    viewer.camera.zoom = 1.5
 
     camera.handle_wheel_zoom(
         emitter,
@@ -59,20 +125,19 @@ def test_handle_wheel_zoom_posts_camera_zoom(qtbot) -> None:
         widget_to_video=lambda x, y: (x, y),
         server_anchor_from_video=lambda x, y: (x, y),
         log_dims_info=False,
+        viewer=viewer,
     )
 
     assert dispatched, "expected state.update dispatch"
     pending, origin = dispatched[-1]
     assert origin == 'wheel'
-    assert pending.scope == 'camera'
-    assert pending.key == 'zoom'
-    assert pending.value == {'factor': 1.2, 'anchor_px': [10.0, 20.0]}
-    assert cam_state.last_zoom_factor is not None
-    assert cam_state.last_zoom_widget_px == (10.0, 20.0)
+    assert pending.key == 'set'
+    assert 'zoom' in pending.value
 
 
-def test_handle_pointer_pan_posts_delta(qtbot) -> None:
-    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+def test_handle_pointer_drag_sends_absolute(qtbot) -> None:
+    _control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    viewer = DummyViewer()
 
     camera.handle_pointer(
         emitter,
@@ -83,8 +148,10 @@ def test_handle_pointer_pan_posts_delta(qtbot) -> None:
         log_dims_info=False,
         in_vol3d=False,
         alt_mask=0x2000,
+        viewer=viewer,
     )
 
+    viewer.camera.center = (5.0, 6.0, 7.0)
     camera.handle_pointer(
         emitter,
         cam_state,
@@ -94,103 +161,54 @@ def test_handle_pointer_pan_posts_delta(qtbot) -> None:
         log_dims_info=False,
         in_vol3d=False,
         alt_mask=0x2000,
+        viewer=viewer,
     )
 
-    camera.handle_pointer(
-        emitter,
-        cam_state,
-        {'phase': 'up', 'x_px': 5, 'y_px': 3, 'mods': 0},
-        widget_to_video=lambda x, y: (x, y),
-        video_delta_to_canvas=lambda dx, dy: (dx, dy),
-        log_dims_info=False,
-        in_vol3d=False,
-        alt_mask=0x2000,
-    )
-
-    assert dispatched, "expected pan dispatch"
-    pan_updates = [entry for entry in dispatched if entry[0].key == 'pan']
-    assert pan_updates, "expected at least one pan entry"
-    assert any(
-        update.scope == 'camera' and update.value == {'dx_px': 5.0, 'dy_px': 3.0}
-        for update, _origin in pan_updates
-    ), "expected pan delta to carry accumulated values"
+    assert any(entry[0].key == 'set' for entry in dispatched), "expected camera.set intent"
+    pending, _origin = dispatched[-1]
+    assert pending.value.get('center') == [5.0, 6.0, 7.0]
 
 
-def test_handle_pointer_orbit_posts_delta(qtbot) -> None:
-    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
-    control_state.dims_ready = True
-    control_state.dims_meta['mode'] = 'volume'
-    control_state.dims_meta['ndisplay'] = 3
-
-    camera.handle_pointer(
-        emitter,
-        cam_state,
-        {'phase': 'down', 'x_px': 0, 'y_px': 0, 'mods': 0x2000},
-        widget_to_video=lambda x, y: (x, y),
-        video_delta_to_canvas=lambda dx, dy: (dx, dy),
-        log_dims_info=False,
-        in_vol3d=True,
-        alt_mask=0x2000,
-    )
-
-    camera.handle_pointer(
-        emitter,
-        cam_state,
-        {'phase': 'move', 'x_px': 4, 'y_px': 2, 'mods': 0x2000},
-        widget_to_video=lambda x, y: (x, y),
-        video_delta_to_canvas=lambda dx, dy: (dx, dy),
-        log_dims_info=False,
-        in_vol3d=True,
-        alt_mask=0x2000,
-    )
-
-    camera.handle_pointer(
-        emitter,
-        cam_state,
-        {'phase': 'up', 'x_px': 4, 'y_px': 2, 'mods': 0x2000},
-        widget_to_video=lambda x, y: (x, y),
-        video_delta_to_canvas=lambda dx, dy: (dx, dy),
-        log_dims_info=False,
-        in_vol3d=True,
-        alt_mask=0x2000,
-    )
-
-    orbit_updates = [(entry[0], entry[1]) for entry in dispatched if entry[0].key == 'orbit']
-    assert orbit_updates, "expected orbit dispatch"
-    non_zero = [(update, src) for update, src in orbit_updates if any(abs(v) > 0 for v in update.value.values())]
-    assert non_zero, "expected orbit delta to carry rotation"
-    pending, origin = non_zero[-1]
-    assert pending.scope == 'camera'
-    assert pending.metadata['mode'] == 'orbit'
-
-
-def test_reset_and_set_camera_send_payloads(qtbot) -> None:
-    control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+def test_reset_camera_uses_viewer_snapshot(qtbot) -> None:
+    _control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    viewer = DummyViewer()
+    viewer.camera.center = (9.0, 8.0, 7.0)
+    viewer.camera.zoom = 3.0
 
     assert camera.reset_camera(
         emitter,
         origin='ui',
-    ) is True
-    assert dispatched, "expected reset dispatch"
-    reset_pending, reset_origin = dispatched[-1]
-    assert reset_origin == 'ui'
-    assert reset_pending.scope == 'camera'
-    assert reset_pending.key == 'reset'
-    assert reset_pending.value == {'reason': 'ui'}
+        viewer=viewer,
+        state=cam_state,
+    )
+    pending, origin = dispatched[-1]
+    assert origin == 'ui'
+    assert pending.key == 'set'
+    assert pending.value['zoom'] == 3.0
 
-    assert camera.set_camera(
+
+def test_zoom_steps_at_center_updates_viewer(qtbot) -> None:
+    _control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    viewer = DummyViewer()
+    viewer.camera.zoom = 2.0
+    # keep last cursor location reasonable
+    cam_state.cursor_wx = 100.0
+    cam_state.cursor_wy = 50.0
+
+    camera.zoom_steps_at_center(
         emitter,
-        center=(1, 2, 3),
-        zoom=2.5,
-        angles=(0.1, 0.2, 0.3),
-        origin='ui',
-    ) is True
-    set_pending, set_origin = dispatched[-1]
-    assert set_origin == 'ui'
-    assert set_pending.scope == 'camera'
-    assert set_pending.key == 'set'
-    assert set_pending.value == {
-        'center': [1.0, 2.0, 3.0],
-        'zoom': 2.5,
-        'angles': [0.1, 0.2, 0.3],
-    }
+        cam_state,
+        steps=1,
+        widget_to_video=lambda x, y: (x, y),
+        server_anchor_from_video=lambda x, y: (x, y),
+        log_dims_info=False,
+        vid_size=(200, 100),
+        viewer=viewer,
+    )
+
+    assert dispatched, "expected camera.set intent"
+    pending, origin = dispatched[-1]
+    assert origin == 'keys'
+    assert pending.key == 'set'
+    assert 'zoom' in pending.value
+    assert viewer.camera.zoom != 2.0

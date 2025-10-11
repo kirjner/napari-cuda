@@ -6,11 +6,14 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
+
+
+CameraSnapshot = Tuple[Optional[Tuple[float, ...]], Optional[float], Optional[Tuple[float, ...]]]
 
 
 @dataclass
@@ -19,39 +22,97 @@ class CameraState:
 
     zoom_base: float
     cam_min_dt: float
-    orbit_deg_per_px_x: float
-    orbit_deg_per_px_y: float
     last_cam_send: float = 0.0
     dragging: bool = False
-    orbit_dragging: bool = False
     last_wx: float = 0.0
     last_wy: float = 0.0
-    pan_dx_accum: float = 0.0
-    pan_dy_accum: float = 0.0
-    orbit_daz_accum: float = 0.0
-    orbit_del_accum: float = 0.0
     cursor_wx: float = 0.0
     cursor_wy: float = 0.0
     last_zoom_factor: Optional[float] = None
     last_zoom_widget_px: Optional[tuple[float, float]] = None
     last_zoom_video_px: Optional[tuple[float, float]] = None
     last_zoom_anchor_px: Optional[tuple[float, float]] = None
-    last_pan_dx_sent: float = 0.0
-    last_pan_dy_sent: float = 0.0
+    last_payload: Optional[CameraSnapshot] = None
 
     @classmethod
     def from_env(cls, env_cfg: object) -> "CameraState":
         rate = getattr(env_cfg, 'camera_rate_hz', 60.0) or 60.0
-        deg_x = getattr(env_cfg, 'orbit_deg_per_px_x', 0.3) or 0.3
-        deg_y = getattr(env_cfg, 'orbit_deg_per_px_y', 0.3) or 0.3
         zoom_base = float(getattr(env_cfg, 'zoom_base', 1.2) or 1.2)
         cam_min_dt = 1.0 / max(1.0, float(rate))
         return cls(
             zoom_base=zoom_base,
             cam_min_dt=cam_min_dt,
-            orbit_deg_per_px_x=float(deg_x),
-            orbit_deg_per_px_y=float(deg_y),
         )
+
+
+def _to_float_tuple(value: Any) -> Optional[Tuple[float, ...]]:
+    if value is None:
+        return None
+    try:
+        seq = tuple(float(v) for v in value)
+    except Exception:
+        return None
+    if not seq:
+        return None
+    return seq
+
+
+def _snapshot_viewer_camera(viewer: Any) -> CameraSnapshot:
+    camera = getattr(viewer, "camera", None)
+    if camera is None:
+        return (None, None, None)
+    center = _to_float_tuple(getattr(camera, "center", None))
+    zoom_value = getattr(camera, "zoom", None)
+    try:
+        zoom = float(zoom_value) if zoom_value is not None else None
+    except Exception:
+        zoom = None
+    angles_raw = getattr(camera, "angles", None)
+    angles = _to_float_tuple(angles_raw)
+    return (center, zoom, angles)
+
+
+def emit_camera_set_from_viewer(
+    camera_emitter: NapariCameraIntentEmitter,
+    state: CameraState,
+    viewer: Any | None,
+    *,
+    origin: str,
+    force: bool = False,
+) -> bool:
+    """Read the viewer camera and emit a `camera.set` intent if needed."""
+
+    if viewer is None:
+        return False
+
+    center, zoom, angles = _snapshot_viewer_camera(viewer)
+    if center is None and zoom is None and angles is None:
+        return False
+
+    payload: CameraSnapshot = (center, zoom, angles)
+    now = time.perf_counter()
+
+    if not force:
+        if state.cam_min_dt > 0.0 and (now - float(state.last_cam_send or 0.0)) < state.cam_min_dt:
+            return False
+        if payload == state.last_payload:
+            return False
+
+    kwargs: dict[str, Any] = {}
+    if center is not None:
+        kwargs["center"] = center
+    if zoom is not None:
+        kwargs["zoom"] = zoom
+    if angles is not None:
+        kwargs["angles"] = angles
+    if not kwargs:
+        return False
+
+    ok = camera_emitter.set(origin=origin, **kwargs)
+    if ok:
+        state.last_cam_send = now
+        state.last_payload = payload
+    return bool(ok)
 
 
 def handle_wheel_zoom(
@@ -62,6 +123,7 @@ def handle_wheel_zoom(
     widget_to_video: Callable[[float, float], tuple[float, float]],
     server_anchor_from_video: Callable[[float, float], tuple[float, float]],
     log_dims_info: bool,
+    viewer: Any | None,
 ) -> None:
     ay = float(data.get('angle_y') or 0.0)
     py = float(data.get('pixel_y') or 0.0)
@@ -74,27 +136,28 @@ def handle_wheel_zoom(
     elif py != 0.0:
         factor = base ** (py / 30.0)
     else:
-        return
+        factor = 1.0
     xv, yv = widget_to_video(xw, yw)
     ax, ay_server = server_anchor_from_video(xv, yv)
     state.last_zoom_factor = float(factor)
     state.last_zoom_widget_px = (float(xw), float(yw))
     state.last_zoom_video_px = (float(xv), float(yv))
     state.last_zoom_anchor_px = (float(ax), float(ay_server))
-    ok = camera_emitter.zoom(
-        factor=float(factor),
-        anchor_px=(float(ax), float(ay_server)),
+
+    sent = emit_camera_set_from_viewer(
+        camera_emitter,
+        state,
+        viewer,
         origin='wheel',
+        force=True,
     )
-    if ok:
-        state.last_cam_send = time.perf_counter()
     if log_dims_info:
         logger.info(
-            "wheel+mod->camera.zoom f=%.4f at(%.1f,%.1f) sent=%s",
+            "wheel+mod camera.set factor=%.4f at(%.1f,%.1f) sent=%s",
             float(factor),
             float(ax),
             float(ay_server),
-            bool(ok),
+            bool(sent),
         )
 
 
@@ -108,7 +171,10 @@ def handle_pointer(
     log_dims_info: bool,
     in_vol3d: bool,
     alt_mask: int,
+    viewer: Any | None,
 ) -> None:
+    del in_vol3d, alt_mask  # kept for signature compatibility; no-op in absolute mode
+
     phase = (data.get('phase') or '').lower()
     xw_raw = data.get('x_px')
     yw_raw = data.get('y_px')
@@ -116,19 +182,18 @@ def handle_pointer(
     yw = float(yw_raw) if yw_raw is not None else 0.0
     state.cursor_wx = xw
     state.cursor_wy = yw
-    mods = int(data.get('mods') or 0)
-    alt = (mods & int(alt_mask)) != 0
 
     if phase == 'down':
         state.dragging = True
         state.last_wx = xw
         state.last_wy = yw
-        state.pan_dx_accum = 0.0
-        state.pan_dy_accum = 0.0
-        if alt and in_vol3d:
-            state.orbit_dragging = True
-            state.orbit_daz_accum = 0.0
-            state.orbit_del_accum = 0.0
+        emit_camera_set_from_viewer(
+            camera_emitter,
+            state,
+            viewer,
+            origin='pointer.down',
+            force=True,
+        )
         return
 
     if phase == 'move' and state.dragging:
@@ -139,151 +204,36 @@ def handle_pointer(
         dx_c, dy_c = video_delta_to_canvas(dx_v, dy_v)
         if log_dims_info:
             logger.info(
-                "pointer move: mods=%d alt=%s vol3d=%s dx_c=%.2f dy_c=%.2f",
-                int(mods), bool(alt), bool(in_vol3d), float(dx_c), float(dy_c),
+                "pointer move drag dx_c=%.2f dy_c=%.2f",
+                float(dx_c),
+                float(dy_c),
             )
-        if alt and in_vol3d:
-            if not state.orbit_dragging:
-                state.orbit_dragging = True
-                state.orbit_daz_accum = 0.0
-                state.orbit_del_accum = 0.0
-            state.orbit_daz_accum += float(dx_c) * float(state.orbit_deg_per_px_x)
-            state.orbit_del_accum += float(-dy_c) * float(state.orbit_deg_per_px_y)
-        else:
-            if state.orbit_dragging:
-                flush_orbit(
-                    camera_emitter,
-                    state,
-                    force=True,
-                    origin='pointer.move',
-                    log_dims_info=log_dims_info,
-                )
-                state.orbit_dragging = False
-            state.pan_dx_accum += float(dx_c)
-            state.pan_dy_accum += float(dy_c)
-        state.last_wx = xw
-        state.last_wy = yw
-        if state.orbit_dragging:
-            flush_orbit_if_due(
-                camera_emitter,
-                state,
-                log_dims_info=log_dims_info,
-            )
-        else:
-            flush_pan_if_due(
-                camera_emitter,
-                state,
-                log_dims_info=log_dims_info,
-            )
+        sent = emit_camera_set_from_viewer(
+            camera_emitter,
+            state,
+            viewer,
+            origin='pointer.drag',
+            force=False,
+        )
+        if sent:
+            state.last_wx = xw
+            state.last_wy = yw
         return
 
     if phase == 'up':
+        if state.dragging:
+            emit_camera_set_from_viewer(
+                camera_emitter,
+                state,
+                viewer,
+                origin='pointer.up',
+                force=True,
+            )
         state.dragging = False
-        if state.orbit_dragging:
-            flush_orbit(
-                camera_emitter,
-                state,
-                force=True,
-                origin='pointer.up',
-                log_dims_info=log_dims_info,
-            )
-            state.orbit_dragging = False
-        else:
-            flush_pan(
-                camera_emitter,
-                state,
-                force=True,
-                origin='pointer.up',
-                log_dims_info=log_dims_info,
-            )
-
-
-def flush_pan_if_due(
-    camera_emitter: NapariCameraIntentEmitter,
-    state: CameraState,
-    *,
-    log_dims_info: bool,
-) -> None:
-    now = time.perf_counter()
-    if (now - float(state.last_cam_send or 0.0)) >= state.cam_min_dt:
-        flush_pan(
-            camera_emitter,
-            state,
-            force=False,
-            origin='pointer.drag',
-            log_dims_info=log_dims_info,
-        )
-
-
-def flush_pan(
-    camera_emitter: NapariCameraIntentEmitter,
-    state: CameraState,
-    *,
-    force: bool,
-    origin: str,
-    log_dims_info: bool,
-) -> None:
-    dx = float(state.pan_dx_accum or 0.0)
-    dy = float(state.pan_dy_accum or 0.0)
-    if not force and abs(dx) < 1e-3 and abs(dy) < 1e-3:
         return
-    ok = camera_emitter.pan(dx_px=float(dx), dy_px=float(dy), origin=origin)
-    if ok:
-        state.last_pan_dx_sent = float(dx)
-        state.last_pan_dy_sent = float(dy)
-        state.last_cam_send = time.perf_counter()
-    state.pan_dx_accum = 0.0
-    state.pan_dy_accum = 0.0
-    if log_dims_info:
-        logger.info(
-            "drag->camera.pan dx=%.1f dy=%.1f sent=%s",
-            float(dx),
-            float(dy),
-            bool(ok),
-        )
 
-
-def flush_orbit_if_due(
-    camera_emitter: NapariCameraIntentEmitter,
-    state: CameraState,
-    *,
-    log_dims_info: bool,
-) -> None:
-    now = time.perf_counter()
-    if (now - float(state.last_cam_send or 0.0)) >= state.cam_min_dt:
-        flush_orbit(
-            camera_emitter,
-            state,
-            force=False,
-            origin='pointer.drag',
-            log_dims_info=log_dims_info,
-        )
-
-
-def flush_orbit(
-    camera_emitter: NapariCameraIntentEmitter,
-    state: CameraState,
-    *,
-    force: bool,
-    origin: str,
-    log_dims_info: bool,
-) -> None:
-    daz = float(state.orbit_daz_accum or 0.0)
-    delv = float(state.orbit_del_accum or 0.0)
-    if not force and abs(daz) < 1e-2 and abs(delv) < 1e-2:
-        return
-    ok = camera_emitter.orbit(d_az_deg=float(daz), d_el_deg=float(delv), origin=origin)
-    if ok:
-        state.last_cam_send = time.perf_counter()
-    state.orbit_daz_accum = 0.0
-    state.orbit_del_accum = 0.0
-    if log_dims_info:
-        logger.info(
-            "alt-drag->camera.orbit daz=%.2f del=%.2f sent=%s",
-            float(daz),
-            float(delv),
-            bool(ok),
-        )
+    if phase == 'cancel':
+        state.dragging = False
 
 
 def zoom_steps_at_center(
@@ -295,6 +245,7 @@ def zoom_steps_at_center(
     server_anchor_from_video: Callable[[float, float], tuple[float, float]],
     log_dims_info: bool,
     vid_size: tuple[Optional[int], Optional[int]],
+    viewer: Any | None,
 ) -> None:
     base = float(state.zoom_base)
     s = int(steps)
@@ -310,28 +261,60 @@ def zoom_steps_at_center(
         xv = float(vw or 0) / 2.0
         yv = float(vh or 0) / 2.0
     ax_s, ay_s = server_anchor_from_video(xv, yv)
-    ok = camera_emitter.zoom(
-        factor=float(factor),
-        anchor_px=(float(ax_s), float(ay_s)),
+    state.last_zoom_factor = float(factor)
+    state.last_zoom_widget_px = (float(cursor_xw), float(cursor_yw))
+    state.last_zoom_video_px = (float(xv), float(yv))
+    state.last_zoom_anchor_px = (float(ax_s), float(ay_s))
+
+    if viewer is None:
+        return
+    viewer_camera = getattr(viewer, "camera", None)
+    if viewer_camera is None:
+        return
+    try:
+        current_zoom = float(getattr(viewer_camera, "zoom"))
+    except Exception:
+        current_zoom = None
+    if current_zoom is not None:
+        try:
+            viewer_camera.zoom = current_zoom * float(factor)
+        except Exception:
+            logger.debug("zoom_steps_at_center failed to adjust viewer zoom", exc_info=True)
+
+    sent = emit_camera_set_from_viewer(
+        camera_emitter,
+        state,
+        viewer,
         origin='keys',
+        force=True,
     )
-    if ok:
-        state.last_cam_send = time.perf_counter()
     if log_dims_info:
         logger.info(
-            "key->camera.zoom_at f=%.4f at(%.1f,%.1f) sent=%s",
+            "keys camera.set factor=%.4f at(%.1f,%.1f) sent=%s",
             float(factor),
             float(ax_s),
             float(ay_s),
-            bool(ok),
+            bool(sent),
         )
 
 
-def reset_camera(camera_emitter: NapariCameraIntentEmitter, *, origin: str) -> bool:
-    logger.info("%s->camera.reset (sending)", origin)
-    ok = camera_emitter.reset(reason=origin, origin=origin)
-    logger.info("%s->camera.reset sent=%s", origin, bool(ok))
-    return bool(ok)
+def reset_camera(
+    camera_emitter: NapariCameraIntentEmitter,
+    *,
+    origin: str,
+    viewer: Any | None,
+    state: CameraState,
+) -> bool:
+    logger.info("%s->camera.reset (absolute snapshot)", origin)
+    sent = emit_camera_set_from_viewer(
+        camera_emitter,
+        state,
+        viewer,
+        origin=origin,
+        force=True,
+    )
+    logger.info("%s->camera.set sent=%s", origin, bool(sent))
+    return bool(sent)
 
 
 def set_camera(
