@@ -182,7 +182,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             initial_snapshot, _ = pull_render_snapshot(server)
             with server._state_lock:
                 server._scene.latest_state = initial_snapshot
-                server._scene.camera_commands.clear()
             worker._consume_render_snapshot(initial_snapshot)
             worker.drain_scene_updates()
 
@@ -227,43 +226,9 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 snapshot, desired_seqs = pull_render_snapshot(server)
                 with server._state_lock:
                     server._scene.latest_state = snapshot
-                    commands = list(server._scene.camera_commands)
-                    server._scene.camera_commands.clear()
                 frame_input_step = snapshot.current_step
 
-                # Request view ndisplay if provided by LatestIntent
-                if commands and server._log_state_traces:
-                    logger.info("frame commands snapshot count=%d", len(commands))
-
                 frame_state = snapshot
-
-                if commands and (server._log_cam_info or server._log_cam_debug):
-                    summaries: list[str] = []
-                    for cmd in commands:
-                        if cmd.kind == "zoom":
-                            factor = cmd.factor if cmd.factor is not None else 0.0
-                            if cmd.anchor_px is not None:
-                                ax, ay = cmd.anchor_px
-                                summaries.append(
-                                    f"zoom factor={factor:.4f} anchor=({ax:.1f},{ay:.1f})"
-                                )
-                            else:
-                                summaries.append(f"zoom factor={factor:.4f}")
-                        elif cmd.kind == "pan":
-                            summaries.append(f"pan dx={cmd.dx_px:.2f} dy={cmd.dy_px:.2f}")
-                        elif cmd.kind == "orbit":
-                            summaries.append(
-                                f"orbit daz={cmd.d_az_deg:.2f} del={cmd.d_el_deg:.2f}"
-                            )
-                        elif cmd.kind == "reset":
-                            summaries.append("reset")
-                        else:
-                            summaries.append(cmd.kind)
-                    message = "apply: cam cmds=" + "; ".join(summaries)
-                    if server._log_cam_info:
-                        logger.info(message)
-                    else:
-                        logger.debug(message)
 
                 # Skip entire pipeline if no new desires, no animation/commands, and no explicit render tick
                 applied_dims_seq = int(getattr(server, "_applied_seqs", {}).get("dims", -1))
@@ -291,7 +256,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     if (
                         dims_satisfied
                         and view_satisfied
-                        and not commands
                         and not server._animate
                         and not getattr(worker, "_render_tick_required", False)
                         and not waiting_for_keyframe
@@ -305,10 +269,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                             next_tick = time.perf_counter()
                         continue
 
-                logger.debug("frame apply proceeding commands=%d animate=%s", len(commands), server._animate)
+                logger.debug("frame apply proceeding animate=%s", server._animate)
                 worker._consume_render_snapshot(frame_state)
-                if commands:
-                    worker.process_camera_commands(commands)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 

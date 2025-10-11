@@ -7,10 +7,10 @@ data and emit immutable snapshots to the worker.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
@@ -53,7 +53,6 @@ __all__ = [
     "CONTROL_KEYS",
     "LayerControlMeta",
     "LayerControlState",
-    "ServerSceneCommand",
     "ServerSceneData",
     "create_server_scene_data",
     "default_layer_controls",
@@ -93,19 +92,6 @@ def default_multiscale_state() -> Dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
-class ServerSceneCommand:
-    """Queued camera command consumed by the render thread."""
-
-    kind: Literal["zoom", "pan", "orbit", "reset"]
-    factor: Optional[float] = None
-    anchor_px: Optional[tuple[float, float]] = None
-    dx_px: float = 0.0
-    dy_px: float = 0.0
-    d_az_deg: float = 0.0
-    d_el_deg: float = 0.0
-
-
 @dataclass
 class LayerControlState:
     """Canonical per-layer controls owned by the control thread."""
@@ -143,7 +129,6 @@ class ServerSceneData:
 
     latest_state: RenderLedgerSnapshot = field(default_factory=RenderLedgerSnapshot)
     use_volume: bool = False
-    camera_commands: Deque[ServerSceneCommand] = field(default_factory=deque)
     next_server_seq: int = 0
     volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)

@@ -54,7 +54,13 @@ from napari_cuda.protocol import (
     build_session_reject,
     build_session_welcome,
 )
-from napari_cuda.protocol.messages import NotifyDimsPayload, NotifyLayersPayload, NotifyScenePayload, NotifyStreamPayload
+from napari_cuda.protocol.messages import (
+    NotifyCameraPayload,
+    NotifyDimsPayload,
+    NotifyLayersPayload,
+    NotifyScenePayload,
+    NotifyStreamPayload,
+)
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
 from napari_cuda.server.control.state_models import ClientStateUpdateRequest, ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import (
@@ -63,7 +69,7 @@ from napari_cuda.server.control.state_reducers import (
     clamp_sample_step,
     is_valid_render_mode,
     normalize_clim,
-    reduce_camera_state,
+    reduce_camera_update,
     reduce_dims_update,
     reduce_layer_property,
     reduce_level_update,
@@ -76,7 +82,6 @@ from napari_cuda.server.control.state_reducers import (
     reduce_view_update,
 )
 from napari_cuda.server.scene import (
-    ServerSceneCommand,
     layer_controls_from_ledger,
     layer_controls_to_dict,
 )
@@ -563,35 +568,17 @@ async def _broadcast_dims_state(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _normalize_camera_delta(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _normalize_camera_delta(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_camera_delta(v) for v in value]
-    if isinstance(value, (int, float)):
-        return float(value)
-    return value
-
-
-async def _broadcast_camera_delta(
+async def _broadcast_camera_state(
     server: Any,
     *,
-    mode: str,
-    delta: Mapping[str, Any],
-    intent_id: Optional[str],
-    origin: str,
+    payload: NotifyCameraPayload,
+    intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     targets: Optional[Sequence[Any]] = None,
 ) -> None:
     clients = list(targets) if targets is not None else list(server._state_clients)
     if not clients:
         return
-
-    payload = {
-        "mode": str(mode),
-        "delta": _normalize_camera_delta(delta),
-        "origin": str(origin),
-    }
 
     tasks: list[Awaitable[None]] = []
     now = time.time() if timestamp is None else float(timestamp)
@@ -1137,202 +1124,34 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         metrics = getattr(server, "metrics", None)
 
         if key == 'zoom':
-            if not isinstance(value, Mapping):
-                await _reject(
-                    "state.invalid",
-                    "camera.zoom requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            try:
-                factor = float(value.get('factor', 0.0))
-            except Exception:
-                factor = 0.0
-            anchor_raw = value.get('anchor_px')
-            if factor <= 0.0:
-                await _reject(
-                    "state.invalid",
-                    "zoom factor must be positive",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            if not isinstance(anchor_raw, Sequence) or len(anchor_raw) < 2:
-                await _reject(
-                    "state.invalid",
-                    "anchor_px requires [x, y]",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            try:
-                anchor = (float(anchor_raw[0]), float(anchor_raw[1]))
-            except Exception:
-                await _reject(
-                    "state.invalid",
-                    "anchor_px must contain numeric values",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-
-            ack_value = {
-                "factor": float(factor),
-                "anchor_px": [float(anchor[0]), float(anchor[1])],
-            }
-
-            await _ack_camera(ack_value)
-
-            _log_camera(
-                "state: camera.zoom factor=%.4f anchor=(%.1f,%.1f)",
-                factor,
-                anchor[0],
-                anchor[1],
-            )
-            if metrics is not None:
-                with suppress(Exception):
-                    metrics.inc('napari_cuda_state_camera_updates')
-
-            try:
-                server._enqueue_camera_command(
-                    ServerSceneCommand(kind='zoom', factor=float(factor), anchor_px=anchor),
-                )
-            except Exception:
-                logger.debug("camera.zoom enqueue failed", exc_info=True)
-
-            server._schedule_coro(
-                _broadcast_camera_delta(
-                    server,
-                    mode='zoom',
-                    delta=ack_value,
-                    intent_id=intent_id,
-                    origin='state.update',
-                ),
-                'state-camera-zoom',
+            await _reject(
+                "state.invalid",
+                "camera.zoom no longer supported; use camera.set",
+                details={"scope": scope, "key": key},
             )
             return True
 
         if key == 'pan':
-            if not isinstance(value, Mapping):
-                await _reject(
-                    "state.invalid",
-                    "camera.pan requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            try:
-                dx = float(value.get('dx_px', 0.0))
-            except Exception:
-                dx = 0.0
-            try:
-                dy = float(value.get('dy_px', 0.0))
-            except Exception:
-                dy = 0.0
-
-            ack_value = {"dx_px": dx, "dy_px": dy}
-
-            await _ack_camera(ack_value)
-
-            if dx != 0.0 or dy != 0.0:
-                _log_camera("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
-                if metrics is not None:
-                    with suppress(Exception):
-                        metrics.inc('napari_cuda_state_camera_updates')
-                try:
-                    server._enqueue_camera_command(
-                        ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy)),
-                    )
-                except Exception:
-                    logger.debug("camera.pan enqueue failed", exc_info=True)
-
-                server._schedule_coro(
-                    _broadcast_camera_delta(
-                        server,
-                        mode='pan',
-                        delta=ack_value,
-                        intent_id=intent_id,
-                        origin='state.update',
-                    ),
-                    'state-camera-pan',
-                )
+            await _reject(
+                "state.invalid",
+                "camera.pan no longer supported; use camera.set",
+                details={"scope": scope, "key": key},
+            )
             return True
 
         if key == 'orbit':
-            if not isinstance(value, Mapping):
-                await _reject(
-                    "state.invalid",
-                    "camera.orbit requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            try:
-                d_az = float(value.get('d_az_deg', 0.0))
-            except Exception:
-                d_az = 0.0
-            try:
-                d_el = float(value.get('d_el_deg', 0.0))
-            except Exception:
-                d_el = 0.0
-
-            ack_value = {"d_az_deg": d_az, "d_el_deg": d_el}
-
-            await _ack_camera(ack_value)
-
-            if d_az != 0.0 or d_el != 0.0:
-                _log_camera("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
-                if metrics is not None:
-                    with suppress(Exception):
-                        metrics.inc('napari_cuda_state_camera_updates')
-                        metrics.inc('napari_cuda_orbit_events')
-                try:
-                    server._enqueue_camera_command(
-                        ServerSceneCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el)),
-                    )
-                except Exception:
-                    logger.debug("camera.orbit enqueue failed", exc_info=True)
-
-                server._schedule_coro(
-                    _broadcast_camera_delta(
-                        server,
-                        mode='orbit',
-                        delta=ack_value,
-                        intent_id=intent_id,
-                        origin='state.update',
-                    ),
-                    'state-camera-orbit',
-                )
+            await _reject(
+                "state.invalid",
+                "camera.orbit no longer supported; use camera.set",
+                details={"scope": scope, "key": key},
+            )
             return True
 
         if key == 'reset':
-            reason = None
-            if isinstance(value, Mapping):
-                raw_reason = value.get('reason')
-                if raw_reason is not None:
-                    reason = str(raw_reason)
-            elif isinstance(value, str) and value:
-                reason = value
-            else:
-                reason = 'state.update'
-
-            await _ack_camera({'reason': reason})
-
-            _log_camera("state: camera.reset")
-            if metrics is not None:
-                with suppress(Exception):
-                    metrics.inc('napari_cuda_state_camera_updates')
-            try:
-                server._enqueue_camera_command(ServerSceneCommand(kind='reset'))
-            except Exception:
-                logger.debug("camera.reset enqueue failed", exc_info=True)
-            if getattr(server, "_idr_on_reset", False) and getattr(server, "_worker", None) is not None:
-                server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
-
-            server._schedule_coro(
-                _broadcast_camera_delta(
-                    server,
-                    mode='reset',
-                    delta={'reason': reason},
-                    intent_id=intent_id,
-                    origin='state.update',
-                ),
-                'state-camera-reset',
+            await _reject(
+                "state.invalid",
+                "camera.reset no longer supported; use camera.set",
+                details={"scope": scope, "key": key},
             )
             return True
 
@@ -1411,7 +1230,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     )
                     return True
 
-            ack_components = reduce_camera_state(
+            ack_components = reduce_camera_update(
                 server._state_ledger,
                 center=center_tuple,
                 zoom=zoom_float,
@@ -1432,16 +1251,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 with suppress(Exception):
                     metrics.inc('napari_cuda_state_camera_updates')
 
-            server._schedule_coro(
-                _broadcast_camera_delta(
-                    server,
-                    mode='set',
-                    delta=ack_components,
-                    intent_id=intent_id,
-                    origin='state.update',
-                ),
-                'state-camera-set',
-            )
             return True
 
         await _reject(

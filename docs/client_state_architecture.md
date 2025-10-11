@@ -155,7 +155,7 @@ Same pattern for `DimsBridge` (drives `ViewerModel.dims` fields) and
   notify frames and verify `state.update` path (similar to existing
   `test_state_channel_updates`, but fully client-side).
 - UI-level manual smoke (already in plan): run streaming client with dim slider
-  drag/click, layer adjustments, camera commands. Compare logs for acks.
+  drag/click, layer adjustments, camera updates. Compare logs for acks.
 
 ## Migration Plan
 

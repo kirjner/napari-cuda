@@ -64,7 +64,7 @@ Mirrors (e.g., ServerDimsMirror)
   - Schedules broadcasts via the control loop rather than relying on worker notifications.
 
 - `src/napari_cuda/server/scene/`
-  - `data.py` houses `ServerSceneData`, camera command queues, and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`, etc.).
+  - `data.py` houses `ServerSceneData` and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`, etc.).
   - `plane_restore_state.py` keeps the render-thread-only plane restore helper.
   - `layer_manager.py` now reflects the new namespace used by control payload builders and tests.
 

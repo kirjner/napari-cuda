@@ -32,7 +32,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `data.py` | 318 | Owns `ServerSceneData`, camera command queues, compatibility caches, and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`). |
+| `data.py` | 318 | Owns `ServerSceneData`, compatibility caches, and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`). |
 | `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas for control baselines. |
 | `plane_restore_state.py` | 23 | Captures plane widget state during 2D/3D transitions (render-thread only metadata). |
 
@@ -43,7 +43,6 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | `render_ledger_snapshot.py` | 196 | Builds immutable `RenderLedgerSnapshot` objects from the ledger plus transitional caches. |
 | `scene_state_applier.py` | 444 | Applies `RenderLedgerSnapshot` values to the worker’s napari/VisPy objects. |
 | `scene_types.py` | 87 | Typed helpers describing ROI and slice payload structures. |
-| `camera_controller.py` | 287 | Interprets camera intents and delegates to `camera_ops`. |
 | `camera_ops.py` | 167 | Low-level napari camera mutations for 2D/3D. |
 | `camera_animator.py` | 37 | Optional auto-rotation animation hooks. |
 

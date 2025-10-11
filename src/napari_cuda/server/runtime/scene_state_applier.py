@@ -414,14 +414,20 @@ class SceneStateApplier:
             )
 
         if state.center is not None:
-            assert hasattr(cam, "center"), "Camera missing center property"
-            cam.center = state.center  # type: ignore[attr-defined]
+            if hasattr(cam, "center"):
+                cam.center = state.center  # type: ignore[attr-defined]
+            else:
+                logger.debug("scene drain: camera missing center attribute; skipping update")
         if state.zoom is not None:
-            assert hasattr(cam, "zoom"), "Camera missing zoom property"
-            cam.zoom = state.zoom  # type: ignore[attr-defined]
+            if hasattr(cam, "zoom"):
+                cam.zoom = state.zoom  # type: ignore[attr-defined]
+            else:
+                logger.debug("scene drain: camera missing zoom attribute; skipping update")
         if state.angles is not None:
-            assert hasattr(cam, "angles"), "Camera missing angles property"
-            cam.angles = state.angles  # type: ignore[attr-defined]
+            if hasattr(cam, "angles"):
+                cam.angles = state.angles  # type: ignore[attr-defined]
+            else:
+                logger.debug("scene drain: camera missing angles attribute; skipping update")
 
         policy_refresh = render_mailbox.update_state_signature(state)
 

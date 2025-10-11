@@ -23,7 +23,6 @@ from websockets.exceptions import ConnectionClosed
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import (
-    ServerSceneCommand,
     ServerSceneData,
     create_server_scene_data,
     layer_controls_from_ledger,
@@ -40,6 +39,7 @@ from napari_cuda.server.app.config import (
     load_server_ctx,
 )
 from napari_cuda.protocol import (
+    NotifyCameraPayload,
     NotifyStreamPayload,
     NotifyDimsPayload,
     NOTIFY_LAYERS_TYPE,
@@ -52,13 +52,14 @@ from napari_cuda.server.rendering import pixel_broadcaster
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
+    _broadcast_camera_state,
     _broadcast_dims_state,
     broadcast_stream_config,
     ingest_state,
 )
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import BootstrapSceneMetadata
-from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors import ServerCameraMirror, ServerDimsMirror
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_dims_update,
@@ -226,6 +227,15 @@ class EGLHeadlessServer:
             schedule=_schedule_from_mirror,
             on_payload=_mirror_apply,
         )
+
+        async def _camera_mirror_broadcast(payload: NotifyCameraPayload) -> None:
+            await _broadcast_camera_state(self, payload=payload)
+
+        self._camera_mirror = ServerCameraMirror(
+            ledger=self._state_ledger,
+            broadcaster=_camera_mirror_broadcast,
+            schedule=_schedule_from_mirror,
+        )
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
         # Logging controls for camera ops
@@ -240,9 +250,6 @@ class EGLHeadlessServer:
         self._log_state_traces = bool(policy_logging.log_state_traces)
         # Logging controls for volume/multiscale intents
         self._log_volume_info = bool(policy_logging.log_volume_info)
-        # Force IDR on reset (default True)
-        self._idr_on_reset = bool(self._ctx.cfg.idr_on_reset)
-
         # Data configuration (optional OME-Zarr dataset for real data)
         self._zarr_path = zarr_path or self._ctx.cfg.zarr_path or None
         self._zarr_level = zarr_level or self._ctx.cfg.zarr_level or None
@@ -270,18 +277,6 @@ class EGLHeadlessServer:
         self._worker_lifecycle.worker = worker
 
     # --- Logging + Broadcast helpers --------------------------------------------
-    def _enqueue_camera_command(self, cmd: ServerSceneCommand) -> None:
-        with self._state_lock:
-            self._scene.camera_commands.append(cmd)
-            queue_len = len(self._scene.camera_commands)
-        if self._log_cam_info or self._log_cam_debug:
-            logger.info(
-                "enqueue camera command kind=%s queue_len=%d payload=%s",
-                cmd.kind,
-                queue_len,
-                cmd,
-            )
-
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:
             if self._log_volume_info:
@@ -574,6 +569,7 @@ class EGLHeadlessServer:
         loop = asyncio.get_running_loop()
         self._control_loop = loop
         self._dims_mirror.start()
+        self._camera_mirror.start()
         if self._zarr_path is None:
             raise RuntimeError("bootstrap requires zarr_path")
         bootstrap_meta = probe_scene_bootstrap(

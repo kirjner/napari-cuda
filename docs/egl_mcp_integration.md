@@ -13,7 +13,7 @@
 - **Ports**: expose MCP on a configurable HTTP port (default disabled) to avoid interfering with existing state/pixel sockets.
 
 ## Architectural Touchpoints
-- **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should apply mutations through the same queues (`RenderUpdateQueue` and camera command deque) that the WebSocket state channel uses.
+- **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should route state changes through the same reducers and queues (`RenderUpdateQueue`, ledger-driven dims/camera updates) that the WebSocket state channel uses.
 - **Scene metadata**: `ViewerSceneManager` can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into it instead of reading napari Viewer objects.
 - **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation functions in `layer_manager.py` or a new helper module that create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
 - **Camera/dims controls**: reuse `_enqueue_camera_command` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.
@@ -54,7 +54,7 @@
 
 ## Operational Considerations
 - **Resource limits**: enforce per-call timeouts (e.g., 5 seconds) and max payload sizes, mirroring WebSocket safeguards.
-- **Backpressure**: because FastMCP is HTTP-based, ensure the handler rejects concurrent long-running requests if the worker thread is busy; queueing onto `_camera_commands` should remain lightweight.
+- **Backpressure**: because FastMCP is HTTP-based, ensure the handler rejects concurrent long-running requests if the worker thread is busy; keep interactions short to avoid stalling the render loop.
 - **Metrics**: extend `Metrics` to emit counters for MCP usage (e.g., `mcp.calls_total`, `mcp.failures_total`) to Grafana along with existing frame metrics.
 - **Observability**: add structured logs when MCP mutates the scene so client operators can trace automated changes.
 
