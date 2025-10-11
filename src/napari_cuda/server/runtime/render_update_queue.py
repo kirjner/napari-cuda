@@ -23,7 +23,6 @@ class RenderLevelRequest:
 class RenderDelta:
     """Delta enqueued by the control thread for the render worker."""
 
-    display_mode: Optional[int] = None
     multiscale: Optional[RenderLevelRequest] = None
     scene_state: Optional[RenderLedgerSnapshot] = None
 
@@ -32,7 +31,6 @@ class RenderDelta:
 class PendingRenderUpdate:
     """Coalesced updates drained by the render worker."""
 
-    display_mode: Optional[int] = None
     multiscale: Optional[RenderLevelRequest] = None
     scene_state: Optional[RenderLedgerSnapshot] = None
 
@@ -50,7 +48,6 @@ class RenderUpdateQueue:
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
-        self._display_mode: Optional[int] = None
         self._multiscale: Optional[RenderLevelRequest] = None
         self._scene_state: Optional[RenderLedgerSnapshot] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
@@ -59,8 +56,6 @@ class RenderUpdateQueue:
 
     def enqueue(self, delta: RenderDelta) -> None:
         with self._lock:
-            if delta.display_mode is not None:
-                self._display_mode = int(delta.display_mode)
             if delta.multiscale is not None:
                 self._multiscale = RenderLevelRequest(
                     int(delta.multiscale.level),
@@ -68,9 +63,6 @@ class RenderUpdateQueue:
                 )
             if delta.scene_state is not None:
                 self._scene_state = delta.scene_state
-
-    def enqueue_display_mode(self, ndisplay: int) -> None:
-        self.enqueue(RenderDelta(display_mode=int(ndisplay)))
 
     def enqueue_multiscale(self, level: int, path: Optional[str]) -> None:
         self.enqueue(RenderDelta(multiscale=RenderLevelRequest(int(level), str(path) if path else None)))
@@ -81,11 +73,9 @@ class RenderUpdateQueue:
     def drain(self) -> PendingRenderUpdate:
         with self._lock:
             drained = PendingRenderUpdate(
-                display_mode=self._display_mode,
                 multiscale=self._multiscale,
                 scene_state=self._scene_state,
             )
-            self._display_mode = None
             self._multiscale = None
             self._scene_state = None
         return drained

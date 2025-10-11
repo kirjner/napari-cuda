@@ -643,23 +643,18 @@ def test_ndisplay_toggle_smoke_preserves_plane_state(render_worker_fixture):
     def _capture(step):  # type: ignore[no-untyped-def]
         if step is None:
             return
-        if hasattr(step, "step"):
-            captured.append(tuple(int(v) for v in step.step))  # PlaneRestoreState
-        elif isinstance(step, (list, tuple)):
+        if isinstance(step, (list, tuple)):
             captured.append(tuple(int(v) for v in step))
 
     worker._scene_refresh_cb = _capture  # type: ignore[assignment]
 
     apply_ndisplay_switch(worker, 3)
-    assert plane_state is not None, "Plane state should be captured when entering 3D"
-
     worker._render_tick_required = False
     worker._last_step = (0, 0, 0)
     apply_ndisplay_switch(worker, 2)
 
     assert captured, "Expected scene refresh callbacks during toggle"
-    assert tuple(int(v) for v in plane_state.step) in captured
-    assert any(step[0] == 0 for step in captured), "Expected transient step reset during toggle"
     final_step = tuple(int(v) for v in worker._viewer.dims.current_step)
+    assert final_step == (5, 1, 0)
     assert captured[-1] == final_step
     assert tuple(int(v) for v in worker._last_step) == final_step

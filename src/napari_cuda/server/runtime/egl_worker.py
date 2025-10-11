@@ -105,6 +105,13 @@ def _rect_to_tuple(rect: Rect) -> tuple[float, float, float, float]:
     return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
 
 
+def _coarsest_level_index(source: ZarrSceneSource) -> Optional[int]:
+    descriptors = source.level_descriptors
+    if not descriptors:
+        return None
+    return len(descriptors) - 1
+
+
 # Back-compat for tests patching the selector directly
 select_level = lod.select_level
 
@@ -319,145 +326,85 @@ class EGLRendererWorker:
         logger.info("notify_scene_refresh invoked by %s step=%s", caller, step_tuple)
         notify_scene_refresh(self, step_hint=step_tuple)
 
-    # --- Plane restore helpers -------------------------------------------------
-
-    def snapshot_plane_state(self) -> Optional[PlaneRestoreState]:
-        """Capture the current plane state for later restoration."""
-
-        if self.use_volume or self._last_step is None:
-            return None
-
-        if self.view is None:
-            return None
-        if self._viewer is None or self._viewer.camera is None:
-            return None
-
-        step_tuple = tuple(int(value) for value in self._last_step)
-        level = int(self._active_ms_level)
-
-        roi_level: Optional[int] = None
-        roi_value: Optional[SliceROI] = None
-        if self._last_roi is not None:
-            roi_level = int(self._last_roi[0])
-            roi_value = self._last_roi[1]
-
-        cam = self.view.camera
-        if cam is None or not hasattr(cam, "get_state"):
-            return None
-        cam_state = cam.get_state()
-        rect_obj = cam_state.get('rect')
-        if rect_obj is None:
-            return None
-        rect = _rect_to_tuple(rect_obj)
-        rect_center = rect_obj.center
-        center = (float(rect_center[0]), float(rect_center[1]))
-
-        zoom = float(self._viewer.camera.zoom)
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "snapshot_plane_state: step=%s level=%s rect=%s center=(%.3f, %.3f) zoom=%.5f",
-                step_tuple,
-                level,
-                rect,
-                center[0],
-                center[1],
-                zoom,
-            )
-
-        data_wh = None
-        if self._data_wh is not None:
-            data_wh = (int(self._data_wh[0]), int(self._data_wh[1]))
-
-        state = PlaneRestoreState(
-            step=step_tuple,
-            level=level,
-            roi_level=roi_level,
-            roi=roi_value,
-            rect=rect,
-            zoom=zoom,
-            center=center,
-            data_wh=data_wh,
-        )
-        self._plane_restore_state = state
-        return state
-
-    def schedule_plane_restore(self, state: PlaneRestoreState) -> None:
-        """Queue a previously captured plane state for restoration."""
-
-        self._plane_restore_state = state
-        self._pending_plane_restore = state
-        self._level_policy_refresh_needed = True
-        self._mark_render_tick_needed()
-
-    def _apply_pending_plane_restore(self) -> None:
-        if self._pending_plane_restore is None or self.use_volume:
+    def _cache_plane_camera(self) -> None:
+        if self.use_volume:
+            self._plane_resume_camera_state = None
             return
 
-        state = self._pending_plane_restore
-        self._pending_plane_restore = None
-        self._plane_restore_state = state
+        if self.view is not None and isinstance(self.view.camera, scene.cameras.PanZoomCamera):
+            state = self.view.camera.get_state()
+            self._plane_resume_camera_state = dict(state) if isinstance(state, dict) else None
+        else:
+            self._plane_resume_camera_state = None
 
+    def _restore_plane_camera(self) -> None:
+        resume_state = self._plane_resume_camera_state
+        self._plane_resume_camera_state = None
+
+        self._configure_camera_for_mode()
+
+        if (
+            resume_state is not None
+            and self.view is not None
+            and isinstance(self.view.camera, scene.cameras.PanZoomCamera)
+        ):
+            self.view.camera.set_state(resume_state)
+
+    def _configure_camera_for_mode(self) -> None:
+        view = self.view
+        if view is None:
+            return
+
+        if self.use_volume:
+            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
+            extent = self._volume_world_extents()
+            if extent is None:
+                width_px, height_px = self._data_wh
+                depth_px = self._data_d or 1
+                extent = (float(width_px), float(height_px), float(depth_px))
+            view.camera.set_range(
+                x=(0.0, max(1.0, extent[0])),
+                y=(0.0, max(1.0, extent[1])),
+                z=(0.0, max(1.0, extent[2])),
+            )
+            self._frame_volume_camera(extent[0], extent[1], extent[2])
+        else:
+            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+            self._apply_camera_reset(view.camera)
+
+    def _enter_volume_mode(self) -> None:
+        if self.use_volume:
+            return
+        self._cache_plane_camera()
+        self.use_volume = True
+        self._last_roi = None
         source = self._ensure_scene_source()
-        with self._state_lock:
-            source.set_current_slice(tuple(int(v) for v in state.step), int(state.level))
+        level = _coarsest_level_index(source)
+        assert level is not None and level >= 0, "Volume mode requires a multiscale level"
+        perform_level_switch(
+            self,
+            target_level=level,
+            reason="ndisplay-3d",
+            requested_level=level,
+            selected_level=level,
+            source=source,
+            budget_error=self._budget_error_cls,
+            restoring_plane_state=False,
+        )
+        self._level_policy_refresh_needed = False
+        self._configure_camera_for_mode()
+        if self._last_step is not None:
+            self._record_step_in_ledger(self._last_step, origin="worker.state.volume-entry")
+        self._request_encoder_idr()
+        self._mark_render_tick_needed()
 
-        self._active_ms_level = int(state.level)
-        self._last_step = tuple(int(v) for v in state.step)
-
-        if state.roi_level is not None and state.roi is not None:
-            self._last_roi = (int(state.roi_level), state.roi)
-
-        if state.data_wh is not None:
-            self._data_wh = (int(state.data_wh[0]), int(state.data_wh[1]))
-
-        if self._viewer is not None:
-            viewer_dims = self._viewer.dims
-            displayed = tuple(int(ax) for ax in viewer_dims.displayed)
-            ndisplay = int(viewer_dims.ndisplay)
-            ndim = int(viewer_dims.ndim or len(state.step))
-            if len(displayed) != ndisplay:
-                viewer_dims.order = tuple(range(ndim))
-                displayed = tuple(int(ax) for ax in viewer_dims.displayed)
-            step_seq = list(int(v) for v in state.step)
-            if len(step_seq) < ndim:
-                step_seq.extend(0 for _ in range(ndim - len(step_seq)))
-            elif len(step_seq) > ndim:
-                step_seq = step_seq[:ndim]
-            viewer_dims.current_step = tuple(step_seq)
-        self._notify_scene_refresh(state.step)
-
-        if self.view is not None:
-            camera = self.view.camera
-            if not isinstance(camera, scene.cameras.PanZoomCamera):
-                camera = scene.cameras.PanZoomCamera(aspect=1.0)
-                self.view.camera = camera
-            if state.rect is not None:
-                camera.rect = Rect(*state.rect)
-            if state.center is not None:
-                camera.center = (float(state.center[0]), float(state.center[1]), 0.0)
-
-        viewer_cam = self._viewer.camera
-        if state.center is not None:
-            viewer_cam.center = (
-                0.0,
-                float(state.center[1]),
-                float(state.center[0]),
-            )
-        viewer_cam.zoom = float(state.zoom)
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "apply_pending_plane_restore: restored step=%s zoom=%.5f center_vispy=(%.3f, %.3f) center_viewer=%s",
-                state.step,
-                state.zoom,
-                state.center[0] if state.center else float('nan'),
-                state.center[1] if state.center else float('nan'),
-                viewer_cam.center,
-            )
-
-        # Notify clients with the restored step metadata.
-        self._notify_scene_refresh(state.step)
+    def _exit_volume_mode(self) -> None:
+        if not self.use_volume:
+            return
+        self.use_volume = False
+        self._restore_plane_camera()
+        self._level_policy_refresh_needed = True
+        self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
         self._render_tick_required = True
@@ -510,8 +457,7 @@ class EGLRendererWorker:
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
-        self._plane_restore_state: Optional[PlaneRestoreState] = None
-        self._pending_plane_restore: Optional[PlaneRestoreState] = None
+        self._plane_resume_camera_state: Optional[dict[str, object]] = None
         self._last_dims_log_step: Optional[tuple[int, ...]] = None
         self._last_dims_log_ndisplay: Optional[int] = None
 
@@ -998,6 +944,14 @@ class EGLRendererWorker:
         if viewer is None:
             return
 
+        target_volume = bool(snapshot.ndisplay is not None and int(snapshot.ndisplay) >= 3)
+        if snapshot.dims_mode is not None:
+            target_volume = str(snapshot.dims_mode).lower() == "volume"
+        if target_volume and not self.use_volume:
+            self._enter_volume_mode()
+        elif not target_volume and self.use_volume:
+            self._exit_volume_mode()
+
         dims = viewer.dims
         ndim = int(getattr(dims, "ndim", 0) or 0)
 
@@ -1060,13 +1014,6 @@ class EGLRendererWorker:
                 step_log != self._last_dims_log_step
                 or ndisplay_log != int(self._last_dims_log_ndisplay or -1)
             ):
-                logger.info(
-                    "worker adopting ledger dims: step=%s ndisplay=%d order=%s labels=%s",
-                    step_log,
-                    ndisplay_log,
-                    tuple(int(v) for v in getattr(dims, "order", ())),
-                    tuple(str(v) for v in getattr(dims, "axis_labels", ())),
-                )
                 self._last_dims_log_step = step_log
                 self._last_dims_log_ndisplay = ndisplay_log
 
@@ -1185,18 +1132,6 @@ class EGLRendererWorker:
     def drain_scene_updates(self) -> None:
         updates: PendingRenderUpdate = self._render_mailbox.drain()
 
-        previous_volume = self.use_volume
-
-        if updates.display_mode is not None:
-            apply_ndisplay_switch(self, updates.display_mode)
-            if not previous_volume and self.use_volume:
-                # entering volume: render loop is the only place that can
-                # broadcast updated dims metadata.
-                self._notify_scene_refresh(self._ledger_step())
-
-        if not self.use_volume:
-            self._apply_pending_plane_restore()
-
         if updates.multiscale is not None:
             lvl = int(updates.multiscale.level)
             pth = updates.multiscale.path
@@ -1228,11 +1163,6 @@ class EGLRendererWorker:
 
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
-
-    # --- Public coalesced toggles ------------------------------------------------
-    def request_ndisplay(self, ndisplay: int) -> None:
-        """Queue a 2D/3D view switch to apply on the render thread."""
-        self._render_mailbox.enqueue_display_mode(3 if int(ndisplay) >= 3 else 2)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return self._capture.pipeline.capture_blit_gpu_ns()
