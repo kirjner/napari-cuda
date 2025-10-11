@@ -393,8 +393,10 @@ class EGLRendererWorker:
         )
         self._level_policy_refresh_needed = False
         self._configure_camera_for_mode()
-        if self._last_step is not None:
-            self._record_step_in_ledger(self._last_step, origin="worker.state.volume-entry")
+        source_step = source.current_step
+        if source_step is not None:
+            step_tuple = tuple(int(v) for v in source_step)
+            self._record_step_in_ledger(step_tuple, origin="worker.state.volume-entry")
         self._request_encoder_idr()
         self._mark_render_tick_needed()
 
@@ -996,16 +998,16 @@ class EGLRendererWorker:
         if snapshot.current_level is not None:
             self._active_ms_level = int(snapshot.current_level)
 
-        if snapshot.order is None:
-            order = tuple(int(v) for v in getattr(dims, "order", tuple(range(ndim))))
-            dims.order = order
-        order_values = tuple(int(v) for v in getattr(dims, "order", ()))
-        ndisplay_value = int(getattr(dims, "ndisplay", 2))
-        displayed_src = snapshot.displayed
-        if displayed_src is not None:
-            displayed_tuple = tuple(int(v) for v in displayed_src)
-            expected_displayed = order_values[-ndisplay_value:] if order_values else tuple(range(ndisplay_value))
-            assert displayed_tuple == tuple(expected_displayed), "ledger displayed mismatch order/ndisplay"
+        assert snapshot.order is not None, "ledger missing dims order"
+        order_values = tuple(int(v) for v in snapshot.order)
+        assert order_values, "ledger emitted empty dims order"
+        dims.order = order_values
+
+        assert snapshot.displayed is not None, "ledger missing dims displayed"
+        displayed_tuple = tuple(int(v) for v in snapshot.displayed)
+        assert displayed_tuple, "ledger emitted empty dims displayed"
+        expected_displayed = tuple(order_values[-len(displayed_tuple):])
+        assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
 
         if logger.isEnabledFor(logging.INFO):
             step_log = tuple(int(v) for v in getattr(dims, "current_step", ()))

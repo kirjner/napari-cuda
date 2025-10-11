@@ -962,12 +962,35 @@ def reduce_view_set_ndisplay(
         timestamp=ts,
     )
 
-    order_value = (
+    existing_order = (
         tuple(int(idx) for idx in dims_payload.order)
         if dims_payload.order is not None
-        else tuple(range(len(dims_payload.current_step)))
+        else tuple()
     )
-    displayed_value = order_value[-target_ndisplay:] if order_value else tuple(range(target_ndisplay))
+    ndim = len(dims_payload.current_step) if dims_payload.current_step else 0
+    if ndim <= 0:
+        ndim = len(existing_order)
+    if ndim <= 0:
+        ndim = max(int(target_ndisplay), 1)
+
+    normalized_order: list[int] = []
+    seen_axes: set[int] = set()
+    for axis in existing_order:
+        axis_int = int(axis)
+        if 0 <= axis_int < ndim and axis_int not in seen_axes:
+            normalized_order.append(axis_int)
+            seen_axes.add(axis_int)
+    for axis_int in range(ndim):
+        if axis_int not in seen_axes:
+            normalized_order.append(axis_int)
+            seen_axes.add(axis_int)
+
+    if not normalized_order:
+        normalized_order = list(range(ndim))
+
+    order_value = tuple(normalized_order)
+    displayed_count = min(len(order_value), max(1, int(target_ndisplay)))
+    displayed_value = tuple(order_value[-displayed_count:]) if displayed_count > 0 else tuple()
     mode_value = "volume" if target_ndisplay == 3 else "plane"
 
     ledger.record_confirmed(
