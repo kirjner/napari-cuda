@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from qtpy import QtCore
 
@@ -11,7 +11,7 @@ from napari_cuda.client.control.client_state_ledger import AckReconciliation, Cl
 from napari_cuda.client.control.state_update_actions import (
     ControlStateContext,
     _emit_state_update,
-    _normalize_camera_state_value,
+    _normalize_camera_delta_value,
     _update_runtime_from_ack_outcome,
 )
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class NapariCameraIntentEmitter:
-    """Translate viewer camera updates into coordinator intents."""
+    """Translate viewer camera interactions into coordinator intents."""
 
     def __init__(
         self,
@@ -48,6 +48,88 @@ class NapariCameraIntentEmitter:
         self._log_camera_info = bool(enabled)
 
     # ------------------------------------------------------------------ public API
+    def zoom(
+        self,
+        *,
+        factor: float,
+        anchor_px: tuple[float, float],
+        origin: str,
+    ) -> bool:
+        sanitized = {
+            "factor": float(factor),
+            "anchor_px": [float(anchor_px[0]), float(anchor_px[1])],
+        }
+        return self._emit_camera_delta(
+            key="zoom",
+            value=sanitized,
+            origin=origin,
+            metadata={
+                "mode": "zoom",
+                "origin": origin,
+                "delta": dict(sanitized),
+                "update_kind": "delta",
+            },
+        )
+
+    def pan(
+        self,
+        *,
+        dx_px: float,
+        dy_px: float,
+        origin: str,
+    ) -> bool:
+        sanitized = {"dx_px": float(dx_px), "dy_px": float(dy_px)}
+        return self._emit_camera_delta(
+            key="pan",
+            value=sanitized,
+            origin=origin,
+            metadata={
+                "mode": "pan",
+                "origin": origin,
+                "delta": dict(sanitized),
+                "update_kind": "delta",
+            },
+        )
+
+    def orbit(
+        self,
+        *,
+        d_az_deg: float,
+        d_el_deg: float,
+        origin: str,
+    ) -> bool:
+        sanitized = {"d_az_deg": float(d_az_deg), "d_el_deg": float(d_el_deg)}
+        return self._emit_camera_delta(
+            key="orbit",
+            value=sanitized,
+            origin=origin,
+            metadata={
+                "mode": "orbit",
+                "origin": origin,
+                "delta": dict(sanitized),
+                "update_kind": "delta",
+            },
+        )
+
+    def reset(
+        self,
+        *,
+        reason: str,
+        origin: str,
+    ) -> bool:
+        sanitized = {"reason": str(reason)}
+        return self._emit_camera_delta(
+            key="reset",
+            value=sanitized,
+            origin=origin,
+            metadata={
+                "mode": "reset",
+                "origin": origin,
+                "delta": dict(sanitized),
+                "update_kind": "delta",
+            },
+        )
+
     def set(
         self,
         *,
@@ -56,8 +138,6 @@ class NapariCameraIntentEmitter:
         angles: Optional[Sequence[float]] = None,
         origin: str,
     ) -> bool:
-        """Publish an absolute camera snapshot via `camera.set` intent."""
-
         payload: dict[str, Any] = {}
         if center is not None:
             payload["center"] = [float(value) for value in center]
@@ -67,15 +147,14 @@ class NapariCameraIntentEmitter:
             payload["angles"] = [float(value) for value in angles]
         if not payload:
             return False
-        return self._emit_camera_update(
+        return self._emit_camera_delta(
             key="set",
             value=payload,
             origin=origin,
             metadata={
                 "mode": "set",
                 "origin": origin,
-                "state": dict(payload),
-                "update_kind": "absolute",
+                "delta": dict(payload),
             },
         )
 
@@ -90,7 +169,7 @@ class NapariCameraIntentEmitter:
         if outcome.status == "accepted":
             applied = outcome.applied_value or outcome.confirmed_value or outcome.pending_value
             if applied is not None:
-                normalized = _normalize_camera_state_value(applied)
+                normalized = _normalize_camera_delta_value(applied)
                 self._state.camera_state[key] = normalized
                 self._confirmed[key] = normalized
             if self._log_camera_info:
@@ -104,7 +183,7 @@ class NapariCameraIntentEmitter:
         revert_value = outcome.confirmed_value if outcome.confirmed_value is not None else outcome.pending_value
         if revert_value is None:
             return
-        normalized = _normalize_camera_state_value(revert_value)
+        normalized = _normalize_camera_delta_value(revert_value)
         self._state.camera_state[key] = normalized
         self._confirmed[key] = normalized
         if self._log_camera_info:
@@ -112,12 +191,12 @@ class NapariCameraIntentEmitter:
 
     def record_confirmed(self, key: str, value: Mapping[str, Any]) -> None:
         self._assert_gui_thread()
-        normalized = _normalize_camera_state_value(value)
+        normalized = _normalize_camera_delta_value(value)
         self._state.camera_state[str(key)] = normalized
         self._confirmed[str(key)] = normalized
 
     # ------------------------------------------------------------------ helpers
-    def _emit_camera_update(
+    def _emit_camera_delta(
         self,
         *,
         key: str,
@@ -141,7 +220,7 @@ class NapariCameraIntentEmitter:
         if not ok:
             return False
         projection_value = projection if projection is not None else dict(value)
-        normalized = _normalize_camera_state_value(projection_value)
+        normalized = _normalize_camera_delta_value(projection_value)
         self._state.camera_state[str(key)] = normalized
         self._confirmed[str(key)] = normalized
         if self._log_camera_info:

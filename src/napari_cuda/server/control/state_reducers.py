@@ -1245,7 +1245,7 @@ def reduce_level_update(
 
 # camera reducers -------------------------------------------------------------
 
-def reduce_camera_update(
+def reduce_camera_state(
     ledger: ServerStateLedger,
     *,
     center: Optional[Sequence[float]] = None,
@@ -1260,16 +1260,16 @@ def reduce_camera_update(
     ts = _now(timestamp)
     ack: Dict[str, Any] = {}
 
-    entries: list[tuple[Any, ...]] = []
+    pending: list[tuple[str, str, str, Any]] = []
 
     if center is not None:
         normalized_center = tuple(float(c) for c in center)
-        entries.append(("camera", "main", "center", normalized_center))
+        pending.append(("camera", "main", "center", normalized_center))
         ack["center"] = [float(c) for c in normalized_center]
 
     if zoom is not None:
         zoom_value = float(zoom)
-        entries.append(("camera", "main", "zoom", zoom_value))
+        pending.append(("camera", "main", "zoom", zoom_value))
         ack["zoom"] = zoom_value
 
     if angles is not None:
@@ -1280,11 +1280,11 @@ def reduce_camera_update(
             float(angles[1]),
             float(angles[2]),
         )
-        entries.append(("camera", "main", "angles", normalized_angles))
+        pending.append(("camera", "main", "angles", normalized_angles))
         ack["angles"] = [float(a) for a in normalized_angles]
 
-    if entries:
-        ledger.batch_record_confirmed(entries, origin=origin, timestamp=ts)
+    for scope, target, key, value in pending:
+        ledger.record_confirmed(scope, target, key, value, origin=origin, timestamp=ts)
 
     return ack
 
@@ -1299,7 +1299,7 @@ __all__ = [
     "clamp_sample_step",
     "is_valid_render_mode",
     "normalize_clim",
-    "reduce_camera_update",
+    "reduce_camera_state",
     "reduce_bootstrap_state",
     "reduce_dims_update",
     "reduce_layer_property",

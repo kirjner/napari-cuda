@@ -17,7 +17,7 @@ from napari_cuda.protocol import (
     build_state_update,
 )
 from napari_cuda.protocol.envelopes import build_session_hello
-from napari_cuda.protocol.messages import HelloClientInfo, NotifyCameraPayload, NotifyDimsPayload
+from napari_cuda.protocol.messages import HelloClientInfo, NotifyDimsPayload
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
     ResumableHistoryStore,
@@ -36,7 +36,7 @@ from napari_cuda.server.control import latest_intent
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.control.mirrors import ServerCameraMirror, ServerDimsMirror
+from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 
 
 class _CaptureWorker:
@@ -192,16 +192,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     _record_dims_to_ledger(server, initial_payload, origin="bootstrap")
     server._dims_mirror.start()
 
-    async def _camera_broadcast(payload: NotifyCameraPayload) -> None:
-        await state_channel_handler._broadcast_camera_state(server, payload=payload)
-
-    server._camera_mirror = ServerCameraMirror(
-        ledger=server._state_ledger,
-        broadcaster=_camera_broadcast,
-        schedule=_mirror_schedule,
-    )
-    server._camera_mirror.start()
-
     axis_labels = tuple(str(lbl) for lbl in (baseline_dims.axis_labels or ("z", "y", "x")))
     order = tuple(int(idx) for idx in (baseline_dims.order or (0, 1, 2)))
     level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in baseline_dims.level_shapes)
@@ -264,6 +254,12 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         server._ensure_keyframe_calls += 1
 
     server._ensure_keyframe = _ensure_keyframe
+    server._idr_on_reset = True
+
+    def _enqueue_camera_command(cmd: Any) -> None:
+        scene.camera_commands.append(cmd)
+
+    server._enqueue_camera_command = _enqueue_camera_command
 
     return server, scheduled, captured
 
@@ -656,7 +652,7 @@ def test_volume_render_mode_update() -> None:
     assert payload["changes"].get("volume.render_mode") == "iso"
 
 
-def test_camera_zoom_update_rejected() -> None:
+def test_camera_zoom_update_emits_notify() -> None:
     server, scheduled, captured = _make_server()
 
     payload = {
@@ -671,19 +667,33 @@ def test_camera_zoom_update_rejected() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
+    commands = server._scene.camera_commands
+    assert commands, "expected camera command queued"
+    cmd = commands[-1]
+    assert cmd.kind == 'zoom'
+    assert cmd.factor == 1.2
+    assert cmd.anchor_px == (12.0, 24.0)
+
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
-    assert ack_payload["status"] == "rejected"
-    assert ack_payload["intent_id"] == "cam-zoom"
-    assert ack_payload["in_reply_to"] == "state-cam-1"
-    assert ack_payload["error"]["code"] == "state.invalid"
+    assert ack_payload == {
+        "intent_id": "cam-zoom",
+        "in_reply_to": "state-cam-1",
+        "status": "accepted",
+        "applied_value": {"factor": 1.2, "anchor_px": [12.0, 24.0]},
+    }
 
     notify_frames = _frames_of_type(captured, "notify.camera")
-    assert not notify_frames
+    assert notify_frames, "expected notify.camera frame"
+    camera_payload = notify_frames[-1]["payload"]
+    assert camera_payload["mode"] == "zoom"
+    assert camera_payload["delta"]["factor"] == 1.2
+    assert camera_payload["delta"]["anchor_px"] == [12.0, 24.0]
+    assert camera_payload["origin"] == "state.update"
 
 
-def test_camera_reset_rejected() -> None:
+def test_camera_reset_triggers_keyframe() -> None:
     server, scheduled, captured = _make_server()
 
     payload = {
@@ -698,18 +708,21 @@ def test_camera_reset_rejected() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
+    commands = server._scene.camera_commands
+    assert commands and commands[-1].kind == 'reset'
+    assert server._ensure_keyframe_calls == 1
+
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
-    assert ack_payload["status"] == "rejected"
     assert ack_payload["intent_id"] == "cam-reset"
-    assert ack_payload["in_reply_to"] == "state-cam-2"
-    assert ack_payload["error"]["code"] == "state.invalid"
-
-    assert server._ensure_keyframe_calls == 0
+    assert ack_payload["applied_value"] == {"reason": "ui"}
 
     notify_frames = _frames_of_type(captured, "notify.camera")
-    assert not notify_frames
+    assert notify_frames
+    camera_payload = notify_frames[-1]["payload"]
+    assert camera_payload["mode"] == "reset"
+    assert camera_payload["delta"] == {"reason": "ui"}
 
 
 def test_camera_set_updates_latest_state() -> None:
@@ -752,7 +765,7 @@ def test_camera_set_updates_latest_state() -> None:
     assert notify_frames
     camera_payload = notify_frames[-1]["payload"]
     assert camera_payload["mode"] == "set"
-    assert camera_payload["state"] == applied
+    assert camera_payload["delta"] == applied
 
 
 def test_parse_failure_emits_rejection_ack() -> None:

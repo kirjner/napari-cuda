@@ -71,7 +71,9 @@ from napari_cuda.server.runtime.scene_state_applier import (
     SceneStateApplyContext,
     SceneDrainResult,
 )
+from napari_cuda.server.runtime.camera_controller import process_commands
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.scene import ServerSceneCommand
 from napari_cuda.server.runtime.render_update_queue import (
     PendingRenderUpdate,
     RenderDelta,
@@ -1065,6 +1067,9 @@ class EGLRendererWorker:
 
         self._apply_dims_from_snapshot(state)
         self._render_mailbox.enqueue_scene_state(state)
+
+    def process_camera_commands(self, commands: Sequence[ServerSceneCommand]) -> None:
+        process_commands(self, commands)
 
     def _apply_camera_reset(self, cam) -> None:
         reset_worker_camera(self, cam)
