@@ -337,6 +337,8 @@ class ClientStreamLoop:
         # Camera ops coalescing
         cam_rate = self._env_cfg.camera_rate_hz
         self._camera_state.cam_min_dt = 1.0 / max(1.0, cam_rate)
+        self._camera_state.orbit_deg_per_px_x = float(self._env_cfg.orbit_deg_per_px_x)
+        self._camera_state.orbit_deg_per_px_y = float(self._env_cfg.orbit_deg_per_px_y)
         self._camera_state.zoom_base = float(self._env_cfg.zoom_base)
     # --- Thread-safe scheduling helpers --------------------------------------
     def _on_gui_thread(self) -> bool:
@@ -992,7 +994,6 @@ class ClientStreamLoop:
         if emitter is None:
             logger.debug("zoom_steps_at_center skipped: camera emitter unavailable")
             return
-        viewer = self._current_viewer()
         camera.zoom_steps_at_center(
             emitter,
             self._camera_state,
@@ -1001,7 +1002,6 @@ class ClientStreamLoop:
             server_anchor_from_video=self._server_anchor_from_video,
             log_dims_info=self._log_dims_info,
             vid_size=(self._vid_w, self._vid_h),
-            viewer=viewer,
         )
 
     def _reset_camera(self) -> None:
@@ -1009,13 +1009,7 @@ class ClientStreamLoop:
         if emitter is None:
             logger.debug("camera.reset skipped: camera emitter unavailable")
             return
-        viewer = self._current_viewer()
-        camera.reset_camera(
-            emitter,
-            origin='keys',
-            viewer=viewer,
-            state=self._camera_state,
-        )
+        camera.reset_camera(emitter, origin='keys')
 
     def _on_key_event(self, data: dict) -> bool:
         return control_actions.handle_key_event(
@@ -1147,21 +1141,19 @@ class ClientStreamLoop:
         return bool(ch.post(obj)) if ch is not None else False
 
     def reset_camera(self, origin: str = 'ui') -> bool:
-        """Publish the current viewer camera pose after a local reset."""
+        """Send a camera.reset to the server (used by UI bindings)."""
         emitter = self._camera_emitter
         if emitter is None:
             logger.debug("camera.reset skipped: camera emitter unavailable")
             return False
-        viewer = self._current_viewer()
-        return camera.reset_camera(
-            emitter,
-            origin=origin,
-            viewer=viewer,
-            state=self._camera_state,
-        )
+        return camera.reset_camera(emitter, origin=origin)
 
     def set_camera(self, *, center=None, zoom=None, angles=None, origin: str = 'ui') -> bool:
-        """Send absolute camera fields when provided (programmatic entry point)."""
+        """Send absolute camera fields when provided.
+
+        Prefer using zoom_at/pan_px/reset ops for interactions; this is
+        intended for explicit UI actions that set a known state.
+        """
         emitter = self._camera_emitter
         if emitter is None:
             logger.debug("camera.set skipped: camera emitter unavailable")
@@ -1192,6 +1184,8 @@ class ClientStreamLoop:
             'last_zoom_widget_px': cam_state.last_zoom_widget_px,
             'last_zoom_video_px': cam_state.last_zoom_video_px,
             'last_zoom_anchor_px': cam_state.last_zoom_anchor_px,
+            'last_pan_dx': cam_state.last_pan_dx_sent,
+            'last_pan_dy': cam_state.last_pan_dy_sent,
             'zoom_base': float(cam_state.zoom_base),
         }
         return control_actions.hud_snapshot(
@@ -1308,7 +1302,6 @@ class ClientStreamLoop:
         if emitter is None:
             logger.debug("wheel zoom skipped: camera emitter unavailable")
             return
-        viewer = self._current_viewer()
         camera.handle_wheel_zoom(
             emitter,
             self._camera_state,
@@ -1316,7 +1309,6 @@ class ClientStreamLoop:
             widget_to_video=self._widget_to_video,
             server_anchor_from_video=self._server_anchor_from_video,
             log_dims_info=self._log_dims_info,
-            viewer=viewer,
         )
 
     def _on_pointer(self, data: dict) -> None:
@@ -1333,7 +1325,6 @@ class ClientStreamLoop:
             in_vol3d = (mode_obj.lower() == 'volume') and ndisplay_obj == 3
         else:
             in_vol3d = False
-        viewer = self._current_viewer()
         camera.handle_pointer(
             emitter,
             self._camera_state,
@@ -1343,7 +1334,6 @@ class ClientStreamLoop:
             log_dims_info=self._log_dims_info,
             in_vol3d=in_vol3d,
             alt_mask=int(QtCore.Qt.AltModifier),
-            viewer=viewer,
         )
 
     # (no key→dims mapping)

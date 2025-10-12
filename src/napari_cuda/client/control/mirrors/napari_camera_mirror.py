@@ -8,7 +8,7 @@ from typing import Any, Mapping, TYPE_CHECKING
 from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
-from napari_cuda.client.control.state_update_actions import ControlStateContext, _normalize_camera_state_value
+from napari_cuda.client.control.state_update_actions import ControlStateContext, _normalize_camera_delta_value
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.rendering.presenter_facade import PresenterFacade
 from napari_cuda.protocol import NotifyCamera
@@ -61,28 +61,28 @@ class NapariCameraMirror:
         payload = frame.payload
         mode = str(payload.mode or "")
         mode_key = mode if mode else "main"
-        camera_state = _normalize_camera_state_value(payload.state)
+        delta = _normalize_camera_delta_value(payload.delta)
         timestamp = frame.envelope.timestamp
         self._ledger.record_confirmed(
             "camera",
             "main",
             mode_key,
-            camera_state,
+            delta,
             timestamp=timestamp,
         )
-        self._state.camera_state[mode_key] = camera_state
-        self._last_deltas[mode_key] = camera_state
+        self._state.camera_state[mode_key] = delta
+        self._last_deltas[mode_key] = delta
         emitter = self._emitter
         if emitter is not None:
-            emitter.record_confirmed(mode_key, camera_state)
+            emitter.record_confirmed(mode_key, delta)
         if self._log_camera_info:
             logger.info(
-                "notify.camera applied: mode=%s intent=%s state=%s",
+                "notify.camera applied: mode=%s intent=%s delta=%s",
                 mode_key,
                 frame.envelope.intent_id,
-                camera_state,
+                delta,
             )
-        self._presenter.apply_camera_update(mode=mode_key, delta=camera_state)
+        self._presenter.apply_camera_update(mode=mode_key, delta=delta)
 
     def replay_last_payload(self) -> None:
         self._assert_gui_thread()
