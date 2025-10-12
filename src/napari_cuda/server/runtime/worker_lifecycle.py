@@ -15,6 +15,7 @@ from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_av
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
+from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 from napari_cuda.server.data.lod import AppliedLevel
 
@@ -135,6 +136,26 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         try:
             control_loop = loop
 
+            def _forward_level(applied: AppliedLevel, downgraded: bool) -> None:
+                control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
+                    server._commit_applied_level,  # type: ignore[attr-defined]
+                    applied,
+                    downgraded,
+                )
+
+            def _forward_level(applied: AppliedLevel, downgraded: bool) -> None:
+                control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
+                    server._commit_applied_level,  # type: ignore[attr-defined]
+                    applied,
+                    downgraded,
+                )
+
+            def _forward_camera_pose(pose: CameraPoseApplied) -> None:
+                control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
+                    server._commit_applied_camera,  # type: ignore[attr-defined]
+                    pose,
+                )
+
             worker = EGLRendererWorker(
                 width=server.width,
                 height=server.height,
@@ -147,7 +168,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 zarr_axes=server._zarr_axes,
                 zarr_z=server._zarr_z,
                 policy_name=server._scene.multiscale_state.get("policy"),
-                state_update_cb=None,
+                level_update_cb=_forward_level,
+                camera_pose_cb=_forward_camera_pose,
                 ctx=server._ctx,
                 env=server._ctx_env,
             )
@@ -185,15 +207,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server._scene.camera_deltas.clear()
             worker._consume_render_snapshot(initial_snapshot)
             worker.drain_scene_updates()
-
-            def _forward_level(applied: AppliedLevel, downgraded: bool) -> None:
-                control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
-                    server._commit_applied_level,  # type: ignore[attr-defined]
-                    applied,
-                    downgraded,
-                )
-
-            worker.set_state_update_callback(_forward_level)
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -306,7 +319,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         continue
 
                 logger.debug("frame apply proceeding camera_deltas=%d animate=%s", len(deltas), server._animate)
-                worker._consume_render_snapshot(frame_state)
+                worker._consume_render_snapshot(
+                    frame_state,
+                    apply_camera_pose=not bool(deltas),
+                )
                 if deltas:
                     worker.process_camera_deltas(deltas)
 

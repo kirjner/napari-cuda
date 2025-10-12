@@ -951,7 +951,10 @@ def reduce_view_update(
     target_ndisplay = resolved_ndisplay
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
 
+    target_name = "main"
+
     with lock:
+        previous_use_volume = bool(store.use_volume)
         store.last_scene_seq = increment_server_sequence(store)
         server_seq = store.last_scene_seq
         meta_entry = get_control_meta(store, "view", "main", "ndisplay")
@@ -1046,6 +1049,68 @@ def reduce_view_update(
             displayed=displayed_value,
             dims_mode=mode_value,
         )
+        if not previous_use_volume and store.use_volume:
+            pose_snapshot = ledger.snapshot()
+            cached_pose: dict[str, Any] = {}
+            center_entry = pose_snapshot.get(("camera", target_name, "center"))
+            if center_entry and center_entry.value is not None:
+                cached_pose["center"] = tuple(float(c) for c in center_entry.value)
+            zoom_entry = pose_snapshot.get(("camera", target_name, "zoom"))
+            if zoom_entry and zoom_entry.value is not None:
+                cached_pose["zoom"] = float(zoom_entry.value)
+            angles_entry = pose_snapshot.get(("camera", target_name, "angles"))
+            if angles_entry and angles_entry.value is not None:
+                cached_pose["angles"] = tuple(float(a) for a in angles_entry.value)
+            distance_entry = pose_snapshot.get(("camera", target_name, "distance"))
+            if distance_entry and distance_entry.value is not None:
+                cached_pose["distance"] = float(distance_entry.value)
+            fov_entry = pose_snapshot.get(("camera", target_name, "fov"))
+            if fov_entry and fov_entry.value is not None:
+                cached_pose["fov"] = float(fov_entry.value)
+            rect_entry = pose_snapshot.get(("camera", target_name, "rect"))
+            if rect_entry and rect_entry.value is not None:
+                rect_val = tuple(float(v) for v in rect_entry.value)
+                cached_pose["rect"] = rect_val
+            if cached_pose:
+                store.plane_camera_cache[target_name] = cached_pose
+                logger.info(
+                    "Cached plane camera pose before volume switch target=%s center=%s zoom=%s rect=%s",
+                    target_name,
+                    cached_pose.get("center"),
+                    cached_pose.get("zoom"),
+                    cached_pose.get("rect"),
+                )
+            else:
+                center_val = pose_snapshot.get(("camera", target_name, "center"))
+                zoom_val = pose_snapshot.get(("camera", target_name, "zoom"))
+                angles_val = pose_snapshot.get(("camera", target_name, "angles"))
+                logger.info(
+                    "No plane camera pose cached before volume switch; ledger center=%s zoom=%s angles=%s",
+                    center_val.value if center_val is not None else None,
+                    zoom_val.value if zoom_val is not None else None,
+                    angles_val.value if angles_val is not None else None,
+                )
+        elif previous_use_volume and not store.use_volume:
+            cached_pose = store.plane_camera_cache.get(target_name)
+            if cached_pose:
+                logger.info(
+                    "Plane camera cache present after volume exit target=%s center=%s zoom=%s rect=%s",
+                    target_name,
+                    cached_pose.get("center"),
+                    cached_pose.get("zoom"),
+                    cached_pose.get("rect"),
+                )
+                reduce_camera_update(
+                    ledger,
+                    center=cached_pose.get("center"),
+                    zoom=cached_pose.get("zoom"),
+                    angles=cached_pose.get("angles"),
+                    distance=cached_pose.get("distance"),
+                    fov=cached_pose.get("fov"),
+                    rect=cached_pose.get("rect"),
+                    timestamp=ts,
+                    origin="control.view.restore_camera",
+                )
 
     return ServerLedgerUpdate(
         scope="view",
@@ -1251,10 +1316,20 @@ def reduce_camera_update(
     center: Optional[Sequence[float]] = None,
     zoom: Optional[float] = None,
     angles: Optional[Sequence[float]] = None,
+    distance: Optional[float] = None,
+    fov: Optional[float] = None,
+    rect: Optional[Sequence[float]] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.camera",
 ) -> Dict[str, Any]:
-    if center is None and zoom is None and angles is None:
+    if (
+        center is None
+        and zoom is None
+        and angles is None
+        and distance is None
+        and fov is None
+        and rect is None
+    ):
         raise ValueError("camera reducer requires at least one property")
 
     ts = _now(timestamp)
@@ -1282,6 +1357,28 @@ def reduce_camera_update(
         )
         pending.append(("camera", "main", "angles", normalized_angles))
         ack["angles"] = [float(a) for a in normalized_angles]
+
+    if distance is not None:
+        distance_val = float(distance)
+        pending.append(("camera", "main", "distance", distance_val))
+        ack["distance"] = distance_val
+
+    if fov is not None:
+        fov_val = float(fov)
+        pending.append(("camera", "main", "fov", fov_val))
+        ack["fov"] = fov_val
+
+    if rect is not None:
+        if len(rect) < 4:
+            raise ValueError("camera rect requires four components")
+        normalized_rect = (
+            float(rect[0]),
+            float(rect[1]),
+            float(rect[2]),
+            float(rect[3]),
+        )
+        pending.append(("camera", "main", "rect", normalized_rect))
+        ack["rect"] = [float(v) for v in normalized_rect]
 
     for scope, target, key, value in pending:
         ledger.record_confirmed(scope, target, key, value, origin=origin, timestamp=ts)

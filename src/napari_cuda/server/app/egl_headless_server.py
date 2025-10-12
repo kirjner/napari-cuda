@@ -28,6 +28,7 @@ from napari_cuda.server.scene import (
     create_server_scene_data,
     layer_controls_from_ledger,
     prune_control_metadata,
+    build_render_scene_state,
 )
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.bitstream import ParamCache, configure_bitstream
@@ -52,6 +53,7 @@ from napari_cuda.server.rendering import pixel_broadcaster
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
+    _broadcast_camera_update,
     _broadcast_dims_state,
     broadcast_stream_config,
     ingest_state,
@@ -63,6 +65,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_dims_update,
     reduce_level_update,
+    reduce_camera_update,
 )
 from napari_cuda.server.data.lod import AppliedLevel
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
@@ -71,6 +74,7 @@ from napari_cuda.server.runtime.worker_lifecycle import (
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
+from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,
@@ -197,6 +201,9 @@ class EGLHeadlessServer:
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
         # Per-scope last applied seqs to help the worker skip idle ticks
         self._applied_seqs: Dict[str, int] = {}
+        # Camera sequencing and pose tracking (per target)
+        self._camera_command_seq: Dict[str, int] = {}
+        self._last_camera_pose_seq: Dict[str, int] = {}
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -270,6 +277,11 @@ class EGLHeadlessServer:
         self._worker_lifecycle.worker = worker
 
     # --- Logging + Broadcast helpers --------------------------------------------
+    def _next_camera_command_seq(self, target: str) -> int:
+        current = self._camera_command_seq.get(target, 0) + 1
+        self._camera_command_seq[target] = current
+        return current
+
     def _enqueue_camera_delta(self, cmd: CameraDeltaCommand) -> None:
         with self._state_lock:
             self._scene.camera_deltas.append(cmd)
@@ -701,6 +713,62 @@ class EGLHeadlessServer:
         seq_value = int(level_update.server_seq)
         self._applied_seqs["multiscale"] = seq_value
         self._applied_seqs["dims"] = seq_value
+
+    def _commit_applied_camera(
+        self,
+        pose: CameraPoseApplied,
+    ) -> None:
+        target = pose.target or "main"
+        seq = int(pose.command_seq)
+        last_seq = int(self._last_camera_pose_seq.get(target, 0))
+        if seq <= last_seq:
+            logger.debug(
+                "camera pose ignored (stale) target=%s seq=%d last_seq=%d",
+                target,
+                seq,
+                last_seq,
+            )
+            return
+        self._last_camera_pose_seq[target] = seq
+
+        with self._state_lock:
+            if self._log_cam_debug:
+                logger.debug(
+                    "camera pose applied target=%s seq=%d center=%s zoom=%s angles=%s distance=%s fov=%s rect=%s",
+                    target,
+                    seq,
+                    pose.center,
+                    pose.zoom,
+                    pose.angles,
+                    pose.distance,
+                    pose.fov,
+                    pose.rect,
+                )
+            ack = reduce_camera_update(
+                self._state_ledger,
+                center=pose.center,
+                zoom=pose.zoom,
+                angles=pose.angles,
+                distance=pose.distance,
+                fov=pose.fov,
+                rect=pose.rect,
+                origin="worker.state.camera",
+            )
+            self._scene.latest_state = build_render_scene_state(
+                self._state_ledger,
+                self._scene,
+            )
+
+        self._schedule_coro(
+            _broadcast_camera_update(
+                self,
+                mode="pose",
+                state=ack,
+                intent_id=None,
+                origin="worker.state.camera",
+            ),
+            "worker-camera-pose",
+        )
 
     def _scene_snapshot_json(self) -> Optional[str]:
         try:

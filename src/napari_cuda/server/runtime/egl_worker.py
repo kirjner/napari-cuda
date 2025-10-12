@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import time
 import logging
+from dataclasses import replace
 from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple, List
 import threading
 import math
@@ -72,6 +73,7 @@ from napari_cuda.server.runtime.scene_state_applier import (
     SceneDrainResult,
 )
 from napari_cuda.server.runtime.camera_controller import process_camera_deltas as _process_camera_deltas
+from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.render_update_queue import (
@@ -128,7 +130,8 @@ class EGLRendererWorker:
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 state_update_cb: Optional[Callable[[lod.AppliedLevel, bool], None]] = None,
+                 level_update_cb: Callable[[lod.AppliedLevel, bool], None] | None = None,
+                 camera_pose_cb: Callable[[CameraPoseApplied], None] | None = None,
                  policy_name: Optional[str] = None,
                  *,
                  ctx: ServerCtx,
@@ -149,8 +152,8 @@ class EGLRendererWorker:
 
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
-        self._init_scene_state(state_update_cb)
-        self._init_locks()
+        self._init_scene_state(level_update_cb)
+        self._init_locks(camera_pose_cb)
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
@@ -183,11 +186,18 @@ class EGLRendererWorker:
     def is_ready(self) -> bool:
         return self._is_ready
 
-    def set_state_update_callback(
+    # Explicit setters are retained for lifecycle reconfiguration if needed
+    def set_level_update_callback(
         self,
-        callback: Optional[Callable[[lod.AppliedLevel, bool], None]],
+        callback: Callable[[lod.AppliedLevel, bool], None],
     ) -> None:
-        self._state_update_cb = callback
+        self._level_update_cb = callback
+
+    def set_camera_pose_callback(
+        self,
+        callback: Callable[[CameraPoseApplied], None],
+    ) -> None:
+        self._camera_pose_callback = callback
 
     def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
         """Choose stable initial center and distance for TurntableCamera.
@@ -456,14 +466,16 @@ class EGLRendererWorker:
 
     def _init_scene_state(
         self,
-        state_update_cb: Optional[Callable[[lod.AppliedLevel, bool], None]],
+        level_update_cb: Optional[Callable[[lod.AppliedLevel, bool], None]],
     ) -> None:
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
         self._scene_source: Optional[ZarrSceneSource] = None
         self._active_ms_level = 0
         self._level_downgraded = False
-        self._state_update_cb = state_update_cb
+        if level_update_cb is None:
+            raise ValueError("EGLRendererWorker requires level_update callback")
+        self._level_update_cb = level_update_cb
         self._last_zoom_hint_ts = 0.0
         self._zoom_hint_hold_s = 0.35
         self._data_wh = (int(self.width), int(self.height))
@@ -476,7 +488,7 @@ class EGLRendererWorker:
         self._plane_restore_level: Optional[int] = None
         self._plane_restore_step: Optional[tuple[int, ...]] = None
 
-    def _init_locks(self) -> None:
+    def _init_locks(self, camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]]) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._render_mailbox = RenderUpdateQueue()
@@ -485,6 +497,9 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = False
         self._level_policy_refresh_needed = False
+        if camera_pose_cb is None:
+            raise ValueError("EGLRendererWorker requires camera_pose callback")
+        self._camera_pose_callback = camera_pose_cb
 
     def _configure_debug_flags(self) -> None:
         worker_dbg = self._debug_policy.worker
@@ -1062,11 +1077,26 @@ class EGLRendererWorker:
         self._render_mailbox.enqueue(normalized)
         self._mark_render_tick_needed()
 
-    def _consume_render_snapshot(self, state: RenderLedgerSnapshot) -> None:
+    def _consume_render_snapshot(
+        self,
+        state: RenderLedgerSnapshot,
+        *,
+        apply_camera_pose: bool = True,
+    ) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
+        state_for_queue = state if apply_camera_pose else replace(
+            state,
+            center=None,
+            zoom=None,
+            angles=None,
+            distance=None,
+            fov=None,
+            rect=None,
+        )
+
         self._apply_dims_from_snapshot(state)
-        self._render_mailbox.enqueue_scene_state(state)
+        self._render_mailbox.enqueue_scene_state(state_for_queue)
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
         _process_camera_deltas(self, commands)

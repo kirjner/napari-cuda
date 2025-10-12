@@ -417,12 +417,7 @@ def set_level_with_budget(
 
     worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
     worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
-    callback = getattr(worker, "_state_update_cb", None)
-    if callback is not None:
-        try:
-            callback(applied_snapshot, bool(downgraded))  # type: ignore[operator]
-        except Exception:
-            logger.debug("state_update callback after level apply failed", exc_info=True)
+    worker._level_update_cb(applied_snapshot, bool(downgraded))  # type: ignore[operator]
 
 
 def perform_level_switch(

@@ -23,6 +23,9 @@ class RenderLedgerSnapshot:
     center: Optional[tuple[float, float, float]] = None
     zoom: Optional[float] = None
     angles: Optional[tuple[float, float, float]] = None
+    distance: Optional[float] = None
+    fov: Optional[float] = None
+    rect: Optional[tuple[float, float, float, float]] = None
     current_step: Optional[tuple[int, ...]] = None
     ndisplay: Optional[int] = None
     displayed: Optional[tuple[int, ...]] = None
@@ -66,6 +69,9 @@ def build_ledger_snapshot(
     center_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "center"), float)
     zoom_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "zoom"))
     angles_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "angles"), float)
+    distance_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "distance"))
+    fov_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "fov"))
+    rect_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "rect"), float)
 
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
     pending_dims = getattr(scene, "pending_dims_step", None)
@@ -117,6 +123,9 @@ def build_ledger_snapshot(
         zoom=zoom_float,
         angles=angles_tuple,
         current_step=current_step,
+        distance=distance_float,
+        fov=fov_float,
+        rect=rect_tuple,
         ndisplay=ndisplay_val,
         displayed=displayed_axes,
         order=order_axes,

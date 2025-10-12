@@ -98,6 +98,8 @@ class CameraDeltaCommand:
     """Queued camera delta consumed by the render thread."""
 
     kind: Literal["zoom", "pan", "orbit", "reset"]
+    target: str = "main"
+    command_seq: int = 0
     factor: Optional[float] = None
     anchor_px: Optional[tuple[float, float]] = None
     dx_px: float = 0.0
@@ -155,6 +157,7 @@ class ServerSceneData:
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
     pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    plane_camera_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
     # Removed optimistic dims caches; LatestIntent carries desired state now
 
@@ -179,6 +182,9 @@ def build_render_scene_state(
     center: Any = None,
     zoom: Any = None,
     angles: Any = None,
+    distance: Any = None,
+    fov: Any = None,
+    rect: Any = None,
     current_step: Any = None,
     volume_mode: Any = None,
     volume_colormap: Any = None,
@@ -205,6 +211,9 @@ def build_render_scene_state(
         center=_coalesce_tuple(center, base.center, float),
         zoom=_coalesce_float(zoom, base.zoom),
         angles=_coalesce_tuple(angles, base.angles, float),
+        distance=_coalesce_float(distance, base.distance),
+        fov=_coalesce_float(fov, base.fov),
+        rect=_coalesce_tuple(rect, base.rect, float),
         current_step=_coalesce_tuple(current_step, base.current_step, int),
         volume_mode=_coalesce_string(volume_mode, base.volume_mode, fallback=scene.volume_state.get("mode")),
         volume_colormap=_coalesce_string(
