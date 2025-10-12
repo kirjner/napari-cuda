@@ -23,7 +23,7 @@ from websockets.exceptions import ConnectionClosed
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import (
-    ServerSceneCommand,
+    CameraDeltaCommand,
     ServerSceneData,
     create_server_scene_data,
     layer_controls_from_ledger,
@@ -270,10 +270,10 @@ class EGLHeadlessServer:
         self._worker_lifecycle.worker = worker
 
     # --- Logging + Broadcast helpers --------------------------------------------
-    def _enqueue_camera_command(self, cmd: ServerSceneCommand) -> None:
+    def _enqueue_camera_delta(self, cmd: CameraDeltaCommand) -> None:
         with self._state_lock:
-            self._scene.camera_commands.append(cmd)
-            queue_len = len(self._scene.camera_commands)
+            self._scene.camera_deltas.append(cmd)
+            queue_len = len(self._scene.camera_deltas)
         if self._log_cam_info or self._log_cam_debug:
             logger.info(
                 "enqueue camera command kind=%s queue_len=%d payload=%s",

@@ -63,7 +63,7 @@ from napari_cuda.server.control.state_reducers import (
     clamp_sample_step,
     is_valid_render_mode,
     normalize_clim,
-    reduce_camera_state,
+    reduce_camera_update,
     reduce_dims_update,
     reduce_layer_property,
     reduce_level_update,
@@ -75,11 +75,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_sample_step,
     reduce_view_update,
 )
-from napari_cuda.server.scene import (
-    ServerSceneCommand,
-    layer_controls_from_ledger,
-    layer_controls_to_dict,
-)
+from napari_cuda.server.scene import CameraDeltaCommand, layer_controls_from_ledger, layer_controls_to_dict
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -1191,8 +1187,8 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     metrics.inc('napari_cuda_state_camera_updates')
 
             try:
-                server._enqueue_camera_command(
-                    ServerSceneCommand(kind='zoom', factor=float(factor), anchor_px=anchor),
+                server._enqueue_camera_delta(
+                    CameraDeltaCommand(kind='zoom', factor=float(factor), anchor_px=anchor),
                 )
             except Exception:
                 logger.debug("camera.zoom enqueue failed", exc_info=True)
@@ -1236,8 +1232,8 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     with suppress(Exception):
                         metrics.inc('napari_cuda_state_camera_updates')
                 try:
-                    server._enqueue_camera_command(
-                        ServerSceneCommand(kind='pan', dx_px=float(dx), dy_px=float(dy)),
+                    server._enqueue_camera_delta(
+                        CameraDeltaCommand(kind='pan', dx_px=float(dx), dy_px=float(dy)),
                     )
                 except Exception:
                     logger.debug("camera.pan enqueue failed", exc_info=True)
@@ -1282,8 +1278,8 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                         metrics.inc('napari_cuda_state_camera_updates')
                         metrics.inc('napari_cuda_orbit_events')
                 try:
-                    server._enqueue_camera_command(
-                        ServerSceneCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el)),
+                    server._enqueue_camera_delta(
+                        CameraDeltaCommand(kind='orbit', d_az_deg=float(d_az), d_el_deg=float(d_el)),
                     )
                 except Exception:
                     logger.debug("camera.orbit enqueue failed", exc_info=True)
@@ -1318,7 +1314,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 with suppress(Exception):
                     metrics.inc('napari_cuda_state_camera_updates')
             try:
-                server._enqueue_camera_command(ServerSceneCommand(kind='reset'))
+                server._enqueue_camera_delta(CameraDeltaCommand(kind='reset'))
             except Exception:
                 logger.debug("camera.reset enqueue failed", exc_info=True)
             if getattr(server, "_idr_on_reset", False) and getattr(server, "_worker", None) is not None:
@@ -1411,7 +1407,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     )
                     return True
 
-            ack_components = reduce_camera_state(
+            ack_components = reduce_camera_update(
                 server._state_ledger,
                 center=center_tuple,
                 zoom=zoom_float,

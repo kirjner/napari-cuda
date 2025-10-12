@@ -16,7 +16,7 @@
 - **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should route state changes through the same reducers and queues (`RenderUpdateQueue`, ledger-driven dims/camera updates) that the WebSocket state channel uses.
 - **Scene metadata**: `ViewerSceneManager` can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into it instead of reading napari Viewer objects.
 - **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation functions in `layer_manager.py` or a new helper module that create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
-- **Camera/dims controls**: reuse `_enqueue_camera_command` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.
+- **Camera/dims controls**: reuse `_enqueue_camera_delta` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.
 - **Code execution**: limit the `execute_code` tool to a constrained namespace that mirrors what the worker already exposes (e.g., viewer metadata snapshot, metrics hooks). Avoid letting the tool mutate global module state directly.
 
 ## Tool Surface Redesign
@@ -35,7 +35,7 @@
 2. **Headless tool bindings**
    - Implement tool methods using existing server helpers:
      - Layer queries: call `server._scene_manager.scene_snapshot()` or `update_from_sources` to build listings.
-     - Mutations: enqueue updates through the ledger-driven reducers, `_enqueue_camera_command`, and the worker's request queues.
+     - Mutations: enqueue updates through the ledger-driven reducers, `_enqueue_camera_delta`, and the worker's request queues.
      - Outputs: use the existing `_store_output` utility or a simplified variant for command transcripts.
 3. **Server wiring**
    - Add optional configuration in `ServerConfig` / `ServerCtx` for `mcp_enabled` and `mcp_port` (default off).

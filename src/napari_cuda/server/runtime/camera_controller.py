@@ -15,7 +15,7 @@ import time
 from vispy import scene  # type: ignore
 
 from napari_cuda.server.runtime import camera_ops as camops
-from napari_cuda.server.scene import ServerSceneCommand
+from napari_cuda.server.scene import CameraDeltaCommand
 
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class CameraDebugFlags:
 
 
 @dataclass(frozen=True)
-class CameraCommandOutcome:
+class CameraDeltaOutcome:
     camera_changed: bool
     policy_triggered: bool
     zoom_hint: Optional[float]
@@ -38,8 +38,8 @@ class CameraCommandOutcome:
     interaction_ts: Optional[float]
 
 
-def apply_camera_commands(
-    commands: Sequence[ServerSceneCommand],
+def apply_camera_deltas(
+    commands: Sequence[CameraDeltaCommand],
     *,
     camera,
     view,
@@ -52,8 +52,8 @@ def apply_camera_commands(
     last_zoom_hint_ts: Optional[float] = None,
     zoom_hint_hold_s: float = 0.0,
     now_fn: Callable[[], float] = time.perf_counter,
-) -> CameraCommandOutcome:
-    """Apply camera commands and report whether policy evaluation is needed."""
+) -> CameraDeltaOutcome:
+    """Apply camera deltas and report whether policy evaluation is needed."""
 
     if camera is None:
         # Camera not ready yet: record zoom hints for policy but skip execution.
@@ -66,7 +66,7 @@ def apply_camera_commands(
                     record_zoom_hint(ratio)
                     zoom_hint = ratio
         interaction_ts = now_val
-        return CameraCommandOutcome(
+        return CameraDeltaOutcome(
             camera_changed=False,
             policy_triggered=False,
             zoom_hint=zoom_hint,
@@ -156,7 +156,7 @@ def apply_camera_commands(
     if policy_touch and trigger_policy_refresh is not None:
         trigger_policy_refresh()
 
-    return CameraCommandOutcome(
+    return CameraDeltaOutcome(
         camera_changed=camera_changed,
         policy_triggered=policy_touch,
         zoom_hint=zoom_hint_ratio,
@@ -165,7 +165,7 @@ def apply_camera_commands(
     )
 
 
-def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
+def process_camera_deltas(worker, commands: Sequence[CameraDeltaCommand]) -> None:
     """Process camera commands on the worker, updating its state as needed."""
 
     if not commands:
@@ -175,7 +175,7 @@ def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
     logger.debug("worker processing %d camera command(s)", len(commands))
 
     view = worker.view
-    assert view is not None, "process_camera_commands requires an active VisPy view"
+    assert view is not None, "process_camera_deltas requires an active VisPy view"
     camera = view.camera
 
     if worker.canvas is not None:
@@ -199,7 +199,7 @@ def process_commands(worker, commands: Sequence[ServerSceneCommand]) -> None:
     def _record_zoom_hint(ratio: float) -> None:
         worker._render_mailbox.record_zoom_hint(float(ratio))
 
-    outcome = apply_camera_commands(
+    outcome = apply_camera_deltas(
         commands,
         camera=camera,
         view=view,
@@ -278,10 +278,10 @@ def log_pan_mapping(view, dx_px: float, dy_px: float, canvas_size: tuple[int, in
 
 
 __all__ = [
-    "CameraCommandOutcome",
+    "CameraDeltaOutcome",
     "CameraDebugFlags",
-    "apply_camera_commands",
-    "process_commands",
+    "apply_camera_deltas",
+    "process_camera_deltas",
     "log_zoom_drift",
     "log_pan_mapping",
 ]

@@ -1245,7 +1245,7 @@ def reduce_level_update(
 
 # camera reducers -------------------------------------------------------------
 
-def reduce_camera_state(
+def reduce_camera_update(
     ledger: ServerStateLedger,
     *,
     center: Optional[Sequence[float]] = None,
@@ -1299,7 +1299,7 @@ __all__ = [
     "clamp_sample_step",
     "is_valid_render_mode",
     "normalize_clim",
-    "reduce_camera_state",
+    "reduce_camera_update",
     "reduce_bootstrap_state",
     "reduce_dims_update",
     "reduce_layer_property",

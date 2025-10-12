@@ -53,7 +53,7 @@ __all__ = [
     "CONTROL_KEYS",
     "LayerControlMeta",
     "LayerControlState",
-    "ServerSceneCommand",
+    "CameraDeltaCommand",
     "ServerSceneData",
     "create_server_scene_data",
     "default_layer_controls",
@@ -94,8 +94,8 @@ def default_multiscale_state() -> Dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class ServerSceneCommand:
-    """Queued camera command consumed by the render thread."""
+class CameraDeltaCommand:
+    """Queued camera delta consumed by the render thread."""
 
     kind: Literal["zoom", "pan", "orbit", "reset"]
     factor: Optional[float] = None
@@ -143,7 +143,7 @@ class ServerSceneData:
 
     latest_state: RenderLedgerSnapshot = field(default_factory=RenderLedgerSnapshot)
     use_volume: bool = False
-    camera_commands: Deque[ServerSceneCommand] = field(default_factory=deque)
+    camera_deltas: Deque[CameraDeltaCommand] = field(default_factory=deque)
     next_server_seq: int = 0
     volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)

@@ -5,11 +5,11 @@ from dataclasses import dataclass
 import pytest
 
 from napari_cuda.server.runtime.camera_controller import (
-    CameraCommandOutcome,
+    CameraDeltaOutcome,
     CameraDebugFlags,
-    apply_camera_commands,
+    apply_camera_deltas,
 )
-from napari_cuda.server.scene import ServerSceneCommand
+from napari_cuda.server.scene import CameraDeltaCommand
 
 
 @dataclass
@@ -43,14 +43,14 @@ def _patch_camops(monkeypatch):
     yield
 
 
-def test_apply_camera_commands_zoom_records_hint_and_callbacks() -> None:
+def test_apply_camera_deltas_zoom_records_hint_and_callbacks() -> None:
     cam = _StubCamera([], [])
-    cmd = ServerSceneCommand(kind="zoom", factor=1.5)
+    cmd = CameraDeltaCommand(kind="zoom", factor=1.5)
     zooms: list[float] = []
     render_marks: list[bool] = []
     policy_marks: list[bool] = []
 
-    outcome = apply_camera_commands(
+    outcome = apply_camera_deltas(
         [cmd],
         camera=cam,
         view=_StubView(),
@@ -67,7 +67,7 @@ def test_apply_camera_commands_zoom_records_hint_and_callbacks() -> None:
 
     assert render_marks == [True]
     assert policy_marks == [True]
-    assert isinstance(outcome, CameraCommandOutcome)
+    assert isinstance(outcome, CameraDeltaOutcome)
     assert outcome.camera_changed is True
     assert outcome.policy_triggered is True
     assert zooms == [pytest.approx(1 / 1.5)]
@@ -77,12 +77,12 @@ def test_apply_camera_commands_zoom_records_hint_and_callbacks() -> None:
     assert cam.zoom_calls == [pytest.approx(1.5)]
 
 
-def test_apply_camera_commands_zoom_honours_hold_window() -> None:
+def test_apply_camera_deltas_zoom_honours_hold_window() -> None:
     cam = _StubCamera([], [])
-    cmd = ServerSceneCommand(kind="zoom", factor=2.0)
+    cmd = CameraDeltaCommand(kind="zoom", factor=2.0)
     recorded: list[float] = []
 
-    outcome = apply_camera_commands(
+    outcome = apply_camera_deltas(
         [cmd],
         camera=cam,
         view=_StubView(),
@@ -100,10 +100,10 @@ def test_apply_camera_commands_zoom_honours_hold_window() -> None:
     assert outcome.last_zoom_hint_ts == 10.0
 
 
-def test_apply_camera_commands_pan_without_zoom_passthrough() -> None:
+def test_apply_camera_deltas_pan_without_zoom_passthrough() -> None:
     cam = _StubCamera([], [])
-    cmd = ServerSceneCommand(kind="pan", dx_px=3.0, dy_px=-2.0)
-    outcome = apply_camera_commands(
+    cmd = CameraDeltaCommand(kind="pan", dx_px=3.0, dy_px=-2.0)
+    outcome = apply_camera_deltas(
         [cmd],
         camera=cam,
         view=_StubView(),
@@ -119,11 +119,11 @@ def test_apply_camera_commands_pan_without_zoom_passthrough() -> None:
     assert cam.pan_calls == [(3.0, -2.0)]
 
 
-def test_apply_camera_commands_requires_positive_zoom() -> None:
+def test_apply_camera_deltas_requires_positive_zoom() -> None:
     cam = _StubCamera([], [])
-    bad = ServerSceneCommand(kind="zoom", factor=0.0)
+    bad = CameraDeltaCommand(kind="zoom", factor=0.0)
     with pytest.raises(ValueError):
-        apply_camera_commands(
+        apply_camera_deltas(
             [bad],
             camera=cam,
             view=_StubView(),

@@ -256,10 +256,10 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._ensure_keyframe = _ensure_keyframe
     server._idr_on_reset = True
 
-    def _enqueue_camera_command(cmd: Any) -> None:
-        scene.camera_commands.append(cmd)
+    def _enqueue_camera_delta(cmd: Any) -> None:
+        scene.camera_deltas.append(cmd)
 
-    server._enqueue_camera_command = _enqueue_camera_command
+    server._enqueue_camera_delta = _enqueue_camera_delta
 
     return server, scheduled, captured
 
@@ -667,9 +667,9 @@ def test_camera_zoom_update_emits_notify() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    commands = server._scene.camera_commands
-    assert commands, "expected camera command queued"
-    cmd = commands[-1]
+    deltas = server._scene.camera_deltas
+    assert deltas, "expected camera delta queued"
+    cmd = deltas[-1]
     assert cmd.kind == 'zoom'
     assert cmd.factor == 1.2
     assert cmd.anchor_px == (12.0, 24.0)
@@ -708,8 +708,8 @@ def test_camera_reset_triggers_keyframe() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    commands = server._scene.camera_commands
-    assert commands and commands[-1].kind == 'reset'
+    deltas = server._scene.camera_deltas
+    assert deltas and deltas[-1].kind == 'reset'
     assert server._ensure_keyframe_calls == 1
 
     acks = _frames_of_type(captured, "ack.state")
