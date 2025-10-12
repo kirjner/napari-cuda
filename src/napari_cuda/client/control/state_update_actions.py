@@ -50,6 +50,19 @@ def _normalize_camera_delta_value(value: Any) -> Any:
     return value
 
 
+def _normalize_camera_state_value(value: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, raw in value.items():
+        name = str(key)
+        if name in {"center", "angles"}:
+            normalized[name] = [float(component) for component in raw]
+        elif name in {"zoom", "distance", "fov"}:
+            normalized[name] = float(raw)
+        else:
+            normalized[name] = raw
+    return normalized
+
+
 @dataclass
 class ControlStateContext:
     """Mutable control state hoisted out of the loop object."""

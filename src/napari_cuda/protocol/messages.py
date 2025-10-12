@@ -744,24 +744,40 @@ class NotifyDimsPayload:
 @dataclass(slots=True)
 class NotifyCameraPayload:
     mode: str
-    delta: Dict[str, Any]
     origin: str
+    delta: Dict[str, Any] | None = None
+    state: Dict[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"mode": self.mode, "delta": dict(self.delta), "origin": self.origin}
+        result: Dict[str, Any] = {"mode": self.mode, "origin": self.origin}
+        if self.delta is not None:
+            result["delta"] = dict(self.delta)
+        if self.state is not None:
+            result["state"] = dict(self.state)
+        return result
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "NotifyCameraPayload":
         mapping = _as_mapping(data, "notify.camera payload")
         _ensure_keyset(
             mapping,
-            required=("mode", "delta", "origin"),
+            required=("mode", "origin"),
+            optional=("delta", "state"),
             context="notify.camera payload",
         )
+        delta_obj: Dict[str, Any] | None = None
+        if "delta" in mapping and mapping["delta"] is not None:
+            delta_obj = _as_mutable_mapping(mapping["delta"], "notify.camera payload.delta")
+        state_obj: Dict[str, Any] | None = None
+        if "state" in mapping and mapping["state"] is not None:
+            state_obj = _as_mutable_mapping(mapping["state"], "notify.camera payload.state")
+        if delta_obj is None and state_obj is None:
+            raise ValueError("notify.camera payload requires delta or state field")
         return cls(
             mode=str(mapping["mode"]),
-            delta=_as_mutable_mapping(mapping["delta"], "notify.camera payload.delta"),
             origin=str(mapping["origin"]),
+            delta=delta_obj,
+            state=state_obj,
         )
 
 

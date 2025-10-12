@@ -25,8 +25,8 @@ class _StubPresenter:
     def __init__(self) -> None:
         self.updates: List[Tuple[str, dict]] = []
 
-    def apply_camera_update(self, *, mode: str, delta: dict) -> None:
-        self.updates.append((mode, dict(delta)))
+    def apply_camera_update(self, *, mode: str, payload: dict) -> None:
+        self.updates.append((mode, dict(payload)))
 
 
 @pytest.mark.usefixtures("qtbot")
@@ -90,3 +90,34 @@ def test_replay_last_payload_reinvokes_presenter() -> None:
     mirror.replay_last_payload()
 
     assert presenter.updates == [('pan', {'dx_px': 3.0, 'dy_px': -2.0})]
+
+
+@pytest.mark.usefixtures("qtbot")
+def test_ingest_notify_camera_pose_updates_state() -> None:
+    ctrl_env = SimpleNamespace(dims_rate_hz=60.0, wheel_step=1.0, settings_rate_hz=30.0)
+    control_state = ControlStateContext.from_env(ctrl_env)
+    loop_state = ClientLoopState()
+    loop_state.gui_thread = QtCore.QThread.currentThread()
+    ledger = ClientStateLedger()
+    presenter = _StubPresenter()
+    mirror = NapariCameraMirror(
+        ledger=ledger,
+        state=control_state,
+        loop_state=loop_state,
+        presenter=presenter,  # type: ignore[arg-type]
+        ui_call=None,
+        log_camera_info=False,
+    )
+
+    pose_payload = {'center': [10.0, 20.0], 'zoom': 0.5}
+    frame = build_notify_camera(
+        session_id='sess-3',
+        payload={'mode': 'pose', 'origin': 'worker', 'state': pose_payload},
+    )
+
+    mirror.ingest_notify_camera(frame)
+
+    assert control_state.camera_state['pose'] == pose_payload
+    confirmed = ledger.confirmed_value('camera', 'main', 'pose')
+    assert confirmed == pose_payload
+    assert presenter.updates[-1] == ('pose', pose_payload)

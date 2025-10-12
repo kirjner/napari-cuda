@@ -196,11 +196,10 @@ class PresenterFacade:
         except Exception:
             logger.exception('PresenterFacade intent dispatcher failed')
 
-    def apply_camera_update(self, *, mode: str, delta: Mapping[str, Any]) -> None:
-        """Record camera deltas so HUD overlays stay in sync."""
-
+    def apply_camera_update(self, *, mode: str, payload: Mapping[str, Any]) -> None:
+        """Record camera payloads so HUD overlays stay in sync."""
         mode_key = str(mode or 'main')
-        normalized = {str(k): v for k, v in dict(delta).items()}
+        normalized = {str(k): v for k, v in dict(payload).items()}
         self._camera_summaries[mode_key] = normalized
         if mode_key == 'main' or 'main' not in self._camera_summaries:
             self._hud_camera_snapshot = dict(normalized)
