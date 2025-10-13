@@ -157,7 +157,6 @@ class ServerSceneData:
     layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
     pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    plane_camera_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
     # Removed optimistic dims caches; LatestIntent carries desired state now
 

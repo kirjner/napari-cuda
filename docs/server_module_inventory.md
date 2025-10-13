@@ -34,7 +34,6 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | --- | ---:| --- |
 | `data.py` | 318 | Owns `ServerSceneData`, compatibility caches, and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`). |
 | `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas for control baselines. |
-| `plane_restore_state.py` | 23 | Captures plane widget state during 2D/3D transitions (render-thread only metadata). |
 
 ## Runtime Helpers (`server/runtime`)
 

@@ -65,7 +65,6 @@ Mirrors (e.g., ServerDimsMirror)
 
 - `src/napari_cuda/server/scene/`
   - `data.py` houses `ServerSceneData` and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`, etc.).
-  - `plane_restore_state.py` keeps the render-thread-only plane restore helper.
   - `layer_manager.py` now reflects the new namespace used by control payload builders and tests.
 
 - `src/napari_cuda/server/runtime/camera_{controller,animator,ops}.py`

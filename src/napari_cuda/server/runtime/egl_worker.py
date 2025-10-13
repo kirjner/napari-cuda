@@ -331,30 +331,6 @@ class EGLRendererWorker:
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
-    def _cache_plane_camera(self) -> None:
-        if self.use_volume:
-            self._plane_resume_camera_state = None
-            return
-
-        if self.view is not None and isinstance(self.view.camera, scene.cameras.PanZoomCamera):
-            state = self.view.camera.get_state()
-            self._plane_resume_camera_state = dict(state) if isinstance(state, dict) else None
-        else:
-            self._plane_resume_camera_state = None
-
-    def _restore_plane_camera(self) -> None:
-        resume_state = self._plane_resume_camera_state
-        self._plane_resume_camera_state = None
-
-        self._configure_camera_for_mode()
-
-        if (
-            resume_state is not None
-            and self.view is not None
-            and isinstance(self.view.camera, scene.cameras.PanZoomCamera)
-        ):
-            self.view.camera.set_state(resume_state)
-
     def _configure_camera_for_mode(self) -> None:
         view = self.view
         if view is None:
@@ -380,15 +356,13 @@ class EGLRendererWorker:
     def _enter_volume_mode(self) -> None:
         if self.use_volume:
             return
-        self._cache_plane_camera()
-        restore_level = self._ledger_level()
-        assert restore_level is not None, "ledger must provide current level before entering volume"
-        step_entry = self._ledger_step()
-        assert step_entry is not None, "ledger must provide current step before entering volume"
-        self._plane_restore_level = int(restore_level)
-        self._plane_restore_step = tuple(int(v) for v in step_entry)
+        # Cache current 2D camera rect (world coordinates) for plane restore
+        if self.view is not None and isinstance(self.view.camera, scene.cameras.PanZoomCamera):
+            r = self.view.camera.rect
+            self._plane_restore_rect_world = (float(r.left), float(r.bottom), float(r.width), float(r.height))
+        else:
+            self._plane_restore_rect_world = None
         self.use_volume = True
-        self._last_roi = None
         source = self._ensure_scene_source()
         level = _coarsest_level_index(source)
         assert level is not None and level >= 0, "Volume mode requires a multiscale level"
@@ -411,11 +385,31 @@ class EGLRendererWorker:
         if not self.use_volume:
             return
         self.use_volume = False
-        self._restore_plane_camera()
-        restore_level = self._plane_restore_level
-        restore_step = self._plane_restore_step
-        self._plane_restore_level = None
-        self._plane_restore_step = None
+        # Ensure the first 2D slice does not inherit a tight 3D frustum ROI
+        self._force_full_roi_next_slice = True
+        restore_level = self._ledger_level()
+        restore_step = self._ledger_step()
+        if restore_level is not None and self._plane_restore_rect_world is not None:
+            lvl = int(restore_level)
+            source = self._ensure_scene_source()
+            sy, sx = plane_scale_for_level(source, lvl)
+            left, bottom, width_w, height_w = self._plane_restore_rect_world
+            sxv = float(max(1e-12, sx))
+            syv = float(max(1e-12, sy))
+            x0 = int(left / sxv)
+            y0 = int(bottom / syv)
+            x1 = int(x0 + max(1.0, width_w / sxv))
+            y1 = int(y0 + max(1.0, height_w / syv))
+            h, w = plane_wh_for_level(source, lvl)
+            if x0 < 0:
+                x0 = 0
+            if y0 < 0:
+                y0 = 0
+            if x1 > int(w):
+                x1 = int(w)
+            if y1 > int(h):
+                y1 = int(h)
+            # (No longer install per-level override; use rect only as cached hint if needed)
         if restore_level is not None:
             set_level_with_budget(
                 self,
@@ -428,6 +422,8 @@ class EGLRendererWorker:
             self._level_policy_refresh_needed = False
         else:
             self._level_policy_refresh_needed = True
+        self._configure_camera_for_mode()
+        # Keep cached plane rect for compatibility
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -483,9 +479,10 @@ class EGLRendererWorker:
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
-        self._plane_resume_camera_state: Optional[dict[str, object]] = None
-        self._plane_restore_level: Optional[int] = None
-        self._plane_restore_step: Optional[tuple[int, ...]] = None
+        # Cached 2D rect for plane restore
+        self._plane_restore_rect_world: Optional[tuple[float, float, float, float]] = None
+        # One-shot: force next 2D ROI to full slab after 3D exit
+        self._force_full_roi_next_slice: bool = False
 
     def _init_locks(self, camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]]) -> None:
         self._enc_lock = threading.Lock()
@@ -544,6 +541,8 @@ class EGLRendererWorker:
         self._roi_pad_chunks = 1
         self._idr_on_z = False
         self._last_roi: Optional[tuple[int, SliceROI]] = None
+        # One-shot ROI override for plane restore (level, roi)
+        self._plane_roi_override: Optional[tuple[int, SliceROI]] = None
 
     def _configure_budget_limits(self) -> None:
         cfg = self._ctx.cfg
@@ -960,12 +959,10 @@ class EGLRendererWorker:
 
         order_src = snapshot.order
         if order_src:
-            order_tuple = tuple(int(v) for v in order_src)
-            dims.order = order_tuple
-            ndim = max(ndim, len(order_tuple))
+            # Defer applying dims.order until after dims.ndim is set
+            ndim = max(ndim, len(tuple(int(v) for v in order_src)))
 
-        if snapshot.ndisplay is not None:
-            dims.ndisplay = max(1, int(snapshot.ndisplay))
+        # Defer applying dims.ndisplay until after dims.ndim and order/displayed are reconciled
 
         if snapshot.level_shapes and snapshot.current_level is not None:
             level_shapes = snapshot.level_shapes
@@ -998,6 +995,10 @@ class EGLRendererWorker:
         assert displayed_tuple, "ledger emitted empty dims displayed"
         expected_displayed = tuple(order_values[-len(displayed_tuple):])
         assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
+
+        # Finally, apply ndisplay so napari's fit sees consistent ndim/order/displayed
+        if snapshot.ndisplay is not None:
+            dims.ndisplay = max(1, int(snapshot.ndisplay))
 
 
     def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:

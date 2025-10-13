@@ -249,34 +249,33 @@ def apply_worker_slice_level(
         except Exception:
             logger.debug("apply_level: setting 2D layer scale pre-slab failed", exc_info=True)
 
-    z_idx = int(getattr(worker, "_z_index", 0) or 0)
+    z_idx = int(worker._z_index or 0)
     slab = worker._load_slice(source, applied.level, z_idx)  # type: ignore[attr-defined]
     roi_for_layer = None
-    last_roi = getattr(worker, "_last_roi", None)
+    last_roi = worker._last_roi
     if last_roi is not None and int(last_roi[0]) == int(applied.level):
         roi_for_layer = last_roi[1]
 
     if layer is not None:
-        view = getattr(worker, "view", None)
+        view = worker.view
         assert view is not None
-        ctx = worker._build_scene_state_context(view.camera)  # type: ignore[attr-defined]
+        ctx = worker._build_scene_state_context(view.camera)
         SceneStateApplier.apply_slice_to_layer(
             ctx,
             source=source,
             slab=slab,
             roi=roi_for_layer,
-            update_contrast=not getattr(worker, "_sticky_contrast", False),
+            update_contrast=not worker._sticky_contrast,
         )
 
     h, w = int(slab.shape[0]), int(slab.shape[1])
     worker._data_wh = (w, h)  # type: ignore[attr-defined]
     worker._data_d = None  # type: ignore[attr-defined]
 
-    view = getattr(worker, "view", None)
+    view = worker.view
     if (
-        not getattr(worker, "_preserve_view_on_switch", False)
+        not worker._preserve_view_on_switch
         and view is not None
-        and getattr(view, "camera", None) is not None
     ):
         world_w = float(w) * float(max(1e-12, sx))
         world_h = float(h) * float(max(1e-12, sy))
@@ -286,7 +285,7 @@ def apply_worker_slice_level(
         enabled=worker._log_layer_debug,  # type: ignore[attr-defined]
         mode="slice",
         level=applied.level,
-        z_index=getattr(worker, "_z_index", None),
+        z_index=worker._z_index,
         shape=(int(h), int(w)),
         contrast=applied.contrast,
         downgraded=worker._level_downgraded,  # type: ignore[attr-defined]
@@ -316,6 +315,11 @@ def viewport_roi_for_level(
     quiet: bool = False,
     for_policy: bool = False,
 ) -> SliceROI:
+    # On first 2D frame after 3D exit, ignore the 3D frustum and use full slab
+    if worker._force_full_roi_next_slice:
+        worker._force_full_roi_next_slice = False
+        h, w = plane_wh_for_level(source, int(level))
+        return SliceROI(y_start=0, y_stop=int(h), x_start=0, x_stop=int(w))
     view = getattr(worker, "view", None)
     align_chunks = (not for_policy) and bool(getattr(worker, "_roi_align_chunks", True))
     ensure_contains = (not for_policy) and bool(getattr(worker, "_roi_ensure_contains_viewport", True))

@@ -1049,69 +1049,6 @@ def reduce_view_update(
             displayed=displayed_value,
             dims_mode=mode_value,
         )
-        if not previous_use_volume and store.use_volume:
-            pose_snapshot = ledger.snapshot()
-            cached_pose: dict[str, Any] = {}
-            center_entry = pose_snapshot.get(("camera", target_name, "center"))
-            if center_entry and center_entry.value is not None:
-                cached_pose["center"] = tuple(float(c) for c in center_entry.value)
-            zoom_entry = pose_snapshot.get(("camera", target_name, "zoom"))
-            if zoom_entry and zoom_entry.value is not None:
-                cached_pose["zoom"] = float(zoom_entry.value)
-            angles_entry = pose_snapshot.get(("camera", target_name, "angles"))
-            if angles_entry and angles_entry.value is not None:
-                cached_pose["angles"] = tuple(float(a) for a in angles_entry.value)
-            distance_entry = pose_snapshot.get(("camera", target_name, "distance"))
-            if distance_entry and distance_entry.value is not None:
-                cached_pose["distance"] = float(distance_entry.value)
-            fov_entry = pose_snapshot.get(("camera", target_name, "fov"))
-            if fov_entry and fov_entry.value is not None:
-                cached_pose["fov"] = float(fov_entry.value)
-            rect_entry = pose_snapshot.get(("camera", target_name, "rect"))
-            if rect_entry and rect_entry.value is not None:
-                rect_val = tuple(float(v) for v in rect_entry.value)
-                cached_pose["rect"] = rect_val
-            if cached_pose:
-                store.plane_camera_cache[target_name] = cached_pose
-                logger.info(
-                    "Cached plane camera pose before volume switch target=%s center=%s zoom=%s rect=%s",
-                    target_name,
-                    cached_pose.get("center"),
-                    cached_pose.get("zoom"),
-                    cached_pose.get("rect"),
-                )
-            else:
-                center_val = pose_snapshot.get(("camera", target_name, "center"))
-                zoom_val = pose_snapshot.get(("camera", target_name, "zoom"))
-                angles_val = pose_snapshot.get(("camera", target_name, "angles"))
-                logger.info(
-                    "No plane camera pose cached before volume switch; ledger center=%s zoom=%s angles=%s",
-                    center_val.value if center_val is not None else None,
-                    zoom_val.value if zoom_val is not None else None,
-                    angles_val.value if angles_val is not None else None,
-                )
-        elif previous_use_volume and not store.use_volume:
-            cached_pose = store.plane_camera_cache.get(target_name)
-            if cached_pose:
-                logger.info(
-                    "Plane camera cache present after volume exit target=%s center=%s zoom=%s rect=%s",
-                    target_name,
-                    cached_pose.get("center"),
-                    cached_pose.get("zoom"),
-                    cached_pose.get("rect"),
-                )
-                reduce_camera_update(
-                    ledger,
-                    center=cached_pose.get("center"),
-                    zoom=cached_pose.get("zoom"),
-                    angles=cached_pose.get("angles"),
-                    distance=cached_pose.get("distance"),
-                    fov=cached_pose.get("fov"),
-                    rect=cached_pose.get("rect"),
-                    timestamp=ts,
-                    origin="control.view.restore_camera",
-                )
-
     return ServerLedgerUpdate(
         scope="view",
         target="main",
