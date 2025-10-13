@@ -401,7 +401,6 @@ class SceneStateApplier:
 
         cam = ctx.camera
         if cam is None:
-            render_mailbox.update_state_signature(state)
             return SceneDrainResult(
                 z_index=int(z_index) if z_index is not None else None,
                 data_wh=(int(data_wh[0]), int(data_wh[1])) if data_wh is not None else None,
@@ -426,14 +425,12 @@ class SceneStateApplier:
             else:
                 cam.angles = state.angles  # type: ignore[attr-defined]
 
-        policy_refresh = render_mailbox.update_state_signature(state)
-
         return SceneDrainResult(
             z_index=int(z_index) if z_index is not None else None,
             data_wh=(int(data_wh[0]), int(data_wh[1])) if data_wh is not None else None,
             last_step=last_step,
             render_marked=render_marked,
-            policy_refresh_needed=policy_refresh,
+            policy_refresh_needed=render_marked,
         )
 
 

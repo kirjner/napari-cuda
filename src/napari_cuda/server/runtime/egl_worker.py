@@ -19,8 +19,7 @@ from __future__ import annotations
 import os
 import time
 import logging
-from dataclasses import replace
-from typing import Any, Callable, Deque, Dict, Optional, Mapping, Sequence, Tuple, List
+from typing import Any, Callable, Dict, Optional, Mapping, Sequence, Tuple
 import threading
 import math
 
@@ -95,10 +94,6 @@ from napari_cuda.server.runtime.worker_runtime import (
     perform_level_switch,
     ensure_scene_source,
     reset_worker_camera,
-)
-from napari_cuda.server.runtime.plane_restore import (
-    PlaneRestore,
-    stage_plane_restore,
 )
 logger = logging.getLogger(__name__)
 
@@ -425,12 +420,25 @@ class EGLRendererWorker:
         rect = tuple(float(v) for v in rect_entry.value)
         step_tuple = tuple(int(v) for v in step_entry.value)
 
-        restore = stage_plane_restore(
+        view = self.view
+        if view is not None:
+            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+            cam = view.camera
+            sy, sx = plane_scale_for_level(source, lvl_idx)
+            h_full, w_full = plane_wh_for_level(source, lvl_idx)
+            world_w = float(w_full) * float(max(1e-12, sx))
+            world_h = float(h_full) * float(max(1e-12, sy))
+            cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+            cam.rect = Rect(*rect)
+
+        self._restoring_plane = True
+        set_level_with_budget(
             self,
-            source,
             lvl_idx,
-            step_tuple,
-            rect,  # type: ignore[arg-type]
+            reason="ndisplay-2d",
+            budget_error=self._budget_error_cls,
+            restoring_plane_state=True,
+            step_override=step_tuple,
         )
 
         self._level_policy_refresh_needed = False
@@ -489,11 +497,7 @@ class EGLRendererWorker:
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
-        # Cached 2D rect for plane restore
-        # Staged plane restore consumed by the render transaction
-        self._pending_plane_restore: Optional[PlaneRestore] = None
-        # Skip signature to suppress duplicate snapshot immediately after plane restore
-        self._skip_snapshot_once: Optional[tuple[int, tuple[int, ...]]] = None
+        self._restoring_plane: bool = False
         # Monotonic sequence for programmatic camera pose commits (op close)
         self._pose_seq: int = 1
         # Track highest command_seq observed from camera deltas
@@ -1103,41 +1107,18 @@ class EGLRendererWorker:
     ) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
-        # RenderTxn owns camera application; do not let the mailbox re-apply camera.
-        state_for_queue = replace(
-            state,
-            center=None,
-            zoom=None,
-            angles=None,
-            distance=None,
-            fov=None,
-            rect=None,
-        )
-
-        # Skip redundant applies to reduce log noise and avoid repeated dim toggles
-        changed = self._render_mailbox.update_state_signature(state_for_queue)
-        if not changed:
-            logger.debug("txn.skip: snapshot unchanged; no apply")
+        if not self._render_mailbox.update_state_signature(state):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "txn.skip: unchanged snapshot level=%s step=%s center=%s zoom=%s",
+                    state.current_level,
+                    state.current_step,
+                    state.center,
+                    state.zoom,
+                )
             return
 
         apply_render_txn(self, state)
-
-        has_layer_updates = bool(state.layer_updates)
-        has_volume_updates = any(
-            value is not None
-            for value in (
-                state.volume_mode,
-                state.volume_colormap,
-                state.volume_clim,
-                state.volume_opacity,
-                state.volume_sample_step,
-            )
-        )
-
-        if not has_layer_updates and not has_volume_updates:
-            return
-
-        self._render_mailbox.enqueue_scene_state(state_for_queue)
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
         if not commands:

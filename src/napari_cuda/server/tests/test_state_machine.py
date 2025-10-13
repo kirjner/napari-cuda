@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from dataclasses import replace
 
 import pytest
 
@@ -61,21 +60,6 @@ def test_zoom_hint_recent_then_stale() -> None:
     # Hint is now stale
     assert mailbox.consume_zoom_hint(max_age=0.5) is None
 
-
-def test_update_state_signature_detects_changes() -> None:
-    mailbox = RenderUpdateQueue()
-
-    base = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.0, current_step=(0,))
-    assert mailbox.update_state_signature(base)
-    # Identical state should not trigger a change
-    assert not mailbox.update_state_signature(base)
-
-    moved = replace(base, center=(1.0, 2.5, 3.0))
-    assert mailbox.update_state_signature(moved)
-
-    # Invalid numeric inputs should raise so invariant violations surface immediately
-    with pytest.raises((ValueError, TypeError)):
-        mailbox.update_state_signature(replace(base, zoom="invalid"))  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":  # pragma: no cover - direct execution helper

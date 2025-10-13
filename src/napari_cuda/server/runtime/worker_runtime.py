@@ -284,20 +284,10 @@ def apply_worker_slice_level(
     view = worker.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
-    pending_restore = worker._pending_plane_restore
-    if pending_restore is not None and int(pending_restore.level) == int(applied.level):
-        override_rect = Rect(*tuple(float(v) for v in pending_restore.rect))
-        view.camera.rect = override_rect
-        roi_for_layer = viewport_roi_for_level(worker, source, int(applied.level))
-        worker._skip_snapshot_once = (
-            int(applied.level),
-            tuple(int(v) for v in pending_restore.step),
-        )
-        worker._pending_plane_restore = None
-        worker._emit_current_camera_pose("plane-restore")  # noqa: SLF001
-    else:
-        roi_for_layer = viewport_roi_for_level(worker, source, int(applied.level))
-        worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
+    roi_for_layer = viewport_roi_for_level(worker, source, int(applied.level))
+    restoring_plane = bool(getattr(worker, "_restoring_plane", False))
+    emit_reason = "plane-restore" if restoring_plane else "slice-apply"
+    worker._emit_current_camera_pose(emit_reason)  # noqa: SLF001
     height_px, width_px = apply_plane_slice_roi(
         worker,
         source,
@@ -324,6 +314,9 @@ def apply_worker_slice_level(
         contrast=applied.contrast,
         downgraded=worker._level_downgraded,  # type: ignore[attr-defined]
     )
+
+    if restoring_plane:
+        worker._restoring_plane = False
 
 
 def format_worker_level_roi(

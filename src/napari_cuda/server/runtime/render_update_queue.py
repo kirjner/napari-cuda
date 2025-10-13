@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import threading
 import time
 from typing import Callable, Optional
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,7 @@ class RenderUpdateQueue:
             drained = list(self._camera_ops)
             self._camera_ops.clear()
             return drained
+
 
     def update_state_signature(self, state: RenderLedgerSnapshot) -> bool:
         signature = self._build_signature(state)

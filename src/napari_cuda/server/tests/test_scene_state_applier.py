@@ -393,7 +393,6 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
     assert isinstance(result, SceneDrainResult)
     assert result.render_marked is True
     assert result.policy_refresh_needed is True
-    assert queue.update_state_signature(state) is False
     assert marks == [None]
 
 
@@ -443,4 +442,3 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
     assert camera.center == (5.0, 6.0, 7.0)
     assert camera.zoom == 0.5
     assert camera.angles == (10.0, 20.0, 30.0)
-    assert queue.update_state_signature(state) is False

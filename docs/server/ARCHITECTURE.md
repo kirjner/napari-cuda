@@ -124,8 +124,8 @@ The codebase is being reshaped to match the architecture above. The refactor rem
 
 - Drop `_apply_mode_and_level_txn`, `_plane_roi_override`, `_force_full_roi_next_slice`, `_suppress_roi_refresh_frames`, and `_plane_restore_rect_world`.
 - Limit `apply_worker_slice_level` / `apply_worker_volume_level` to the transaction so each slab applies exactly once.
-- Introduce `runtime/plane_restore.py` with `PlaneRestore` and `stage_plane_restore`.
-- Rename staging field to `_pending_plane_restore`; refresh gating uses a simple ROI signature instead of timers.
+- Remove the legacy `plane_restore` staging helpers; the render worker now restores the 2D camera directly when leaving volume mode.
+- Simplify the render transaction to rely on the live camera rect (no `_pending_plane_restore`/signature shims).
 
 Expected pipeline (post-cleanup):
 
