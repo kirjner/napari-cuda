@@ -51,6 +51,7 @@ class RenderUpdateQueue:
         self._multiscale: Optional[RenderLevelRequest] = None
         self._scene_state: Optional[RenderLedgerSnapshot] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
+        self._camera_ops: list = []
         self._last_signature: Optional[tuple] = None
         self._lock = threading.Lock()
 
@@ -99,6 +100,27 @@ class RenderUpdateQueue:
                 return None
             self._zoom_hint = None
             return zoom
+
+    # ---- Camera ops ---------------------------------------------------------
+    def enqueue_camera_ops(self, ops) -> None:
+        """Append a batch of camera ops for the render loop to consume.
+
+        Type of ``ops`` is intentionally untyped here to avoid a hard import
+        on the camera command class; we treat them as opaque objects and hand
+        them to the existing camera controller on the render thread.
+        """
+        if not ops:
+            return
+        with self._lock:
+            self._camera_ops.extend(list(ops))
+
+    def drain_camera_ops(self):
+        with self._lock:
+            if not self._camera_ops:
+                return []
+            drained = list(self._camera_ops)
+            self._camera_ops.clear()
+            return drained
 
     def update_state_signature(self, state: RenderLedgerSnapshot) -> bool:
         signature = self._build_signature(state)

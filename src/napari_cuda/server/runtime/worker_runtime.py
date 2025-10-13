@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, Optional, Sequence, Tuple, Mapping
+from typing import Any, Dict, Optional, Sequence, Tuple, Mapping, NamedTuple
 import logging
 import time
+from vispy.geometry import Rect
 
 import numpy as np
 
@@ -20,7 +21,6 @@ from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.data.roi_applier import refresh_slice_for_worker
 
 logger = logging.getLogger(__name__)
 
@@ -75,54 +75,50 @@ def ensure_scene_source(worker) -> ZarrSceneSource:
     return source
 
 
-def refresh_worker_slice_if_needed(worker) -> None:
-    """Refresh the napari slice layer when ROI drift warrants it."""
+def roi_equal(a: SliceROI, b: SliceROI) -> bool:
+    """Return True when two ROIs cover identical bounds."""
 
-    if getattr(worker, "use_volume", False):
-        return
+    return (
+        int(a.y_start) == int(b.y_start)
+        and int(a.y_stop) == int(b.y_stop)
+        and int(a.x_start) == int(b.x_start)
+        and int(a.x_stop) == int(b.x_stop)
+    )
 
-    # After 3D->2D restore (or similar transactional applies), defer ROI
-    # refresh for a couple frames so the scene graph transform reflects the
-    # new layer data/scale/translate. This prevents transient, incorrect ROI
-    # computations from clobbering the restored view.
-    suppress = int(getattr(worker, "_suppress_roi_refresh_frames", 0))
-    if suppress > 0:
-        worker._suppress_roi_refresh_frames = suppress - 1  # type: ignore[attr-defined]
-        return
 
-    source = getattr(worker, "_scene_source", None)
+def apply_plane_slice_roi(
+    worker: Any,
+    source: ZarrSceneSource,
+    level: int,
+    roi: SliceROI,
+    *,
+    update_contrast: bool,
+) -> tuple[int, int]:
+    """Load and apply a plane slice for the given ROI."""
+
+    z_idx = int(worker._z_index or 0)
+    slab = source.slice(int(level), z_idx, compute=True, roi=roi)
+
     layer = worker._napari_layer
-    if source is None or layer is None:
-        return
-
-    def _apply_slice(slab: np.ndarray, roi_to_apply: SliceROI) -> None:
-        view = getattr(worker, "view", None)
-        cam = getattr(view, "camera", None)
-        ctx = worker._build_scene_state_context(cam)  # type: ignore[attr-defined]
+    if layer is not None:
+        view = worker.view
+        assert view is not None, "VisPy view required for slice apply"
+        ctx = worker._build_scene_state_context(view.camera)
         SceneStateApplier.apply_slice_to_layer(
             ctx,
             source=source,
             slab=slab,
-            roi=roi_to_apply,
-            update_contrast=False,
+            roi=roi,
+            update_contrast=bool(update_contrast),
         )
 
-    def _viewport(src: ZarrSceneSource, lvl: int) -> SliceROI:
-        return viewport_roi_for_level(worker, src, lvl)
-
-    refreshed, new_last = refresh_slice_for_worker(
-        source=source,
-        level=int(getattr(worker, "_active_ms_level", 0)),
-        last_roi=getattr(worker, "_last_roi", None),
-        z_index=getattr(worker, "_z_index", None),
-        edge_threshold=int(getattr(worker, "_roi_edge_threshold", 0)),
-        viewport_roi_for_level=_viewport,
-        load_slice=worker._load_slice,  # type: ignore[attr-defined]
-        apply_slice=_apply_slice,
-    )
-
-    if refreshed:
-        worker._last_roi = new_last  # type: ignore[attr-defined]
+    height_px = int(slab.shape[0])
+    width_px = int(slab.shape[1])
+    worker._data_wh = (int(width_px), int(height_px))
+    worker._data_d = None
+    worker._last_roi = (int(level), roi)
+    worker._mark_render_tick_needed()
+    return height_px, width_px
 
 
 def reset_worker_camera(worker, cam) -> None:
@@ -158,9 +154,12 @@ def reset_worker_camera(worker, cam) -> None:
     world_w = float(full_w) * float(max(1e-12, sx))
     world_h = float(full_h) * float(max(1e-12, sy))
     cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+    cam.rect = Rect(0.0, 0.0, max(1.0, world_w), max(1.0, world_h))
 
 
-def apply_worker_level(
+
+
+def stage_worker_level(
     worker: object,
     source: ZarrSceneSource,
     level: int,
@@ -169,7 +168,7 @@ def apply_worker_level(
     restoring_plane_state: bool = False,
     step_override: Optional[Sequence[int]] = None,
 ) -> lod.AppliedLevel:
-    """Apply ``level`` through the worker's existing helpers and return the snapshot."""
+    """Return the ``AppliedLevel`` snapshot without touching the napari layer."""
 
     if step_override is not None:
         step_hint = tuple(int(v) for v in step_override)
@@ -187,6 +186,29 @@ def apply_worker_level(
 
     descriptor = source.level_descriptors[int(level)]
     worker._update_level_metadata(descriptor, applied)  # type: ignore[attr-defined]
+
+    return applied
+
+
+def apply_worker_level(
+    worker: object,
+    source: ZarrSceneSource,
+    level: int,
+    *,
+    prev_level: Optional[int] = None,
+    restoring_plane_state: bool = False,
+    step_override: Optional[Sequence[int]] = None,
+) -> lod.AppliedLevel:
+    """Apply ``level`` and update the napari layer, returning the snapshot."""
+
+    applied = stage_worker_level(
+        worker,
+        source,
+        level,
+        prev_level=prev_level,
+        restoring_plane_state=restoring_plane_state,
+        step_override=step_override,
+    )
 
     if getattr(worker, "use_volume", False):
         apply_worker_volume_level(worker, source, applied)
@@ -251,7 +273,7 @@ def apply_worker_slice_level(
 ) -> None:
     """Apply a slice level and refresh the napari layer state."""
 
-    layer = getattr(worker, "_napari_layer", None)
+    layer = worker._napari_layer
     sy, sx = applied.scale_yx
     if layer is not None:
         try:
@@ -259,52 +281,38 @@ def apply_worker_slice_level(
         except Exception:
             logger.debug("apply_level: setting 2D layer scale pre-slab failed", exc_info=True)
 
-    z_idx = int(worker._z_index or 0)
-    # Rect-driven ROI, no transform fallbacks.
-    # Prefer explicit override set during 3D->2D. Otherwise derive from current PanZoom rect.
-    override = worker._plane_roi_override
-    if override is not None and int(override[0]) == int(applied.level):
-        roi_for_layer = override[1]
-        worker._plane_roi_override = None  # type: ignore[attr-defined]
-    else:
-        view = worker.view
-        assert view is not None, "view must be initialised for 2D apply"
-        cam = view.camera
-        rect = cam.rect  # PanZoomCamera rect must be present in 2D
-        rect_tuple = (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
-        roi_for_layer = rect_world_to_level_roi(worker, source, int(applied.level), rect_tuple)
-
-    # Load slab using the resolved ROI
-    if roi_for_layer is not None:
-        slab = source.slice(int(applied.level), z_idx, compute=True, roi=roi_for_layer)
-    else:
-        slab = worker._load_slice(source, applied.level, z_idx)  # type: ignore[attr-defined]
-
-    if layer is not None:
-        view = worker.view
-        assert view is not None
-        ctx = worker._build_scene_state_context(view.camera)
-        SceneStateApplier.apply_slice_to_layer(
-            ctx,
-            source=source,
-            slab=slab,
-            roi=roi_for_layer,
-            update_contrast=not worker._sticky_contrast,
-        )
-        # Persist last ROI for logging/metrics only; not used for fallback logic.
-        if roi_for_layer is not None:
-            worker._last_roi = (int(applied.level), roi_for_layer)  # type: ignore[attr-defined]
-
-    h, w = int(slab.shape[0]), int(slab.shape[1])
-    worker._data_wh = (w, h)  # type: ignore[attr-defined]
-    worker._data_d = None  # type: ignore[attr-defined]
     view = worker.view
+    assert view is not None, "VisPy view must be initialised for 2D apply"
+
+    pending_restore = worker._pending_plane_restore
+    if pending_restore is not None and int(pending_restore.level) == int(applied.level):
+        override_rect = Rect(*tuple(float(v) for v in pending_restore.rect))
+        view.camera.rect = override_rect
+        roi_for_layer = viewport_roi_for_level(worker, source, int(applied.level))
+        worker._skip_snapshot_once = (
+            int(applied.level),
+            tuple(int(v) for v in pending_restore.step),
+        )
+        worker._pending_plane_restore = None
+        worker._emit_current_camera_pose("plane-restore")  # noqa: SLF001
+    else:
+        roi_for_layer = viewport_roi_for_level(worker, source, int(applied.level))
+        worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
+    height_px, width_px = apply_plane_slice_roi(
+        worker,
+        source,
+        int(applied.level),
+        roi_for_layer,
+        update_contrast=not worker._sticky_contrast,
+    )
+
     if (
         not worker._preserve_view_on_switch
         and view is not None
     ):
-        world_w = float(w) * float(max(1e-12, sx))
-        world_h = float(h) * float(max(1e-12, sy))
+        full_h, full_w = plane_wh_for_level(source, int(applied.level))
+        world_w = float(full_w) * float(max(1e-12, sx))
+        world_h = float(full_h) * float(max(1e-12, sy))
         view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
     worker._layer_logger.log(  # type: ignore[attr-defined]
@@ -312,7 +320,7 @@ def apply_worker_slice_level(
         mode="slice",
         level=applied.level,
         z_index=worker._z_index,
-        shape=(int(h), int(w)),
+        shape=(int(height_px), int(width_px)),
         contrast=applied.contrast,
         downgraded=worker._level_downgraded,  # type: ignore[attr-defined]
     )
@@ -341,11 +349,6 @@ def viewport_roi_for_level(
     quiet: bool = False,
     for_policy: bool = False,
 ) -> SliceROI:
-    # On first 2D frame after 3D exit, ignore the 3D frustum and use full slab
-    if worker._force_full_roi_next_slice:
-        worker._force_full_roi_next_slice = False
-        h, w = plane_wh_for_level(source, int(level))
-        return SliceROI(y_start=0, y_stop=int(h), x_start=0, x_stop=int(w))
     view = getattr(worker, "view", None)
     align_chunks = (not for_policy) and bool(getattr(worker, "_roi_align_chunks", True))
     ensure_contains = (not for_policy) and bool(getattr(worker, "_roi_ensure_contains_viewport", True))
@@ -384,50 +387,6 @@ def viewport_roi_for_level(
         reason=reason,
         logger_ref=logger,
     )
-
-
-def rect_world_to_level_roi(
-    worker: object,
-    source: ZarrSceneSource,
-    level: int,
-    rect_world: tuple[float, float, float, float],
-) -> SliceROI:
-    """Map a world-space camera rect to an integer ROI for a given level.
-
-    Computes (y0:y1, x0:x1) by dividing world coords by level scale and clamps to the
-    level's plane dimensions.
-    """
-    sy, sx = plane_scale_for_level(source, int(level))
-    left, bottom, width_w, height_w = rect_world
-    if logger.isEnabledFor(logging.INFO):
-        logger.info(
-            "roi.rect->level: level=%d rect=(%.3f,%.3f,%.3f,%.3f) scale=(sy=%.6f,sx=%.6f)",
-            int(level), left, bottom, width_w, height_w, float(sy), float(sx)
-        )
-    sxv = float(sx) if float(sx) != 0.0 else 1.0
-    syv = float(sy) if float(sy) != 0.0 else 1.0
-    x0 = int(left / sxv)
-    y0 = int(bottom / syv)
-    x1 = int(x0 + max(1.0, width_w / sxv))
-    y1 = int(y0 + max(1.0, height_w / syv))
-    h, w = plane_wh_for_level(source, int(level))
-    if x0 < 0:
-        x0 = 0
-    if y0 < 0:
-        y0 = 0
-    if x1 > int(w):
-        x1 = int(w)
-    if y1 > int(h):
-        y1 = int(h)
-    roi = SliceROI(y_start=int(y0), y_stop=int(y1), x_start=int(x0), x_stop=int(x1))
-    if logger.isEnabledFor(logging.INFO):
-        logger.info(
-            "roi.level: size=%dx%d roi=(y:%d..%d x:%d..%d) hw=(%d,%d)",
-            int(roi.height), int(roi.width), int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop), int(h), int(w)
-        )
-    return roi
-
-
 def set_level_with_budget(
     worker: object,
     desired_level: int,
@@ -436,7 +395,8 @@ def set_level_with_budget(
     budget_error: type[Exception],
     restoring_plane_state: bool = False,
     step_override: Optional[Sequence[int]] = None,
-) -> None:
+    stage_only: bool = False,
+) -> lod.AppliedLevel:
     source = worker._ensure_scene_source()  # type: ignore[attr-defined]
 
     def _budget_check(scene: ZarrSceneSource, level: int) -> None:
@@ -449,6 +409,15 @@ def set_level_with_budget(
             raise LevelBudgetError(str(exc)) from exc
 
     def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> lod.AppliedLevel:
+        if stage_only:
+            return stage_worker_level(
+                worker,
+                scene,
+                level,
+                prev_level=prev_level,
+                restoring_plane_state=restoring_plane_state,
+                step_override=step_override,
+            )
         return apply_worker_level(
             worker,
             scene,
@@ -490,6 +459,7 @@ def set_level_with_budget(
     worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
     worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
     worker._level_update_cb(applied_snapshot, bool(downgraded))  # type: ignore[operator]
+    return applied_snapshot
 
 
 def perform_level_switch(
@@ -540,15 +510,15 @@ def perform_level_switch(
 
 __all__ = [
     "ensure_scene_source",
-    "notify_scene_refresh",
-    "refresh_worker_slice_if_needed",
     "reset_worker_camera",
+    "stage_worker_level",
     "apply_worker_level",
     "apply_worker_volume_level",
     "apply_worker_slice_level",
     "format_worker_level_roi",
     "viewport_roi_for_level",
-    "rect_world_to_level_roi",
+    "apply_plane_slice_roi",
+    "roi_equal",
     "set_level_with_budget",
     "perform_level_switch",
 ]

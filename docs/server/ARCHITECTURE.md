@@ -24,6 +24,7 @@ This document defines the server‑side architecture for napari‑cuda. It keeps
 - `src/napari_cuda/server/runtime/`
   - `egl_worker.py` — render thread (VisPy + CUDA/NVENC) and mailbox
   - `render_txn.py` — RenderTxn builder/apply (atomic dims/level/camera, fit suppression)
+  - `plane_restore.py` — stage/consume data for deterministic 3D→2D restores
   - `camera_controller.py` — camera delta queue, rect↔ROI helpers, pose snapshots
   - `render_ledger_snapshot.py` — builds the worker snapshot from the ledger (no “scene bag” merge)
 - `src/napari_cuda/server/data/`
@@ -108,6 +109,37 @@ Build from snapshot, apply atomically, then commit applied state:
    - `reduce_level_update(applied, downgraded)`, `reduce_camera_update(pose)`; update per‑mode caches (`camera_plane.*` + `view_cache.plane.*` for 2D, or `camera_volume.*` for 3D); close `scene.op_seq` as `applied`.
 
 This ordering prevents napari’s auto‑fit from running on partial state and eliminates letterbox/flicker on 3D→2D.
+
+### RenderTxn & ROI responsibilities
+
+To keep the call stack shallow, the render transaction owns every mutation that reaches the napari layer:
+
+- Plane restores are staged as data only (level, step, rect, ROI). The worker never applies the slab outside the transaction.
+- `render_txn.apply_render_txn` consumes the staged restore, applies the single slab through `SceneStateApplier`, and clears the staging slot.
+- Refresh logic merely verifies the ROI signature; if nothing changed, it does nothing. There is no second “apply if needed” helper.
+
+### 2D/3D toggle cleanup (in progress)
+
+The codebase is being reshaped to match the architecture above. The refactor removes duplicate helpers and puts the entire toggle pipeline in one place. Planned deletions/renames:
+
+- Drop `_apply_mode_and_level_txn`, `_plane_roi_override`, `_force_full_roi_next_slice`, `_suppress_roi_refresh_frames`, and `_plane_restore_rect_world`.
+- Limit `apply_worker_slice_level` / `apply_worker_volume_level` to the transaction so each slab applies exactly once.
+- Introduce `runtime/plane_restore.py` with `PlaneRestore` and `stage_plane_restore`.
+- Rename staging field to `_pending_plane_restore`; refresh gating uses a simple ROI signature instead of timers.
+
+Expected pipeline (post-cleanup):
+
+```
+stage_plane_restore(...)   # data only, no layer touch
+render_txn.apply_render_txn
+    ├─ apply dims (fit suppressed)
+    ├─ apply_mode_switch (2D↔3D decision)
+    ├─ apply_level_change (returns AppliedLevel)
+    ├─ consume_plane_restore → SceneStateApplier.apply_slice_to_layer (once)
+    └─ emit camera pose (close op fence)
+```
+
+This structure guarantees exactly one slab apply per toggle and keeps ROI logic alongside the transaction that uses it.
 
 ## Mirrors (thin, op‑gated)
 

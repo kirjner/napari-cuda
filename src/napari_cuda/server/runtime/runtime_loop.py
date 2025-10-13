@@ -10,7 +10,6 @@ def run_render_tick(
     *,
     animate_camera: Callable[[], None],
     drain_scene_updates: Callable[[], None],
-    refresh_slice: Callable[[], None],
     render_canvas: Callable[[], None],
     evaluate_policy_if_needed: Callable[[], None],
     mark_tick_complete: Callable[[], None],
@@ -22,7 +21,6 @@ def run_render_tick(
     t0 = perf_counter()
     animate_camera()
     drain_scene_updates()
-    refresh_slice()
     render_canvas()
     evaluate_policy_if_needed()
     mark_tick_complete()

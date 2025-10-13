@@ -60,11 +60,7 @@ from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
 from napari_cuda.server.rendering.capture import CaptureFacade, FrameTimings, encode_frame
 from napari_cuda.server.runtime.runtime_loop import run_render_tick
-from napari_cuda.server.data.roi_applier import (
-    SliceUpdatePlanner,
-    refresh_slice,
-    SliceDataApplier,
-)
+# No direct use of roi_applier here; slice application goes through SceneStateApplier.
 from napari_cuda.server.data.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
@@ -91,14 +87,18 @@ from napari_cuda.server.runtime.worker_runtime import (
     apply_worker_level,
     apply_worker_volume_level,
     apply_worker_slice_level,
+    apply_plane_slice_roi,
+    roi_equal,
     format_worker_level_roi,
     viewport_roi_for_level,
-    rect_world_to_level_roi,
     set_level_with_budget,
     perform_level_switch,
     ensure_scene_source,
-    refresh_worker_slice_if_needed,
     reset_worker_camera,
+)
+from napari_cuda.server.runtime.plane_restore import (
+    PlaneRestore,
+    stage_plane_restore,
 )
 logger = logging.getLogger(__name__)
 
@@ -422,45 +422,18 @@ class EGLRendererWorker:
         lvl_idx = int(lvl_entry.value)
         rect_entry = self._ledger.get("camera_plane", "main", "rect")
         assert rect_entry is not None, "plane camera cache missing rect"
-        left, bottom, width, height = tuple(float(v) for v in rect_entry.value)
+        rect = tuple(float(v) for v in rect_entry.value)
+        step_tuple = tuple(int(v) for v in step_entry.value)
 
-        view = self.view
-        roi_override = rect_world_to_level_roi(self, source, lvl_idx, (left, bottom, width, height))
-        if view is not None:
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            cam = view.camera
-            sy, sx = plane_scale_for_level(source, lvl_idx)
-            h_full, w_full = plane_wh_for_level(source, lvl_idx)
-            world_w = float(w_full) * float(max(1e-12, sx))
-            world_h = float(h_full) * float(max(1e-12, sy))
-            cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-            cam.rect = Rect(left, bottom, width, height)
-            if logger.isEnabledFor(logging.INFO):
-                logger.info(
-                    "toggle.exit_3d: camera.rect=(%.3f,%.3f,%.3f,%.3f)", left, bottom, width, height
-                )
-            # Use viewport resolver to derive the ROI that cartography will
-            # converge on, so the first slab apply matches steady-state.
-            roi_override = viewport_roi_for_level(self, source, lvl_idx, quiet=True)
-
-        self._plane_roi_override = (lvl_idx, roi_override)
-
-        set_level_with_budget(
+        restore = stage_plane_restore(
             self,
-            int(lvl_entry.value),
-            reason="plane-restore",
-            budget_error=self._budget_error_cls,
-            restoring_plane_state=True,
-            step_override=tuple(int(v) for v in step_entry.value),
+            source,
+            lvl_idx,
+            step_tuple,
+            rect,  # type: ignore[arg-type]
         )
+
         self._level_policy_refresh_needed = False
-        if view is not None:
-            # Suppress the immediate per-frame ROI refresh to avoid a duplicate
-            # roi.apply right after the explicit restore.
-            self._suppress_roi_refresh_frames = 2
-            # Commit current 2D camera pose so op fence can close and client
-            # receives the updated plane pose/level without requiring input.
-            self._emit_current_camera_pose(reason="exit-3d")
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -517,12 +490,10 @@ class EGLRendererWorker:
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
         # Cached 2D rect for plane restore
-        self._plane_restore_rect_world: Optional[tuple[float, float, float, float]] = None
-        # One-shot: force next 2D ROI to full slab after 3D exit
-        self._force_full_roi_next_slice: bool = False
-        # Suppress ROI refresh for a few frames after mode/level restores to
-        # avoid racing against transform updates. Decremented in refresh helper.
-        self._suppress_roi_refresh_frames: int = 0
+        # Staged plane restore consumed by the render transaction
+        self._pending_plane_restore: Optional[PlaneRestore] = None
+        # Skip signature to suppress duplicate snapshot immediately after plane restore
+        self._skip_snapshot_once: Optional[tuple[int, tuple[int, ...]]] = None
         # Monotonic sequence for programmatic camera pose commits (op close)
         self._pose_seq: int = 1
         # Track highest command_seq observed from camera deltas
@@ -586,10 +557,6 @@ class EGLRendererWorker:
         self._roi_pad_chunks = 1
         self._idr_on_z = False
         self._last_roi: Optional[tuple[int, SliceROI]] = None
-        # One-shot ROI override for plane restore (level, roi)
-        self._plane_roi_override: Optional[tuple[int, SliceROI]] = None
-        # Bootstrap: request full-slab ROI before the first slice apply
-        self._bootstrap_full_roi: bool = False
 
     def _configure_budget_limits(self) -> None:
         cfg = self._ctx.cfg
@@ -982,22 +949,6 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def _apply_mode_and_level_txn(self, snapshot: RenderLedgerSnapshot) -> None:
-        """Atomically apply 2D/3D mode change and associated level/ROI.
-
-        Decides target mode from ``snapshot.ndisplay``. On 3D entry, switch to
-        coarsest level and configure the Turntable camera. On 3D exit, restore
-        plane level/step and compute a rect-derived ROI override so the first
-        2D slab places correctly. Camera class/rect are applied inside the
-        mode helpers.
-        """
-        nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
-        target_volume = nd >= 3
-        if target_volume and not self.use_volume:
-            self._enter_volume_mode()
-        elif not target_volume and self.use_volume:
-            self._exit_volume_mode()
-
     def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
         viewer = self._viewer
         if viewer is None:
@@ -1170,30 +1121,32 @@ class EGLRendererWorker:
             return
 
         apply_render_txn(self, state)
+
+        has_layer_updates = bool(state.layer_updates)
+        has_volume_updates = any(
+            value is not None
+            for value in (
+                state.volume_mode,
+                state.volume_colormap,
+                state.volume_clim,
+                state.volume_opacity,
+                state.volume_sample_step,
+            )
+        )
+
+        if not has_layer_updates and not has_volume_updates:
+            return
+
         self._render_mailbox.enqueue_scene_state(state_for_queue)
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
         if not commands:
             return
-
-        outcome = _process_camera_deltas(self, commands)
+        # Enqueue ops for the render loop; keep ACK path responsive.
+        self._render_mailbox.enqueue_camera_ops(commands)
+        # Maintain interaction/zoom hint analytics immediately.
         self._last_interaction_ts = time.perf_counter()
         self._record_zoom_hint(commands)
-
-        last_seq = getattr(outcome, "last_command_seq", None)
-        if last_seq is not None:
-            last_seq_int = int(last_seq)
-            self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
-            self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
-
-        if not outcome.camera_changed:
-            return
-        callback = self._camera_pose_callback
-        if callback is None:
-            return
-        pose = self._snapshot_camera_pose(outcome.last_target, outcome.last_command_seq)
-        if pose is not None:
-            callback(pose)
 
     def _apply_camera_reset(self, cam) -> None:
         reset_worker_camera(self, cam)
@@ -1386,10 +1339,6 @@ class EGLRendererWorker:
 
         return encoded.timings, encoded.packet, encoded.flags, encoded.sequence
 
-    # ---- C5 helpers (pure refactor; no behavior change) ---------------------
-    def _refresh_slice_if_needed(self) -> None:
-        refresh_worker_slice_if_needed(self)
-
     def render_tick(self) -> float:
         canvas = self.canvas
         assert canvas is not None, "render_tick requires an initialized canvas"
@@ -1403,13 +1352,44 @@ class EGLRendererWorker:
                 animate_dps=float(self._animate_dps),
                 anim_start=float(self._anim_start),
             ),
-            drain_scene_updates=self.drain_scene_updates,
-            refresh_slice=self._refresh_slice_if_needed,
+            drain_scene_updates=lambda: self._drain_camera_ops_then_scene_updates(),
             render_canvas=canvas.render,
             evaluate_policy_if_needed=self._evaluate_policy_if_needed,
             mark_tick_complete=self._mark_render_tick_complete,
             mark_loop_started=self._mark_render_loop_started,
         )
+
+    def _drain_camera_ops_then_scene_updates(self) -> None:
+        # Apply any queued camera ops on the render thread before scene updates.
+        ops = self._render_mailbox.drain_camera_ops()
+        if ops:
+            outcome = _process_camera_deltas(self, ops)
+            # Update seq baselines from outcome.
+            last_seq = getattr(outcome, "last_command_seq", None)
+            if last_seq is not None:
+                last_seq_int = int(last_seq)
+                self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
+                self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
+
+            if not self.use_volume:
+                source = self._scene_source or self._ensure_scene_source()
+                roi = viewport_roi_for_level(self, source, int(self._active_ms_level))
+                last_roi_entry = self._last_roi
+                last_roi_obj = last_roi_entry[1] if last_roi_entry is not None else None
+                if last_roi_obj is None or not roi_equal(roi, last_roi_obj):
+                    apply_plane_slice_roi(
+                        self,
+                        source,
+                        int(self._active_ms_level),
+                        roi,
+                        update_contrast=False,
+                    )
+
+            # Emit pose once per batch so ledger/client observe the updated camera.
+            self._emit_current_camera_pose(reason="camera-delta")
+
+        # Now drain scene updates (txn, dims, etc.).
+        self.drain_scene_updates()
 
     # ---- C6 selection (napari-anchored) -------------------------------------
     def _evaluate_level_policy(self) -> None:
