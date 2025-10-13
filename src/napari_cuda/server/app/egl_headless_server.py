@@ -713,6 +713,26 @@ class EGLHeadlessServer:
         seq_value = int(level_update.server_seq)
         self._applied_seqs["multiscale"] = seq_value
         self._applied_seqs["dims"] = seq_value
+        # Op close now deferred to camera commit so dims+level+camera can land as one op.
+
+        # Keep the plane view cache in sync with the latest applied level/step
+        # when we are in 2D mode. This ensures 3D->2D restores pick the most
+        # recent plane level even if no camera interaction occurred since the
+        # level change.
+        with self._state_lock:
+            nd_entry = self._state_ledger.get("view", "main", "ndisplay")
+            if nd_entry is not None and int(nd_entry.value) < 3:
+                step_entry = self._state_ledger.get("dims", "main", "current_step")
+                if step_entry is not None:
+                    step_tuple = tuple(int(v) for v in step_entry.value)
+                    cache_entries = [
+                        ("view_cache", "plane", "level", int(applied.level)),
+                        ("view_cache", "plane", "step", step_tuple),
+                    ]
+                    self._state_ledger.batch_record_confirmed(
+                        cache_entries,
+                        origin="worker.state.level",
+                    )
 
     def _commit_applied_camera(
         self,
@@ -758,6 +778,72 @@ class EGLHeadlessServer:
                 self._state_ledger,
                 self._scene,
             )
+
+            # Persist per-mode camera caches for deterministic restores.
+            # Plane cache: camera_plane.* and view_cache.plane.*
+            # Volume cache: camera_volume.*
+            # Decide plane vs volume from presence of angles/distance/fov in applied pose.
+            if pose.angles is None and pose.distance is None and pose.fov is None:
+                # 2D plane pose expected: center, zoom, rect must be present
+                assert pose.center is not None, "plane pose requires center"
+                assert pose.zoom is not None, "plane pose requires zoom"
+                assert pose.rect is not None, "plane pose requires rect"
+
+                lvl_entry = self._state_ledger.get("multiscale", "main", "level")
+                assert lvl_entry is not None, "ledger missing multiscale/level"
+                lvl_value = int(lvl_entry.value)
+                step_entry = self._state_ledger.get("dims", "main", "current_step")
+                assert step_entry is not None, "ledger missing dims/current_step"
+                step_tuple = tuple(int(v) for v in step_entry.value)
+
+                plane_entries = [
+                    ("camera_plane", "main", "center", tuple(float(c) for c in pose.center)),
+                    ("camera_plane", "main", "zoom", float(pose.zoom)),
+                    ("camera_plane", "main", "rect", tuple(float(v) for v in pose.rect)),
+                ]
+                self._state_ledger.batch_record_confirmed(
+                    plane_entries,
+                    origin="worker.state.camera_plane",
+                )
+
+                view_cache_entries = [
+                    ("view_cache", "plane", "level", lvl_value),
+                    ("view_cache", "plane", "step", step_tuple),
+                ]
+                self._state_ledger.batch_record_confirmed(
+                    view_cache_entries,
+                    origin="worker.state.camera_plane",
+                )
+            else:
+                # 3D volume pose expected: center, angles, distance, fov must be present
+                assert pose.center is not None, "volume pose requires center"
+                assert pose.angles is not None, "volume pose requires angles"
+                assert pose.distance is not None, "volume pose requires distance"
+                assert pose.fov is not None, "volume pose requires fov"
+
+                vol_entries = [
+                    ("camera_volume", "main", "center", tuple(float(c) for c in pose.center)),
+                    ("camera_volume", "main", "angles", tuple(float(a) for a in pose.angles)),
+                    ("camera_volume", "main", "distance", float(pose.distance)),
+                    ("camera_volume", "main", "fov", float(pose.fov)),
+                ]
+                self._state_ledger.batch_record_confirmed(
+                    vol_entries,
+                    origin="worker.state.camera_volume",
+                )
+
+        # Close any open op after camera commit so dims+level+camera are atomic for mirrors
+        op_state = self._state_ledger.get("scene", "main", "op_state")
+        if op_state is not None:
+            val = str(op_state.value)
+            if val == "open":
+                self._state_ledger.record_confirmed(
+                    "scene",
+                    "main",
+                    "op_state",
+                    "applied",
+                    origin="worker.state.camera",
+                )
 
         self._schedule_coro(
             _broadcast_camera_update(

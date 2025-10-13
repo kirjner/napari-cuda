@@ -30,7 +30,6 @@ class ServerDimsMirror:
         _Key("view", "main", "ndisplay"),
         _Key("view", "main", "displayed"),
         _Key("dims", "main", "current_step"),
-        _Key("dims", "main", "mode"),
         _Key("dims", "main", "order"),
         _Key("dims", "main", "axis_labels"),
         _Key("dims", "main", "labels"),
@@ -38,6 +37,7 @@ class ServerDimsMirror:
         _Key("multiscale", "main", "levels"),
         _Key("multiscale", "main", "level_shapes"),
         _Key("multiscale", "main", "downgraded"),
+        _Key("scene", "main", "op_state"),
     )
 
     def __init__(
@@ -73,6 +73,14 @@ class ServerDimsMirror:
 
     # ------------------------------------------------------------------
     def _on_ledger_event(self, event: LedgerEvent) -> None:
+        # Gate notifications on op_state if present
+        snap = self._ledger.snapshot()
+        op_entry = snap.get(("scene", "main", "op_state"))
+        if op_entry is not None:
+            text = str(op_entry.value)
+            if text != "applied":
+                return
+
         payload = self._build_payload()
 
         signature = self._compute_signature(payload)
@@ -106,7 +114,6 @@ class ServerDimsMirror:
             ("multiscale", "main", "level"),
             ("multiscale", "main", "levels"),
             ("multiscale", "main", "level_shapes"),
-            ("dims", "main", "mode"),
             ("view", "main", "ndisplay"),
         }
         for key in required:
@@ -117,8 +124,8 @@ class ServerDimsMirror:
         current_level = int(snapshot[("multiscale", "main", "level")].value)
         levels = self._as_level_sequence(snapshot[("multiscale", "main", "levels")].value)
         level_shapes = self._as_shape_sequence(snapshot[("multiscale", "main", "level_shapes")].value)
-        mode = str(snapshot[("dims", "main", "mode")].value)
         ndisplay = int(snapshot[("view", "main", "ndisplay")].value)
+        mode = "volume" if int(ndisplay) >= 3 else "plane"
 
         displayed = self._optional_int_tuple(snapshot.get(("view", "main", "displayed")))
         order = self._optional_int_tuple(snapshot.get(("dims", "main", "order")))

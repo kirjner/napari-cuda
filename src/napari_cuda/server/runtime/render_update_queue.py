@@ -120,7 +120,23 @@ class RenderUpdateQueue:
             if state.current_step is not None
             else None
         )
-        return (center, zoom, angles, distance, fov, current_step)
+        # Include display mode axes in the signature so 2D/3D toggles and
+        # displayed/order changes are not treated as no-ops. Previously, only
+        # camera pose and step were considered, which caused us to skip
+        # applying dims on ndisplay changes and prevented camera class switches
+        # (PanZoom <-> Turntable) from taking effect.
+        ndisplay = int(state.ndisplay) if state.ndisplay is not None else None
+        displayed = (
+            tuple(int(i) for i in state.displayed)
+            if state.displayed is not None
+            else None
+        )
+        order = (
+            tuple(int(i) for i in state.order)
+            if state.order is not None
+            else None
+        )
+        return (center, zoom, angles, distance, fov, current_step, ndisplay, displayed, order)
 
 
 __all__ = [

@@ -553,7 +553,7 @@ def _dims_entries_from_payload(
         )
     )
 
-    entries.append(("dims", "main", "mode", str(payload.mode)))
+    # mode is derived from view.ndisplay; do not persist dims.mode
     if payload.order is not None:
         entries.append(("dims", "main", "order", tuple(int(idx) for idx in payload.order)))
     if payload.axis_labels is not None:
@@ -607,8 +607,8 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     current_level = int(require("multiscale", "level"))
     downgraded_raw = optional("multiscale", "downgraded")
     downgraded = None if downgraded_raw is None else bool(downgraded_raw)
-    mode = str(require("dims", "mode"))
     ndisplay = int(require("view", "ndisplay"))
+    mode = "volume" if int(ndisplay) >= 3 else "plane"
 
     axis_labels_raw = optional("dims", "axis_labels")
     axis_labels = (
@@ -930,7 +930,6 @@ def reduce_view_update(
     ndisplay: Optional[int] = None,
     order: Optional[Sequence[int]] = None,
     displayed: Optional[Sequence[int]] = None,
-    mode: Optional[str] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.view",
@@ -951,7 +950,20 @@ def reduce_view_update(
     target_ndisplay = resolved_ndisplay
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
 
-    target_name = "main"
+    # Open an operation fence for view toggle (op_seq/op_state/op_kind)
+    # Write before any dims/view keys so mirrors can gate intermediate frames.
+    with lock:
+        op_seq = increment_server_sequence(store)
+    ledger.batch_record_confirmed(
+        (
+            ("scene", "main", "op_seq", int(op_seq)),
+            ("scene", "main", "op_state", "open"),
+            ("scene", "main", "op_kind", "view-toggle"),
+        ),
+        origin=origin,
+        timestamp=ts,
+        dedupe=False,
+    )
 
     with lock:
         previous_use_volume = bool(store.use_volume)
@@ -1010,24 +1022,11 @@ def reduce_view_update(
         displayed_count = min(len(order_value), max(1, int(target_ndisplay)))
         displayed_value = tuple(order_value[-displayed_count:]) if displayed_count > 0 else tuple()
 
-    if mode is not None:
-        mode_value = str(mode)
-    else:
-        mode_value = "volume" if target_ndisplay == 3 else "plane"
-
     ledger.record_confirmed(
         "dims",
         "main",
         "order",
         order_value,
-        origin=origin,
-        timestamp=ts,
-    )
-    ledger.record_confirmed(
-        "dims",
-        "main",
-        "mode",
-        mode_value,
         origin=origin,
         timestamp=ts,
     )
@@ -1047,7 +1046,6 @@ def reduce_view_update(
             ndisplay=int(target_ndisplay),
             order=order_value,
             displayed=displayed_value,
-            dims_mode=mode_value,
         )
     return ServerLedgerUpdate(
         scope="view",

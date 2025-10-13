@@ -200,6 +200,8 @@ class ViewerBuilder:
                 scene_src = "napari-zarr-volume"
                 scene_meta = f"level={self._bridge._zarr_level or selected_level} shape={d}x{h}x{w}"
             else:
+                # Bootstrap: request a full-slab ROI for the first slice load
+                self._bridge._bootstrap_full_roi = True
                 slice_array = self._bridge._load_slice(source, selected_level, int(z_index))
                 if self._bridge._log_layer_debug:
                     smin = float(np.nanmin(slice_array))

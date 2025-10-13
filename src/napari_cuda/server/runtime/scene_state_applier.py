@@ -151,18 +151,13 @@ class SceneStateApplier:
             update_contrast=not ctx.sticky_contrast,
         )
 
-        visual = ctx.visual
-        assert visual is not None, "visual must be initialised in 2D mode"
-        visual.set_data(slab)  # type: ignore[attr-defined]
+        # Layer.data update above is sufficient; napari's vispy adapter will
+        # propagate the change to the visual. Avoid calling visual.set_data
+        # here to prevent transient transform resets that can misalign the
+        # viewport ROI.
 
-        # Update camera range unless preserving the view
-        cam = ctx.camera
-        if not ctx.preserve_view_on_switch:
-            assert cam is not None, "camera must be available to update range"
-            h, w = int(slab.shape[0]), int(slab.shape[1])
-            world_w = max(1.0, float(w) * float(max(1e-12, sx)))
-            world_h = max(1.0, float(h) * float(max(1e-12, sy)))
-            cam.set_range(x=(0.0, world_w), y=(0.0, world_h))
+        # Do not call cam.set_range here; preserving the current PanZoom rect
+        # avoids recentring the view on Z-step changes.
 
         if ctx.idr_on_z and ctx.request_encoder_idr is not None:
             ctx.request_encoder_idr()

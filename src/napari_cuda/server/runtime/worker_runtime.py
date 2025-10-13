@@ -81,8 +81,17 @@ def refresh_worker_slice_if_needed(worker) -> None:
     if getattr(worker, "use_volume", False):
         return
 
+    # After 3D->2D restore (or similar transactional applies), defer ROI
+    # refresh for a couple frames so the scene graph transform reflects the
+    # new layer data/scale/translate. This prevents transient, incorrect ROI
+    # computations from clobbering the restored view.
+    suppress = int(getattr(worker, "_suppress_roi_refresh_frames", 0))
+    if suppress > 0:
+        worker._suppress_roi_refresh_frames = suppress - 1  # type: ignore[attr-defined]
+        return
+
     source = getattr(worker, "_scene_source", None)
-    layer = getattr(worker, "_napari_layer", None)
+    layer = worker._napari_layer
     if source is None or layer is None:
         return
 
@@ -122,12 +131,12 @@ def reset_worker_camera(worker, cam) -> None:
     assert cam is not None, "VisPy camera expected"
     assert hasattr(cam, "set_range"), "Camera missing set_range handler"
 
-    data_wh = getattr(worker, "_data_wh", None)
+    data_wh = worker._data_wh
     assert data_wh is not None, "Worker missing _data_wh for camera reset"
     w, h = data_wh
-    data_d = getattr(worker, "_data_d", None)
+    data_d = worker._data_d
 
-    if getattr(worker, "use_volume", False):
+    if worker.use_volume:
         extent = worker._volume_world_extents()  # type: ignore[attr-defined]
         if extent is None:
             depth = data_d or 1
@@ -141,12 +150,13 @@ def reset_worker_camera(worker, cam) -> None:
         worker._frame_volume_camera(world_w, world_h, world_d)  # type: ignore[attr-defined]
         return
 
-    sy = sx = 1.0
-    source = getattr(worker, "_scene_source", None)
-    if source is not None:
-        sy, sx = plane_scale_for_level(source, int(getattr(worker, "_active_ms_level", 0)))
-    world_w = float(w) * float(max(1e-12, sx))
-    world_h = float(h) * float(max(1e-12, sy))
+    # Set camera range to world extents in 2D
+    source = worker._scene_source
+    assert source is not None, "scene source must be initialised for 2D reset"
+    sy, sx = plane_scale_for_level(source, int(worker._active_ms_level))
+    full_h, full_w = plane_wh_for_level(source, int(worker._active_ms_level))
+    world_w = float(full_w) * float(max(1e-12, sx))
+    world_h = float(full_h) * float(max(1e-12, sy))
     cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
 
@@ -250,11 +260,25 @@ def apply_worker_slice_level(
             logger.debug("apply_level: setting 2D layer scale pre-slab failed", exc_info=True)
 
     z_idx = int(worker._z_index or 0)
-    slab = worker._load_slice(source, applied.level, z_idx)  # type: ignore[attr-defined]
-    roi_for_layer = None
-    last_roi = worker._last_roi
-    if last_roi is not None and int(last_roi[0]) == int(applied.level):
-        roi_for_layer = last_roi[1]
+    # Rect-driven ROI, no transform fallbacks.
+    # Prefer explicit override set during 3D->2D. Otherwise derive from current PanZoom rect.
+    override = worker._plane_roi_override
+    if override is not None and int(override[0]) == int(applied.level):
+        roi_for_layer = override[1]
+        worker._plane_roi_override = None  # type: ignore[attr-defined]
+    else:
+        view = worker.view
+        assert view is not None, "view must be initialised for 2D apply"
+        cam = view.camera
+        rect = cam.rect  # PanZoomCamera rect must be present in 2D
+        rect_tuple = (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
+        roi_for_layer = rect_world_to_level_roi(worker, source, int(applied.level), rect_tuple)
+
+    # Load slab using the resolved ROI
+    if roi_for_layer is not None:
+        slab = source.slice(int(applied.level), z_idx, compute=True, roi=roi_for_layer)
+    else:
+        slab = worker._load_slice(source, applied.level, z_idx)  # type: ignore[attr-defined]
 
     if layer is not None:
         view = worker.view
@@ -267,11 +291,13 @@ def apply_worker_slice_level(
             roi=roi_for_layer,
             update_contrast=not worker._sticky_contrast,
         )
+        # Persist last ROI for logging/metrics only; not used for fallback logic.
+        if roi_for_layer is not None:
+            worker._last_roi = (int(applied.level), roi_for_layer)  # type: ignore[attr-defined]
 
     h, w = int(slab.shape[0]), int(slab.shape[1])
     worker._data_wh = (w, h)  # type: ignore[attr-defined]
     worker._data_d = None  # type: ignore[attr-defined]
-
     view = worker.view
     if (
         not worker._preserve_view_on_switch
@@ -299,7 +325,7 @@ def format_worker_level_roi(
 ) -> str:
     """Return the stringified ROI description for logging."""
 
-    if getattr(worker, "use_volume", False):
+    if worker.use_volume:
         return "volume"
     roi = viewport_roi_for_level(worker, source, level)
     if roi.is_empty():
@@ -358,6 +384,48 @@ def viewport_roi_for_level(
         reason=reason,
         logger_ref=logger,
     )
+
+
+def rect_world_to_level_roi(
+    worker: object,
+    source: ZarrSceneSource,
+    level: int,
+    rect_world: tuple[float, float, float, float],
+) -> SliceROI:
+    """Map a world-space camera rect to an integer ROI for a given level.
+
+    Computes (y0:y1, x0:x1) by dividing world coords by level scale and clamps to the
+    level's plane dimensions.
+    """
+    sy, sx = plane_scale_for_level(source, int(level))
+    left, bottom, width_w, height_w = rect_world
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "roi.rect->level: level=%d rect=(%.3f,%.3f,%.3f,%.3f) scale=(sy=%.6f,sx=%.6f)",
+            int(level), left, bottom, width_w, height_w, float(sy), float(sx)
+        )
+    sxv = float(sx) if float(sx) != 0.0 else 1.0
+    syv = float(sy) if float(sy) != 0.0 else 1.0
+    x0 = int(left / sxv)
+    y0 = int(bottom / syv)
+    x1 = int(x0 + max(1.0, width_w / sxv))
+    y1 = int(y0 + max(1.0, height_w / syv))
+    h, w = plane_wh_for_level(source, int(level))
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > int(w):
+        x1 = int(w)
+    if y1 > int(h):
+        y1 = int(h)
+    roi = SliceROI(y_start=int(y0), y_stop=int(y1), x_start=int(x0), x_stop=int(x1))
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "roi.level: size=%dx%d roi=(y:%d..%d x:%d..%d) hw=(%d,%d)",
+            int(roi.height), int(roi.width), int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop), int(h), int(w)
+        )
+    return roi
 
 
 def set_level_with_budget(
@@ -480,6 +548,7 @@ __all__ = [
     "apply_worker_slice_level",
     "format_worker_level_roi",
     "viewport_roi_for_level",
+    "rect_world_to_level_roi",
     "set_level_with_budget",
     "perform_level_switch",
 ]

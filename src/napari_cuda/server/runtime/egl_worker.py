@@ -63,6 +63,7 @@ from napari_cuda.server.runtime.runtime_loop import run_render_tick
 from napari_cuda.server.data.roi_applier import (
     SliceUpdatePlanner,
     refresh_slice,
+    SliceDataApplier,
 )
 from napari_cuda.server.data.roi import (
     plane_scale_for_level,
@@ -76,6 +77,7 @@ from napari_cuda.server.runtime.scene_state_applier import (
 from napari_cuda.server.runtime.camera_controller import process_camera_deltas as _process_camera_deltas
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_txn import apply_render_txn
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.render_update_queue import (
     PendingRenderUpdate,
@@ -91,6 +93,7 @@ from napari_cuda.server.runtime.worker_runtime import (
     apply_worker_slice_level,
     format_worker_level_roi,
     viewport_roi_for_level,
+    rect_world_to_level_roi,
     set_level_with_budget,
     perform_level_switch,
     ensure_scene_source,
@@ -249,6 +252,12 @@ class EGLRendererWorker:
         cam = self.view.camera
         if cam is not None:
             self._apply_camera_reset(cam)
+            # Persist initial camera pose so plane caches exist deterministically
+            callback = self._camera_pose_callback
+            if callback is not None:
+                pose = self._snapshot_camera_pose("main", 1)
+                if pose is not None:
+                    callback(pose)
 
     def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
         """Set napari dims.range to match the chosen level shape.
@@ -356,12 +365,6 @@ class EGLRendererWorker:
     def _enter_volume_mode(self) -> None:
         if self.use_volume:
             return
-        # Cache current 2D camera rect (world coordinates) for plane restore
-        if self.view is not None and isinstance(self.view.camera, scene.cameras.PanZoomCamera):
-            r = self.view.camera.rect
-            self._plane_restore_rect_world = (float(r.left), float(r.bottom), float(r.width), float(r.height))
-        else:
-            self._plane_restore_rect_world = None
         self.use_volume = True
         source = self._ensure_scene_source()
         level = _coarsest_level_index(source)
@@ -378,6 +381,24 @@ class EGLRendererWorker:
         )
         self._level_policy_refresh_needed = False
         self._configure_camera_for_mode()
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("toggle.enter_3d: coarsest_level=%d", int(level))
+        # Apply cached 3D camera pose if present
+        cam = self.view.camera if self.view is not None else None
+        if cam is not None:
+            cen = self._ledger.get("camera_volume", "main", "center")
+            ang = self._ledger.get("camera_volume", "main", "angles")
+            dist = self._ledger.get("camera_volume", "main", "distance")
+            fov = self._ledger.get("camera_volume", "main", "fov")
+            if cen is not None and ang is not None and dist is not None and fov is not None:
+                cx, cy, cz = tuple(float(v) for v in cen.value)
+                az, el, rl = tuple(float(v) for v in ang.value)
+                cam.center = (cx, cy, cz)  # type: ignore[attr-defined]
+                cam.azimuth = float(az)  # type: ignore[attr-defined]
+                cam.elevation = float(el)  # type: ignore[attr-defined]
+                setattr(cam, "roll", float(rl))
+                cam.distance = float(dist.value)  # type: ignore[attr-defined]
+                cam.fov = float(fov.value)  # type: ignore[attr-defined]
         self._request_encoder_idr()
         self._mark_render_tick_needed()
 
@@ -385,45 +406,48 @@ class EGLRendererWorker:
         if not self.use_volume:
             return
         self.use_volume = False
-        # Ensure the first 2D slice does not inherit a tight 3D frustum ROI
-        self._force_full_roi_next_slice = True
-        restore_level = self._ledger_level()
-        restore_step = self._ledger_step()
-        if restore_level is not None and self._plane_restore_rect_world is not None:
-            lvl = int(restore_level)
-            source = self._ensure_scene_source()
-            sy, sx = plane_scale_for_level(source, lvl)
-            left, bottom, width_w, height_w = self._plane_restore_rect_world
-            sxv = float(max(1e-12, sx))
-            syv = float(max(1e-12, sy))
-            x0 = int(left / sxv)
-            y0 = int(bottom / syv)
-            x1 = int(x0 + max(1.0, width_w / sxv))
-            y1 = int(y0 + max(1.0, height_w / syv))
-            h, w = plane_wh_for_level(source, lvl)
-            if x0 < 0:
-                x0 = 0
-            if y0 < 0:
-                y0 = 0
-            if x1 > int(w):
-                x1 = int(w)
-            if y1 > int(h):
-                y1 = int(h)
-            # (No longer install per-level override; use rect only as cached hint if needed)
-        if restore_level is not None:
-            set_level_with_budget(
-                self,
-                int(restore_level),
-                reason="plane-restore",
-                budget_error=self._budget_error_cls,
-                restoring_plane_state=True,
-                step_override=restore_step,
+        # Restore plane target level/step and plane camera rect from caches
+        lvl_entry = self._ledger.get("view_cache", "plane", "level")
+        step_entry = self._ledger.get("view_cache", "plane", "step")
+        assert lvl_entry is not None, "plane restore requires view_cache.plane.level"
+        assert step_entry is not None, "plane restore requires view_cache.plane.step"
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "toggle.exit_3d: restore level=%s step=%s", str(lvl_entry.value), str(step_entry.value)
             )
-            self._level_policy_refresh_needed = False
-        else:
-            self._level_policy_refresh_needed = True
-        self._configure_camera_for_mode()
-        # Keep cached plane rect for compatibility
+        # Prepare rect-derived ROI override for the first 2D slab apply
+        rect_entry = self._ledger.get("camera_plane", "main", "rect")
+        assert rect_entry is not None, "plane camera cache missing rect"
+        left, bottom, width, height = tuple(float(v) for v in rect_entry.value)
+        source = self._ensure_scene_source()
+        lvl_idx = int(lvl_entry.value)
+        roi_override = rect_world_to_level_roi(self, source, lvl_idx, (left, bottom, width, height))
+        self._plane_roi_override = (lvl_idx, roi_override)
+
+        set_level_with_budget(
+            self,
+            int(lvl_entry.value),
+            reason="plane-restore",
+            budget_error=self._budget_error_cls,
+            restoring_plane_state=True,
+            step_override=tuple(int(v) for v in step_entry.value),
+        )
+        self._level_policy_refresh_needed = False
+        # Switch camera to PanZoom and set rect
+        view = self.view
+        if view is not None:
+            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
+            cam = view.camera
+            sy, sx = plane_scale_for_level(source, lvl_idx)
+            h_full, w_full = plane_wh_for_level(source, lvl_idx)
+            world_w = float(w_full) * float(max(1e-12, sx))
+            world_h = float(h_full) * float(max(1e-12, sy))
+            cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+            cam.rect = Rect(left, bottom, width, height)
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "toggle.exit_3d: camera.rect=(%.3f,%.3f,%.3f,%.3f)", left, bottom, width, height
+                )
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -483,6 +507,10 @@ class EGLRendererWorker:
         self._plane_restore_rect_world: Optional[tuple[float, float, float, float]] = None
         # One-shot: force next 2D ROI to full slab after 3D exit
         self._force_full_roi_next_slice: bool = False
+        # Suppress ROI refresh for a few frames after mode/level restores to
+        # avoid racing against transform updates. Decremented in refresh helper.
+        self._suppress_roi_refresh_frames: int = 0
+        
 
     def _init_locks(self, camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]]) -> None:
         self._enc_lock = threading.Lock()
@@ -543,6 +571,8 @@ class EGLRendererWorker:
         self._last_roi: Optional[tuple[int, SliceROI]] = None
         # One-shot ROI override for plane restore (level, roi)
         self._plane_roi_override: Optional[tuple[int, SliceROI]] = None
+        # Bootstrap: request full-slab ROI before the first slice apply
+        self._bootstrap_full_roi: bool = False
 
     def _configure_budget_limits(self) -> None:
         cfg = self._ctx.cfg
@@ -935,18 +965,33 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
-        viewer = self._viewer
-        if viewer is None:
-            return
+    def _apply_mode_and_level_txn(self, snapshot: RenderLedgerSnapshot) -> None:
+        """Atomically apply 2D/3D mode change and associated level/ROI.
 
-        target_volume = bool(snapshot.ndisplay is not None and int(snapshot.ndisplay) >= 3)
-        if snapshot.dims_mode is not None:
-            target_volume = str(snapshot.dims_mode).lower() == "volume"
+        Decides target mode from ``snapshot.ndisplay``. On 3D entry, switch to
+        coarsest level and configure the Turntable camera. On 3D exit, restore
+        plane level/step and compute a rect-derived ROI override so the first
+        2D slab places correctly. Camera class/rect are applied inside the
+        mode helpers.
+        """
+        nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
+        target_volume = nd >= 3
         if target_volume and not self.use_volume:
             self._enter_volume_mode()
         elif not target_volume and self.use_volume:
             self._exit_volume_mode()
+
+    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
+        viewer = self._viewer
+        if viewer is None:
+            return
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "dims.apply: ndisplay=%s order=%s displayed=%s current_step=%s",
+                str(snapshot.ndisplay), str(snapshot.order), str(snapshot.displayed), str(snapshot.current_step)
+            )
+
+        # Mode switches are handled atomically in the render transaction.
 
         dims = viewer.dims
         ndim = int(getattr(dims, "ndim", 0) or 0)
@@ -999,6 +1044,11 @@ class EGLRendererWorker:
         # Finally, apply ndisplay so napari's fit sees consistent ndim/order/displayed
         if snapshot.ndisplay is not None:
             dims.ndisplay = max(1, int(snapshot.ndisplay))
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "dims.applied: ndim=%d order=%s displayed=%s ndisplay=%d",
+                int(dims.ndim), str(tuple(dims.order)), str(tuple(dims.displayed)), int(dims.ndisplay)
+            )
 
 
     def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
@@ -1085,7 +1135,8 @@ class EGLRendererWorker:
     ) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
-        state_for_queue = state if apply_camera_pose else replace(
+        # RenderTxn owns camera application; do not let the mailbox re-apply camera.
+        state_for_queue = replace(
             state,
             center=None,
             zoom=None,
@@ -1095,7 +1146,13 @@ class EGLRendererWorker:
             rect=None,
         )
 
-        self._apply_dims_from_snapshot(state)
+        # Skip redundant applies to reduce log noise and avoid repeated dim toggles
+        changed = self._render_mailbox.update_state_signature(state_for_queue)
+        if not changed:
+            logger.debug("txn.skip: snapshot unchanged; no apply")
+            return
+
+        apply_render_txn(self, state)
         self._render_mailbox.enqueue_scene_state(state_for_queue)
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:

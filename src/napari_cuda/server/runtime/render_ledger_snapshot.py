@@ -79,8 +79,10 @@ def build_ledger_snapshot(
         current_step = tuple(int(v) for v in pending_dims)
         scene.pending_dims_step = None
 
-    dims_mode = _string_or_none(_ledger_value(snapshot, "dims", "main", "mode"))
     ndisplay_val = _int_or_none(_ledger_value(snapshot, "view", "main", "ndisplay"))
+    dims_mode = None
+    if ndisplay_val is not None:
+        dims_mode = "volume" if int(ndisplay_val) >= 3 else "plane"
     displayed_axes = _tuple_or_none(_ledger_value(snapshot, "view", "main", "displayed"), int)
     order_axes = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "order"), int)
     axis_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "axis_labels"), str)
