@@ -569,6 +569,70 @@ def _normalize_camera_value(value: Any) -> Any:
     return value
 
 
+def _float_value(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _positive_float(value: Any) -> Optional[float]:
+    result = _float_value(value)
+    if result is None or result <= 0.0:
+        return None
+    return result
+
+
+def _float_pair(value: Any) -> Optional[tuple[float, float]]:
+    if not isinstance(value, Sequence) or len(value) < 2:
+        return None
+    first = _float_value(value[0])
+    second = _float_value(value[1])
+    if first is None or second is None:
+        return None
+    return float(first), float(second)
+
+
+def _float_triplet(value: Any) -> Optional[tuple[float, float, float]]:
+    if not isinstance(value, Sequence) or len(value) < 3:
+        return None
+    x = _float_value(value[0])
+    y = _float_value(value[1])
+    z = _float_value(value[2])
+    if x is None or y is None or z is None:
+        return None
+    return float(x), float(y), float(z)
+
+
+def _float_rect(value: Any) -> Optional[tuple[float, float, float, float]]:
+    if not isinstance(value, Sequence) or len(value) < 4:
+        return None
+    left = _float_value(value[0])
+    bottom = _float_value(value[1])
+    width = _float_value(value[2])
+    height = _float_value(value[3])
+    if None in (left, bottom, width, height):
+        return None
+    return float(left), float(bottom), float(width), float(height)
+
+
+def _float_sequence(value: Any) -> Optional[tuple[float, ...]]:
+    if not isinstance(value, Sequence) or not value:
+        return None
+    components: list[float] = []
+    for item in value:
+        component = _float_value(item)
+        if component is None:
+            return None
+        components.append(component)
+    return tuple(components)
+
+
+def _string_value(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return str(value)
+    return None
+
+
 async def _broadcast_camera_update(
     server: Any,
     *,
@@ -1100,18 +1164,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             applied_value=int(result.value),
         )
 
-        if was_volume and not server.use_volume:
-            cached_pose = server._scene.plane_camera_cache.get("main")
-            if cached_pose:
-                seq = server._next_camera_command_seq("main")
-                noop_cmd = CameraDeltaCommand(
-                    kind='zoom',
-                    target='main',
-                    command_seq=int(seq),
-                    factor=1.0,
-                )
-                server._enqueue_camera_delta(noop_cmd)
-
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "state.update view intent=%s frame=%s ndisplay=%s accepted",
@@ -1144,54 +1196,46 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 applied_value=applied_value,
             )
 
+        log_camera_info = bool(server._log_cam_info)
+        log_camera_debug = bool(server._log_cam_debug)
+
         def _log_camera(fmt: str, *args: Any) -> None:
-            if getattr(server, "_log_cam_info", False):
+            if log_camera_info:
                 logger.info(fmt, *args)
-            elif getattr(server, "_log_cam_debug", False):
+            elif log_camera_debug:
                 logger.debug(fmt, *args)
 
-        metrics = getattr(server, "metrics", None)
+        metrics = server.metrics if hasattr(server, "metrics") else None
 
         if key == 'zoom':
-            if not isinstance(value, Mapping):
+            payload_map = value if isinstance(value, Mapping) else None
+            if payload_map is None:
                 await _reject(
                     "state.invalid",
                     "camera.zoom requires mapping payload",
                     details={"scope": scope, "key": key},
                 )
                 return True
-            try:
-                factor = float(value.get('factor', 0.0))
-            except Exception:
-                factor = 0.0
-            anchor_raw = value.get('anchor_px')
-            if factor <= 0.0:
+            factor = _positive_float(payload_map.get('factor'))
+            if factor is None:
                 await _reject(
                     "state.invalid",
                     "zoom factor must be positive",
                     details={"scope": scope, "key": key},
                 )
                 return True
-            if not isinstance(anchor_raw, Sequence) or len(anchor_raw) < 2:
+            anchor = _float_pair(payload_map.get('anchor_px'))
+            if anchor is None:
                 await _reject(
                     "state.invalid",
-                    "anchor_px requires [x, y]",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            try:
-                anchor = (float(anchor_raw[0]), float(anchor_raw[1]))
-            except Exception:
-                await _reject(
-                    "state.invalid",
-                    "anchor_px must contain numeric values",
+                    "anchor_px requires numeric [x, y]",
                     details={"scope": scope, "key": key},
                 )
                 return True
 
             ack_value = {
-                "factor": float(factor),
-                "anchor_px": [float(anchor[0]), float(anchor[1])],
+                "factor": factor,
+                "anchor_px": [anchor[0], anchor[1]],
             }
 
             await _ack_camera(ack_value)
@@ -1203,22 +1247,18 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 anchor[1],
             )
             if metrics is not None:
-                with suppress(Exception):
-                    metrics.inc('napari_cuda_state_camera_updates')
+                metrics.inc('napari_cuda_state_camera_updates')
 
-            try:
-                seq = server._next_camera_command_seq(cam_target or "main")
-                server._enqueue_camera_delta(
-                    CameraDeltaCommand(
-                        kind='zoom',
-                        target=cam_target or "main",
-                        command_seq=int(seq),
-                        factor=float(factor),
-                        anchor_px=anchor,
-                    ),
-                )
-            except Exception:
-                logger.debug("camera.zoom enqueue failed", exc_info=True)
+            seq = server._next_camera_command_seq(cam_target or "main")
+            server._enqueue_camera_delta(
+                CameraDeltaCommand(
+                    kind='zoom',
+                    target=cam_target or "main",
+                    command_seq=int(seq),
+                    factor=factor,
+                    anchor_px=anchor,
+                ),
+            )
 
             server._schedule_coro(
                 _broadcast_camera_update(
@@ -1240,37 +1280,34 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     details={"scope": scope, "key": key},
                 )
                 return True
-            try:
-                dx = float(value.get('dx_px', 0.0))
-            except Exception:
-                dx = 0.0
-            try:
-                dy = float(value.get('dy_px', 0.0))
-            except Exception:
-                dy = 0.0
+            dx = _float_value(value.get('dx_px'))
+            dy = _float_value(value.get('dy_px'))
+            if dx is None or dy is None:
+                await _reject(
+                    "state.invalid",
+                    "pan payload must provide numeric dx_px and dy_px",
+                    details={"scope": scope, "key": key},
+                )
+                return True
 
-            ack_value = {"dx_px": dx, "dy_px": dy}
+            ack_value = {"dx_px": float(dx), "dy_px": float(dy)}
 
             await _ack_camera(ack_value)
 
             if dx != 0.0 or dy != 0.0:
                 _log_camera("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
                 if metrics is not None:
-                    with suppress(Exception):
-                        metrics.inc('napari_cuda_state_camera_updates')
-                try:
-                    seq = server._next_camera_command_seq(cam_target or "main")
-                    server._enqueue_camera_delta(
-                        CameraDeltaCommand(
-                            kind='pan',
-                            target=cam_target or "main",
-                            command_seq=int(seq),
-                            dx_px=float(dx),
-                            dy_px=float(dy),
-                        ),
-                    )
-                except Exception:
-                    logger.debug("camera.pan enqueue failed", exc_info=True)
+                    metrics.inc('napari_cuda_state_camera_updates')
+                seq = server._next_camera_command_seq(cam_target or "main")
+                server._enqueue_camera_delta(
+                    CameraDeltaCommand(
+                        kind='pan',
+                        target=cam_target or "main",
+                        command_seq=int(seq),
+                        dx_px=float(dx),
+                        dy_px=float(dy),
+                    ),
+                )
 
                 server._schedule_coro(
                     _broadcast_camera_update(
@@ -1292,38 +1329,34 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     details={"scope": scope, "key": key},
                 )
                 return True
-            try:
-                d_az = float(value.get('d_az_deg', 0.0))
-            except Exception:
-                d_az = 0.0
-            try:
-                d_el = float(value.get('d_el_deg', 0.0))
-            except Exception:
-                d_el = 0.0
+            d_az = _float_value(value.get('d_az_deg'))
+            d_el = _float_value(value.get('d_el_deg'))
+            if d_az is None or d_el is None:
+                await _reject(
+                    "state.invalid",
+                    "orbit payload must provide numeric d_az_deg and d_el_deg",
+                    details={"scope": scope, "key": key},
+                )
+                return True
 
-            ack_value = {"d_az_deg": d_az, "d_el_deg": d_el}
+            ack_value = {"d_az_deg": float(d_az), "d_el_deg": float(d_el)}
 
             await _ack_camera(ack_value)
 
             if d_az != 0.0 or d_el != 0.0:
                 _log_camera("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
                 if metrics is not None:
-                    with suppress(Exception):
-                        metrics.inc('napari_cuda_state_camera_updates')
-                        metrics.inc('napari_cuda_orbit_events')
-                try:
-                    seq = server._next_camera_command_seq(cam_target or "main")
-                    server._enqueue_camera_delta(
-                        CameraDeltaCommand(
-                            kind='orbit',
-                            target=cam_target or "main",
-                            command_seq=int(seq),
-                            d_az_deg=float(d_az),
-                            d_el_deg=float(d_el),
-                        ),
-                    )
-                except Exception:
-                    logger.debug("camera.orbit enqueue failed", exc_info=True)
+                    metrics.inc('napari_cuda_state_camera_updates')
+                seq = server._next_camera_command_seq(cam_target or "main")
+                server._enqueue_camera_delta(
+                    CameraDeltaCommand(
+                        kind='orbit',
+                        target=cam_target or "main",
+                        command_seq=int(seq),
+                        d_az_deg=float(d_az),
+                        d_el_deg=float(d_el),
+                    ),
+                )
 
                 server._schedule_coro(
                     _broadcast_camera_update(
@@ -1338,30 +1371,26 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             return True
 
         if key == 'reset':
-            reason = None
-            if isinstance(value, Mapping):
-                raw_reason = value.get('reason')
-                if raw_reason is not None:
-                    reason = str(raw_reason)
-            elif isinstance(value, str) and value:
-                reason = value
-            else:
-                reason = 'state.update'
+            payload_map = value if isinstance(value, Mapping) else None
+            reason_value = None
+            if payload_map is not None:
+                raw = payload_map.get('reason')
+                if isinstance(raw, str) and raw.strip():
+                    reason_value = str(raw)
+            elif isinstance(value, str) and value.strip():
+                reason_value = str(value)
+            reason = reason_value if reason_value is not None else 'state.update'
 
             await _ack_camera({'reason': reason})
 
             _log_camera("state: camera.reset")
             if metrics is not None:
-                with suppress(Exception):
-                    metrics.inc('napari_cuda_state_camera_updates')
-            try:
-                seq = server._next_camera_command_seq(cam_target or "main")
-                server._enqueue_camera_delta(
-                    CameraDeltaCommand(kind='reset', target=cam_target or "main", command_seq=int(seq)),
-                )
-            except Exception:
-                logger.debug("camera.reset enqueue failed", exc_info=True)
-            if getattr(server, "_idr_on_reset", False) and getattr(server, "_worker", None) is not None:
+                metrics.inc('napari_cuda_state_camera_updates')
+            seq = server._next_camera_command_seq(cam_target or "main")
+            server._enqueue_camera_delta(
+                CameraDeltaCommand(kind='reset', target=cam_target or "main", command_seq=int(seq)),
+            )
+            if server._idr_on_reset and server._worker is not None:
                 server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
 
             server._schedule_coro(
@@ -1385,17 +1414,16 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 )
                 return True
 
-            center_val = value.get('center')
-            zoom_val = value.get('zoom')
-            angles_val = value.get('angles')
-
-            rect_val = value.get('rect')
+            center_tuple = _float_sequence(value.get('center'))
+            zoom_float = _float_value(value.get('zoom'))
+            angles_tuple = _float_triplet(value.get('angles'))
+            rect_tuple = _float_rect(value.get('rect'))
 
             if (
-                center_val is None
-                and zoom_val is None
-                and angles_val is None
-                and rect_val is None
+                center_tuple is None
+                and zoom_float is None
+                and angles_tuple is None
+                and rect_tuple is None
             ):
                 await _reject(
                     "state.invalid",
@@ -1403,76 +1431,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                     details={"scope": scope, "key": key},
                 )
                 return True
-
-            center_tuple: Optional[tuple[float, ...]] = None
-            if center_val is not None:
-                if not isinstance(center_val, Sequence) or not center_val:
-                    await _reject(
-                        "state.invalid",
-                        "camera.center must be a sequence",
-                        details={"scope": scope, "key": key},
-                    )
-                    return True
-                try:
-                    center_tuple = tuple(float(c) for c in center_val)
-                except Exception:
-                    await _reject(
-                        "state.invalid",
-                        "camera.center values must be numeric",
-                        details={"scope": scope, "key": key},
-                    )
-                    return True
-
-            zoom_float: Optional[float] = None
-            if zoom_val is not None:
-                try:
-                    zoom_float = float(zoom_val)
-                except Exception:
-                    await _reject(
-                        "state.invalid",
-                        "camera.zoom must be numeric",
-                        details={"scope": scope, "key": key},
-                    )
-                    return True
-
-            angles_tuple: Optional[tuple[float, float, float]] = None
-            if angles_val is not None:
-                if not isinstance(angles_val, Sequence) or len(angles_val) < 3:
-                    await _reject(
-                        "state.invalid",
-                        "camera.angles requires [az, el, roll]",
-                        details={"scope": scope, "key": key},
-                    )
-                    return True
-                try:
-                    angles_tuple = (
-                        float(angles_val[0]),
-                        float(angles_val[1]),
-                        float(angles_val[2]),
-                    )
-                except Exception:
-                    await _reject(
-                        "state.invalid",
-                        "camera.angles must be numeric",
-                        details={"scope": scope, "key": key},
-                    )
-                    return True
-
-            rect_tuple: Optional[tuple[float, float, float, float]] = None
-            if rect_val is not None:
-                if not isinstance(rect_val, Sequence) or len(rect_val) < 4:
-                    await _reject(
-                        "state.invalid",
-                        "camera.rect requires [left, bottom, width, height]",
-                        details={"scope": scope, "key": key},
-                    )
-                    return True
-                rect_tuple = (
-                    float(rect_val[0]),
-                    float(rect_val[1]),
-                    float(rect_val[2]),
-                    float(rect_val[3]),
-                )
 
             ack_components = reduce_camera_update(
                 server._state_ledger,
@@ -1493,8 +1451,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             )
 
             if metrics is not None:
-                with suppress(Exception):
-                    metrics.inc('napari_cuda_state_camera_updates')
+                metrics.inc('napari_cuda_state_camera_updates')
 
             server._schedule_coro(
                 _broadcast_camera_update(

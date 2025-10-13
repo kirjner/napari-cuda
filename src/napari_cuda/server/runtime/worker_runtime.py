@@ -449,8 +449,6 @@ def perform_level_switch(
         budget_error=budget_error,
         restoring_plane_state=restoring_plane_state,
     )
-    if reason in {"zoom-in", "zoom-out"}:
-        worker._last_zoom_hint_ts = time.perf_counter()  # type: ignore[attr-defined]
     idle_ms = max(0.0, (time.perf_counter() - getattr(worker, "_last_interaction_ts", time.perf_counter())) * 1000.0)
     worker._policy_metrics.record(  # type: ignore[attr-defined]
         policy=getattr(worker, "_policy_name", "oversampling"),

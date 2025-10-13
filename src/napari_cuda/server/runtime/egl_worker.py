@@ -37,6 +37,7 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
 from vispy import scene  # type: ignore
 from vispy.geometry import Rect
+from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
 from napari.components.viewer_model import ViewerModel
 from napari._vispy.layers.image import VispyImageLayer, _napari_cmap_to_vispy
@@ -476,8 +477,6 @@ class EGLRendererWorker:
         if level_update_cb is None:
             raise ValueError("EGLRendererWorker requires level_update callback")
         self._level_update_cb = level_update_cb
-        self._last_zoom_hint_ts = 0.0
-        self._zoom_hint_hold_s = 0.35
         self._data_wh = (int(self.width), int(self.height))
         self._data_d = None
         self._volume_scale = (1.0, 1.0, 1.0)
@@ -1099,10 +1098,105 @@ class EGLRendererWorker:
         self._render_mailbox.enqueue_scene_state(state_for_queue)
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
-        _process_camera_deltas(self, commands)
+        if not commands:
+            return
+
+        outcome = _process_camera_deltas(self, commands)
+        self._last_interaction_ts = time.perf_counter()
+        self._record_zoom_hint(commands)
+
+        if not outcome.camera_changed:
+            return
+        callback = self._camera_pose_callback
+        if callback is None:
+            return
+        pose = self._snapshot_camera_pose(outcome.last_target, outcome.last_command_seq)
+        if pose is not None:
+            callback(pose)
 
     def _apply_camera_reset(self, cam) -> None:
         reset_worker_camera(self, cam)
+
+    def _record_zoom_hint(self, commands: Sequence[CameraDeltaCommand]) -> None:
+        for command in reversed(commands):
+            if command.kind != "zoom":
+                continue
+            if command.factor is None:
+                continue
+            factor = float(command.factor)
+            if factor <= 0.0:
+                continue
+            hint = factor if factor <= 1.0 else 1.0 / factor
+            self._render_mailbox.record_zoom_hint(hint)
+            break
+
+    def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
+        view = self.view
+        if view is None:
+            return None
+        cam = view.camera
+        def _center_tuple(camera) -> Optional[tuple[float, ...]]:
+            center_value = getattr(camera, "center", None)
+            if callable(center_value):
+                center_value = center_value()
+            if center_value is None:
+                return None
+            return tuple(float(component) for component in center_value)
+
+        if isinstance(cam, TurntableCamera):
+            center_tuple = _center_tuple(cam)
+            distance_val = float(cam.distance)
+            fov_val = float(cam.fov)
+            azimuth = float(cam.azimuth)
+            elevation = float(cam.elevation)
+            roll = float(getattr(cam, "roll", 0.0))
+            return CameraPoseApplied(
+                target=str(target or "main"),
+                command_seq=int(command_seq),
+                center=center_tuple,
+                zoom=None,
+                angles=(azimuth, elevation, roll),
+                distance=distance_val,
+                fov=fov_val,
+                rect=None,
+            )
+        if isinstance(cam, PanZoomCamera):
+            center_tuple = _center_tuple(cam)
+            rect_obj = cam.rect
+            rect_tuple: Optional[tuple[float, float, float, float]]
+            if rect_obj is None:
+                rect_tuple = None
+            else:
+                rect_tuple = (
+                    float(rect_obj.left),
+                    float(rect_obj.bottom),
+                    float(rect_obj.width),
+                    float(rect_obj.height),
+                )
+            zoom_attr = cam.zoom
+            if callable(zoom_attr):
+                zoom_attr = getattr(cam, "_zoom", 1.0)
+            zoom_val = float(zoom_attr)
+            return CameraPoseApplied(
+                target=str(target or "main"),
+                command_seq=int(command_seq),
+                center=center_tuple,
+                zoom=zoom_val,
+                angles=None,
+                distance=None,
+                fov=None,
+                rect=rect_tuple,
+            )
+        return CameraPoseApplied(
+            target=str(target or "main"),
+            command_seq=int(command_seq),
+            center=_center_tuple(cam),
+            zoom=None,
+            angles=None,
+            distance=None,
+            fov=None,
+            rect=None,
+        )
 
     def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
         return SceneStateApplyContext(
@@ -1119,7 +1213,7 @@ class EGLRendererWorker:
             sticky_contrast=self._sticky_contrast,
             idr_on_z=self._idr_on_z,
             data_wh=self._data_wh,
-            volume_scale=getattr(self, '_volume_scale', None),
+            volume_scale=self._volume_scale,
             state_lock=self._state_lock,
             ensure_scene_source=self._ensure_scene_source,
             plane_scale_for_level=plane_scale_for_level,
@@ -1255,8 +1349,6 @@ class EGLRendererWorker:
 
         prev = current
         self._last_level_switch_ts = float(outcome.timestamp)
-        if outcome.decision.action in {"zoom-in", "zoom-out"}:
-            self._last_zoom_hint_ts = float(outcome.timestamp)
 
         logger.info(
             "ms.switch: %d -> %d (reason=%s) overs=%s",

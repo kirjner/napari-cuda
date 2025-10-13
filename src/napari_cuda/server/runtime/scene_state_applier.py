@@ -20,6 +20,8 @@ from napari.layers.image._image_constants import ImageRendering as NapariImageRe
 
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.roi_applier import SliceDataApplier
+from vispy.scene.cameras import PanZoomCamera, TurntableCamera
+
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_update_queue import RenderUpdateQueue
 
@@ -414,14 +416,20 @@ class SceneStateApplier:
             )
 
         if state.center is not None:
-            assert hasattr(cam, "center"), "Camera missing center property"
             cam.center = state.center  # type: ignore[attr-defined]
         if state.zoom is not None:
-            assert hasattr(cam, "zoom"), "Camera missing zoom property"
             cam.zoom = state.zoom  # type: ignore[attr-defined]
         if state.angles is not None:
-            assert hasattr(cam, "angles"), "Camera missing angles property"
-            cam.angles = state.angles  # type: ignore[attr-defined]
+            if isinstance(cam, TurntableCamera):
+                az, el, roll = state.angles
+                cam.azimuth = float(az)  # type: ignore[attr-defined]
+                cam.elevation = float(el)  # type: ignore[attr-defined]
+                cam.roll = float(roll)  # type: ignore[attr-defined]
+            elif isinstance(cam, PanZoomCamera):
+                # PanZoomCamera does not use angles; ignore to keep legacy behaviour.
+                pass
+            else:
+                cam.angles = state.angles  # type: ignore[attr-defined]
 
         policy_refresh = render_mailbox.update_state_signature(state)
 

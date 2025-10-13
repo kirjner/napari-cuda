@@ -714,10 +714,16 @@ def handle_generic_ack(
         if confirmed_value is not None:
             state.view_state[key] = confirmed_value
             if key == 'ndisplay':
-                try:
+                if isinstance(confirmed_value, (int, float)):
                     state.dims_meta['ndisplay'] = int(confirmed_value)
-                except Exception:
+                else:
                     state.dims_meta['ndisplay'] = None
+                meta_ndisplay = state.dims_meta.get('ndisplay')
+                if isinstance(meta_ndisplay, (int, float)):
+                    ndisplay_int = int(meta_ndisplay)
+                else:
+                    ndisplay_int = 2
+                state.dims_meta['mode'] = 'volume' if ndisplay_int >= 3 else 'plane'
                 payload = _sync_dims_payload_from_meta(state, loop_state)
                 if presenter is not None:
                     try:

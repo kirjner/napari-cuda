@@ -65,10 +65,7 @@ class ServerDimsMirror:
             self._started = True
         for key in self._WATCH_KEYS:
             self._ledger.subscribe(key.scope, key.target, key.key, self._on_ledger_event)
-        try:
-            payload = self._build_payload()
-        except ValueError:
-            return
+        payload = self._build_payload()
         signature = self._compute_signature(payload)
         with self._lock:
             self._latest_payload = payload
@@ -76,10 +73,7 @@ class ServerDimsMirror:
 
     # ------------------------------------------------------------------
     def _on_ledger_event(self, event: LedgerEvent) -> None:
-        try:
-            payload = self._build_payload()
-        except ValueError:
-            return
+        payload = self._build_payload()
 
         signature = self._compute_signature(payload)
         with self._lock:
@@ -87,22 +81,17 @@ class ServerDimsMirror:
                 return
             self._last_signature = signature
             self._latest_payload = payload
-            origin = str(getattr(event, "origin", "") or "")
 
         if self._on_payload is not None:
             self._on_payload(payload)
-        if origin.startswith("worker."):
-            self._schedule(self._broadcaster(payload), "mirror-dims")
+        self._schedule(self._broadcaster(payload), "mirror-dims")
 
     # ------------------------------------------------------------------
     def latest_payload(self) -> Optional[NotifyDimsPayload]:
         with self._lock:
             if self._latest_payload is not None:
                 return self._latest_payload
-        try:
-            payload = self._build_payload()
-        except ValueError:
-            return None
+        payload = self._build_payload()
         signature = self._compute_signature(payload)
         with self._lock:
             self._latest_payload = payload

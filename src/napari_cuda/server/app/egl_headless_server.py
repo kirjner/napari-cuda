@@ -585,7 +585,6 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._control_loop = loop
-        self._dims_mirror.start()
         if self._zarr_path is None:
             raise RuntimeError("bootstrap requires zarr_path")
         bootstrap_meta = probe_scene_bootstrap(
@@ -617,6 +616,7 @@ class EGLHeadlessServer:
                 ndisplay=bootstrap_meta.ndisplay,
                 origin="server.bootstrap",
             )
+        self._dims_mirror.start()
         self._start_worker(loop)
         try:
             self._update_scene_manager()
