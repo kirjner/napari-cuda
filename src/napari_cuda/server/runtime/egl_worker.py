@@ -401,6 +401,9 @@ class EGLRendererWorker:
                 cam.fov = float(fov.value)  # type: ignore[attr-defined]
         self._request_encoder_idr()
         self._mark_render_tick_needed()
+        # Commit current 3D camera pose so op fence can close and client
+        # receives immediate volume pose, enabling orbit without extra input.
+        self._emit_current_camera_pose(reason="enter-3d")
 
     def _exit_volume_mode(self) -> None:
         if not self.use_volume:
@@ -415,26 +418,14 @@ class EGLRendererWorker:
             logger.info(
                 "toggle.exit_3d: restore level=%s step=%s", str(lvl_entry.value), str(step_entry.value)
             )
-        # Prepare rect-derived ROI override for the first 2D slab apply
+        source = self._ensure_scene_source()
+        lvl_idx = int(lvl_entry.value)
         rect_entry = self._ledger.get("camera_plane", "main", "rect")
         assert rect_entry is not None, "plane camera cache missing rect"
         left, bottom, width, height = tuple(float(v) for v in rect_entry.value)
-        source = self._ensure_scene_source()
-        lvl_idx = int(lvl_entry.value)
-        roi_override = rect_world_to_level_roi(self, source, lvl_idx, (left, bottom, width, height))
-        self._plane_roi_override = (lvl_idx, roi_override)
 
-        set_level_with_budget(
-            self,
-            int(lvl_entry.value),
-            reason="plane-restore",
-            budget_error=self._budget_error_cls,
-            restoring_plane_state=True,
-            step_override=tuple(int(v) for v in step_entry.value),
-        )
-        self._level_policy_refresh_needed = False
-        # Switch camera to PanZoom and set rect
         view = self.view
+        roi_override = rect_world_to_level_roi(self, source, lvl_idx, (left, bottom, width, height))
         if view is not None:
             view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
             cam = view.camera
@@ -448,6 +439,28 @@ class EGLRendererWorker:
                 logger.info(
                     "toggle.exit_3d: camera.rect=(%.3f,%.3f,%.3f,%.3f)", left, bottom, width, height
                 )
+            # Use viewport resolver to derive the ROI that cartography will
+            # converge on, so the first slab apply matches steady-state.
+            roi_override = viewport_roi_for_level(self, source, lvl_idx, quiet=True)
+
+        self._plane_roi_override = (lvl_idx, roi_override)
+
+        set_level_with_budget(
+            self,
+            int(lvl_entry.value),
+            reason="plane-restore",
+            budget_error=self._budget_error_cls,
+            restoring_plane_state=True,
+            step_override=tuple(int(v) for v in step_entry.value),
+        )
+        self._level_policy_refresh_needed = False
+        if view is not None:
+            # Suppress the immediate per-frame ROI refresh to avoid a duplicate
+            # roi.apply right after the explicit restore.
+            self._suppress_roi_refresh_frames = 2
+            # Commit current 2D camera pose so op fence can close and client
+            # receives the updated plane pose/level without requiring input.
+            self._emit_current_camera_pose(reason="exit-3d")
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -510,6 +523,10 @@ class EGLRendererWorker:
         # Suppress ROI refresh for a few frames after mode/level restores to
         # avoid racing against transform updates. Decremented in refresh helper.
         self._suppress_roi_refresh_frames: int = 0
+        # Monotonic sequence for programmatic camera pose commits (op close)
+        self._pose_seq: int = 1
+        # Track highest command_seq observed from camera deltas
+        self._max_camera_command_seq: int = 0
         
 
     def _init_locks(self, camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]]) -> None:
@@ -1163,6 +1180,12 @@ class EGLRendererWorker:
         self._last_interaction_ts = time.perf_counter()
         self._record_zoom_hint(commands)
 
+        last_seq = getattr(outcome, "last_command_seq", None)
+        if last_seq is not None:
+            last_seq_int = int(last_seq)
+            self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
+            self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
+
         if not outcome.camera_changed:
             return
         callback = self._camera_pose_callback
@@ -1187,6 +1210,40 @@ class EGLRendererWorker:
             hint = factor if factor <= 1.0 else 1.0 / factor
             self._render_mailbox.record_zoom_hint(hint)
             break
+
+    def _emit_current_camera_pose(self, reason: str) -> None:
+        """Snapshot and emit the current camera pose for ledger sync."""
+
+        callback = self._camera_pose_callback
+        if callback is None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("pose.emit skipped (no callback) reason=%s", reason)
+            return
+
+        base_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
+        next_seq = base_seq + 1
+        self._pose_seq = int(next_seq)
+        pose = self._snapshot_camera_pose("main", int(next_seq))
+        if pose is None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("pose.emit skipped (no pose) reason=%s seq=%d", reason, int(self._pose_seq))
+            return
+
+        if logger.isEnabledFor(logging.INFO):
+            mode = "volume" if self.use_volume else "plane"
+            rect = pose.rect if pose.rect is not None else None
+            logger.info(
+                "pose.emit: seq=%d reason=%s mode=%s rect=%s center=%s zoom=%s",
+                int(next_seq),
+                reason,
+                mode,
+                rect,
+                pose.center,
+                pose.zoom,
+            )
+
+        callback(pose)
+        self._max_camera_command_seq = max(int(self._max_camera_command_seq), int(next_seq))
 
     def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
         view = self.view
