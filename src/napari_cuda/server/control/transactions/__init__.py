@@ -1,0 +1,12 @@
+"""Control-side ledger transactions.
+
+These helpers batch related ledger writes under the control server's lock so
+that the render thread receives coherent snapshots without relying on worker
+staging state.
+"""
+
+from __future__ import annotations
+
+from .plane_restore import apply_plane_restore_transaction
+
+__all__ = ["apply_plane_restore_transaction"]

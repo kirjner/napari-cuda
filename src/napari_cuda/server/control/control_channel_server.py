@@ -75,6 +75,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_sample_step,
     reduce_view_update,
 )
+from napari_cuda.server.control.transactions import apply_plane_restore_transaction
 from napari_cuda.server.scene import CameraDeltaCommand, layer_controls_from_ledger, layer_controls_to_dict
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
@@ -1149,6 +1150,47 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             pixel_channel.mark_stream_config_dirty(server._pixel_channel)
             server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
             server._applied_seqs["view"] = int(result.server_seq)
+
+            if was_volume and ndisplay == 2:
+                ledger = server._state_ledger
+                scene = server._scene
+                if ledger is not None and scene is not None:
+                    with server._state_lock:
+                        lvl_entry = ledger.get("view_cache", "plane", "level")
+                        step_entry = ledger.get("view_cache", "plane", "step")
+                        center_entry = ledger.get("camera_plane", "main", "center") or ledger.get("camera", "main", "center")
+                        zoom_entry = ledger.get("camera_plane", "main", "zoom") or ledger.get("camera", "main", "zoom")
+                        rect_entry = ledger.get("camera_plane", "main", "rect") or ledger.get("camera", "main", "rect")
+
+                        missing: list[str] = []
+                        if lvl_entry is None:
+                            missing.append("view_cache.plane.level")
+                        if step_entry is None:
+                            missing.append("view_cache.plane.step")
+                        if center_entry is None:
+                            missing.append("camera_plane.center")
+                        if zoom_entry is None:
+                            missing.append("camera_plane.zoom")
+                        if rect_entry is None:
+                            missing.append("camera_plane.rect")
+
+                        if missing:
+                            logger.warning(
+                                "plane_restore skipped due to missing ledger entries: %s",
+                                ", ".join(missing),
+                            )
+                        else:
+                            apply_plane_restore_transaction(
+                                ledger=ledger,
+                                scene=scene,
+                                level=lvl_entry.value,
+                                step=step_entry.value,
+                                center=center_entry.value,
+                                zoom=zoom_entry.value,
+                                rect=rect_entry.value,
+                                origin="client.state.view",
+                                timestamp=timestamp,
+                            )
         except Exception:
             logger.info("state.update view.set_ndisplay failed", exc_info=True)
             await _reject("state.error", "failed to apply ndisplay")

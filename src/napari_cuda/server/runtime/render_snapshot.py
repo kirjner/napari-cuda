@@ -1,9 +1,8 @@
-"""Atomic render transaction scaffolding.
+"""Render snapshot application helpers.
 
-Initial scaffold: route dims application through a single entry point so the
-apply path stays shallow and centralized. Subsequent phases will batch
-dimension updates, level apply, and camera pose application within this
-function to ensure napari never observes partial state.
+These helpers consume a controller-authored render snapshot and apply it to the
+napari viewer model while temporarily suppressing ``fit_to_view`` so the viewer
+never observes a partially-updated dims state.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from napari_cuda.server.runtime.worker_runtime import (
 )
 
 
-def apply_render_txn(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
+def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     """Apply the snapshot atomically, suppressing napari auto-fit during dims.
 
     This ensures that napari's fit_to_view callback does not run against a
@@ -44,22 +43,22 @@ def apply_render_txn(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     od.disconnect(viewer.fit_to_view)
 
     if _l.isEnabledFor(_logging.INFO):
-        _l.info("txn.begin: suppress fit; applying dims")
+        _l.info("snapshot.apply.begin: suppress fit; applying dims")
     worker._apply_dims_from_snapshot(snapshot)  # noqa: SLF001
-    _apply_snapshot(worker, snapshot)
+    _apply_level_state(worker, snapshot)
 
     if _l.isEnabledFor(_logging.INFO):
-        _l.info("txn.end: dims applied; resuming fit callbacks")
+        _l.info("snapshot.apply.end: dims applied; resuming fit callbacks")
 
     # Reconnect fit_to_view so subsequent dims changes behave normally
     nd.connect(viewer.fit_to_view)
     od.connect(viewer.fit_to_view)
 
 
-__all__ = ["apply_render_txn"]
+__all__ = ["apply_render_snapshot"]
 
 
-def _apply_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
+def _apply_level_state(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     """Apply mode + level + ROI inside the transaction."""
 
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2

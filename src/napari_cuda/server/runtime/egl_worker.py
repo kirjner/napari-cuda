@@ -72,7 +72,7 @@ from napari_cuda.server.runtime.scene_state_applier import (
 from napari_cuda.server.runtime.camera_controller import process_camera_deltas as _process_camera_deltas
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_txn import apply_render_txn
+from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.render_update_queue import (
     PendingRenderUpdate,
@@ -1118,7 +1118,7 @@ class EGLRendererWorker:
                 )
             return
 
-        apply_render_txn(self, state)
+        apply_render_snapshot(self, state)
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
         if not commands:
