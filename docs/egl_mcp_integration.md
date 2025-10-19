@@ -2,7 +2,7 @@
 
 ## Goals
 - Embed the FastMCP tool surface directly into the EGL headless server so agents can automate layer and camera workflows without a GUI napari viewer.
-- Reuse existing headless primitives (`ViewerSceneManager`, the ledger-backed `RenderLedgerSnapshot`, `RenderUpdateQueue`) instead of instantiating Qt objects.
+- Reuse existing headless primitives (`ViewerSceneManager`, the ledger-backed `RenderLedgerSnapshot`, `RenderUpdateMailbox`) instead of instantiating Qt objects.
 - Provide a secure, minimal tool set (layer CRUD, camera/dims controls, code execution hook) suitable for research automation.
 - Leave screenshots and other GUI-only behaviors out of scope for this phase.
 
@@ -13,7 +13,7 @@
 - **Ports**: expose MCP on a configurable HTTP port (default disabled) to avoid interfering with existing state/pixel sockets.
 
 ## Architectural Touchpoints
-- **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should route state changes through the same reducers and queues (`RenderUpdateQueue`, ledger-driven dims/camera updates) that the WebSocket state channel uses.
+- **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should route state changes through the same reducers and mailboxes (`RenderUpdateMailbox`, ledger-driven dims/camera updates) that the WebSocket state channel uses.
 - **Scene metadata**: `ViewerSceneManager` can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into it instead of reading napari Viewer objects.
 - **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation functions in `layer_manager.py` or a new helper module that create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
 - **Camera/dims controls**: reuse `_enqueue_camera_delta` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.

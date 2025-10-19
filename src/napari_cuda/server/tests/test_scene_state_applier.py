@@ -13,7 +13,7 @@ from napari_cuda.server.runtime.scene_state_applier import (
     SceneStateApplyContext,
 )
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_update_queue import RenderUpdateQueue
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
 from napari_cuda.server.runtime.scene_types import SliceROI
 
 
@@ -126,7 +126,7 @@ def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
     assert layer.blending == "opaque"
     assert layer.contrast_limits == [10.0, 13.0]
     assert visual.data is not None and np.all(visual.data == layer.data)
-    assert camera.ranges == [((0.0, 1.0), (0.0, 1.0))]
+    assert camera.ranges == []
     assert len(mark_calls) == 1
     assert len(idr_requests) == 1
     assert result.z_index == 1
@@ -385,7 +385,7 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
         request_encoder_idr=None,
     )
 
-    queue = RenderUpdateQueue()
+    queue = RenderUpdateMailbox()
     state = RenderLedgerSnapshot(current_step=(1, 0, 0))
 
     result = SceneStateApplier.drain_updates(ctx, state=state, mailbox=queue)
@@ -425,7 +425,7 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
         request_encoder_idr=None,
     )
 
-    queue = RenderUpdateQueue()
+    queue = RenderUpdateMailbox()
     state = RenderLedgerSnapshot(
         current_step=(1, 0, 0),
         center=(5.0, 6.0, 7.0),

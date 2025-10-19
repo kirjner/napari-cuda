@@ -72,7 +72,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | `display_mode.py` | 175 | Applies napari ndisplay transitions (2D↔3D). |
 | `debug_tools.py` | 176 | Dumps renderer state / GL buffers for diagnostics. |
 | `patterns.py` | 206 | Generates test patterns for validation runs. |
-| `runtime/render_update_queue.py` | 140 | Thread-safe command queue for frame hand-off. |
+| `runtime/render_update_mailbox.py` | 140 | Latest-wins mailbox for render snapshots and camera ops. |
 | `runtime/runtime_loop.py` | 33 | Legacy helper (largely superseded by worker). |
 | `frame_pipeline.py` / `gl_capture.py` | 152 / 177 | Capture helpers (GPU copy, staging). |
 | `vispy_intercept.py` | 267 | Hooks vispy GL calls to integrate with the worker. |

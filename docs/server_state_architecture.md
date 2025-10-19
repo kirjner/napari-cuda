@@ -39,7 +39,7 @@ Mirrors (e.g., ServerDimsMirror)
 
 ### Terminology
 
-- **RenderUpdateQueue** (rename of `RenderMailbox`): carries staged render snapshots and batched camera deltas to the worker.
+- **RenderUpdateMailbox** (latest-wins mailbox): carries staged render snapshots and batched camera deltas to the worker.
 - **ServerStateLedger**: authoritative property store, mirroring the client’s `ClientStateLedger`.
 - **ServerDimsMirror**: subscriber that broadcasts dims/multiscale updates to clients (and any other consumers) once the ledger confirms them.
 - **RenderLedgerSnapshot**: immutable render-thread input built from the ledger; replaces the legacy `ServerSceneState` bag.
@@ -73,8 +73,8 @@ Mirrors (e.g., ServerDimsMirror)
 
 ### Updated Modules
 
-- `src/napari_cuda/server/runtime/render_update_queue.py`
-  - Renamed from the legacy mailbox and now stores `RenderLedgerSnapshot` values.
+- `src/napari_cuda/server/runtime/render_update_mailbox.py`
+  - Latest-wins mailbox holding pending `RenderLedgerSnapshot` values and multiscale requests.
   - Signature tracking ensures the worker only triggers expensive policy refreshes when the snapshot actually changes.
 
 - `src/napari_cuda/server/runtime/worker_lifecycle.py`

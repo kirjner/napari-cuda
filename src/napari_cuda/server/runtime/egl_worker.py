@@ -4,7 +4,7 @@
 the neutral module name reflects its broader responsibilities:
 
 * bootstrap the napari Viewer/VisPy canvas and keep it on the worker thread,
-* drain `RenderUpdateQueue` updates and apply them through `SceneStateApplier`,
+* drain `RenderUpdateMailbox` updates and apply them through `SceneStateApplier`,
 * drive the render loop, including camera animation and policy evaluation,
 * capture frames via `CaptureFacade`, hand them to the encoder, and surface
   timing metadata for downstream metrics.
@@ -74,10 +74,10 @@ from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
 from napari_cuda.server.scene import CameraDeltaCommand
-from napari_cuda.server.runtime.render_update_queue import (
+from napari_cuda.server.runtime.render_update_mailbox import (
     PendingRenderUpdate,
     RenderDelta,
-    RenderUpdateQueue,
+    RenderUpdateMailbox,
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
@@ -509,7 +509,7 @@ class EGLRendererWorker:
     ) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.RLock()
-        self._render_mailbox = RenderUpdateQueue()
+        self._render_mailbox = RenderUpdateMailbox()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
         self._last_ensure_log_ts = 0.0
         self._render_tick_required = False
@@ -1129,9 +1129,20 @@ class EGLRendererWorker:
             return
         # Enqueue ops for the render loop; keep ACK path responsive.
         self._render_mailbox.enqueue_camera_ops(commands)
+        self._mark_render_tick_needed()
+        self._level_policy_refresh_needed = True
+        self._user_interaction_seen = True
         # Maintain interaction/zoom hint analytics immediately.
         self._last_interaction_ts = time.perf_counter()
+        if commands:
+            last = commands[-1]
+            if last.command_seq is not None:
+                self._max_camera_command_seq = max(
+                    int(self._max_camera_command_seq),
+                    int(last.command_seq),
+                )
         self._record_zoom_hint(commands)
+        self._emit_current_camera_pose(reason="camera-delta")
 
     def _apply_camera_reset(self, cam) -> None:
         reset_worker_camera(self, cam)

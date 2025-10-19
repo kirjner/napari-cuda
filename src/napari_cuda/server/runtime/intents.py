@@ -16,6 +16,8 @@ class LevelSwitchIntent:
     previous_level: int
     oversampling: Mapping[int, float]
     timestamp: float
+    zoom_ratio: float | None = None
+    lock_level: int | None = None
 
 
 __all__ = ["LevelSwitchIntent"]

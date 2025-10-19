@@ -23,7 +23,7 @@ from napari_cuda.server.data.roi_applier import SliceDataApplier
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_update_queue import RenderUpdateQueue
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
 
 from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.utils.colormaps.colormap_utils import ensure_colormap
@@ -198,6 +198,10 @@ class SceneStateApplier:
                 else:
                     layer.contrast_limits = [smin, smax]  # type: ignore[assignment]
 
+        visual = ctx.visual
+        if visual is not None and hasattr(visual, "set_data"):
+            visual.set_data(slab)
+
         return sy, sx
 
     @staticmethod
@@ -350,8 +354,7 @@ class SceneStateApplier:
         ctx: SceneStateApplyContext,
         *,
         state: RenderLedgerSnapshot,
-        mailbox: Optional[RenderUpdateQueue] = None,
-        queue: Optional[RenderUpdateQueue] = None,
+        mailbox: Optional[RenderUpdateMailbox] = None,
     ) -> SceneDrainResult:
         """Apply pending scene state updates and report side effects."""
 
@@ -365,9 +368,8 @@ class SceneStateApplier:
 
         ctx_for_apply = replace(ctx, mark_render_tick_needed=_mark_render)
 
-        render_mailbox = mailbox or queue
-        if render_mailbox is None:
-            raise ValueError("RenderUpdateQueue instance required")
+        if mailbox is None:
+            raise ValueError("RenderUpdateMailbox instance required")
 
         z_index = ctx.z_index
         data_wh = ctx.data_wh

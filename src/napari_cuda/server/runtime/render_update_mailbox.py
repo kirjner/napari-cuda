@@ -1,5 +1,4 @@
-
-"""Render-thread command queue for coalescing scene updates before each frame."""
+"""Render-thread mailbox for coalescing scene updates before each frame."""
 
 from __future__ import annotations
 
@@ -24,7 +23,7 @@ class RenderLevelRequest:
 
 @dataclass(frozen=True)
 class RenderDelta:
-    """Delta enqueued by the control thread for the render worker."""
+    """Delta enqueued by the controller for the render worker."""
 
     multiscale: Optional[RenderLevelRequest] = None
     scene_state: Optional[RenderLedgerSnapshot] = None
@@ -46,8 +45,8 @@ class RenderZoomHint:
     timestamp: float
 
 
-class RenderUpdateQueue:
-    """Thread-safe queue that coalesces render updates for the worker."""
+class RenderUpdateMailbox:
+    """Thread-safe mailbox that coalesces render updates for the worker."""
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
@@ -125,7 +124,6 @@ class RenderUpdateQueue:
             self._camera_ops.clear()
             return drained
 
-
     def update_state_signature(self, state: RenderLedgerSnapshot) -> bool:
         signature = self._build_signature(state)
         with self._lock:
@@ -168,7 +166,7 @@ class RenderUpdateQueue:
 __all__ = [
     "RenderDelta",
     "RenderLevelRequest",
-    "RenderUpdateQueue",
+    "RenderUpdateMailbox",
     "RenderZoomHint",
     "PendingRenderUpdate",
 ]

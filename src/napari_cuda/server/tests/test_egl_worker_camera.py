@@ -7,7 +7,7 @@ import pytest
 from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.camera_controller import CameraDeltaOutcome
-from napari_cuda.server.runtime.render_update_queue import RenderUpdateQueue
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.scene import CameraDeltaCommand
 
@@ -28,12 +28,15 @@ class _StubWorker:
         self._debug_orbit = False
         self._debug_reset = False
         self._level_policy_refresh_needed = False
-        self._render_mailbox = RenderUpdateQueue()
+        self._render_mailbox = RenderUpdateMailbox()
         self._user_interaction_seen = False
         self._last_interaction_ts = 0.0
         self._capture = None
         self._camera_pose_callback = None
         self._zoom_hints: list[float] = []
+        self.use_volume = False
+        self._pose_seq = 1
+        self._max_camera_command_seq = 0
 
     def _mark_render_tick_needed(self) -> None:
         pass
@@ -64,6 +67,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     worker._record_zoom_hint = _record_zoom_hint  # type: ignore[assignment]
     worker._camera_pose_callback = captured.append
     worker._snapshot_camera_pose = EGLRendererWorker._snapshot_camera_pose.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
+    worker._emit_current_camera_pose = EGLRendererWorker._emit_current_camera_pose.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
 
     def _fake_process(self, commands):
         self._mark_render_tick_needed()
@@ -91,7 +95,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     assert hint is not None and hint.ratio == pytest.approx(0.8)
     assert len(captured) == 1
     pose = captured[0]
-    assert pose.command_seq == 9
+    assert pose.command_seq == 10
     assert pose.target == "main"
     assert pose.zoom == pytest.approx(2.0)
     assert pose.center is not None

@@ -5,7 +5,7 @@ import math
 import pytest
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_update_queue import RenderUpdateQueue
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
 
 
 class _FakeClock:
@@ -21,7 +21,7 @@ class _FakeClock:
 
 def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
-    mailbox = RenderUpdateQueue(time_fn=clock)
+    mailbox = RenderUpdateMailbox(time_fn=clock)
 
     mailbox.enqueue_multiscale(1, "coarse")
     mailbox.enqueue_multiscale(2, None)
@@ -42,7 +42,7 @@ def test_drain_pending_updates_returns_last_values() -> None:
 
 def test_zoom_hint_recent_then_stale() -> None:
     clock = _FakeClock()
-    mailbox = RenderUpdateQueue(time_fn=clock)
+    mailbox = RenderUpdateMailbox(time_fn=clock)
 
     mailbox.record_zoom_hint(1.2)
     zoom = mailbox.consume_zoom_hint(max_age=0.5)

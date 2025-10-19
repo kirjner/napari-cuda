@@ -69,6 +69,8 @@ from napari_cuda.server.control.state_reducers import (
 )
 from napari_cuda.server.data.lod import AppliedLevel
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
+from napari_cuda.server.runtime.intents import LevelSwitchIntent
+from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
@@ -183,6 +185,8 @@ class EGLHeadlessServer:
         )
         self._seq = 0
         self._worker_lifecycle = WorkerLifecycleState()
+        self._worker_intents = WorkerIntentMailbox()
+        self._pending_level_intents: list[LevelSwitchIntent] = []
         self._scene_manager = ViewerSceneManager((self.width, self.height))
         self._state_ledger = ServerStateLedger()
         self._scene: ServerSceneData = create_server_scene_data(
@@ -293,6 +297,24 @@ class EGLHeadlessServer:
                 queue_len,
                 cmd,
             )
+
+    def _handle_worker_level_intents(self) -> None:
+        intents = self._worker_intents.drain_level_switches()
+        if not intents:
+            return
+
+        with self._state_lock:
+            self._pending_level_intents.extend(intents)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            for intent in intents:
+                logger.debug(
+                    "worker level intent queued: desired=%d prev=%d reason=%s step=%s",
+                    int(intent.desired_level),
+                    int(intent.previous_level),
+                    intent.reason,
+                    intent.step,
+                )
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:
