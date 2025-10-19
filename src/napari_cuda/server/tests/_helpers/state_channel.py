@@ -299,10 +299,6 @@ class StateServerHarness:
     def _build_server(self) -> SimpleNamespace:
         """Create the stub server object expected by control_channel_server."""
 
-        from napari_cuda.server.control import latest_intent
-
-        latest_intent.clear_all()
-
         scene = create_server_scene_data()
         manager = ViewerSceneManager((self.width, self.height))
         worker = CaptureWorker()

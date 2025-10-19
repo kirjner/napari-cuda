@@ -7,7 +7,6 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from napari_cuda.server.control.state_ledger import ServerStateLedger, LedgerEntry
-from napari_cuda.server.control.latest_intent import get_all as latest_get_all
 
 if TYPE_CHECKING:
     from napari_cuda.server.scene import ServerSceneData
@@ -214,38 +213,19 @@ def _shape_sequence(value: Any) -> Optional[tuple[tuple[int, ...], ...]]:
 __all__ = ["RenderLedgerSnapshot", "build_ledger_snapshot"]
 
 
-def pull_render_snapshot(
-    server: Any,
-) -> tuple[RenderLedgerSnapshot, Dict[str, int]]:
-    """Return the current render snapshot plus latest intent metadata."""
+def pull_render_snapshot(server: Any) -> RenderLedgerSnapshot:
+    """Return the current render snapshot."""
 
     with server._state_lock:
         snapshot = build_ledger_snapshot(server._state_ledger, server._scene)
 
-        desired_dims_seq = -1
-        latest_dims = latest_get_all("dims")
-        for _key, (seq, value) in latest_dims.items():
-            seq_int = int(seq)
-            if seq_int >= desired_dims_seq and isinstance(value, (list, tuple)):
-                desired_dims_seq = seq_int
-
-        desired_view_seq = -1
-        latest_view = latest_get_all("view")
-        for _key, (seq, value) in latest_view.items():
-            seq_int = int(seq)
-            # Retain latest sequence for applied comparison even if worker no longer consumes desired ndisplay.
-            if seq_int >= desired_view_seq:
-                desired_view_seq = seq_int
-
-    desired_seqs = {"dims": int(desired_dims_seq), "view": int(desired_view_seq)}
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            "render snapshot pulled step=%s ndisplay=%s desired_seqs=%s",
+            "render snapshot pulled step=%s ndisplay=%s",
             snapshot.current_step,
             snapshot.ndisplay,
-            desired_seqs,
         )
-    return snapshot, desired_seqs
+    return snapshot
 
 
 __all__.append("pull_render_snapshot")

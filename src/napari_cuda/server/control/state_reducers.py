@@ -15,7 +15,6 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 # ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.server.control.latest_intent import set_intent as latest_set_intent
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import (
@@ -772,9 +771,6 @@ def reduce_bootstrap_state(
         mode_value,
         )
 
-    latest_set_intent("dims", axis_target, resolved_step, int(dims_seq))
-    latest_set_intent("view", "ndisplay", resolved_ndisplay, int(view_seq))
-    latest_set_intent("multiscale", "level", resolved_current_level, int(view_seq))
     logger.debug(
         "bootstrap intents seeded axis=%s step=%s ndisplay=%d level=%d seqs(dims=%d,view=%d)",
         axis_target,
@@ -898,7 +894,6 @@ def reduce_dims_update(
         metadata=step_metadata,
     )
 
-    latest_set_intent("dims", control_target, requested_step, int(server_seq))
     logger.debug(
         "dims intent updated axis=%s prop=%s step=%s seq=%d origin=%s",
         control_target,
@@ -974,7 +969,6 @@ def reduce_view_update(
         meta_entry.last_timestamp = ts
         store.use_volume = bool(target_ndisplay == 3)
 
-    latest_set_intent("view", "ndisplay", target_ndisplay, int(server_seq))
     logger.debug(
         "view intent updated ndisplay=%d seq=%d origin=%s",
         target_ndisplay,
@@ -1183,7 +1177,6 @@ def reduce_level_update(
         if downgraded is not None:
             store.multiscale_state["downgraded"] = bool(downgraded)
 
-    latest_set_intent("multiscale", "level", level, int(server_seq))
     logger.debug(
         "multiscale intent updated level=%d seq=%d origin=%s",
         level,

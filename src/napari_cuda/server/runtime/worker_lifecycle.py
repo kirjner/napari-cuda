@@ -201,7 +201,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 bool(worker._zarr_path),
             )
 
-            initial_snapshot, _ = pull_render_snapshot(server)
+            initial_snapshot = pull_render_snapshot(server)
             with server._state_lock:
                 server._scene.latest_state = initial_snapshot
                 server._scene.camera_deltas.clear()
@@ -237,14 +237,14 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             next_tick = time.perf_counter()
 
             while not state.stop_event.is_set():
-                snapshot, desired_seqs = pull_render_snapshot(server)
+                snapshot = pull_render_snapshot(server)
                 with server._state_lock:
                     server._scene.latest_state = snapshot
                     deltas = list(server._scene.camera_deltas)
                     server._scene.camera_deltas.clear()
                 frame_input_step = snapshot.current_step
 
-                # Request view ndisplay if provided by LatestIntent
+                # Request view ndisplay if provided by staged intents
                 if deltas and server._log_state_traces:
                     logger.info("frame camera deltas snapshot count=%d", len(deltas))
 
@@ -281,42 +281,32 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 # Skip entire pipeline if no new desires, no animation/commands, and no explicit render tick
                 applied_dims_seq = int(getattr(server, "_applied_seqs", {}).get("dims", -1))
                 applied_view_seq = int(getattr(server, "_applied_seqs", {}).get("view", -1))
-                desired_dims_seq = int(desired_seqs.get("dims", -1))
-                desired_view_seq = int(desired_seqs.get("view", -1))
-                dims_satisfied = (desired_dims_seq >= 0 and desired_dims_seq <= applied_dims_seq)
-                view_satisfied = (desired_view_seq >= 0 and desired_view_seq <= applied_view_seq)
                 broadcast_state = getattr(server, "_pixel_channel", None)
                 broadcast = getattr(broadcast_state, "broadcast", None)
                 clients_connected = bool(getattr(broadcast, "clients", set()))
                 waiting_for_keyframe = bool(getattr(broadcast, "waiting_for_keyframe", False))
                 logger.debug(
-                    "frame desire seqs dims=%d view=%d applied dims=%d view=%d satisfied(dims=%s view=%s) clients=%d waiting_for_key=%s",
-                    desired_dims_seq,
-                    desired_view_seq,
+                    "frame applied seqs dims=%d view=%d clients=%d waiting_for_key=%s",
                     applied_dims_seq,
                     applied_view_seq,
-                    dims_satisfied,
-                    view_satisfied,
                     len(getattr(broadcast, "clients", set())),
                     waiting_for_keyframe,
                 )
-                if not clients_connected:
-                    if (
-                        dims_satisfied
-                        and view_satisfied
-                        and not deltas
-                        and not server._animate
-                        and not getattr(worker, "_render_tick_required", False)
-                        and not waiting_for_keyframe
-                    ):
-                        logger.debug("frame skip tick: desires satisfied and idle (no clients)")
-                        next_tick += tick
-                        sleep_duration = next_tick - time.perf_counter()
-                        if sleep_duration > 0:
-                            time.sleep(sleep_duration)
-                        else:
-                            next_tick = time.perf_counter()
-                        continue
+                if (
+                    not clients_connected
+                    and not deltas
+                    and not server._animate
+                    and not getattr(worker, "_render_tick_required", False)
+                    and not waiting_for_keyframe
+                ):
+                    logger.debug("frame skip tick: idle (no clients)")
+                    next_tick += tick
+                    sleep_duration = next_tick - time.perf_counter()
+                    if sleep_duration > 0:
+                        time.sleep(sleep_duration)
+                    else:
+                        next_tick = time.perf_counter()
+                    continue
 
                 logger.debug("frame apply proceeding camera_deltas=%d animate=%s", len(deltas), server._animate)
                 worker._consume_render_snapshot(

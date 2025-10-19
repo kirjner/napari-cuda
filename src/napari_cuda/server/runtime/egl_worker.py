@@ -82,6 +82,7 @@ from napari_cuda.server.runtime.render_update_queue import (
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
 from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_runtime import (
     apply_worker_level,
     apply_worker_volume_level,
@@ -131,6 +132,7 @@ class EGLRendererWorker:
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
                  level_update_cb: Callable[[lod.AppliedLevel, bool], None] | None = None,
                  camera_pose_cb: Callable[[CameraPoseApplied], None] | None = None,
+                 level_intent_cb: Callable[[LevelSwitchIntent], None] | None = None,
                  policy_name: Optional[str] = None,
                  *,
                  ctx: ServerCtx,
@@ -152,7 +154,7 @@ class EGLRendererWorker:
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
         self._init_scene_state(level_update_cb)
-        self._init_locks(camera_pose_cb)
+        self._init_locks(camera_pose_cb, level_intent_cb)
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
@@ -500,7 +502,11 @@ class EGLRendererWorker:
         self._max_camera_command_seq: int = 0
         
 
-    def _init_locks(self, camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]]) -> None:
+    def _init_locks(
+        self,
+        camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]],
+        level_intent_cb: Optional[Callable[[LevelSwitchIntent], None]] = None,
+    ) -> None:
         self._enc_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._render_mailbox = RenderUpdateQueue()
@@ -512,6 +518,8 @@ class EGLRendererWorker:
         if camera_pose_cb is None:
             raise ValueError("EGLRendererWorker requires camera_pose callback")
         self._camera_pose_callback = camera_pose_cb
+        self._level_intent_callback = level_intent_cb
+        self._level_switch_pending = False
 
     def _configure_debug_flags(self) -> None:
         worker_dbg = self._debug_policy.worker

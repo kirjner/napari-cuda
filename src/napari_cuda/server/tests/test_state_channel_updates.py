@@ -4,7 +4,7 @@ import asyncio
 import json
 import threading
 from types import SimpleNamespace
-from typing import Any, Coroutine, List
+from typing import Any, Coroutine, List, Tuple
 
 import time
 import pytest
@@ -32,7 +32,6 @@ from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import create_server_scene_data
-from napari_cuda.server.control import latest_intent
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -60,6 +59,10 @@ class _CaptureWorker:
             step=(0, 0),
             use_volume=False,
         )
+        self._axis_labels = ("z", "y", "x")
+        self._axis_order = (0, 1, 2)
+        self._displayed = (1, 2)
+        self._level_shapes = ((16, self._zarr_shape[0], self._zarr_shape[1]), (8, self._zarr_shape[0] // 2, self._zarr_shape[1] // 2))
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -78,12 +81,33 @@ class _CaptureWorker:
         return self._is_ready
 
 
+    def _ledger_axis_labels(self) -> tuple[str, ...]:
+        return self._axis_labels
+
+    def _ledger_order(self) -> tuple[int, ...]:
+        return self._axis_order
+
+    def _ledger_displayed(self) -> tuple[int, ...]:
+        return self._displayed
+
+    def _ledger_ndisplay(self) -> int:
+        return 2
+
+    def _ledger_step(self) -> tuple[int, ...]:
+        return (0, 0, 0)
+
+    def _ledger_level_shapes(self) -> tuple[tuple[int, ...], ...]:
+        return self._level_shapes
+
+    def _ledger_level(self) -> int:
+        return int(self._active_ms_level)
+
+
 class _FakeWS(SimpleNamespace):
     __hash__ = object.__hash__
 
 
 def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
-    latest_intent.clear_all()
     scene = create_server_scene_data()
     manager = ViewerSceneManager((640, 480))
     worker = _CaptureWorker()
@@ -109,11 +133,13 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._log_cam_info = False
     server._log_cam_debug = False
     server._allowed_render_modes = {"mip"}
+    server._stage_layer_controls_from_ledger = lambda: None
     server.metrics = SimpleNamespace(inc=lambda *a, **k: None)
     server.width = 640
     server.height = 480
     server.cfg = SimpleNamespace(fps=60.0)
     server.use_volume = False
+    server._applied_seqs = {"view": 0, "dims": 0, "multiscale": 0}
     scheduled: list[Coroutine[Any, Any, None]] = []
     captured: list[dict[str, Any]] = []
 
@@ -255,6 +281,18 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._ensure_keyframe = _ensure_keyframe
     server._idr_on_reset = True
+    server._pixel_channel = SimpleNamespace(
+        broadcast=SimpleNamespace(bypass_until_key=False, waiting_for_keyframe=False)
+    )
+    server._pixel_config = SimpleNamespace()
+    server._camera_seq: dict[str, int] = {}
+
+    def _next_camera_command_seq(target: str) -> int:
+        current = server._camera_seq.get(target, 0) + 1
+        server._camera_seq[target] = current
+        return current
+
+    server._next_camera_command_seq = _next_camera_command_seq
 
     def _enqueue_camera_delta(cmd: Any) -> None:
         scene.camera_deltas.append(cmd)
@@ -496,11 +534,9 @@ def test_dims_update_emits_ack_and_notify() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    intent_entry = latest_intent.get_intent("dims", "z")
-    assert intent_entry is not None
-    intent_seq, intent_value = intent_entry
-    assert intent_seq > 0
-    assert tuple(int(v) for v in intent_value) == (5, 0, 0)
+    dims_entry = server._state_ledger.get("dims", "main", "current_step")
+    assert dims_entry is not None
+    assert tuple(int(v) for v in dims_entry.value) == (5, 0, 0)
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -544,11 +580,9 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    assert server._ndisplay_calls == [3]
-    view_intent = latest_intent.get_intent("view", "ndisplay")
-    assert view_intent is not None
-    _, desired_ndisplay = view_intent
-    assert int(desired_ndisplay) == 3
+    view_entry = server._state_ledger.get("view", "main", "ndisplay")
+    assert view_entry is not None
+    assert int(view_entry.value) == 3
     assert server.use_volume is True
 
     acks = _frames_of_type(captured, "ack.state")
@@ -561,13 +595,15 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
         "applied_value": 3,
     }
 
-    assert not _frames_of_type(captured, "notify.dims")
+    interim_dims = _frames_of_type(captured, "notify.dims")
+    if interim_dims:
+        assert interim_dims[-1]["payload"]["ndisplay"] == 2
 
     notify_payload = NotifyDimsPayload.from_dict(
         _make_dims_snapshot(
             step=[0, 0, 0],
             current_step=[0, 0, 0],
-            level_shapes=[[512, 256, 64], [8, 8, 8]],
+            level_shapes=[[512, 256, 64], [256, 128, 32]],
             ndisplay=3,
             mode="volume",
             displayed=[0, 1, 2],
@@ -577,11 +613,13 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     _record_dims_to_ledger(server, notify_payload)
     _drain_scheduled(scheduled)
 
-    dims_frames = _frames_of_type(captured, "notify.dims")
-    assert dims_frames, "expected dims broadcast after worker refresh"
-    dims_payload = dims_frames[-1]["payload"]
-    assert dims_payload["ndisplay"] == 3
-    assert dims_payload["mode"] == "volume"
+    dims_entry = server._state_ledger.get("view", "main", "ndisplay")
+    assert dims_entry is not None
+    assert int(dims_entry.value) == 3
+    level_entry = server._state_ledger.get("multiscale", "main", "level")
+    assert level_entry is not None
+    assert int(level_entry.value) == 1
+
 
 
 

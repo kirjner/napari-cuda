@@ -158,7 +158,7 @@ class ServerSceneData:
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
     pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
-    # Removed optimistic dims caches; LatestIntent carries desired state now
+    # Removed optimistic dims caches; staged transactions drive desired state
 
 
 def create_server_scene_data(

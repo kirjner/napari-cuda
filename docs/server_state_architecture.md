@@ -10,6 +10,8 @@ Offensive coding tenets: assert invariants, no fallback branches, surface failur
 - Ensure render worker feedback (dims/multiscale) ingests into the ledger before any broadcasts.
 - Document the concurrency boundary between asyncio control loop and the render worker thread.
 
+> **WN**: This document predates the removal of `LatestIntent`; the current implementation uses controller-staged snapshots and worker intents instead. The narrative below will be updated as part of the ongoing refactor.
+
 ## High-Level Flow
 
 ```
@@ -20,16 +22,15 @@ Reducers (control handlers)
    │                 ┌───────────────────────────────────────────────┐
    │                 │                                               │
    │                 ▼                                               │
-   │        LatestIntent (continuous, latest‑wins)           ControlCommandQueue
-   │        (dims/camera/view/layers per‑key latest)         (discrete, FIFO)
+   │        IntentQueue (level/bootstrap transactions)      ControlCommandQueue
+   │        (worker-originated requests)                    (discrete, FIFO)
    │                 │                                               │
    │                 ▼                                               │
-   │        Render Worker (applied‑first): consumes LatestIntent,    │
-   │        renders from applied snapshot only, then confirms        │
-   │        applied state (dims/level/view/camera/layers).           │
+   │        Controller stages ledger snapshot; worker       │
+   │        applies staged state and captures output.       │
    │                 │                                               │
    ▼                 ▼                                               ▼
-ServerStateLedger ◀── Confirmations (applied)                 Command acks/results
+ServerStateLedger ◀── Applied confirmations                 Command acks/results
    │
    ├─────────▶ notify.dims / notify.scene / notify.layers / notify.camera
    ▼
@@ -38,7 +39,7 @@ Mirrors (e.g., ServerDimsMirror)
 
 ### Terminology
 
-- **RenderUpdateQueue** (rename of `RenderMailbox`): queues discrete commands before the render worker applies them.
+- **RenderUpdateQueue** (rename of `RenderMailbox`): carries staged render snapshots and batched camera deltas to the worker.
 - **ServerStateLedger**: authoritative property store, mirroring the client’s `ClientStateLedger`.
 - **ServerDimsMirror**: subscriber that broadcasts dims/multiscale updates to clients (and any other consumers) once the ledger confirms them.
 - **RenderLedgerSnapshot**: immutable render-thread input built from the ledger; replaces the legacy `ServerSceneState` bag.
@@ -87,7 +88,7 @@ Mirrors (e.g., ServerDimsMirror)
 
 - `src/napari_cuda/server/control/state_reducers.py`
   - For continuous domains (dims/camera/view/layers), reducers normalise and store desired targets in `LatestIntent` with per-key monotonic `seq` tracking.
-  - Discrete commands continue to queue via `ControlCommandQueue`.
+- Discrete camera deltas continue to queue via `ControlCommandQueue`.
   - `ServerStateLedger` remains authoritative; reducers no longer optimistically project into worker snapshots.
 
 - `src/napari_cuda/server/runtime/worker_runtime.py`
@@ -111,7 +112,7 @@ Mirrors (e.g., ServerDimsMirror)
 - **Async control loop (main thread)**:
   - Receives state updates and commands from clients.
   - Writes desired targets into `LatestIntent` for continuous scopes.
-  - Enqueues discrete commands into `ControlCommandQueue`.
+- Enqueues discrete camera delta batches into `ControlCommandQueue`.
   - Receives worker confirmations, writes them into the ledger, and drives mirrors (`notify.dims`, `notify.scene`, etc.).
 
 - **Render worker thread**:
@@ -126,7 +127,7 @@ The ledger is the only authoritative store for applied state. Mirrors subscribe 
 
 - `ClientStateLedger` ↔ `ServerStateLedger`.
 - `napari_dims_mirror` ↔ `ServerDimsMirror`.
-- Client intent emitters ↔ server control handlers writing to `LatestIntent` (continuous) or `ControlCommandQueue` (discrete).
+- Client intent emitters ↔ server control handlers enqueueing transactions or camera deltas.
 - Mirrors broadcast from the ledger after applied confirmations; render worker remains authoritative for multiscale switches and applied camera/layer state.
 
 ## LatestIntent: Continuous Control State

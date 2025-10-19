@@ -11,7 +11,7 @@ from typing import Any
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker_runtime import (
-    stage_worker_level,
+    prepare_worker_level,
     apply_worker_slice_level,
 )
 
@@ -80,7 +80,7 @@ def _apply_level_state(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
         else None
     )
 
-    applied_snapshot = stage_worker_level(
+    applied_snapshot = prepare_worker_level(
         worker,
         source,
         target_level,

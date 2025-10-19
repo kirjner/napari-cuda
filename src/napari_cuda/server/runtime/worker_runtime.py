@@ -159,7 +159,7 @@ def reset_worker_camera(worker, cam) -> None:
 
 
 
-def stage_worker_level(
+def prepare_worker_level(
     worker: object,
     source: ZarrSceneSource,
     level: int,
@@ -201,7 +201,7 @@ def apply_worker_level(
 ) -> lod.AppliedLevel:
     """Apply ``level`` and update the napari layer, returning the snapshot."""
 
-    applied = stage_worker_level(
+    applied = prepare_worker_level(
         worker,
         source,
         level,
@@ -397,7 +397,7 @@ def set_level_with_budget(
 
     def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> lod.AppliedLevel:
         if stage_only:
-            return stage_worker_level(
+            return prepare_worker_level(
                 worker,
                 scene,
                 level,
@@ -494,7 +494,7 @@ def perform_level_switch(
 __all__ = [
     "ensure_scene_source",
     "reset_worker_camera",
-    "stage_worker_level",
+    "prepare_worker_level",
     "apply_worker_level",
     "apply_worker_volume_level",
     "apply_worker_slice_level",
