@@ -372,7 +372,6 @@ class EGLRendererWorker:
             selected_level=level,
             source=source,
             budget_error=self._budget_error_cls,
-            restoring_plane_state=False,
         )
         self._level_policy_refresh_needed = False
         self._configure_camera_for_mode()
@@ -431,14 +430,12 @@ class EGLRendererWorker:
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             cam.rect = Rect(*rect)
 
-        self._restoring_plane = True
         set_level_with_budget(
             self,
             lvl_idx,
             reason="ndisplay-2d",
             budget_error=self._budget_error_cls,
-            restoring_plane_state=True,
-            step_override=step_tuple,
+            ledger_step=step_tuple,
         )
 
         self._level_policy_refresh_needed = False
@@ -497,7 +494,6 @@ class EGLRendererWorker:
         self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
-        self._restoring_plane: bool = False
         # Monotonic sequence for programmatic camera pose commits (op close)
         self._pose_seq: int = 1
         # Track highest command_seq observed from camera deltas

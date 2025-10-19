@@ -315,12 +315,13 @@ def apply_level(
     prev_level: Optional[int],
     last_step: Optional[Sequence[int]],
     viewer: Optional[ViewerModel],
-    restoring_plane_state: bool = False,
+    step_is_authoritative: bool = False,
 ) -> AppliedLevel:
     """Apply target level, update dims, and return the applied snapshot."""
     axes = source.axes
     lower = [str(a).lower() for a in axes]
     desc = source.level_descriptors[target_level]
+    zi = lower.index("z") if "z" in lower else None
 
     prev_shape: Optional[Sequence[int]] = None
     if prev_level is not None and 0 <= int(prev_level) < len(source.level_descriptors):
@@ -328,17 +329,19 @@ def apply_level(
 
     # Current Z guess (None -> derive from last_step)
     cur_z = None
-    if last_step is not None and "z" in lower:
-        zi = lower.index("z")
-        if len(last_step) > zi:
-            try:
-                cur_z = int(last_step[zi])
-            except Exception:
-                cur_z = None
+    if last_step is not None and zi is not None and len(last_step) > zi:
+        try:
+            cur_z = int(last_step[zi])
+        except Exception:
+            cur_z = None
 
-    # Proportional remap if needed
-    if restoring_plane_state:
-        new_z = cur_z
+    if step_is_authoritative and last_step is not None:
+        if zi is not None and len(last_step) > zi:
+            new_z: Optional[int] = int(last_step[zi])
+        elif len(last_step) > 0:
+            new_z = int(last_step[0])
+        else:
+            new_z = None
     else:
         new_z = _proportional_z_remap(
             prev_level=prev_level,
@@ -363,10 +366,15 @@ def apply_level(
 
     # Build step hint and set level
     step_hint: list[int] = [0] * len(desc.shape)
-    if new_z is not None and "z" in lower:
-        zi = lower.index("z")
-        if 0 <= zi < len(step_hint):
+    if step_is_authoritative and last_step is not None:
+        limit = min(len(step_hint), len(last_step))
+        for idx in range(limit):
+            step_hint[idx] = int(last_step[idx])
+    elif new_z is not None:
+        if zi is not None and 0 <= zi < len(step_hint):
             step_hint[zi] = int(new_z)
+        elif step_hint:
+            step_hint[0] = int(new_z)
 
     step = source.set_current_slice(tuple(step_hint), int(target_level))
 

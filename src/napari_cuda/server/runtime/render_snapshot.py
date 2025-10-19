@@ -11,7 +11,6 @@ from typing import Any
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker_runtime import (
-    set_level_with_budget,
     stage_worker_level,
     apply_worker_slice_level,
 )
@@ -64,60 +63,28 @@ def _apply_level_state(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
     target_volume = nd >= 3
 
-    if target_volume and not worker.use_volume:
-        worker._pending_plane_restore = None  # noqa: SLF001
-        worker._enter_volume_mode()
-    elif not target_volume and worker.use_volume:
+    if target_volume:
+        if not worker.use_volume:
+            worker._enter_volume_mode()
+        return
+
+    if worker.use_volume:
         worker._exit_volume_mode()
 
     source = worker._ensure_scene_source()  # noqa: SLF001
-
-    restore = getattr(worker, "_pending_plane_restore", None)
-    skip_signature = getattr(worker, "_skip_snapshot_once", None)
-    if (
-        not target_volume
-        and restore is None
-        and skip_signature is not None
-    ):
-        sig_level, sig_step = skip_signature
-        snap_level = snapshot.current_level
-        snap_step = snapshot.current_step
-        level_matches = snap_level is not None and int(snap_level) == int(sig_level)
-        step_matches = (
-            snap_step is None
-            or tuple(int(v) for v in snap_step) == tuple(int(v) for v in sig_step)
-        )
-        if level_matches and step_matches:
-            worker._skip_snapshot_once = None  # noqa: SLF001
-            return
-        worker._skip_snapshot_once = None  # noqa: SLF001
-
-    if restore is None:
-        if target_volume:
-            return
-        current_level = int(getattr(worker, "_active_ms_level", 0))
-        applied_snapshot = stage_worker_level(
-            worker,
-            source,
-            current_level,
-            prev_level=current_level,
-            restoring_plane_state=False,
-        )
-        apply_worker_slice_level(worker, source, applied_snapshot)
-        return
-
-    applied_snapshot = set_level_with_budget(
-        worker,
-        int(restore.level),
-        reason="plane-restore",
-        budget_error=worker._budget_error_cls,  # noqa: SLF001
-        restoring_plane_state=True,
-        step_override=restore.step,
-        stage_only=True,
+    prev_level = int(worker._active_ms_level)
+    target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
+    ledger_step = (
+        tuple(int(v) for v in snapshot.current_step)
+        if snapshot.current_step is not None
+        else None
     )
 
+    applied_snapshot = stage_worker_level(
+        worker,
+        source,
+        target_level,
+        prev_level=prev_level,
+        ledger_step=ledger_step,
+    )
     apply_worker_slice_level(worker, source, applied_snapshot)
-
-    worker._pending_plane_restore = None  # noqa: SLF001
-    worker.use_volume = False
-    worker._level_policy_refresh_needed = False  # noqa: SLF001

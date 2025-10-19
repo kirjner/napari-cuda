@@ -165,15 +165,16 @@ def stage_worker_level(
     level: int,
     *,
     prev_level: Optional[int] = None,
-    restoring_plane_state: bool = False,
-    step_override: Optional[Sequence[int]] = None,
+    ledger_step: Optional[Sequence[int]] = None,
 ) -> lod.AppliedLevel:
     """Return the ``AppliedLevel`` snapshot without touching the napari layer."""
 
-    if step_override is not None:
-        step_hint = tuple(int(v) for v in step_override)
+    step_authoritative = ledger_step is not None
+    if ledger_step is not None:
+        step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)
     else:
-        step_hint = worker._ledger_step()
+        recorded_step = worker._ledger_step()
+        step_hint = tuple(int(v) for v in recorded_step) if recorded_step is not None else None
 
     applied = lod.apply_level(
         source=source,
@@ -181,7 +182,7 @@ def stage_worker_level(
         prev_level=prev_level,
         last_step=step_hint,
         viewer=getattr(worker, "_viewer", None),
-        restoring_plane_state=restoring_plane_state,
+        step_is_authoritative=step_authoritative,
     )
 
     descriptor = source.level_descriptors[int(level)]
@@ -196,8 +197,7 @@ def apply_worker_level(
     level: int,
     *,
     prev_level: Optional[int] = None,
-    restoring_plane_state: bool = False,
-    step_override: Optional[Sequence[int]] = None,
+    ledger_step: Optional[Sequence[int]] = None,
 ) -> lod.AppliedLevel:
     """Apply ``level`` and update the napari layer, returning the snapshot."""
 
@@ -206,8 +206,7 @@ def apply_worker_level(
         source,
         level,
         prev_level=prev_level,
-        restoring_plane_state=restoring_plane_state,
-        step_override=step_override,
+        ledger_step=ledger_step,
     )
 
     if getattr(worker, "use_volume", False):
@@ -285,9 +284,7 @@ def apply_worker_slice_level(
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
     roi_for_layer = viewport_roi_for_level(worker, source, int(applied.level))
-    restoring_plane = bool(getattr(worker, "_restoring_plane", False))
-    emit_reason = "plane-restore" if restoring_plane else "slice-apply"
-    worker._emit_current_camera_pose(emit_reason)  # noqa: SLF001
+    worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
     height_px, width_px = apply_plane_slice_roi(
         worker,
         source,
@@ -315,8 +312,6 @@ def apply_worker_slice_level(
         downgraded=worker._level_downgraded,  # type: ignore[attr-defined]
     )
 
-    if restoring_plane:
-        worker._restoring_plane = False
 
 
 def format_worker_level_roi(
@@ -386,8 +381,7 @@ def set_level_with_budget(
     *,
     reason: str,
     budget_error: type[Exception],
-    restoring_plane_state: bool = False,
-    step_override: Optional[Sequence[int]] = None,
+    ledger_step: Optional[Sequence[int]] = None,
     stage_only: bool = False,
 ) -> lod.AppliedLevel:
     source = worker._ensure_scene_source()  # type: ignore[attr-defined]
@@ -408,16 +402,14 @@ def set_level_with_budget(
                 scene,
                 level,
                 prev_level=prev_level,
-                restoring_plane_state=restoring_plane_state,
-                step_override=step_override,
+                ledger_step=ledger_step,
             )
         return apply_worker_level(
             worker,
             scene,
             level,
             prev_level=prev_level,
-            restoring_plane_state=restoring_plane_state,
-            step_override=step_override,
+            ledger_step=ledger_step,
         )
 
     def _on_switch(prev_level: int, applied: int, elapsed_ms: float) -> None:
@@ -464,7 +456,6 @@ def perform_level_switch(
     selected_level: Optional[int],
     source: Optional[ZarrSceneSource] = None,
     budget_error: type[Exception],
-    restoring_plane_state: bool = False,
 ) -> None:
     if not getattr(worker, "_zarr_path", None):
         return
@@ -482,7 +473,6 @@ def perform_level_switch(
         target_level,
         reason=reason,
         budget_error=budget_error,
-        restoring_plane_state=restoring_plane_state,
     )
     idle_ms = max(0.0, (time.perf_counter() - getattr(worker, "_last_interaction_ts", time.perf_counter())) * 1000.0)
     worker._policy_metrics.record(  # type: ignore[attr-defined]
