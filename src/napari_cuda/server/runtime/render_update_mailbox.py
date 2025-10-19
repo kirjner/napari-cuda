@@ -22,19 +22,11 @@ class RenderLevelRequest:
 
 
 @dataclass(frozen=True)
-class RenderDelta:
-    """Delta enqueued by the controller for the render worker."""
+class RenderUpdate:
+    """Latest-wins state drained by the render worker."""
 
-    multiscale: Optional[RenderLevelRequest] = None
-    scene_state: Optional[RenderLedgerSnapshot] = None
-
-
-@dataclass(frozen=True)
-class PendingRenderUpdate:
-    """Coalesced updates drained by the render worker."""
-
-    multiscale: Optional[RenderLevelRequest] = None
-    scene_state: Optional[RenderLedgerSnapshot] = None
+    multiscale: Optional[RenderLevelRequest]
+    scene_state: Optional[RenderLedgerSnapshot]
 
 
 @dataclass(frozen=True)
@@ -57,25 +49,20 @@ class RenderUpdateMailbox:
         self._last_signature: Optional[tuple] = None
         self._lock = threading.Lock()
 
-    def enqueue(self, delta: RenderDelta) -> None:
+    def set_multiscale_target(self, level: int, path: Optional[str]) -> None:
         with self._lock:
-            if delta.multiscale is not None:
-                self._multiscale = RenderLevelRequest(
-                    int(delta.multiscale.level),
-                    str(delta.multiscale.path) if delta.multiscale.path else None,
-                )
-            if delta.scene_state is not None:
-                self._scene_state = delta.scene_state
+            self._multiscale = RenderLevelRequest(
+                int(level),
+                str(path) if path else None,
+            )
 
-    def enqueue_multiscale(self, level: int, path: Optional[str]) -> None:
-        self.enqueue(RenderDelta(multiscale=RenderLevelRequest(int(level), str(path) if path else None)))
-
-    def enqueue_scene_state(self, state: RenderLedgerSnapshot) -> None:
-        self.enqueue(RenderDelta(scene_state=state))
-
-    def drain(self) -> PendingRenderUpdate:
+    def set_scene_state(self, state: RenderLedgerSnapshot) -> None:
         with self._lock:
-            drained = PendingRenderUpdate(
+            self._scene_state = state
+
+    def drain(self) -> RenderUpdate:
+        with self._lock:
+            drained = RenderUpdate(
                 multiscale=self._multiscale,
                 scene_state=self._scene_state,
             )
@@ -104,7 +91,7 @@ class RenderUpdateMailbox:
             return zoom
 
     # ---- Camera ops ---------------------------------------------------------
-    def enqueue_camera_ops(self, ops) -> None:
+    def append_camera_ops(self, ops) -> None:
         """Append a batch of camera ops for the render loop to consume.
 
         Type of ``ops`` is intentionally untyped here to avoid a hard import
@@ -164,9 +151,8 @@ class RenderUpdateMailbox:
 
 
 __all__ = [
-    "RenderDelta",
     "RenderLevelRequest",
+    "RenderUpdate",
     "RenderUpdateMailbox",
     "RenderZoomHint",
-    "PendingRenderUpdate",
 ]

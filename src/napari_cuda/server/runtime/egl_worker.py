@@ -74,8 +74,7 @@ from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapsh
 from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.render_update_mailbox import (
-    PendingRenderUpdate,
-    RenderDelta,
+    RenderUpdate,
     RenderUpdateMailbox,
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
@@ -333,7 +332,7 @@ class EGLRendererWorker:
                 int(level),
                 str(path) if path else "<default>",
             )
-        self._render_mailbox.enqueue_multiscale(int(level), str(path) if path else None)
+        self._render_mailbox.set_multiscale_target(int(level), str(path) if path else None)
         self._last_interaction_ts = time.perf_counter()
         self._mark_render_tick_needed()
 
@@ -432,14 +431,42 @@ class EGLRendererWorker:
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             cam.rect = Rect(*rect)
 
-        set_level_with_budget(
-            self,
-            lvl_idx,
+        if self._level_switch_pending:
+            logger.debug("plane restore skipped (pending intent)")
+            return
+
+        decision = lod.LevelDecision(
+            desired_level=int(lvl_idx),
+            selected_level=int(lvl_idx),
             reason="ndisplay-2d",
-            budget_error=self._budget_error_cls,
-            ledger_step=step_tuple,
+            timestamp=time.perf_counter(),
+            oversampling={},
+        )
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=int(self._active_ms_level),
+            last_step=step_tuple,
+            step_authoritative=True,
+        )
+        intent = LevelSwitchIntent(
+            desired_level=int(lvl_idx),
+            selected_level=int(context.level),
+            reason="ndisplay-2d",
+            previous_level=int(self._active_ms_level),
+            context=context,
+            oversampling={},
+            timestamp=decision.timestamp,
+            downgraded=False,
         )
 
+        callback = self._level_intent_callback
+        if callback is None:
+            logger.debug("plane restore intent dropped (no callback)")
+            return
+
+        self._level_switch_pending = True
+        callback(intent)
         self._level_policy_refresh_needed = False
         self._mark_render_tick_needed()
 
@@ -1079,28 +1106,23 @@ class EGLRendererWorker:
             layer_updates=layer_updates,
         )
 
-    def enqueue_update(self, delta: RenderDelta) -> None:
+    def enqueue_update(self, delta: RenderUpdate) -> None:
         """Normalize and enqueue a render delta for the worker mailbox."""
 
         scene_state = None
         if delta.scene_state is not None:
             self._last_interaction_ts = time.perf_counter()
             scene_state = self._normalize_scene_state(delta.scene_state)
-
-        normalized = RenderDelta(
-            display_mode=delta.display_mode,
-            multiscale=delta.multiscale,
-            scene_state=scene_state,
-        )
-
-        if (
-            normalized.display_mode is None
-            and normalized.multiscale is None
-            and normalized.scene_state is None
-        ):
+        if delta.multiscale is not None:
+            self._render_mailbox.set_multiscale_target(
+                int(delta.multiscale.level),
+                delta.multiscale.path,
+            )
+        if scene_state is not None:
+            self._render_mailbox.set_scene_state(scene_state)
+        if delta.multiscale is None and scene_state is None:
             return
 
-        self._render_mailbox.enqueue(normalized)
         self._mark_render_tick_needed()
 
     def _consume_render_snapshot(
@@ -1128,7 +1150,7 @@ class EGLRendererWorker:
         if not commands:
             return
         # Enqueue ops for the render loop; keep ACK path responsive.
-        self._render_mailbox.enqueue_camera_ops(commands)
+        self._render_mailbox.append_camera_ops(commands)
         self._mark_render_tick_needed()
         self._level_policy_refresh_needed = True
         self._user_interaction_seen = True
@@ -1287,7 +1309,7 @@ class EGLRendererWorker:
         )
 
     def drain_scene_updates(self) -> None:
-        updates: PendingRenderUpdate = self._render_mailbox.drain()
+        updates: RenderUpdate = self._render_mailbox.drain()
 
         if updates.multiscale is not None:
             lvl = int(updates.multiscale.level)
@@ -1313,6 +1335,7 @@ class EGLRendererWorker:
             self._z_index = int(drain_res.z_index)
         if drain_res.data_wh is not None:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
+        self._level_switch_pending = False
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
 
@@ -1443,23 +1466,54 @@ class EGLRendererWorker:
             log_layer_debug=self._log_layer_debug,
         )
 
-        prev = current
         self._last_level_switch_ts = float(decision.timestamp)
 
-        logger.info(
-            "ms.switch: %d -> %d (reason=%s) overs=%s",
-            int(prev),
-            int(decision.selected_level),
-            decision.reason,
-            lod.format_oversampling(decision.oversampling),
+        if self._level_switch_pending:
+            logger.debug(
+                "level intent suppressed (pending) prev=%d target=%d reason=%s",
+                int(current),
+                int(decision.selected_level),
+                decision.reason,
+            )
+            return
+
+        step_hint = self._ledger_step()
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=current,
+            last_step=step_hint,
+            step_authoritative=False,
         )
 
-        set_level_with_budget(
-            self,
-            int(decision.selected_level),
+        intent = LevelSwitchIntent(
+            desired_level=int(decision.desired_level),
+            selected_level=int(context.level),
             reason=decision.reason,
-            budget_error=self._budget_error_cls,
+            previous_level=current,
+            context=context,
+            oversampling=decision.oversampling,
+            timestamp=decision.timestamp,
+            downgraded=decision.downgraded,
+            zoom_ratio=zoom_ratio,
+            lock_level=self._lock_level,
         )
+
+        logger.info(
+            "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
+            int(current),
+            int(context.level),
+            decision.reason,
+            intent.downgraded,
+        )
+
+        callback = self._level_intent_callback
+        if callback is None:
+            logger.debug("level intent callback missing; skipping emission")
+            return
+
+        self._level_switch_pending = True
+        callback(intent)
 
     # (packer is now provided by bitstream.py)
 

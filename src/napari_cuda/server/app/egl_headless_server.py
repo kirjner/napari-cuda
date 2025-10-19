@@ -69,6 +69,7 @@ from napari_cuda.server.control.state_reducers import (
 )
 from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
 from napari_cuda.server.runtime.worker_lifecycle import (
@@ -186,7 +187,6 @@ class EGLHeadlessServer:
         self._seq = 0
         self._worker_lifecycle = WorkerLifecycleState()
         self._worker_intents = WorkerIntentMailbox()
-        self._pending_level_intents: list[LevelSwitchIntent] = []
         self._scene_manager = ViewerSceneManager((self.width, self.height))
         self._state_ledger = ServerStateLedger()
         self._scene: ServerSceneData = create_server_scene_data(
@@ -299,22 +299,39 @@ class EGLHeadlessServer:
             )
 
     def _handle_worker_level_intents(self) -> None:
-        intents = self._worker_intents.drain_level_switches()
-        if not intents:
+        intent = self._worker_intents.pop_level_switch()
+        if intent is None:
             return
 
-        with self._state_lock:
-            self._pending_level_intents.extend(intents)
+        worker = self._worker
+        if worker is None:
+            logger.debug("level intent dropped (no active worker)")
+            return
 
-        if logger.isEnabledFor(logging.DEBUG):
-            for intent in intents:
-                logger.debug(
-                    "worker level intent queued: desired=%d prev=%d reason=%s step=%s",
-                    int(intent.desired_level),
-                    int(intent.previous_level),
-                    intent.reason,
-                    intent.step,
-                )
+        self._apply_level_switch_transaction(worker, intent)
+
+    def _apply_level_switch_transaction(
+        self,
+        worker: "EGLRendererWorker",
+        intent: LevelSwitchIntent,
+    ) -> None:
+        context = intent.context
+        downgraded = bool(intent.downgraded)
+
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "apply.level_intent: prev=%d target=%d reason=%s downgraded=%s",
+                int(intent.previous_level),
+                int(context.level),
+                intent.reason,
+                downgraded,
+            )
+
+        self._commit_applied_level(context, downgraded)
+
+        snapshot = build_render_scene_state(self._state_ledger, self._scene)
+        self._scene.latest_state = snapshot
+        worker.enqueue_update(RenderUpdate(multiscale=None, scene_state=snapshot))
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:

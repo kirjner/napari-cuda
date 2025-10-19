@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Tuple
+from typing import Mapping
+
+from napari_cuda.server.data.lod import LevelContext
 
 
 @dataclass(frozen=True)
@@ -11,11 +13,13 @@ class LevelSwitchIntent:
     """Request controller to stage a multiscale level change."""
 
     desired_level: int
-    step: Tuple[int, ...]
+    selected_level: int
     reason: str
     previous_level: int
+    context: LevelContext
     oversampling: Mapping[int, float]
     timestamp: float
+    downgraded: bool
     zoom_ratio: float | None = None
     lock_level: int | None = None
 

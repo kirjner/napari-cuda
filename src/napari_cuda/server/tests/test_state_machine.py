@@ -23,10 +23,10 @@ def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
     mailbox = RenderUpdateMailbox(time_fn=clock)
 
-    mailbox.enqueue_multiscale(1, "coarse")
-    mailbox.enqueue_multiscale(2, None)
+    mailbox.set_multiscale_target(1, "coarse")
+    mailbox.set_multiscale_target(2, None)
     snapshot = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25)
-    mailbox.enqueue_scene_state(snapshot)
+    mailbox.set_scene_state(snapshot)
 
     updates = mailbox.drain()
     assert updates.multiscale is not None
