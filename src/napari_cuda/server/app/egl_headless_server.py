@@ -67,7 +67,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_level_update,
     reduce_camera_update,
 )
-from napari_cuda.server.data.lod import AppliedLevel
+from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
@@ -721,7 +721,7 @@ class EGLHeadlessServer:
 
     def _commit_applied_level(
         self,
-        applied: AppliedLevel,
+        applied: LevelContext,
         downgraded: bool,
     ) -> None:
         level_update = reduce_level_update(

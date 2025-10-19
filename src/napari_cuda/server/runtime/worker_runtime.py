@@ -166,29 +166,37 @@ def prepare_worker_level(
     *,
     prev_level: Optional[int] = None,
     ledger_step: Optional[Sequence[int]] = None,
-) -> lod.AppliedLevel:
-    """Return the ``AppliedLevel`` snapshot without touching the napari layer."""
+    context: Optional[lod.LevelContext] = None,
+) -> lod.LevelContext:
+    """Build the level context and update worker metadata without applying slices."""
 
-    step_authoritative = ledger_step is not None
-    if ledger_step is not None:
-        step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)
-    else:
-        recorded_step = worker._ledger_step()
-        step_hint = tuple(int(v) for v in recorded_step) if recorded_step is not None else None
+    if context is None:
+        step_authoritative = ledger_step is not None
+        if ledger_step is not None:
+            step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)
+        else:
+            recorded_step = worker._ledger_step()
+            step_hint = tuple(int(v) for v in recorded_step) if recorded_step is not None else None
 
-    applied = lod.apply_level(
-        source=source,
-        target_level=int(level),
-        prev_level=prev_level,
-        last_step=step_hint,
-        viewer=getattr(worker, "_viewer", None),
-        step_is_authoritative=step_authoritative,
-    )
+        decision = lod.LevelDecision(
+            desired_level=int(level),
+            selected_level=int(level),
+            reason="direct",
+            timestamp=time.perf_counter(),
+            oversampling={},
+            downgraded=False,
+        )
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=prev_level,
+            last_step=step_hint,
+            step_authoritative=step_authoritative,
+        )
 
-    descriptor = source.level_descriptors[int(level)]
-    worker._update_level_metadata(descriptor, applied)  # type: ignore[attr-defined]
+    _stage_level_context(worker, source, context)
 
-    return applied
+    return context
 
 
 def apply_worker_level(
@@ -198,16 +206,23 @@ def apply_worker_level(
     *,
     prev_level: Optional[int] = None,
     ledger_step: Optional[Sequence[int]] = None,
-) -> lod.AppliedLevel:
+    context: Optional[lod.LevelContext] = None,
+    staged: bool = False,
+) -> lod.LevelContext:
     """Apply ``level`` and update the napari layer, returning the snapshot."""
 
-    applied = prepare_worker_level(
-        worker,
-        source,
-        level,
-        prev_level=prev_level,
-        ledger_step=ledger_step,
-    )
+    applied = context
+    if applied is None:
+        applied = prepare_worker_level(
+            worker,
+            source,
+            level,
+            prev_level=prev_level,
+            ledger_step=ledger_step,
+        )
+        staged = True
+    elif not staged:
+        _stage_level_context(worker, source, applied)
 
     if getattr(worker, "use_volume", False):
         apply_worker_volume_level(worker, source, applied)
@@ -221,7 +236,7 @@ def apply_worker_level(
 def apply_worker_volume_level(
     worker: object,
     source: ZarrSceneSource,
-    applied: lod.AppliedLevel,
+    applied: lod.LevelContext,
 ) -> None:
     """Apply a volume level and emit layer logging via the worker hooks."""
 
@@ -268,7 +283,7 @@ def apply_worker_volume_level(
 def apply_worker_slice_level(
     worker: object,
     source: ZarrSceneSource,
-    applied: lod.AppliedLevel,
+    applied: lod.LevelContext,
 ) -> None:
     """Apply a slice level and refresh the napari layer state."""
 
@@ -311,6 +326,24 @@ def apply_worker_slice_level(
         contrast=applied.contrast,
         downgraded=worker._level_downgraded,  # type: ignore[attr-defined]
     )
+
+
+def _stage_level_context(
+    worker: object,
+    source: ZarrSceneSource,
+    context: lod.LevelContext,
+) -> None:
+    """Synchronize viewer metadata for the provided context."""
+
+    viewer = getattr(worker, "_viewer", None)
+    if viewer is not None:
+        set_range = getattr(worker, "_set_dims_range_for_level", None)
+        if callable(set_range):
+            set_range(source, int(context.level))
+        viewer.dims.current_step = tuple(int(v) for v in context.step)
+
+    descriptor = source.level_descriptors[int(context.level)]
+    worker._update_level_metadata(descriptor, context)  # type: ignore[attr-defined]
 
 
 
@@ -383,7 +416,7 @@ def set_level_with_budget(
     budget_error: type[Exception],
     ledger_step: Optional[Sequence[int]] = None,
     stage_only: bool = False,
-) -> lod.AppliedLevel:
+) -> lod.LevelContext:
     source = worker._ensure_scene_source()  # type: ignore[attr-defined]
 
     def _budget_check(scene: ZarrSceneSource, level: int) -> None:
@@ -395,55 +428,90 @@ def set_level_with_budget(
         except budget_error as exc:
             raise LevelBudgetError(str(exc)) from exc
 
-    def _apply(scene: ZarrSceneSource, level: int, prev_level: Optional[int]) -> lod.AppliedLevel:
-        if stage_only:
-            return prepare_worker_level(
-                worker,
-                scene,
-                level,
-                prev_level=prev_level,
-                ledger_step=ledger_step,
-            )
-        return apply_worker_level(
-            worker,
-            scene,
-            level,
-            prev_level=prev_level,
-            ledger_step=ledger_step,
-        )
+    prev_level = int(getattr(worker, "_active_ms_level", 0))
 
-    def _on_switch(prev_level: int, applied: int, elapsed_ms: float) -> None:
-        roi_desc = format_worker_level_roi(worker, source, applied)
-        worker._switch_logger.log(  # type: ignore[attr-defined]
-            enabled=getattr(worker, "_log_layer_debug", False),
-            previous=prev_level,
-            applied=applied,
-            roi_desc=roi_desc,
-            reason=reason,
-            elapsed_ms=elapsed_ms,
-        )
-        worker._mark_render_tick_needed()  # type: ignore[attr-defined]
+    policy_ctx = worker._build_policy_context(source, requested_level=desired_level)  # type: ignore[attr-defined]
+    overs_map = dict(policy_ctx.level_oversampling)
+
+    decision = lod.LevelDecision(
+        desired_level=int(desired_level),
+        selected_level=int(desired_level),
+        reason=reason,
+        timestamp=time.perf_counter(),
+        oversampling=overs_map,
+        downgraded=False,
+    )
 
     try:
-        applied_snapshot, downgraded = lod.apply_level_with_context(
-            desired_level=desired_level,
-            use_volume=getattr(worker, "use_volume", False),
+        decision = lod.enforce_budgets(
+            decision,
             source=source,
-            current_level=int(getattr(worker, "_active_ms_level", 0)),
-            log_layer_debug=getattr(worker, "_log_layer_debug", False),
+            use_volume=getattr(worker, "use_volume", False),
             budget_check=_budget_check,
-            apply_level_fn=_apply,
-            on_switch=_on_switch,
-            roi_cache=getattr(worker, "_roi_cache", None),
-            roi_log_state=getattr(worker, "_roi_log_state", None),
+            log_layer_debug=getattr(worker, "_log_layer_debug", False),
         )
     except LevelBudgetError as exc:
         raise budget_error(str(exc)) from exc
 
+    step_authoritative = ledger_step is not None
+    if ledger_step is not None:
+        step_hint = tuple(int(v) for v in ledger_step)
+    else:
+        recorded_step = worker._ledger_step()
+        step_hint = tuple(int(v) for v in recorded_step) if recorded_step is not None else None
 
-    worker._active_ms_level = int(applied_snapshot.level)  # type: ignore[attr-defined]
-    worker._level_downgraded = bool(downgraded)  # type: ignore[attr-defined]
-    worker._level_update_cb(applied_snapshot, bool(downgraded))  # type: ignore[operator]
+    context = lod.build_level_context(
+        decision,
+        source=source,
+        prev_level=prev_level,
+        last_step=step_hint,
+        step_authoritative=step_authoritative,
+    )
+
+    roi_cache = getattr(worker, "_roi_cache", None)
+    if isinstance(roi_cache, dict):
+        roi_cache.pop(int(context.level), None)
+    roi_log_state = getattr(worker, "_roi_log_state", None)
+    if isinstance(roi_log_state, dict):
+        roi_log_state.pop(int(context.level), None)
+
+    start = time.perf_counter()
+    if stage_only:
+        staged = prepare_worker_level(
+            worker,
+            source,
+            int(context.level),
+            prev_level=prev_level,
+            ledger_step=ledger_step,
+            context=context,
+        )
+        applied_snapshot = staged
+    else:
+        applied_snapshot = apply_worker_level(
+            worker,
+            source,
+            int(context.level),
+            prev_level=prev_level,
+            ledger_step=ledger_step,
+            context=context,
+            staged=True,
+        )
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+    roi_desc = format_worker_level_roi(worker, source, int(context.level))
+    worker._switch_logger.log(  # type: ignore[attr-defined]
+        enabled=getattr(worker, "_log_layer_debug", False),
+        previous=prev_level,
+        applied=int(context.level),
+        roi_desc=roi_desc,
+        reason=reason,
+        elapsed_ms=elapsed_ms,
+    )
+    worker._mark_render_tick_needed()  # type: ignore[attr-defined]
+
+    worker._active_ms_level = int(context.level)  # type: ignore[attr-defined]
+    worker._level_downgraded = bool(decision.downgraded)  # type: ignore[attr-defined]
+    worker._level_update_cb(applied_snapshot, bool(decision.downgraded))  # type: ignore[operator]
     return applied_snapshot
 
 

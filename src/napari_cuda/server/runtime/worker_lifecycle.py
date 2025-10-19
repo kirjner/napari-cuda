@@ -18,7 +18,7 @@ from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.rendering.debug_tools import DebugDumper
-from napari_cuda.server.data.lod import AppliedLevel
+from napari_cuda.server.data.lod import LevelContext
 
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         try:
             control_loop = loop
 
-            def _forward_level(applied: AppliedLevel, downgraded: bool) -> None:
+            def _forward_level(applied: LevelContext, downgraded: bool) -> None:
                 control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
                     server._commit_applied_level,  # type: ignore[attr-defined]
                     applied,

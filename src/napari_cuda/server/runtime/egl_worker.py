@@ -52,7 +52,6 @@ from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
 from napari_cuda.server.runtime.camera_animator import animate_if_enabled
 import napari_cuda.server.data.policy as level_policy
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.lod import apply_level
 from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
@@ -81,6 +80,7 @@ from napari_cuda.server.runtime.render_update_mailbox import (
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
+from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_runtime import (
@@ -130,7 +130,7 @@ class EGLRendererWorker:
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 level_update_cb: Callable[[lod.AppliedLevel, bool], None] | None = None,
+                 level_update_cb: Callable[[lod.LevelContext, bool], None] | None = None,
                  camera_pose_cb: Callable[[CameraPoseApplied], None] | None = None,
                  level_intent_cb: Callable[[LevelSwitchIntent], None] | None = None,
                  policy_name: Optional[str] = None,
@@ -190,7 +190,7 @@ class EGLRendererWorker:
     # Explicit setters are retained for lifecycle reconfiguration if needed
     def set_level_update_callback(
         self,
-        callback: Callable[[lod.AppliedLevel, bool], None],
+        callback: Callable[[lod.LevelContext, bool], None],
     ) -> None:
         self._level_update_cb = callback
 
@@ -480,7 +480,7 @@ class EGLRendererWorker:
 
     def _init_scene_state(
         self,
-        level_update_cb: Optional[Callable[[lod.AppliedLevel, bool], None]],
+        level_update_cb: Optional[Callable[[lod.LevelContext, bool], None]],
     ) -> None:
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
@@ -820,20 +820,20 @@ class EGLRendererWorker:
         level: int,
         *,
         prev_level: Optional[int] = None,
-    ) -> lod.AppliedLevel:
+    ) -> lod.LevelContext:
         return apply_worker_level(self, source, level, prev_level=prev_level)
 
     def _apply_volume_level(
         self,
         source: ZarrSceneSource,
-        applied: lod.AppliedLevel,
+        applied: lod.LevelContext,
     ) -> None:
         apply_worker_volume_level(self, source, applied)
 
     def _apply_slice_level(
         self,
         source: ZarrSceneSource,
-        applied: lod.AppliedLevel,
+        applied: lod.LevelContext,
     ) -> None:
         apply_worker_slice_level(self, source, applied)
 
@@ -1410,43 +1410,55 @@ class EGLRendererWorker:
             cooldown_ms=float(self._level_switch_cooldown_ms),
         )
 
-        try:
-            outcome = lod.run_policy_switch(
-                source=source,
-                current_level=current,
-                oversampling_for_level=self._oversampling_for_level,
-                zoom_ratio=zoom_ratio,
-                lock_level=self._lock_level,
-                last_switch_ts=float(self._last_level_switch_ts),
-                config=config,
-                log_policy_eval=self._log_policy_eval,
-                apply_level=lambda level, reason: set_level_with_budget(
-                    self,
-                    level,
-                    reason=reason,
-                    budget_error=self._budget_error_cls,
-                ),
-                budget_error=self._budget_error_cls,
-                select_level_fn=select_level,
-                logger_ref=logger,
-            )
-        except Exception as exc:
-            action = getattr(getattr(exc, "policy_decision", None), "action", "unknown")
-            logger.exception("ms.switch: level apply failed (reason=%s)", action)
-            raise
+        outcome = lod.evaluate_policy(
+            source=source,
+            current_level=current,
+            oversampling_for_level=self._oversampling_for_level,
+            zoom_ratio=zoom_ratio,
+            lock_level=self._lock_level,
+            last_switch_ts=float(self._last_level_switch_ts),
+            config=config,
+            log_policy_eval=self._log_policy_eval,
+            select_level_fn=select_level,
+            logger_ref=logger,
+        )
 
         if outcome is None:
             return
 
+        def _budget_check(scene: ZarrSceneSource, level: int) -> None:
+            try:
+                if self.use_volume:
+                    self._volume_budget_allows(scene, level)
+                else:
+                    self._slice_budget_allows(scene, level)
+            except _LevelBudgetError as exc:  # noqa: SLF001
+                raise LevelBudgetError(str(exc)) from exc
+
+        decision = lod.enforce_budgets(
+            outcome,
+            source=source,
+            use_volume=self.use_volume,
+            budget_check=_budget_check,
+            log_layer_debug=self._log_layer_debug,
+        )
+
         prev = current
-        self._last_level_switch_ts = float(outcome.timestamp)
+        self._last_level_switch_ts = float(decision.timestamp)
 
         logger.info(
             "ms.switch: %d -> %d (reason=%s) overs=%s",
             int(prev),
-            int(self._active_ms_level),
-            outcome.decision.action,
-            lod.format_oversampling(outcome.oversampling),
+            int(decision.selected_level),
+            decision.reason,
+            lod.format_oversampling(decision.oversampling),
+        )
+
+        set_level_with_budget(
+            self,
+            int(decision.selected_level),
+            reason=decision.reason,
+            budget_error=self._budget_error_cls,
         )
 
     # (packer is now provided by bitstream.py)
