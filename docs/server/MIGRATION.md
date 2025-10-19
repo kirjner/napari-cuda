@@ -91,7 +91,7 @@ De‑queue plan:
   - Build strictly from ledger; do not merge non‑ledger “scene bag” entries.
 
 - `src/napari_cuda/server/app/egl_headless_server.py`
-  - Continue to `_commit_applied_level(...)` and `_commit_applied_camera(...)` only from worker callbacks.
+  - Continue to `_commit_level_snapshot(...)` and `_commit_applied_camera(...)` only from worker callbacks.
   - Introduce/propagate `scene.op_seq/op_state` with reducers for op gating.
 
 - `src/napari_cuda/server/control/control_channel_server.py`

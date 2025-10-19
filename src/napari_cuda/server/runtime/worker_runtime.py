@@ -171,7 +171,11 @@ def prepare_worker_level(
     """Build the level context and update worker metadata without applying slices."""
 
     if context is None:
-        step_authoritative = ledger_step is not None
+        same_level = (
+            prev_level is None
+            or int(prev_level) == int(level)
+        )
+        step_authoritative = bool(ledger_step is not None and same_level)
         if ledger_step is not None:
             step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)
         else:
@@ -408,157 +412,6 @@ def viewport_roi_for_level(
         reason=reason,
         logger_ref=logger,
     )
-def set_level_with_budget(
-    worker: object,
-    desired_level: int,
-    *,
-    reason: str,
-    budget_error: type[Exception],
-    ledger_step: Optional[Sequence[int]] = None,
-    stage_only: bool = False,
-) -> lod.LevelContext:
-    source = worker._ensure_scene_source()  # type: ignore[attr-defined]
-
-    def _budget_check(scene: ZarrSceneSource, level: int) -> None:
-        try:
-            if getattr(worker, "use_volume", False):
-                worker._volume_budget_allows(scene, level)  # type: ignore[attr-defined]
-            else:
-                worker._slice_budget_allows(scene, level)  # type: ignore[attr-defined]
-        except budget_error as exc:
-            raise LevelBudgetError(str(exc)) from exc
-
-    prev_level = int(getattr(worker, "_active_ms_level", 0))
-
-    policy_ctx = worker._build_policy_context(source, requested_level=desired_level)  # type: ignore[attr-defined]
-    overs_map = dict(policy_ctx.level_oversampling)
-
-    decision = lod.LevelDecision(
-        desired_level=int(desired_level),
-        selected_level=int(desired_level),
-        reason=reason,
-        timestamp=time.perf_counter(),
-        oversampling=overs_map,
-        downgraded=False,
-    )
-
-    try:
-        decision = lod.enforce_budgets(
-            decision,
-            source=source,
-            use_volume=getattr(worker, "use_volume", False),
-            budget_check=_budget_check,
-            log_layer_debug=getattr(worker, "_log_layer_debug", False),
-        )
-    except LevelBudgetError as exc:
-        raise budget_error(str(exc)) from exc
-
-    step_authoritative = ledger_step is not None
-    if ledger_step is not None:
-        step_hint = tuple(int(v) for v in ledger_step)
-    else:
-        recorded_step = worker._ledger_step()
-        step_hint = tuple(int(v) for v in recorded_step) if recorded_step is not None else None
-
-    context = lod.build_level_context(
-        decision,
-        source=source,
-        prev_level=prev_level,
-        last_step=step_hint,
-        step_authoritative=step_authoritative,
-    )
-
-    roi_cache = getattr(worker, "_roi_cache", None)
-    if isinstance(roi_cache, dict):
-        roi_cache.pop(int(context.level), None)
-    roi_log_state = getattr(worker, "_roi_log_state", None)
-    if isinstance(roi_log_state, dict):
-        roi_log_state.pop(int(context.level), None)
-
-    start = time.perf_counter()
-    if stage_only:
-        staged = prepare_worker_level(
-            worker,
-            source,
-            int(context.level),
-            prev_level=prev_level,
-            ledger_step=ledger_step,
-            context=context,
-        )
-        applied_snapshot = staged
-    else:
-        applied_snapshot = apply_worker_level(
-            worker,
-            source,
-            int(context.level),
-            prev_level=prev_level,
-            ledger_step=ledger_step,
-            context=context,
-            staged=True,
-        )
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
-
-    roi_desc = format_worker_level_roi(worker, source, int(context.level))
-    worker._switch_logger.log(  # type: ignore[attr-defined]
-        enabled=getattr(worker, "_log_layer_debug", False),
-        previous=prev_level,
-        applied=int(context.level),
-        roi_desc=roi_desc,
-        reason=reason,
-        elapsed_ms=elapsed_ms,
-    )
-    worker._mark_render_tick_needed()  # type: ignore[attr-defined]
-
-    worker._active_ms_level = int(context.level)  # type: ignore[attr-defined]
-    worker._level_downgraded = bool(decision.downgraded)  # type: ignore[attr-defined]
-    worker._level_update_cb(applied_snapshot, bool(decision.downgraded))  # type: ignore[operator]
-    return applied_snapshot
-
-
-def perform_level_switch(
-    worker: object,
-    *,
-    target_level: int,
-    reason: str,
-    requested_level: Optional[int],
-    selected_level: Optional[int],
-    source: Optional[ZarrSceneSource] = None,
-    budget_error: type[Exception],
-) -> None:
-    if not getattr(worker, "_zarr_path", None):
-        return
-    if getattr(worker, "_lock_level", None) is not None:
-        if getattr(worker, "_log_layer_debug", False) and logger.isEnabledFor(logging.INFO):
-            logger.info("perform_level_switch ignored due to lock_level=%s", str(worker._lock_level))  # type: ignore[attr-defined]
-        return
-    if source is None:
-        source = worker._ensure_scene_source()  # type: ignore[attr-defined]
-    target_level = int(target_level)
-    ctx = worker._build_policy_context(source, requested_level=target_level)  # type: ignore[attr-defined]
-    prev = int(getattr(worker, "_active_ms_level", 0))
-    set_level_with_budget(
-        worker,
-        target_level,
-        reason=reason,
-        budget_error=budget_error,
-    )
-    idle_ms = max(0.0, (time.perf_counter() - getattr(worker, "_last_interaction_ts", time.perf_counter())) * 1000.0)
-    worker._policy_metrics.record(  # type: ignore[attr-defined]
-        policy=getattr(worker, "_policy_name", "oversampling"),
-        requested_level=requested_level if requested_level is not None else ctx.requested_level,
-        selected_level=selected_level if selected_level is not None else target_level,
-        desired_level=target_level,
-        applied_level=int(getattr(worker, "_active_ms_level", target_level)),
-        reason=reason,
-        idle_ms=idle_ms,
-        oversampling=ctx.level_oversampling,
-        downgraded=bool(getattr(worker, "_level_downgraded", False)),
-        from_level=prev,
-    )
-
-    # (policy intent moved to EGL worker after switch; no synthesis here)
-
-
 __all__ = [
     "ensure_scene_source",
     "reset_worker_camera",
@@ -570,6 +423,4 @@ __all__ = [
     "viewport_roi_for_level",
     "apply_plane_slice_roi",
     "roi_equal",
-    "set_level_with_budget",
-    "perform_level_switch",
 ]

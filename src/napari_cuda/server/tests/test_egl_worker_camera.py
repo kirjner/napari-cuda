@@ -27,7 +27,6 @@ class _StubWorker:
         self._debug_pan = False
         self._debug_orbit = False
         self._debug_reset = False
-        self._level_policy_refresh_needed = False
         self._render_mailbox = RenderUpdateMailbox()
         self._user_interaction_seen = False
         self._last_interaction_ts = 0.0
@@ -60,7 +59,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
         for command in commands:
             if command.kind == "zoom" and command.factor is not None and command.factor > 0.0:
                 factor = float(command.factor)
-                ratio = factor if factor <= 1.0 else 1.0 / factor
+                ratio = 1.0 / factor
                 worker._zoom_hints.append(ratio)
                 worker._render_mailbox.record_zoom_hint(ratio)
 
@@ -71,8 +70,8 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
 
     def _fake_process(self, commands):
         self._mark_render_tick_needed()
-        self._level_policy_refresh_needed = True
         self._user_interaction_seen = True
+        worker._evaluate_level_policy()
         return CameraDeltaOutcome(
             camera_changed=True,
             policy_triggered=True,
@@ -88,7 +87,6 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     command = CameraDeltaCommand(kind="zoom", factor=1.25, command_seq=9)
     EGLRendererWorker.process_camera_deltas(worker, [command])  # type: ignore[arg-type]
 
-    assert worker._level_policy_refresh_needed is True
     assert worker._user_interaction_seen is True
     assert worker._last_interaction_ts > 0.0
     hint = worker._render_mailbox.consume_zoom_hint(max_age=1.0)

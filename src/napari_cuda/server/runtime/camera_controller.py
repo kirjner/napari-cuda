@@ -164,9 +164,6 @@ def process_camera_deltas(worker, commands: Sequence[CameraDeltaCommand]) -> Cam
     def _mark_render() -> None:
         worker._mark_render_tick_needed()
 
-    def _trigger_policy() -> None:
-        worker._level_policy_refresh_needed = True
-
     return apply_camera_deltas(
         commands,
         camera=camera,
@@ -175,7 +172,7 @@ def process_camera_deltas(worker, commands: Sequence[CameraDeltaCommand]) -> Cam
         reset_camera=worker._apply_camera_reset,
         debug_flags=debug_flags,
         mark_render_tick_needed=_mark_render,
-        trigger_policy_refresh=_trigger_policy,
+        trigger_policy_refresh=None,
     )
 
 

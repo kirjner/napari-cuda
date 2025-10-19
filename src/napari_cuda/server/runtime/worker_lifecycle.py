@@ -139,7 +139,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             def _forward_level(applied: LevelContext, downgraded: bool) -> None:
                 control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
-                    server._commit_applied_level,  # type: ignore[attr-defined]
+                    server._commit_level_snapshot,  # type: ignore[attr-defined]
                     applied,
                     downgraded,
                 )

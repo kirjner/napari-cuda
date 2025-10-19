@@ -327,10 +327,16 @@ class EGLHeadlessServer:
                 downgraded,
             )
 
-        self._commit_applied_level(context, downgraded)
+        self._commit_level_snapshot(context, downgraded)
 
         snapshot = build_render_scene_state(self._state_ledger, self._scene)
         self._scene.latest_state = snapshot
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "level.intent snapshot: level=%d step=%s",
+                int(snapshot.current_level) if snapshot.current_level is not None else -1,
+                snapshot.current_step,
+            )
         worker.enqueue_update(RenderUpdate(multiscale=None, scene_state=snapshot))
 
     def _log_volume_update(self, fmt: str, *args) -> None:
@@ -736,7 +742,7 @@ class EGLHeadlessServer:
             metrics=self.metrics,
         )
 
-    def _commit_applied_level(
+    def _commit_level_snapshot(
         self,
         applied: LevelContext,
         downgraded: bool,
@@ -752,8 +758,6 @@ class EGLHeadlessServer:
         seq_value = int(level_update.server_seq)
         self._applied_seqs["multiscale"] = seq_value
         self._applied_seqs["dims"] = seq_value
-        # Op close now deferred to camera commit so dims+level+camera can land as one op.
-
         # Keep the plane view cache in sync with the latest applied level/step
         # when we are in 2D mode. This ensures 3D->2D restores pick the most
         # recent plane level even if no camera interaction occurred since the

@@ -83,6 +83,7 @@ from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_runtime import (
+    prepare_worker_level,
     apply_worker_level,
     apply_worker_volume_level,
     apply_worker_slice_level,
@@ -90,8 +91,6 @@ from napari_cuda.server.runtime.worker_runtime import (
     roi_equal,
     format_worker_level_roi,
     viewport_roi_for_level,
-    set_level_with_budget,
-    perform_level_switch,
     ensure_scene_source,
     reset_worker_camera,
 )
@@ -361,20 +360,74 @@ class EGLRendererWorker:
     def _enter_volume_mode(self) -> None:
         if self.use_volume:
             return
-        self.use_volume = True
+
+        if self._level_intent_callback is None:
+            raise RuntimeError("level intent callback required for volume mode")
+
         source = self._ensure_scene_source()
         level = _coarsest_level_index(source)
         assert level is not None and level >= 0, "Volume mode requires a multiscale level"
-        perform_level_switch(
-            self,
-            target_level=level,
+
+        decision = lod.LevelDecision(
+            desired_level=int(level),
+            selected_level=int(level),
             reason="ndisplay-3d",
-            requested_level=level,
-            selected_level=level,
-            source=source,
-            budget_error=self._budget_error_cls,
+            timestamp=time.perf_counter(),
+            oversampling={},
+            downgraded=False,
         )
-        self._level_policy_refresh_needed = False
+        last_step = self._ledger_step()
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=int(self._active_ms_level),
+            last_step=last_step,
+            step_authoritative=False,
+        )
+
+        # Apply immediately for responsiveness before handing control to the controller.
+        self.use_volume = True
+        staged_context = prepare_worker_level(
+            self,
+            source,
+            int(context.level),
+            prev_level=int(self._active_ms_level),
+            ledger_step=last_step,
+            context=context,
+        )
+        apply_worker_level(
+            self,
+            source,
+            int(staged_context.level),
+            prev_level=int(self._active_ms_level),
+            ledger_step=last_step,
+            context=staged_context,
+            staged=True,
+        )
+        self._mark_render_tick_needed()
+
+        intent = LevelSwitchIntent(
+            desired_level=int(level),
+            selected_level=int(context.level),
+            reason="ndisplay-3d",
+            previous_level=int(self._active_ms_level),
+            context=context,
+            oversampling={},
+            timestamp=decision.timestamp,
+            downgraded=False,
+            zoom_ratio=None,
+            lock_level=self._lock_level,
+        )
+        logger.info(
+            "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
+            int(self._active_ms_level),
+            int(context.level),
+            intent.reason,
+            intent.downgraded,
+        )
+        self._level_switch_pending = True
+        self._level_intent_callback(intent)
+
         self._configure_camera_for_mode()
         if logger.isEnabledFor(logging.INFO):
             logger.info("toggle.enter_3d: coarsest_level=%d", int(level))
@@ -396,8 +449,6 @@ class EGLRendererWorker:
                 cam.fov = float(fov.value)  # type: ignore[attr-defined]
         self._request_encoder_idr()
         self._mark_render_tick_needed()
-        # Commit current 3D camera pose so op fence can close and client
-        # receives immediate volume pose, enabling orbit without extra input.
         self._emit_current_camera_pose(reason="enter-3d")
 
     def _exit_volume_mode(self) -> None:
@@ -467,7 +518,6 @@ class EGLRendererWorker:
 
         self._level_switch_pending = True
         callback(intent)
-        self._level_policy_refresh_needed = False
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -478,12 +528,6 @@ class EGLRendererWorker:
 
     def _mark_render_loop_started(self) -> None:
         self._render_loop_started = True
-
-    def _evaluate_policy_if_needed(self) -> None:
-        if not self._level_policy_refresh_needed or self.use_volume:
-            return
-        self._level_policy_refresh_needed = False
-        self._evaluate_level_policy()
 
     # ---- Init helpers -------------------------------------------------------
 
@@ -541,7 +585,6 @@ class EGLRendererWorker:
         self._last_ensure_log_ts = 0.0
         self._render_tick_required = False
         self._render_loop_started = False
-        self._level_policy_refresh_needed = False
         if camera_pose_cb is None:
             raise ValueError("EGLRendererWorker requires camera_pose callback")
         self._camera_pose_callback = camera_pose_cb
@@ -870,19 +913,78 @@ class EGLRendererWorker:
     def _apply_multiscale_switch(self, level: int, path: Optional[str]) -> None:
         if not self._zarr_path:
             return
+        if self._level_intent_callback is None:
+            raise RuntimeError("level intent callback required for multiscale switch")
         source = self._ensure_scene_source()
         target = level
         if path:
             target = source.level_index_for_path(path)
-        perform_level_switch(
-            self,
-            target_level=int(target),
-            reason="intent",
-            requested_level=int(target),
+        if self._level_switch_pending:
+            logger.debug(
+                "level intent suppressed (pending) prev=%d target=%d reason=%s",
+                int(self._active_ms_level),
+                int(target),
+                "manual",
+            )
+            return
+
+        decision = lod.LevelDecision(
+            desired_level=int(target),
             selected_level=int(target),
-            source=source,
-            budget_error=self._budget_error_cls,
+            reason="manual",
+            timestamp=time.perf_counter(),
+            oversampling={},
+            downgraded=False,
         )
+        last_step = self._ledger_step()
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=int(self._active_ms_level),
+            last_step=last_step,
+            step_authoritative=False,
+        )
+
+        staged_context = prepare_worker_level(
+            self,
+            source,
+            int(context.level),
+            prev_level=int(self._active_ms_level),
+            ledger_step=last_step,
+            context=context,
+        )
+        apply_worker_level(
+            self,
+            source,
+            int(staged_context.level),
+            prev_level=int(self._active_ms_level),
+            ledger_step=last_step,
+            context=staged_context,
+            staged=True,
+        )
+        self._mark_render_tick_needed()
+
+        intent = LevelSwitchIntent(
+            desired_level=int(target),
+            selected_level=int(context.level),
+            reason="manual",
+            previous_level=int(self._active_ms_level),
+            context=context,
+            oversampling={},
+            timestamp=decision.timestamp,
+            downgraded=False,
+            zoom_ratio=None,
+            lock_level=self._lock_level,
+        )
+        logger.info(
+            "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
+            int(self._active_ms_level),
+            int(context.level),
+            intent.reason,
+            intent.downgraded,
+        )
+        self._level_switch_pending = True
+        self._level_intent_callback(intent)
 
     def _clear_visual(self) -> None:
         if self._visual is not None:
@@ -1152,7 +1254,6 @@ class EGLRendererWorker:
         # Enqueue ops for the render loop; keep ACK path responsive.
         self._render_mailbox.append_camera_ops(commands)
         self._mark_render_tick_needed()
-        self._level_policy_refresh_needed = True
         self._user_interaction_seen = True
         # Maintain interaction/zoom hint analytics immediately.
         self._last_interaction_ts = time.perf_counter()
@@ -1178,7 +1279,7 @@ class EGLRendererWorker:
             factor = float(command.factor)
             if factor <= 0.0:
                 continue
-            hint = factor if factor <= 1.0 else 1.0 / factor
+            hint = 1.0 / factor
             self._render_mailbox.record_zoom_hint(hint)
             break
 
@@ -1373,7 +1474,7 @@ class EGLRendererWorker:
             ),
             drain_scene_updates=lambda: self._drain_camera_ops_then_scene_updates(),
             render_canvas=canvas.render,
-            evaluate_policy_if_needed=self._evaluate_policy_if_needed,
+            evaluate_policy_if_needed=lambda: None,
             mark_tick_complete=self._mark_render_tick_complete,
             mark_loop_started=self._mark_render_loop_started,
         )
@@ -1381,8 +1482,10 @@ class EGLRendererWorker:
     def _drain_camera_ops_then_scene_updates(self) -> None:
         # Apply any queued camera ops on the render thread before scene updates.
         ops = self._render_mailbox.drain_camera_ops()
+        policy_triggered = False
         if ops:
             outcome = _process_camera_deltas(self, ops)
+            policy_triggered = bool(outcome.policy_triggered)
             # Update seq baselines from outcome.
             last_seq = getattr(outcome, "last_command_seq", None)
             if last_seq is not None:
@@ -1409,6 +1512,8 @@ class EGLRendererWorker:
 
         # Now drain scene updates (txn, dims, etc.).
         self.drain_scene_updates()
+        if policy_triggered and not self.use_volume:
+            self._evaluate_level_policy()
 
     # ---- C6 selection (napari-anchored) -------------------------------------
     def _evaluate_level_policy(self) -> None:
@@ -1445,6 +1550,18 @@ class EGLRendererWorker:
             select_level_fn=select_level,
             logger_ref=logger,
         )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                current_overs = self._oversampling_for_level(source, current)
+            except Exception:
+                current_overs = float("nan")
+            logger.debug(
+                "policy.evaluate: level=%d zoom_hint=%s overs_current=%.3f",
+                current,
+                f"{zoom_ratio:.3f}" if zoom_ratio is not None else None,
+                current_overs,
+            )
 
         if outcome is None:
             return
