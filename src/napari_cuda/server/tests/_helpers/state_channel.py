@@ -38,6 +38,7 @@ from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 
 from napari_cuda.server.runtime import worker_runtime
+from napari_cuda.server.runtime import render_snapshot as snapshot_mod
 
 
 _SENTINEL = object()
@@ -492,7 +493,7 @@ class StateServerHarness:
             origin="harness.level",
         )
             try:
-                worker_runtime.apply_worker_slice_level(server._worker, server._scene_source, applied)
+                snapshot_mod._apply_slice_level(server._worker, server._scene_source, applied)
             except Exception:
                 pass
             server._scene.latest_state = build_render_scene_state(

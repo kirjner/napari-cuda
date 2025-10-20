@@ -7,6 +7,7 @@ from napari_cuda.protocol import build_state_update
 from napari_cuda.protocol.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.runtime import worker_runtime
+from napari_cuda.server.runtime import render_snapshot as snapshot_mod
 from napari_cuda.server.tests._helpers.state_channel import StateServerHarness
 
 
@@ -299,13 +300,13 @@ async def _test_roi_applied_once_on_level_switch() -> None:
     harness = StateServerHarness(loop)
 
     roi_calls: list[tuple] = []
-    orig_apply_worker_level = worker_runtime.apply_worker_slice_level
+    orig_apply_worker_level = snapshot_mod._apply_slice_level
 
-    def _spy_apply_worker_slice_level(*args, **kwargs):
+    def _spy_apply_slice_level(*args, **kwargs):
         roi_calls.append((args, kwargs))
         return None
 
-    worker_runtime.apply_worker_slice_level = _spy_apply_worker_slice_level
+    snapshot_mod._apply_slice_level = _spy_apply_slice_level  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -331,5 +332,5 @@ async def _test_roi_applied_once_on_level_switch() -> None:
 
         assert len(roi_calls) == 1
     finally:
-        worker_runtime.apply_worker_slice_level = orig_apply_worker_level
+        snapshot_mod._apply_slice_level = orig_apply_worker_level  # type: ignore[assignment]
         await harness.stop()

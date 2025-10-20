@@ -82,10 +82,6 @@ from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSw
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_runtime import (
-    prepare_worker_level,
-    apply_worker_level,
-    apply_worker_volume_level,
-    apply_worker_slice_level,
     apply_plane_slice_roi,
     roi_equal,
     format_worker_level_roi,
