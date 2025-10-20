@@ -46,6 +46,7 @@ class _StubWorker:
         self.use_volume = use_volume
         self._active_ms_level = level
         self.configure_calls = 0
+        self._last_dims_signature: tuple[int, ...] | None = None
         self._scene_source = _FakeSource()
         self._volume_max_bytes = None
         self._volume_max_voxels = None
@@ -69,6 +70,14 @@ class _StubWorker:
             voxels *= int(dim)
         dtype_size = 4  # float32
         return voxels, voxels * dtype_size
+
+    def _resolve_volume_intent_level(self, source, requested_level: int) -> tuple[int, bool]:
+        descriptors = getattr(source, "level_descriptors", ())
+        if not descriptors:
+            return int(requested_level), False
+        coarsest = max(0, len(descriptors) - 1)
+        downgraded = coarsest != int(requested_level)
+        return int(coarsest), downgraded
 
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
