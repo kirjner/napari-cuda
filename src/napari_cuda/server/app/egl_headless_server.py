@@ -66,7 +66,9 @@ from napari_cuda.server.control.state_reducers import (
     reduce_dims_update,
     reduce_camera_update,
 )
-from napari_cuda.server.control.transactions import apply_level_switch_transaction
+from napari_cuda.server.control.transactions.level_switch import (
+    apply_level_switch_transaction,
+)
 from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.level_budget import LevelBudgetError, select_volume_level

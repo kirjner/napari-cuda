@@ -75,7 +75,9 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_sample_step,
     reduce_view_update,
 )
-from napari_cuda.server.control.transactions import apply_plane_restore_transaction
+from napari_cuda.server.control.transactions.plane_restore import (
+    apply_plane_restore_transaction,
+)
 from napari_cuda.server.scene import CameraDeltaCommand, layer_controls_from_ledger, layer_controls_to_dict
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,

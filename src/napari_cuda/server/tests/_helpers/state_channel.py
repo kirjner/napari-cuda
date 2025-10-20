@@ -828,7 +828,7 @@ class StateServerHarness:
             ),
             ("multiscale", "main", "downgraded", payload.downgraded),
         ]
-        server._state_ledger.batch_record_confirmed(entries, origin=origin)
+        server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
 
 
 def frames_of_type(frames: Iterable[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:

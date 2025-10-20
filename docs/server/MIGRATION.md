@@ -2,14 +2,16 @@
 
 This guide lays out a pragmatic path to reach the greenfield architecture in `docs/server/ARCHITECTURE.md`, with focused steps that keep changes minimal and measurable.
 
-## Phase 0 — Lock in current stability (done/verify)
+## Phase 0 — Lock in current stability ✅
 
 - Apply dims coherently and set `ndisplay` last so napari’s fit sees consistent state.
   - Verify in `src/napari_cuda/server/runtime/egl_worker.py:938–1001`.
 - Ignore `dims.mode` for mode decisions; decide 2D/3D from `view.ndisplay` only.
   - Ensure no remaining references affect mode flips in the worker.
 
-## Phase 1 — Dims mirror correctness and gating
+Status: Both invariants are enforced in the worker apply path today.
+
+## Phase 1 — Dims mirror correctness and gating ✅
 
 - Derive `mode` from `view.ndisplay`; stop requiring `dims.mode` as a mandatory key.
 - Add op gating: do not emit until `scene.op_state == "applied"` for the leading op in progress.
@@ -18,7 +20,9 @@ This guide lays out a pragmatic path to reach the greenfield architecture in `do
     - Relax required key set; compute `mode` from ledger `view.ndisplay`.
     - Maintain last payload, plus a small buffer for the open op.
 
-## Phase 2 — Camera is applied‑only
+Status: Mirror derives mode from the ledger and buffers notifications until the worker closes the op fence.
+
+## Phase 2 — Camera is applied-only ✅
 
 - Ensure only the render worker writes camera pose to the ledger (applied state).
 - Client camera intents continue via queue (`CameraDeltaCommand`).
@@ -27,7 +31,9 @@ This guide lays out a pragmatic path to reach the greenfield architecture in `do
   - File: `src/napari_cuda/server/app/egl_headless_server.py`
     - `_commit_applied_camera(...)` remains the only ledger writer for `camera.*`.
 
-## Phase 3 — RenderTxn scaffolding (atomic apply)
+Status: Camera intents feed `CameraCommandQueue`; `_commit_applied_camera` (worker side) is the single writer for `camera.*` and per-mode caches.
+
+## Phase 3 — RenderTxn scaffolding (atomic apply) ✅
 
 - Introduce `src/napari_cuda/server/runtime/render_txn.py` with:
   - Builder from `RenderLedgerSnapshot` → (dims target, level target, camera hints) → plan.
@@ -40,7 +46,9 @@ De‑queue plan:
 - Trim `drain_scene_updates` to handle only multiscale requests (or call level apply directly and remove the queue entirely).
 - Control loop remains unchanged; it still drives ticks and camera deltas.
 
-## Phase 4 — Deterministic plane restore (no fallbacks)
+Status: `render_snapshot.apply_render_snapshot` is the single apply site; scene mailboxes are gone. Camera queue + worker ack close the loop.
+
+## Phase 4 — Deterministic plane restore (no fallbacks) ✅
 
 - Persist per‑mode snapshots in the ledger (worker‑applied only):
   - Plane: `camera_plane.center`, `camera_plane.zoom`, `camera_plane.rect`; plus `view_cache.plane.level` and `view_cache.plane.step`.
@@ -50,6 +58,8 @@ De‑queue plan:
   - 3D → 2D: read `view_cache.plane.*` and `camera_plane.rect`; project rect (world→level) and apply slab, then apply plane camera pose.
 - Remove private plane‑restore flags/caches and any “full slab” overrides.
   - Files: `src/napari_cuda/server/app/egl_headless_server.py` (cache writes in `_commit_applied_camera`), `src/napari_cuda/server/runtime/egl_worker.py` (read/apply on mode switch), `src/napari_cuda/server/runtime/worker_runtime.py` (world‑rect→ROI projection helper).
+
+Status: Worker toggles reuse ledger-backed caches; `_restoring_plane` scaffolding removed. ROI helpers now live with `render_snapshot`.
 
 ## Phase 5 — Layer mirror
 
@@ -71,6 +81,8 @@ De‑queue plan:
   - Level switch preserves 2D rect (no jolt to center when `preserve_view_on_switch=True`).
   - Camera via queue only; applied camera ledger matches the on‑screen pose.
   - No reliance on `enqueue_scene_state`/`drain_scene_updates` for scene state; RenderTxn is the single apply site.
+
+Status: Harness exercises toggles/plane restore/level switches. Still need focused unit coverage for view toggle transaction, ROI counts, and layer mirror once implemented.
 
 ## Module‑by‑Module Worklist (current → target)
 
@@ -104,6 +116,11 @@ De‑queue plan:
 - `src/napari_cuda/server/rendering/viewer_builder.py`
   - Keep bootstrap minimal; do not over‑fit; worker txn becomes the authoritative applier.
 
+## ROI follow-up
+
+- Consolidate ROI helpers owned by `render_snapshot` (currently split with `worker_runtime.py`).
+- Add regression tests that count ROI applications per transaction (toggle, level switch) to guard against over-apply.
+- Ensure the harness paths call the public render snapshot entry point instead of legacy shims when asserting ROI behaviour.
 ## Order of Operations Reference (worker txn)
 
 1) Decide mode from `view.ndisplay` only.
@@ -137,6 +154,12 @@ De‑queue plan:
 - `control/control_channel_server.py` → keep websocket/routing; state changes go through `state_reducers.py` only.
 - `control/state_reducers.py` → clarify sections: view, dims, multiscale, camera (applied ack only), layer, volume; avoid cross‑module imports.
 - `rendering/viewer_builder.py` → bootstrap only; do not over‑apply dims/fit. Worker txn becomes authoritative applier.
+
+## ROI follow-up
+
+- Consolidate ROI helpers that moved alongside `render_snapshot` and drop any residual duplicates in `worker_runtime.py`.
+- Add regression tests (state-channel harness is a good spot) that count ROI applies for toggles and level switches so we catch over-apply regressions.
+- Ensure harness shortcuts call the public render snapshot entry point so ROI assertions match production code paths.
 
 ## Naming & API Conventions (server)
 

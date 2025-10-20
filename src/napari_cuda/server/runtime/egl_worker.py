@@ -1230,6 +1230,12 @@ class EGLRendererWorker:
 
         apply_render_snapshot(self, state)
 
+        if state.layer_updates:
+            view = self.view
+            if view is not None:
+                ctx = self._build_scene_state_context(view.camera)
+                SceneStateApplier.apply_layer_updates(ctx, state.layer_updates)
+
     def _apply_camera_commands(self, commands: Sequence[CameraDeltaCommand]) -> bool:
         outcome = _process_camera_deltas(self, commands)
         policy_triggered = bool(outcome.policy_triggered)

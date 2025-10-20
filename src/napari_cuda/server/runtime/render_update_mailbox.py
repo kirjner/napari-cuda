@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 
@@ -128,7 +128,47 @@ class RenderUpdateMailbox:
             if state.order is not None
             else None
         )
-        return (center, zoom, angles, distance, fov, current_step, ndisplay, displayed, order)
+        def _canonical(value: Any) -> Any:
+            if isinstance(value, (list, tuple)):
+                return tuple(_canonical(v) for v in value)
+            if isinstance(value, dict):
+                return tuple(sorted((str(k), _canonical(v)) for k, v in value.items()))
+            return value
+
+        layer_sig = None
+        if state.layer_updates:
+            layer_items = []
+            for layer_id, props in state.layer_updates.items():
+                if not props:
+                    continue
+                normalized = tuple(
+                    sorted((str(key), _canonical(value)) for key, value in props.items())
+                )
+                layer_items.append((str(layer_id), normalized))
+            if layer_items:
+                layer_sig = tuple(sorted(layer_items))
+
+        volume_sig = (
+            str(state.volume_mode) if state.volume_mode is not None else None,
+            str(state.volume_colormap) if state.volume_colormap is not None else None,
+            tuple(float(v) for v in state.volume_clim) if state.volume_clim is not None else None,
+            float(state.volume_opacity) if state.volume_opacity is not None else None,
+            float(state.volume_sample_step) if state.volume_sample_step is not None else None,
+        )
+
+        return (
+            center,
+            zoom,
+            angles,
+            distance,
+            fov,
+            current_step,
+            ndisplay,
+            displayed,
+            order,
+            layer_sig,
+            volume_sig,
+        )
 
 
 __all__ = [

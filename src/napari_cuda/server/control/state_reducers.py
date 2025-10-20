@@ -25,6 +25,9 @@ from napari_cuda.server.scene import (
     get_control_meta,
     increment_server_sequence,
 )
+from napari_cuda.server.control.transactions.view_toggle import (
+    apply_view_toggle_transaction,
+)
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 logger = logging.getLogger(__name__)
 
@@ -668,7 +671,7 @@ def reduce_bootstrap_state(
     origin: str = "server.bootstrap",
     timestamp: Optional[float] = None,
 ) -> list[ServerLedgerUpdate]:
-    """Legacy bootstrap reducer retained for tests; closes op fence immediately."""
+    """Legacy bootstrap reducer retained for tests; worker closes the fence."""
 
     resolved_step = tuple(int(v) for v in step)
     resolved_axis_labels = tuple(str(label) for label in axis_labels)
@@ -693,17 +696,6 @@ def reduce_bootstrap_state(
         origin=origin,
         timestamp=timestamp,
     )
-
-    op_state = ledger.get("scene", "main", "op_state")
-    if op_state is not None and str(op_state.value).lower() == "open":
-        ledger.record_confirmed(
-            "scene",
-            "main",
-            "op_state",
-            "applied",
-            origin=origin,
-            timestamp=ts,
-        )
 
     dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
     view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
@@ -869,102 +861,38 @@ def reduce_view_update(
     target_ndisplay = resolved_ndisplay
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
 
-    # Open an operation fence for view toggle (op_seq/op_state/op_kind)
-    # Write before any dims/view keys so mirrors can gate intermediate frames.
-    with lock:
-        op_seq = increment_server_sequence(store)
-    ledger.batch_record_confirmed(
-        (
-            ("scene", "main", "op_seq", int(op_seq)),
-            ("scene", "main", "op_state", "open"),
-            ("scene", "main", "op_kind", "view-toggle"),
-        ),
-        origin=origin,
-        timestamp=ts,
-        dedupe=False,
+    baseline_step = (
+        tuple(int(v) for v in dims_payload.current_step)
+        if dims_payload.current_step
+        else None
+    )
+    baseline_order = (
+        tuple(int(idx) for idx in dims_payload.order)
+        if dims_payload.order is not None
+        else None
     )
 
-    with lock:
-        previous_use_volume = bool(store.use_volume)
-        store.last_scene_seq = increment_server_sequence(store)
-        server_seq = store.last_scene_seq
-        meta_entry = get_control_meta(store, "view", "main", "ndisplay")
-        meta_entry.last_server_seq = server_seq
-        meta_entry.last_timestamp = ts
-        store.use_volume = bool(target_ndisplay == 3)
+    server_seq, order_value, displayed_value = apply_view_toggle_transaction(
+        store=store,
+        ledger=ledger,
+        lock=lock,
+        target_ndisplay=int(target_ndisplay),
+        baseline_step=baseline_step,
+        baseline_order=baseline_order,
+        requested_order=order,
+        requested_displayed=displayed,
+        origin=origin,
+        timestamp=ts,
+    )
 
     logger.debug(
-        "view intent updated ndisplay=%d seq=%d origin=%s",
+        "view intent updated ndisplay=%d order=%s displayed=%s seq=%d origin=%s",
         target_ndisplay,
+        order_value,
+        displayed_value,
         server_seq,
         origin,
     )
-
-    ledger.record_confirmed(
-        "view",
-        "main",
-        "ndisplay",
-        int(target_ndisplay),
-        origin=origin,
-        timestamp=ts,
-    )
-
-    existing_order = tuple(int(idx) for idx in order) if order is not None else (
-        tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else tuple()
-    )
-    ndim = len(dims_payload.current_step) if dims_payload.current_step else 0
-    if ndim <= 0:
-        ndim = len(existing_order)
-    if ndim <= 0:
-        ndim = max(int(target_ndisplay), 1)
-
-    normalized_order: list[int] = []
-    seen_axes: set[int] = set()
-    for axis in existing_order:
-        axis_int = int(axis)
-        if 0 <= axis_int < ndim and axis_int not in seen_axes:
-            normalized_order.append(axis_int)
-            seen_axes.add(axis_int)
-    for axis_int in range(ndim):
-        if axis_int not in seen_axes:
-            normalized_order.append(axis_int)
-            seen_axes.add(axis_int)
-
-    if not normalized_order:
-        normalized_order = list(range(ndim))
-
-    order_value = tuple(normalized_order)
-    if displayed is not None:
-        displayed_value = tuple(int(idx) for idx in displayed)
-    else:
-        displayed_count = min(len(order_value), max(1, int(target_ndisplay)))
-        displayed_value = tuple(order_value[-displayed_count:]) if displayed_count > 0 else tuple()
-
-    ledger.record_confirmed(
-        "dims",
-        "main",
-        "order",
-        order_value,
-        origin=origin,
-        timestamp=ts,
-    )
-    ledger.record_confirmed(
-        "view",
-        "main",
-        "displayed",
-        displayed_value,
-        origin=origin,
-        timestamp=ts,
-    )
-
-    with lock:
-        snapshot = store.latest_state
-        store.latest_state = replace(
-            snapshot,
-            ndisplay=int(target_ndisplay),
-            order=order_value,
-            displayed=displayed_value,
-        )
     return ServerLedgerUpdate(
         scope="view",
         target="main",

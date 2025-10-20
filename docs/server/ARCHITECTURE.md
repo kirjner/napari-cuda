@@ -70,9 +70,9 @@ Invariants:
 Intents → Reducers → Ledger → Worker Txn → Ledger (applied) → Mirrors.
 
 - View toggle (2D↔3D)
-  - Reducer writes `view.ndisplay`, derives and writes `dims.order` + `view.displayed`, opens `scene.op_seq(kind="view-toggle")`.
+  - `apply_view_toggle_transaction(...)` opens the fence, writes `view.ndisplay`, and derives `dims.order`/`view.displayed` in one batch.
 - Worker pulls snapshot, runs `apply_render_snapshot`, commits applied `multiscale.level/current_step` + `camera.*`, closes op.
-  - Dims and camera mirrors emit once (op‑gated).
+  - Dims and camera mirrors emit once (op-gated).
 
 - Dims step
   - Reducer writes normalized `dims.current_step` (pad/truncate); optional op fence `kind="dims"`.
@@ -86,7 +86,7 @@ Intents → Reducers → Ledger → Worker Txn → Ledger (applied) → Mirrors.
   - Worker applies deltas, snapshots pose, writes `camera.*`; camera mirror emits.
 
 - Bootstrap
-  - `apply_bootstrap_transaction(...)` opens the op fence, seeds dims/levels/view in the ledger, and hands the initial snapshot to the worker; the worker’s first camera ACK closes the fence.
+  - `apply_bootstrap_transaction(...)` opens the fence and seeds dims/levels/view in the ledger; the worker’s first `apply_render_snapshot` writes the applied camera pose and closes the op.
 - Start mirrors after bootstrap; start worker; the first `apply_render_snapshot` produces a consistent frame.
 
 ## Render Snapshot Apply (atomic, fit‑safe)

@@ -237,6 +237,17 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         origin="test.bootstrap",
     )
 
+    server._state_ledger.record_confirmed(
+        "scene",
+        "main",
+        "op_state",
+        "applied",
+        origin="test.bootstrap",
+        dedupe=False,
+    )
+    while scheduled:
+        asyncio.run(scheduled.pop(0))
+
     def _update_scene_manager() -> None:
         return
 
@@ -355,7 +366,7 @@ def _record_dims_to_ledger(
         ),
         ("multiscale", "main", "downgraded", payload.downgraded),
     ]
-    server._state_ledger.batch_record_confirmed(entries, origin=origin)
+    server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
 
 
 def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
