@@ -365,12 +365,13 @@ class EGLRendererWorker:
             raise RuntimeError("level intent callback required for volume mode")
 
         source = self._ensure_scene_source()
-        level = _coarsest_level_index(source)
-        assert level is not None and level >= 0, "Volume mode requires a multiscale level"
+        requested_level = _coarsest_level_index(source)
+        assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
+        target_level = self._select_intent_volume_level(source, int(requested_level))
 
         decision = lod.LevelDecision(
-            desired_level=int(level),
-            selected_level=int(level),
+            desired_level=int(target_level),
+            selected_level=int(target_level),
             reason="ndisplay-3d",
             timestamp=time.perf_counter(),
             oversampling={},
@@ -385,29 +386,11 @@ class EGLRendererWorker:
             step_authoritative=False,
         )
 
-        # Apply immediately for responsiveness before handing control to the controller.
+        # Defer level application to the controller transaction.
         self.use_volume = True
-        staged_context = prepare_worker_level(
-            self,
-            source,
-            int(context.level),
-            prev_level=int(self._active_ms_level),
-            ledger_step=last_step,
-            context=context,
-        )
-        apply_worker_level(
-            self,
-            source,
-            int(staged_context.level),
-            prev_level=int(self._active_ms_level),
-            ledger_step=last_step,
-            context=staged_context,
-            staged=True,
-        )
-        self._mark_render_tick_needed()
 
         intent = LevelSwitchIntent(
-            desired_level=int(level),
+            desired_level=int(target_level),
             selected_level=int(context.level),
             reason="ndisplay-3d",
             previous_level=int(self._active_ms_level),
@@ -430,7 +413,7 @@ class EGLRendererWorker:
 
         self._configure_camera_for_mode()
         if logger.isEnabledFor(logging.INFO):
-            logger.info("toggle.enter_3d: coarsest_level=%d", int(level))
+            logger.info("toggle.enter_3d: requested_level=%d selected_level=%d", int(requested_level), int(target_level))
         # Apply cached 3D camera pose if present
         cam = self.view.camera if self.view is not None else None
         if cam is not None:
@@ -850,6 +833,41 @@ class EGLRendererWorker:
         if self._log_layer_debug:
             logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> OK", level, voxels, bytes_est)
 
+    def _volume_level_fits_budget(self, source: ZarrSceneSource, level: int) -> bool:
+        voxels, bytes_est = self._estimate_level_bytes(source, level)
+        limit_bytes = self._volume_max_bytes or self._hw_limits.volume_max_bytes
+        limit_voxels = self._volume_max_voxels or self._hw_limits.volume_max_voxels
+        if limit_voxels and voxels > limit_voxels:
+            return False
+        if limit_bytes and bytes_est > limit_bytes:
+            return False
+        return True
+
+    def _select_intent_volume_level(self, source: ZarrSceneSource, requested_level: int) -> int:
+        descriptors = source.level_descriptors
+        if descriptors:
+            max_index = len(descriptors) - 1
+            requested_level = max(0, min(int(requested_level), int(max_index)))
+        else:
+            requested_level = max(0, int(requested_level))
+
+        if self._volume_level_fits_budget(source, requested_level):
+            return int(requested_level)
+
+        if descriptors:
+            coarsest_level = len(descriptors) - 1
+            if self._volume_level_fits_budget(source, coarsest_level):
+                return int(coarsest_level)
+
+        voxels, bytes_est = self._estimate_level_bytes(source, requested_level)
+        limit_bytes = self._volume_max_bytes or self._hw_limits.volume_max_bytes
+        limit_voxels = self._volume_max_voxels or self._hw_limits.volume_max_voxels
+        if limit_voxels and voxels > limit_voxels:
+            raise _LevelBudgetError(f"voxels={voxels} exceeds cap={limit_voxels}")
+        if limit_bytes and bytes_est > limit_bytes:
+            raise _LevelBudgetError(f"bytes={bytes_est} exceeds cap={limit_bytes}")
+        return int(requested_level)
+
     def _slice_budget_allows(self, source: ZarrSceneSource, level: int) -> None:
         """Enforce optional max-bytes budget for a single 2D slice.
 
@@ -962,8 +980,6 @@ class EGLRendererWorker:
             context=staged_context,
             staged=True,
         )
-        self._mark_render_tick_needed()
-
         intent = LevelSwitchIntent(
             desired_level=int(target),
             selected_level=int(context.level),
