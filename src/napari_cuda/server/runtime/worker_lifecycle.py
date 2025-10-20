@@ -18,6 +18,7 @@ from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.rendering.debug_tools import DebugDumper
+from napari_cuda.server.data.lod import LevelContext
 
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,13 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         try:
             control_loop = loop
 
+            def _forward_level(applied: LevelContext, downgraded: bool) -> None:
+                control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
+                    server._commit_level_snapshot,  # type: ignore[attr-defined]
+                    applied,
+                    downgraded,
+                )
+
             def _forward_level_intent(intent: LevelSwitchIntent) -> None:
                 server._worker_intents.enqueue_level_switch(intent)
                 control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
@@ -160,6 +168,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 zarr_axes=server._zarr_axes,
                 zarr_z=server._zarr_z,
                 policy_name=server._scene.multiscale_state.get("policy"),
+                level_update_cb=_forward_level,
                 camera_pose_cb=_forward_camera_pose,
                 level_intent_cb=_forward_level_intent,
                 ctx=server._ctx,
