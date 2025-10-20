@@ -14,18 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class RenderLevelRequest:
-    """Pending multiscale level switch request."""
-
-    level: int
-    path: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class RenderUpdate:
     """Latest-wins state drained by the render worker."""
 
-    multiscale: Optional[RenderLevelRequest]
     scene_state: Optional[RenderLedgerSnapshot]
 
 
@@ -42,19 +33,11 @@ class RenderUpdateMailbox:
 
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
-        self._multiscale: Optional[RenderLevelRequest] = None
         self._scene_state: Optional[RenderLedgerSnapshot] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
         self._camera_ops: list = []
         self._last_signature: Optional[tuple] = None
         self._lock = threading.Lock()
-
-    def set_multiscale_target(self, level: int, path: Optional[str]) -> None:
-        with self._lock:
-            self._multiscale = RenderLevelRequest(
-                int(level),
-                str(path) if path else None,
-            )
 
     def set_scene_state(self, state: RenderLedgerSnapshot) -> None:
         with self._lock:
@@ -63,10 +46,8 @@ class RenderUpdateMailbox:
     def drain(self) -> RenderUpdate:
         with self._lock:
             drained = RenderUpdate(
-                multiscale=self._multiscale,
                 scene_state=self._scene_state,
             )
-            self._multiscale = None
             self._scene_state = None
         return drained
 
@@ -151,7 +132,6 @@ class RenderUpdateMailbox:
 
 
 __all__ = [
-    "RenderLevelRequest",
     "RenderUpdate",
     "RenderUpdateMailbox",
     "RenderZoomHint",

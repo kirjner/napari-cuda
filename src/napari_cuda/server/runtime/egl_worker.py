@@ -319,19 +319,75 @@ class EGLRendererWorker:
         
     # --- Multiscale: request switch (thread-safe) ---
     def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
-        """Queue a multiscale level switch; applied on render thread next frame."""
-        if getattr(self, '_lock_level', None) is not None:
+        """Emit a manual level intent back to the controller."""
+
+        if getattr(self, "_lock_level", None) is not None:
             if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
                 logger.info("request_multiscale_level ignored due to lock_level=%s", str(self._lock_level))
             return
-        if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
+
+        callback = self._level_intent_callback
+        if callback is None:
+            logger.debug("manual level switch ignored (no callback)")
+            return
+
+        source = self._ensure_scene_source()
+        target = int(level)
+        if path:
+            target = int(source.level_index_for_path(path))
+
+        descriptors = source.level_descriptors
+        if descriptors:
+            target = max(0, min(target, len(descriptors) - 1))
+
+        downgraded = False
+        if self.use_volume:
+            target, downgraded = self._resolve_volume_intent_level(source, target)
+
+        self._level_downgraded = bool(downgraded)
+
+        decision = lod.LevelDecision(
+            desired_level=int(target),
+            selected_level=int(target),
+            reason="manual",
+            timestamp=time.perf_counter(),
+            oversampling={},
+            downgraded=bool(downgraded),
+        )
+        last_step = self._ledger_step()
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=int(self._active_ms_level),
+            last_step=last_step,
+            step_authoritative=False,
+        )
+
+        intent = LevelSwitchIntent(
+            desired_level=int(target),
+            selected_level=int(context.level),
+            reason="manual",
+            previous_level=int(self._active_ms_level),
+            context=context,
+            oversampling={},
+            timestamp=decision.timestamp,
+            downgraded=bool(downgraded),
+            zoom_ratio=None,
+            lock_level=self._lock_level,
+        )
+
+        if logger.isEnabledFor(logging.INFO):
             logger.info(
-                "request multiscale level: level=%d path=%s",
-                int(level),
-                str(path) if path else "<default>",
+                "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
+                int(self._active_ms_level),
+                int(context.level),
+                intent.reason,
+                intent.downgraded,
             )
-        self._render_mailbox.set_multiscale_target(int(level), str(path) if path else None)
+
+        self._level_switch_pending = True
         self._last_interaction_ts = time.perf_counter()
+        callback(intent)
         self._mark_render_tick_needed()
 
     def _configure_camera_for_mode(self) -> None:
@@ -916,80 +972,6 @@ class EGLRendererWorker:
     def _format_level_roi(self, source: ZarrSceneSource, level: int) -> str:
         return format_worker_level_roi(self, source, level)
 
-    def _apply_multiscale_switch(self, level: int, path: Optional[str]) -> None:
-        if not self._zarr_path:
-            return
-        if self._level_intent_callback is None:
-            raise RuntimeError("level intent callback required for multiscale switch")
-        source = self._ensure_scene_source()
-        target = level
-        if path:
-            target = source.level_index_for_path(path)
-        if self._level_switch_pending:
-            logger.debug(
-                "level intent suppressed (pending) prev=%d target=%d reason=%s",
-                int(self._active_ms_level),
-                int(target),
-                "manual",
-            )
-            return
-
-        decision = lod.LevelDecision(
-            desired_level=int(target),
-            selected_level=int(target),
-            reason="manual",
-            timestamp=time.perf_counter(),
-            oversampling={},
-            downgraded=False,
-        )
-        last_step = self._ledger_step()
-        context = lod.build_level_context(
-            decision,
-            source=source,
-            prev_level=int(self._active_ms_level),
-            last_step=last_step,
-            step_authoritative=False,
-        )
-
-        staged_context = prepare_worker_level(
-            self,
-            source,
-            int(context.level),
-            prev_level=int(self._active_ms_level),
-            ledger_step=last_step,
-            context=context,
-        )
-        apply_worker_level(
-            self,
-            source,
-            int(staged_context.level),
-            prev_level=int(self._active_ms_level),
-            ledger_step=last_step,
-            context=staged_context,
-            staged=True,
-        )
-        intent = LevelSwitchIntent(
-            desired_level=int(target),
-            selected_level=int(context.level),
-            reason="manual",
-            previous_level=int(self._active_ms_level),
-            context=context,
-            oversampling={},
-            timestamp=decision.timestamp,
-            downgraded=False,
-            zoom_ratio=None,
-            lock_level=self._lock_level,
-        )
-        logger.info(
-            "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
-            int(self._active_ms_level),
-            int(context.level),
-            intent.reason,
-            intent.downgraded,
-        )
-        self._level_switch_pending = True
-        self._level_intent_callback(intent)
-
     def _clear_visual(self) -> None:
         if self._visual is not None:
             self._visual.parent = None  # type: ignore[attr-defined]
@@ -1219,17 +1201,10 @@ class EGLRendererWorker:
         if delta.scene_state is not None:
             self._last_interaction_ts = time.perf_counter()
             scene_state = self._normalize_scene_state(delta.scene_state)
-        if delta.multiscale is not None:
-            self._render_mailbox.set_multiscale_target(
-                int(delta.multiscale.level),
-                delta.multiscale.path,
-            )
         if scene_state is not None:
             self._render_mailbox.set_scene_state(scene_state)
-        if delta.multiscale is None and scene_state is None:
+            self._mark_render_tick_needed()
             return
-
-        self._mark_render_tick_needed()
 
     def _consume_render_snapshot(
         self,
@@ -1415,12 +1390,6 @@ class EGLRendererWorker:
 
     def drain_scene_updates(self) -> None:
         updates: RenderUpdate = self._render_mailbox.drain()
-
-        if updates.multiscale is not None:
-            lvl = int(updates.multiscale.level)
-            pth = updates.multiscale.path
-            self._apply_multiscale_switch(lvl, pth)
-
         state = updates.scene_state
         if state is None:
             return

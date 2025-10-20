@@ -373,7 +373,7 @@ class EGLHeadlessServer:
                 int(snapshot.current_level) if snapshot.current_level is not None else -1,
                 snapshot.current_step,
             )
-        worker.enqueue_update(RenderUpdate(multiscale=None, scene_state=snapshot))
+        worker.enqueue_update(RenderUpdate(scene_state=snapshot))
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:

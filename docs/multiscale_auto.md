@@ -44,7 +44,7 @@ Mirror napari’s logic:
   - `downsample_factors` comes from NGFF multiscales (per-axis factors), ordered to match the displayed axes.
 - If the recommended level differs from current:
   - Respect hysteresis: only switch if sustained for dwell_ms and outside thresholds (below).
-  - Switch via `request_multiscale_level(level, path)` and trigger a clean keyframe (reuse server `_ensure_keyframe()`).
+- Switch via `request_multiscale_level(level, path)` which emits a controller intent and trigger a clean keyframe (reuse server `_ensure_keyframe()`).
 
 ### 3D (TurntableCamera)
 
@@ -75,7 +75,7 @@ Default for first cut: keep lowest resolution in 3D for stability; add the heuri
 - Methods
   - `_maybe_auto_switch_level_2d()`: compute corners from `canvas` + view transforms, then recommended level via `compute_multiscale_level(...)`. Manage dwell/cooldown and call `request_multiscale_level(...)` if needed.
   - Optional `_maybe_auto_switch_level_3d()` when enabled.
-  - On applying a switch in `_apply_multiscale_switch(...)`, notify the server (callback) to update `ms_state.current_level` and rebroadcast dims meta.
+- When a manual switch is emitted, notify the server (callback) to update `ms_state.current_level` and rebroadcast dims meta.
 
 ## Server Changes
 
@@ -147,7 +147,7 @@ We’re addressing both gaps with the following steps:
 
 2. **Render-thread enforcement of pending level switches**
    - Ensure `_apply_pending_state` always forces a render tick after queuing `_pending_ms_level`. Today the warm-up intents can queue switches before the first pixel client attaches, so the worker never advances the state machine.
-   - Solution: trigger an immediate `canvas.render()` (or enqueue a one-shot frame) whenever we set `_pending_ms_level`, guaranteeing `_apply_multiscale_switch` runs even before the pixel drain connects.
+  - Solution: trigger an immediate `canvas.render()` (or enqueue a one-shot frame) whenever we mark `_pending_ms_level`, guaranteeing the manual snapshot path runs even before the pixel drain connects.
    - Record a debug log (`ms.switch: level=<from>→<to> roi=<…> elapsed=<…>ms`) once `_load_slice_with_metrics` finishes so it’s obvious in the server log that the priming switch executed.
 
 3. **Latency policy bootstrap**

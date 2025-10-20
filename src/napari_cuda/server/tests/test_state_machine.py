@@ -23,20 +23,14 @@ def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
     mailbox = RenderUpdateMailbox(time_fn=clock)
 
-    mailbox.set_multiscale_target(1, "coarse")
-    mailbox.set_multiscale_target(2, None)
     snapshot = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25)
     mailbox.set_scene_state(snapshot)
 
     updates = mailbox.drain()
-    assert updates.multiscale is not None
-    assert updates.multiscale.level == 2
-    assert updates.multiscale.path is None
     assert updates.scene_state == snapshot
 
     # Second drain should be empty (one-shot semantics)
     updates_empty = mailbox.drain()
-    assert updates_empty.multiscale is None
     assert updates_empty.scene_state is None
 
 
