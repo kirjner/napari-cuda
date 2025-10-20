@@ -102,72 +102,91 @@ class RenderUpdateMailbox:
 
     @staticmethod
     def _build_signature(state: RenderLedgerSnapshot) -> tuple:
-        center = tuple(float(c) for c in state.center) if state.center is not None else None
-        zoom = float(state.zoom) if state.zoom is not None else None
-        angles = tuple(float(a) for a in state.angles) if state.angles is not None else None
-        distance = float(state.distance) if state.distance is not None else None
-        fov = float(state.fov) if state.fov is not None else None
-        current_step = (
-            tuple(int(s) for s in state.current_step)
-            if state.current_step is not None
-            else None
-        )
-        # Include display mode axes in the signature so 2D/3D toggles and
-        # displayed/order changes are not treated as no-ops. Previously, only
-        # camera pose and step were considered, which caused us to skip
-        # applying dims on ndisplay changes and prevented camera class switches
-        # (PanZoom <-> Turntable) from taking effect.
-        ndisplay = int(state.ndisplay) if state.ndisplay is not None else None
-        displayed = (
-            tuple(int(i) for i in state.displayed)
-            if state.displayed is not None
-            else None
-        )
-        order = (
-            tuple(int(i) for i in state.order)
-            if state.order is not None
-            else None
-        )
         def _canonical(value: Any) -> Any:
+            if value is None:
+                return None
             if isinstance(value, (list, tuple)):
                 return tuple(_canonical(v) for v in value)
             if isinstance(value, dict):
                 return tuple(sorted((str(k), _canonical(v)) for k, v in value.items()))
             return value
 
-        layer_sig = None
+        dims_token: tuple
+        if state.dims_version is not None:
+            dims_token = ("dv", int(state.dims_version))
+        else:
+            dims_token = (
+                "dvals",
+                _canonical(state.current_step),
+                _canonical(state.order),
+                _canonical(state.displayed),
+            )
+
+        view_token: tuple
+        if state.view_version is not None:
+            view_token = ("vv", int(state.view_version))
+        else:
+            view_token = (
+                "vvals",
+                int(state.ndisplay) if state.ndisplay is not None else None,
+                _canonical(state.displayed),
+                _canonical(state.order),
+            )
+
+        multiscale_token: tuple
+        if state.multiscale_level_version is not None:
+            multiscale_token = ("lv", int(state.multiscale_level_version))
+        else:
+            multiscale_token = (
+                "lvals",
+                int(state.current_level) if state.current_level is not None else None,
+                _canonical(state.level_shapes),
+            )
+
+        if state.camera_versions:
+            camera_token = (
+                "cv",
+                tuple(sorted((str(k), int(v)) for k, v in state.camera_versions.items())),
+            )
+        else:
+            camera_token = (
+                "cvals",
+                _canonical(state.center),
+                _canonical(state.zoom),
+                _canonical(state.angles),
+                _canonical(state.distance),
+                _canonical(state.fov),
+                _canonical(state.rect),
+            )
+
+        layer_token = None
         if state.layer_updates:
             layer_items = []
             for layer_id, props in state.layer_updates.items():
                 if not props:
                     continue
                 normalized = tuple(
-                    sorted((str(key), _canonical(value)) for key, value in props.items())
+                    sorted((str(key), _canonical(val)) for key, val in props.items())
                 )
                 layer_items.append((str(layer_id), normalized))
             if layer_items:
-                layer_sig = tuple(sorted(layer_items))
+                layer_token = tuple(sorted(layer_items))
 
-        volume_sig = (
-            str(state.volume_mode) if state.volume_mode is not None else None,
-            str(state.volume_colormap) if state.volume_colormap is not None else None,
-            tuple(float(v) for v in state.volume_clim) if state.volume_clim is not None else None,
-            float(state.volume_opacity) if state.volume_opacity is not None else None,
-            float(state.volume_sample_step) if state.volume_sample_step is not None else None,
+        volume_token = (
+            _canonical(state.volume_mode),
+            _canonical(state.volume_colormap),
+            _canonical(state.volume_clim),
+            _canonical(state.volume_opacity),
+            _canonical(state.volume_sample_step),
         )
 
         return (
-            center,
-            zoom,
-            angles,
-            distance,
-            fov,
-            current_step,
-            ndisplay,
-            displayed,
-            order,
-            layer_sig,
-            volume_sig,
+            dims_token,
+            view_token,
+            multiscale_token,
+            camera_token,
+            layer_token,
+            volume_token,
         )
 
 

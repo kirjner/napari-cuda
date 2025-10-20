@@ -218,9 +218,8 @@ class EGLHeadlessServer:
         self._state_lock = threading.RLock()
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
         self._bootstrap_snapshot: Optional[RenderLedgerSnapshot] = None
-        # Camera sequencing and pose tracking (per target)
+        # Camera sequencing per target
         self._camera_command_seq: Dict[str, int] = {}
-        self._last_camera_pose_seq: Dict[str, int] = {}
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -819,16 +818,6 @@ class EGLHeadlessServer:
     ) -> None:
         target = pose.target or "main"
         seq = int(pose.command_seq)
-        last_seq = int(self._last_camera_pose_seq.get(target, 0))
-        if seq <= last_seq:
-            logger.debug(
-                "camera pose ignored (stale) target=%s seq=%d last_seq=%d",
-                target,
-                seq,
-                last_seq,
-            )
-            return
-        self._last_camera_pose_seq[target] = seq
 
         with self._state_lock:
             if self._log_cam_debug:

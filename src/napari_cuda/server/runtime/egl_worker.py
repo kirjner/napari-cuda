@@ -1228,18 +1228,10 @@ class EGLRendererWorker:
             for key, version in state.camera_versions.items():
                 self._applied_versions[("camera", "main", str(key))] = int(version)
 
-        if not self._render_mailbox.update_state_signature(state):
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "txn.skip: unchanged snapshot level=%s step=%s center=%s zoom=%s",
-                    state.current_level,
-                    state.current_step,
-                    state.center,
-                    state.zoom,
-                )
-            return
+        signature_changed = self._render_mailbox.update_state_signature(state)
 
-        apply_render_snapshot(self, state)
+        if signature_changed:
+            apply_render_snapshot(self, state)
 
         if state.layer_updates:
             view = self.view
