@@ -374,24 +374,29 @@ def viewport_roi_for_level(
     quiet: bool = False,
     for_policy: bool = False,
 ) -> SliceROI:
-    view = getattr(worker, "view", None)
-    align_chunks = (not for_policy) and bool(getattr(worker, "_roi_align_chunks", True))
-    ensure_contains = (not for_policy) and bool(getattr(worker, "_roi_ensure_contains_viewport", True))
-    edge_threshold = int(getattr(worker, "_roi_edge_threshold", 4))
-    chunk_pad = int(getattr(worker, "_roi_pad_chunks", 1))
+    view = worker.view
+    align_chunks = (not for_policy) and bool(worker._roi_align_chunks)
+    ensure_contains = (not for_policy) and bool(worker._roi_ensure_contains_viewport)
+    edge_threshold = int(worker._roi_edge_threshold)
+    chunk_pad = int(worker._roi_pad_chunks)
 
-    roi_log = getattr(worker, "_roi_log_state", None)
+    roi_log = worker._roi_log_state
     log_state = roi_log if isinstance(roi_log, dict) else None
+
+    data_wh = worker._data_wh
+    data_depth = worker._data_d
 
     def _snapshot() -> Dict[str, Any]:
         return viewport_debug_snapshot(
-            view=getattr(worker, "view", None),
+            view=view,
             canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
-            data_wh=getattr(worker, "_data_wh", None),
-            data_depth=getattr(worker, "_data_d", None),
+            data_wh=data_wh,
+            data_depth=data_depth,
         )
 
     reason = "policy-roi" if for_policy else "roi-request"
+
+    roi_cache = worker._roi_cache
 
     return resolve_worker_viewport_roi(
         view=view,
@@ -403,12 +408,12 @@ def viewport_roi_for_level(
         ensure_contains_viewport=ensure_contains,
         edge_threshold=edge_threshold,
         for_policy=for_policy,
-        roi_cache=getattr(worker, "_roi_cache", None),
+        roi_cache=roi_cache,
         roi_log_state=log_state,
         snapshot_cb=_snapshot,
-        log_layer_debug=getattr(worker, "_log_layer_debug", False),
+        log_layer_debug=worker._log_layer_debug,
         quiet=quiet,
-        data_wh=getattr(worker, "_data_wh", None),
+        data_wh=data_wh,
         reason=reason,
         logger_ref=logger,
     )

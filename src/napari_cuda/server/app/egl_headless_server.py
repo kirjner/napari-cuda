@@ -64,9 +64,9 @@ from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_dims_update,
-    reduce_level_update,
     reduce_camera_update,
 )
+from napari_cuda.server.control.transactions import apply_level_switch_transaction
 from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
@@ -747,10 +747,10 @@ class EGLHeadlessServer:
         applied: LevelContext,
         downgraded: bool,
     ) -> None:
-        level_update = reduce_level_update(
-            self._scene,
-            self._state_ledger,
-            self._state_lock,
+        level_update = apply_level_switch_transaction(
+            store=self._scene,
+            ledger=self._state_ledger,
+            lock=self._state_lock,
             applied=applied,
             downgraded=bool(downgraded),
             origin="worker.state.level",

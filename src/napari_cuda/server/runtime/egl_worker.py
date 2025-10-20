@@ -1279,7 +1279,7 @@ class EGLRendererWorker:
             factor = float(command.factor)
             if factor <= 0.0:
                 continue
-            hint = 1.0 / factor
+            hint = factor
             self._render_mailbox.record_zoom_hint(hint)
             break
 
