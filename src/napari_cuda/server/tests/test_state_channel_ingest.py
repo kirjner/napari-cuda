@@ -300,13 +300,13 @@ async def _test_roi_applied_once_on_level_switch() -> None:
     harness = StateServerHarness(loop)
 
     roi_calls: list[tuple] = []
-    orig_apply_worker_level = snapshot_mod._apply_slice_level
+    orig_apply_worker_level = snapshot_mod.apply_slice_level
 
     def _spy_apply_slice_level(*args, **kwargs):
         roi_calls.append((args, kwargs))
         return None
 
-    snapshot_mod._apply_slice_level = _spy_apply_slice_level  # type: ignore[assignment]
+    snapshot_mod.apply_slice_level = _spy_apply_slice_level  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -332,5 +332,5 @@ async def _test_roi_applied_once_on_level_switch() -> None:
 
         assert len(roi_calls) == 1
     finally:
-        snapshot_mod._apply_slice_level = orig_apply_worker_level  # type: ignore[assignment]
+        snapshot_mod.apply_slice_level = orig_apply_worker_level  # type: ignore[assignment]
         await harness.stop()

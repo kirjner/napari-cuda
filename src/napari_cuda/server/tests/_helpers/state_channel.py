@@ -11,13 +11,15 @@ memory for assertions.
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 import threading
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence
+from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional
 
+import numpy as np
 from websockets.exceptions import ConnectionClosedOK
 from websockets.protocol import State
 
@@ -36,6 +38,11 @@ from napari_cuda.server.rendering import pixel_broadcaster
 from napari_cuda.server.scene import create_server_scene_data, build_render_scene_state
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext
+from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.data.level_logging import LayerAssignmentLogger
+from napari_cuda.server.data.roi import plane_scale_for_level
+from napari.components import viewer_model
 
 from napari_cuda.server.runtime import worker_runtime
 from napari_cuda.server.runtime import render_snapshot as snapshot_mod
@@ -127,6 +134,106 @@ class ScheduledCall:
     task: asyncio.Task[Any]
 
 
+class _HarnessPanZoomCamera:
+    def __init__(self) -> None:
+        self.rect: tuple[float, float, float, float] | None = None
+        self.center: tuple[float, float] = (0.0, 0.0)
+        self.zoom: float = 1.0
+
+    def set_range(
+        self,
+        *,
+        x: tuple[float, float],
+        y: tuple[float, float],
+    ) -> None:
+        self._range_x = tuple(float(v) for v in x)
+        self._range_y = tuple(float(v) for v in y)
+
+
+class _HarnessTurntableCamera:
+    def __init__(self) -> None:
+        self.center: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.azimuth: float = 0.0
+        self.elevation: float = 0.0
+        self.roll: float = 0.0
+        self.distance: float = 1.0
+        self.fov: float = 60.0
+
+
+class _HarnessLayer:
+    def __init__(self) -> None:
+        self.scale: tuple[float, float] = (1.0, 1.0)
+        self.translate: tuple[float, float] = (0.0, 0.0)
+        self.visible: bool = True
+        self.opacity: float = 1.0
+        self.blending: str = "opaque"
+        self.contrast_limits: list[float] = [0.0, 1.0]
+        self.data = np.zeros((1, 1), dtype=np.float32)
+
+
+class _HarnessSceneSource:
+    def __init__(self) -> None:
+        self.axes = ("z", "y", "x")
+        self.level_descriptors = [
+            SimpleNamespace(shape=(64, 512, 512), path=None),
+            SimpleNamespace(shape=(32, 256, 256), path=None),
+        ]
+        self.dtype = "float32"
+        self._current_level = 0
+        self._current_step = (0, 0, 0)
+
+    @property
+    def current_level(self) -> int:
+        return int(self._current_level)
+
+    @current_level.setter
+    def current_level(self, value: int) -> None:
+        self._current_level = int(value)
+
+    @property
+    def current_step(self) -> tuple[int, ...]:
+        return tuple(self._current_step)
+
+    def initial_step(self, level: int) -> tuple[int, ...]:
+        _ = int(level)
+        return (0, 0, 0)
+
+    def level_index_for_path(self, _path: Optional[str]) -> int:
+        return 0
+
+    def level_scale(self, level: int) -> tuple[float, float, float]:
+        factor = float(2 ** int(level))
+        return (1.0, factor, factor)
+
+    def level_shape(self, index: Optional[int] = None) -> tuple[int, ...]:
+        idx = self._current_level if index is None else int(index)
+        return tuple(self.level_descriptors[idx].shape)
+
+    def slice(
+        self,
+        level: int,
+        z_index: int,
+        *,
+        compute: bool = True,
+        roi: Optional[SliceROI] = None,
+    ) -> np.ndarray:
+        del compute, z_index  # unused in harness
+        desc = self.level_descriptors[int(level)]
+        _, height, width = desc.shape
+        if roi is not None and not roi.is_empty():
+            height = int(roi.height)
+            width = int(roi.width)
+        return np.zeros((height, width), dtype=np.float32)
+
+    def set_current_slice(self, step: tuple[int, ...], level: int) -> tuple[int, ...]:
+        self._current_step = tuple(int(v) for v in step)
+        self._current_level = int(level)
+        return self._current_step
+
+    def ensure_contrast(self, level: int) -> tuple[float, float]:
+        _ = int(level)
+        return (0.0, 1.0)
+
 class CaptureWorker:
     """Match the behaviour exercised in state channel tests without a renderer."""
 
@@ -137,13 +244,43 @@ class CaptureWorker:
         self.use_volume = False
         self._is_ready = True
         self._data_wh = (640, 480)
+        self._data_d = None
+        self._viewer = viewer_model.ViewerModel()
+        self.view = SimpleNamespace(camera=_HarnessPanZoomCamera())
+        self._napari_layer = _HarnessLayer()
+        self._scene_source = _HarnessSceneSource()
+        self._state_lock = threading.RLock()
         self._zarr_axes = "yx"
         self._zarr_shape = (480, 640)
         self._zarr_dtype = "float32"
         self.volume_dtype = "float32"
         self._active_ms_level = 0
         self._last_step = (0, 0)
-        self._scene_source = None
+        self._roi_cache: dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
+        self._roi_log_state: dict[int, tuple[SliceROI, float]] = {}
+        self._roi_edge_threshold = 0
+        self._roi_align_chunks = False
+        self._roi_ensure_contains_viewport = False
+        self._roi_pad_chunks = 0
+        self._idr_on_z = False
+        self._last_roi: Optional[tuple[int, SliceROI]] = None
+        self._sticky_contrast = False
+        self._preserve_view_on_switch = False
+        self._layer_logger = LayerAssignmentLogger(logging.getLogger(__name__))
+        self._log_layer_debug = False
+        self._level_downgraded = False
+        self._render_tick_required = False
+        self._emit_current_camera_pose = lambda *_args, **_kwargs: None
+        self._volume_scale = (1.0, 1.0, 1.0)
+        self._hw_limits = SimpleNamespace(volume_max_bytes=None, volume_max_voxels=None)
+        self._volume_max_bytes = None
+        self._volume_max_voxels = None
+        self._budget_error_cls = RuntimeError
+        self._z_index = 0
+        self._pose_seq = 0
+        self._max_camera_command_seq = 0
+        self._level_switch_pending = False
+        self._last_dims_signature = None
         from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 
         self._canonical_axes = canonical_axes_from_source(
@@ -194,6 +331,118 @@ class CaptureWorker:
 
     def _ledger_displayed(self) -> tuple[int, ...]:
         return self._displayed
+
+    # Worker helpers required by render_snapshot ---------------------------------
+    def _mark_render_tick_needed(self) -> None:
+        self._render_tick_required = True
+
+    def _dims_signature(self, snapshot: RenderLedgerSnapshot) -> tuple:
+        return (
+            int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
+            tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
+            tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
+            tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None,
+            int(snapshot.current_level) if snapshot.current_level is not None else None,
+            tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
+        )
+
+    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot, *, signature: tuple) -> None:
+        dims = self._viewer.dims
+        self._last_dims_signature = signature
+
+        if snapshot.ndisplay is not None:
+            dims.ndisplay = max(1, int(snapshot.ndisplay))
+
+        if snapshot.axis_labels is not None:
+            dims.axis_labels = tuple(str(v) for v in snapshot.axis_labels)  # type: ignore[assignment]
+
+        if snapshot.order is not None:
+            dims.order = tuple(int(v) for v in snapshot.order)  # type: ignore[assignment]
+
+        if snapshot.displayed is not None:
+            dims.displayed = tuple(int(v) for v in snapshot.displayed)  # type: ignore[assignment]
+
+        if snapshot.current_step is not None:
+            step_tuple = tuple(int(v) for v in snapshot.current_step)
+            dims.current_step = step_tuple  # type: ignore[assignment]
+
+        if snapshot.current_level is not None:
+            self._active_ms_level = int(snapshot.current_level)
+
+        self._update_z_index_from_snapshot(snapshot)
+
+    def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
+        if snapshot.axis_labels is None or snapshot.current_step is None:
+            return
+        labels = [str(label).lower() for label in snapshot.axis_labels]
+        if "z" not in labels:
+            return
+        idx = labels.index("z")
+        steps = tuple(int(v) for v in snapshot.current_step)
+        if idx < len(steps):
+            self._z_index = int(steps[idx])
+
+    def _ensure_scene_source(self) -> _HarnessSceneSource:
+        if self._scene_source is None:
+            self._scene_source = _HarnessSceneSource()
+        return self._scene_source
+
+    def _configure_camera_for_mode(self) -> None:
+        self.view = SimpleNamespace(
+            camera=_HarnessTurntableCamera() if self.use_volume else _HarnessPanZoomCamera()
+        )
+
+    def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
+        return SceneStateApplyContext(
+            use_volume=bool(self.use_volume),
+            viewer=self._viewer,
+            camera=cam,
+            visual=None,
+            layer=self._napari_layer,
+            scene_source=self._ensure_scene_source(),
+            active_ms_level=int(self._active_ms_level),
+            z_index=self._z_index,
+            last_roi=self._last_roi,
+            preserve_view_on_switch=self._preserve_view_on_switch,
+            sticky_contrast=self._sticky_contrast,
+            idr_on_z=self._idr_on_z,
+            data_wh=self._data_wh,
+            volume_scale=self._volume_scale,
+            state_lock=self._state_lock,
+            ensure_scene_source=self._ensure_scene_source,
+            plane_scale_for_level=plane_scale_for_level,
+            load_slice=self._load_slice,
+            mark_render_tick_needed=self._mark_render_tick_needed,
+            request_encoder_idr=self._request_encoder_idr,
+        )
+
+    def _load_slice(self, source: _HarnessSceneSource, level: int, z_index: int):
+        return source.slice(level, z_index, compute=True)
+
+    def _get_level_volume(self, source: _HarnessSceneSource, level: int) -> np.ndarray:
+        shape = source.level_shape(level)
+        return np.zeros(shape, dtype=np.float32)
+
+    def _resolve_visual(self):
+        return None
+
+    def _request_encoder_idr(self) -> None:
+        return None
+
+    def _emit_current_camera_pose(self, _reason: str) -> None:
+        self._pose_seq += 1
+
+    def _update_level_metadata(self, descriptor: SimpleNamespace, applied: Any) -> None:
+        self._active_ms_level = int(applied.level)
+        self._z_index = int(applied.z_index) if applied.z_index is not None else 0
+        self._zarr_level = getattr(descriptor, "path", None)
+        self._zarr_shape = tuple(int(v) for v in getattr(descriptor, "shape", ()))
+        self._zarr_axes = getattr(applied, "axes", "".join(self._axis_labels))
+        self._zarr_dtype = str(getattr(applied, "dtype", self._zarr_dtype))
+        source = self._ensure_scene_source()
+        source.current_level = int(applied.level)
+        source.set_current_slice(tuple(int(v) for v in applied.step), int(applied.level))
+
 
 
 class StateServerHarness:
@@ -311,7 +560,8 @@ class StateServerHarness:
             current_step=None,
             ndisplay=2,
             zarr_path=None,
-            scene_source=None,
+            scene_source=worker._ensure_scene_source(),
+            viewer_model=worker._viewer,
             layer_controls=None,
         )
 
@@ -481,25 +731,24 @@ class StateServerHarness:
         server._broadcast_stream_config = _broadcast_stream_config
 
         server._state_send = self._state_send  # type: ignore[assignment]
-        server._scene_source = None
+        server._scene_source = worker._ensure_scene_source()
 
         def _commit_level(applied, downgraded):
             reduce_level_update(
-            server._scene,
-            server._state_ledger,
-            server._state_lock,
-            applied=applied,
-            downgraded=bool(downgraded),
-            origin="harness.level",
-        )
-            try:
-                snapshot_mod._apply_slice_level(server._worker, server._scene_source, applied)
-            except Exception:
-                pass
-            server._scene.latest_state = build_render_scene_state(
+                server._scene,
+                server._state_ledger,
+                server._state_lock,
+                applied=applied,
+                downgraded=bool(downgraded),
+                origin="harness.level",
+            )
+            snapshot = build_render_scene_state(
                 server._state_ledger,
                 server._scene,
             )
+            server._scene.latest_state = snapshot
+            assert server._worker._viewer is not None, "harness worker viewer not initialised"
+            snapshot_mod.apply_render_snapshot(server._worker, snapshot)
 
         server._commit_level = _commit_level
         return server

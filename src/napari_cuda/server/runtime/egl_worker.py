@@ -71,7 +71,13 @@ from napari_cuda.server.runtime.scene_state_applier import (
 from napari_cuda.server.runtime.camera_controller import process_camera_deltas as _process_camera_deltas
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
+from napari_cuda.server.runtime.render_snapshot import (
+    apply_render_snapshot,
+    apply_plane_slice_roi,
+    apply_slice_level,
+    apply_volume_level,
+    viewport_roi_for_level,
+)
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdate,
@@ -81,14 +87,7 @@ from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
-from napari_cuda.server.runtime.worker_runtime import (
-    apply_plane_slice_roi,
-    roi_equal,
-    format_worker_level_roi,
-    viewport_roi_for_level,
-    ensure_scene_source,
-    reset_worker_camera,
-)
+from napari_cuda.server.runtime.worker_runtime import ensure_scene_source, reset_worker_camera
 logger = logging.getLogger(__name__)
 
 
@@ -957,17 +956,22 @@ class EGLRendererWorker:
         source: ZarrSceneSource,
         applied: lod.LevelContext,
     ) -> None:
-        apply_worker_volume_level(self, source, applied)
+        apply_volume_level(self, source, applied)
 
     def _apply_slice_level(
         self,
         source: ZarrSceneSource,
         applied: lod.LevelContext,
     ) -> None:
-        apply_worker_slice_level(self, source, applied)
+        apply_slice_level(self, source, applied)
 
     def _format_level_roi(self, source: ZarrSceneSource, level: int) -> str:
-        return format_worker_level_roi(self, source, level)
+        if self.use_volume:
+            return "volume"
+        roi = viewport_roi_for_level(self, source, level)
+        if roi.is_empty():
+            return "full"
+        return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
     def _clear_visual(self) -> None:
         if self._visual is not None:
@@ -1476,7 +1480,7 @@ class EGLRendererWorker:
                 roi = viewport_roi_for_level(self, source, int(self._active_ms_level))
                 last_roi_entry = self._last_roi
                 last_roi_obj = last_roi_entry[1] if last_roi_entry is not None else None
-                if last_roi_obj is None or not roi_equal(roi, last_roi_obj):
+                if last_roi_obj is None or roi != last_roi_obj:
                     apply_plane_slice_roi(
                         self,
                         source,

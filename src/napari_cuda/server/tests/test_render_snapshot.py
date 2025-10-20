@@ -91,8 +91,8 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
         call_order.append("volume")
 
     monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "_apply_volume_level", _fake_volume)
-    monkeypatch.setattr(snapshot_mod, "_apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
+    monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
     original_configure = worker._configure_camera_for_mode
 
@@ -132,8 +132,8 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
         volume_called = True
 
     monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "_apply_volume_level", _fake_volume)
-    monkeypatch.setattr(snapshot_mod, "_apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
+    monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 
@@ -161,8 +161,8 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
         calls["slice"] = (context.level, context.step)
 
     monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "_apply_slice_level", _fake_slice)
-    monkeypatch.setattr(snapshot_mod, "_apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "apply_slice_level", _fake_slice)
+    monkeypatch.setattr(snapshot_mod, "apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 
@@ -191,8 +191,8 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
         calls.setdefault("volume", []).append(context.level)
 
     monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "_apply_volume_level", _fake_volume)
-    monkeypatch.setattr(snapshot_mod, "_apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
+    monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 

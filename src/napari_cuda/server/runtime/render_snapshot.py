@@ -7,18 +7,120 @@ never observes a partially-updated dims state.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Dict
+import logging
 import time
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker_runtime import apply_plane_slice_roi, viewport_roi_for_level, plane_wh_for_level
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
 from dataclasses import replace
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.level_budget import select_volume_level
+from napari_cuda.server.data.roi import (
+    plane_scale_for_level,
+    plane_wh_for_level,
+    viewport_debug_snapshot,
+    resolve_worker_viewport_roi,
+)
+from napari_cuda.server.runtime.scene_types import SliceROI
+
+logger = logging.getLogger(__name__)
+
+
+def viewport_roi_for_level(
+    worker: object,
+    source: Any,
+    level: int,
+    *,
+    quiet: bool = False,
+    for_policy: bool = False,
+) -> SliceROI:
+    view = worker.view
+    align_chunks = (not for_policy) and bool(worker._roi_align_chunks)
+    ensure_contains = (not for_policy) and bool(worker._roi_ensure_contains_viewport)
+    edge_threshold = int(worker._roi_edge_threshold)
+    chunk_pad = int(worker._roi_pad_chunks)
+
+    roi_log = worker._roi_log_state
+    log_state = roi_log if isinstance(roi_log, dict) else None
+
+    data_wh = worker._data_wh
+
+    def _snapshot() -> Dict[str, Any]:
+        return viewport_debug_snapshot(
+            view=view,
+            canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
+            data_wh=data_wh,
+            data_depth=worker._data_d,
+        )
+
+    reason = "policy-roi" if for_policy else "roi-request"
+    roi_cache = worker._roi_cache
+
+    roi = resolve_worker_viewport_roi(
+        view=view,
+        canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
+        source=source,
+        level=int(level),
+        align_chunks=align_chunks,
+        chunk_pad=chunk_pad,
+        ensure_contains_viewport=ensure_contains,
+        edge_threshold=edge_threshold,
+        for_policy=for_policy,
+        roi_cache=roi_cache,
+        roi_log_state=log_state,
+        snapshot_cb=_snapshot,
+        log_layer_debug=worker._log_layer_debug,
+        quiet=quiet,
+        data_wh=data_wh,
+        reason=reason,
+        logger_ref=logger,
+    )
+
+    if log_state is not None:
+        log_state["roi"] = roi
+        log_state["level"] = int(level)
+        log_state["requested"] = (align_chunks, ensure_contains, chunk_pad)
+
+    return roi
+
+
+def apply_plane_slice_roi(
+    worker: Any,
+    source: Any,
+    level: int,
+    roi: SliceROI,
+    *,
+    update_contrast: bool,
+) -> tuple[int, int]:
+    """Load and apply a plane slice for the given ROI."""
+
+    z_idx = int(worker._z_index or 0)
+    slab = source.slice(int(level), z_idx, compute=True, roi=roi)
+
+    layer = worker._napari_layer
+    if layer is not None:
+        view = worker.view
+        assert view is not None, "VisPy view required for slice apply"
+        ctx = worker._build_scene_state_context(view.camera)
+        SceneStateApplier.apply_slice_to_layer(
+            ctx,
+            source=source,
+            slab=slab,
+            roi=roi,
+            update_contrast=bool(update_contrast),
+        )
+
+    height_px = int(slab.shape[0])
+    width_px = int(slab.shape[1])
+    worker._data_wh = (int(width_px), int(height_px))
+    worker._data_d = None
+    worker._last_roi = (int(level), roi)
+    worker._mark_render_tick_needed()
+    return height_px, width_px
 
 
 def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
@@ -60,7 +162,13 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
         _apply_snapshot_multiscale(worker, snapshot)
 
 
-__all__ = ["apply_render_snapshot"]
+__all__ = [
+    "apply_render_snapshot",
+    "apply_plane_slice_roi",
+    "viewport_roi_for_level",
+    "apply_volume_level",
+    "apply_slice_level",
+]
 
 
 def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
@@ -99,7 +207,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
                 prev_level=prev_level,
                 ledger_step=ledger_step,
             )
-            _apply_volume_level(worker, source, applied_context)
+            apply_volume_level(worker, source, applied_context)
             target_level = int(applied_context.level)
             level_changed = target_level != prev_level
             worker._configure_camera_for_mode()
@@ -124,7 +232,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         worker._last_dims_signature = None  # noqa: SLF001
     worker._level_downgraded = False
     _apply_plane_camera_pose(worker, snapshot)
-    _apply_slice_level(worker, source, applied_context)
+    apply_slice_level(worker, source, applied_context)
 
 
 def _apply_volume_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
@@ -250,7 +358,7 @@ def _stage_level_context(worker: Any, source: Any, context: lod.LevelContext) ->
     worker._update_level_metadata(descriptor, context)  # noqa: SLF001
 
 
-def _apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
+def apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
     scale_vals = list(source.level_scale(applied.level)) if hasattr(source, "level_scale") else []
     scales = [float(s) for s in scale_vals[-3:]] if scale_vals else []
     while len(scales) < 3:
@@ -289,7 +397,7 @@ def _apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> 
     )
 
 
-def _apply_slice_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
+def apply_slice_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
     layer = getattr(worker, "_napari_layer", None)
     sy, sx = applied.scale_yx
 

@@ -23,8 +23,7 @@ This document defines the server‑side architecture for napari‑cuda. It keeps
     - `layer_mirror.py` — builds `notify.layers` (or fold into `notify.scene`)
 - `src/napari_cuda/server/runtime/`
   - `egl_worker.py` — render thread (VisPy + CUDA/NVENC) and mailbox
-  - `render_txn.py` — RenderTxn builder/apply (atomic dims/level/camera, fit suppression)
-  - `plane_restore.py` — stage/consume data for deterministic 3D→2D restores
+  - `render_snapshot.py` — applies controller snapshots (dims/level/camera) and owns ROI selection
   - `camera_controller.py` — camera delta queue, rect↔ROI helpers, pose snapshots
   - `render_ledger_snapshot.py` — builds the worker snapshot from the ledger (no “scene bag” merge)
 - `src/napari_cuda/server/data/`
@@ -72,7 +71,7 @@ Intents → Reducers → Ledger → Worker Txn → Ledger (applied) → Mirrors.
 
 - View toggle (2D↔3D)
   - Reducer writes `view.ndisplay`, derives and writes `dims.order` + `view.displayed`, opens `scene.op_seq(kind="view-toggle")`.
-  - Worker pulls snapshot, runs `RenderTxn`, commits applied `multiscale.level/current_step` + `camera.*`, closes op.
+- Worker pulls snapshot, runs `apply_render_snapshot`, commits applied `multiscale.level/current_step` + `camera.*`, closes op.
   - Dims and camera mirrors emit once (op‑gated).
 
 - Dims step
@@ -88,58 +87,34 @@ Intents → Reducers → Ledger → Worker Txn → Ledger (applied) → Mirrors.
 
 - Bootstrap
   - `reduce_bootstrap_state(...)` seeds dims, levels, shapes, current_level, view.ndisplay (no `dims.mode`).
-  - Start mirrors after bootstrap; start worker; first `RenderTxn` applies a consistent frame.
+- Start mirrors after bootstrap; start worker; the first `apply_render_snapshot` produces a consistent frame.
 
-## Worker RenderTxn (atomic, fit‑safe)
+## Render Snapshot Apply (atomic, fit‑safe)
 
-Build from snapshot, apply atomically, then commit applied state:
+`render_snapshot.apply_render_snapshot` is the single entry point on the worker. It consumes the controller-authored snapshot, applies dims/levels/camera atomically, and writes back the applied pose:
 
 1) Resolve mode: `target_volume = (snapshot.ndisplay >= 3)`.
-2) Normalize dims: compute `ndim`; derive/normalize `order`, `displayed`, `current_step`.
-3) Select level: requested or policy (oversampling + hysteresis), bounded by budgets; remap z proportionally unless restoring.
-4) Determine 2D ROI from cache:
-   - Project `camera_plane.rect` (world) to target level via `plane_scale_for_level`.
-   - No fallbacks in steady‑state; the worker writes the caches on apply so they are always present.
-5) Apply with fit suppression (napari sees a coherent state only):
-   - Set `dims.ndim` → `dims.order` → `dims.current_step` → `dims.ndisplay` (last).
-   - Apply level (slab/volume) and update layer.
-   - Apply camera: 2D `set_range` then rect/center/zoom; 3D `set_range` then TT angles/dist.
-   - Suppress napari auto‑fit during dims: block the `viewer.dims.events.ndisplay` and `viewer.dims.events.order` emitters while the transaction applies dims. The worker sets camera explicitly as part of the txn, so fit is not needed during toggles.
+2) Normalize dims: compute `ndim`; derive `order`, `displayed`, `current_step`; cache a signature to skip redundant re-applies on camera-only updates.
+3) Select level: use the snapshot’s requested level, clamp via budget, and remap z proportionally when switching between mip levels.
+4) Compute the 2D ROI inline:
+   - Project `camera_plane.rect` to the target level using `plane_scale_for_level`.
+   - Reuse cached ROI when possible; otherwise call `viewport_roi_for_level` (now co-located with the snapshot helpers).
+5) Apply with fit suppression (napari never sees partial dims):
+   - Temporarily disconnect `viewer.dims.events.(ndisplay|order)` callbacks.
+   - Apply dims ordering/current_step, then invoke `apply_slice_level` or `apply_volume_level` to update the layer exactly once.
+   - Restore the camera pose (2D rect/center/zoom or 3D azimuth/elevation/distance) and reconnect the fit callbacks.
 6) Commit applied:
-   - `reduce_level_update(applied, downgraded)`, `reduce_camera_update(pose)`; update per‑mode caches (`camera_plane.*` + `view_cache.plane.*` for 2D, or `camera_volume.*` for 3D); close `scene.op_seq` as `applied`.
+   - `reduce_level_update(applied, downgraded)` and `reduce_camera_update(pose)` publish the new state; per-mode caches (`camera_plane.*`, `camera_volume.*`) are refreshed before mirrors emit.
 
-This ordering prevents napari’s auto‑fit from running on partial state and eliminates letterbox/flicker on 3D→2D.
+The ROI and slab helpers (`viewport_roi_for_level`, `apply_plane_slice_roi`, `format_worker_level_roi`) now live next to `apply_render_snapshot`, so the render path owns the only mutation site for napari layers.
 
-### RenderTxn & ROI responsibilities
+### Toggle flow (current)
 
-To keep the call stack shallow, the render transaction owns every mutation that reaches the napari layer:
+The 2D↔3D toggle path already follows the cleaned-up transaction:
 
-- Plane restores are staged as data only (level, step, rect, ROI). The worker never applies the slab outside the transaction.
-- `render_txn.apply_render_txn` consumes the staged restore, applies the single slab through `SceneStateApplier`, and clears the staging slot.
-- Refresh logic merely verifies the ROI signature; if nothing changed, it does nothing. There is no second “apply if needed” helper.
-
-### 2D/3D toggle cleanup (in progress)
-
-The codebase is being reshaped to match the architecture above. The refactor removes duplicate helpers and puts the entire toggle pipeline in one place. Planned deletions/renames:
-
-- Drop `_apply_mode_and_level_txn`, `_plane_roi_override`, `_force_full_roi_next_slice`, `_suppress_roi_refresh_frames`, and `_plane_restore_rect_world`.
-- Limit `apply_worker_slice_level` / `apply_worker_volume_level` to the transaction so each slab applies exactly once.
-- Remove the legacy `plane_restore` staging helpers; the render worker now restores the 2D camera directly when leaving volume mode.
-- Simplify the render transaction to rely on the live camera rect (no `_pending_plane_restore`/signature shims).
-
-Expected pipeline (post-cleanup):
-
-```
-stage_plane_restore(...)   # data only, no layer touch
-render_txn.apply_render_txn
-    ├─ apply dims (fit suppressed)
-    ├─ apply_mode_switch (2D↔3D decision)
-    ├─ apply_level_change (returns AppliedLevel)
-    ├─ consume_plane_restore → SceneStateApplier.apply_slice_to_layer (once)
-    └─ emit camera pose (close op fence)
-```
-
-This structure guarantees exactly one slab apply per toggle and keeps ROI logic alongside the transaction that uses it.
+- No plane-restore staging helpers; the worker switches `use_volume`, reapplies the mip level via `apply_volume_level`, and writes the cached 2D pose straight from the ledger.
+- Snapshots arrive via the intent queue, so there is no second mailbox or “latest intent” shim.
+- Each toggle produces exactly one ROI apply and one pose emit, which the state-channel harness now verifies through `apply_render_snapshot`.
 
 ## Mirrors (thin, op‑gated)
 
@@ -177,6 +152,6 @@ Sequence (zoom example): client intent → enqueue `CameraDeltaCommand` → work
 ## Render Loop vs Mailboxes
 
 - Control loop (async): pulls ledger snapshots, decides whether to render this tick, and calls the worker’s consume/apply. It also sends the captured packets to clients.
-- Worker (render thread): applies state and renders frames. RenderTxn is the single apply site (dims → level → camera) and runs on the worker thread.
-- Mailboxes: the legacy “scene state” mailbox (`enqueue_scene_state`/`drain_scene_updates`) is being removed. RenderTxn applies state directly; only multiscale requests may keep a tiny queue or be applied directly.
+- Worker (render thread): applies state and renders frames. `apply_render_snapshot` is the single apply site (dims → level → camera) and runs on the worker thread.
+- Mailboxes: the legacy “scene state” mailbox (`enqueue_scene_state`/`drain_scene_updates`) is being removed. `apply_render_snapshot` applies state directly; only multiscale requests may keep a tiny queue or be applied directly.
 - Cadence: continuous rendering for connected clients remains; adaptive throttling can be added later behind flags. Removing the scene mailbox does not change the control loop cadence.
