@@ -106,14 +106,14 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     assert worker.use_volume is True
     assert worker.configure_calls == 1
-    assert calls["build"] == (0, 1, (5, 0, 0))
-    assert calls["volume"] == 0
+    assert calls["build"] == (2, 1, (5, 0, 0))
+    assert calls["volume"] == 2
     assert call_order == ["volume", "configure"]
 
 
 def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: pytest.MonkeyPatch) -> None:
-    worker = _StubWorker(use_volume=True, level=1)
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=1, current_step=(9, 0, 0))
+    worker = _StubWorker(use_volume=True, level=2)
+    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=2, current_step=(9, 0, 0))
     prepare_called = False
     volume_called = False
 

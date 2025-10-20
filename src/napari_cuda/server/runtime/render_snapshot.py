@@ -195,8 +195,9 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
             worker._last_dims_signature = None  # noqa: SLF001
 
         requested_level = int(target_level)
-        effective_level = _resolve_volume_level(worker, source, requested_level)
-        worker._level_downgraded = bool(effective_level != requested_level)
+        selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
+        effective_level = int(selected_level)
+        worker._level_downgraded = bool(downgraded)
         load_needed = entering_volume or (int(effective_level) != prev_level)
 
         if load_needed:
@@ -288,20 +289,6 @@ def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> Non
             float(center[1]),
         )
 
-
-def _resolve_volume_level(worker: Any, source: Any, requested_level: int) -> int:
-    max_voxels_cfg = worker._volume_max_voxels or worker._hw_limits.volume_max_voxels
-    max_bytes_cfg = worker._volume_max_bytes or worker._hw_limits.volume_max_bytes
-    max_voxels = int(max_voxels_cfg) if max_voxels_cfg else None
-    max_bytes = int(max_bytes_cfg) if max_bytes_cfg else None
-    level, _ = select_volume_level(
-        source,
-        int(requested_level),
-        max_voxels=max_voxels,
-        max_bytes=max_bytes,
-        error_cls=worker._budget_error_cls,
-    )
-    return int(level)
 
 
 def _build_level_context(
