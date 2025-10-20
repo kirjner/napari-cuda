@@ -26,6 +26,7 @@ class RenderLedgerSnapshot:
     fov: Optional[float] = None
     rect: Optional[tuple[float, float, float, float]] = None
     current_step: Optional[tuple[int, ...]] = None
+    dims_version: Optional[int] = None
     ndisplay: Optional[int] = None
     displayed: Optional[tuple[int, ...]] = None
     order: Optional[tuple[int, ...]] = None
@@ -72,7 +73,9 @@ def build_ledger_snapshot(
     fov_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "fov"))
     rect_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "rect"), float)
 
+    dims_entry = snapshot.get(("dims", "main", "current_step"))
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
+    dims_version = None if dims_entry is None else _version_or_none(dims_entry.version)
     pending_dims = getattr(scene, "pending_dims_step", None)
     if pending_dims is not None:
         current_step = tuple(int(v) for v in pending_dims)
@@ -135,6 +138,7 @@ def build_ledger_snapshot(
         level_shapes=level_shapes,
         current_level=current_level,
         dims_mode=dims_mode,
+        dims_version=dims_version,
         volume_mode=volume_mode,
         volume_colormap=volume_colormap,
         volume_clim=volume_clim,
@@ -208,6 +212,12 @@ def _shape_sequence(value: Any) -> Optional[tuple[tuple[int, ...], ...]]:
         assert shape_tuple is not None, "shape entries must be iterable"
         result.append(shape_tuple)
     return tuple(result)
+
+
+def _version_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
 
 
 __all__ = ["RenderLedgerSnapshot", "build_ledger_snapshot"]

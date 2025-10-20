@@ -46,6 +46,7 @@ class ServerStateLedger:
         self._state: Dict[PropertyKey, LedgerEntry] = {}
         self._subscribers: Dict[PropertyKey, List[Subscriber]] = {}
         self._global_subscribers: List[Subscriber] = []
+        self._versions: Dict[PropertyKey, int] = {}
 
     # ------------------------------------------------------------------
     def record_confirmed(
@@ -70,13 +71,13 @@ class ServerStateLedger:
             metadata_dict = self._normalize_metadata(metadata)
             ts = float(timestamp) if timestamp is not None else float(self._clock())
 
-            if (
-                dedupe
-                and previous is not None
+            same_value = (
+                previous is not None
                 and previous.value == value
                 and previous.metadata == metadata_dict
-                and previous.version == version
-            ):
+            )
+            same_version = version is not None and previous is not None and previous.version == version
+            if dedupe and same_value and (version is None or same_version):
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "ledger dedupe: scope=%s target=%s key=%s origin=%s",
@@ -87,12 +88,20 @@ class ServerStateLedger:
                     )
                 return None
 
+            if version is None:
+                next_version = int(self._versions.get(property_key, 0)) + 1
+                self._versions[property_key] = next_version
+                resolved_version: Any | None = next_version
+            else:
+                resolved_version = version
+                self._versions[property_key] = int(version)
+
             entry = LedgerEntry(
                 value=value,
                 timestamp=ts,
                 origin=str(origin),
                 metadata=metadata_dict,
-                version=version,
+                version=resolved_version,
             )
             self._state[property_key] = entry
 
@@ -104,7 +113,7 @@ class ServerStateLedger:
                 timestamp=ts,
                 origin=str(origin),
                 metadata=metadata_dict,
-                version=version,
+                version=resolved_version,
             )
 
             per_key = list(self._subscribers.get(property_key, ()))
@@ -169,21 +178,30 @@ class ServerStateLedger:
                 property_key = (scope, target, key)
                 previous = self._state.get(property_key)
 
-                if (
-                    dedupe
-                    and previous is not None
+                same_value = (
+                    previous is not None
                     and previous.value == value
                     and previous.metadata == metadata_dict
-                    and previous.version == version
-                ):
+                )
+                same_version = version is not None and previous is not None and previous.version == version
+                if dedupe and same_value and (version is None or same_version):
                     continue
+
+                property_key = (scope, target, key)
+                if version is None:
+                    next_version = int(self._versions.get(property_key, 0)) + 1
+                    self._versions[property_key] = next_version
+                    resolved_version: Any | None = next_version
+                else:
+                    resolved_version = version
+                    self._versions[property_key] = int(version)
 
                 entry = LedgerEntry(
                     value=value,
                     timestamp=ts,
                     origin=str(origin),
                     metadata=metadata_dict,
-                    version=version,
+                    version=resolved_version,
                 )
                 self._state[property_key] = entry
 
@@ -195,7 +213,7 @@ class ServerStateLedger:
                     timestamp=ts,
                     origin=str(origin),
                     metadata=metadata_dict,
-                    version=version,
+                    version=resolved_version,
                 )
 
                 per_key = list(self._subscribers.get(property_key, ()))
@@ -272,6 +290,13 @@ class ServerStateLedger:
         property_key = (str(scope), str(target), str(key))
         with self._lock:
             return self._state.get(property_key)
+
+    def current_version(self, scope: str, target: str, key: str) -> Optional[int]:
+        property_key = (str(scope), str(target), str(key))
+        with self._lock:
+            if property_key not in self._versions:
+                return None
+            return int(self._versions[property_key])
 
     # ------------------------------------------------------------------
     @staticmethod

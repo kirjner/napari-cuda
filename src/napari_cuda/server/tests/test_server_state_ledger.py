@@ -97,3 +97,73 @@ def test_metadata_requires_mapping() -> None:
             origin="worker",
             metadata=42,  # type: ignore[arg-type]
         )
+
+
+def test_record_confirmed_assigns_monotonic_versions() -> None:
+    ledger = ServerStateLedger()
+
+    first = ledger.record_confirmed("dims", "main", "current_step", (1, 0, 0), origin="worker")
+    assert first is not None
+    assert first.version == 1
+
+    stored = ledger.get("dims", "main", "current_step")
+    assert stored is not None
+    assert stored.version == 1
+    assert ledger.current_version("dims", "main", "current_step") == 1
+
+    deduped = ledger.record_confirmed("dims", "main", "current_step", (1, 0, 0), origin="worker")
+    assert deduped is None
+    assert ledger.current_version("dims", "main", "current_step") == 1
+
+    second = ledger.record_confirmed("dims", "main", "current_step", (2, 0, 0), origin="worker")
+    assert second is not None
+    assert second.version == 2
+    assert ledger.current_version("dims", "main", "current_step") == 2
+
+
+def test_record_confirmed_accepts_version_override() -> None:
+    ledger = ServerStateLedger()
+    event = ledger.record_confirmed(
+        "view",
+        "main",
+        "ndisplay",
+        3,
+        origin="worker",
+        version=99,
+    )
+    assert event is not None
+    assert event.version == 99
+
+    stored = ledger.get("view", "main", "ndisplay")
+    assert stored is not None
+    assert stored.version == 99
+    assert ledger.current_version("view", "main", "ndisplay") == 99
+
+    next_event = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
+    assert next_event is not None
+    assert next_event.version == 100
+
+
+def test_batch_record_confirmed_assigns_versions_per_key() -> None:
+    ledger = ServerStateLedger()
+    events = ledger.batch_record_confirmed(
+        [
+            ("dims", "main", "current_step", (0, 0, 0)),
+            ("multiscale", "main", "level", 0),
+        ],
+        origin="worker",
+    )
+    assert len(events) == 2
+    assert events[0].version == 1
+    assert events[1].version == 1
+
+    follow_up = ledger.batch_record_confirmed(
+        [
+            ("dims", "main", "current_step", (1, 0, 0)),
+            ("multiscale", "main", "level", 1, None, 5),
+        ],
+        origin="worker",
+    )
+    assert len(follow_up) == 2
+    assert follow_up[0].version == 2
+    assert follow_up[1].version == 5

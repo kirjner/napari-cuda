@@ -300,7 +300,14 @@ def _build_level_context(
     ledger_step: Optional[Sequence[int]],
 ) -> lod.LevelContext:
     same_level = prev_level is None or int(prev_level) == int(level)
-    step_authoritative = bool(ledger_step is not None and same_level)
+    going_finer = (
+        ledger_step is not None
+        and prev_level is not None
+        and int(level) < int(prev_level)
+    )
+    step_authoritative = bool(
+        ledger_step is not None and (same_level or going_finer)
+    )
 
     if ledger_step is not None:
         step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)

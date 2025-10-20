@@ -165,6 +165,7 @@ class EGLRendererWorker:
         self._configure_roi_settings()
         self._configure_budget_limits()
         self._last_dims_signature: Optional[tuple] = None
+        self._applied_versions: Dict[tuple[str, str, str], int] = {}
 
         if policy_name:
             try:
@@ -1216,6 +1217,9 @@ class EGLRendererWorker:
         apply_camera_pose: bool = True,
     ) -> None:
         """Queue a complete scene state snapshot for the next frame."""
+
+        if state.dims_version is not None:
+            self._applied_versions[("dims", "main", "current_step")] = int(state.dims_version)
 
         if not self._render_mailbox.update_state_signature(state):
             if logger.isEnabledFor(logging.DEBUG):
