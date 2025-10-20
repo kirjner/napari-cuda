@@ -42,21 +42,22 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     nd = viewer.dims.events.ndisplay
     od = viewer.dims.events.order
 
-    # Disconnect the fit_to_view callback from both emitters
-    nd.disconnect(viewer.fit_to_view)
-    od.disconnect(viewer.fit_to_view)
+    signature = worker._dims_signature(snapshot)  # noqa: SLF001
+    dims_changed = signature != getattr(worker, "_last_dims_signature", None)
 
-    if _l.isEnabledFor(_logging.INFO):
-        _l.info("snapshot.apply.begin: suppress fit; applying dims")
-    worker._apply_dims_from_snapshot(snapshot)  # noqa: SLF001
-    _apply_snapshot_multiscale(worker, snapshot)
-
-    if _l.isEnabledFor(_logging.INFO):
-        _l.info("snapshot.apply.end: dims applied; resuming fit callbacks")
-
-    # Reconnect fit_to_view so subsequent dims changes behave normally
-    nd.connect(viewer.fit_to_view)
-    od.connect(viewer.fit_to_view)
+    if dims_changed:
+        nd.disconnect(viewer.fit_to_view)
+        od.disconnect(viewer.fit_to_view)
+        if _l.isEnabledFor(_logging.INFO):
+            _l.info("snapshot.apply.begin: suppress fit; applying dims")
+        worker._apply_dims_from_snapshot(snapshot, signature=signature)  # noqa: SLF001
+        _apply_snapshot_multiscale(worker, snapshot)
+        if _l.isEnabledFor(_logging.INFO):
+            _l.info("snapshot.apply.end: dims applied; resuming fit callbacks")
+        nd.connect(viewer.fit_to_view)
+        od.connect(viewer.fit_to_view)
+    else:
+        _apply_snapshot_multiscale(worker, snapshot)
 
 
 __all__ = ["apply_render_snapshot"]

@@ -1069,11 +1069,8 @@ class EGLRendererWorker:
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
-        viewer = self._viewer
-        if viewer is None:
-            return
-        dims_signature = (
+    def _dims_signature(self, snapshot: RenderLedgerSnapshot) -> tuple:
+        return (
             int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
             tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
             tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
@@ -1082,20 +1079,18 @@ class EGLRendererWorker:
             tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
         )
 
-        if dims_signature == self._last_dims_signature:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("dims.skip: unchanged signature %s", dims_signature)
+    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot, *, signature: tuple) -> None:
+        viewer = self._viewer
+        if viewer is None:
             return
 
-        self._last_dims_signature = dims_signature
+        self._last_dims_signature = signature
 
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "dims.apply: ndisplay=%s order=%s displayed=%s current_step=%s",
                 str(snapshot.ndisplay), str(snapshot.order), str(snapshot.displayed), str(snapshot.current_step)
             )
-
-        # Mode switches are handled atomically in the render transaction.
 
         dims = viewer.dims
         ndim = int(getattr(dims, "ndim", 0) or 0)
@@ -1108,10 +1103,7 @@ class EGLRendererWorker:
 
         order_src = snapshot.order
         if order_src:
-            # Defer applying dims.order until after dims.ndim is set
             ndim = max(ndim, len(tuple(int(v) for v in order_src)))
-
-        # Defer applying dims.ndisplay until after dims.ndim and order/displayed are reconciled
 
         if snapshot.level_shapes and snapshot.current_level is not None:
             level_shapes = snapshot.level_shapes
@@ -1145,9 +1137,9 @@ class EGLRendererWorker:
         expected_displayed = tuple(order_values[-len(displayed_tuple):])
         assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
 
-        # Finally, apply ndisplay so napari's fit sees consistent ndim/order/displayed
         if snapshot.ndisplay is not None:
             dims.ndisplay = max(1, int(snapshot.ndisplay))
+
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "dims.applied: ndim=%d order=%s displayed=%s ndisplay=%d",
