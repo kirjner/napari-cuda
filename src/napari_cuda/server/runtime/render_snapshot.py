@@ -7,17 +7,17 @@ never observes a partially-updated dims state.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional, Sequence
+import time
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker_runtime import (
-    prepare_worker_level,
-    apply_worker_slice_level,
-    apply_worker_volume_level,
-)
+from napari_cuda.server.runtime.worker_runtime import apply_plane_slice_roi, viewport_roi_for_level, plane_wh_for_level
+from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
+from dataclasses import replace
+import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.level_budget import select_volume_level
 
 
@@ -84,22 +84,23 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         if entering_volume:
             worker.use_volume = True
             worker._last_dims_signature = None  # noqa: SLF001
+
         requested_level = int(target_level)
         effective_level = _resolve_volume_level(worker, source, requested_level)
         worker._level_downgraded = bool(effective_level != requested_level)
         load_needed = entering_volume or (int(effective_level) != prev_level)
+
         if load_needed:
-            applied_context = prepare_worker_level(
+            applied_context = _build_level_context(
                 worker,
                 source,
                 int(effective_level),
                 prev_level=prev_level,
                 ledger_step=ledger_step,
             )
-            apply_worker_volume_level(worker, source, applied_context)
-            target_level = int(effective_level)
-            level_changed = int(target_level) != prev_level
-        if load_needed:
+            _apply_volume_level(worker, source, applied_context)
+            target_level = int(applied_context.level)
+            level_changed = target_level != prev_level
             worker._configure_camera_for_mode()
         _apply_volume_camera_pose(worker, snapshot)
         return
@@ -108,10 +109,10 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.use_volume and not target_volume:
         stage_prev_level = target_level
 
-    applied_context = prepare_worker_level(
+    applied_context = _build_level_context(
         worker,
         source,
-        target_level,
+        int(target_level),
         prev_level=stage_prev_level,
         ledger_step=ledger_step,
     )
@@ -122,8 +123,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         worker._last_dims_signature = None  # noqa: SLF001
     worker._level_downgraded = False
     _apply_plane_camera_pose(worker, snapshot)
-
-    apply_worker_slice_level(worker, source, applied_context)
+    _apply_slice_level(worker, source, applied_context)
 
 
 def _apply_volume_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
@@ -193,3 +193,133 @@ def _resolve_volume_level(worker: Any, source: Any, requested_level: int) -> int
         error_cls=worker._budget_error_cls,
     )
     return int(level)
+
+
+def _build_level_context(
+    worker: Any,
+    source: Any,
+    level: int,
+    *,
+    prev_level: Optional[int],
+    ledger_step: Optional[Sequence[int]],
+) -> lod.LevelContext:
+    same_level = prev_level is None or int(prev_level) == int(level)
+    step_authoritative = bool(ledger_step is not None and same_level)
+
+    if ledger_step is not None:
+        step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)
+    else:
+        recorded_step = worker._ledger_step()
+        step_hint = (
+            tuple(int(v) for v in recorded_step)
+            if recorded_step is not None
+            else None
+        )
+
+    decision = lod.LevelDecision(
+        desired_level=int(level),
+        selected_level=int(level),
+        reason="direct",
+        timestamp=time.perf_counter(),
+        oversampling={},
+        downgraded=False,
+    )
+
+    context = lod.build_level_context(
+        decision,
+        source=source,
+        prev_level=prev_level,
+        last_step=step_hint,
+        step_authoritative=step_authoritative,
+    )
+
+    _stage_level_context(worker, source, context)
+    return context
+
+
+def _stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> None:
+    viewer = getattr(worker, "_viewer", None)
+    if viewer is not None:
+        set_range = getattr(worker, "_set_dims_range_for_level", None)
+        if callable(set_range):
+            set_range(source, int(context.level))
+        viewer.dims.current_step = tuple(int(v) for v in context.step)
+
+    descriptor = source.level_descriptors[int(context.level)]
+    worker._update_level_metadata(descriptor, context)  # noqa: SLF001
+
+
+def _apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
+    scale_vals = list(source.level_scale(applied.level)) if hasattr(source, "level_scale") else []
+    scales = [float(s) for s in scale_vals[-3:]] if scale_vals else []
+    while len(scales) < 3:
+        scales.insert(0, 1.0)
+    scale_tuple = (float(scales[-3]), float(scales[-2]), float(scales[-1]))
+    worker._volume_scale = scale_tuple  # noqa: SLF001
+
+    volume = worker._get_level_volume(source, applied.level)  # noqa: SLF001
+    cam = worker.view.camera if getattr(worker, "view", None) is not None else None
+    ctx = worker._build_scene_state_context(cam)  # noqa: SLF001
+    if ctx.volume_scale is None:
+        ctx = replace(ctx, volume_scale=scale_tuple)
+
+    data_wh, data_d = SceneStateApplier.apply_volume_layer(
+        ctx,
+        volume=volume,
+        contrast=applied.contrast,
+    )
+    worker._data_wh = data_wh  # noqa: SLF001
+    worker._data_d = data_d  # noqa: SLF001
+
+    shape = (
+        (int(data_d), int(data_wh[1]), int(data_wh[0]))
+        if data_d is not None
+        else (int(data_wh[1]), int(data_wh[0]))
+    )
+
+    worker._layer_logger.log(  # noqa: SLF001
+        enabled=worker._log_layer_debug,  # noqa: SLF001
+        mode="volume",
+        level=applied.level,
+        z_index=None,
+        shape=shape,
+        contrast=applied.contrast,
+        downgraded=worker._level_downgraded,  # noqa: SLF001
+    )
+
+
+def _apply_slice_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
+    layer = getattr(worker, "_napari_layer", None)
+    sy, sx = applied.scale_yx
+
+    if layer is not None:
+        layer.scale = (float(sy), float(sx))
+
+    view = worker.view
+    assert view is not None, "VisPy view must be initialised for 2D apply"
+
+    roi = viewport_roi_for_level(worker, source, int(applied.level))
+    worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
+    height_px, width_px = apply_plane_slice_roi(
+        worker,
+        source,
+        int(applied.level),
+        roi,
+        update_contrast=not worker._sticky_contrast,  # noqa: SLF001
+    )
+
+    if not worker._preserve_view_on_switch:  # noqa: SLF001
+        full_h, full_w = plane_wh_for_level(source, int(applied.level))
+        world_w = float(full_w) * float(max(1e-12, sx))
+        world_h = float(full_h) * float(max(1e-12, sy))
+        view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+
+    worker._layer_logger.log(  # noqa: SLF001
+        enabled=worker._log_layer_debug,  # noqa: SLF001
+        mode="slice",
+        level=applied.level,
+        z_index=worker._z_index,  # noqa: SLF001
+        shape=(int(height_px), int(width_px)),
+        contrast=applied.contrast,
+        downgraded=worker._level_downgraded,  # noqa: SLF001
+    )
