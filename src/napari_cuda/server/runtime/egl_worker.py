@@ -122,7 +122,6 @@ class EGLRendererWorker:
                  animate: bool = False, animate_dps: float = 30.0,
                  zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
                  zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 level_update_cb: Callable[[lod.LevelContext, bool], None] | None = None,
                  camera_pose_cb: Callable[[CameraPoseApplied], None] | None = None,
                  level_intent_cb: Callable[[LevelSwitchIntent], None] | None = None,
                  policy_name: Optional[str] = None,
@@ -145,7 +144,7 @@ class EGLRendererWorker:
 
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
-        self._init_scene_state(level_update_cb)
+        self._init_scene_state()
         self._init_locks(camera_pose_cb, level_intent_cb)
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
@@ -179,13 +178,6 @@ class EGLRendererWorker:
     @property
     def is_ready(self) -> bool:
         return self._is_ready
-
-    # Explicit setters are retained for lifecycle reconfiguration if needed
-    def set_level_update_callback(
-        self,
-        callback: Callable[[lod.LevelContext, bool], None],
-    ) -> None:
-        self._level_update_cb = callback
 
     def set_camera_pose_callback(
         self,
@@ -589,18 +581,12 @@ class EGLRendererWorker:
         self._capture = CaptureFacade(width=self.width, height=self.height)
         self._encoder: Optional[Encoder] = None
 
-    def _init_scene_state(
-        self,
-        level_update_cb: Optional[Callable[[lod.LevelContext, bool], None]],
-    ) -> None:
+    def _init_scene_state(self) -> None:
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
         self._scene_source: Optional[ZarrSceneSource] = None
         self._active_ms_level = 0
         self._level_downgraded = False
-        if level_update_cb is None:
-            raise ValueError("EGLRendererWorker requires level_update callback")
-        self._level_update_cb = level_update_cb
         self._data_wh = (int(self.width), int(self.height))
         self._data_d = None
         self._volume_scale = (1.0, 1.0, 1.0)
