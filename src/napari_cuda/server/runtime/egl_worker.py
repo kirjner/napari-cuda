@@ -83,6 +83,7 @@ from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdate,
     RenderUpdateMailbox,
 )
+from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -117,17 +118,29 @@ class _LevelBudgetError(RuntimeError):
 class EGLRendererWorker:
     """Headless VisPy renderer using EGL with CUDA interop and NVENC."""
 
-    def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False, fps: int = 60,
-                 volume_depth: int = 64, volume_dtype: str = "float32", volume_relative_step: Optional[float] = None,
-                 animate: bool = False, animate_dps: float = 30.0,
-                 zarr_path: Optional[str] = None, zarr_level: Optional[str] = None,
-                 zarr_axes: Optional[str] = None, zarr_z: Optional[int] = None,
-                 camera_pose_cb: Callable[[CameraPoseApplied], None] | None = None,
-                 level_intent_cb: Callable[[LevelSwitchIntent], None] | None = None,
-                 policy_name: Optional[str] = None,
-                 *,
-                 ctx: ServerCtx,
-                 env: Optional[Mapping[str, str]] = None) -> None:
+    def __init__(
+        self,
+        width: int = 1920,
+        height: int = 1080,
+        use_volume: bool = False,
+        fps: int = 60,
+        volume_depth: int = 64,
+        volume_dtype: str = "float32",
+        volume_relative_step: Optional[float] = None,
+        animate: bool = False,
+        animate_dps: float = 30.0,
+        zarr_path: Optional[str] = None,
+        zarr_level: Optional[str] = None,
+        zarr_axes: Optional[str] = None,
+        zarr_z: Optional[int] = None,
+        camera_pose_cb: Callable[[CameraPoseApplied], None] | None = None,
+        level_intent_cb: Callable[[LevelSwitchIntent], None] | None = None,
+        policy_name: Optional[str] = None,
+        *,
+        camera_queue: CameraCommandQueue,
+        ctx: ServerCtx,
+        env: Optional[Mapping[str, str]] = None,
+    ) -> None:
         self.width = int(width)
         self.height = int(height)
         self.use_volume = bool(use_volume)
@@ -145,6 +158,7 @@ class EGLRendererWorker:
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
         self._init_scene_state()
+        self._camera_queue = camera_queue
         self._init_locks(camera_pose_cb, level_intent_cb)
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
@@ -1216,24 +1230,44 @@ class EGLRendererWorker:
 
         apply_render_snapshot(self, state)
 
+    def _apply_camera_commands(self, commands: Sequence[CameraDeltaCommand]) -> bool:
+        outcome = _process_camera_deltas(self, commands)
+        policy_triggered = bool(outcome.policy_triggered)
+
+        last_seq = getattr(outcome, "last_command_seq", None)
+        if last_seq is not None:
+            last_seq_int = int(last_seq)
+            self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
+            self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
+
+        if not self.use_volume:
+            source = self._scene_source or self._ensure_scene_source()
+            roi = viewport_roi_for_level(self, source, int(self._active_ms_level))
+            last_roi_entry = self._last_roi
+            last_roi_obj = last_roi_entry[1] if last_roi_entry is not None else None
+            if last_roi_obj is None or roi != last_roi_obj:
+                apply_plane_slice_roi(
+                    self,
+                    source,
+                    int(self._active_ms_level),
+                    roi,
+                    update_contrast=False,
+                )
+
+        self._mark_render_tick_needed()
+        self._user_interaction_seen = True
+        self._last_interaction_ts = time.perf_counter()
+        self._record_zoom_hint(commands)
+        self._emit_current_camera_pose(reason="camera-delta")
+
+        return policy_triggered
+
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
         if not commands:
             return
-        # Enqueue ops for the render loop; keep ACK path responsive.
-        self._render_mailbox.append_camera_ops(commands)
-        self._mark_render_tick_needed()
-        self._user_interaction_seen = True
-        # Maintain interaction/zoom hint analytics immediately.
-        self._last_interaction_ts = time.perf_counter()
-        if commands:
-            last = commands[-1]
-            if last.command_seq is not None:
-                self._max_camera_command_seq = max(
-                    int(self._max_camera_command_seq),
-                    int(last.command_seq),
-                )
-        self._record_zoom_hint(commands)
-        self._emit_current_camera_pose(reason="camera-delta")
+        policy_triggered = self._apply_camera_commands(commands)
+        if policy_triggered and not self.use_volume:
+            self._evaluate_level_policy()
 
     def _apply_camera_reset(self, cam) -> None:
         reset_worker_camera(self, cam)
@@ -1442,37 +1476,11 @@ class EGLRendererWorker:
         )
 
     def _drain_camera_ops_then_scene_updates(self) -> None:
-        # Apply any queued camera ops on the render thread before scene updates.
-        ops = self._render_mailbox.drain_camera_ops()
+        commands = self._camera_queue.pop_all()
         policy_triggered = False
-        if ops:
-            outcome = _process_camera_deltas(self, ops)
-            policy_triggered = bool(outcome.policy_triggered)
-            # Update seq baselines from outcome.
-            last_seq = getattr(outcome, "last_command_seq", None)
-            if last_seq is not None:
-                last_seq_int = int(last_seq)
-                self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
-                self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
+        if commands:
+            policy_triggered = self._apply_camera_commands(commands)
 
-            if not self.use_volume:
-                source = self._scene_source or self._ensure_scene_source()
-                roi = viewport_roi_for_level(self, source, int(self._active_ms_level))
-                last_roi_entry = self._last_roi
-                last_roi_obj = last_roi_entry[1] if last_roi_entry is not None else None
-                if last_roi_obj is None or roi != last_roi_obj:
-                    apply_plane_slice_roi(
-                        self,
-                        source,
-                        int(self._active_ms_level),
-                        roi,
-                        update_contrast=False,
-                    )
-
-            # Emit pose once per batch so ledger/client observe the updated camera.
-            self._emit_current_camera_pose(reason="camera-delta")
-
-        # Now drain scene updates (txn, dims, etc.).
         self.drain_scene_updates()
         if policy_triggered and not self.use_volume:
             self._evaluate_level_policy()

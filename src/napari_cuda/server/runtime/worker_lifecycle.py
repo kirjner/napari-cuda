@@ -162,6 +162,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 policy_name=server._scene.multiscale_state.get("policy"),
                 camera_pose_cb=_forward_camera_pose,
                 level_intent_cb=_forward_level_intent,
+                camera_queue=server._camera_queue,
                 ctx=server._ctx,
                 env=server._ctx_env,
             )
@@ -200,7 +201,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server._bootstrap_snapshot = None  # type: ignore[attr-defined]
             with server._state_lock:
                 server._scene.latest_state = initial_snapshot
-                server._scene.camera_deltas.clear()
             worker._consume_render_snapshot(initial_snapshot)
             worker.drain_scene_updates()
 
@@ -236,39 +236,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 snapshot = pull_render_snapshot(server)
                 with server._state_lock:
                     server._scene.latest_state = snapshot
-                    deltas = list(server._scene.camera_deltas)
-                    server._scene.camera_deltas.clear()
-                frame_input_step = snapshot.current_step
+                has_camera_deltas = len(server._camera_queue) > 0
 
                 # Request view ndisplay if provided by staged intents
-                if deltas and server._log_state_traces:
-                    logger.info("frame camera deltas snapshot count=%d", len(deltas))
+                if has_camera_deltas and server._log_state_traces:
+                    logger.info("frame camera deltas snapshot pending")
 
                 frame_state = snapshot
 
-                if deltas and (server._log_cam_info or server._log_cam_debug):
-                    summaries: list[str] = []
-                    for delta in deltas:
-                        if delta.kind == "zoom":
-                            factor = delta.factor if delta.factor is not None else 0.0
-                            if delta.anchor_px is not None:
-                                ax, ay = delta.anchor_px
-                                summaries.append(
-                                    f"zoom factor={factor:.4f} anchor=({ax:.1f},{ay:.1f})"
-                                )
-                            else:
-                                summaries.append(f"zoom factor={factor:.4f}")
-                        elif delta.kind == "pan":
-                            summaries.append(f"pan dx={delta.dx_px:.2f} dy={delta.dy_px:.2f}")
-                        elif delta.kind == "orbit":
-                            summaries.append(
-                                f"orbit daz={delta.d_az_deg:.2f} del={delta.d_el_deg:.2f}"
-                            )
-                        elif delta.kind == "reset":
-                            summaries.append("reset")
-                        else:
-                            summaries.append(delta.kind)
-                    message = "apply: cam deltas=" + "; ".join(summaries)
+                if has_camera_deltas and (server._log_cam_info or server._log_cam_debug):
+                    message = "apply: cam deltas pending"
                     if server._log_cam_info:
                         logger.info(message)
                     else:
@@ -290,7 +267,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
                 if (
                     not clients_connected
-                    and not deltas
+                    and not has_camera_deltas
                     and not server._animate
                     and not getattr(worker, "_render_tick_required", False)
                     and not waiting_for_keyframe
@@ -304,13 +281,15 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         next_tick = time.perf_counter()
                     continue
 
-                logger.debug("frame apply proceeding camera_deltas=%d animate=%s", len(deltas), server._animate)
+                logger.debug(
+                    "frame apply proceeding camera_deltas_pending=%s animate=%s",
+                    bool(has_camera_deltas),
+                    server._animate,
+                )
                 worker._consume_render_snapshot(
                     frame_state,
-                    apply_camera_pose=not bool(deltas),
+                    apply_camera_pose=not has_camera_deltas,
                 )
-                if deltas:
-                    worker.process_camera_deltas(deltas)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 

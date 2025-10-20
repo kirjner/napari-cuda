@@ -75,6 +75,7 @@ from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
+from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
@@ -197,6 +198,7 @@ class EGLHeadlessServer:
         self._seq = 0
         self._worker_lifecycle = WorkerLifecycleState()
         self._worker_intents = WorkerIntentMailbox()
+        self._camera_queue = CameraCommandQueue()
         self._scene_manager = ViewerSceneManager((self.width, self.height))
         self._state_ledger = ServerStateLedger()
         self._scene: ServerSceneData = create_server_scene_data(
@@ -298,9 +300,8 @@ class EGLHeadlessServer:
         return current
 
     def _enqueue_camera_delta(self, cmd: CameraDeltaCommand) -> None:
-        with self._state_lock:
-            self._scene.camera_deltas.append(cmd)
-            queue_len = len(self._scene.camera_deltas)
+        self._camera_queue.append(cmd)
+        queue_len = len(self._camera_queue)
         if self._log_cam_info or self._log_cam_debug:
             logger.info(
                 "enqueue camera command kind=%s queue_len=%d payload=%s",

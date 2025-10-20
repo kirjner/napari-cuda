@@ -1403,6 +1403,5 @@ def apply_bootstrap_transaction(
             ledger,
             store,
         )
-        store.camera_deltas.clear()
 
     return int(dims_seq), int(view_seq), ts

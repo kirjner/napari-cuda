@@ -7,10 +7,10 @@ data and emit immutable snapshots to the worker.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, Literal, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
@@ -145,7 +145,6 @@ class ServerSceneData:
 
     latest_state: RenderLedgerSnapshot = field(default_factory=RenderLedgerSnapshot)
     use_volume: bool = False
-    camera_deltas: Deque[CameraDeltaCommand] = field(default_factory=deque)
     next_server_seq: int = 0
     volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)

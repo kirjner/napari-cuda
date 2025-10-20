@@ -31,6 +31,7 @@ from napari_cuda.server.control import control_channel_server as state_channel_h
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
 from napari_cuda.server.scene import create_server_scene_data
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
@@ -294,8 +295,10 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     server._next_camera_command_seq = _next_camera_command_seq
 
+    server._camera_queue = CameraCommandQueue()
+
     def _enqueue_camera_delta(cmd: Any) -> None:
-        scene.camera_deltas.append(cmd)
+        server._camera_queue.append(cmd)
 
     server._enqueue_camera_delta = _enqueue_camera_delta
 
@@ -705,7 +708,7 @@ def test_camera_zoom_update_emits_notify() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    deltas = server._scene.camera_deltas
+    deltas = server._camera_queue.pop_all()
     assert deltas, "expected camera delta queued"
     cmd = deltas[-1]
     assert cmd.kind == 'zoom'
@@ -746,7 +749,7 @@ def test_camera_reset_triggers_keyframe() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    deltas = server._scene.camera_deltas
+    deltas = server._camera_queue.pop_all()
     assert deltas and deltas[-1].kind == 'reset'
     assert server._ensure_keyframe_calls == 1
 

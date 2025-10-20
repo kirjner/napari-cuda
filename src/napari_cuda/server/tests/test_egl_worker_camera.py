@@ -36,6 +36,7 @@ class _StubWorker:
         self.use_volume = False
         self._pose_seq = 1
         self._max_camera_command_seq = 0
+        self._evaluate_level_policy = lambda: None
 
     def _mark_render_tick_needed(self) -> None:
         pass
@@ -71,7 +72,6 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     def _fake_process(self, commands):
         self._mark_render_tick_needed()
         self._user_interaction_seen = True
-        worker._evaluate_level_policy()
         return CameraDeltaOutcome(
             camera_changed=True,
             policy_triggered=True,
@@ -83,6 +83,20 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
         "napari_cuda.server.runtime.egl_worker._process_camera_deltas",
         _fake_process,
     )
+
+    def _apply(commands):
+        _fake_process(worker, commands)
+        worker._mark_render_tick_needed()
+        worker._user_interaction_seen = True
+        worker._last_interaction_ts = 1.0
+        last_seq = commands[-1].command_seq
+        if last_seq is not None:
+            worker._max_camera_command_seq = max(worker._max_camera_command_seq, int(last_seq))
+        worker._record_zoom_hint(commands)
+        worker._emit_current_camera_pose("camera-delta")
+        return True
+
+    worker._apply_camera_commands = _apply  # type: ignore[assignment]
 
     command = CameraDeltaCommand(kind="zoom", factor=1.25, command_seq=9)
     EGLRendererWorker.process_camera_deltas(worker, [command])  # type: ignore[arg-type]

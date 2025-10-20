@@ -46,6 +46,7 @@ from napari.components import viewer_model
 
 from napari_cuda.server.runtime import worker_runtime
 from napari_cuda.server.runtime import render_snapshot as snapshot_mod
+from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
 
 
 _SENTINEL = object()
@@ -595,6 +596,7 @@ class StateServerHarness:
         server._schedule_coro = self._schedule_coro
         server._state_ledger = ServerStateLedger()
         server._update_client_gauges = lambda: None
+        server._camera_queue = CameraCommandQueue()
 
         base_metrics = NotifyDimsPayload.from_dict(_default_dims_snapshot())
         scene.multiscale_state["current_level"] = 0
@@ -688,10 +690,9 @@ class StateServerHarness:
 
         server._ensure_keyframe = _ensure_keyframe
         server._idr_on_reset = True
-        scene.camera_deltas: list[Any] = []
 
         def _enqueue_camera_delta(cmd: Any) -> None:
-            scene.camera_deltas.append(cmd)
+            server._camera_queue.append(cmd)
 
         server._enqueue_camera_delta = _enqueue_camera_delta
 

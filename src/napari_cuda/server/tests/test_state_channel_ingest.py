@@ -185,7 +185,7 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         dims_step_entry = harness.server._state_ledger.get("dims", "main", "current_step")
         assert dims_step_entry is not None
         assert tuple(int(v) for v in dims_step_entry.value) == plane_step
-        assert harness.server._scene.camera_deltas == []
+        assert len(harness.server._camera_queue) == 0
 
         harness.queue_client_payload(_make_update("frame-repeat", 2))
         ack_repeat = await harness.wait_for_frame(
