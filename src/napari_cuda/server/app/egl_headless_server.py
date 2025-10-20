@@ -68,6 +68,8 @@ from napari_cuda.server.control.state_reducers import (
 )
 from napari_cuda.server.control.transactions import apply_level_switch_transaction
 from napari_cuda.server.data.lod import LevelContext
+from napari_cuda.server.data.hw_limits import get_hw_limits
+from napari_cuda.server.data.level_budget import LevelBudgetError, select_volume_level
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
@@ -114,6 +116,13 @@ class EGLHeadlessServer:
             configure_bitstream(self._ctx.bitstream)
         except Exception:
             logger.debug("Bitstream configuration failed", exc_info=True)
+
+        hw_limits = get_hw_limits()
+        cfg_limits = self._ctx.cfg
+        self._volume_max_bytes_cfg = int(max(0, getattr(cfg_limits, "max_volume_bytes", 0)))
+        self._volume_max_voxels_cfg = int(max(0, getattr(cfg_limits, "max_volume_voxels", 0)))
+        self._hw_volume_max_bytes = int(getattr(hw_limits, "volume_max_bytes", 0))
+        self._hw_volume_max_voxels = int(getattr(hw_limits, "volume_max_voxels", 0))
 
         self.width = width
         self.height = height
@@ -298,6 +307,16 @@ class EGLHeadlessServer:
                 cmd,
             )
 
+    def _volume_budget_caps(self) -> tuple[Optional[int], Optional[int]]:
+        cfg_bytes = self._volume_max_bytes_cfg
+        cfg_voxels = self._volume_max_voxels_cfg
+        max_bytes = cfg_bytes or self._hw_volume_max_bytes
+        max_voxels = cfg_voxels or self._hw_volume_max_voxels
+        return (
+            int(max_bytes) if max_bytes else None,
+            int(max_voxels) if max_voxels else None,
+        )
+
     def _handle_worker_level_intents(self) -> None:
         intent = self._worker_intents.pop_level_switch()
         if intent is None:
@@ -316,7 +335,24 @@ class EGLHeadlessServer:
         intent: LevelSwitchIntent,
     ) -> None:
         context = intent.context
-        downgraded = bool(intent.downgraded)
+        controller_downgraded = bool(intent.downgraded)
+        level_shapes_state = self._scene.multiscale_state.get("level_shapes") or []
+        if level_shapes_state and getattr(context, "dtype", None):
+            max_bytes, max_voxels = self._volume_budget_caps()
+            resolved_level, controller_downgraded = select_volume_level(
+                source=worker._ensure_scene_source(),  # noqa: SLF001
+                requested_level=int(intent.desired_level),
+                max_voxels=max_voxels,
+                max_bytes=max_bytes,
+                error_cls=LevelBudgetError,
+            )
+            if resolved_level != int(context.level):
+                logger.warning(
+                    "controller clamp mismatch: intent_level=%d resolved=%d",
+                    int(context.level),
+                    int(resolved_level),
+                )
+        downgraded = bool(controller_downgraded)
 
         if logger.isEnabledFor(logging.INFO):
             logger.info(

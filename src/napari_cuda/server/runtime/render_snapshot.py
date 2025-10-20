@@ -18,6 +18,7 @@ from napari_cuda.server.runtime.worker_runtime import (
     apply_worker_slice_level,
     apply_worker_volume_level,
 )
+from napari_cuda.server.data.level_budget import select_volume_level
 
 
 def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
@@ -82,7 +83,9 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         entering_volume = not worker.use_volume
         if entering_volume:
             worker.use_volume = True
-        effective_level = _resolve_volume_level(worker, source, target_level)
+        requested_level = int(target_level)
+        effective_level = _resolve_volume_level(worker, source, requested_level)
+        worker._level_downgraded = bool(effective_level != requested_level)
         load_needed = entering_volume or (int(effective_level) != prev_level)
         if load_needed:
             applied_context = prepare_worker_level(
@@ -115,6 +118,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.use_volume:
         worker.use_volume = False
         worker._configure_camera_for_mode()
+    worker._level_downgraded = False
     _apply_plane_camera_pose(worker, snapshot)
 
     apply_worker_slice_level(worker, source, applied_context)
@@ -174,37 +178,16 @@ def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> Non
         )
 
 
-def _fits_volume_budget(worker: Any, source: Any, level: int) -> bool:
-    return _volume_budget_error(worker, source, level) is None
-
-
-def _volume_budget_error(worker: Any, source: Any, level: int) -> str | None:
-    voxels, bytes_est = worker._estimate_level_bytes(source, level)
-    limit_bytes = worker._volume_max_bytes or worker._hw_limits.volume_max_bytes
-    limit_voxels = worker._volume_max_voxels or worker._hw_limits.volume_max_voxels
-    if limit_voxels and voxels > limit_voxels:
-        return f"voxels={voxels} exceeds cap={limit_voxels}"
-    if limit_bytes and bytes_est > limit_bytes:
-        return f"bytes={bytes_est} exceeds cap={limit_bytes}"
-    return None
-
-
 def _resolve_volume_level(worker: Any, source: Any, requested_level: int) -> int:
-    descriptors = getattr(source, "level_descriptors", None) or []
-    coarsest_level = requested_level
-    if descriptors:
-        coarsest_level = max(0, len(descriptors) - 1)
-        requested_level = max(0, min(int(requested_level), coarsest_level))
-
-    level = int(requested_level)
-    if _fits_volume_budget(worker, source, level):
-        return level
-    if level == coarsest_level:
-        msg = _volume_budget_error(worker, source, level)
-        raise worker._budget_error_cls(msg)
-
-    level = coarsest_level
-    if _fits_volume_budget(worker, source, level):
-        return level
-    msg = _volume_budget_error(worker, source, level)
-    raise worker._budget_error_cls(msg)
+    max_voxels_cfg = worker._volume_max_voxels or worker._hw_limits.volume_max_voxels
+    max_bytes_cfg = worker._volume_max_bytes or worker._hw_limits.volume_max_bytes
+    max_voxels = int(max_voxels_cfg) if max_voxels_cfg else None
+    max_bytes = int(max_bytes_cfg) if max_bytes_cfg else None
+    level, _ = select_volume_level(
+        source,
+        int(requested_level),
+        max_voxels=max_voxels,
+        max_bytes=max_bytes,
+        error_cls=worker._budget_error_cls,
+    )
+    return int(level)

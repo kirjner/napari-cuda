@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence, Tuple
 import logging
 import time
+
+import numpy as np
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
@@ -68,7 +70,60 @@ def apply_level_with_budget(
     raise RuntimeError("Unable to select multiscale level within budget")
 
 
+def select_volume_level(
+    source: ZarrSceneSource,
+    requested_level: int,
+    *,
+    max_voxels: Optional[int],
+    max_bytes: Optional[int],
+    error_cls: type[Exception] = LevelBudgetError,
+) -> Tuple[int, bool]:
+    """Clamp ``requested_level`` against voxel/byte budgets using source metadata."""
+
+    level_shapes = [descriptor.shape for descriptor in source.level_descriptors]
+    if not level_shapes:
+        raise error_cls("select_volume_level requires at least one multiscale level")
+
+    max_index = len(level_shapes) - 1
+    clamped_request = max(0, min(int(requested_level), max_index))
+    itemsize = int(np.dtype(source.dtype).itemsize)
+
+    def _fits(level_idx: int) -> tuple[bool, int, int]:
+        shape = level_shapes[level_idx]
+        voxels = 1
+        for dim in shape:
+            voxels *= max(1, int(dim))
+        voxels = int(voxels)
+        bytes_est = int(voxels * itemsize)
+        vox_cap = int(max_voxels) if max_voxels else 0
+        bytes_cap = int(max_bytes) if max_bytes else 0
+        if vox_cap and voxels > vox_cap:
+            return False, voxels, vox_cap
+        if bytes_cap and bytes_est > bytes_cap:
+            return False, bytes_est, bytes_cap
+        return True, voxels, bytes_est
+
+    fits_request, estimate, cap = _fits(clamped_request)
+    if fits_request:
+        return int(clamped_request), bool(clamped_request != requested_level)
+
+    coarsest = max_index
+    fits_coarse, coarse_estimate, coarse_cap = _fits(coarsest)
+    if fits_coarse:
+        downgraded = coarsest != clamped_request or clamped_request != requested_level
+        return int(coarsest), downgraded
+
+    if max_voxels and estimate > max_voxels:
+        msg = f"voxels={estimate} exceeds cap={int(max_voxels)}"
+    elif max_bytes and estimate > max_bytes:
+        msg = f"bytes={estimate} exceeds cap={int(max_bytes)}"
+    else:
+        msg = "requested level exceeds configured budgets"
+    raise error_cls(msg)
+
+
 __all__ = [
     "LevelBudgetError",
     "apply_level_with_budget",
+    "select_volume_level",
 ]

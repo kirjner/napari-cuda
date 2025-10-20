@@ -52,7 +52,7 @@ from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
 from napari_cuda.server.runtime.camera_animator import animate_if_enabled
 import napari_cuda.server.data.policy as level_policy
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.level_budget import LevelBudgetError
+from napari_cuda.server.data.level_budget import LevelBudgetError, select_volume_level
 from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.rendering.egl_context import EglContext
 from napari_cuda.server.rendering.encoder import Encoder
@@ -79,7 +79,6 @@ from napari_cuda.server.runtime.render_update_mailbox import (
 )
 from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
-from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_runtime import (
@@ -367,15 +366,16 @@ class EGLRendererWorker:
         source = self._ensure_scene_source()
         requested_level = _coarsest_level_index(source)
         assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
-        target_level = self._select_intent_volume_level(source, int(requested_level))
+        selected_level, downgraded = self._resolve_volume_intent_level(source, int(requested_level))
+        self._level_downgraded = bool(downgraded)
 
         decision = lod.LevelDecision(
-            desired_level=int(target_level),
-            selected_level=int(target_level),
+            desired_level=int(requested_level),
+            selected_level=int(selected_level),
             reason="ndisplay-3d",
             timestamp=time.perf_counter(),
             oversampling={},
-            downgraded=False,
+            downgraded=bool(downgraded),
         )
         last_step = self._ledger_step()
         context = lod.build_level_context(
@@ -390,14 +390,14 @@ class EGLRendererWorker:
         self.use_volume = True
 
         intent = LevelSwitchIntent(
-            desired_level=int(target_level),
+            desired_level=int(requested_level),
             selected_level=int(context.level),
             reason="ndisplay-3d",
             previous_level=int(self._active_ms_level),
             context=context,
             oversampling={},
             timestamp=decision.timestamp,
-            downgraded=False,
+            downgraded=bool(downgraded),
             zoom_ratio=None,
             lock_level=self._lock_level,
         )
@@ -413,7 +413,12 @@ class EGLRendererWorker:
 
         self._configure_camera_for_mode()
         if logger.isEnabledFor(logging.INFO):
-            logger.info("toggle.enter_3d: requested_level=%d selected_level=%d", int(requested_level), int(target_level))
+            logger.info(
+                "toggle.enter_3d: requested_level=%d selected_level=%d downgraded=%s",
+                int(requested_level),
+                int(selected_level),
+                bool(downgraded),
+            )
         # Apply cached 3D camera pose if present
         cam = self.view.camera if self.view is not None else None
         if cam is not None:
@@ -833,40 +838,23 @@ class EGLRendererWorker:
         if self._log_layer_debug:
             logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> OK", level, voxels, bytes_est)
 
-    def _volume_level_fits_budget(self, source: ZarrSceneSource, level: int) -> bool:
-        voxels, bytes_est = self._estimate_level_bytes(source, level)
-        limit_bytes = self._volume_max_bytes or self._hw_limits.volume_max_bytes
-        limit_voxels = self._volume_max_voxels or self._hw_limits.volume_max_voxels
-        if limit_voxels and voxels > limit_voxels:
-            return False
-        if limit_bytes and bytes_est > limit_bytes:
-            return False
-        return True
-
-    def _select_intent_volume_level(self, source: ZarrSceneSource, requested_level: int) -> int:
-        descriptors = source.level_descriptors
-        if descriptors:
-            max_index = len(descriptors) - 1
-            requested_level = max(0, min(int(requested_level), int(max_index)))
-        else:
-            requested_level = max(0, int(requested_level))
-
-        if self._volume_level_fits_budget(source, requested_level):
-            return int(requested_level)
-
-        if descriptors:
-            coarsest_level = len(descriptors) - 1
-            if self._volume_level_fits_budget(source, coarsest_level):
-                return int(coarsest_level)
-
-        voxels, bytes_est = self._estimate_level_bytes(source, requested_level)
-        limit_bytes = self._volume_max_bytes or self._hw_limits.volume_max_bytes
-        limit_voxels = self._volume_max_voxels or self._hw_limits.volume_max_voxels
-        if limit_voxels and voxels > limit_voxels:
-            raise _LevelBudgetError(f"voxels={voxels} exceeds cap={limit_voxels}")
-        if limit_bytes and bytes_est > limit_bytes:
-            raise _LevelBudgetError(f"bytes={bytes_est} exceeds cap={limit_bytes}")
-        return int(requested_level)
+    def _resolve_volume_intent_level(
+        self,
+        source: ZarrSceneSource,
+        requested_level: int,
+    ) -> tuple[int, bool]:
+        max_voxels_cfg = self._volume_max_voxels or self._hw_limits.volume_max_voxels
+        max_bytes_cfg = self._volume_max_bytes or self._hw_limits.volume_max_bytes
+        max_voxels = int(max_voxels_cfg) if max_voxels_cfg else None
+        max_bytes = int(max_bytes_cfg) if max_bytes_cfg else None
+        selected_level, downgraded = select_volume_level(
+            source,
+            int(requested_level),
+            max_voxels=max_voxels,
+            max_bytes=max_bytes,
+            error_cls=_LevelBudgetError,
+        )
+        return int(selected_level), bool(downgraded)
 
     def _slice_budget_allows(self, source: ZarrSceneSource, level: int) -> None:
         """Enforce optional max-bytes budget for a single 2D slice.
