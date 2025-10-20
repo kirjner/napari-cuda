@@ -9,5 +9,10 @@ from __future__ import annotations
 
 from .plane_restore import apply_plane_restore_transaction
 from .level_switch import apply_level_switch_transaction
+from napari_cuda.server.control.state_reducers import apply_bootstrap_transaction
 
-__all__ = ["apply_plane_restore_transaction", "apply_level_switch_transaction"]
+__all__ = [
+    "apply_bootstrap_transaction",
+    "apply_plane_restore_transaction",
+    "apply_level_switch_transaction",
+]

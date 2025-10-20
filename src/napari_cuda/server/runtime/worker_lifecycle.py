@@ -193,7 +193,11 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 bool(worker._zarr_path),
             )
 
-            initial_snapshot = pull_render_snapshot(server)
+            initial_snapshot = getattr(server, "_bootstrap_snapshot", None)
+            if initial_snapshot is None:
+                initial_snapshot = pull_render_snapshot(server)
+            else:
+                server._bootstrap_snapshot = None  # type: ignore[attr-defined]
             with server._state_lock:
                 server._scene.latest_state = initial_snapshot
                 server._scene.camera_deltas.clear()

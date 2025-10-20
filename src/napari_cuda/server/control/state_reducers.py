@@ -25,6 +25,7 @@ from napari_cuda.server.scene import (
     get_control_meta,
     increment_server_sequence,
 )
+from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 logger = logging.getLogger(__name__)
 
 
@@ -667,119 +668,42 @@ def reduce_bootstrap_state(
     origin: str = "server.bootstrap",
     timestamp: Optional[float] = None,
 ) -> list[ServerLedgerUpdate]:
-    """Seed reducer intents from a bootstrap scene snapshot."""
+    """Legacy bootstrap reducer retained for tests; closes op fence immediately."""
 
-    ts = _now(timestamp)
     resolved_step = tuple(int(v) for v in step)
     resolved_axis_labels = tuple(str(label) for label in axis_labels)
-    resolved_order = tuple(int(v) for v in order)
-    resolved_level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in level_shapes)
-    resolved_levels = tuple(dict(level) for level in levels)
-    resolved_current_level = int(current_level)
-    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
-    mode_value = "volume" if resolved_ndisplay >= 3 else "plane"
-
-    ndim = max(len(resolved_axis_labels), len(resolved_step), len(resolved_order), len(resolved_level_shapes[resolved_current_level]) if resolved_level_shapes else 0)
-    if ndim == 0:
-        ndim = 1
-
-    if not resolved_order:
-        resolved_order = tuple(range(ndim))
-
     axis_index = 0 if resolved_step else 0
-    axis_target = (
-        resolved_axis_labels[axis_index]
-        if resolved_axis_labels and axis_index < len(resolved_axis_labels)
-        else str(axis_index)
-    )
+    if resolved_axis_labels and axis_index < len(resolved_axis_labels):
+        axis_target = str(resolved_axis_labels[axis_index])
+    else:
+        axis_target = str(axis_index)
+    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
 
-    displayed = resolved_order[-resolved_ndisplay:] if resolved_order else tuple(range(max(ndim - resolved_ndisplay, 0), ndim))
-    displayed_tuple = tuple(int(v) for v in displayed)
-
-    with lock:
-        store.last_scene_seq = increment_server_sequence(store)
-        dims_seq = store.last_scene_seq
-        dims_meta = get_control_meta(store, "dims", axis_target, "index")
-        dims_meta.last_server_seq = dims_seq
-        dims_meta.last_timestamp = ts
-
-        store.multiscale_state["current_level"] = resolved_current_level
-        store.multiscale_state["levels"] = [dict(level) for level in levels]
-        store.multiscale_state["level_shapes"] = [list(shape) for shape in resolved_level_shapes]
-        if "downgraded" in store.multiscale_state:
-            store.multiscale_state["downgraded"] = False
-
-        store.last_scene_seq = increment_server_sequence(store)
-        view_seq = store.last_scene_seq
-        view_meta = get_control_meta(store, "view", "main", "ndisplay")
-        view_meta.last_server_seq = view_seq
-        view_meta.last_timestamp = ts
-        store.use_volume = bool(mode_value == "volume")
-
-        dims_payload = NotifyDimsPayload(
-            current_step=resolved_step,
-            level_shapes=resolved_level_shapes,
-            levels=resolved_levels,
-            current_level=resolved_current_level,
-            downgraded=False,
-            mode=mode_value,
-            ndisplay=resolved_ndisplay,
-            axis_labels=resolved_axis_labels if resolved_axis_labels else None,
-            order=resolved_order if resolved_order else None,
-            displayed=displayed_tuple if displayed_tuple else None,
-            labels=None,
-        )
-
-        entries = _dims_entries_from_payload(
-            dims_payload,
-            axis_index=axis_index,
-            axis_target=axis_target,
-        )
-        axis_index_metadata = {
-            "axis_index": axis_index,
-            "axis_target": axis_target,
-            "server_seq": dims_seq,
-        }
-        axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
-        entries.append(
-            (
-                "dims",
-                axis_target,
-                "index",
-                axis_index_value,
-                axis_index_metadata,
-            )
-        )
-
-    ledger.batch_record_confirmed(
-        entries,
+    dims_seq, view_seq, ts = apply_bootstrap_transaction(
+        store,
+        ledger,
+        lock,
+        step=step,
+        axis_labels=axis_labels,
+        order=order,
+        level_shapes=level_shapes,
+        levels=levels,
+        current_level=current_level,
+        ndisplay=ndisplay,
         origin=origin,
-        timestamp=ts,
-        dedupe=False,
+        timestamp=timestamp,
     )
 
-    with lock:
-        store.latest_state = build_render_scene_state(
-            ledger,
-            store,
+    op_state = ledger.get("scene", "main", "op_state")
+    if op_state is not None and str(op_state.value).lower() == "open":
+        ledger.record_confirmed(
+            "scene",
+            "main",
+            "op_state",
+            "applied",
+            origin=origin,
+            timestamp=ts,
         )
-    logger.debug(
-        "bootstrap ledger seeded step=%s ndisplay=%d level=%d mode=%s",
-        resolved_step,
-        resolved_ndisplay,
-        resolved_current_level,
-        mode_value,
-        )
-
-    logger.debug(
-        "bootstrap intents seeded axis=%s step=%s ndisplay=%d level=%d seqs(dims=%d,view=%d)",
-        axis_target,
-        resolved_step,
-        resolved_ndisplay,
-        resolved_current_level,
-        dims_seq,
-        view_seq,
-    )
 
     dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
     view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
@@ -1319,13 +1243,14 @@ StateUpdateResult = ServerLedgerUpdate
 __all__ = [
     "ServerLedgerUpdate",
     "StateUpdateResult",
+    "apply_bootstrap_transaction",
     "clamp_level",
     "clamp_opacity",
     "clamp_sample_step",
     "is_valid_render_mode",
     "normalize_clim",
-    "reduce_camera_update",
     "reduce_bootstrap_state",
+    "reduce_camera_update",
     "reduce_dims_update",
     "reduce_layer_property",
     "reduce_level_update",
@@ -1338,3 +1263,146 @@ __all__ = [
     "reduce_view_update",
     "resolve_axis_index",
 ]
+
+
+def apply_bootstrap_transaction(
+    store: ServerSceneData,
+    ledger: ServerStateLedger,
+    lock: Lock,
+    *,
+    step: Sequence[int],
+    axis_labels: Sequence[str],
+    order: Sequence[int],
+    level_shapes: Sequence[Sequence[int]],
+    levels: Sequence[Mapping[str, Any]],
+    current_level: int,
+    ndisplay: int,
+    origin: str = "server.bootstrap",
+    timestamp: Optional[float] = None,
+) -> tuple[int, int, float]:
+    """Seed the ledger from bootstrap metadata and return ledger seq metadata."""
+
+    ts = _now(timestamp)
+    resolved_step = tuple(int(v) for v in step)
+    resolved_axis_labels = tuple(str(label) for label in axis_labels)
+    resolved_order = tuple(int(v) for v in order)
+    resolved_level_shapes = tuple(
+        tuple(int(dim) for dim in shape) for shape in level_shapes
+    )
+    resolved_levels = tuple(dict(level) for level in levels)
+    resolved_current_level = int(current_level)
+    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
+    mode_value = "volume" if resolved_ndisplay >= 3 else "plane"
+
+    ndim = max(
+        len(resolved_axis_labels),
+        len(resolved_step),
+        len(resolved_order),
+        len(resolved_level_shapes[resolved_current_level]) if resolved_level_shapes else 0,
+    )
+    if ndim == 0:
+        ndim = 1
+
+    if not resolved_order:
+        resolved_order = tuple(range(ndim))
+
+    axis_index = 0 if resolved_step else 0
+    axis_target = (
+        resolved_axis_labels[axis_index]
+        if resolved_axis_labels and axis_index < len(resolved_axis_labels)
+        else str(axis_index)
+    )
+
+    displayed = (
+        resolved_order[-resolved_ndisplay:]
+        if resolved_order
+        else tuple(range(max(ndim - resolved_ndisplay, 0), ndim))
+    )
+    displayed_tuple = tuple(int(v) for v in displayed)
+
+    # Open operation fence
+    with lock:
+        op_seq = increment_server_sequence(store)
+    ledger.batch_record_confirmed(
+        (
+            ("scene", "main", "op_seq", int(op_seq)),
+            ("scene", "main", "op_state", "open"),
+            ("scene", "main", "op_kind", "bootstrap"),
+        ),
+        origin=origin,
+        timestamp=ts,
+        dedupe=False,
+    )
+
+    with lock:
+        store.last_scene_seq = increment_server_sequence(store)
+        dims_seq = store.last_scene_seq
+        dims_meta = get_control_meta(store, "dims", axis_target, "index")
+        dims_meta.last_server_seq = dims_seq
+        dims_meta.last_timestamp = ts
+
+        store.multiscale_state["current_level"] = resolved_current_level
+        store.multiscale_state["levels"] = [dict(level) for level in levels]
+        store.multiscale_state["level_shapes"] = [
+            list(shape) for shape in resolved_level_shapes
+        ]
+        if "downgraded" in store.multiscale_state:
+            store.multiscale_state["downgraded"] = False
+
+        store.last_scene_seq = increment_server_sequence(store)
+        view_seq = store.last_scene_seq
+        view_meta = get_control_meta(store, "view", "main", "ndisplay")
+        view_meta.last_server_seq = view_seq
+        view_meta.last_timestamp = ts
+        store.use_volume = bool(mode_value == "volume")
+
+        dims_payload = NotifyDimsPayload(
+            current_step=resolved_step,
+            level_shapes=resolved_level_shapes,
+            levels=resolved_levels,
+            current_level=resolved_current_level,
+            downgraded=False,
+            mode=mode_value,
+            ndisplay=resolved_ndisplay,
+            axis_labels=resolved_axis_labels if resolved_axis_labels else None,
+            order=resolved_order if resolved_order else None,
+            displayed=displayed_tuple if displayed_tuple else None,
+            labels=None,
+        )
+
+        entries = _dims_entries_from_payload(
+            dims_payload,
+            axis_index=axis_index,
+            axis_target=axis_target,
+        )
+        axis_index_metadata = {
+            "axis_index": axis_index,
+            "axis_target": axis_target,
+            "server_seq": dims_seq,
+        }
+        axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
+        entries.append(
+            (
+                "dims",
+                axis_target,
+                "index",
+                axis_index_value,
+                axis_index_metadata,
+            )
+        )
+
+    ledger.batch_record_confirmed(
+        entries,
+        origin=origin,
+        timestamp=ts,
+        dedupe=False,
+    )
+
+    with lock:
+        store.latest_state = build_render_scene_state(
+            ledger,
+            store,
+        )
+        store.camera_deltas.clear()
+
+    return int(dims_seq), int(view_seq), ts

@@ -86,7 +86,7 @@ Intents → Reducers → Ledger → Worker Txn → Ledger (applied) → Mirrors.
   - Worker applies deltas, snapshots pose, writes `camera.*`; camera mirror emits.
 
 - Bootstrap
-  - `reduce_bootstrap_state(...)` seeds dims, levels, shapes, current_level, view.ndisplay (no `dims.mode`).
+  - `apply_bootstrap_transaction(...)` opens the op fence, seeds dims/levels/view in the ledger, and hands the initial snapshot to the worker; the worker’s first camera ACK closes the fence.
 - Start mirrors after bootstrap; start worker; the first `apply_render_snapshot` produces a consistent frame.
 
 ## Render Snapshot Apply (atomic, fit‑safe)

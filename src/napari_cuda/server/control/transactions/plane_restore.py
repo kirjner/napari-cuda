@@ -92,17 +92,6 @@ def apply_plane_restore_transaction(
         timestamp=timestamp,
     )
 
-    op_state = ledger.get("scene", "main", "op_state")
-    if op_state is not None and str(op_state.value).lower() == "open":
-        ledger.record_confirmed(
-            "scene",
-            "main",
-            "op_state",
-            "applied",
-            origin=origin,
-            timestamp=timestamp,
-        )
-
     if scene is not None:
         scene.latest_state = build_render_scene_state(ledger, scene)
         scene.camera_deltas.clear()

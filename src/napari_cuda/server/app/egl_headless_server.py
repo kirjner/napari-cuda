@@ -62,7 +62,7 @@ from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import BootstrapSceneMetadata
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.state_reducers import (
-    reduce_bootstrap_state,
+    apply_bootstrap_transaction,
     reduce_dims_update,
     reduce_camera_update,
 )
@@ -72,6 +72,7 @@ from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.level_budget import LevelBudgetError, select_volume_level
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
+from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
 from napari_cuda.server.runtime.worker_lifecycle import (
@@ -214,6 +215,7 @@ class EGLHeadlessServer:
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
         # Per-scope last applied seqs to help the worker skip idle ticks
         self._applied_seqs: Dict[str, int] = {}
+        self._bootstrap_snapshot: Optional[RenderLedgerSnapshot] = None
         # Camera sequencing and pose tracking (per target)
         self._camera_command_seq: Dict[str, int] = {}
         self._last_camera_pose_seq: Dict[str, int] = {}
@@ -683,20 +685,23 @@ class EGLHeadlessServer:
             policy_hysteresis=self._ctx.policy.hysteresis,
             cooldown_ms=self._ctx.policy.cooldown_ms,
         )
-        with self._state_lock:
-            reduce_bootstrap_state(
-                self._scene,
-                self._state_ledger,
-                self._state_lock,
-                step=bootstrap_meta.step,
-                axis_labels=bootstrap_meta.axis_labels,
-                order=bootstrap_meta.order,
-                level_shapes=bootstrap_meta.level_shapes,
-                levels=bootstrap_meta.levels,
-                current_level=bootstrap_meta.current_level,
-                ndisplay=bootstrap_meta.ndisplay,
-                origin="server.bootstrap",
-            )
+        bootstrap_dims_seq, bootstrap_view_seq, _ = apply_bootstrap_transaction(
+            self._scene,
+            self._state_ledger,
+            self._state_lock,
+            step=bootstrap_meta.step,
+            axis_labels=bootstrap_meta.axis_labels,
+            order=bootstrap_meta.order,
+            level_shapes=bootstrap_meta.level_shapes,
+            levels=bootstrap_meta.levels,
+            current_level=bootstrap_meta.current_level,
+            ndisplay=bootstrap_meta.ndisplay,
+            origin="server.bootstrap",
+        )
+        self._bootstrap_snapshot = pull_render_snapshot(self)
+        self._applied_seqs["dims"] = int(bootstrap_dims_seq)
+        self._applied_seqs["multiscale"] = int(bootstrap_dims_seq)
+        self._applied_seqs["view"] = int(bootstrap_view_seq)
         self._dims_mirror.start()
         self._start_worker(loop)
         try:
