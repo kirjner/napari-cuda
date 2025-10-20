@@ -140,7 +140,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server.height = 480
     server.cfg = SimpleNamespace(fps=60.0)
     server.use_volume = False
-    server._applied_seqs = {"view": 0, "dims": 0, "multiscale": 0}
     scheduled: list[Coroutine[Any, Any, None]] = []
     captured: list[dict[str, Any]] = []
 

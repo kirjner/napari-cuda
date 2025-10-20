@@ -581,7 +581,6 @@ class StateServerHarness:
         server.height = self.height
         server.cfg = SimpleNamespace(fps=60.0)
         server.use_volume = False
-        server._applied_seqs = {"view": 0, "dims": 0, "multiscale": 0}
         server._camera_seq: dict[str, int] = {}
         server._stage_layer_controls_from_ledger = lambda: None
 

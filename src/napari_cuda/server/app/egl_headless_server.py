@@ -217,8 +217,6 @@ class EGLHeadlessServer:
         # State access synchronization for latest-wins camera op coalescing
         self._state_lock = threading.RLock()
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
-        # Per-scope last applied seqs to help the worker skip idle ticks
-        self._applied_seqs: Dict[str, int] = {}
         self._bootstrap_snapshot: Optional[RenderLedgerSnapshot] = None
         # Camera sequencing and pose tracking (per target)
         self._camera_command_seq: Dict[str, int] = {}
@@ -688,7 +686,7 @@ class EGLHeadlessServer:
             policy_hysteresis=self._ctx.policy.hysteresis,
             cooldown_ms=self._ctx.policy.cooldown_ms,
         )
-        bootstrap_dims_seq, bootstrap_view_seq, _ = apply_bootstrap_transaction(
+        apply_bootstrap_transaction(
             self._scene,
             self._state_ledger,
             self._state_lock,
@@ -702,9 +700,6 @@ class EGLHeadlessServer:
             origin="server.bootstrap",
         )
         self._bootstrap_snapshot = pull_render_snapshot(self)
-        self._applied_seqs["dims"] = int(bootstrap_dims_seq)
-        self._applied_seqs["multiscale"] = int(bootstrap_dims_seq)
-        self._applied_seqs["view"] = int(bootstrap_view_seq)
         self._dims_mirror.start()
         self._start_worker(loop)
         try:
@@ -791,7 +786,7 @@ class EGLHeadlessServer:
         applied: LevelContext,
         downgraded: bool,
     ) -> None:
-        level_update = apply_level_switch_transaction(
+        apply_level_switch_transaction(
             store=self._scene,
             ledger=self._state_ledger,
             lock=self._state_lock,
@@ -799,9 +794,6 @@ class EGLHeadlessServer:
             downgraded=bool(downgraded),
             origin="worker.state.level",
         )
-        seq_value = int(level_update.server_seq)
-        self._applied_seqs["multiscale"] = seq_value
-        self._applied_seqs["dims"] = seq_value
         # Keep the plane view cache in sync with the latest applied level/step
         # when we are in 2D mode. This ensures 3D->2D restores pick the most
         # recent plane level even if no camera interaction occurred since the

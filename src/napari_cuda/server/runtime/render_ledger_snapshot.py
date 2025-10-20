@@ -28,12 +28,14 @@ class RenderLedgerSnapshot:
     current_step: Optional[tuple[int, ...]] = None
     dims_version: Optional[int] = None
     ndisplay: Optional[int] = None
+    view_version: Optional[int] = None
     displayed: Optional[tuple[int, ...]] = None
     order: Optional[tuple[int, ...]] = None
     axis_labels: Optional[tuple[str, ...]] = None
     dims_labels: Optional[tuple[str, ...]] = None
     level_shapes: Optional[tuple[tuple[int, ...], ...]] = None
     current_level: Optional[int] = None
+    multiscale_level_version: Optional[int] = None
     dims_mode: Optional[str] = None
     volume_mode: Optional[str] = None
     volume_colormap: Optional[str] = None
@@ -41,6 +43,7 @@ class RenderLedgerSnapshot:
     volume_opacity: Optional[float] = None
     volume_sample_step: Optional[float] = None
     layer_updates: Optional[Dict[str, Dict[str, Any]]] = None
+    camera_versions: Optional[Dict[str, int]] = None
 
 
 def build_ledger_snapshot(
@@ -81,6 +84,8 @@ def build_ledger_snapshot(
         current_step = tuple(int(v) for v in pending_dims)
         scene.pending_dims_step = None
 
+    view_entry_key = ("view", "main", "ndisplay")
+    view_entry = snapshot.get(view_entry_key)
     ndisplay_val = _int_or_none(_ledger_value(snapshot, "view", "main", "ndisplay"))
     dims_mode = None
     if ndisplay_val is not None:
@@ -90,7 +95,12 @@ def build_ledger_snapshot(
     axis_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "axis_labels"), str)
     dims_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "labels"), str)
     level_shapes = _shape_sequence(_ledger_value(snapshot, "multiscale", "main", "level_shapes"))
+    multiscale_level_entry_key = ("multiscale", "main", "level")
+    multiscale_level_entry = snapshot.get(multiscale_level_entry_key)
     current_level = _int_or_none(_ledger_value(snapshot, "multiscale", "main", "level"))
+    multiscale_level_version = (
+        None if multiscale_level_entry is None else _version_or_none(multiscale_level_entry.version)
+    )
 
     volume_mode = _string_or_none(
         _ledger_value(snapshot, "volume", "main", "render_mode"),
@@ -122,6 +132,16 @@ def build_ledger_snapshot(
         if drain_pending_layers:
             scene.pending_layer_updates.clear()
 
+    camera_versions: Dict[str, int] = {}
+    for camera_key in ("center", "zoom", "angles", "distance", "fov", "rect"):
+        entry = snapshot.get(("camera", "main", camera_key))
+        if entry is None:
+            continue
+        version_value = _version_or_none(entry.version)
+        if version_value is not None:
+            camera_versions[str(camera_key)] = int(version_value)
+    camera_versions_payload = camera_versions or None
+
     return RenderLedgerSnapshot(
         center=center_tuple,
         zoom=zoom_float,
@@ -131,6 +151,7 @@ def build_ledger_snapshot(
         fov=fov_float,
         rect=rect_tuple,
         ndisplay=ndisplay_val,
+        view_version=_version_or_none(view_entry.version) if view_entry is not None else None,
         displayed=displayed_axes,
         order=order_axes,
         axis_labels=axis_labels,
@@ -139,12 +160,14 @@ def build_ledger_snapshot(
         current_level=current_level,
         dims_mode=dims_mode,
         dims_version=dims_version,
+        multiscale_level_version=multiscale_level_version,
         volume_mode=volume_mode,
         volume_colormap=volume_colormap,
         volume_clim=volume_clim,
         volume_opacity=volume_opacity,
         volume_sample_step=volume_sample_step,
         layer_updates=resolved_layers or None,
+        camera_versions=camera_versions_payload,
     )
 
 

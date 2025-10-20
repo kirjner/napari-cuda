@@ -252,16 +252,12 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         logger.debug(message)
 
                 # Skip entire pipeline if no new desires, no animation/commands, and no explicit render tick
-                applied_dims_seq = int(getattr(server, "_applied_seqs", {}).get("dims", -1))
-                applied_view_seq = int(getattr(server, "_applied_seqs", {}).get("view", -1))
                 broadcast_state = getattr(server, "_pixel_channel", None)
                 broadcast = getattr(broadcast_state, "broadcast", None)
                 clients_connected = bool(getattr(broadcast, "clients", set()))
                 waiting_for_keyframe = bool(getattr(broadcast, "waiting_for_keyframe", False))
                 logger.debug(
-                    "frame applied seqs dims=%d view=%d clients=%d waiting_for_key=%s",
-                    applied_dims_seq,
-                    applied_view_seq,
+                    "frame state clients=%d waiting_for_key=%s",
                     len(getattr(broadcast, "clients", set())),
                     waiting_for_keyframe,
                 )
@@ -313,8 +309,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 # Clear one-shot render tick requirement if set
                 if getattr(worker, "_render_tick_required", False):
                     worker._mark_render_tick_complete()
-
-                # No local seq tracking; server._applied_seqs updated on confirmation write
 
                 on_frame(packet, flags, timings.capture_wall_ts, seq)
 

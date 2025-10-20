@@ -1151,7 +1151,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             server._pixel_channel.broadcast.waiting_for_keyframe = True
             pixel_channel.mark_stream_config_dirty(server._pixel_channel)
             server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
-            server._applied_seqs["view"] = int(result.server_seq)
 
             if was_volume and ndisplay == 2:
                 ledger = server._state_ledger
@@ -1835,8 +1834,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 value_arg,
                 result.current_step,
             )
-
-        server._applied_seqs["dims"] = int(result.server_seq)
 
         await _send_state_ack(
             server,

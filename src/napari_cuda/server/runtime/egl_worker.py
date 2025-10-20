@@ -1220,6 +1220,13 @@ class EGLRendererWorker:
 
         if state.dims_version is not None:
             self._applied_versions[("dims", "main", "current_step")] = int(state.dims_version)
+        if state.view_version is not None:
+            self._applied_versions[("view", "main", "ndisplay")] = int(state.view_version)
+        if state.multiscale_level_version is not None:
+            self._applied_versions[("multiscale", "main", "level")] = int(state.multiscale_level_version)
+        if state.camera_versions:
+            for key, version in state.camera_versions.items():
+                self._applied_versions[("camera", "main", str(key))] = int(version)
 
         if not self._render_mailbox.update_state_signature(state):
             if logger.isEnabledFor(logging.DEBUG):
