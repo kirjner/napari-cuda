@@ -156,6 +156,7 @@ class EGLRendererWorker:
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
         self._configure_budget_limits()
+        self._last_dims_signature: Optional[tuple] = None
 
         if policy_name:
             try:
@@ -1076,6 +1077,22 @@ class EGLRendererWorker:
         viewer = self._viewer
         if viewer is None:
             return
+        dims_signature = (
+            int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
+            tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
+            tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
+            tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None,
+            int(snapshot.current_level) if snapshot.current_level is not None else None,
+            tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
+        )
+
+        if dims_signature == self._last_dims_signature:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("dims.skip: unchanged signature %s", dims_signature)
+            return
+
+        self._last_dims_signature = dims_signature
+
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "dims.apply: ndisplay=%s order=%s displayed=%s current_step=%s",

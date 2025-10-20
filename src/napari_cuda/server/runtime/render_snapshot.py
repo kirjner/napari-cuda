@@ -83,6 +83,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         entering_volume = not worker.use_volume
         if entering_volume:
             worker.use_volume = True
+            worker._last_dims_signature = None  # noqa: SLF001
         requested_level = int(target_level)
         effective_level = _resolve_volume_level(worker, source, requested_level)
         worker._level_downgraded = bool(effective_level != requested_level)
@@ -118,6 +119,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.use_volume:
         worker.use_volume = False
         worker._configure_camera_for_mode()
+        worker._last_dims_signature = None  # noqa: SLF001
     worker._level_downgraded = False
     _apply_plane_camera_pose(worker, snapshot)
 
