@@ -23,13 +23,12 @@ from napari_cuda.server.scene import (
     get_control_meta,
     increment_server_sequence,
 )
-from napari_cuda.server.control.transactions.view_toggle import (
+from napari_cuda.server.control.transactions import (
+    apply_camera_update_transaction,
+    apply_dims_step_transaction,
+    apply_level_switch_transaction,
     apply_view_toggle_transaction,
 )
-from napari_cuda.server.control.transactions.level_switch import (
-    apply_level_switch_transaction,
-)
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 logger = logging.getLogger(__name__)
 
 
@@ -548,6 +547,52 @@ def _axis_label_from_axes(
     return None
 
 
+def _normalize_view_order(
+    *,
+    baseline_order: Optional[Sequence[int]],
+    requested_order: Optional[Sequence[int]],
+    ndim: int,
+) -> Tuple[int, ...]:
+    current: Tuple[int, ...] = ()
+    if requested_order is not None:
+        current = tuple(int(idx) for idx in requested_order)
+    elif baseline_order is not None:
+        current = tuple(int(idx) for idx in baseline_order)
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for axis in current:
+        axis_idx = int(axis)
+        if 0 <= axis_idx < max(ndim, 1) and axis_idx not in seen:
+            normalized.append(axis_idx)
+            seen.add(axis_idx)
+
+    for axis_idx in range(max(ndim, 1)):
+        if axis_idx not in seen:
+            normalized.append(axis_idx)
+            seen.add(axis_idx)
+
+    if not normalized:
+        normalized = list(range(max(ndim, 1)))
+
+    return tuple(normalized)
+
+
+def _normalize_view_displayed(
+    *,
+    requested_displayed: Optional[Sequence[int]],
+    order_value: Tuple[int, ...],
+    target_ndisplay: int,
+) -> Tuple[int, ...]:
+    if requested_displayed is not None:
+        return tuple(int(idx) for idx in requested_displayed)
+
+    count = min(len(order_value), max(1, int(target_ndisplay)))
+    if count <= 0:
+        return tuple()
+    return tuple(order_value[-count:])
+
+
 def _dims_entries_from_payload(
     payload: NotifyDimsPayload,
     *,
@@ -758,7 +803,6 @@ def reduce_dims_update(
         raise ValueError("dims update requires value or step_delta")
 
     ts = _now(timestamp)
-
     payload = _ledger_dims_payload(ledger)
 
     step = [int(v) for v in payload.current_step]
@@ -807,30 +851,28 @@ def reduce_dims_update(
     }
 
     with lock:
-        store.last_scene_seq = increment_server_sequence(store)
-        meta_entry = get_control_meta(store, "dims", control_target, prop)
-        meta_entry.last_server_seq = store.last_scene_seq
-        meta_entry.last_timestamp = ts
-        server_seq = store.last_scene_seq
         snapshot = store.latest_state
         store.latest_state = replace(snapshot, current_step=requested_step)
 
-    ledger.record_confirmed(
-        "dims",
-        "main",
-        "current_step",
-        requested_step,
+    stored_entries = apply_dims_step_transaction(
+        ledger=ledger,
+        step=requested_step,
+        metadata=step_metadata,
         origin=origin,
         timestamp=ts,
-        metadata=step_metadata,
     )
 
+    current_step_entry = stored_entries.get(("dims", "main", "current_step"))
+    assert current_step_entry is not None, "dims transaction must return current_step entry"
+    assert current_step_entry.version is not None, "dims transaction must yield versioned entry"
+    version = int(current_step_entry.version)
+
     logger.debug(
-        "dims intent updated axis=%s prop=%s step=%s seq=%d origin=%s",
+        "dims intent updated axis=%s prop=%s step=%s version=%d origin=%s",
         control_target,
         prop,
         requested_step,
-        server_seq,
+        version,
         origin,
     )
 
@@ -839,12 +881,13 @@ def reduce_dims_update(
         target=control_target,
         key=prop,
         value=int(step[idx]),
-        server_seq=server_seq,
+        server_seq=None,
         intent_id=resolved_intent_id,
         timestamp=ts,
         axis_index=idx,
         current_step=requested_step,
         origin=origin,
+        version=version,
     )
 
 
@@ -863,62 +906,79 @@ def reduce_view_update(
     ts = _now(timestamp)
     dims_payload = _ledger_dims_payload(ledger)
 
-    resolved_ndisplay: Optional[int] = None
     if ndisplay is not None:
-        resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
+        target_ndisplay = 3 if int(ndisplay) >= 3 else 2
     else:
         entry = ledger.get("view", "main", "ndisplay")
-        if entry is not None and isinstance(entry.value, int):
-            resolved_ndisplay = int(entry.value)
-    if resolved_ndisplay is None:
-        resolved_ndisplay = 2
+        target_ndisplay = int(entry.value) if entry is not None and isinstance(entry.value, int) else 2
 
-    target_ndisplay = resolved_ndisplay
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
 
-    baseline_step = (
-        tuple(int(v) for v in dims_payload.current_step)
-        if dims_payload.current_step
-        else None
-    )
-    baseline_order = (
-        tuple(int(idx) for idx in dims_payload.order)
-        if dims_payload.order is not None
-        else None
-    )
+    baseline_step = tuple(int(v) for v in dims_payload.current_step) if dims_payload.current_step else None
+    baseline_order = tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None
 
-    entries, order_value, displayed_value, server_seq = apply_view_toggle_transaction(
-        store=store,
-        ledger=ledger,
-        lock=lock,
-        target_ndisplay=int(target_ndisplay),
-        baseline_step=baseline_step,
+    ndim = 0
+    if baseline_step is not None:
+        ndim = len(baseline_step)
+    elif baseline_order is not None:
+        ndim = len(baseline_order)
+    if ndim <= 0:
+        ndim = max(int(target_ndisplay), 1)
+
+    order_value = _normalize_view_order(
         baseline_order=baseline_order,
         requested_order=order,
+        ndim=ndim,
+    )
+    displayed_value = _normalize_view_displayed(
         requested_displayed=displayed,
+        order_value=order_value,
+        target_ndisplay=target_ndisplay,
+    )
+
+    with lock:
+        snapshot = store.latest_state
+        store.latest_state = replace(
+            snapshot,
+            ndisplay=int(target_ndisplay),
+            order=order_value,
+            displayed=displayed_value,
+        )
+        store.use_volume = bool(int(target_ndisplay) >= 3)
+
+    op_entry = ledger.get("scene", "main", "op_seq")
+    next_op_seq = int(op_entry.value) + 1 if op_entry is not None and isinstance(op_entry.value, int) else 1
+
+    stored_entries = apply_view_toggle_transaction(
+        ledger=ledger,
+        op_seq=next_op_seq,
+        target_ndisplay=int(target_ndisplay),
+        order_value=order_value,
+        displayed_value=displayed_value,
         origin=origin,
         timestamp=ts,
     )
 
+    ndisplay_entry = stored_entries.get(("view", "main", "ndisplay"))
+    assert ndisplay_entry is not None, "view toggle transaction must return ndisplay entry"
+    assert ndisplay_entry.version is not None, "view toggle transaction must yield versioned entry"
+    version = int(ndisplay_entry.version)
+
     logger.debug(
-        "view intent updated ndisplay=%d order=%s displayed=%s seq=%d origin=%s",
+        "view intent updated ndisplay=%d order=%s displayed=%s version=%d origin=%s",
         target_ndisplay,
         order_value,
         displayed_value,
-        server_seq,
+        version,
         origin,
     )
-    ndisplay_entry = entries.get(("view", "main", "ndisplay"))
-    assert ndisplay_entry is not None, "view toggle transaction must return ndisplay entry"
-    version: Optional[int] = None
-    if ndisplay_entry.version is not None:
-        version = int(ndisplay_entry.version)
+
     return ServerLedgerUpdate(
         scope="view",
         target="main",
         key="ndisplay",
         value=int(target_ndisplay),
-        server_seq=server_seq,
+        server_seq=None,
         intent_id=resolved_intent_id,
         timestamp=ts,
         origin=origin,
@@ -981,12 +1041,6 @@ def reduce_level_update(
     updated_level_shapes = tuple(level_shapes_payload) if level_shapes_payload else tuple()
 
     with lock:
-        store.last_scene_seq = increment_server_sequence(store)
-        server_seq = store.last_scene_seq
-        meta = get_control_meta(store, "multiscale", "main", "level")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
-
         snapshot = store.latest_state
         store.latest_state = replace(
             snapshot,
@@ -1010,13 +1064,6 @@ def reduce_level_update(
         if downgraded is not None:
             store.multiscale_state["downgraded"] = bool(downgraded)
 
-    logger.debug(
-        "multiscale intent updated level=%d seq=%d origin=%s",
-        level,
-        server_seq,
-        origin,
-    )
-
     step_metadata = {"source": "worker.level_update", "level": level}
     if intent_id is not None:
         step_metadata["intent_id"] = intent_id
@@ -1038,12 +1085,19 @@ def reduce_level_update(
     assert level_entry is not None, "level switch transaction must return level entry"
     level_version = None if level_entry.version is None else int(level_entry.version)
 
+    logger.debug(
+        "multiscale intent updated level=%d version=%s origin=%s",
+        level,
+        level_version,
+        origin,
+    )
+
     return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
         key="level",
         value=level,
-        server_seq=server_seq,
+        server_seq=None,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
@@ -1078,17 +1132,16 @@ def reduce_camera_update(
 
     ts = _now(timestamp)
     ack: Dict[str, Any] = {}
-
-    pending: list[tuple[str, str, str, Any]] = []
+    updates: list[tuple[str, str, str, Any]] = []
 
     if center is not None:
         normalized_center = tuple(float(c) for c in center)
-        pending.append(("camera", "main", "center", normalized_center))
+        updates.append(("camera", "main", "center", normalized_center))
         ack["center"] = [float(c) for c in normalized_center]
 
     if zoom is not None:
         zoom_value = float(zoom)
-        pending.append(("camera", "main", "zoom", zoom_value))
+        updates.append(("camera", "main", "zoom", zoom_value))
         ack["zoom"] = zoom_value
 
     if angles is not None:
@@ -1099,17 +1152,17 @@ def reduce_camera_update(
             float(angles[1]),
             float(angles[2]),
         )
-        pending.append(("camera", "main", "angles", normalized_angles))
+        updates.append(("camera", "main", "angles", normalized_angles))
         ack["angles"] = [float(a) for a in normalized_angles]
 
     if distance is not None:
         distance_val = float(distance)
-        pending.append(("camera", "main", "distance", distance_val))
+        updates.append(("camera", "main", "distance", distance_val))
         ack["distance"] = distance_val
 
     if fov is not None:
         fov_val = float(fov)
-        pending.append(("camera", "main", "fov", fov_val))
+        updates.append(("camera", "main", "fov", fov_val))
         ack["fov"] = fov_val
 
     if rect is not None:
@@ -1121,11 +1174,15 @@ def reduce_camera_update(
             float(rect[2]),
             float(rect[3]),
         )
-        pending.append(("camera", "main", "rect", normalized_rect))
+        updates.append(("camera", "main", "rect", normalized_rect))
         ack["rect"] = [float(v) for v in normalized_rect]
 
-    for scope, target, key, value in pending:
-        ledger.record_confirmed(scope, target, key, value, origin=origin, timestamp=ts)
+    stored_entries = apply_camera_update_transaction(
+        ledger=ledger,
+        updates=updates,
+        origin=origin,
+        timestamp=ts,
+    )
 
     return ack
 
