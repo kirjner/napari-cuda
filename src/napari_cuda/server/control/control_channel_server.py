@@ -78,7 +78,7 @@ from napari_cuda.server.control.state_reducers import (
 from napari_cuda.server.control.transactions.plane_restore import (
     apply_plane_restore_transaction,
 )
-from napari_cuda.server.scene import CameraDeltaCommand, layer_controls_from_ledger, layer_controls_to_dict
+from napari_cuda.server.scene import CameraDeltaCommand, layer_controls_from_ledger
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -2366,19 +2366,10 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             viewer_settings=_viewer_settings(server),
         )
 
-        scene_data = server._scene
-        latest_updates = scene_data.pending_layer_updates
         ledger_controls = layer_controls_from_ledger(ledger_snapshot)
         for layer_snapshot in snapshot.layers:
             layer_id = layer_snapshot.layer_id
             controls: Dict[str, Any] = dict(ledger_controls.get(layer_id, {}))
-            control_state = scene_data.layer_controls.get(layer_id)
-            if control_state is not None:
-                for key, value in layer_controls_to_dict(control_state).items():
-                    controls.setdefault(key, value)
-            pending = latest_updates.get(layer_id, {})
-            for key, value in pending.items():
-                controls[str(key)] = value
             if not controls and "controls" in layer_snapshot.block:
                 block_controls = layer_snapshot.block["controls"]
                 assert isinstance(block_controls, Mapping), "layer snapshot controls missing mapping"
@@ -2519,25 +2510,19 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
     if snapshot is None or not snapshot.layers:
         return
 
-    latest_updates = scene.latest_state.layer_updates or {}
+    latest_state = scene.latest_state
+    latest_values = latest_state.layer_values or {}
 
     for layer in snapshot.layers:
         layer_id = layer.layer_id
         if not layer_id:
             continue
 
-        controls: dict[str, Any] = {}
-        control_state = scene.layer_controls.get(layer_id)
-        if control_state is not None:
-            controls.update(layer_controls_to_dict(control_state))
-
-        pending = latest_updates.get(layer_id, {})
-        if pending:
-            for key, value in pending.items():
-                controls[str(key)] = value
-
-        if not controls:
+        values = latest_values.get(layer_id, {})
+        if not values:
             continue
+
+        controls = {str(key): value for key, value in values.items()}
 
         await _broadcast_layers_delta(
             server,

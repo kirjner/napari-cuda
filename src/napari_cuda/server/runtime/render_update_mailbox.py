@@ -160,9 +160,18 @@ class RenderUpdateMailbox:
             )
 
         layer_token = None
-        if state.layer_updates:
+        if state.layer_versions:
+            version_items: list[tuple[str, str, int]] = []
+            for layer_id, props in state.layer_versions.items():
+                if not props:
+                    continue
+                for prop, version in props.items():
+                    version_items.append((str(layer_id), str(prop), int(version)))
+            if version_items:
+                layer_token = ("lver", tuple(sorted(version_items)))
+        elif state.layer_values:
             layer_items = []
-            for layer_id, props in state.layer_updates.items():
+            for layer_id, props in state.layer_values.items():
                 if not props:
                     continue
                 normalized = tuple(
@@ -170,7 +179,7 @@ class RenderUpdateMailbox:
                 )
                 layer_items.append((str(layer_id), normalized))
             if layer_items:
-                layer_token = tuple(sorted(layer_items))
+                layer_token = ("lvals", tuple(sorted(layer_items)))
 
         volume_token = (
             _canonical(state.volume_mode),

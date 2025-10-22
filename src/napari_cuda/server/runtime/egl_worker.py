@@ -1159,15 +1159,29 @@ class EGLRendererWorker:
     def _normalize_scene_state(self, state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
         """Return the render-thread-friendly copy of *state*."""
 
-        layer_updates = None
-        if state.layer_updates:
-            updates: Dict[str, Dict[str, object]] = {}
-            for layer_id, props in state.layer_updates.items():
+        layer_values = None
+        if state.layer_values:
+            values: Dict[str, Dict[str, object]] = {}
+            for layer_id, props in state.layer_values.items():
                 if not props:
                     continue
-                updates[str(layer_id)] = {str(key): value for key, value in props.items()}
-            if updates:
-                layer_updates = updates
+                values[str(layer_id)] = {str(key): value for key, value in props.items()}
+            if values:
+                layer_values = values
+
+        layer_versions = None
+        if state.layer_versions:
+            versions: Dict[str, Dict[str, int]] = {}
+            for layer_id, props in state.layer_versions.items():
+                if not props:
+                    continue
+                mapped: Dict[str, int] = {}
+                for key, version in props.items():
+                    mapped[str(key)] = int(version)
+                if mapped:
+                    versions[str(layer_id)] = mapped
+            if versions:
+                layer_versions = versions
 
         return RenderLedgerSnapshot(
             center=(tuple(float(c) for c in state.center) if state.center is not None else None),
@@ -1195,7 +1209,8 @@ class EGLRendererWorker:
                 if state.volume_sample_step is not None
                 else None
             ),
-            layer_updates=layer_updates,
+            layer_values=layer_values,
+            layer_versions=layer_versions,
         )
 
     def enqueue_update(self, delta: RenderUpdate) -> None:
@@ -1228,16 +1243,38 @@ class EGLRendererWorker:
             for key, version in state.camera_versions.items():
                 self._applied_versions[("camera", "main", str(key))] = int(version)
 
+        layer_changes: Dict[str, Dict[str, Any]] = {}
+        layer_versions = state.layer_versions or {}
+        if state.layer_values:
+            for raw_layer_id, props in state.layer_values.items():
+                if not props:
+                    continue
+                layer_id = str(raw_layer_id)
+                version_map = layer_versions.get(layer_id)
+                if version_map is None and raw_layer_id in layer_versions:
+                    version_map = layer_versions[raw_layer_id]
+                for raw_prop, value in props.items():
+                    prop = str(raw_prop)
+                    version_value = None
+                    if version_map is not None and prop in version_map:
+                        version_value = int(version_map[prop])
+                        key = ("layer", layer_id, prop)
+                        previous = self._applied_versions.get(key)
+                        if previous is not None and previous == version_value:
+                            continue
+                        self._applied_versions[key] = version_value
+                    layer_changes.setdefault(layer_id, {})[prop] = value
+
         signature_changed = self._render_mailbox.update_state_signature(state)
 
         if signature_changed:
             apply_render_snapshot(self, state)
 
-        if state.layer_updates:
+        if layer_changes:
             view = self.view
             if view is not None:
                 ctx = self._build_scene_state_context(view.camera)
-                SceneStateApplier.apply_layer_updates(ctx, state.layer_updates)
+                SceneStateApplier.apply_layer_updates(ctx, layer_changes)
 
     def _apply_camera_commands(self, commands: Sequence[CameraDeltaCommand]) -> bool:
         outcome = _process_camera_deltas(self, commands)

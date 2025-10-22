@@ -459,38 +459,34 @@ class EGLHeadlessServer:
         if not controls:
             return
 
+        primary_props = next((props for props in controls.values() if props), None)
+        if primary_props is None:
+            return
+
         ledger_sync: list[tuple[str, Any]] = []
         with self._state_lock:
-            pending = self._scene.pending_layer_updates
-            for layer_id, props in controls.items():
-                layer_pending = pending.setdefault(layer_id, {})
-                for key, value in props.items():
-                    layer_pending[str(key)] = value
+            volume_state = self._scene.volume_state
 
-            primary_props = next((props for props in controls.values() if props), None)
-            if primary_props:
-                volume_state = self._scene.volume_state
+            colormap = primary_props.get("colormap")
+            if colormap is not None:
+                name = str(colormap)
+                if volume_state.get("colormap") != name:
+                    volume_state["colormap"] = name
+                    ledger_sync.append(("colormap", name))
 
-                colormap = primary_props.get("colormap")
-                if colormap is not None:
-                    name = str(colormap)
-                    if volume_state.get("colormap") != name:
-                        volume_state["colormap"] = name
-                        ledger_sync.append(("colormap", name))
+            clim = primary_props.get("contrast_limits")
+            if clim is not None:
+                lo, hi = (float(clim[0]), float(clim[1]))
+                if volume_state.get("clim") != [lo, hi]:
+                    volume_state["clim"] = [lo, hi]
+                    ledger_sync.append(("contrast_limits", (lo, hi)))
 
-                clim = primary_props.get("contrast_limits")
-                if clim is not None:
-                    lo, hi = (float(clim[0]), float(clim[1]))
-                    if volume_state.get("clim") != [lo, hi]:
-                        volume_state["clim"] = [lo, hi]
-                        ledger_sync.append(("contrast_limits", (lo, hi)))
-
-                opacity = primary_props.get("opacity")
-                if opacity is not None:
-                    alpha = float(opacity)
-                    if volume_state.get("opacity") != alpha:
-                        volume_state["opacity"] = alpha
-                        ledger_sync.append(("opacity", alpha))
+            opacity = primary_props.get("opacity")
+            if opacity is not None:
+                alpha = float(opacity)
+                if volume_state.get("opacity") != alpha:
+                    volume_state["opacity"] = alpha
+                    ledger_sync.append(("opacity", alpha))
 
         for key, value in ledger_sync:
             self._state_ledger.record_confirmed(
@@ -619,7 +615,7 @@ class EGLHeadlessServer:
             zarr_path=self._zarr_path,
             scene_source=source,
             viewer_model=viewer_model,
-            layer_controls=dict(self._scene.layer_controls),
+            layer_controls=layer_controls_from_ledger(self._state_ledger.snapshot()),
         )
 
         snapshot = self._scene_manager.scene_snapshot()

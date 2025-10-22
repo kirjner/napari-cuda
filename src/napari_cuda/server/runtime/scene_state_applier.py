@@ -397,7 +397,7 @@ class SceneStateApplier:
                 sample_step=state.volume_sample_step,
             )
 
-        layer_updates = state.layer_updates or {}
+        layer_updates = state.layer_values or {}
         if layer_updates:
             SceneStateApplier.apply_layer_updates(ctx_for_apply, layer_updates)
 

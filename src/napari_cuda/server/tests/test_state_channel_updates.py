@@ -32,7 +32,7 @@ from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
-from napari_cuda.server.scene import create_server_scene_data
+from napari_cuda.server.scene import build_render_scene_state, create_server_scene_data, layer_controls_from_ledger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -868,7 +868,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             value="viridis",
         )
 
-        server._scene.latest_state = RenderLedgerSnapshot(layer_updates=server._scene.pending_layer_updates.copy())
+        server._scene.latest_state = build_render_scene_state(server._state_ledger, server._scene)
 
         server._scene_manager.update_from_sources(
             worker=server._worker,
@@ -879,7 +879,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             ndisplay=2,
             zarr_path=None,
             scene_source=None,
-            layer_controls=server._scene.layer_controls,
+            layer_controls=layer_controls_from_ledger(server._state_ledger.snapshot()),
         )
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)

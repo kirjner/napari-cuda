@@ -19,17 +19,20 @@ from napari_cuda.protocol.snapshots import (
     scene_snapshot,
     viewer_snapshot_from_blocks,
 )
-from napari_cuda.server.scene import (
-    LayerControlState,
-    default_layer_controls,
-    layer_controls_to_dict,
-)
-
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_LAYER_CONTROLS: Dict[str, Any] = {
+    "visible": True,
+    "opacity": 1.0,
+    "blending": "opaque",
+    "interpolation": "linear",
+    "gamma": 1.0,
+    "colormap": "gray",
+}
 
 
 @dataclass
@@ -73,7 +76,7 @@ class ViewerSceneManager:
         zarr_path: Optional[str],
         scene_source: Optional[object],
         viewer_model: Optional[ViewerModel] = None,
-        layer_controls: Optional[Dict[str, LayerControlState]] = None,
+        layer_controls: Optional[Dict[str, Mapping[str, Any]]] = None,
     ) -> SceneSnapshot:
         if viewer_model is not None and viewer_model is not self._viewer:
             self._viewer = viewer_model
@@ -82,8 +85,13 @@ class ViewerSceneManager:
         worker_snapshot = self._snapshot_worker(worker, ndisplay, viewer_model=viewer_model)
         adapter_layer = self._adapter_layer(viewer_model)
 
-        controls_state = self._resolve_controls(layer_controls)
-        control_map = layer_controls_to_dict(controls_state)
+        control_map: Dict[str, Any] = {}
+        if layer_controls:
+            layer_props = layer_controls.get(self._default_layer_id, {})
+            if layer_props:
+                control_map = {str(key): value for key, value in layer_props.items()}
+        if not control_map:
+            control_map = self._extract_controls_from_layer(adapter_layer)
 
         layer_metadata = self._layer_metadata(adapter_layer)
         layer_block = self._build_layer_block(
@@ -192,11 +200,6 @@ class ViewerSceneManager:
             return None
         return viewer_model.layers[0] if viewer_model.layers else None
 
-    def _resolve_controls(self, layer_controls: Optional[Dict[str, LayerControlState]]) -> LayerControlState:
-        if not layer_controls:
-            return default_layer_controls()
-        return layer_controls.get(self._default_layer_id, default_layer_controls())
-
     def _layer_metadata(self, adapter_layer: Optional[Any]) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {}
         if adapter_layer is None:
@@ -205,6 +208,99 @@ class ViewerSceneManager:
         if thumbnail is not None:
             metadata["thumbnail"] = thumbnail.tolist()
         return metadata
+
+    def _extract_controls_from_layer(self, layer: Optional[Any]) -> Dict[str, Any]:
+        controls: Dict[str, Any] = dict(_DEFAULT_LAYER_CONTROLS)
+        if layer is None:
+            return controls
+
+        try:
+            controls["visible"] = bool(layer.visible)
+        except Exception:
+            pass
+
+        try:
+            controls["opacity"] = float(layer.opacity)
+        except Exception:
+            pass
+
+        try:
+            blending_value = layer.blending  # type: ignore[attr-defined]
+        except Exception:
+            blending_value = None
+        if blending_value is not None:
+            try:
+                controls["blending"] = str(blending_value.value)  # type: ignore[attr-defined]
+            except Exception:
+                controls["blending"] = str(blending_value)
+
+        try:
+            interpolation_value = layer.interpolation  # type: ignore[attr-defined]
+        except Exception:
+            interpolation_value = None
+        if interpolation_value is not None:
+            try:
+                controls["interpolation"] = str(interpolation_value.value)  # type: ignore[attr-defined]
+            except Exception:
+                controls["interpolation"] = str(interpolation_value)
+
+        try:
+            controls["gamma"] = float(layer.gamma)
+        except Exception:
+            pass
+
+        try:
+            clim = layer.contrast_limits
+        except Exception:
+            clim = None
+        if clim is not None:
+            try:
+                lo, hi = float(clim[0]), float(clim[1])
+                controls["contrast_limits"] = [lo, hi]
+            except Exception:
+                pass
+
+        try:
+            colormap_obj = layer.colormap
+        except Exception:
+            colormap_obj = None
+        if colormap_obj is not None:
+            name = None
+            try:
+                name = str(colormap_obj.name)  # type: ignore[attr-defined]
+            except Exception:
+                if isinstance(colormap_obj, str):
+                    name = colormap_obj
+            if name:
+                controls["colormap"] = name
+
+        # Skip optional depiction/rendering metadata for now; legacy clients
+        # do not recognise these keys.
+        # try:
+        #     value = layer.depiction  # type: ignore[attr-defined]
+        # except Exception:
+        #     value = None
+        # if value is not None:
+        #     controls["depiction"] = str(value)
+
+        # try:
+        #     render_value = layer.rendering  # type: ignore[attr-defined]
+        # except Exception:
+        #     render_value = None
+        # if render_value is not None:
+        #     controls["rendering"] = str(render_value)
+
+        try:
+            controls["attenuation"] = float(layer.attenuation)
+        except Exception:
+            pass
+
+        try:
+            controls["iso_threshold"] = float(layer.iso_threshold)
+        except Exception:
+            pass
+
+        return controls
 
     def _build_layer_block(
         self,
@@ -235,8 +331,7 @@ class ViewerSceneManager:
 
         if metadata:
             block["metadata"] = dict(metadata)
-        if controls:
-            block["controls"] = dict(controls)
+        block["controls"] = dict(controls)
 
         multiscale_block = self._build_multiscale_block(multiscale_state, base_shape=shape)
         if multiscale_block is not None:

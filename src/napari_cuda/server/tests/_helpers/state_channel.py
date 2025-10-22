@@ -751,10 +751,12 @@ class StateServerHarness:
             snapshot_mod.apply_render_snapshot(server._worker, snapshot)
 
         server._commit_level = _commit_level
-        return server
         server._pending_tasks = self.scheduled
-        server._scene.pending_layer_updates = {}
-        server._scene.latest_state = RenderLedgerSnapshot(layer_updates={})
+        server._scene.latest_state = build_render_scene_state(
+            server._state_ledger,
+            server._scene,
+        )
+        return server
 
     def _state_send(self, _ws: Any, text: str) -> None:
         """Capture outbound frames for later assertions."""

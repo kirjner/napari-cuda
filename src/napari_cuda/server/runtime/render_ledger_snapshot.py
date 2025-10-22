@@ -42,16 +42,14 @@ class RenderLedgerSnapshot:
     volume_clim: Optional[tuple[float, float]] = None
     volume_opacity: Optional[float] = None
     volume_sample_step: Optional[float] = None
-    layer_updates: Optional[Dict[str, Dict[str, Any]]] = None
+    layer_values: Optional[Dict[str, Dict[str, Any]]] = None
+    layer_versions: Optional[Dict[str, Dict[str, int]]] = None
     camera_versions: Optional[Dict[str, int]] = None
 
 
 def build_ledger_snapshot(
     ledger: ServerStateLedger,
     scene: "ServerSceneData",
-    *,
-    layer_updates: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    drain_pending_layers: bool = True,
 ) -> RenderLedgerSnapshot:
     """Construct the render snapshot by stitching together ledger + local state.
 
@@ -60,12 +58,8 @@ def build_ledger_snapshot(
     ledger
         ServerStateLedger containing confirmed property values.
     scene
-        Mutable scene data bag holding local fallbacks (volume hints, pending layer deltas).
-    layer_updates
-        Optional explicit layer deltas to include instead of draining the pending store.
-    drain_pending_layers
-        When ``True`` (default) the helper will consume ``scene.pending_layer_updates``.
-    """
+        Mutable scene data bag holding local fallbacks (volume hints).
+"""
 
     snapshot = ledger.snapshot()
 
@@ -124,13 +118,19 @@ def build_ledger_snapshot(
         fallback=scene.volume_state.get("sample_step"),
     )
 
-    resolved_layers: Dict[str, Dict[str, Any]] = {}
-    if layer_updates is not None:
-        resolved_layers.update(_normalise_layer_updates(layer_updates))
-    elif scene.pending_layer_updates:
-        resolved_layers.update(_normalise_layer_updates(scene.pending_layer_updates))
-        if drain_pending_layers:
-            scene.pending_layer_updates.clear()
+    layer_values: Dict[str, Dict[str, Any]] = {}
+    layer_versions: Dict[str, Dict[str, int]] = {}
+    for (scope, target, key), entry in snapshot.items():
+        if scope != "layer":
+            continue
+        layer_id = str(target)
+        prop = str(key)
+        values = layer_values.setdefault(layer_id, {})
+        values[prop] = entry.value
+        version_value = _version_or_none(entry.version)
+        if version_value is not None:
+            versions = layer_versions.setdefault(layer_id, {})
+            versions[prop] = version_value
 
     camera_versions: Dict[str, int] = {}
     for camera_key in ("center", "zoom", "angles", "distance", "fov", "rect"):
@@ -166,7 +166,8 @@ def build_ledger_snapshot(
         volume_clim=volume_clim,
         volume_opacity=volume_opacity,
         volume_sample_step=volume_sample_step,
-        layer_updates=resolved_layers or None,
+        layer_values=layer_values or None,
+        layer_versions=layer_versions or None,
         camera_versions=camera_versions_payload,
     )
 
@@ -210,17 +211,6 @@ def _int_or_none(value: Any, *, fallback: Any = None) -> Optional[int]:
     if source is None:
         return None
     return int(source)
-
-
-def _normalise_layer_updates(updates: Mapping[str, Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    normalised: Dict[str, Dict[str, Any]] = {}
-    for layer_id, props in updates.items():
-        entries: Dict[str, Any] = {}
-        for key, value in props.items():
-            entries[str(key)] = value
-        if entries:
-            normalised[str(layer_id)] = entries
-    return normalised
 
 
 def _shape_sequence(value: Any) -> Optional[tuple[tuple[int, ...], ...]]:

@@ -12,9 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
-from napari.layers.base._base_constants import Blending as NapariBlending
-from napari.layers.image._image_constants import Interpolation as NapariInterpolation
-
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
 from napari_cuda.server.control.state_ledger import LedgerEntry, ServerStateLedger
 
@@ -34,36 +31,18 @@ CONTROL_KEYS: tuple[str, ...] = (
 )
 
 
-def layer_controls_to_dict(control: LayerControlState) -> dict[str, Any]:
-    """Serialise a LayerControlState into JSON-friendly primitives."""
-
-    payload: dict[str, Any] = {}
-    for key in CONTROL_KEYS:
-        value = getattr(control, key)
-        if value is None:
-            continue
-        if isinstance(value, tuple):
-            payload[key] = list(value)
-        else:
-            payload[key] = value
-    return payload
-
-
 __all__ = [
     "CONTROL_KEYS",
     "LayerControlMeta",
-    "LayerControlState",
     "CameraDeltaCommand",
     "ServerSceneData",
     "create_server_scene_data",
-    "default_layer_controls",
     "default_multiscale_state",
     "default_volume_state",
     "increment_server_sequence",
     "get_control_meta",
     "clear_control_meta",
     "prune_control_metadata",
-    "layer_controls_to_dict",
     "build_render_scene_state",
     "layer_controls_from_ledger",
     "volume_state_from_ledger",
@@ -109,34 +88,11 @@ class CameraDeltaCommand:
 
 
 @dataclass
-class LayerControlState:
-    """Canonical per-layer controls owned by the control thread."""
-
-    visible: bool = True
-    opacity: float = 1.0
-    blending: str = NapariBlending.OPAQUE.value
-    interpolation: str = NapariInterpolation.LINEAR.value
-    gamma: float = 1.0
-    colormap: Optional[str] = None
-    contrast_limits: Optional[tuple[float, float]] = None
-    depiction: Optional[str] = None
-    rendering: Optional[str] = None
-    attenuation: Optional[float] = None
-    iso_threshold: Optional[float] = None
-
-
-@dataclass
 class LayerControlMeta:
     """Sequencing metadata for a specific control property."""
 
     last_server_seq: int = 0
     last_timestamp: Optional[float] = None
-
-
-def default_layer_controls() -> LayerControlState:
-    """Return the default LayerControlState for new layers."""
-
-    return LayerControlState(colormap="gray")
 
 
 @dataclass
@@ -153,9 +109,7 @@ class ServerSceneData:
     policy_event_path: Path = field(default_factory=Path)
     last_scene_snapshot: Optional[Dict[str, Any]] = None
     last_scene_seq: int = 0
-    layer_controls: Dict[str, LayerControlState] = field(default_factory=dict)
     control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
-    pending_layer_updates: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
     # Removed optimistic dims caches; staged transactions drive desired state
 
@@ -189,21 +143,13 @@ def build_render_scene_state(
     volume_clim: Any = None,
     volume_opacity: Any = None,
     volume_sample_step: Any = None,
-    layer_updates: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> RenderLedgerSnapshot:
     """Build a render-scene snapshot from the ledger with optional overrides."""
 
     base = build_ledger_snapshot(
         ledger,
         scene,
-        layer_updates=layer_updates,
-        drain_pending_layers=False,
     )
-
-    chosen_layer_updates = base.layer_updates
-    if layer_updates is not None:
-        # build_ledger_snapshot handles normalisation when overrides provided
-        chosen_layer_updates = base.layer_updates
 
     return RenderLedgerSnapshot(
         center=_coalesce_tuple(center, base.center, float),
@@ -231,7 +177,8 @@ def build_render_scene_state(
             base.volume_sample_step,
             fallback=scene.volume_state.get("sample_step"),
         ),
-        layer_updates=chosen_layer_updates,
+        layer_values=base.layer_values,
+        layer_versions=base.layer_versions,
     )
 
 
@@ -355,18 +302,15 @@ def prune_control_metadata(
     provides a fallback axis count if metadata is incomplete.
     """
 
-    layer_ids_specified = layer_ids is not None
+    assert layer_ids is not None, "layer_ids required to prune control metadata"
 
     active_layers: set[str] = set()
-    if layer_ids is not None:
-        for layer_id in layer_ids:
-            if layer_id is None:
-                continue
-            text = str(layer_id).strip()
-            if text:
-                active_layers.add(text)
-    else:
-        active_layers.update(str(key) for key in scene.layer_controls.keys())
+    for layer_id in layer_ids:
+        if layer_id is None:
+            continue
+        text = str(layer_id).strip()
+        if text:
+            active_layers.add(text)
 
     dims_known = dims_meta is not None
     dims_targets: set[str] = set()
@@ -375,15 +319,10 @@ def prune_control_metadata(
 
     for meta_key in list(scene.control_meta.keys()):
         scope, target, prop_key = meta_key
-        if scope == "layer" and layer_ids_specified and target not in active_layers:
+        if scope == "layer" and target not in active_layers:
             clear_control_meta(scene, scope, target, prop_key)
         elif scope == "dims" and dims_known and target not in dims_targets:
             clear_control_meta(scene, scope, target, prop_key)
-
-    if layer_ids_specified:
-        for stored_layer in list(scene.layer_controls.keys()):
-            if stored_layer not in active_layers:
-                scene.layer_controls.pop(stored_layer, None)
 
 
 def _dims_targets_from_meta(

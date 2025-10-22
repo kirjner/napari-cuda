@@ -18,10 +18,8 @@ from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import (
-    LayerControlState,
     ServerSceneData,
     build_render_scene_state,
-    default_layer_controls,
     get_control_meta,
     increment_server_sequence,
 )
@@ -247,12 +245,6 @@ def reduce_layer_property(
     ts = _now(timestamp)
 
     with lock:
-        control = store.layer_controls.setdefault(layer_id, default_layer_controls())
-        setattr(control, prop, canonical)
-
-        pending = store.pending_layer_updates.setdefault(layer_id, {})
-        pending[prop] = canonical
-
         server_seq = increment_server_sequence(store)
 
         meta = get_control_meta(store, "layer", layer_id, prop)

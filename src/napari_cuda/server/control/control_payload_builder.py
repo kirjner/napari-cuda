@@ -8,7 +8,6 @@ from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayloa
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.scene import (
     ServerSceneData,
-    layer_controls_to_dict,
     volume_state_from_ledger,
 )
 from napari_cuda.server.control.state_ledger import LedgerEntry
@@ -61,16 +60,6 @@ def build_notify_layers_payload(
         layer_id=str(layer_id),
         changes={key: _normalize_value(value) for key, value in changes.items()},
     )
-
-
-def build_layer_controls_payload(layer_id: str, state: ServerSceneData) -> NotifyLayersPayload | None:
-    control_state = state.layer_controls.get(layer_id)
-    if control_state is None:
-        return None
-    controls = layer_controls_to_dict(control_state)
-    if not controls:
-        return None
-    return build_notify_layers_payload(layer_id=layer_id, changes=controls)
 
 
 def _normalize_value(value: Any) -> Any:
