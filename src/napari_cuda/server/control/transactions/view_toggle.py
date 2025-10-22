@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from threading import Lock
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_ledger import (
+    LedgerEntry,
+    PropertyKey,
+    ServerStateLedger,
+)
 from napari_cuda.server.scene import (
     ServerSceneData,
     get_control_meta,
@@ -70,12 +74,14 @@ def apply_view_toggle_transaction(
     requested_displayed: Optional[Sequence[int]],
     origin: str,
     timestamp: float,
-) -> Tuple[int, Tuple[int, ...], Tuple[int, ...]]:
+) -> Tuple[Dict[PropertyKey, LedgerEntry], Tuple[int, ...], Tuple[int, ...], int]:
     """Record the ledger updates for a view toggle intent."""
 
+    entries: Dict[PropertyKey, LedgerEntry] = {}
     with lock:
         op_seq = increment_server_sequence(store)
-    ledger.batch_record_confirmed(
+    entries.update(
+        ledger.batch_record_confirmed(
         (
             ("scene", "main", "op_seq", int(op_seq)),
             ("scene", "main", "op_state", "open"),
@@ -84,6 +90,7 @@ def apply_view_toggle_transaction(
         origin=origin,
         timestamp=timestamp,
         dedupe=False,
+    )
     )
 
     with lock:
@@ -94,7 +101,7 @@ def apply_view_toggle_transaction(
         meta.last_timestamp = timestamp
         store.use_volume = bool(int(target_ndisplay) == 3)
 
-    ledger.record_confirmed(
+    ndisplay_entry = ledger.record_confirmed(
         "view",
         "main",
         "ndisplay",
@@ -102,6 +109,7 @@ def apply_view_toggle_transaction(
         origin=origin,
         timestamp=timestamp,
     )
+    entries[("view", "main", "ndisplay")] = ndisplay_entry
 
     ndim = 0
     if baseline_step is not None:
@@ -122,7 +130,7 @@ def apply_view_toggle_transaction(
         target_ndisplay=target_ndisplay,
     )
 
-    ledger.record_confirmed(
+    dims_entry = ledger.record_confirmed(
         "dims",
         "main",
         "order",
@@ -130,7 +138,8 @@ def apply_view_toggle_transaction(
         origin=origin,
         timestamp=timestamp,
     )
-    ledger.record_confirmed(
+    entries[("dims", "main", "order")] = dims_entry
+    displayed_entry = ledger.record_confirmed(
         "view",
         "main",
         "displayed",
@@ -138,6 +147,7 @@ def apply_view_toggle_transaction(
         origin=origin,
         timestamp=timestamp,
     )
+    entries[("view", "main", "displayed")] = displayed_entry
 
     with lock:
         snapshot = store.latest_state
@@ -148,7 +158,7 @@ def apply_view_toggle_transaction(
             displayed=displayed_value,
         )
 
-    return int(server_seq), order_value, displayed_value
+    return entries, order_value, displayed_value, int(server_seq)
 
 
 __all__ = ["apply_view_toggle_transaction"]

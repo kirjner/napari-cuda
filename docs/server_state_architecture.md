@@ -41,6 +41,7 @@ Mirrors (e.g., ServerDimsMirror)
 
 - **RenderUpdateMailbox** (latest-wins mailbox): carries staged render snapshots and batched camera deltas to the worker.
 - **ServerStateLedger**: authoritative property store, mirroring the client’s `ClientStateLedger`.
+  - `record_confirmed` / `batch_record_confirmed` return the authoritative `LedgerEntry` objects (deduped writes hand back the existing entry while skipping notifications).
 - **ServerDimsMirror**: subscriber that broadcasts dims/multiscale updates to clients (and any other consumers) once the ledger confirms them.
 - **RenderLedgerSnapshot**: immutable render-thread input built from the ledger; replaces the legacy `ServerSceneState` bag.
 - **AppliedSeqs**: small per-scope counters on the server that record the last applied confirmation sequence (e.g., `dims`, `view`, later `camera`, `layers`). Used only for skip decisions.
@@ -65,7 +66,7 @@ Mirrors (e.g., ServerDimsMirror)
   - Schedules broadcasts via the control loop rather than relying on worker notifications.
 
 - `src/napari_cuda/server/scene/`
-  - `data.py` houses `ServerSceneData` and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`, etc.).
+  - `data.py` houses `ServerSceneData` and helper utilities (`layer_controls_to_dict`, etc.).
   - `layer_manager.py` now reflects the new namespace used by control payload builders and tests.
 
 - `src/napari_cuda/server/runtime/camera_{controller,animator,ops}.py`

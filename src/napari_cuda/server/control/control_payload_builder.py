@@ -124,11 +124,4 @@ def _merge_scene_metadata(
         metadata.setdefault("volume_state", {})
         metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in scene.volume_state.items()})
 
-    if scene.policy_metrics_snapshot:
-        metadata["policy_metrics"] = {
-            str(k): _normalize_value(v)
-            for k, v in scene.policy_metrics_snapshot.items()
-            if v is not None
-        }
-
     return metadata or None

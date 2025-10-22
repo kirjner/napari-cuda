@@ -27,9 +27,9 @@ from napari_cuda.server.scene import (
     ServerSceneData,
     create_server_scene_data,
     layer_controls_from_ledger,
-    prune_control_metadata,
     build_render_scene_state,
 )
+from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.bitstream import ParamCache, configure_bitstream
 from napari_cuda.server.app.metrics_core import Metrics
@@ -206,7 +206,6 @@ class EGLHeadlessServer:
         self._scene_manager = ViewerSceneManager((self.width, self.height))
         self._state_ledger = ServerStateLedger()
         self._scene: ServerSceneData = create_server_scene_data(
-            policy_event_path=self._ctx.policy_event_path,
             state_ledger=self._state_ledger,
         )
         self._scene.use_volume = bool(self.use_volume)
@@ -641,15 +640,6 @@ class EGLHeadlessServer:
         )
 
         snapshot = self._scene_manager.scene_snapshot()
-        layer_ids = [layer.layer_id for layer in snapshot.layers] if snapshot else []
-        dims_meta = self._scene_manager.dims_metadata()
-
-        prune_control_metadata(
-            self._scene,
-            layer_ids=layer_ids,
-            dims_meta=dims_meta,
-            current_step=current_step,
-        )
 
     def _default_layer_id(self) -> Optional[str]:
         snapshot = self._scene_manager.scene_snapshot()
@@ -810,12 +800,14 @@ class EGLHeadlessServer:
         applied: LevelContext,
         downgraded: bool,
     ) -> None:
-        apply_level_switch_transaction(
-            store=self._scene,
-            ledger=self._state_ledger,
-            lock=self._state_lock,
+        reduce_level_update(
+            self._scene,
+            self._state_ledger,
+            self._state_lock,
             applied=applied,
             downgraded=bool(downgraded),
+            intent_id=None,
+            timestamp=None,
             origin="worker.state.level",
         )
         # Keep the plane view cache in sync with the latest applied level/step
@@ -995,22 +987,6 @@ class EGLHeadlessServer:
     def _update_client_gauges(self) -> None:
         count = len(self._pixel_channel.broadcast.clients)
         self.metrics.set('napari_cuda_pixel_clients', float(count))
-        # We could track state clients separately if desired; here we reuse pixel_clients for demo
-        self._publish_policy_metrics()
-
-    def _publish_policy_metrics(self) -> None:
-        worker = self._worker
-        if worker is None:
-            return
-        snapshot = worker.policy_metrics_snapshot()
-        if not isinstance(snapshot, Mapping):
-            raise TypeError("policy metrics snapshot must be a mapping")
-
-        metrics_server.update_policy_metrics(
-            self._scene,
-            self.metrics,
-            snapshot,
-        )
 
 
 def main() -> None:

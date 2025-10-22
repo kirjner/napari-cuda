@@ -14,7 +14,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | `app/config.py` | 539 | Resolves environment/config values into dataclasses (`ServerCtx`, `EncoderRuntime`, policy settings). | Central source of truth for downstream packages. |
 | `app/dash_dashboard.py` | 389 | Optional Dash monitoring UI. | Reads metrics snapshots and exposes simple controls. |
 | `app/metrics_core.py` | 143 | Shared metrics containers (frame timings, counters). | Consumed by `egl_headless_server`, render worker, and dashboard. |
-| `app/metrics_server.py` | 80 | Writes metrics/policy snapshots to disk; optional HTTP hooks. |
+| `app/metrics_server.py` | 35 | Boots the optional Dash dashboard for render-speed telemetry. |
 | `app/experiments/*` | ~200 | Legacy benchmarking tools (baseline capture, vispy spike). | Consider archiving once profiling story stabilises. |
 
 ## Control Package (`server/control`)
@@ -32,7 +32,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `data.py` | 318 | Owns `ServerSceneData`, compatibility caches, and helper utilities (`layer_controls_to_dict`, `prune_control_metadata`). |
+| `data.py` | 318 | Owns `ServerSceneData`, compatibility caches, and helper utilities (`layer_controls_from_ledger`, etc.). |
 | `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas for control baselines. |
 
 ## Runtime Helpers (`server/runtime`)
@@ -77,7 +77,6 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | `frame_pipeline.py` / `gl_capture.py` | 152 / 177 | Capture helpers (GPU copy, staging). |
 | `vispy_intercept.py` | 267 | Hooks vispy GL calls to integrate with the worker. |
 | `viewer_builder.py` | 347 | Constructs napari viewer for server-side rendering. |
-| `policy_metrics.py` | 67 | Collects policy/LOD metrics for telemetry. |
 | `pixel_broadcaster.py` | 244 | Multi-client broadcaster for encoded frames. |
 | `control/pixel_channel.py` | 312 | WebSocket channel serving encoded frames to clients. |
 
@@ -92,12 +91,11 @@ source access.
 
 1. **Control channel size** – `control_channel_server.py` still folds transport,
    resume/history, acking, and command routing into one 3k-line module.
-2. **Render worker complexity** – `runtime/egl_worker.py` coordinates capture,
-   encoding, policy metrics, camera updates, and telemetry; refactoring into
-   smaller components remains high priority.
-3. **Policy/LOD split across packages** – `data/lod.py`, `data/policy.py`, and
-   rendering-side `policy_metrics.py` share concepts; aligning interfaces would
-   simplify debugging.
+2. **Render worker complexity** – `runtime/egl_worker.py` still coordinates capture,
+   encoding, camera updates, and telemetry; refactoring into smaller components
+   remains high priority.
+3. **Policy/LOD split across packages** – `data/lod.py` and `data/policy.py`
+   still share concepts; aligning interfaces would simplify debugging.
 4. **Legacy shims** – Lightweight files like `runtime/runtime_loop.py` and
    `control/pixel_channel.py` exist purely for compatibility; consider
    removing once downstream imports are updated.

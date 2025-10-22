@@ -26,6 +26,9 @@ from napari_cuda.server.scene import (
 from napari_cuda.server.control.transactions.view_toggle import (
     apply_view_toggle_transaction,
 )
+from napari_cuda.server.control.transactions.level_switch import (
+    apply_level_switch_transaction,
+)
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 logger = logging.getLogger(__name__)
 
@@ -884,7 +887,7 @@ def reduce_view_update(
         else None
     )
 
-    server_seq, order_value, displayed_value = apply_view_toggle_transaction(
+    entries, order_value, displayed_value, server_seq = apply_view_toggle_transaction(
         store=store,
         ledger=ledger,
         lock=lock,
@@ -905,6 +908,11 @@ def reduce_view_update(
         server_seq,
         origin,
     )
+    ndisplay_entry = entries.get(("view", "main", "ndisplay"))
+    assert ndisplay_entry is not None, "view toggle transaction must return ndisplay entry"
+    version: Optional[int] = None
+    if ndisplay_entry.version is not None:
+        version = int(ndisplay_entry.version)
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -914,50 +922,7 @@ def reduce_view_update(
         intent_id=resolved_intent_id,
         timestamp=ts,
         origin=origin,
-    )
-
-
-def reduce_multiscale_policy(
-    store: ServerSceneData,
-    ledger: ServerStateLedger,
-    lock: Lock,
-    policy: str,
-    *,
-    intent_id: Optional[str] = None,
-    timestamp: Optional[float] = None,
-    origin: str = "control.multiscale",
-) -> ServerLedgerUpdate:
-    ts = _now(timestamp)
-    normalized = str(policy)
-
-    with lock:
-        store.multiscale_state["policy"] = normalized
-        server_seq = increment_server_sequence(store)
-        meta = get_control_meta(store, "multiscale", "main", "policy")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
-
-    metadata = {"intent_id": intent_id} if intent_id else None
-
-    ledger.record_confirmed(
-        "multiscale",
-        "main",
-        "policy",
-        normalized,
-        origin=origin,
-        timestamp=ts,
-        metadata=metadata,
-    )
-
-    return ServerLedgerUpdate(
-        scope="multiscale",
-        target="main",
-        key="policy",
-        value=normalized,
-        server_seq=server_seq,
-        intent_id=intent_id,
-        timestamp=ts,
-        origin=origin,
+        version=version,
     )
 
 
@@ -1052,70 +1017,26 @@ def reduce_level_update(
         origin,
     )
 
-    batch_entries: list[tuple[Any, ...]] = []
-    if metadata is None:
-        batch_entries.append(("multiscale", "main", "level", level))
-    else:
-        batch_entries.append(("multiscale", "main", "level", level, metadata))
-    if updated_level_shapes:
-        if metadata is None:
-            batch_entries.append(
-                (
-                    "multiscale",
-                    "main",
-                    "level_shapes",
-                    updated_level_shapes,
-                )
-            )
-        else:
-            batch_entries.append(
-                (
-                    "multiscale",
-                    "main",
-                    "level_shapes",
-                    updated_level_shapes,
-                    metadata,
-                )
-            )
-    if downgraded is not None:
-        if metadata is None:
-            batch_entries.append(
-                (
-                    "multiscale",
-                    "main",
-                    "downgraded",
-                    bool(downgraded),
-                )
-            )
-        else:
-            batch_entries.append(
-                (
-                    "multiscale",
-                    "main",
-                    "downgraded",
-                    bool(downgraded),
-                    metadata,
-                )
-            )
-
     step_metadata = {"source": "worker.level_update", "level": level}
     if intent_id is not None:
         step_metadata["intent_id"] = intent_id
-    batch_entries.append(
-        (
-            "dims",
-            "main",
-            "current_step",
-            step_tuple,
-            step_metadata,
-        )
-    )
-
-    ledger.batch_record_confirmed(
-        batch_entries,
+    stored_entries = apply_level_switch_transaction(
+        ledger=ledger,
+        level=level,
+        step=step_tuple,
+        level_shapes=updated_level_shapes if updated_level_shapes else None,
+        downgraded=bool(downgraded) if downgraded is not None else None,
+        step_metadata=step_metadata,
+        level_metadata=metadata,
+        level_shapes_metadata=metadata if metadata is not None and updated_level_shapes else None,
+        downgraded_metadata=metadata if metadata is not None and downgraded is not None else None,
         origin=origin,
         timestamp=ts,
     )
+
+    level_entry = stored_entries.get(("multiscale", "main", "level"))
+    assert level_entry is not None, "level switch transaction must return level entry"
+    level_version = None if level_entry.version is None else int(level_entry.version)
 
     return ServerLedgerUpdate(
         scope="multiscale",
@@ -1127,6 +1048,7 @@ def reduce_level_update(
         timestamp=ts,
         origin=origin,
         current_step=step_tuple,
+        version=level_version,
     )
 
 
@@ -1224,7 +1146,6 @@ __all__ = [
     "reduce_dims_update",
     "reduce_layer_property",
     "reduce_level_update",
-    "reduce_multiscale_policy",
     "reduce_volume_colormap",
     "reduce_volume_contrast_limits",
     "reduce_volume_opacity",

@@ -397,9 +397,6 @@ class ServerCtx:
     metrics_port: int = 8083
     metrics_refresh_ms: int = 1000
 
-    # Policy event path
-    policy_event_path: str = "tmp/policy_events.jsonl"
-
     # Level policy settings
     policy: LevelPolicySettings = LevelPolicySettings()
 
@@ -471,8 +468,6 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     metrics_port = _env_int(env, "NAPARI_CUDA_METRICS_PORT", 8083)
     metrics_refresh_ms = _env_int(env, "NAPARI_CUDA_METRICS_REFRESH_MS", 1000)
 
-    policy_event_path = _env_str(env, "NAPARI_CUDA_POLICY_EVENT_PATH", "tmp/policy_events.jsonl") or "tmp/policy_events.jsonl"
-
     policy_cfg = _load_json_config(env, "NAPARI_CUDA_POLICY_CONFIG")
     policy_threshold_in = _cfg_float(policy_cfg.get("threshold_in") if policy_cfg else None, 1.05)
     policy_threshold_out = _cfg_float(policy_cfg.get("threshold_out") if policy_cfg else None, 1.35)
@@ -520,7 +515,6 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         debug_policy=debug_policy,
         metrics_port=metrics_port,
         metrics_refresh_ms=metrics_refresh_ms,
-        policy_event_path=policy_event_path,
         policy=policy_settings,
         encoder_runtime=encoder_runtime,
         bitstream=bitstream_runtime,

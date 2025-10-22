@@ -316,21 +316,22 @@ class ClientStateLedger:
         origin: str = "remote",
         version: Any | None = None,
         metadata: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        """Prime a property with authoritative baseline state."""
+    ) -> LedgerConfirmedEntry:
+        """Prime a property with authoritative baseline state and return the entry."""
 
         property_key = (scope, target, key)
         state = self._state.setdefault(property_key, LedgerPropertyState())
         for stale_frame in list(state.pending.keys()):
             self._pending_index.pop(stale_frame, None)
         state.pending.clear()
-        state.confirmed = LedgerConfirmedEntry(
+        entry = LedgerConfirmedEntry(
             value=value,
             timestamp=float(timestamp) if timestamp is not None else float(self._clock()),
             origin=str(origin),
             version=version,
             metadata=dict(metadata) if metadata is not None else None,
         )
+        state.confirmed = entry
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "ledger record_confirmed: scope=%s target=%s key=%s value=%r origin=%s",
@@ -340,7 +341,8 @@ class ClientStateLedger:
                 value,
                 origin,
             )
-        self._notify(property_key, state.confirmed)
+        self._notify(property_key, entry)
+        return entry
 
     # ------------------------------------------------------------------
     def batch_record_confirmed(
@@ -349,14 +351,15 @@ class ClientStateLedger:
         *,
         timestamp: Optional[float] = None,
         origin: str = "remote",
-    ) -> None:
+    ) -> Dict[PropertyKey, LedgerConfirmedEntry]:
         """Promote multiple confirmed properties in a single batch."""
 
         materialized = list(entries)
         if not materialized:
-            return
+            return {}
 
         notifications: List[Tuple[PropertyKey, LedgerConfirmedEntry]] = []
+        stored: Dict[PropertyKey, LedgerConfirmedEntry] = {}
 
         for raw_entry in materialized:
             length = len(raw_entry)
@@ -379,13 +382,14 @@ class ClientStateLedger:
             entry_timestamp = float(timestamp) if timestamp is not None else float(self._clock())
             entry_metadata = dict(metadata) if isinstance(metadata, Mapping) else None
 
-            state.confirmed = LedgerConfirmedEntry(
+            entry = LedgerConfirmedEntry(
                 value=value,
                 timestamp=entry_timestamp,
                 origin=str(origin),
                 version=version,
                 metadata=entry_metadata,
             )
+            state.confirmed = entry
 
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -397,10 +401,12 @@ class ClientStateLedger:
                     origin,
                 )
 
-            notifications.append((property_key, state.confirmed))
+            notifications.append((property_key, entry))
+            stored[property_key] = entry
 
         for property_key, confirmed in notifications:
             self._notify(property_key, confirmed)
+        return stored
 
     # ------------------------------------------------------------------
     def clear_pending_on_reconnect(self) -> None:

@@ -67,7 +67,6 @@ from napari_cuda.server.control.state_reducers import (
     reduce_dims_update,
     reduce_layer_property,
     reduce_level_update,
-    reduce_multiscale_policy,
     reduce_volume_colormap,
     reduce_volume_contrast_limits,
     reduce_volume_opacity,
@@ -1661,28 +1660,13 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         log_fn = logger.info if server._log_state_traces else logger.debug
 
         if key == 'policy':
-            policy = str(value or '').lower().strip()
-            allowed = {'oversampling', 'thresholds', 'ratio'}
-            if policy not in allowed:
-                logger.debug("state.update multiscale ignored invalid policy=%r", value)
-                await _reject("state.invalid", "unknown multiscale policy", details={"scope": scope, "key": key})
-                return True
-            result = reduce_multiscale_policy(
-                server._scene,
-                server._state_ledger,
-                server._state_lock,
-                policy=policy,
-                intent_id=intent_id,
-                timestamp=timestamp,
+            logger.debug("state.update multiscale policy ignored (unsupported)")
+            await _reject(
+                "state.unsupported",
+                "multiscale policy is no longer configurable",
+                details={"scope": scope, "key": key},
             )
-            rebroadcast_tag = 'rebroadcast-policy'
-            if server._worker is not None:
-                try:
-                    log_fn("state: multiscale policy -> worker.set_policy start")
-                    server._worker.set_policy(policy)
-                    log_fn("state: multiscale policy -> worker.set_policy done")
-                except Exception:
-                    logger.exception("worker set_policy failed for %s", policy)
+            return True
         elif key == 'level':
             levels = server._scene.multiscale_state.get('levels') or []
             try:

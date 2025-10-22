@@ -2,36 +2,86 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
-from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.control.state_reducers import reduce_level_update
-from napari_cuda.server.data.lod import LevelContext
-from napari_cuda.server.scene import ServerSceneData
-from napari_cuda.server.control.state_models import ServerLedgerUpdate
+from napari_cuda.server.control.state_ledger import (
+    LedgerEntry,
+    PropertyKey,
+    ServerStateLedger,
+)
 
 
 def apply_level_switch_transaction(
     *,
-    store: ServerSceneData,
     ledger: ServerStateLedger,
-    lock,
-    applied: LevelContext,
-    downgraded: bool,
+    level: int,
+    step: Sequence[int],
+    level_shapes: Optional[Sequence[Sequence[int]]] = None,
+    downgraded: Optional[bool] = None,
+    step_metadata: Optional[Mapping[str, object]] = None,
+    level_metadata: Optional[Mapping[str, object]] = None,
+    level_shapes_metadata: Optional[Mapping[str, object]] = None,
+    downgraded_metadata: Optional[Mapping[str, object]] = None,
     origin: str = "worker.state.level",
     timestamp: Optional[float] = None,
-) -> ServerLedgerUpdate:
-    """Apply a level switch by recording the updated level/step on the ledger."""
+) -> Dict[PropertyKey, LedgerEntry]:
+    """Record the ledger updates for a level switch and return stored entries."""
 
-    return reduce_level_update(
-        store,
-        ledger,
-        lock,
-        applied=applied,
-        downgraded=bool(downgraded),
-        intent_id=None,
+    step_tuple = tuple(int(v) for v in step)
+
+    batch_entries: list[tuple] = []
+    if level_metadata is None:
+        batch_entries.append(("multiscale", "main", "level", int(level)))
+    else:
+        batch_entries.append(
+            ("multiscale", "main", "level", int(level), dict(level_metadata))
+        )
+
+    if level_shapes is not None:
+        normalized_shapes = tuple(
+            tuple(int(dim) for dim in shape) for shape in level_shapes
+        )
+        if level_shapes_metadata is None:
+            batch_entries.append(
+                ("multiscale", "main", "level_shapes", normalized_shapes),
+            )
+        else:
+            batch_entries.append(
+                (
+                    "multiscale",
+                    "main",
+                    "level_shapes",
+                    normalized_shapes,
+                    dict(level_shapes_metadata),
+                ),
+            )
+    if downgraded is not None:
+        if downgraded_metadata is None:
+            batch_entries.append(
+                ("multiscale", "main", "downgraded", bool(downgraded)),
+            )
+        else:
+            batch_entries.append(
+                (
+                    "multiscale",
+                    "main",
+                    "downgraded",
+                    bool(downgraded),
+                    dict(downgraded_metadata),
+                ),
+            )
+
+    if step_metadata is not None:
+        batch_entries.append(
+            ("dims", "main", "current_step", step_tuple, dict(step_metadata)),
+        )
+    else:
+        batch_entries.append(("dims", "main", "current_step", step_tuple))
+
+    return ledger.batch_record_confirmed(
+        batch_entries,
+        origin=origin,
         timestamp=timestamp,
-        origin=str(origin),
     )
 
 

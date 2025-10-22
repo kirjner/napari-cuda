@@ -14,7 +14,7 @@ def test_record_confirmed_stores_value_and_notifies() -> None:
     seen: list[LedgerEvent] = []
     ledger.subscribe("dims", "main", "current_step", seen.append)
 
-    event = ledger.record_confirmed(
+    entry = ledger.record_confirmed(
         "dims",
         "main",
         "current_step",
@@ -22,10 +22,12 @@ def test_record_confirmed_stores_value_and_notifies() -> None:
         origin="worker",
     )
 
-    assert event is not None
-    assert event.value == (5, 0, 0)
-    assert event.timestamp == pytest.approx(42.0)
-    assert seen == [event]
+    assert entry.value == (5, 0, 0)
+    assert entry.timestamp == pytest.approx(42.0)
+    assert len(seen) == 1
+    event = seen[0]
+    assert event.value == entry.value
+    assert event.timestamp == entry.timestamp
 
     stored = ledger.get("dims", "main", "current_step")
     assert isinstance(stored, LedgerEntry)
@@ -38,10 +40,10 @@ def test_record_confirmed_dedupes_identical_value() -> None:
     ledger = ServerStateLedger(clock=lambda: float(next(clock_steps)))
 
     first = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
-    assert first is not None
+    assert first.value == 2
 
     deduped = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
-    assert deduped is None
+    assert deduped is first
 
     stored = ledger.get("view", "main", "ndisplay")
     assert stored is not None
@@ -53,7 +55,7 @@ def test_batch_record_confirmed_updates_multiple_keys() -> None:
     captured: list[LedgerEvent] = []
     ledger.subscribe_all(captured.append)
 
-    events = ledger.batch_record_confirmed(
+    stored = ledger.batch_record_confirmed(
         [
             ("dims", "main", "current_step", (10, 0, 0), {"level": 1}),
             ("multiscale", "main", "level", 1, None),
@@ -61,9 +63,10 @@ def test_batch_record_confirmed_updates_multiple_keys() -> None:
         origin="worker",
     )
 
-    assert len(events) == 2
-    assert captured == events
-    assert ledger.get("multiscale", "main", "level") is not None
+    assert len(stored) == 2
+    assert len(captured) == 2
+    assert ("multiscale", "main", "level") in stored
+    assert ledger.get("multiscale", "main", "level") is stored[("multiscale", "main", "level")]
 
 
 def test_batch_record_confirmed_rejects_invalid_entry_length() -> None:
@@ -103,7 +106,6 @@ def test_record_confirmed_assigns_monotonic_versions() -> None:
     ledger = ServerStateLedger()
 
     first = ledger.record_confirmed("dims", "main", "current_step", (1, 0, 0), origin="worker")
-    assert first is not None
     assert first.version == 1
 
     stored = ledger.get("dims", "main", "current_step")
@@ -112,18 +114,17 @@ def test_record_confirmed_assigns_monotonic_versions() -> None:
     assert ledger.current_version("dims", "main", "current_step") == 1
 
     deduped = ledger.record_confirmed("dims", "main", "current_step", (1, 0, 0), origin="worker")
-    assert deduped is None
+    assert deduped is first
     assert ledger.current_version("dims", "main", "current_step") == 1
 
     second = ledger.record_confirmed("dims", "main", "current_step", (2, 0, 0), origin="worker")
-    assert second is not None
     assert second.version == 2
     assert ledger.current_version("dims", "main", "current_step") == 2
 
 
 def test_record_confirmed_accepts_version_override() -> None:
     ledger = ServerStateLedger()
-    event = ledger.record_confirmed(
+    entry = ledger.record_confirmed(
         "view",
         "main",
         "ndisplay",
@@ -131,31 +132,29 @@ def test_record_confirmed_accepts_version_override() -> None:
         origin="worker",
         version=99,
     )
-    assert event is not None
-    assert event.version == 99
+    assert entry.version == 99
 
     stored = ledger.get("view", "main", "ndisplay")
     assert stored is not None
     assert stored.version == 99
     assert ledger.current_version("view", "main", "ndisplay") == 99
 
-    next_event = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
-    assert next_event is not None
-    assert next_event.version == 100
+    next_entry = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
+    assert next_entry.version == 100
 
 
 def test_batch_record_confirmed_assigns_versions_per_key() -> None:
     ledger = ServerStateLedger()
-    events = ledger.batch_record_confirmed(
+    stored = ledger.batch_record_confirmed(
         [
             ("dims", "main", "current_step", (0, 0, 0)),
             ("multiscale", "main", "level", 0),
         ],
         origin="worker",
     )
-    assert len(events) == 2
-    assert events[0].version == 1
-    assert events[1].version == 1
+    assert len(stored) == 2
+    assert stored[("dims", "main", "current_step")].version == 1
+    assert stored[("multiscale", "main", "level")].version == 1
 
     follow_up = ledger.batch_record_confirmed(
         [
@@ -165,5 +164,5 @@ def test_batch_record_confirmed_assigns_versions_per_key() -> None:
         origin="worker",
     )
     assert len(follow_up) == 2
-    assert follow_up[0].version == 2
-    assert follow_up[1].version == 5
+    assert follow_up[("dims", "main", "current_step")].version == 2
+    assert follow_up[("multiscale", "main", "level")].version == 5

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_ledger import (
+    LedgerEntry,
+    PropertyKey,
+    ServerStateLedger,
+)
 from napari_cuda.server.scene import build_render_scene_state
 
 
@@ -48,7 +52,7 @@ def apply_plane_restore_transaction(
     rect: Sequence[float | int | str],
     origin: str = "control.view.plane_restore",
     timestamp: Optional[float] = None,
-) -> None:
+) -> Dict[PropertyKey, LedgerEntry]:
     """Batch ledger writes for a plane camera restore.
 
     Parameters
@@ -86,7 +90,7 @@ def apply_plane_restore_transaction(
         ("view_cache", "plane", "step", step_tuple),
     ]
 
-    ledger.batch_record_confirmed(
+    stored = ledger.batch_record_confirmed(
         batch_entries,
         origin=origin,
         timestamp=timestamp,
@@ -94,3 +98,5 @@ def apply_plane_restore_transaction(
 
     if scene is not None:
         scene.latest_state = build_render_scene_state(ledger, scene)
+
+    return stored

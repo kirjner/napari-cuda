@@ -84,7 +84,6 @@ from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdateMailbox,
 )
 from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
-from napari_cuda.server.rendering.policy_metrics import PolicyMetrics
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
@@ -605,7 +604,6 @@ class EGLRendererWorker:
         self._data_wh = (int(self.width), int(self.height))
         self._data_d = None
         self._volume_scale = (1.0, 1.0, 1.0)
-        self._policy_metrics = PolicyMetrics()
         self._layer_logger = LayerAssignmentLogger(logger)
         self._switch_logger = LevelSwitchLogger(logger)
         # Monotonic sequence for programmatic camera pose commits (op close)
@@ -645,7 +643,6 @@ class EGLRendererWorker:
         self._policy_func = level_policy.resolve_policy('oversampling')
         self._policy_name = 'oversampling'
         self._last_interaction_ts = time.perf_counter()
-        self._policy_metrics.reset()
         policy_logging = self._debug_policy.logging
         worker_dbg = self._debug_policy.worker
         self._log_layer_debug = bool(policy_logging.log_layer_debug)
@@ -773,7 +770,6 @@ class EGLRendererWorker:
         self._policy_name = new_name
         # Map all aliases to the same selector
         self._policy_func = level_policy.resolve_policy(new_name)
-        self._policy_metrics.reset()
         # No history maintenance; snapshot excludes history
         if self._log_layer_debug:
             logger.info("policy set: name=%s", new_name)
@@ -806,12 +802,6 @@ class EGLRendererWorker:
         vw = max(1, int(self.width))
         return float(max(h / vh, w / vw))
 
-    def policy_metrics_snapshot(self) -> Dict[str, object]:
-        return self._policy_metrics.snapshot(
-            policy=self._policy_name,
-            active_level=int(self._active_ms_level),
-            downgraded=bool(self._level_downgraded),
-        )
 
     def _load_slice(
         self,

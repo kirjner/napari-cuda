@@ -40,11 +40,11 @@ class ServerLedgerUpdate:
     target: str
     key: str
     value: Any
-    server_seq: int
+    server_seq: Optional[int] = None
     intent_id: Optional[str] = None
     timestamp: Optional[float] = None
     metadata: Optional[Mapping[str, Any]] = None
     origin: Optional[str] = None
-    version: Any | None = None
+    version: Optional[int] = None
     axis_index: Optional[int] = None
     current_step: Optional[tuple[int, ...]] = None

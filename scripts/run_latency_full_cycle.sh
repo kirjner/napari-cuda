@@ -17,7 +17,6 @@ RUN_DIR="tmp/policy_runs/${RUN_TAG}"
 LOG_PATH="${RUN_DIR}/headless_server.log"
 export NAPARI_CUDA_POLICY_CONFIG=${NAPARI_CUDA_POLICY_CONFIG:-'{"oversampling":{"thresholds":{"0":1.3,"1":1.2}}}'}
 export NAPARI_CUDA_USE_NAPARI_ADAPTER="${NAPARI_CUDA_USE_NAPARI_ADAPTER:-1}"
-export NAPARI_CUDA_POLICY_EVENT_PATH="${RUN_DIR}/policy_events.jsonl"
 export NAPARI_CUDA_MS_PRIME="${NAPARI_CUDA_MS_PRIME:-0}"
 METRICS_URL="http://${HOST}:${METRICS_PORT}/metrics.json"
 
@@ -117,17 +116,6 @@ if curl -fsS "${METRICS_URL}" -o "${RUN_DIR}/metrics_final.json"; then
   echo "Metrics snapshot saved to ${RUN_DIR}/metrics_final.json"
 else
   echo "Failed to fetch metrics snapshot" >&2
-fi
-
-if [[ -f tmp/policy_metrics_latest.json ]]; then
-  cp tmp/policy_metrics_latest.json "${RUN_DIR}/policy_metrics_latest.json"
-fi
-
-# Copy policy events file if present
-if [[ -f "${RUN_DIR}/policy_events.jsonl" ]]; then
-  : # already in RUN_DIR by env override
-elif [[ -f tmp/policy_events.jsonl ]]; then
-  cp tmp/policy_events.jsonl "${RUN_DIR}/policy_events.jsonl"
 fi
 
 printf '\nRun artifacts stored in %s:\n' "${RUN_DIR}"

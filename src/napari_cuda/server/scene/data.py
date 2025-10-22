@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
@@ -33,19 +32,17 @@ CONTROL_KEYS: tuple[str, ...] = (
 
 __all__ = [
     "CONTROL_KEYS",
-    "LayerControlMeta",
     "CameraDeltaCommand",
     "ServerSceneData",
     "create_server_scene_data",
     "default_multiscale_state",
     "default_volume_state",
-    "increment_server_sequence",
-    "get_control_meta",
-    "clear_control_meta",
-    "prune_control_metadata",
     "build_render_scene_state",
     "layer_controls_from_ledger",
     "volume_state_from_ledger",
+    "ControlMeta",
+    "get_control_meta",
+    "increment_server_sequence",
 ]
 
 
@@ -88,43 +85,54 @@ class CameraDeltaCommand:
 
 
 @dataclass
-class LayerControlMeta:
-    """Sequencing metadata for a specific control property."""
-
-    last_server_seq: int = 0
-    last_timestamp: Optional[float] = None
-
-
-@dataclass
 class ServerSceneData:
     """Mutable scene metadata owned by the headless server."""
 
     latest_state: RenderLedgerSnapshot = field(default_factory=RenderLedgerSnapshot)
     use_volume: bool = False
-    next_server_seq: int = 0
     volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)
-    policy_metrics_snapshot: Dict[str, Any] = field(default_factory=dict)
-    last_written_decision_seq: int = 0
-    policy_event_path: Path = field(default_factory=Path)
     last_scene_snapshot: Optional[Dict[str, Any]] = None
-    last_scene_seq: int = 0
-    control_meta: Dict[tuple[str, str, str], LayerControlMeta] = field(default_factory=dict)
     state_ledger: Optional[ServerStateLedger] = None
+    last_scene_seq: int = 0
+    control_meta: Dict[str, Dict[str, Dict[str, "ControlMeta"]]] = field(default_factory=dict)
     # Removed optimistic dims caches; staged transactions drive desired state
 
 
 def create_server_scene_data(
     *,
-    policy_event_path: Optional[str | Path] = None,
     state_ledger: Optional[ServerStateLedger] = None,
 ) -> ServerSceneData:
     """Instantiate :class:`ServerSceneData` with an optional policy log path."""
 
-    data = ServerSceneData(state_ledger=state_ledger)
-    if policy_event_path is not None:
-        data.policy_event_path = Path(policy_event_path)
-    return data
+    return ServerSceneData(state_ledger=state_ledger)
+
+
+@dataclass
+class ControlMeta:
+    """Bookkeeping for legacy reducer compatibility."""
+
+    last_server_seq: int = 0
+    last_timestamp: float = 0.0
+
+
+def get_control_meta(store: ServerSceneData, scope: str, target: str, key: str) -> ControlMeta:
+    """Return (and create if needed) control metadata for a property."""
+
+    scope_map = store.control_meta.setdefault(scope, {})
+    target_map = scope_map.setdefault(target, {})
+    meta = target_map.get(key)
+    if meta is None:
+        meta = ControlMeta()
+        target_map[key] = meta
+    return meta
+
+
+def increment_server_sequence(store: ServerSceneData) -> int:
+    """Increment and return the scene-level sequence counter."""
+
+    store.last_scene_seq += 1
+    return store.last_scene_seq
 
 
 def build_render_scene_state(
@@ -249,133 +257,3 @@ def volume_state_from_ledger(
         if entry is not None and entry.value is not None:
             mapping[field] = entry.value
     return mapping
-
-
-def _meta_key(scope: str, target: str, key: str) -> tuple[str, str, str]:
-    """Compute the canonical metadata key for a control property."""
-
-    return (str(scope), str(target), str(key))
-
-
-def get_control_meta(
-    scene: ServerSceneData,
-    scope: str,
-    target: str,
-    key: str,
-) -> LayerControlMeta:
-    """Fetch (and create if needed) control metadata for ``scope/target/key``."""
-
-    meta_key = _meta_key(scope, target, key)
-    meta = scene.control_meta.get(meta_key)
-    if meta is None:
-        meta = LayerControlMeta()
-        scene.control_meta[meta_key] = meta
-    return meta
-
-
-def clear_control_meta(scene: ServerSceneData, scope: str, target: str, key: str) -> None:
-    """Remove stored metadata for ``scope/target/key`` if present."""
-
-    meta_key = _meta_key(scope, target, key)
-    scene.control_meta.pop(meta_key, None)
-
-
-def increment_server_sequence(scene: ServerSceneData) -> int:
-    """Advance and return the global server sequence counter."""
-
-    scene.next_server_seq = (int(scene.next_server_seq) + 1) & 0x7FFFFFFF
-    return scene.next_server_seq
-
-
-def prune_control_metadata(
-    scene: ServerSceneData,
-    *,
-    layer_ids: Iterable[str] | None = None,
-    dims_meta: Optional[Mapping[str, Any]] = None,
-    current_step: Optional[Sequence[int]] = None,
-) -> None:
-    """Drop metadata for layers/axes that no longer exist.
-
-    ``layer_ids`` should contain the canonical identifiers for active layers.
-    ``dims_meta`` is the latest dims metadata snapshot (matching
-    ``ViewerSceneManager.dims_metadata``.  ``current_step``
-    provides a fallback axis count if metadata is incomplete.
-    """
-
-    assert layer_ids is not None, "layer_ids required to prune control metadata"
-
-    active_layers: set[str] = set()
-    for layer_id in layer_ids:
-        if layer_id is None:
-            continue
-        text = str(layer_id).strip()
-        if text:
-            active_layers.add(text)
-
-    dims_known = dims_meta is not None
-    dims_targets: set[str] = set()
-    if dims_meta is not None:
-        dims_targets = _dims_targets_from_meta(dims_meta, current_step=current_step)
-
-    for meta_key in list(scene.control_meta.keys()):
-        scope, target, prop_key = meta_key
-        if scope == "layer" and target not in active_layers:
-            clear_control_meta(scene, scope, target, prop_key)
-        elif scope == "dims" and dims_known and target not in dims_targets:
-            clear_control_meta(scene, scope, target, prop_key)
-
-
-def _dims_targets_from_meta(
-    meta: Optional[Mapping[str, Any]],
-    *,
-    current_step: Optional[Sequence[int]] = None,
-) -> set[str]:
-    if not meta:
-        if current_step is None:
-            return set()
-        axis_count = len(list(current_step))
-        return {str(idx) for idx in range(axis_count)}
-
-    targets: set[str] = set()
-
-    def _ensure_sequence(value: object) -> list[Any]:
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return list(value)
-        if isinstance(value, str):
-            return list(value)
-        return []
-
-    order_seq = _ensure_sequence(meta.get("order"))
-    axis_seq = _ensure_sequence(meta.get("axis_labels"))
-    level_shapes_seq = _ensure_sequence(meta.get("level_shapes"))
-
-    axis_count = 0
-    try:
-        axis_count = int(meta.get("ndim") or 0)
-    except Exception:
-        axis_count = 0
-    axis_count = max(axis_count, len(order_seq), len(axis_seq))
-    if level_shapes_seq:
-        first_shape = _ensure_sequence(level_shapes_seq[0])
-        axis_count = max(axis_count, len(first_shape))
-    if axis_count <= 0 and current_step is not None:
-        axis_count = len(list(current_step))
-
-    for idx in range(max(0, axis_count)):
-        targets.add(str(idx))
-
-        label: Optional[str] = None
-        if idx < len(order_seq):
-            candidate = order_seq[idx]
-            text = str(candidate).strip()
-            if text:
-                label = text
-        if label is None and idx < len(axis_seq):
-            candidate = axis_seq[idx]
-            text = str(candidate).strip()
-            if text:
-                label = text
-        if label:
-            targets.add(label)
-
-    return targets

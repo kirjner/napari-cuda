@@ -164,4 +164,3 @@ Execution order: implement the worker priming helper and render tick enforcement
 
 - Worker priming now executes the level switches synchronously on the render thread, records slice timing/IO in a new `PrimedLevelMetrics` cache, and restores the original level without relying on the pixel drain loop.
 - `select_latency_aware` consumes those primed metrics immediately so fresh sessions can downgrade based on budget before live samples accumulate.
-- Telemetry exposes the cache under `policy_metrics.primed_metrics`, and the latency harness prints switch transitions including policy reasons/intents for fast validation.

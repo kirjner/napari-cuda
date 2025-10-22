@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import threading
 import time
@@ -311,21 +310,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     worker._mark_render_tick_complete()
 
                 on_frame(packet, flags, timings.capture_wall_ts, seq)
-
-                server._publish_policy_metrics()
-                snapshot = server._scene.policy_metrics_snapshot
-                last_decision = snapshot.get("last_decision") if snapshot else None
-                if isinstance(last_decision, dict):
-                    seq_value = int(last_decision.get("seq") or 0)
-                    if seq_value > server._scene.last_written_decision_seq:
-                        try:
-                            server._scene.policy_event_path.parent.mkdir(parents=True, exist_ok=True)
-                            with server._scene.policy_event_path.open("a", encoding="utf-8") as fh:
-                                fh.write(json.dumps(last_decision) + "\n")
-                        except OSError as exc:
-                            logger.debug("Policy event write failed: %s", exc)
-                        else:
-                            server._scene.last_written_decision_seq = seq_value
 
                 next_tick += tick
                 sleep_duration = next_tick - time.perf_counter()

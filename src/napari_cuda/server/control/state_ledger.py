@@ -61,8 +61,8 @@ class ServerStateLedger:
         metadata: Optional[Mapping[str, Any]] = None,
         version: Any | None = None,
         dedupe: bool = True,
-    ) -> LedgerEvent | None:
-        """Record a single confirmed property update."""
+    ) -> LedgerEntry:
+        """Record a single confirmed property update and return the stored entry."""
 
         property_key = (str(scope), str(target), str(key))
 
@@ -86,7 +86,8 @@ class ServerStateLedger:
                         key,
                         origin,
                     )
-                return None
+                assert previous is not None
+                return previous
 
             if version is None:
                 next_version = int(self._versions.get(property_key, 0)) + 1
@@ -140,7 +141,7 @@ class ServerStateLedger:
             callback(event)
         for callback in globals_copy:
             callback(event)
-        return event
+        return entry
 
     # ------------------------------------------------------------------
     def batch_record_confirmed(
@@ -150,14 +151,15 @@ class ServerStateLedger:
         origin: str,
         timestamp: Optional[float] = None,
         dedupe: bool = True,
-    ) -> List[LedgerEvent]:
-        """Promote multiple confirmed properties in one batch."""
+    ) -> Dict[PropertyKey, LedgerEntry]:
+        """Promote multiple confirmed properties in one batch and return stored entries."""
 
         materialized = list(entries)
         if not materialized:
-            return []
+            return {}
 
         notifications: List[Tuple[LedgerEvent, List[Subscriber], List[Subscriber]]] = []
+        stored: Dict[PropertyKey, LedgerEntry] = {}
 
         with self._lock:
             for raw in materialized:
@@ -185,9 +187,10 @@ class ServerStateLedger:
                 )
                 same_version = version is not None and previous is not None and previous.version == version
                 if dedupe and same_value and (version is None or same_version):
+                    if previous is not None:
+                        stored[property_key] = previous
                     continue
 
-                property_key = (scope, target, key)
                 if version is None:
                     next_version = int(self._versions.get(property_key, 0)) + 1
                     self._versions[property_key] = next_version
@@ -204,6 +207,7 @@ class ServerStateLedger:
                     version=resolved_version,
                 )
                 self._state[property_key] = entry
+                stored[property_key] = entry
 
                 event = LedgerEvent(
                     scope=scope,
@@ -237,14 +241,12 @@ class ServerStateLedger:
                         origin,
                     )
 
-        events: List[LedgerEvent] = []
         for event, per_key, globals_copy in notifications:
             for callback in per_key:
                 callback(event)
             for callback in globals_copy:
                 callback(event)
-            events.append(event)
-        return events
+        return stored
 
     # ------------------------------------------------------------------
     def subscribe(self, scope: str, target: str, key: str, callback: Subscriber) -> None:
