@@ -251,6 +251,8 @@ def reduce_layer_property(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "layer",
         layer_id,
@@ -258,6 +260,7 @@ def reduce_layer_property(
         canonical,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     volume_sync: list[tuple[str, Any]] = []
@@ -287,6 +290,7 @@ def reduce_layer_property(
             volume_value,
             origin=f"{origin}.volume",
             timestamp=ts,
+            metadata=metadata,
         )
 
     return ServerLedgerUpdate(
@@ -312,6 +316,7 @@ def reduce_volume_render_mode(
     origin: str = "control.volume",
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
+    metadata = {"intent_id": intent_id} if intent_id else None
     normalized = str(mode)
 
     with lock:
@@ -321,6 +326,8 @@ def reduce_volume_render_mode(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "volume",
         "main",
@@ -328,6 +335,7 @@ def reduce_volume_render_mode(
         normalized,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -363,6 +371,8 @@ def reduce_volume_contrast_limits(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "volume",
         "main",
@@ -370,6 +380,7 @@ def reduce_volume_contrast_limits(
         pair,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -404,6 +415,8 @@ def reduce_volume_colormap(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "volume",
         "main",
@@ -411,6 +424,7 @@ def reduce_volume_colormap(
         normalized,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -445,6 +459,8 @@ def reduce_volume_opacity(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "volume",
         "main",
@@ -452,6 +468,7 @@ def reduce_volume_opacity(
         value,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -486,6 +503,8 @@ def reduce_volume_sample_step(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "volume",
         "main",
@@ -493,6 +512,7 @@ def reduce_volume_sample_step(
         value,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -917,6 +937,8 @@ def reduce_multiscale_policy(
         meta.last_server_seq = server_seq
         meta.last_timestamp = ts
 
+    metadata = {"intent_id": intent_id} if intent_id else None
+
     ledger.record_confirmed(
         "multiscale",
         "main",
@@ -924,6 +946,7 @@ def reduce_multiscale_policy(
         normalized,
         origin=origin,
         timestamp=ts,
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -950,6 +973,7 @@ def reduce_level_update(
     origin: str = "control.multiscale",
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
+    metadata = {"intent_id": intent_id} if intent_id else None
 
     def _applied_value(attr: str, default: Any = None) -> Any:
         if hasattr(applied, attr):
@@ -1028,29 +1052,55 @@ def reduce_level_update(
         origin,
     )
 
-    batch_entries: list[tuple[Any, ...]] = [
-        ("multiscale", "main", "level", level),
-    ]
+    batch_entries: list[tuple[Any, ...]] = []
+    if metadata is None:
+        batch_entries.append(("multiscale", "main", "level", level))
+    else:
+        batch_entries.append(("multiscale", "main", "level", level, metadata))
     if updated_level_shapes:
-        batch_entries.append(
-            (
-                "multiscale",
-                "main",
-                "level_shapes",
-                updated_level_shapes,
+        if metadata is None:
+            batch_entries.append(
+                (
+                    "multiscale",
+                    "main",
+                    "level_shapes",
+                    updated_level_shapes,
+                )
             )
-        )
+        else:
+            batch_entries.append(
+                (
+                    "multiscale",
+                    "main",
+                    "level_shapes",
+                    updated_level_shapes,
+                    metadata,
+                )
+            )
     if downgraded is not None:
-        batch_entries.append(
-            (
-                "multiscale",
-                "main",
-                "downgraded",
-                bool(downgraded),
+        if metadata is None:
+            batch_entries.append(
+                (
+                    "multiscale",
+                    "main",
+                    "downgraded",
+                    bool(downgraded),
+                )
             )
-        )
+        else:
+            batch_entries.append(
+                (
+                    "multiscale",
+                    "main",
+                    "downgraded",
+                    bool(downgraded),
+                    metadata,
+                )
+            )
 
     step_metadata = {"source": "worker.level_update", "level": level}
+    if intent_id is not None:
+        step_metadata["intent_id"] = intent_id
     batch_entries.append(
         (
             "dims",

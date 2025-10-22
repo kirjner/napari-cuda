@@ -55,12 +55,14 @@ from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
     _broadcast_camera_update,
     _broadcast_dims_state,
+    _broadcast_layers_delta,
     broadcast_stream_config,
     ingest_state,
 )
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import BootstrapSceneMetadata
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.state_reducers import (
     apply_bootstrap_transaction,
     reduce_dims_update,
@@ -248,6 +250,26 @@ class EGLHeadlessServer:
             broadcaster=_mirror_broadcast,
             schedule=_schedule_from_mirror,
             on_payload=_mirror_apply,
+        )
+        async def _mirror_layer_broadcast(
+            layer_id: str,
+            changes: Mapping[str, object],
+            intent_id: Optional[str],
+            timestamp: float,
+        ) -> None:
+            await _broadcast_layers_delta(
+                self,
+                layer_id=layer_id,
+                changes=changes,
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
+
+        self._layer_mirror = ServerLayerMirror(
+            ledger=self._state_ledger,
+            broadcaster=_mirror_layer_broadcast,
+            schedule=_schedule_from_mirror,
+            default_layer=self._default_layer_id,
         )
         if logger.isEnabledFor(logging.INFO):
             logger.info("Server debug policy: %s", self._ctx.debug_policy)
@@ -629,6 +651,12 @@ class EGLHeadlessServer:
             current_step=current_step,
         )
 
+    def _default_layer_id(self) -> Optional[str]:
+        snapshot = self._scene_manager.scene_snapshot()
+        if snapshot is None or not snapshot.layers:
+            return "layer-0"
+        return snapshot.layers[0].layer_id
+
     def _current_ndisplay(self) -> int:
         ledger = self._state_ledger
         assert ledger is not None, "state ledger unavailable"
@@ -696,6 +724,7 @@ class EGLHeadlessServer:
         )
         self._bootstrap_snapshot = pull_render_snapshot(self)
         self._dims_mirror.start()
+        self._layer_mirror.start()
         self._start_worker(loop)
         try:
             self._update_scene_manager()

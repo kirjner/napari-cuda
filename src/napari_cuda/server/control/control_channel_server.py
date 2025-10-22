@@ -78,7 +78,7 @@ from napari_cuda.server.control.state_reducers import (
 from napari_cuda.server.control.transactions.plane_restore import (
     apply_plane_restore_transaction,
 )
-from napari_cuda.server.scene import CameraDeltaCommand, layer_controls_from_ledger
+from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -428,33 +428,6 @@ def _viewer_settings(server: Any) -> Dict[str, Any]:
         "canvas_size": [width, height],
         "volume_enabled": use_volume,
     }
-
-
-def _default_layer_id(server: Any) -> Optional[str]:
-    snapshot = server._scene_manager.scene_snapshot()
-    if snapshot is None or not snapshot.layers:
-        return None
-    return snapshot.layers[0].layer_id
-
-
-def _layer_changes_from_result(server: Any, result: ServerLedgerUpdate) -> tuple[str | None, Dict[str, Any]]:
-    key = str(result.key)
-    if result.scope == "layer":
-        return str(result.target), {key: result.value}
-    if result.scope in {"volume", "multiscale"}:
-        namespaced = f"{result.scope}.{key}"
-        target = str(result.target) if result.target else None
-        if not target or not target.startswith("layer"):
-            target = _default_layer_id(server)
-        return target, {namespaced: result.value}
-    return None, {}
-
-
-
-
-
-
-
 
 def _resolve_dims_mode_from_ndisplay(ndisplay: int) -> str:
     return "volume" if int(ndisplay) >= 3 else "plane"
@@ -1902,21 +1875,6 @@ async def _broadcast_state_update(
     include_control_versions: bool = True,
 ) -> None:
     if result.scope in {"layer", "volume", "multiscale"}:
-        layer_id, changes = _layer_changes_from_result(server, result)
-        if not layer_id:
-            logger.debug(
-                "layer delta ignored: unable to resolve layer id for scope=%s target=%s",
-                result.scope,
-                result.target,
-            )
-            return
-        await _broadcast_layers_delta(
-            server,
-            layer_id=layer_id,
-            changes=changes,
-            intent_id=result.intent_id,
-            timestamp=result.timestamp,
-        )
         return
 
     if result.scope == "dims":
@@ -2366,10 +2324,15 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             viewer_settings=_viewer_settings(server),
         )
 
-        ledger_controls = layer_controls_from_ledger(ledger_snapshot)
+        layer_controls_map: Dict[str, Dict[str, Any]] = {}
+        mirror = getattr(server, "_layer_mirror", None)
+        if mirror is not None:
+            layer_controls_map = mirror.latest_controls()
+        else:
+            logger.debug("layer mirror not initialised; falling back to scene snapshot controls")
         for layer_snapshot in snapshot.layers:
             layer_id = layer_snapshot.layer_id
-            controls: Dict[str, Any] = dict(ledger_controls.get(layer_id, {}))
+            controls: Dict[str, Any] = dict(layer_controls_map.get(layer_id, {}))
             if not controls and "controls" in layer_snapshot.block:
                 block_controls = layer_snapshot.block["controls"]
                 assert isinstance(block_controls, Mapping), "layer snapshot controls missing mapping"

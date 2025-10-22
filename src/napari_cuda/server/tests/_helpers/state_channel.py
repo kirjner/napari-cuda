@@ -27,6 +27,7 @@ from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.protocol.messages import NotifyDimsPayload, SessionHello
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,
@@ -635,9 +636,36 @@ class StateServerHarness:
             schedule=lambda coro, label: self._schedule_coro(coro, label),
             on_payload=_mirror_apply,
         )
+        async def _layer_mirror_broadcast(
+            layer_id: str,
+            changes: Mapping[str, object],
+            intent_id: Optional[str],
+            timestamp: float,
+        ) -> None:
+            await state_channel_handler._broadcast_layers_delta(
+                server,
+                layer_id=layer_id,
+                changes=changes,
+                intent_id=intent_id,
+                timestamp=timestamp,
+            )
+
+        def _default_layer_id() -> Optional[str]:
+            snapshot = server._scene_manager.scene_snapshot()
+            if snapshot is None or not snapshot.layers:
+                return None
+            return snapshot.layers[0].layer_id
+
+        server._layer_mirror = ServerLayerMirror(
+            ledger=server._state_ledger,
+            broadcaster=_layer_mirror_broadcast,
+            schedule=lambda coro, label: self._schedule_coro(coro, label),
+            default_layer=_default_layer_id,
+        )
 
         self._record_dims_to_ledger(server, base_metrics, origin="bootstrap")
         server._dims_mirror.start()
+        server._layer_mirror.start()
 
         axis_labels = tuple(str(lbl) for lbl in (base_metrics.axis_labels or ("z", "y", "x")))
         order = tuple(int(idx) for idx in (base_metrics.order or (0, 1, 2)))

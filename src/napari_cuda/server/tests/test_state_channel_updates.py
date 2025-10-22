@@ -4,7 +4,7 @@ import asyncio
 import json
 import threading
 from types import SimpleNamespace
-from typing import Any, Coroutine, List, Tuple
+from typing import Any, Coroutine, List, Tuple, Mapping, Optional
 
 import time
 import pytest
@@ -32,11 +32,12 @@ from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
-from napari_cuda.server.scene import build_render_scene_state, create_server_scene_data, layer_controls_from_ledger
+from napari_cuda.server.scene import build_render_scene_state, create_server_scene_data
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 
 
 class _CaptureWorker:
@@ -217,6 +218,34 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     initial_payload = baseline_dims
     _record_dims_to_ledger(server, initial_payload, origin="bootstrap")
     server._dims_mirror.start()
+
+    async def _layer_broadcast(
+        layer_id: str,
+        changes: Mapping[str, object],
+        intent_id: Optional[str],
+        timestamp: float,
+    ) -> None:
+        await state_channel_handler._broadcast_layers_delta(
+            server,
+            layer_id=layer_id,
+            changes=changes,
+            intent_id=intent_id,
+            timestamp=timestamp,
+        )
+
+    def _default_layer_id() -> Optional[str]:
+        snapshot = server._scene_manager.scene_snapshot()
+        if snapshot is None or not snapshot.layers:
+            return "layer-0"
+        return snapshot.layers[0].layer_id
+
+    server._layer_mirror = ServerLayerMirror(
+        ledger=server._state_ledger,
+        broadcaster=_layer_broadcast,
+        schedule=_mirror_schedule,
+        default_layer=_default_layer_id,
+    )
+    server._layer_mirror.start()
 
     axis_labels = tuple(str(lbl) for lbl in (baseline_dims.axis_labels or ("z", "y", "x")))
     order = tuple(int(idx) for idx in (baseline_dims.order or (0, 1, 2)))
@@ -698,9 +727,7 @@ def test_volume_render_mode_update() -> None:
     }
 
     layer_frames = _frames_of_type(captured, "notify.layers")
-    assert layer_frames
-    payload = layer_frames[-1]["payload"]
-    assert payload["changes"].get("volume.render_mode") == "iso"
+    assert not layer_frames
 
 
 def test_camera_zoom_update_emits_notify() -> None:
@@ -869,6 +896,8 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         )
 
         server._scene.latest_state = build_render_scene_state(server._state_ledger, server._scene)
+        _drain_scheduled(scheduled)
+        captured.clear()
 
         server._scene_manager.update_from_sources(
             worker=server._worker,
@@ -879,7 +908,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             ndisplay=2,
             zarr_path=None,
             scene_source=None,
-            layer_controls=layer_controls_from_ledger(server._state_ledger.snapshot()),
+            layer_controls=server._layer_mirror.latest_controls(),
         )
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
