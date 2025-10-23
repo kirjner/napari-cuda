@@ -1866,8 +1866,6 @@ def _log_volume_event(server: Any, fmt: str, *args: Any) -> None:
 async def _broadcast_state_update(
     server: Any,
     result: ServerLedgerUpdate,
-    *,
-    include_control_versions: bool = True,
 ) -> None:
     if result.scope in {"layer", "volume", "multiscale"}:
         return
@@ -1892,14 +1890,11 @@ async def _broadcast_state_update(
 async def _broadcast_state_updates(
     server: Any,
     results: Sequence[ServerLedgerUpdate],
-    *,
-    include_control_versions: bool = True,
 ) -> None:
     for result in results:
         await _broadcast_state_update(
             server,
             result,
-            include_control_versions=include_control_versions,
         )
 
 

@@ -142,6 +142,7 @@ The ledger is the only authoritative store for applied state. Mirrors subscribe 
 - `napari_dims_mirror` ↔ `ServerDimsMirror`.
 - Client intent emitters ↔ server control handlers enqueueing transactions or camera deltas.
 - Mirrors broadcast from the ledger after applied confirmations; render worker remains authoritative for multiscale switches and applied camera/layer state.
+- Mirrors/mirrors rely solely on ledger event `version` values for dedupe; legacy `server_seq` counters and `ControlMeta` shims were removed.
 
 ## LatestIntent: Continuous Control State
 
