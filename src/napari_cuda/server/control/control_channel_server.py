@@ -1116,7 +1116,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 origin="client.state.view",
             )
             server.use_volume = bool(result.value == 3)
-            server._scene.use_volume = server.use_volume
             server._stage_layer_controls_from_ledger()
 
             server._pixel_channel.broadcast.bypass_until_key = True

@@ -125,7 +125,7 @@ def build_render_scene_state(
         scene,
     )
 
-    volume_defaults = volume_state_from_ledger(snapshot)
+    volume_defaults = volume_state_from_ledger(ledger.snapshot())
     if not volume_defaults:
         volume_defaults = default_volume_state()
     default_mode = volume_defaults.get("mode")

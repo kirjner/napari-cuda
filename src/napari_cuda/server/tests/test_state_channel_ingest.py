@@ -158,7 +158,6 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
             origin="test.seed",
         )
         harness.server.use_volume = True
-        harness.server._scene.use_volume = True
 
         def _make_update(frame_id: str, value: int) -> dict[str, object]:
             return build_state_update(

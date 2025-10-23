@@ -293,7 +293,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         value = 3 if int(ndisplay) >= 3 else 2
         server._ndisplay_calls.append(value)
         server.use_volume = bool(value == 3)
-        server._scene.use_volume = bool(value == 3)
         return ServerLedgerUpdate(
             scope="view",
             target="main",
@@ -755,7 +754,8 @@ def test_volume_render_mode_update() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    assert server._scene.volume_state.get("mode") == "iso"
+    entry = server._state_ledger.get("volume", "main", "render_mode")
+    assert entry is not None and entry.value == "iso"
     volume_entry = server._state_ledger.get("volume", "main", "render_mode")
     assert volume_entry is not None
     assert volume_entry.version is not None
@@ -934,7 +934,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         asyncio.set_event_loop(loop)
 
         server, scheduled, captured = _make_server()
-        server._scene.use_volume = False
+        server.use_volume = False
         reduce_layer_property(
             server._scene,
             server._state_ledger,
@@ -952,13 +952,13 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             value="viridis",
         )
 
-        server._scene.latest_state = build_render_scene_state(server._state_ledger, server._scene)
+        snapshot_state = build_render_scene_state(server._state_ledger, server._scene)
         _drain_scheduled(scheduled)
         captured.clear()
 
         server._scene_manager.update_from_sources(
             worker=server._worker,
-            scene_state=server._scene.latest_state,
+            scene_state=snapshot_state,
             multiscale_state=None,
             volume_state=None,
             current_step=None,

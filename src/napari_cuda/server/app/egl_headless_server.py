@@ -28,6 +28,7 @@ from napari_cuda.server.scene import (
     create_server_scene_data,
     build_render_scene_state,
     default_volume_state,
+    layer_controls_from_ledger,
 )
 from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
@@ -474,7 +475,8 @@ class EGLHeadlessServer:
                 logger.debug("ensure_keyframe: request_idr failed", exc_info=True)
 
     def _stage_layer_controls_from_ledger(self) -> None:
-        controls = layer_controls_from_ledger(self._state_ledger.snapshot())
+        snapshot = self._state_ledger.snapshot()
+        controls = layer_controls_from_ledger(snapshot)
         if not controls:
             return
 
@@ -482,39 +484,27 @@ class EGLHeadlessServer:
         if primary_props is None:
             return
 
-        ledger_sync: list[tuple[str, Any]] = []
-        with self._state_lock:
-            volume_state = self._scene.volume_state
+        updates: list[tuple[str, str, str, Any]] = []
+        colormap = primary_props.get("colormap")
+        if colormap is not None:
+            updates.append(("volume", "main", "colormap", str(colormap)))
 
-            colormap = primary_props.get("colormap")
-            if colormap is not None:
-                name = str(colormap)
-                if volume_state.get("colormap") != name:
-                    volume_state["colormap"] = name
-                    ledger_sync.append(("colormap", name))
+        clim = primary_props.get("contrast_limits")
+        if clim is not None:
+            lo, hi = float(clim[0]), float(clim[1])
+            updates.append(("volume", "main", "contrast_limits", (lo, hi)))
 
-            clim = primary_props.get("contrast_limits")
-            if clim is not None:
-                lo, hi = (float(clim[0]), float(clim[1]))
-                if volume_state.get("clim") != [lo, hi]:
-                    volume_state["clim"] = [lo, hi]
-                    ledger_sync.append(("contrast_limits", (lo, hi)))
+        opacity = primary_props.get("opacity")
+        if opacity is not None:
+            updates.append(("volume", "main", "opacity", float(opacity)))
 
-            opacity = primary_props.get("opacity")
-            if opacity is not None:
-                alpha = float(opacity)
-                if volume_state.get("opacity") != alpha:
-                    volume_state["opacity"] = alpha
-                    ledger_sync.append(("opacity", alpha))
+        if not updates:
+            return
 
-        for key, value in ledger_sync:
-            self._state_ledger.record_confirmed(
-                "volume",
-                "main",
-                key,
-                value,
-                origin="control.layer_sync",
-            )
+        self._state_ledger.batch_record_confirmed(
+            updates,
+            origin="control.layer_sync",
+        )
 
     def _start_kf_watchdog(self) -> None:
         return
@@ -623,10 +613,15 @@ class EGLHeadlessServer:
             multiscale_state = dict(self._scene.multiscale_state)
 
         volume_defaults = default_volume_state()
+        clim_source = snapshot.volume_clim or volume_defaults['clim']
+        if isinstance(clim_source, Sequence):
+            clim_list = [float(v) for v in clim_source]
+        else:
+            clim_list = [float(volume_defaults['clim'][0]), float(volume_defaults['clim'][1])]
         volume_state = {
             'mode': snapshot.volume_mode or volume_defaults['mode'],
             'colormap': snapshot.volume_colormap or volume_defaults['colormap'],
-            'clim': [float(v) for v in (snapshot.volume_clim or volume_defaults['clim'])],
+            'clim': clim_list,
             'opacity': float(snapshot.volume_opacity if snapshot.volume_opacity is not None else volume_defaults['opacity']),
             'sample_step': float(
                 snapshot.volume_sample_step if snapshot.volume_sample_step is not None else volume_defaults['sample_step']

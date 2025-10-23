@@ -112,15 +112,13 @@ def _merge_scene_metadata(
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = dict(snapshot_metadata)
 
-    ledger_volume_state: Dict[str, Any] = {}
     if ledger_snapshot is not None:
-        ledger_volume_state = volume_state_from_ledger(ledger_snapshot)
+        volume_state = volume_state_from_ledger(ledger_snapshot)
+    else:
+        volume_state = {}
 
-    if ledger_volume_state:
+    if volume_state:
         metadata.setdefault("volume_state", {})
-        metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in ledger_volume_state.items()})
-    elif scene.volume_state:
-        metadata.setdefault("volume_state", {})
-        metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in scene.volume_state.items()})
+        metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in volume_state.items()})
 
     return metadata or None

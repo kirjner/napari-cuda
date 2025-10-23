@@ -47,6 +47,15 @@ class RenderLedgerSnapshot:
     camera_versions: Optional[Dict[str, int]] = None
 
 
+DEFAULT_VOLUME_STATE = {
+    "mode": "mip",
+    "colormap": "gray",
+    "clim": (0.0, 1.0),
+    "opacity": 1.0,
+    "sample_step": 1.0,
+}
+
+
 def build_ledger_snapshot(
     ledger: ServerStateLedger,
     scene: "ServerSceneData",
@@ -96,26 +105,27 @@ def build_ledger_snapshot(
         None if multiscale_level_entry is None else _version_or_none(multiscale_level_entry.version)
     )
 
+    defaults = DEFAULT_VOLUME_STATE
     volume_mode = _string_or_none(
         _ledger_value(snapshot, "volume", "main", "render_mode"),
-        fallback=scene.volume_state.get("mode"),
+        fallback=defaults.get("mode"),
     )
     volume_colormap = _string_or_none(
         _ledger_value(snapshot, "volume", "main", "colormap"),
-        fallback=scene.volume_state.get("colormap"),
+        fallback=defaults.get("colormap"),
     )
     volume_clim = _tuple_or_none(
         _ledger_value(snapshot, "volume", "main", "contrast_limits"),
         float,
-        fallback=scene.volume_state.get("clim"),
+        fallback=defaults.get("clim"),
     )
     volume_opacity = _float_or_none(
         _ledger_value(snapshot, "volume", "main", "opacity"),
-        fallback=scene.volume_state.get("opacity"),
+        fallback=defaults.get("opacity"),
     )
     volume_sample_step = _float_or_none(
         _ledger_value(snapshot, "volume", "main", "sample_step"),
-        fallback=scene.volume_state.get("sample_step"),
+        fallback=defaults.get("sample_step"),
     )
 
     layer_values: Dict[str, Dict[str, Any]] = {}
