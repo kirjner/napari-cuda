@@ -198,8 +198,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 initial_snapshot = pull_render_snapshot(server)
             else:
                 server._bootstrap_snapshot = None  # type: ignore[attr-defined]
-            with server._state_lock:
-                server._scene.latest_state = initial_snapshot
             worker._consume_render_snapshot(initial_snapshot)
             worker.drain_scene_updates()
 
@@ -233,8 +231,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             while not state.stop_event.is_set():
                 snapshot = pull_render_snapshot(server)
-                with server._state_lock:
-                    server._scene.latest_state = snapshot
                 has_camera_deltas = len(server._camera_queue) > 0
 
                 # Request view ndisplay if provided by staged intents

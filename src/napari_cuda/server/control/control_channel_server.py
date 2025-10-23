@@ -77,7 +77,7 @@ from napari_cuda.server.control.state_reducers import (
 from napari_cuda.server.control.transactions.plane_restore import (
     apply_plane_restore_transaction,
 )
-from napari_cuda.server.scene import CameraDeltaCommand
+from napari_cuda.server.scene import CameraDeltaCommand, build_render_scene_state
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -2473,8 +2473,8 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
     if snapshot is None or not snapshot.layers:
         return
 
-    latest_state = scene.latest_state
-    latest_values = latest_state.layer_values or {}
+    snapshot_state = build_render_scene_state(server._state_ledger, scene)
+    latest_values = snapshot_state.layer_values or {}
 
     for layer in snapshot.layers:
         layer_id = layer.layer_id

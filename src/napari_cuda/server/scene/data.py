@@ -85,13 +85,9 @@ class CameraDeltaCommand:
 class ServerSceneData:
     """Mutable scene metadata owned by the headless server."""
 
-    latest_state: RenderLedgerSnapshot = field(default_factory=RenderLedgerSnapshot)
-    use_volume: bool = False
-    volume_state: Dict[str, Any] = field(default_factory=default_volume_state)
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)
-    last_scene_snapshot: Optional[Dict[str, Any]] = None
     state_ledger: Optional[ServerStateLedger] = None
-    # Removed optimistic dims caches; staged transactions drive desired state
+    # Removed optimistic caches; staged transactions drive desired state
 
 
 def create_server_scene_data(
@@ -129,6 +125,18 @@ def build_render_scene_state(
         scene,
     )
 
+    volume_defaults = volume_state_from_ledger(snapshot)
+    if not volume_defaults:
+        volume_defaults = default_volume_state()
+    default_mode = volume_defaults.get("mode")
+    default_colormap = volume_defaults.get("colormap")
+    default_clim_value = volume_defaults.get("clim")
+    default_clim = None
+    if isinstance(default_clim_value, Sequence):
+        default_clim = tuple(float(v) for v in default_clim_value)
+    default_opacity = volume_defaults.get("opacity")
+    default_sample_step = volume_defaults.get("sample_step")
+
     return RenderLedgerSnapshot(
         center=_coalesce_tuple(center, base.center, float),
         zoom=_coalesce_float(zoom, base.zoom),
@@ -137,23 +145,23 @@ def build_render_scene_state(
         fov=_coalesce_float(fov, base.fov),
         rect=_coalesce_tuple(rect, base.rect, float),
         current_step=_coalesce_tuple(current_step, base.current_step, int),
-        volume_mode=_coalesce_string(volume_mode, base.volume_mode, fallback=scene.volume_state.get("mode")),
+        volume_mode=_coalesce_string(volume_mode, base.volume_mode, fallback=default_mode),
         volume_colormap=_coalesce_string(
             volume_colormap,
             base.volume_colormap,
-            fallback=scene.volume_state.get("colormap"),
+            fallback=default_colormap,
         ),
         volume_clim=_coalesce_tuple(
             volume_clim,
             base.volume_clim,
             float,
-            fallback=scene.volume_state.get("clim"),
+            fallback=default_clim,
         ),
-        volume_opacity=_coalesce_float(volume_opacity, base.volume_opacity, fallback=scene.volume_state.get("opacity")),
+        volume_opacity=_coalesce_float(volume_opacity, base.volume_opacity, fallback=default_opacity),
         volume_sample_step=_coalesce_float(
             volume_sample_step,
             base.volume_sample_step,
-            fallback=scene.volume_state.get("sample_step"),
+            fallback=default_sample_step,
         ),
         layer_values=base.layer_values,
         layer_versions=base.layer_versions,

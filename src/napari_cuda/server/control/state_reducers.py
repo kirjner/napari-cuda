@@ -250,28 +250,13 @@ def reduce_layer_property(
 
     updates: list[tuple[str, str, str, Any]] = [("layer", layer_id, prop, canonical)]
 
-    with lock:
-        volume_sync: list[tuple[str, Any]] = []
-        if prop == "colormap":
-            volume_state = store.volume_state
-            if volume_state.get("colormap") != canonical:
-                volume_state["colormap"] = canonical
-                volume_sync.append(("colormap", canonical))
-        elif prop == "contrast_limits":
-            lo, hi = float(canonical[0]), float(canonical[1])
-            volume_state = store.volume_state
-            if volume_state.get("clim") != [lo, hi]:
-                volume_state["clim"] = [lo, hi]
-                volume_sync.append(("contrast_limits", (lo, hi)))
-        elif prop == "opacity":
-            alpha = float(canonical)
-            volume_state = store.volume_state
-            if volume_state.get("opacity") != alpha:
-                volume_state["opacity"] = alpha
-                volume_sync.append(("opacity", alpha))
-
-    for volume_key, volume_value in volume_sync:
-        updates.append(("volume", "main", volume_key, volume_value))
+    if prop == "colormap":
+        updates.append(("volume", "main", "colormap", canonical))
+    elif prop == "contrast_limits":
+        lo, hi = float(canonical[0]), float(canonical[1])
+        updates.append(("volume", "main", "contrast_limits", (lo, hi)))
+    elif prop == "opacity":
+        updates.append(("volume", "main", "opacity", float(canonical)))
 
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
@@ -312,9 +297,6 @@ def reduce_volume_render_mode(
     metadata = {"intent_id": intent_id} if intent_id else None
     normalized = str(mode)
 
-    with lock:
-        store.volume_state["mode"] = normalized
-
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=[("volume", "main", "render_mode", normalized)],
@@ -353,9 +335,6 @@ def reduce_volume_contrast_limits(
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     pair = (float(lo), float(hi))
-
-    with lock:
-        store.volume_state["clim"] = [pair[0], pair[1]]
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
@@ -397,9 +376,6 @@ def reduce_volume_colormap(
     ts = _now(timestamp)
     normalized = str(name)
 
-    with lock:
-        store.volume_state["colormap"] = normalized
-
     metadata = {"intent_id": intent_id} if intent_id else None
 
     stored_entries = apply_layer_property_transaction(
@@ -440,9 +416,6 @@ def reduce_volume_opacity(
     ts = _now(timestamp)
     value = float(alpha)
 
-    with lock:
-        store.volume_state["opacity"] = value
-
     metadata = {"intent_id": intent_id} if intent_id else None
 
     stored_entries = apply_layer_property_transaction(
@@ -482,9 +455,6 @@ def reduce_volume_sample_step(
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     value = float(sample_step)
-
-    with lock:
-        store.volume_state["sample_step"] = value
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
@@ -772,7 +742,6 @@ def reduce_bootstrap_state(
         store.multiscale_state["levels"] = [dict(level) for level in levels]
         store.multiscale_state["level_shapes"] = [list(shape) for shape in resolved_level_shapes]
         store.multiscale_state.pop("downgraded", None)
-        store.use_volume = bool(mode_value == "volume")
 
     entries = _dims_entries_from_payload(
         dims_payload,
@@ -909,10 +878,6 @@ def reduce_dims_update(
         "axis_target": control_target,
     }
 
-    with lock:
-        snapshot = store.latest_state
-        store.latest_state = replace(snapshot, current_step=requested_step)
-
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=requested_step,
@@ -993,16 +958,6 @@ def reduce_view_update(
         order_value=order_value,
         target_ndisplay=target_ndisplay,
     )
-
-    with lock:
-        snapshot = store.latest_state
-        store.latest_state = replace(
-            snapshot,
-            ndisplay=int(target_ndisplay),
-            order=order_value,
-            displayed=displayed_value,
-        )
-        store.use_volume = bool(int(target_ndisplay) >= 3)
 
     op_entry = ledger.get("scene", "main", "op_seq")
     next_op_seq = int(op_entry.value) + 1 if op_entry is not None and isinstance(op_entry.value, int) else 1
@@ -1098,14 +1053,6 @@ def reduce_level_update(
     updated_level_shapes = tuple(level_shapes_payload) if level_shapes_payload else tuple()
 
     with lock:
-        snapshot = store.latest_state
-        store.latest_state = replace(
-            snapshot,
-            current_level=level,
-            current_step=step_tuple,
-            level_shapes=updated_level_shapes or snapshot.level_shapes,
-        )
-
         store.multiscale_state["current_level"] = level
         if updated_level_shapes:
             store.multiscale_state["level_shapes"] = [

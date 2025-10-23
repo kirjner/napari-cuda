@@ -26,8 +26,8 @@ from napari_cuda.server.scene import (
     CameraDeltaCommand,
     ServerSceneData,
     create_server_scene_data,
-    layer_controls_from_ledger,
     build_render_scene_state,
+    default_volume_state,
 )
 from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
@@ -208,7 +208,6 @@ class EGLHeadlessServer:
         self._scene: ServerSceneData = create_server_scene_data(
             state_ledger=self._state_ledger,
         )
-        self._scene.use_volume = bool(self.use_volume)
         # Bitstream parameter cache and config tracking (server-side)
         self._param_cache = ParamCache()
         # Optional bitstream dump for validation
@@ -389,7 +388,6 @@ class EGLHeadlessServer:
         self._commit_level_snapshot(context, downgraded)
 
         snapshot = build_render_scene_state(self._state_ledger, self._scene)
-        self._scene.latest_state = snapshot
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "level.intent snapshot: level=%d step=%s",
@@ -600,46 +598,58 @@ class EGLHeadlessServer:
         if worker is None or not worker.is_ready:
             return
 
-        current_step = None
-        with self._state_lock:
-            if self._scene.latest_state.current_step is not None:
-                current_step = list(self._scene.latest_state.current_step)  # type: ignore[arg-type]
+        snapshot = build_render_scene_state(self._state_ledger, self._scene)
+        current_step = list(snapshot.current_step) if snapshot.current_step is not None else None
 
         source = getattr(worker, '_scene_source', None)
-        if source is not None:
-            current_level = int(source.current_level)
-            self._scene.multiscale_state['policy'] = 'auto'
-            self._scene.multiscale_state['current_level'] = current_level
-            descriptors = source.level_descriptors
-            self._scene.multiscale_state['levels'] = [
-                {
-                    'path': desc.path,
-                    'shape': [int(x) for x in desc.shape],
-                    'downsample': list(desc.downsample),
-                    'scale': [float(x) for x in desc.scale],
-                }
-                for desc in descriptors
-            ]
-            self._scene.multiscale_state['index_space'] = 'base'
-        else:
-            self._scene.multiscale_state.pop('levels', None)
+        with self._state_lock:
+            if source is not None:
+                current_level = int(source.current_level)
+                self._scene.multiscale_state['policy'] = 'auto'
+                self._scene.multiscale_state['current_level'] = current_level
+                descriptors = source.level_descriptors
+                self._scene.multiscale_state['levels'] = [
+                    {
+                        'path': desc.path,
+                        'shape': [int(x) for x in desc.shape],
+                        'downsample': list(desc.downsample),
+                        'scale': [float(x) for x in desc.scale],
+                    }
+                    for desc in descriptors
+                ]
+                self._scene.multiscale_state['index_space'] = 'base'
+            else:
+                self._scene.multiscale_state.pop('levels', None)
+            multiscale_state = dict(self._scene.multiscale_state)
 
-        viewer_model = None
+        volume_defaults = default_volume_state()
+        volume_state = {
+            'mode': snapshot.volume_mode or volume_defaults['mode'],
+            'colormap': snapshot.volume_colormap or volume_defaults['colormap'],
+            'clim': [float(v) for v in (snapshot.volume_clim or volume_defaults['clim'])],
+            'opacity': float(snapshot.volume_opacity if snapshot.volume_opacity is not None else volume_defaults['opacity']),
+            'sample_step': float(
+                snapshot.volume_sample_step if snapshot.volume_sample_step is not None else volume_defaults['sample_step']
+            ),
+        }
+
+        layer_controls = {}
+        if snapshot.layer_values:
+            layer_controls = {layer_id: dict(props) for layer_id, props in snapshot.layer_values.items()}
+
         viewer_model = worker.viewer_model()
         self._scene_manager.update_from_sources(
             worker=worker,
-            scene_state=self._scene.latest_state,
-            multiscale_state=dict(self._scene.multiscale_state),
-            volume_state=dict(self._scene.volume_state),
+            scene_state=snapshot,
+            multiscale_state=multiscale_state,
+            volume_state=volume_state,
             current_step=current_step,
             ndisplay=self._current_ndisplay(),
             zarr_path=self._zarr_path,
             scene_source=source,
             viewer_model=viewer_model,
-            layer_controls=layer_controls_from_ledger(self._state_ledger.snapshot()),
+            layer_controls=layer_controls,
         )
-
-        snapshot = self._scene_manager.scene_snapshot()
 
     def _default_layer_id(self) -> Optional[str]:
         snapshot = self._scene_manager.scene_snapshot()
@@ -858,10 +868,6 @@ class EGLHeadlessServer:
                 fov=pose.fov,
                 rect=pose.rect,
                 origin="worker.state.camera",
-            )
-            self._scene.latest_state = build_render_scene_state(
-                self._state_ledger,
-                self._scene,
             )
 
             # Persist per-mode camera caches for deterministic restores.

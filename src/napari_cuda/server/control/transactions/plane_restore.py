@@ -96,7 +96,4 @@ def apply_plane_restore_transaction(
         timestamp=timestamp,
     )
 
-    if scene is not None:
-        scene.latest_state = build_render_scene_state(ledger, scene)
-
     return stored
