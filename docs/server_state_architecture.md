@@ -51,7 +51,7 @@ Mirrors (e.g., ServerDimsMirror)
 ### New (or Relocated) Modules
 
 - `src/napari_cuda/server/runtime/render_ledger_snapshot.py`
-  - Builds immutable `RenderLedgerSnapshot` objects from the ledger plus transitional caches on `ServerSceneData`.
+- Builds immutable `RenderLedgerSnapshot` objects directly from the ledger; any auxiliary metadata is reconstructed on-demand from ledger entries.
   - Normalises layer deltas and drains them so the worker sees each update once.
 
 - `src/napari_cuda/server/runtime/scene_state_applier.py`
@@ -66,7 +66,7 @@ Mirrors (e.g., ServerDimsMirror)
   - Schedules broadcasts via the control loop rather than relying on worker notifications.
 
 - `src/napari_cuda/server/scene/`
-  - `data.py` houses `ServerSceneData` and helper utilities (`layer_controls_to_dict`, etc.).
+- `data.py` houses ledger utilities (`build_render_scene_state`, `layer_controls_from_ledger`, etc.).
   - `layer_manager.py` now reflects the new namespace used by control payload builders and tests.
 
 - `src/napari_cuda/server/runtime/camera_{controller,animator,ops}.py`
@@ -96,7 +96,7 @@ Mirrors (e.g., ServerDimsMirror)
   - The loop can skip an entire tick when no new desires exist (latest desired seq per scope ≤ last applied seq per scope), there are no discrete commands, and no animation/diagnostics are active.
 
 - `src/napari_cuda/server/control/control_channel_server.py`
-  - Baseline responses compose payloads from the ledger snapshot plus `ServerSceneData` control metadata.
+- Baseline responses compose payloads directly from the ledger snapshot (no separate scene cache).
   - State reducers write continuous updates to `LatestIntent` (dims/camera/view/layers) and schedule command acks; they do not mutate legacy scene bags nor push continuous updates into FIFO queues.
 
 - `src/napari_cuda/server/control/state_reducers.py`

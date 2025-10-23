@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional
+from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional, Sequence
 
 import numpy as np
 from websockets.exceptions import ConnectionClosedOK
@@ -36,7 +36,12 @@ from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
 from napari_cuda.server.rendering import pixel_broadcaster
-from napari_cuda.server.scene import create_server_scene_data, build_render_scene_state
+from napari_cuda.server.scene import (
+    build_render_scene_state,
+    default_volume_state,
+    layer_controls_from_ledger,
+    multiscale_state_from_snapshot,
+)
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext
@@ -551,7 +556,6 @@ class StateServerHarness:
     def _build_server(self) -> SimpleNamespace:
         """Create the stub server object expected by control_channel_server."""
 
-        scene = create_server_scene_data()
         manager = ViewerSceneManager((self.width, self.height))
         worker = CaptureWorker()
         manager.update_from_sources(
@@ -568,7 +572,6 @@ class StateServerHarness:
         )
 
         server = SimpleNamespace()
-        server._scene = scene
         server._scene_manager = manager
         server._state_lock = threading.RLock()
         server._worker = worker
@@ -582,6 +585,7 @@ class StateServerHarness:
         server.height = self.height
         server.cfg = SimpleNamespace(fps=60.0)
         server.use_volume = False
+        server._latest_scene_snapshot: Optional[RenderLedgerSnapshot] = None
         server._camera_seq: dict[str, int] = {}
         server._stage_layer_controls_from_ledger = lambda: None
 
@@ -599,18 +603,59 @@ class StateServerHarness:
         server._camera_queue = CameraCommandQueue()
 
         base_metrics = NotifyDimsPayload.from_dict(_default_dims_snapshot())
-        scene.multiscale_state["current_level"] = 0
-        scene.multiscale_state["levels"] = [{"index": 0, "shape": [10, 10, 10]}]
+
+        def _update_scene_manager() -> None:
+            snapshot = build_render_scene_state(server._state_ledger)
+            multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+            current_step = list(snapshot.current_step) if snapshot.current_step is not None else None
+
+            defaults = default_volume_state()
+            default_clim = defaults.get("clim", [0.0, 1.0])
+            if isinstance(default_clim, Sequence):
+                default_clim_list = [float(v) for v in default_clim]
+            else:
+                default_clim_list = [0.0, 1.0]
+
+            clim_values = snapshot.volume_clim
+            clim_list = [float(v) for v in clim_values] if clim_values is not None else default_clim_list
+
+            volume_state = {
+                "mode": snapshot.volume_mode or defaults.get("mode"),
+                "colormap": snapshot.volume_colormap or defaults.get("colormap"),
+                "clim": clim_list,
+                "opacity": float(
+                    snapshot.volume_opacity
+                    if snapshot.volume_opacity is not None
+                    else defaults.get("opacity", 1.0)
+                ),
+                "sample_step": float(
+                    snapshot.volume_sample_step
+                    if snapshot.volume_sample_step is not None
+                    else defaults.get("sample_step", 1.0)
+                ),
+            }
+
+            layer_controls = layer_controls_from_ledger(server._state_ledger.snapshot())
+
+            manager.update_from_sources(
+                worker=worker,
+                scene_state=snapshot,
+                multiscale_state=multiscale_state or None,
+                volume_state=volume_state,
+                current_step=current_step,
+                ndisplay=int(snapshot.ndisplay) if snapshot.ndisplay is not None else int(base_metrics.ndisplay),
+                zarr_path=None,
+                scene_source=worker._ensure_scene_source(),
+                viewer_model=worker._viewer,
+                layer_controls=layer_controls or None,
+            )
+            server._latest_scene_snapshot = snapshot
+
+        server._update_scene_manager = _update_scene_manager
 
         def _mirror_apply(payload: NotifyDimsPayload) -> None:
-            with server._state_lock:
-                multiscale_state = scene.multiscale_state
-                multiscale_state["current_level"] = payload.current_level
-                multiscale_state["levels"] = [dict(level) for level in payload.levels]
-                if payload.downgraded is not None:
-                    multiscale_state["downgraded"] = bool(payload.downgraded)
-                else:
-                    multiscale_state.pop("downgraded", None)
+            _ = payload
+            server._update_scene_manager()
 
         server._resumable_store = ResumableHistoryStore(
             {
@@ -672,7 +717,6 @@ class StateServerHarness:
         level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in base_metrics.level_shapes)
         levels_payload = tuple(dict(level) for level in base_metrics.levels)
         reduce_bootstrap_state(
-            scene,
             server._state_ledger,
             server._state_lock,
             step=tuple(int(v) for v in base_metrics.current_step),
@@ -684,6 +728,8 @@ class StateServerHarness:
             ndisplay=int(base_metrics.ndisplay),
             origin="harness.bootstrap",
         )
+
+        server._update_scene_manager()
 
         server._ndisplay_calls: list[int] = []
 
@@ -697,7 +743,7 @@ class StateServerHarness:
             value = 3 if int(ndisplay) >= 3 else 2
             server._ndisplay_calls.append(value)
             server.use_volume = bool(value == 3)
-            scene.use_volume = bool(value == 3)
+            server._update_scene_manager()
             return ServerLedgerUpdate(
                 scope="view",
                 target="main",
@@ -762,27 +808,21 @@ class StateServerHarness:
 
         def _commit_level(applied, downgraded):
             reduce_level_update(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 applied=applied,
                 downgraded=bool(downgraded),
                 origin="harness.level",
             )
-            snapshot = build_render_scene_state(
-                server._state_ledger,
-                server._scene,
-            )
-            server._scene.latest_state = snapshot
+            server._update_scene_manager()
+            snapshot = server._latest_scene_snapshot
+            assert snapshot is not None, "harness scene snapshot unavailable"
             assert server._worker._viewer is not None, "harness worker viewer not initialised"
             snapshot_mod.apply_render_snapshot(server._worker, snapshot)
 
         server._commit_level = _commit_level
         server._pending_tasks = self.scheduled
-        server._scene.latest_state = build_render_scene_state(
-            server._state_ledger,
-            server._scene,
-        )
+        server._update_scene_manager()
         return server
 
     def _state_send(self, _ws: Any, text: str) -> None:

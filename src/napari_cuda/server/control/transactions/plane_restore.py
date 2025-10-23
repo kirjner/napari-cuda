@@ -9,7 +9,6 @@ from napari_cuda.server.control.state_ledger import (
     PropertyKey,
     ServerStateLedger,
 )
-from napari_cuda.server.scene import build_render_scene_state
 
 
 def _as_level(value: int | float | str) -> int:
@@ -44,7 +43,6 @@ def _as_rect(rect: Sequence[float | int | str]) -> Tuple[float, float, float, fl
 def apply_plane_restore_transaction(
     *,
     ledger: ServerStateLedger,
-    scene,
     level: int | float | str,
     step: Sequence[int | float | str],
     center: Sequence[float | int | str],
@@ -59,8 +57,6 @@ def apply_plane_restore_transaction(
     ----------
     ledger
         Server ledger to update.
-    scene
-        Mutable scene data bag; used to rebuild the cached snapshot.
     level, step
         Target multiscale level and step indices for the restored plane.
     center, zoom, rect

@@ -1,14 +1,9 @@
-"""Server control-channel data bag and helpers.
-
-This module centralises the mutable scene metadata tracked by the
-headless server so state-channel handlers can operate on a single bag of
-data and emit immutable snapshots to the worker.
-"""
+"""Server-side helpers derived from the control ledger."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
@@ -33,13 +28,11 @@ CONTROL_KEYS: tuple[str, ...] = (
 __all__ = [
     "CONTROL_KEYS",
     "CameraDeltaCommand",
-    "ServerSceneData",
-    "create_server_scene_data",
-    "default_multiscale_state",
     "default_volume_state",
     "build_render_scene_state",
     "layer_controls_from_ledger",
     "volume_state_from_ledger",
+    "multiscale_state_from_snapshot",
 ]
 
 
@@ -55,15 +48,63 @@ def default_volume_state() -> Dict[str, Any]:
     }
 
 
-def default_multiscale_state() -> Dict[str, Any]:
-    """Return the canonical defaults for multiscale metadata."""
+def multiscale_state_from_snapshot(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+) -> Dict[str, Any]:
+    """Derive multiscale policy metadata from a ledger snapshot."""
 
-    return {
-        "levels": [],
-        "current_level": 0,
-        "policy": "oversampling",
-        "index_space": "base",
-    }
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(k): _normalize(v) for k, v in value.items()}
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return [_normalize(v) for v in value]
+        return value
+
+    state: Dict[str, Any] = {}
+
+    policy_entry = snapshot.get(("multiscale", "main", "policy"))
+    if policy_entry is not None and policy_entry.value is not None:
+        state["policy"] = str(policy_entry.value)
+
+    index_space_entry = snapshot.get(("multiscale", "main", "index_space"))
+    if index_space_entry is not None and index_space_entry.value is not None:
+        state["index_space"] = str(index_space_entry.value)
+
+    level_entry = snapshot.get(("multiscale", "main", "level"))
+    if level_entry is not None and level_entry.value is not None:
+        try:
+            state["current_level"] = int(level_entry.value)
+        except Exception:
+            state["current_level"] = level_entry.value
+
+    levels_entry = snapshot.get(("multiscale", "main", "levels"))
+    if levels_entry is not None and isinstance(levels_entry.value, Sequence):
+        levels_payload = []
+        for entry in levels_entry.value:
+            if isinstance(entry, Mapping):
+                normalized = _normalize(entry)
+                if "downsample" not in normalized:
+                    shape_value = normalized.get("shape")
+                    if isinstance(shape_value, Sequence) and shape_value:
+                        normalized["downsample"] = [1.0 for _ in shape_value]
+                levels_payload.append(normalized)
+        if levels_payload:
+            state["levels"] = levels_payload
+
+    level_shapes_entry = snapshot.get(("multiscale", "main", "level_shapes"))
+    if level_shapes_entry is not None and isinstance(level_shapes_entry.value, Sequence):
+        shapes_payload = []
+        for shape in level_shapes_entry.value:
+            if isinstance(shape, Sequence):
+                shapes_payload.append([int(dim) for dim in shape])
+        if shapes_payload:
+            state["level_shapes"] = shapes_payload
+
+    downgraded_entry = snapshot.get(("multiscale", "main", "downgraded"))
+    if downgraded_entry is not None and downgraded_entry.value is not None:
+        state["downgraded"] = bool(downgraded_entry.value)
+
+    return state
 
 
 @dataclass(frozen=True)
@@ -81,29 +122,8 @@ class CameraDeltaCommand:
     d_el_deg: float = 0.0
 
 
-@dataclass
-class ServerSceneData:
-    """Mutable scene metadata owned by the headless server."""
-
-    multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)
-    state_ledger: Optional[ServerStateLedger] = None
-    # Removed optimistic caches; staged transactions drive desired state
-
-
-def create_server_scene_data(
-    *,
-    state_ledger: Optional[ServerStateLedger] = None,
-) -> ServerSceneData:
-    """Instantiate :class:`ServerSceneData` with an optional policy log path."""
-
-    return ServerSceneData(state_ledger=state_ledger)
-
-
-
-
 def build_render_scene_state(
     ledger: ServerStateLedger,
-    scene: ServerSceneData,
     *,
     center: Any = None,
     zoom: Any = None,
@@ -120,10 +140,7 @@ def build_render_scene_state(
 ) -> RenderLedgerSnapshot:
     """Build a render-scene snapshot from the ledger with optional overrides."""
 
-    base = build_ledger_snapshot(
-        ledger,
-        scene,
-    )
+    base = build_ledger_snapshot(ledger)
 
     volume_defaults = volume_state_from_ledger(ledger.snapshot())
     if not volume_defaults:

@@ -77,7 +77,11 @@ from napari_cuda.server.control.state_reducers import (
 from napari_cuda.server.control.transactions.plane_restore import (
     apply_plane_restore_transaction,
 )
-from napari_cuda.server.scene import CameraDeltaCommand, build_render_scene_state
+from napari_cuda.server.scene import (
+    CameraDeltaCommand,
+    build_render_scene_state,
+    multiscale_state_from_snapshot,
+)
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -727,7 +731,6 @@ async def _emit_scene_baseline(
         if snapshot is None or need_reset:
             if payload is None:
                 payload = build_notify_scene_payload(
-                    server._scene,
                     server._scene_manager,
                     ledger_snapshot=server._state_ledger.snapshot(),
                     viewer_settings=_viewer_settings(server),
@@ -745,7 +748,6 @@ async def _emit_scene_baseline(
     else:
         if payload is None:
             payload = build_notify_scene_payload(
-                server._scene,
                 server._scene_manager,
                 ledger_snapshot=server._state_ledger.snapshot(),
                 viewer_settings=_viewer_settings(server),
@@ -1107,7 +1109,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
 
             result = reduce_view_update(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 ndisplay=int(ndisplay),
@@ -1125,8 +1126,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
 
             if was_volume and ndisplay == 2:
                 ledger = server._state_ledger
-                scene = server._scene
-                if ledger is not None and scene is not None:
+                if ledger is not None:
                     with server._state_lock:
                         lvl_entry = ledger.get("view_cache", "plane", "level")
                         step_entry = ledger.get("view_cache", "plane", "step")
@@ -1154,7 +1154,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                         else:
                             apply_plane_restore_transaction(
                                 ledger=ledger,
-                                scene=scene,
                                 level=lvl_entry.value,
                                 step=step_entry.value,
                                 center=center_entry.value,
@@ -1494,7 +1493,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         layer_id = target
         try:
             result = reduce_layer_property(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 layer_id=layer_id,
@@ -1550,7 +1548,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "unknown render_mode", details={"scope": scope, "key": key, "value": value})
                 return True
             result = reduce_volume_render_mode(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 mode=mode,
@@ -1571,7 +1568,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "contrast_limits invalid", details={"scope": scope, "key": key})
                 return True
             result = reduce_volume_contrast_limits(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 lo=lo,
@@ -1587,7 +1583,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "colormap must be non-empty", details={"scope": scope, "key": key})
                 return True
             result = reduce_volume_colormap(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 name=str(name),
@@ -1604,7 +1599,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "opacity must be float", details={"scope": scope, "key": key})
                 return True
             result = reduce_volume_opacity(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 alpha=float(norm_alpha),
@@ -1621,7 +1615,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "sample_step must be float", details={"scope": scope, "key": key})
                 return True
             result = reduce_volume_sample_step(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 sample_step=float(norm_step),
@@ -1674,7 +1667,8 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             )
             return True
         elif key == 'level':
-            levels = server._scene.multiscale_state.get('levels') or []
+            multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+            levels = multiscale_state.get('levels') or []
             try:
                 level = clamp_level(value, levels)
             except (TypeError, ValueError):
@@ -1682,7 +1676,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 await _reject("state.invalid", "level out of range", details={"scope": scope, "key": key})
                 return True
             result = reduce_level_update(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 applied={"level": int(level)},
@@ -1693,7 +1686,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             rebroadcast_tag = 'rebroadcast-ms-level'
             if server._worker is not None:
                 try:
-                    levels_meta = server._scene.multiscale_state.get('levels') or []
+                    levels_meta = multiscale_state.get('levels') or []
                     path = None
                     if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
                         entry = levels_meta[int(level)]
@@ -1775,7 +1768,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
 
         try:
             result = reduce_dims_update(
-                server._scene,
                 server._state_ledger,
                 server._state_lock,
                 axis=request.target,
@@ -2317,7 +2309,6 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
 
         ledger_snapshot = server._state_ledger.snapshot()
         scene_payload = build_notify_scene_payload(
-            server._scene,
             server._scene_manager,
             ledger_snapshot=ledger_snapshot,
             viewer_settings=_viewer_settings(server),
@@ -2384,8 +2375,7 @@ async def _send_scene_snapshot_direct(server: Any, ws: Any, *, reason: str) -> N
         return
 
     payload = build_notify_scene_payload(
-        server._scene,
-        server._scene_manager,
+                server._scene_manager,
         ledger_snapshot=server._state_ledger.snapshot(),
         viewer_settings=_viewer_settings(server),
     )
@@ -2420,8 +2410,7 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
     if not clients:
         return
     payload = build_notify_scene_payload(
-        server._scene,
-        server._scene_manager,
+                server._scene_manager,
         viewer_settings=_viewer_settings(server),
     )
     timestamp = time.time()
@@ -2466,13 +2455,12 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
 async def _send_layer_baseline(server: Any, ws: Any) -> None:
     """Send canonical layer controls for all known layers to *ws*."""
 
-    scene = server._scene
     manager = server._scene_manager
     snapshot = manager.scene_snapshot()
     if snapshot is None or not snapshot.layers:
         return
 
-    snapshot_state = build_render_scene_state(server._state_ledger, scene)
+    snapshot_state = build_render_scene_state(server._state_ledger)
     latest_values = snapshot_state.layer_values or {}
 
     for layer in snapshot.layers:

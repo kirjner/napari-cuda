@@ -10,12 +10,11 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 
 ## Proposed structure
 
-1. **LayerControlState dataclass** ✅
-   - Lives in `server/scene/data.py` and captures canonical properties (`visible`, `opacity`, `blending`, `interpolation`, `gamma`, `colormap`, `contrast_limits`, etc.).
-   - `ServerSceneData` stores `layer_controls: dict[layer_id, LayerControlState]`.
+1. **Ledger-backed layer controls** ✅
+   - Control values are stored in the ledger (`layer` scope entries) and reused by helpers such as `layer_controls_from_ledger`.
 
 2. **Intent helpers** ✅
-   - `control/state_reducers.py` mutates `layer_controls` (instead of raw dicts) and records deltas in `ServerSceneData.pending_layer_updates` for the worker ingest path.
+   - `control/state_reducers.py` write confirmed values via transactions (`apply_layer_property_transaction`), so mirrors/tests rebuild control maps from the ledger snapshot.
 
 3. **Worker application** ✅
    - `runtime/scene_state_applier.py` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.

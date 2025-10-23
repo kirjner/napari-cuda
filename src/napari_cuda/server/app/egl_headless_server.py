@@ -24,11 +24,10 @@ from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
-    ServerSceneData,
-    create_server_scene_data,
     build_render_scene_state,
     default_volume_state,
     layer_controls_from_ledger,
+    multiscale_state_from_snapshot,
 )
 from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
@@ -206,9 +205,6 @@ class EGLHeadlessServer:
         self._camera_queue = CameraCommandQueue()
         self._scene_manager = ViewerSceneManager((self.width, self.height))
         self._state_ledger = ServerStateLedger()
-        self._scene: ServerSceneData = create_server_scene_data(
-            state_ledger=self._state_ledger,
-        )
         # Bitstream parameter cache and config tracking (server-side)
         self._param_cache = ParamCache()
         # Optional bitstream dump for validation
@@ -232,14 +228,7 @@ class EGLHeadlessServer:
             await _broadcast_dims_state(self, payload=payload)
 
         def _mirror_apply(payload: NotifyDimsPayload) -> None:
-            with self._state_lock:
-                multiscale_state = self._scene.multiscale_state
-                multiscale_state["current_level"] = payload.current_level
-                multiscale_state["levels"] = [dict(level) for level in payload.levels]
-                if payload.downgraded is not None:
-                    multiscale_state["downgraded"] = bool(payload.downgraded)
-                else:
-                    multiscale_state.pop("downgraded", None)
+            _ = payload  # dims mirror ensures ledger is already updated
             loop = self._control_loop
             if loop is not None:
                 loop.call_soon_threadsafe(self._update_scene_manager)
@@ -300,11 +289,6 @@ class EGLHeadlessServer:
         self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug_policy.enabled)
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
         # Populate multiscale description from NGFF metadata if available
-        try:
-            self._populate_multiscale_state()
-        except Exception:
-            logger.debug("populate multiscale state failed", exc_info=True)
-
     @property
     def _worker(self) -> Optional["EGLRendererWorker"]:
         return self._worker_lifecycle.worker
@@ -359,7 +343,14 @@ class EGLHeadlessServer:
     ) -> None:
         context = intent.context
         controller_downgraded = bool(intent.downgraded)
-        level_shapes_state = self._scene.multiscale_state.get("level_shapes") or []
+        level_shapes_entry = self._state_ledger.get("multiscale", "main", "level_shapes")
+        level_shapes_state: Sequence[Sequence[int]] = ()
+        if level_shapes_entry is not None and isinstance(level_shapes_entry.value, Sequence):
+            level_shapes_state = tuple(
+                tuple(int(dim) for dim in shape)
+                for shape in level_shapes_entry.value
+                if isinstance(shape, Sequence)
+            )
         if level_shapes_state and getattr(context, "dtype", None):
             max_bytes, max_voxels = self._volume_budget_caps()
             resolved_level, controller_downgraded = select_volume_level(
@@ -388,7 +379,7 @@ class EGLHeadlessServer:
 
         self._commit_level_snapshot(context, downgraded)
 
-        snapshot = build_render_scene_state(self._state_ledger, self._scene)
+        snapshot = build_render_scene_state(self._state_ledger)
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "level.intent snapshot: level=%d step=%s",
@@ -509,46 +500,6 @@ class EGLHeadlessServer:
     def _start_kf_watchdog(self) -> None:
         return
 
-    # --- Meta builders ------------------------------------------------------------
-    def _populate_multiscale_state(self) -> None:
-        """Populate self._scene.multiscale_state['levels'] from NGFF multiscales if available.
-
-        Stores minimal fields needed by clients and worker switching:
-        - path: dataset subpath (e.g., 'level_03')
-        - downsample: per-axis scale factors ordered as z,y,x when axes present; else [1,1,1]
-        - shape: optional, if inexpensive to obtain (omitted here for speed)
-        """
-        root = self._zarr_path
-        if not root:
-            return
-        axes_override = tuple(self._zarr_axes) if isinstance(self._zarr_axes, str) else None
-        try:
-            source = ZarrSceneSource(root, preferred_level=self._zarr_level, axis_override=axes_override)
-        except ZarrSceneSourceError:
-            logger.debug("multiscale state: invalid Zarr scene source", exc_info=True)
-            return
-        except Exception:
-            logger.debug("multiscale state: unexpected error building Zarr scene source", exc_info=True)
-            return
-
-        levels: list[dict] = []
-        for desc in source.level_descriptors:
-            levels.append(
-                {
-                    'path': desc.path,
-                    'downsample': list(desc.downsample),
-                    'shape': [int(x) for x in desc.shape],
-                }
-            )
-
-        if levels:
-            self._scene.multiscale_state['levels'] = levels
-            self._scene.multiscale_state['current_level'] = int(source.current_level)
-            self._zarr_axes = ''.join(source.axes)
-            current_desc = source.level_descriptors[source.current_level]
-            if current_desc.path:
-                self._zarr_level = current_desc.path
-
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.
 
@@ -588,29 +539,29 @@ class EGLHeadlessServer:
         if worker is None or not worker.is_ready:
             return
 
-        snapshot = build_render_scene_state(self._state_ledger, self._scene)
+        ledger_snapshot = self._state_ledger.snapshot()
+        snapshot = build_render_scene_state(self._state_ledger)
         current_step = list(snapshot.current_step) if snapshot.current_step is not None else None
 
+        multiscale_state = multiscale_state_from_snapshot(ledger_snapshot)
+
         source = getattr(worker, '_scene_source', None)
-        with self._state_lock:
-            if source is not None:
-                current_level = int(source.current_level)
-                self._scene.multiscale_state['policy'] = 'auto'
-                self._scene.multiscale_state['current_level'] = current_level
-                descriptors = source.level_descriptors
-                self._scene.multiscale_state['levels'] = [
+        if not multiscale_state and source is not None:
+            # Fallback for early bootstrap before ledger seeds level metadata.
+            descriptors = getattr(source, "level_descriptors", [])
+            multiscale_state = {
+                "policy": "auto",
+                "index_space": "base",
+                "current_level": int(getattr(source, "current_level", 0)),
+                "levels": [
                     {
-                        'path': desc.path,
-                        'shape': [int(x) for x in desc.shape],
-                        'downsample': list(desc.downsample),
-                        'scale': [float(x) for x in desc.scale],
+                        "path": getattr(desc, "path", ""),
+                        "shape": [int(x) for x in getattr(desc, "shape", ())],
+                        "downsample": list(getattr(desc, "downsample", ())),
                     }
                     for desc in descriptors
-                ]
-                self._scene.multiscale_state['index_space'] = 'base'
-            else:
-                self._scene.multiscale_state.pop('levels', None)
-            multiscale_state = dict(self._scene.multiscale_state)
+                ],
+            }
 
         volume_defaults = default_volume_state()
         clim_source = snapshot.volume_clim or volume_defaults['clim']
@@ -628,8 +579,8 @@ class EGLHeadlessServer:
             ),
         }
 
-        layer_controls = {}
-        if snapshot.layer_values:
+        layer_controls = layer_controls_from_ledger(ledger_snapshot)
+        if not layer_controls and snapshot.layer_values:
             layer_controls = {layer_id: dict(props) for layer_id, props in snapshot.layer_values.items()}
 
         viewer_model = worker.viewer_model()
@@ -705,7 +656,6 @@ class EGLHeadlessServer:
             cooldown_ms=self._ctx.policy.cooldown_ms,
         )
         reduce_bootstrap_state(
-            self._scene,
             self._state_ledger,
             self._state_lock,
             step=bootstrap_meta.step,
@@ -806,7 +756,6 @@ class EGLHeadlessServer:
         downgraded: bool,
     ) -> None:
         reduce_level_update(
-            self._scene,
             self._state_ledger,
             self._state_lock,
             applied=applied,
@@ -950,10 +899,8 @@ class EGLHeadlessServer:
 
         try:
             payload = build_notify_scene_payload(
-                self._scene,
                 self._scene_manager,
                 ledger_snapshot=self._state_ledger.snapshot(),
-                timestamp=time.time(),
             )
             json_payload = json.dumps(payload.to_dict())
         except Exception:

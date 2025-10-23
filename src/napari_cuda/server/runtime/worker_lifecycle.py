@@ -14,6 +14,7 @@ from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_av
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
+from napari_cuda.server.scene import multiscale_state_from_snapshot
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.rendering.debug_tools import DebugDumper
@@ -147,6 +148,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     pose,
                 )
 
+            policy_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+
             worker = EGLRendererWorker(
                 width=server.width,
                 height=server.height,
@@ -158,7 +161,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 zarr_level=server._zarr_level,
                 zarr_axes=server._zarr_axes,
                 zarr_z=server._zarr_z,
-                policy_name=server._scene.multiscale_state.get("policy"),
+                policy_name=policy_state.get("policy"),
                 camera_pose_cb=_forward_camera_pose,
                 level_intent_cb=_forward_level_intent,
                 camera_queue=server._camera_queue,

@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from napari_cuda.server.control.state_ledger import ServerStateLedger, LedgerEntry
-
-if TYPE_CHECKING:
-    from napari_cuda.server.scene import ServerSceneData
 
 
 logger = logging.getLogger(__name__)
@@ -58,17 +55,8 @@ DEFAULT_VOLUME_STATE = {
 
 def build_ledger_snapshot(
     ledger: ServerStateLedger,
-    scene: "ServerSceneData",
 ) -> RenderLedgerSnapshot:
-    """Construct the render snapshot by stitching together ledger + local state.
-
-    Parameters
-    ----------
-    ledger
-        ServerStateLedger containing confirmed property values.
-    scene
-        Mutable scene data bag holding local fallbacks (volume hints).
-"""
+    """Construct the render snapshot from confirmed ledger state."""
 
     snapshot = ledger.snapshot()
 
@@ -82,10 +70,6 @@ def build_ledger_snapshot(
     dims_entry = snapshot.get(("dims", "main", "current_step"))
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
     dims_version = None if dims_entry is None else _version_or_none(dims_entry.version)
-    pending_dims = getattr(scene, "pending_dims_step", None)
-    if pending_dims is not None:
-        current_step = tuple(int(v) for v in pending_dims)
-        scene.pending_dims_step = None
 
     view_entry_key = ("view", "main", "ndisplay")
     view_entry = snapshot.get(view_entry_key)
@@ -250,7 +234,7 @@ def pull_render_snapshot(server: Any) -> RenderLedgerSnapshot:
     """Return the current render snapshot."""
 
     with server._state_lock:
-        snapshot = build_ledger_snapshot(server._state_ledger, server._scene)
+        snapshot = build_ledger_snapshot(server._state_ledger)
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(

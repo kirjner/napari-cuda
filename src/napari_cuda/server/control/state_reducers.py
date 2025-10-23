@@ -17,10 +17,6 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.scene import (
-    ServerSceneData,
-    build_render_scene_state,
-)
 from napari_cuda.server.control.transactions import (
     apply_bootstrap_transaction,
     apply_camera_update_transaction,
@@ -232,7 +228,6 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
 
 
 def reduce_layer_property(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     *,
@@ -284,7 +279,6 @@ def reduce_layer_property(
 
 
 def reduce_volume_render_mode(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     mode: str,
@@ -323,7 +317,6 @@ def reduce_volume_render_mode(
 
 
 def reduce_volume_contrast_limits(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     lo: float,
@@ -364,7 +357,6 @@ def reduce_volume_contrast_limits(
 
 
 def reduce_volume_colormap(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     name: str,
@@ -404,7 +396,6 @@ def reduce_volume_colormap(
 
 
 def reduce_volume_opacity(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     alpha: float,
@@ -444,7 +435,6 @@ def reduce_volume_opacity(
 
 
 def reduce_volume_sample_step(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     sample_step: float,
@@ -671,7 +661,6 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
 
 
 def reduce_bootstrap_state(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     *,
@@ -736,12 +725,6 @@ def reduce_bootstrap_state(
         displayed=displayed_tuple if displayed_tuple else None,
         labels=None,
     )
-
-    with lock:
-        store.multiscale_state["current_level"] = resolved_current_level
-        store.multiscale_state["levels"] = [dict(level) for level in levels]
-        store.multiscale_state["level_shapes"] = [list(shape) for shape in resolved_level_shapes]
-        store.multiscale_state.pop("downgraded", None)
 
     entries = _dims_entries_from_payload(
         dims_payload,
@@ -815,7 +798,6 @@ def reduce_bootstrap_state(
 
 
 def reduce_dims_update(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     *,
@@ -915,7 +897,6 @@ def reduce_dims_update(
 
 
 def reduce_view_update(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     *,
@@ -999,7 +980,6 @@ def reduce_view_update(
 
 
 def reduce_level_update(
-    store: ServerSceneData,
     ledger: ServerStateLedger,
     lock: Lock,
     *,
@@ -1051,22 +1031,6 @@ def reduce_level_update(
             level_shapes_payload.append(shape_tuple)
         level_shapes_payload[level] = shape_tuple
     updated_level_shapes = tuple(level_shapes_payload) if level_shapes_payload else tuple()
-
-    with lock:
-        store.multiscale_state["current_level"] = level
-        if updated_level_shapes:
-            store.multiscale_state["level_shapes"] = [
-                [int(dim) for dim in shape]
-                for shape in updated_level_shapes
-            ]
-        levels_state = store.multiscale_state.get("levels")
-        if isinstance(levels_state, list) and 0 <= level < len(levels_state):
-            entry = dict(levels_state[level])
-            if shape_tuple is not None:
-                entry["shape"] = [int(v) for v in shape_tuple]
-            levels_state[level] = entry
-        if downgraded is not None:
-            store.multiscale_state["downgraded"] = bool(downgraded)
 
     step_metadata = {"source": "worker.level_update", "level": level}
     if intent_id is not None:

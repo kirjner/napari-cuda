@@ -4,7 +4,7 @@ import asyncio
 import json
 import threading
 from types import SimpleNamespace
-from typing import Any, Coroutine, List, Tuple, Mapping, Optional
+from typing import Any, Coroutine, List, Tuple, Mapping, Optional, Sequence
 
 import time
 import pytest
@@ -32,7 +32,12 @@ from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
-from napari_cuda.server.scene import build_render_scene_state, create_server_scene_data
+from napari_cuda.server.scene import (
+    build_render_scene_state,
+    default_volume_state,
+    layer_controls_from_ledger,
+    multiscale_state_from_snapshot,
+)
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -110,7 +115,6 @@ class _FakeWS(SimpleNamespace):
 
 
 def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
-    scene = create_server_scene_data()
     manager = ViewerSceneManager((640, 480))
     worker = _CaptureWorker()
     manager.update_from_sources(
@@ -126,7 +130,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
 
     server = SimpleNamespace()
-    server._scene = scene
     server._scene_manager = manager
     server._state_lock = threading.RLock()
     server._worker = worker
@@ -141,6 +144,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server.height = 480
     server.cfg = SimpleNamespace(fps=60.0)
     server.use_volume = False
+    server._latest_scene_snapshot: Optional[RenderLedgerSnapshot] = None
     scheduled: list[Coroutine[Any, Any, None]] = []
     captured: list[dict[str, Any]] = []
 
@@ -185,9 +189,56 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
             "current_level": 0,
         }
     )
-    server._scene.multiscale_state["current_level"] = 0
-    server._scene.multiscale_state["levels"] = [{"index": 0, "shape": [10, 10, 10]}]
     server._pixel = SimpleNamespace(bypass_until_key=False)
+
+    def _update_scene_manager() -> None:
+        snapshot = build_render_scene_state(server._state_ledger)
+        multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+        current_step = list(snapshot.current_step) if snapshot.current_step is not None else None
+
+        defaults = default_volume_state()
+        default_clim = defaults.get("clim", [0.0, 1.0])
+        if isinstance(default_clim, Sequence):
+            default_clim_list = [float(v) for v in default_clim]
+        else:
+            default_clim_list = [0.0, 1.0]
+
+        clim_values = snapshot.volume_clim
+        clim_list = [float(v) for v in clim_values] if clim_values is not None else default_clim_list
+
+        volume_state = {
+            "mode": snapshot.volume_mode or defaults.get("mode"),
+            "colormap": snapshot.volume_colormap or defaults.get("colormap"),
+            "clim": clim_list,
+            "opacity": float(
+                snapshot.volume_opacity
+                if snapshot.volume_opacity is not None
+                else defaults.get("opacity", 1.0)
+            ),
+            "sample_step": float(
+                snapshot.volume_sample_step
+                if snapshot.volume_sample_step is not None
+                else defaults.get("sample_step", 1.0)
+            ),
+        }
+
+        layer_controls = layer_controls_from_ledger(server._state_ledger.snapshot())
+
+        server._scene_manager.update_from_sources(
+            worker=worker,
+            scene_state=snapshot,
+            multiscale_state=multiscale_state or None,
+            volume_state=volume_state,
+            current_step=current_step,
+            ndisplay=int(snapshot.ndisplay) if snapshot.ndisplay is not None else int(baseline_dims.ndisplay),
+            zarr_path=None,
+            scene_source=None,
+            viewer_model=None,
+            layer_controls=layer_controls or None,
+        )
+        server._latest_scene_snapshot = snapshot
+
+    server._update_scene_manager = _update_scene_manager
 
     server._schedule_coro = lambda coro, _label: scheduled.append(coro)
     server._state_ledger = ServerStateLedger()
@@ -199,14 +250,8 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         await state_channel_handler._broadcast_dims_state(server, payload=payload)
 
     def _mirror_apply(payload: NotifyDimsPayload) -> None:
-        with server._state_lock:
-            multiscale_state = server._scene.multiscale_state
-            multiscale_state["current_level"] = payload.current_level
-            multiscale_state["levels"] = [dict(level) for level in payload.levels]
-            if payload.downgraded is not None:
-                multiscale_state["downgraded"] = bool(payload.downgraded)
-            else:
-                multiscale_state.pop("downgraded", None)
+        _ = payload
+        server._update_scene_manager()
 
     server._dims_mirror = ServerDimsMirror(
         ledger=server._state_ledger,
@@ -217,6 +262,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
 
     initial_payload = baseline_dims
     _record_dims_to_ledger(server, initial_payload, origin="bootstrap")
+    server._update_scene_manager()
     server._dims_mirror.start()
 
     async def _layer_broadcast(
@@ -252,7 +298,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in baseline_dims.level_shapes)
     levels_payload = tuple(dict(level) for level in baseline_dims.levels)
     reduce_bootstrap_state(
-        server._scene,
         server._state_ledger,
         server._state_lock,
         step=tuple(int(v) for v in baseline_dims.current_step),
@@ -264,6 +309,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         ndisplay=int(baseline_dims.ndisplay),
         origin="test.bootstrap",
     )
+    server._update_scene_manager()
 
     server._state_ledger.record_confirmed(
         "scene",
@@ -275,11 +321,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
     while scheduled:
         asyncio.run(scheduled.pop(0))
-
-    def _update_scene_manager() -> None:
-        return
-
-    server._update_scene_manager = _update_scene_manager
 
     server._ndisplay_calls: list[int] = []
 
@@ -293,6 +334,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         value = 3 if int(ndisplay) >= 3 else 2
         server._ndisplay_calls.append(value)
         server.use_volume = bool(value == 3)
+        server._update_scene_manager()
         return ServerLedgerUpdate(
             scope="view",
             target="main",
@@ -731,9 +773,10 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     assert payload["current_level"] == 1
     assert payload.get("downgraded") is True
 
-    ms_state = server._scene.multiscale_state
+    ms_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
     assert ms_state.get("current_level") == 1
-    assert ms_state.get("levels")[1]["shape"] == [256, 128, 32]
+    levels_snapshot = ms_state.get("levels") or []
+    assert levels_snapshot and levels_snapshot[1]["shape"] == [256, 128, 32]
     assert ms_state.get("downgraded") is True
 
 
@@ -936,7 +979,6 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         server, scheduled, captured = _make_server()
         server.use_volume = False
         reduce_layer_property(
-            server._scene,
             server._state_ledger,
             server._state_lock,
             layer_id="layer-0",
@@ -944,7 +986,6 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             value=0.25,
         )
         reduce_layer_property(
-            server._scene,
             server._state_ledger,
             server._state_lock,
             layer_id="layer-0",
@@ -952,21 +993,11 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             value="viridis",
         )
 
-        snapshot_state = build_render_scene_state(server._state_ledger, server._scene)
+        snapshot_state = build_render_scene_state(server._state_ledger)
         _drain_scheduled(scheduled)
         captured.clear()
 
-        server._scene_manager.update_from_sources(
-            worker=server._worker,
-            scene_state=snapshot_state,
-            multiscale_state=None,
-            volume_state=None,
-            current_step=None,
-            ndisplay=2,
-            zarr_path=None,
-            scene_source=None,
-            layer_controls=server._layer_mirror.latest_controls(),
-        )
+        server._update_scene_manager()
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
         server._state_send = lambda _ws, text: captured.append(json.loads(text))
@@ -1021,8 +1052,8 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot]:
     store: ResumableHistoryStore = server._resumable_store
     scene_payload = state_channel_handler.build_notify_scene_payload(
-        server._scene,
         server._scene_manager,
+        ledger_snapshot=server._state_ledger.snapshot(),
         viewer_settings={"fps_target": 60.0},
     )
     scene_snapshot = store.snapshot_envelope(

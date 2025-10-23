@@ -6,10 +6,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
-from napari_cuda.server.scene import (
-    ServerSceneData,
-    volume_state_from_ledger,
-)
+from napari_cuda.server.scene import volume_state_from_ledger
 from napari_cuda.server.control.state_ledger import LedgerEntry
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 
@@ -19,11 +16,9 @@ from napari_cuda.server.control.state_models import ServerLedgerUpdate
 
 
 def build_notify_scene_payload(
-    scene: ServerSceneData,
     manager: ViewerSceneManager,
     *,
-    ledger_snapshot: Optional[Mapping[tuple[str, str, str], LedgerEntry]] = None,
-    timestamp: Optional[float] = None,
+    ledger_snapshot: Mapping[tuple[str, str, str], LedgerEntry],
     viewer_settings: Optional[Mapping[str, Any]] = None,
 ) -> NotifyScenePayload:
     """Build a ``notify.scene`` payload aligned with the greenfield schema."""
@@ -37,8 +32,8 @@ def build_notify_scene_payload(
         settings = payload.viewer.setdefault("settings", {})
         settings.update({str(key): _normalize_value(value) for key, value in viewer_settings.items()})
 
-    payload.policies = _build_policies_block(scene)
-    payload.metadata = _merge_scene_metadata(snapshot.metadata, scene, ledger_snapshot)
+    payload.policies = _build_policies_block(ledger_snapshot)
+    payload.metadata = _merge_scene_metadata(snapshot.metadata, ledger_snapshot)
 
     return payload
 
@@ -71,52 +66,52 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
-def _build_policies_block(scene: ServerSceneData) -> Optional[Dict[str, Any]]:
-    policies: Dict[str, Any] = {}
-    multiscale = scene.multiscale_state or {}
-    if isinstance(multiscale, Mapping):
-        policy_payload: Dict[str, Any] = {}
-        policy = multiscale.get("policy")
-        if policy is not None:
-            policy_payload["policy"] = str(policy)
-        current_level = multiscale.get("current_level")
-        if current_level is not None:
-            try:
-                policy_payload["active_level"] = int(current_level)
-            except Exception:
-                policy_payload["active_level"] = current_level
-        downgraded = multiscale.get("downgraded")
-        if downgraded is not None:
-            policy_payload["downgraded"] = bool(downgraded)
-        index_space = multiscale.get("index_space")
-        if index_space is not None:
-            policy_payload["index_space"] = str(index_space)
-        levels = multiscale.get("levels")
-        if isinstance(levels, Sequence):
-            level_payload = []
-            for entry in levels:
-                if isinstance(entry, Mapping):
-                    level_payload.append({str(k): _normalize_value(v) for k, v in entry.items()})
-            if level_payload:
-                policy_payload["levels"] = level_payload
-        if policy_payload:
-            policies["multiscale"] = policy_payload
+def _build_policies_block(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+) -> Optional[Dict[str, Any]]:
+    policy_payload: Dict[str, Any] = {}
 
-    return policies or None
+    policy_entry = snapshot.get(("multiscale", "main", "policy"))
+    if policy_entry is not None and policy_entry.value is not None:
+        policy_payload["policy"] = str(policy_entry.value)
+
+    level_entry = snapshot.get(("multiscale", "main", "level"))
+    if level_entry is not None and level_entry.value is not None:
+        try:
+            policy_payload["active_level"] = int(level_entry.value)
+        except Exception:
+            policy_payload["active_level"] = level_entry.value
+
+    downgraded_entry = snapshot.get(("multiscale", "main", "downgraded"))
+    if downgraded_entry is not None and downgraded_entry.value is not None:
+        policy_payload["downgraded"] = bool(downgraded_entry.value)
+
+    index_space_entry = snapshot.get(("multiscale", "main", "index_space"))
+    if index_space_entry is not None and index_space_entry.value is not None:
+        policy_payload["index_space"] = str(index_space_entry.value)
+
+    levels_entry = snapshot.get(("multiscale", "main", "levels"))
+    if levels_entry is not None and isinstance(levels_entry.value, Sequence):
+        level_payload = []
+        for entry in levels_entry.value:
+            if isinstance(entry, Mapping):
+                level_payload.append({str(k): _normalize_value(v) for k, v in entry.items()})
+        if level_payload:
+            policy_payload["levels"] = level_payload
+
+    if not policy_payload:
+        return None
+
+    return {"multiscale": policy_payload}
 
 
 def _merge_scene_metadata(
     snapshot_metadata: Mapping[str, Any],
-    scene: ServerSceneData,
-    ledger_snapshot: Optional[Mapping[tuple[str, str, str], LedgerEntry]] = None,
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = dict(snapshot_metadata)
 
-    if ledger_snapshot is not None:
-        volume_state = volume_state_from_ledger(ledger_snapshot)
-    else:
-        volume_state = {}
-
+    volume_state = volume_state_from_ledger(snapshot)
     if volume_state:
         metadata.setdefault("volume_state", {})
         metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in volume_state.items()})

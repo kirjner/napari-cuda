@@ -24,7 +24,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 | `control_channel_server.py` | 3 012 | WebSocket server handling state.update, notify.*, resume tokens, command execution. |
 | `state_reducers.py` | 511 | Reducers that apply `state.update` payloads and emit ledger-backed results. |
 | `resumable_history_store.py` | 249 | Maintains topic history for resume/replay. |
-| `control_payload_builder.py` | 194 | Builds ack/notify payloads from `ServerSceneData` snapshots + ledger state. |
+| `control_payload_builder.py` | 194 | Builds ack/notify payloads directly from the ledger snapshot (no scene cache). |
 | `mirrors/dims_mirror.py` | 118 | Subscribes to the ledger and broadcasts `notify.dims` payloads. |
 | `command_registry.py` | 54 | Maps greenfield command names to callables (e.g., `napari.pixel.request_keyframe`). |
 
@@ -32,7 +32,7 @@ in `server/data`, rendering pipeline in `server/rendering`, transport in
 
 | Module | Lines | Purpose |
 | --- | ---:| --- |
-| `data.py` | 318 | Owns `ServerSceneData`, compatibility caches, and helper utilities (`layer_controls_from_ledger`, etc.). |
+| `data.py` | 318 | Provides ledger utilities (`build_render_scene_state`, `layer_controls_from_ledger`, etc.). |
 | `layer_manager.py` | 566 | Maintains layer blocks, emits scene snapshots/deltas for control baselines. |
 
 ## Runtime Helpers (`server/runtime`)

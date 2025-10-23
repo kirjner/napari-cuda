@@ -3,7 +3,7 @@ graph LR
     subgraph AsyncLoop["EGLHeadlessServer (async loop)"]
         SSC["control_channel_server\n(ingest_state, dims/spec)"]
         PCH["pixel_channel\n(client lifecycle, keyframe)"]
-        SceneBag["ServerSceneData\n(mutable state bag)"]
+        Ledger["ServerStateLedger\n(authoritative state)"]
         PixelBag["PixelBroadcastState\n(frame queue + metrics)"]
         WQueue["WorkerSceneNotificationQueue"]
     end
@@ -20,12 +20,14 @@ graph LR
 
     %% Data/control flow
     StateClient -->|intents| SSC
-    SSC -->|mutate| SceneBag
-    SSC -->|broadcast dims/spec| StateClient
-    SceneBag -->|enqueue updates| SceneQueue
+    SSC -->|ledger writes| Ledger
+    Ledger -->|subscribe| SSC
+    Ledger -->|subscribe| SceneQueue
     SceneQueue --> Worker
     Worker -->|scene_refresh| WQueue
     WQueue --> SSC
+
+    SSC -->|broadcast dims/spec| StateClient
 
     PixelClient -->|connect| PCH
     PCH -->|metrics/gauges| SSC
