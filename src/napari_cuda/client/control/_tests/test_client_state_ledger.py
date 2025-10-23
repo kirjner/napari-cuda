@@ -98,6 +98,7 @@ def test_apply_ack_accepted_updates_confirmed_state(store: ClientStateLedger) ->
             "in_reply_to": pending.frame_id,
             "status": "accepted",
             "applied_value": 0.5,
+            "version": 11,
         },
         timestamp=10.0,
     )
@@ -109,10 +110,12 @@ def test_apply_ack_accepted_updates_confirmed_state(store: ClientStateLedger) ->
     assert outcome.confirmed_value == pytest.approx(0.5)
     assert outcome.applied_value == pytest.approx(0.5)
     assert outcome.was_pending is True
+    assert outcome.version == 11
 
     debug = store.dump_debug()["layer:layer-1:opacity"]
     assert debug["pending"] == []
     assert debug["confirmed"]["value"] == pytest.approx(0.5)
+    assert debug["confirmed"]["version"] == 11
 
 
 def test_apply_ack_rejected_reverts_to_confirmed(store: ClientStateLedger) -> None:

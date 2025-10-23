@@ -138,6 +138,8 @@ def _ack_from_pending(pending: IntentRecord, *, status: str, applied_value: Any 
     }
     if status == 'accepted' and applied_value is not None:
         payload['applied_value'] = applied_value
+    if status == 'accepted':
+        payload['version'] = 1
     if status == 'rejected':
         payload['error'] = error or {'code': 'state.rejected', 'message': 'rejected'}
     return build_ack_state(
@@ -550,6 +552,7 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
             'in_reply_to': pending.frame_id,
             'status': 'accepted',
             'applied_value': 271,
+            'version': 2,
         },
         timestamp=6.0,
     )

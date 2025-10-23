@@ -703,7 +703,6 @@ class StateServerHarness:
                 target="main",
                 key="ndisplay",
                 value=value,
-                server_seq=scene.next_server_seq,
                 intent_id=intent_id,
                 timestamp=timestamp,
                 origin=origin,

@@ -611,10 +611,11 @@ class StateChannel:
 
         payload = frame.payload
         logger.debug(
-            "ack.state received intent=%s in_reply_to=%s status=%s",
+            "ack.state received intent=%s in_reply_to=%s status=%s version=%s",
             payload.intent_id,
             payload.in_reply_to,
             payload.status,
+            payload.version,
         )
         if _STATE_DEBUG and payload.applied_value is not None:
             logger.debug(

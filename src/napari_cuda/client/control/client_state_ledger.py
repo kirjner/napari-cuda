@@ -71,6 +71,7 @@ class AckReconciliation:
     error: Optional[Dict[str, Any]]
     update_phase: Optional[str]
     metadata: Optional[Dict[str, Any]]
+    version: Optional[Any]
     pending_len: int
     was_pending: bool
 
@@ -249,8 +250,10 @@ class ClientStateLedger:
         applied_value = payload.applied_value
         error_dict: Optional[Dict[str, Any]] = None
         status = str(payload.status)
+        ack_version = payload.version
 
         if status == "accepted":
+            assert ack_version is not None, "accepted ack requires version"
             if property_state is not None:
                 value_to_store = applied_value if applied_value is not None else pending_value
                 if value_to_store is not None:
@@ -258,7 +261,7 @@ class ClientStateLedger:
                         value=value_to_store,
                         timestamp=float(self._clock()),
                         origin="remote_ack",
-                        version=None,
+                        version=ack_version,
                         metadata=dict(metadata) if metadata is not None else None,
                     )
                     confirmed_value = property_state.confirmed.value
@@ -295,6 +298,7 @@ class ClientStateLedger:
             error=error_dict,
             update_phase=update_phase,
             metadata=metadata,
+            version=ack_version,
             pending_len=len(property_state.pending) if property_state is not None else 0,
             was_pending=pending_entry is not None,
         )

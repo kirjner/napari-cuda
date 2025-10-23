@@ -20,12 +20,12 @@ from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import (
     ServerSceneData,
     build_render_scene_state,
-    get_control_meta,
-    increment_server_sequence,
 )
 from napari_cuda.server.control.transactions import (
+    apply_bootstrap_transaction,
     apply_camera_update_transaction,
     apply_dims_step_transaction,
+    apply_layer_property_transaction,
     apply_level_switch_transaction,
     apply_view_toggle_transaction,
 )
@@ -246,64 +246,55 @@ def reduce_layer_property(
     canonical = _normalize_layer_property(prop, value)
     ts = _now(timestamp)
 
-    with lock:
-        server_seq = increment_server_sequence(store)
-
-        meta = get_control_meta(store, "layer", layer_id, prop)
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
-
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    ledger.record_confirmed(
-        "layer",
-        layer_id,
-        prop,
-        canonical,
+    updates: list[tuple[str, str, str, Any]] = [("layer", layer_id, prop, canonical)]
+
+    with lock:
+        volume_sync: list[tuple[str, Any]] = []
+        if prop == "colormap":
+            volume_state = store.volume_state
+            if volume_state.get("colormap") != canonical:
+                volume_state["colormap"] = canonical
+                volume_sync.append(("colormap", canonical))
+        elif prop == "contrast_limits":
+            lo, hi = float(canonical[0]), float(canonical[1])
+            volume_state = store.volume_state
+            if volume_state.get("clim") != [lo, hi]:
+                volume_state["clim"] = [lo, hi]
+                volume_sync.append(("contrast_limits", (lo, hi)))
+        elif prop == "opacity":
+            alpha = float(canonical)
+            volume_state = store.volume_state
+            if volume_state.get("opacity") != alpha:
+                volume_state["opacity"] = alpha
+                volume_sync.append(("opacity", alpha))
+
+    for volume_key, volume_value in volume_sync:
+        updates.append(("volume", "main", volume_key, volume_value))
+
+    stored_entries = apply_layer_property_transaction(
+        ledger=ledger,
+        updates=updates,
         origin=origin,
         timestamp=ts,
         metadata=metadata,
     )
 
-    volume_sync: list[tuple[str, Any]] = []
-    if prop == "colormap":
-        volume_state = store.volume_state
-        if volume_state.get("colormap") != canonical:
-            volume_state["colormap"] = canonical
-            volume_sync.append(("colormap", canonical))
-    elif prop == "contrast_limits":
-        lo, hi = float(canonical[0]), float(canonical[1])
-        volume_state = store.volume_state
-        if volume_state.get("clim") != [lo, hi]:
-            volume_state["clim"] = [lo, hi]
-            volume_sync.append(("contrast_limits", (lo, hi)))
-    elif prop == "opacity":
-        alpha = float(canonical)
-        volume_state = store.volume_state
-        if volume_state.get("opacity") != alpha:
-            volume_state["opacity"] = alpha
-            volume_sync.append(("opacity", alpha))
-
-    for volume_key, volume_value in volume_sync:
-        ledger.record_confirmed(
-            "volume",
-            "main",
-            volume_key,
-            volume_value,
-            origin=f"{origin}.volume",
-            timestamp=ts,
-            metadata=metadata,
-        )
+    primary_entry = stored_entries.get(("layer", layer_id, prop))
+    assert primary_entry is not None, "layer transaction must return primary entry"
+    assert primary_entry.version is not None, "layer transaction must yield version"
+    version = int(primary_entry.version)
 
     return ServerLedgerUpdate(
         scope="layer",
         target=layer_id,
         key=prop,
         value=canonical,
-        server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        version=version,
     )
 
 
@@ -323,32 +314,29 @@ def reduce_volume_render_mode(
 
     with lock:
         store.volume_state["mode"] = normalized
-        server_seq = increment_server_sequence(store)
-        meta = get_control_meta(store, "volume", "main", "render_mode")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
 
-    metadata = {"intent_id": intent_id} if intent_id else None
-
-    ledger.record_confirmed(
-        "volume",
-        "main",
-        "render_mode",
-        normalized,
+    stored_entries = apply_layer_property_transaction(
+        ledger=ledger,
+        updates=[("volume", "main", "render_mode", normalized)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
     )
+
+    entry = stored_entries.get(("volume", "main", "render_mode"))
+    assert entry is not None, "volume transaction must return entry"
+    assert entry.version is not None, "volume transaction must yield version"
+    version = int(entry.version)
 
     return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="render_mode",
         value=normalized,
-        server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        version=version,
     )
 
 
@@ -368,32 +356,31 @@ def reduce_volume_contrast_limits(
 
     with lock:
         store.volume_state["clim"] = [pair[0], pair[1]]
-        server_seq = increment_server_sequence(store)
-        meta = get_control_meta(store, "volume", "main", "contrast_limits")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    ledger.record_confirmed(
-        "volume",
-        "main",
-        "contrast_limits",
-        pair,
+    stored_entries = apply_layer_property_transaction(
+        ledger=ledger,
+        updates=[("volume", "main", "contrast_limits", pair)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
     )
+
+    entry = stored_entries.get(("volume", "main", "contrast_limits"))
+    assert entry is not None, "volume transaction must return entry"
+    assert entry.version is not None, "volume transaction must yield version"
+    version = int(entry.version)
 
     return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="contrast_limits",
         value=pair,
-        server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        version=version,
     )
 
 
@@ -412,32 +399,31 @@ def reduce_volume_colormap(
 
     with lock:
         store.volume_state["colormap"] = normalized
-        server_seq = increment_server_sequence(store)
-        meta = get_control_meta(store, "volume", "main", "colormap")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    ledger.record_confirmed(
-        "volume",
-        "main",
-        "colormap",
-        normalized,
+    stored_entries = apply_layer_property_transaction(
+        ledger=ledger,
+        updates=[("volume", "main", "colormap", normalized)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
     )
+
+    entry = stored_entries.get(("volume", "main", "colormap"))
+    assert entry is not None, "volume transaction must return entry"
+    assert entry.version is not None, "volume transaction must yield version"
+    version = int(entry.version)
 
     return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="colormap",
         value=normalized,
-        server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        version=version,
     )
 
 
@@ -456,32 +442,31 @@ def reduce_volume_opacity(
 
     with lock:
         store.volume_state["opacity"] = value
-        server_seq = increment_server_sequence(store)
-        meta = get_control_meta(store, "volume", "main", "opacity")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    ledger.record_confirmed(
-        "volume",
-        "main",
-        "opacity",
-        value,
+    stored_entries = apply_layer_property_transaction(
+        ledger=ledger,
+        updates=[("volume", "main", "opacity", value)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
     )
+
+    entry = stored_entries.get(("volume", "main", "opacity"))
+    assert entry is not None, "volume transaction must return entry"
+    assert entry.version is not None, "volume transaction must yield version"
+    version = int(entry.version)
 
     return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="opacity",
         value=value,
-        server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        version=version,
     )
 
 
@@ -500,32 +485,31 @@ def reduce_volume_sample_step(
 
     with lock:
         store.volume_state["sample_step"] = value
-        server_seq = increment_server_sequence(store)
-        meta = get_control_meta(store, "volume", "main", "sample_step")
-        meta.last_server_seq = server_seq
-        meta.last_timestamp = ts
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    ledger.record_confirmed(
-        "volume",
-        "main",
-        "sample_step",
-        value,
+    stored_entries = apply_layer_property_transaction(
+        ledger=ledger,
+        updates=[("volume", "main", "sample_step", value)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
     )
+
+    entry = stored_entries.get(("volume", "main", "sample_step"))
+    assert entry is not None, "volume transaction must return entry"
+    assert entry.version is not None, "volume transaction must yield version"
+    version = int(entry.version)
 
     return ServerLedgerUpdate(
         scope="volume",
         target="main",
         key="sample_step",
         value=value,
-        server_seq=server_seq,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
+        version=version,
     )
 
 
@@ -731,31 +715,106 @@ def reduce_bootstrap_state(
     origin: str = "server.bootstrap",
     timestamp: Optional[float] = None,
 ) -> list[ServerLedgerUpdate]:
-    """Legacy bootstrap reducer retained for tests; worker closes the fence."""
+    """Seed the ledger and local state from bootstrap metadata."""
+
+    ts = _now(timestamp)
 
     resolved_step = tuple(int(v) for v in step)
     resolved_axis_labels = tuple(str(label) for label in axis_labels)
+    resolved_order = tuple(int(idx) for idx in order)
+    resolved_level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in level_shapes)
+    resolved_levels = tuple(dict(level) for level in levels)
+    resolved_current_level = int(current_level)
+    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
+    mode_value = "volume" if resolved_ndisplay >= 3 else "plane"
+
+    ndim = max(
+        len(resolved_axis_labels),
+        len(resolved_step),
+        len(resolved_order),
+        len(resolved_level_shapes[resolved_current_level]) if resolved_level_shapes else 0,
+    )
+    if ndim == 0:
+        ndim = 1
+
+    if not resolved_order:
+        resolved_order = tuple(range(ndim))
+
     axis_index = 0 if resolved_step else 0
     if resolved_axis_labels and axis_index < len(resolved_axis_labels):
         axis_target = str(resolved_axis_labels[axis_index])
     else:
         axis_target = str(axis_index)
-    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
 
-    dims_seq, view_seq, ts = apply_bootstrap_transaction(
-        store,
-        ledger,
-        lock,
-        step=step,
-        axis_labels=axis_labels,
-        order=order,
-        level_shapes=level_shapes,
-        levels=levels,
-        current_level=current_level,
-        ndisplay=ndisplay,
-        origin=origin,
-        timestamp=timestamp,
+    displayed = (
+        resolved_order[-resolved_ndisplay:]
+        if resolved_order
+        else tuple(range(max(ndim - resolved_ndisplay, 0), ndim))
     )
+    displayed_tuple = tuple(int(v) for v in displayed)
+
+    dims_payload = NotifyDimsPayload(
+        current_step=resolved_step,
+        level_shapes=resolved_level_shapes,
+        levels=resolved_levels,
+        current_level=resolved_current_level,
+        downgraded=False,
+        mode=mode_value,
+        ndisplay=resolved_ndisplay,
+        axis_labels=resolved_axis_labels if resolved_axis_labels else None,
+        order=resolved_order if resolved_order else None,
+        displayed=displayed_tuple if displayed_tuple else None,
+        labels=None,
+    )
+
+    with lock:
+        store.multiscale_state["current_level"] = resolved_current_level
+        store.multiscale_state["levels"] = [dict(level) for level in levels]
+        store.multiscale_state["level_shapes"] = [list(shape) for shape in resolved_level_shapes]
+        store.multiscale_state.pop("downgraded", None)
+        store.use_volume = bool(mode_value == "volume")
+
+    entries = _dims_entries_from_payload(
+        dims_payload,
+        axis_index=axis_index,
+        axis_target=axis_target,
+    )
+
+    axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
+    axis_index_metadata = {
+        "axis_index": axis_index,
+        "axis_target": axis_target,
+    }
+    entries.append(
+        (
+            "dims",
+            axis_target,
+            "index",
+            axis_index_value,
+            axis_index_metadata,
+        )
+    )
+
+    op_entry = ledger.get("scene", "main", "op_seq")
+    next_op_seq = int(op_entry.value) + 1 if op_entry is not None and isinstance(op_entry.value, int) else 1
+
+    stored_entries = apply_bootstrap_transaction(
+        ledger=ledger,
+        op_seq=next_op_seq,
+        entries=entries,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    dims_entry = stored_entries.get(("dims", axis_target, "index"))
+    assert dims_entry is not None, "bootstrap transaction must return dims index entry"
+    assert dims_entry.version is not None, "bootstrap transaction must yield dims version"
+    dims_version = int(dims_entry.version)
+
+    view_entry = stored_entries.get(("view", "main", "ndisplay"))
+    assert view_entry is not None, "bootstrap transaction must return view entry"
+    assert view_entry.version is not None, "bootstrap transaction must yield view version"
+    view_version = int(view_entry.version)
 
     dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
     view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
@@ -764,23 +823,23 @@ def reduce_bootstrap_state(
         scope="dims",
         target=axis_target,
         key="index",
-        value=int(resolved_step[axis_index]) if resolved_step else 0,
-        server_seq=dims_seq,
+        value=axis_index_value,
         intent_id=dims_intent_id,
         timestamp=ts,
         axis_index=axis_index,
         current_step=resolved_step,
         origin=origin,
+        version=dims_version,
     )
     view_update = ServerLedgerUpdate(
         scope="view",
         target="main",
         key="ndisplay",
         value=resolved_ndisplay,
-        server_seq=view_seq,
         intent_id=view_intent_id,
         timestamp=ts,
         origin=origin,
+        version=view_version,
     )
 
     return [dims_update, view_update]
@@ -881,7 +940,6 @@ def reduce_dims_update(
         target=control_target,
         key=prop,
         value=int(step[idx]),
-        server_seq=None,
         intent_id=resolved_intent_id,
         timestamp=ts,
         axis_index=idx,
@@ -978,7 +1036,6 @@ def reduce_view_update(
         target="main",
         key="ndisplay",
         value=int(target_ndisplay),
-        server_seq=None,
         intent_id=resolved_intent_id,
         timestamp=ts,
         origin=origin,
@@ -1097,7 +1154,6 @@ def reduce_level_update(
         target="main",
         key="level",
         value=level,
-        server_seq=None,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
@@ -1119,7 +1175,7 @@ def reduce_camera_update(
     rect: Optional[Sequence[float]] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.camera",
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], int]:
     if (
         center is None
         and zoom is None
@@ -1184,7 +1240,15 @@ def reduce_camera_update(
         timestamp=ts,
     )
 
-    return ack
+    versions = [
+        int(entry.version)
+        for entry in stored_entries.values()
+        if entry.version is not None
+    ]
+    assert versions, "camera transaction must return versioned entries"
+    version = max(versions)
+
+    return ack, version
 
 
 StateUpdateResult = ServerLedgerUpdate
@@ -1192,7 +1256,6 @@ StateUpdateResult = ServerLedgerUpdate
 __all__ = [
     "ServerLedgerUpdate",
     "StateUpdateResult",
-    "apply_bootstrap_transaction",
     "clamp_level",
     "clamp_opacity",
     "clamp_sample_step",
@@ -1211,145 +1274,3 @@ __all__ = [
     "reduce_view_update",
     "resolve_axis_index",
 ]
-
-
-def apply_bootstrap_transaction(
-    store: ServerSceneData,
-    ledger: ServerStateLedger,
-    lock: Lock,
-    *,
-    step: Sequence[int],
-    axis_labels: Sequence[str],
-    order: Sequence[int],
-    level_shapes: Sequence[Sequence[int]],
-    levels: Sequence[Mapping[str, Any]],
-    current_level: int,
-    ndisplay: int,
-    origin: str = "server.bootstrap",
-    timestamp: Optional[float] = None,
-) -> tuple[int, int, float]:
-    """Seed the ledger from bootstrap metadata and return ledger seq metadata."""
-
-    ts = _now(timestamp)
-    resolved_step = tuple(int(v) for v in step)
-    resolved_axis_labels = tuple(str(label) for label in axis_labels)
-    resolved_order = tuple(int(v) for v in order)
-    resolved_level_shapes = tuple(
-        tuple(int(dim) for dim in shape) for shape in level_shapes
-    )
-    resolved_levels = tuple(dict(level) for level in levels)
-    resolved_current_level = int(current_level)
-    resolved_ndisplay = 3 if int(ndisplay) >= 3 else 2
-    mode_value = "volume" if resolved_ndisplay >= 3 else "plane"
-
-    ndim = max(
-        len(resolved_axis_labels),
-        len(resolved_step),
-        len(resolved_order),
-        len(resolved_level_shapes[resolved_current_level]) if resolved_level_shapes else 0,
-    )
-    if ndim == 0:
-        ndim = 1
-
-    if not resolved_order:
-        resolved_order = tuple(range(ndim))
-
-    axis_index = 0 if resolved_step else 0
-    axis_target = (
-        resolved_axis_labels[axis_index]
-        if resolved_axis_labels and axis_index < len(resolved_axis_labels)
-        else str(axis_index)
-    )
-
-    displayed = (
-        resolved_order[-resolved_ndisplay:]
-        if resolved_order
-        else tuple(range(max(ndim - resolved_ndisplay, 0), ndim))
-    )
-    displayed_tuple = tuple(int(v) for v in displayed)
-
-    # Open operation fence
-    with lock:
-        op_seq = increment_server_sequence(store)
-    ledger.batch_record_confirmed(
-        (
-            ("scene", "main", "op_seq", int(op_seq)),
-            ("scene", "main", "op_state", "open"),
-            ("scene", "main", "op_kind", "bootstrap"),
-        ),
-        origin=origin,
-        timestamp=ts,
-        dedupe=False,
-    )
-
-    with lock:
-        store.last_scene_seq = increment_server_sequence(store)
-        dims_seq = store.last_scene_seq
-        dims_meta = get_control_meta(store, "dims", axis_target, "index")
-        dims_meta.last_server_seq = dims_seq
-        dims_meta.last_timestamp = ts
-
-        store.multiscale_state["current_level"] = resolved_current_level
-        store.multiscale_state["levels"] = [dict(level) for level in levels]
-        store.multiscale_state["level_shapes"] = [
-            list(shape) for shape in resolved_level_shapes
-        ]
-        if "downgraded" in store.multiscale_state:
-            store.multiscale_state["downgraded"] = False
-
-        store.last_scene_seq = increment_server_sequence(store)
-        view_seq = store.last_scene_seq
-        view_meta = get_control_meta(store, "view", "main", "ndisplay")
-        view_meta.last_server_seq = view_seq
-        view_meta.last_timestamp = ts
-        store.use_volume = bool(mode_value == "volume")
-
-        dims_payload = NotifyDimsPayload(
-            current_step=resolved_step,
-            level_shapes=resolved_level_shapes,
-            levels=resolved_levels,
-            current_level=resolved_current_level,
-            downgraded=False,
-            mode=mode_value,
-            ndisplay=resolved_ndisplay,
-            axis_labels=resolved_axis_labels if resolved_axis_labels else None,
-            order=resolved_order if resolved_order else None,
-            displayed=displayed_tuple if displayed_tuple else None,
-            labels=None,
-        )
-
-        entries = _dims_entries_from_payload(
-            dims_payload,
-            axis_index=axis_index,
-            axis_target=axis_target,
-        )
-        axis_index_metadata = {
-            "axis_index": axis_index,
-            "axis_target": axis_target,
-            "server_seq": dims_seq,
-        }
-        axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
-        entries.append(
-            (
-                "dims",
-                axis_target,
-                "index",
-                axis_index_value,
-                axis_index_metadata,
-            )
-        )
-
-    ledger.batch_record_confirmed(
-        entries,
-        origin=origin,
-        timestamp=ts,
-        dedupe=False,
-    )
-
-    with lock:
-        store.latest_state = build_render_scene_state(
-            ledger,
-            store,
-        )
-
-    return int(dims_seq), int(view_seq), ts

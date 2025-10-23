@@ -157,6 +157,7 @@ def test_state_channel_ack_dispatch() -> None:
             'in_reply_to': 'state-88',
             'status': 'accepted',
             'applied_value': {'value': 1},
+            'version': 4,
         },
         timestamp=2.5,
     )
@@ -168,6 +169,7 @@ def test_state_channel_ack_dispatch() -> None:
     assert ack.payload.intent_id == 'intent-55'
     assert ack.payload.in_reply_to == 'state-88'
     assert ack.payload.status == 'accepted'
+    assert ack.payload.version == 4
 
 
 def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> None:

@@ -71,6 +71,7 @@ def test_handle_ack_updates_state() -> None:
         error=None,
         update_phase='update',
         metadata=None,
+        version=42,
         pending_len=0,
         was_pending=True,
     )
@@ -101,6 +102,7 @@ def test_handle_ack_reverts_on_rejection() -> None:
         error={'code': 'camera.out_of_bounds'},
         update_phase='update',
         metadata=None,
+        version=None,
         pending_len=0,
         was_pending=True,
     )

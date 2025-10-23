@@ -128,10 +128,12 @@ def test_handle_ack_accept_clears_runtime(emitter_setup: EmitterSetup) -> None:
             "in_reply_to": pending.frame_id,
             "status": "accepted",
             "applied_value": 0.3,
+            "version": 7,
         },
         timestamp=10.0,
     )
     outcome = ledger.apply_ack(ack)
+    assert outcome.version == 7
     emitter.handle_ack(outcome)
 
     runtime_key = "layer:layer-1:opacity"
@@ -166,4 +168,3 @@ def test_handle_ack_rejected_reverts_property(emitter_setup: EmitterSetup) -> No
     emitter.handle_ack(outcome)
 
     assert layer.opacity == pytest.approx(original_opacity)
-

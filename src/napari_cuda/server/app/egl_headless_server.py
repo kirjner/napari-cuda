@@ -64,7 +64,7 @@ from napari_cuda.server.control.state_models import BootstrapSceneMetadata
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.state_reducers import (
-    apply_bootstrap_transaction,
+    reduce_bootstrap_state,
     reduce_dims_update,
     reduce_camera_update,
 )
@@ -699,7 +699,7 @@ class EGLHeadlessServer:
             policy_hysteresis=self._ctx.policy.hysteresis,
             cooldown_ms=self._ctx.policy.cooldown_ms,
         )
-        apply_bootstrap_transaction(
+        reduce_bootstrap_state(
             self._scene,
             self._state_ledger,
             self._state_lock,
@@ -844,12 +844,12 @@ class EGLHeadlessServer:
                     seq,
                     pose.center,
                     pose.zoom,
-                    pose.angles,
-                    pose.distance,
-                    pose.fov,
-                    pose.rect,
-                )
-            ack = reduce_camera_update(
+                pose.angles,
+                pose.distance,
+                pose.fov,
+                pose.rect,
+            )
+            ack_state, _ = reduce_camera_update(
                 self._state_ledger,
                 center=pose.center,
                 zoom=pose.zoom,
@@ -934,7 +934,7 @@ class EGLHeadlessServer:
             _broadcast_camera_update(
                 self,
                 mode="pose",
-                state=ack,
+                state=ack_state,
                 intent_id=None,
                 origin="worker.state.camera",
             ),

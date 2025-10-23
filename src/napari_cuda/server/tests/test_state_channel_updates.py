@@ -299,7 +299,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
             target="main",
             key="ndisplay",
             value=value,
-            server_seq=server._scene.next_server_seq,
             intent_id=intent_id,
             timestamp=timestamp,
             origin=origin,
@@ -449,22 +448,64 @@ def test_layer_update_emits_ack_and_notify() -> None:
     entry = server._state_ledger.get("layer", "layer-0", "colormap")
     assert entry is not None
     assert entry.value == "red"
+    assert entry.version is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
-    assert ack_payload == {
-        "intent_id": "layer-intent",
-        "in_reply_to": "state-layer-1",
-        "status": "accepted",
-        "applied_value": "red",
-    }
+    assert ack_payload["intent_id"] == "layer-intent"
+    assert ack_payload["in_reply_to"] == "state-layer-1"
+    assert ack_payload["status"] == "accepted"
+    assert ack_payload["applied_value"] == "red"
+    assert ack_payload["version"] == entry.version
 
     layer_frames = _frames_of_type(captured, "notify.layers")
     assert layer_frames, "expected notify.layers frame"
     notify_payload = layer_frames[-1]["payload"]
     assert notify_payload["layer_id"] == "layer-0"
     assert notify_payload["changes"]["colormap"] == "red"
+
+
+def test_layer_update_dedupe_preserves_version() -> None:
+    server, scheduled, captured = _make_server()
+
+    payload = {
+        "scope": "layer",
+        "target": "layer-0",
+        "key": "opacity",
+        "value": 0.6,
+    }
+
+    frame = _build_state_update(payload, intent_id="layer-dedupe", frame_id="state-layer-dup")
+
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    _drain_scheduled(scheduled)
+    acks = _frames_of_type(captured, "ack.state")
+    assert len(acks) == 1
+    ack_payload = acks[0]["payload"]
+    assert ack_payload["status"] == "accepted"
+    assert ack_payload["applied_value"] == pytest.approx(0.6)
+    base_version = ack_payload["version"]
+
+    entry = server._state_ledger.get("layer", "layer-0", "opacity")
+    assert entry is not None
+    assert entry.value == pytest.approx(0.6)
+    assert entry.version == base_version
+
+    captured.clear()
+
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    _drain_scheduled(scheduled)
+
+    entry_after = server._state_ledger.get("layer", "layer-0", "opacity")
+    assert entry_after is not None
+    assert entry_after.version == base_version
+
+    replay_acks = _frames_of_type(captured, "ack.state")
+    assert len(replay_acks) == 1
+    replay_payload = replay_acks[0]["payload"]
+    assert replay_payload["status"] == "accepted"
+    assert replay_payload["version"] == base_version
 
 
 def test_call_command_requests_keyframe() -> None:
@@ -579,16 +620,16 @@ def test_dims_update_emits_ack_and_notify() -> None:
     dims_entry = server._state_ledger.get("dims", "main", "current_step")
     assert dims_entry is not None
     assert tuple(int(v) for v in dims_entry.value) == (5, 0, 0)
+    assert dims_entry.version is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
-    assert ack_payload == {
-        "intent_id": "dims-intent",
-        "in_reply_to": "state-dims-1",
-        "status": "accepted",
-        "applied_value": 5,
-    }
+    assert ack_payload["intent_id"] == "dims-intent"
+    assert ack_payload["in_reply_to"] == "state-dims-1"
+    assert ack_payload["status"] == "accepted"
+    assert ack_payload["applied_value"] == 5
+    assert ack_payload["version"] == dims_entry.version
 
     notify_payload = NotifyDimsPayload.from_dict(
         _make_dims_snapshot(
@@ -625,17 +666,17 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     view_entry = server._state_ledger.get("view", "main", "ndisplay")
     assert view_entry is not None
     assert int(view_entry.value) == 3
+    assert view_entry.version is not None
     assert server.use_volume is True
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
     ack_payload = acks[-1]["payload"]
-    assert ack_payload == {
-        "intent_id": "view-intent",
-        "in_reply_to": "state-view-1",
-        "status": "accepted",
-        "applied_value": 3,
-    }
+    assert ack_payload["intent_id"] == "view-intent"
+    assert ack_payload["in_reply_to"] == "state-view-1"
+    assert ack_payload["status"] == "accepted"
+    assert ack_payload["applied_value"] == 3
+    assert ack_payload["version"] == view_entry.version
 
     interim_dims = _frames_of_type(captured, "notify.dims")
     if interim_dims:
@@ -715,16 +756,18 @@ def test_volume_render_mode_update() -> None:
     _drain_scheduled(scheduled)
 
     assert server._scene.volume_state.get("mode") == "iso"
+    volume_entry = server._state_ledger.get("volume", "main", "render_mode")
+    assert volume_entry is not None
+    assert volume_entry.version is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
-    assert ack_payload == {
-        "intent_id": "volume-intent",
-        "in_reply_to": "state-volume-1",
-        "status": "accepted",
-        "applied_value": "iso",
-    }
+    assert ack_payload["intent_id"] == "volume-intent"
+    assert ack_payload["in_reply_to"] == "state-volume-1"
+    assert ack_payload["status"] == "accepted"
+    assert ack_payload["applied_value"] == "iso"
+    assert ack_payload["version"] == volume_entry.version
 
     layer_frames = _frames_of_type(captured, "notify.layers")
     assert not layer_frames
@@ -751,16 +794,17 @@ def test_camera_zoom_update_emits_notify() -> None:
     assert cmd.kind == 'zoom'
     assert cmd.factor == 1.2
     assert cmd.anchor_px == (12.0, 24.0)
+    seq = server._camera_seq.get("main")
+    assert seq is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
-    assert ack_payload == {
-        "intent_id": "cam-zoom",
-        "in_reply_to": "state-cam-1",
-        "status": "accepted",
-        "applied_value": {"factor": 1.2, "anchor_px": [12.0, 24.0]},
-    }
+    assert ack_payload["intent_id"] == "cam-zoom"
+    assert ack_payload["in_reply_to"] == "state-cam-1"
+    assert ack_payload["status"] == "accepted"
+    assert ack_payload["applied_value"] == {"factor": 1.2, "anchor_px": [12.0, 24.0]}
+    assert ack_payload["version"] == seq
 
     notify_frames = _frames_of_type(captured, "notify.camera")
     assert notify_frames, "expected notify.camera frame"
@@ -789,12 +833,15 @@ def test_camera_reset_triggers_keyframe() -> None:
     deltas = server._camera_queue.pop_all()
     assert deltas and deltas[-1].kind == 'reset'
     assert server._ensure_keyframe_calls == 1
+    seq = server._camera_seq.get("main")
+    assert seq is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
     ack_payload = acks[0]["payload"]
     assert ack_payload["intent_id"] == "cam-reset"
     assert ack_payload["applied_value"] == {"reason": "ui"}
+    assert ack_payload["version"] == seq
 
     notify_frames = _frames_of_type(captured, "notify.camera")
     assert notify_frames
@@ -829,15 +876,25 @@ def test_camera_set_updates_latest_state() -> None:
     assert center_entry is not None and center_entry.value == (1.0, 2.0, 3.0)
     assert zoom_entry is not None and zoom_entry.value == 2.5
     assert angles_entry is not None and angles_entry.value == (0.1, 0.2, 0.3)
+    assert center_entry.version is not None
+    assert zoom_entry.version is not None
+    assert angles_entry.version is not None
+    expected_version = max(
+        int(center_entry.version),
+        int(zoom_entry.version),
+        int(angles_entry.version),
+    )
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks
-    applied = acks[-1]["payload"]["applied_value"]
+    payload = acks[-1]["payload"]
+    applied = payload["applied_value"]
     assert applied == {
         "center": [1.0, 2.0, 3.0],
         "zoom": 2.5,
         "angles": [0.1, 0.2, 0.3],
     }
+    assert payload["version"] == expected_version
 
     notify_frames = _frames_of_type(captured, "notify.camera")
     assert notify_frames

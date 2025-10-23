@@ -9,6 +9,7 @@ an envelope and payload pair.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
 PROTO_VERSION = 1
@@ -907,6 +908,7 @@ class AckStatePayload:
     status: str
     applied_value: Any | None = None
     error: StateErrorPayload | None = None
+    version: int | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -915,6 +917,7 @@ class AckStatePayload:
             "status": self.status,
             "applied_value": self.applied_value,
             "error": self.error.to_dict() if self.error else None,
+            "version": self.version,
         }
         return _strip_none(data)
 
@@ -934,12 +937,26 @@ class AckStatePayload:
             raise ValueError("ack.state accepted payload cannot include error details")
         if status_value == "rejected" and error is None:
             raise ValueError("ack.state rejected payload requires error details")
+        raw_version = mapping.get("version")
+        if status_value == "accepted":
+            if raw_version is None:
+                raise ValueError("ack.state accepted payload requires version")
+            if not isinstance(raw_version, Integral):
+                raise ValueError("ack.state version must be integer")
+            version = int(raw_version)
+        else:
+            version = None
+            if raw_version is not None:
+                if not isinstance(raw_version, Integral):
+                    raise ValueError("ack.state version must be integer")
+                version = int(raw_version)
         return cls(
             intent_id=str(mapping["intent_id"]),
             in_reply_to=str(mapping["in_reply_to"]),
             status=status_value,
             applied_value=mapping.get("applied_value"),
             error=error,
+            version=version,
         )
 
 

@@ -1169,6 +1169,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.error", "failed to apply ndisplay")
             return True
 
+        assert result.version is not None, "view reducer must supply version"
         await _send_state_ack(
             server,
             ws,
@@ -1177,6 +1178,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             in_reply_to=frame_id,
             status="accepted",
             applied_value=int(result.value),
+            version=int(result.version),
         )
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -1200,7 +1202,11 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             )
             return True
 
-        async def _ack_camera(applied_value: Mapping[str, Any] | str | None) -> None:
+        async def _ack_camera(
+            applied_value: Mapping[str, Any] | str | None,
+            *,
+            version: int,
+        ) -> None:
             await _send_state_ack(
                 server,
                 ws,
@@ -1209,6 +1215,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 in_reply_to=frame_id,
                 status="accepted",
                 applied_value=applied_value,
+                version=int(version),
             )
 
         log_camera_info = bool(server._log_cam_info)
@@ -1253,8 +1260,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 "anchor_px": [anchor[0], anchor[1]],
             }
 
-            await _ack_camera(ack_value)
-
             _log_camera(
                 "state: camera.zoom factor=%.4f anchor=(%.1f,%.1f)",
                 factor,
@@ -1265,6 +1270,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 metrics.inc('napari_cuda_state_camera_updates')
 
             seq = server._next_camera_command_seq(cam_target or "main")
+            await _ack_camera(ack_value, version=seq)
             server._enqueue_camera_delta(
                 CameraDeltaCommand(
                     kind='zoom',
@@ -1307,13 +1313,12 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
 
             ack_value = {"dx_px": float(dx), "dy_px": float(dy)}
 
-            await _ack_camera(ack_value)
-
+            seq = server._next_camera_command_seq(cam_target or "main")
+            await _ack_camera(ack_value, version=seq)
             if dx != 0.0 or dy != 0.0:
                 _log_camera("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
                 if metrics is not None:
                     metrics.inc('napari_cuda_state_camera_updates')
-                seq = server._next_camera_command_seq(cam_target or "main")
                 server._enqueue_camera_delta(
                     CameraDeltaCommand(
                         kind='pan',
@@ -1356,13 +1361,12 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
 
             ack_value = {"d_az_deg": float(d_az), "d_el_deg": float(d_el)}
 
-            await _ack_camera(ack_value)
-
+            seq = server._next_camera_command_seq(cam_target or "main")
+            await _ack_camera(ack_value, version=seq)
             if d_az != 0.0 or d_el != 0.0:
                 _log_camera("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
                 if metrics is not None:
                     metrics.inc('napari_cuda_state_camera_updates')
-                seq = server._next_camera_command_seq(cam_target or "main")
                 server._enqueue_camera_delta(
                     CameraDeltaCommand(
                         kind='orbit',
@@ -1396,12 +1400,11 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 reason_value = str(value)
             reason = reason_value if reason_value is not None else 'state.update'
 
-            await _ack_camera({'reason': reason})
-
             _log_camera("state: camera.reset")
             if metrics is not None:
                 metrics.inc('napari_cuda_state_camera_updates')
             seq = server._next_camera_command_seq(cam_target or "main")
+            await _ack_camera({'reason': reason}, version=seq)
             server._enqueue_camera_delta(
                 CameraDeltaCommand(kind='reset', target=cam_target or "main", command_seq=int(seq)),
             )
@@ -1447,7 +1450,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 )
                 return True
 
-            ack_components = reduce_camera_update(
+            ack_components, ack_version = reduce_camera_update(
                 server._state_ledger,
                 center=center_tuple,
                 zoom=zoom_float,
@@ -1456,7 +1459,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 timestamp=timestamp,
             )
 
-            await _ack_camera(ack_components)
+            await _ack_camera(ack_components, version=ack_version)
 
             _log_camera(
                 "state: camera.set center=%s zoom=%s angles=%s",
@@ -1510,6 +1513,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.error", "layer update failed", details={"scope": scope, "key": key, "target": layer_id})
             return True
 
+        assert result.version is not None, "layer reducer must supply version"
         await _send_state_ack(
             server,
             ws,
@@ -1518,16 +1522,17 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             in_reply_to=frame_id,
             status="accepted",
             applied_value=result.value,
+            version=int(result.version),
         )
 
         logger.debug(
-            "state.update layer intent=%s frame=%s layer_id=%s key=%s value=%s server_seq=%s",
+            "state.update layer intent=%s frame=%s layer_id=%s key=%s value=%s version=%s",
             intent_id,
             frame_id,
             layer_id,
             key,
             result.value,
-            result.server_seq,
+            result.version,
         )
 
         server._schedule_coro(
@@ -1630,6 +1635,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.invalid", f"unsupported volume key {key}", details={"scope": scope, "key": key})
             return True
 
+        assert result.version is not None, "volume reducer must supply version"
         await _send_state_ack(
             server,
             ws,
@@ -1638,6 +1644,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             in_reply_to=frame_id,
             status="accepted",
             applied_value=result.value,
+            version=int(result.version),
         )
 
         logger.debug(
@@ -1707,6 +1714,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             await _reject("state.invalid", f"unsupported multiscale key {key}", details={"scope": scope, "key": key})
             return True
 
+        assert result.version is not None, "multiscale reducer must supply version"
         await _send_state_ack(
             server,
             ws,
@@ -1715,6 +1723,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             in_reply_to=frame_id,
             status="accepted",
             applied_value=result.value,
+            version=int(result.version),
         )
 
         server._schedule_coro(
@@ -1792,6 +1801,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 result.current_step,
             )
 
+        assert result.version is not None, "dims reducer must supply version"
         await _send_state_ack(
             server,
             ws,
@@ -1800,6 +1810,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             in_reply_to=frame_id,
             status="accepted",
             applied_value=result.value,
+            version=int(result.version),
         )
 
         return True
@@ -2174,6 +2185,7 @@ async def _send_state_ack(
     status: str,
     applied_value: Any | None = None,
     error: Mapping[str, Any] | Any | None = None,
+    version: int | None = None,
 ) -> None:
     """Build and emit an ``ack.state`` frame that mirrors the incoming update."""
 
@@ -2193,14 +2205,23 @@ async def _send_state_ack(
     if normalized_status == "accepted":
         if error is not None:
             raise ValueError("accepted ack.state payload cannot include error details")
+        if version is None:
+            raise ValueError("accepted ack.state payload requires version")
+        if not isinstance(version, Integral):
+            raise ValueError("ack.state version must be integer")
         if applied_value is not None:
             payload["applied_value"] = applied_value
+        payload["version"] = int(version)
     else:
         if not isinstance(error, Mapping):
             raise ValueError("rejected ack.state payload requires {code, message}")
         if "code" not in error or "message" not in error:
             raise ValueError("ack.state error payload must include 'code' and 'message'")
         payload["error"] = dict(error)
+        if version is not None:
+            if not isinstance(version, Integral):
+                raise ValueError("ack.state version must be integer")
+            payload["version"] = int(version)
 
     frame = build_ack_state(
         session_id=str(session_id),

@@ -40,9 +40,6 @@ __all__ = [
     "build_render_scene_state",
     "layer_controls_from_ledger",
     "volume_state_from_ledger",
-    "ControlMeta",
-    "get_control_meta",
-    "increment_server_sequence",
 ]
 
 
@@ -94,8 +91,6 @@ class ServerSceneData:
     multiscale_state: Dict[str, Any] = field(default_factory=default_multiscale_state)
     last_scene_snapshot: Optional[Dict[str, Any]] = None
     state_ledger: Optional[ServerStateLedger] = None
-    last_scene_seq: int = 0
-    control_meta: Dict[str, Dict[str, Dict[str, "ControlMeta"]]] = field(default_factory=dict)
     # Removed optimistic dims caches; staged transactions drive desired state
 
 
@@ -108,31 +103,6 @@ def create_server_scene_data(
     return ServerSceneData(state_ledger=state_ledger)
 
 
-@dataclass
-class ControlMeta:
-    """Bookkeeping for legacy reducer compatibility."""
-
-    last_server_seq: int = 0
-    last_timestamp: float = 0.0
-
-
-def get_control_meta(store: ServerSceneData, scope: str, target: str, key: str) -> ControlMeta:
-    """Return (and create if needed) control metadata for a property."""
-
-    scope_map = store.control_meta.setdefault(scope, {})
-    target_map = scope_map.setdefault(target, {})
-    meta = target_map.get(key)
-    if meta is None:
-        meta = ControlMeta()
-        target_map[key] = meta
-    return meta
-
-
-def increment_server_sequence(store: ServerSceneData) -> int:
-    """Increment and return the scene-level sequence counter."""
-
-    store.last_scene_seq += 1
-    return store.last_scene_seq
 
 
 def build_render_scene_state(
