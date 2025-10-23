@@ -78,6 +78,18 @@ Mirrors (e.g., ServerDimsMirror)
   - Latest-wins mailbox holding pending `RenderLedgerSnapshot` values and multiscale requests.
   - Signature tracking ensures the worker only triggers expensive policy refreshes when the snapshot actually changes.
 
+### Reducer ↔ Transaction Contract
+
+- Every reducer normalises inputs while holding the shared control lock, derives the canonical payload, and then calls a
+  dedicated `apply_*_transaction(...)`. Reducers never invoke the ledger directly.
+- Transactions are ledger-only helpers: they call `ServerStateLedger.batch_record_confirmed(...)`, return the stored
+  `LedgerEntry` map, and do not interact with any controller-side caches or scene bags.
+- Reducers must assert that the expected entries exist in the returned map and surface the authoritative `version`
+  (used for control-channel acks and mirrors). Deduped writes keep the previous `version` so idempotent updates reuse the
+  same ack metadata.
+- Controller helpers (`_broadcast_*`, mirrors, etc.) consume the reducer’s `ServerLedgerUpdate` (value + version) instead
+  of recalculating or touching the ledger again.
+
 - `src/napari_cuda/server/runtime/worker_lifecycle.py`
   - The render loop calls a single frame input builder to merge `LatestIntent` onto the baseline snapshot per tick.
   - After applying, the worker emits applied-first confirmations; the server commits these to the ledger without requiring a matching id for continuous scopes.
