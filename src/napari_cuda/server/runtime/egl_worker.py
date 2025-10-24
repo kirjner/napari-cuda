@@ -21,6 +21,7 @@ import math
 import os
 import threading
 import time
+from copy import deepcopy
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Optional
 
@@ -104,7 +105,7 @@ from napari_cuda.server.runtime.scene_state_applier import (
     SceneStateApplyContext,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
+from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, ViewportState, VolumeState
 from napari_cuda.server.runtime.viewport_runner import ViewportRunner
 from napari_cuda.server.runtime.worker_runtime import (
     ensure_scene_source,
@@ -446,6 +447,9 @@ class EGLRendererWorker:
             downgraded=bool(downgraded),
             zoom_ratio=None,
             lock_level=self._lock_level,
+            mode=self.viewport_state.mode,
+            plane_state=deepcopy(self.viewport_state.plane),
+            volume_state=deepcopy(self.viewport_state.volume),
         )
 
         if logger.isEnabledFor(logging.INFO):
@@ -528,6 +532,9 @@ class EGLRendererWorker:
             downgraded=bool(downgraded),
             zoom_ratio=None,
             lock_level=self._lock_level,
+            mode=self.viewport_state.mode,
+            plane_state=deepcopy(self.viewport_state.plane),
+            volume_state=deepcopy(self.viewport_state.volume),
         )
         logger.info(
             "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
@@ -622,6 +629,9 @@ class EGLRendererWorker:
             oversampling={},
             timestamp=decision.timestamp,
             downgraded=False,
+            mode=self.viewport_state.mode,
+            plane_state=deepcopy(self.viewport_state.plane),
+            volume_state=deepcopy(self.viewport_state.volume),
         )
 
         callback = self._level_intent_callback
@@ -1304,6 +1314,17 @@ class EGLRendererWorker:
     def enqueue_update(self, delta: RenderUpdate) -> None:
         """Normalize and enqueue a render delta for the worker mailbox."""
 
+        if (
+            delta.mode is not None
+            or delta.plane_state is not None
+            or delta.volume_state is not None
+        ):
+            self._render_mailbox.set_viewport_state(
+                mode=delta.mode,
+                plane_state=delta.plane_state,
+                volume_state=delta.volume_state,
+            )
+
         scene_state = None
         if delta.scene_state is not None:
             self._last_interaction_ts = time.perf_counter()
@@ -1312,6 +1333,20 @@ class EGLRendererWorker:
             self._render_mailbox.set_scene_state(scene_state)
             self._mark_render_tick_needed()
             return
+
+    def _apply_viewport_state_snapshot(
+        self,
+        *,
+        mode: Optional[RenderMode],
+        plane_state: Optional[PlaneState],
+        volume_state: Optional[VolumeState],
+    ) -> None:
+        if mode is not None:
+            self.viewport_state.mode = mode
+        if plane_state is not None:
+            self.viewport_state.plane = deepcopy(plane_state)
+        if volume_state is not None:
+            self.viewport_state.volume = deepcopy(volume_state)
 
     def _consume_render_snapshot(
         self,
@@ -1565,6 +1600,12 @@ class EGLRendererWorker:
 
     def drain_scene_updates(self) -> None:
         updates: RenderUpdate = self._render_mailbox.drain()
+        self._apply_viewport_state_snapshot(
+            mode=updates.mode,
+            plane_state=updates.plane_state,
+            volume_state=updates.volume_state,
+        )
+
         state = updates.scene_state
         if state is None:
             return
@@ -1804,6 +1845,9 @@ class EGLRendererWorker:
             downgraded=decision.downgraded,
             zoom_ratio=zoom_ratio,
             lock_level=self._lock_level,
+            mode=self.viewport_state.mode,
+            plane_state=deepcopy(self.viewport_state.plane),
+            volume_state=deepcopy(self.viewport_state.volume),
         )
 
         logger.info(

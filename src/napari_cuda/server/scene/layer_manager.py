@@ -19,6 +19,7 @@ from napari_cuda.protocol.snapshots import (
     scene_snapshot,
     viewer_snapshot_from_blocks,
 )
+from napari_cuda.server.runtime.state_structs import RenderMode
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 
@@ -611,6 +612,8 @@ class ViewerSceneManager:
     ) -> _WorkerSnapshot:
         assert worker.is_ready, "worker snapshot requested before worker ready"
 
+        viewport_state = getattr(worker, "viewport_state", None)
+
         ledger_labels = worker._ledger_axis_labels()
         assert ledger_labels is not None and len(ledger_labels) > 0, "ledger missing axis labels"
         axis_labels = [str(label) for label in ledger_labels]
@@ -629,8 +632,18 @@ class ViewerSceneManager:
 
         ledger_shapes = worker._ledger_level_shapes()
         assert ledger_shapes is not None and len(ledger_shapes) > 0, "ledger missing multiscale level shapes"
-        active_index = worker._active_ms_level
-        assert active_index is not None, "worker missing active multiscale level"
+
+        mode = viewport_state.mode if viewport_state is not None else RenderMode.PLANE
+        if viewport_state is not None:
+            if mode is RenderMode.VOLUME:
+                active_index = int(viewport_state.volume.level)
+            else:
+                active_index = int(viewport_state.plane.applied_level)
+        else:
+            active_index_value = getattr(worker, "_active_ms_level", None)
+            assert active_index_value is not None, "worker missing active multiscale level"
+            active_index = int(active_index_value)
+
         assert 0 <= int(active_index) < len(ledger_shapes), "active multiscale level out of range"
         shape = [int(s) for s in ledger_shapes[int(active_index)]]
 
@@ -641,10 +654,15 @@ class ViewerSceneManager:
         assert ledger_displayed is not None and len(ledger_displayed) == ndisplay_val, "ledger displayed axes mismatch ndisplay"
         displayed = order[-ndisplay_val:] if order else list(range(ndisplay_val))
 
+        if viewport_state is not None and mode is RenderMode.PLANE and viewport_state.plane.applied_step is not None:
+            plane_step = [int(val) for val in viewport_state.plane.applied_step]
+            if len(plane_step) == len(axis_labels):
+                current_step = plane_step
+
         dtype_value = worker._zarr_dtype or worker.volume_dtype
         dtype_str = str(dtype_value) if dtype_value is not None else None
 
-        is_volume = bool(worker.use_volume or (ndisplay == 3))
+        is_volume = bool((mode is RenderMode.VOLUME) or (ndisplay == 3))
 
         return _WorkerSnapshot(
             shape=shape,

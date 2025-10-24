@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
@@ -25,6 +25,7 @@ from napari_cuda.server.control.transactions import (
     apply_plane_restore_transaction,
     apply_view_toggle_transaction,
 )
+from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +79,68 @@ def clamp_opacity(alpha: object) -> float:
 def clamp_sample_step(rel: object) -> float:
     val = float(rel)
     return max(0.1, min(4.0, val))
+
+
+def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
+    if state is None:
+        return None
+    if isinstance(state, PlaneState):
+        return asdict(state)
+    if isinstance(state, Mapping):
+        return dict(state)
+    raise TypeError(f"unsupported plane state payload: {type(state)!r}")
+
+
+def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
+    if state is None:
+        return None
+    if isinstance(state, VolumeState):
+        return asdict(state)
+    if isinstance(state, Mapping):
+        return dict(state)
+    raise TypeError(f"unsupported volume state payload: {type(state)!r}")
+
+
+def _record_viewport_state(
+    ledger: ServerStateLedger,
+    *,
+    mode: RenderMode | str | None,
+    plane_state: PlaneState | Mapping[str, Any] | None,
+    volume_state: VolumeState | Mapping[str, Any] | None,
+    origin: str,
+    timestamp: float,
+    metadata: Optional[Mapping[str, Any]],
+) -> None:
+    entries: list[tuple] = []
+
+    if mode is not None:
+        if isinstance(mode, RenderMode):
+            mode_value = mode.name
+        else:
+            mode_value = str(mode)
+        if metadata:
+            entries.append(("viewport", "state", "mode", mode_value, dict(metadata)))
+        else:
+            entries.append(("viewport", "state", "mode", mode_value))
+
+    plane_payload = _plain_plane_state(plane_state)
+    if plane_payload is not None:
+        if metadata:
+            entries.append(("viewport", "plane", "state", plane_payload, dict(metadata)))
+        else:
+            entries.append(("viewport", "plane", "state", plane_payload))
+
+    volume_payload = _plain_volume_state(volume_state)
+    if volume_payload is not None:
+        if metadata:
+            entries.append(("viewport", "volume", "state", volume_payload, dict(metadata)))
+        else:
+            entries.append(("viewport", "volume", "state", volume_payload))
+
+    if not entries:
+        return
+
+    ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
 
 
 def clamp_level(level: object, levels: Sequence[Mapping[str, Any]]) -> int:
@@ -1004,6 +1067,9 @@ def reduce_level_update(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.multiscale",
+    mode: RenderMode | str | None = None,
+    plane_state: PlaneState | Mapping[str, Any] | None = None,
+    volume_state: VolumeState | Mapping[str, Any] | None = None,
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     metadata = {"intent_id": intent_id} if intent_id else None
@@ -1063,6 +1129,16 @@ def reduce_level_update(
         downgraded_metadata=metadata if metadata is not None and downgraded is not None else None,
         origin=origin,
         timestamp=ts,
+    )
+
+    _record_viewport_state(
+        ledger,
+        mode=mode,
+        plane_state=plane_state,
+        volume_state=volume_state,
+        origin=origin,
+        timestamp=ts,
+        metadata=metadata,
     )
 
     level_entry = stored_entries.get(("multiscale", "main", "level"))

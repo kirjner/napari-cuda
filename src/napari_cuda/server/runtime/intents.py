@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from napari_cuda.server.data.lod import LevelContext
+from napari_cuda.server.runtime.state_structs import (
+    PlaneState,
+    RenderMode,
+    VolumeState,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +27,9 @@ class LevelSwitchIntent:
     downgraded: bool
     zoom_ratio: float | None = None
     lock_level: int | None = None
+    mode: RenderMode = RenderMode.PLANE
+    plane_state: PlaneState | None = None
+    volume_state: VolumeState | None = None
 
 
 __all__ = ["LevelSwitchIntent"]

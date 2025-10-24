@@ -22,6 +22,7 @@ from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
     build_render_scene_state,
@@ -345,6 +346,14 @@ class EGLHeadlessServer:
         intent: LevelSwitchIntent,
     ) -> None:
         context = intent.context
+        intent_mode = intent.mode if intent.mode is not None else RenderMode.PLANE
+        if not isinstance(intent_mode, RenderMode):
+            try:
+                intent_mode = RenderMode[str(intent_mode).upper()]
+            except Exception:
+                intent_mode = RenderMode.PLANE
+        plane_state = intent.plane_state
+        volume_state = intent.volume_state
         controller_downgraded = bool(intent.downgraded)
         level_shapes_entry = self._state_ledger.get("multiscale", "main", "level_shapes")
         level_shapes_state: Sequence[Sequence[int]] = ()
@@ -371,6 +380,23 @@ class EGLHeadlessServer:
                 )
         downgraded = bool(controller_downgraded)
 
+        if intent_mode is RenderMode.VOLUME and isinstance(volume_state, VolumeState):
+            level_value = int(volume_state.level)
+            downgraded = bool(volume_state.downgraded)
+            step_source = getattr(context, "step", None)
+        else:
+            plane_snapshot = plane_state if isinstance(plane_state, PlaneState) else None
+            level_value = int(plane_snapshot.applied_level) if plane_snapshot is not None else int(context.level)
+            step_source = plane_snapshot.applied_step if plane_snapshot and plane_snapshot.applied_step is not None else getattr(context, "step", None)
+
+        step_tuple = tuple(int(v) for v in step_source) if step_source is not None else tuple()
+
+        applied_payload: Dict[str, Any] = {"level": level_value}
+        if step_tuple:
+            applied_payload["step"] = step_tuple
+        if getattr(context, "shape", None) is not None:
+            applied_payload["shape"] = tuple(int(v) for v in context.shape)
+
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "apply.level_intent: prev=%d target=%d reason=%s downgraded=%s",
@@ -382,30 +408,30 @@ class EGLHeadlessServer:
 
         reduce_level_update(
             self._state_ledger,
-            applied=context,
+            applied=applied_payload,
             downgraded=downgraded,
             intent_id=None,
             timestamp=None,
             origin="worker.state.level",
+            mode=intent_mode,
+            plane_state=plane_state,
+            volume_state=volume_state,
         )
         # Keep the plane view cache in sync with the latest applied level/step
         # when we are in 2D mode. This ensures 3D->2D restores pick the most
         # recent plane level even if no camera interaction occurred since the
         # level change.
         with self._state_lock:
-            nd_entry = self._state_ledger.get("view", "main", "ndisplay")
-            if nd_entry is not None and int(nd_entry.value) < 3:
-                step_entry = self._state_ledger.get("dims", "main", "current_step")
-                if step_entry is not None:
-                    step_tuple = tuple(int(v) for v in step_entry.value)
-                    cache_entries = [
-                        ("view_cache", "plane", "level", int(context.level)),
-                        ("view_cache", "plane", "step", step_tuple),
-                    ]
-                    self._state_ledger.batch_record_confirmed(
-                        cache_entries,
-                        origin="worker.state.level",
-                    )
+            if intent_mode is RenderMode.PLANE:
+                cache_level = level_value
+                cache_step = step_tuple
+                cache_entries = [("view_cache", "plane", "level", int(cache_level))]
+                if cache_step:
+                    cache_entries.append(("view_cache", "plane", "step", cache_step))
+                self._state_ledger.batch_record_confirmed(
+                    cache_entries,
+                    origin="worker.state.level",
+                )
 
         snapshot = build_render_scene_state(self._state_ledger)
         if logger.isEnabledFor(logging.INFO):
@@ -414,7 +440,14 @@ class EGLHeadlessServer:
                 int(snapshot.current_level) if snapshot.current_level is not None else -1,
                 snapshot.current_step,
             )
-        worker.enqueue_update(RenderUpdate(scene_state=snapshot))
+        worker.enqueue_update(
+            RenderUpdate(
+                scene_state=snapshot,
+                mode=intent_mode,
+                plane_state=plane_state,
+                volume_state=volume_state,
+            )
+        )
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:

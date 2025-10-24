@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import logging
 import threading
@@ -9,6 +10,7 @@ import time
 from typing import Any, Callable, Optional
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,9 @@ class RenderUpdate:
     """Latest-wins state drained by the render worker."""
 
     scene_state: Optional[RenderLedgerSnapshot]
+    mode: Optional[RenderMode] = None
+    plane_state: Optional[PlaneState] = None
+    volume_state: Optional[VolumeState] = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,9 @@ class RenderUpdateMailbox:
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
         self._scene_state: Optional[RenderLedgerSnapshot] = None
+        self._mode: Optional[RenderMode] = None
+        self._plane_state: Optional[PlaneState] = None
+        self._volume_state: Optional[VolumeState] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
         self._camera_ops: list = []
         self._last_signature: Optional[tuple] = None
@@ -43,12 +51,30 @@ class RenderUpdateMailbox:
         with self._lock:
             self._scene_state = state
 
+    def set_viewport_state(
+        self,
+        *,
+        mode: Optional[RenderMode],
+        plane_state: Optional[PlaneState],
+        volume_state: Optional[VolumeState],
+    ) -> None:
+        with self._lock:
+            self._mode = mode
+            self._plane_state = deepcopy(plane_state) if plane_state is not None else None
+            self._volume_state = deepcopy(volume_state) if volume_state is not None else None
+
     def drain(self) -> RenderUpdate:
         with self._lock:
             drained = RenderUpdate(
                 scene_state=self._scene_state,
+                mode=self._mode,
+                plane_state=self._plane_state,
+                volume_state=self._volume_state,
             )
             self._scene_state = None
+            self._mode = None
+            self._plane_state = None
+            self._volume_state = None
         return drained
 
     def record_zoom_hint(self, ratio: float, *, timestamp: Optional[float] = None) -> None:
