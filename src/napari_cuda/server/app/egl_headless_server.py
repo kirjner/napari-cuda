@@ -67,6 +67,9 @@ from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_dims_update,
     reduce_camera_update,
+    reduce_volume_colormap,
+    reduce_volume_contrast_limits,
+    reduce_volume_opacity,
 )
 from napari_cuda.server.control.transactions.level_switch import (
     apply_level_switch_transaction,
@@ -377,7 +380,33 @@ class EGLHeadlessServer:
                 downgraded,
             )
 
-        self._commit_level_snapshot(context, downgraded)
+        reduce_level_update(
+            self._state_ledger,
+            self._state_lock,
+            applied=context,
+            downgraded=downgraded,
+            intent_id=None,
+            timestamp=None,
+            origin="worker.state.level",
+        )
+        # Keep the plane view cache in sync with the latest applied level/step
+        # when we are in 2D mode. This ensures 3D->2D restores pick the most
+        # recent plane level even if no camera interaction occurred since the
+        # level change.
+        with self._state_lock:
+            nd_entry = self._state_ledger.get("view", "main", "ndisplay")
+            if nd_entry is not None and int(nd_entry.value) < 3:
+                step_entry = self._state_ledger.get("dims", "main", "current_step")
+                if step_entry is not None:
+                    step_tuple = tuple(int(v) for v in step_entry.value)
+                    cache_entries = [
+                        ("view_cache", "plane", "level", int(context.level)),
+                        ("view_cache", "plane", "step", step_tuple),
+                    ]
+                    self._state_ledger.batch_record_confirmed(
+                        cache_entries,
+                        origin="worker.state.level",
+                    )
 
         snapshot = build_render_scene_state(self._state_ledger)
         if logger.isEnabledFor(logging.INFO):
@@ -396,6 +425,114 @@ class EGLHeadlessServer:
                 logger.debug(fmt, *args)
         except Exception:
             logger.debug("volume update log failed", exc_info=True)
+
+    def _apply_worker_camera_pose(
+        self,
+        pose: CameraPoseApplied,
+    ) -> None:
+        target = pose.target or "main"
+        seq = int(pose.command_seq)
+
+        with self._state_lock:
+            if self._log_cam_debug:
+                logger.debug(
+                    "camera pose applied target=%s seq=%d center=%s zoom=%s angles=%s distance=%s fov=%s rect=%s",
+                    target,
+                    seq,
+                    pose.center,
+                    pose.zoom,
+                    pose.angles,
+                    pose.distance,
+                    pose.fov,
+                    pose.rect,
+                )
+            ack_state, _ = reduce_camera_update(
+                self._state_ledger,
+                center=pose.center,
+                zoom=pose.zoom,
+                angles=pose.angles,
+                distance=pose.distance,
+                fov=pose.fov,
+                rect=pose.rect,
+                origin="worker.state.camera",
+            )
+
+            # Persist per-mode camera caches for deterministic restores.
+            # Plane cache: camera_plane.* and view_cache.plane.*
+            # Volume cache: camera_volume.*
+            # Decide plane vs volume from presence of angles/distance/fov in applied pose.
+            if pose.angles is None and pose.distance is None and pose.fov is None:
+                # 2D plane pose expected: center, zoom, rect must be present
+                assert pose.center is not None, "plane pose requires center"
+                assert pose.zoom is not None, "plane pose requires zoom"
+                assert pose.rect is not None, "plane pose requires rect"
+
+                lvl_entry = self._state_ledger.get("multiscale", "main", "level")
+                assert lvl_entry is not None, "ledger missing multiscale/level"
+                lvl_value = int(lvl_entry.value)
+                step_entry = self._state_ledger.get("dims", "main", "current_step")
+                assert step_entry is not None, "ledger missing dims/current_step"
+                step_tuple = tuple(int(v) for v in step_entry.value)
+
+                plane_entries = [
+                    ("camera_plane", "main", "center", tuple(float(c) for c in pose.center)),
+                    ("camera_plane", "main", "zoom", float(pose.zoom)),
+                    ("camera_plane", "main", "rect", tuple(float(v) for v in pose.rect)),
+                ]
+                self._state_ledger.batch_record_confirmed(
+                    plane_entries,
+                    origin="worker.state.camera_plane",
+                )
+
+                view_cache_entries = [
+                    ("view_cache", "plane", "level", lvl_value),
+                    ("view_cache", "plane", "step", step_tuple),
+                ]
+                self._state_ledger.batch_record_confirmed(
+                    view_cache_entries,
+                    origin="worker.state.camera_plane",
+                )
+            else:
+                # 3D volume pose expected: center, angles, distance, fov must be present
+                assert pose.center is not None, "volume pose requires center"
+                assert pose.angles is not None, "volume pose requires angles"
+                assert pose.distance is not None, "volume pose requires distance"
+                assert pose.fov is not None, "volume pose requires fov"
+
+                vol_entries = [
+                    ("camera_volume", "main", "center", tuple(float(c) for c in pose.center)),
+                    ("camera_volume", "main", "angles", tuple(float(a) for a in pose.angles)),
+                    ("camera_volume", "main", "distance", float(pose.distance)),
+                    ("camera_volume", "main", "fov", float(pose.fov)),
+                ]
+                self._state_ledger.batch_record_confirmed(
+                    vol_entries,
+                    origin="worker.state.camera_volume",
+                )
+
+        # Close any open op after camera commit so dims+level+camera are atomic for mirrors
+        op_state = self._state_ledger.get("scene", "main", "op_state")
+        if op_state is not None:
+            val = str(op_state.value)
+            if val == "open":
+                self._state_ledger.record_confirmed(
+                    "scene",
+                    "main",
+                    "op_state",
+                    "applied",
+                    origin="worker.state.camera",
+                )
+
+        self._schedule_coro(
+            _broadcast_camera_update(
+                self,
+                mode="pose",
+                state=ack_state,
+                intent_id=None,
+                origin="worker.state.camera",
+            ),
+            "worker-camera-pose",
+        )
 
     def _try_reset_encoder(self, *, reason: str = "unspecified") -> bool:
         worker = self._worker
@@ -464,38 +601,6 @@ class EGLHeadlessServer:
                 worker._request_encoder_idr()
             except Exception:
                 logger.debug("ensure_keyframe: request_idr failed", exc_info=True)
-
-    def _stage_layer_controls_from_ledger(self) -> None:
-        snapshot = self._state_ledger.snapshot()
-        controls = layer_controls_from_ledger(snapshot)
-        if not controls:
-            return
-
-        primary_props = next((props for props in controls.values() if props), None)
-        if primary_props is None:
-            return
-
-        updates: list[tuple[str, str, str, Any]] = []
-        colormap = primary_props.get("colormap")
-        if colormap is not None:
-            updates.append(("volume", "main", "colormap", str(colormap)))
-
-        clim = primary_props.get("contrast_limits")
-        if clim is not None:
-            lo, hi = float(clim[0]), float(clim[1])
-            updates.append(("volume", "main", "contrast_limits", (lo, hi)))
-
-        opacity = primary_props.get("opacity")
-        if opacity is not None:
-            updates.append(("volume", "main", "opacity", float(opacity)))
-
-        if not updates:
-            return
-
-        self._state_ledger.batch_record_confirmed(
-            updates,
-            origin="control.layer_sync",
-        )
 
     def _start_kf_watchdog(self) -> None:
         return
@@ -750,40 +855,7 @@ class EGLHeadlessServer:
             metrics=self.metrics,
         )
 
-    def _commit_level_snapshot(
-        self,
-        applied: LevelContext,
-        downgraded: bool,
-    ) -> None:
-        reduce_level_update(
-            self._state_ledger,
-            self._state_lock,
-            applied=applied,
-            downgraded=bool(downgraded),
-            intent_id=None,
-            timestamp=None,
-            origin="worker.state.level",
-        )
-        # Keep the plane view cache in sync with the latest applied level/step
-        # when we are in 2D mode. This ensures 3D->2D restores pick the most
-        # recent plane level even if no camera interaction occurred since the
-        # level change.
-        with self._state_lock:
-            nd_entry = self._state_ledger.get("view", "main", "ndisplay")
-            if nd_entry is not None and int(nd_entry.value) < 3:
-                step_entry = self._state_ledger.get("dims", "main", "current_step")
-                if step_entry is not None:
-                    step_tuple = tuple(int(v) for v in step_entry.value)
-                    cache_entries = [
-                        ("view_cache", "plane", "level", int(applied.level)),
-                        ("view_cache", "plane", "step", step_tuple),
-                    ]
-                    self._state_ledger.batch_record_confirmed(
-                        cache_entries,
-                        origin="worker.state.level",
-                    )
-
-    def _commit_applied_camera(
+    def _apply_worker_camera_pose(
         self,
         pose: CameraPoseApplied,
     ) -> None:

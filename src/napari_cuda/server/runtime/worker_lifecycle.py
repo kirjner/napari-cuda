@@ -144,7 +144,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             def _forward_camera_pose(pose: CameraPoseApplied) -> None:
                 control_loop.call_soon_threadsafe(  # type: ignore[attr-defined]
-                    server._commit_applied_camera,  # type: ignore[attr-defined]
+                    server._apply_worker_camera_pose,  # type: ignore[attr-defined]
                     pose,
                 )
 

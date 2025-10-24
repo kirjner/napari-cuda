@@ -138,7 +138,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server._log_cam_info = False
     server._log_cam_debug = False
     server._allowed_render_modes = {"mip"}
-    server._stage_layer_controls_from_ledger = lambda: None
     server.metrics = SimpleNamespace(inc=lambda *a, **k: None)
     server.width = 640
     server.height = 480

@@ -587,7 +587,6 @@ class StateServerHarness:
         server.use_volume = False
         server._latest_scene_snapshot: Optional[RenderLedgerSnapshot] = None
         server._camera_seq: dict[str, int] = {}
-        server._stage_layer_controls_from_ledger = lambda: None
 
         def _next_camera_command_seq(target: str) -> int:
             current = server._camera_seq.get(target, 0) + 1

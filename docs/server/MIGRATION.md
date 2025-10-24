@@ -29,9 +29,9 @@ Status: Mirror derives mode from the ledger and buffers notifications until the 
   - File: `src/napari_cuda/server/control/control_channel_server.py`
     - Reject direct `camera.*` ledger writes; keep ack + broadcast based on deltas.
   - File: `src/napari_cuda/server/app/egl_headless_server.py`
-    - `_commit_applied_camera(...)` remains the only ledger writer for `camera.*`.
+    - `_apply_worker_camera_pose(...)` remains the only ledger writer for `camera.*`.
 
-Status: Camera intents feed `CameraCommandQueue`; `_commit_applied_camera` (worker side) is the single writer for `camera.*` and per-mode caches.
+Status: Camera intents feed `CameraCommandQueue`; `_apply_worker_camera_pose` (worker side) is the single writer for `camera.*` and per-mode caches.
 
 ## Phase 3 — RenderTxn scaffolding (atomic apply) ✅
 
@@ -57,7 +57,8 @@ Status: `render_snapshot.apply_render_snapshot` is the single apply site; scene 
   - 2D → 3D: snapshot plane cache before switch; apply volume pose from `camera_volume.*` (if absent, compute canonical TT pose once and write it).
   - 3D → 2D: read `view_cache.plane.*` and `camera_plane.rect`; project rect (world→level) and apply slab, then apply plane camera pose.
 - Remove private plane‑restore flags/caches and any “full slab” overrides.
-  - Files: `src/napari_cuda/server/app/egl_headless_server.py` (cache writes in `_commit_applied_camera`), `src/napari_cuda/server/runtime/egl_worker.py` (read/apply on mode switch), `src/napari_cuda/server/runtime/worker_runtime.py` (world‑rect→ROI projection helper).
+  - Files: `src/napari_cuda/server/app/egl_headless_server.py` (cache writes via `_apply_worker_camera_pose`), `src/napari_cuda/server/runtime/egl_worker.py` (read/apply on mode switch), `src/napari_cuda/server/runtime/worker_runtime.py` (world‑rect→ROI projection helper).
+- Layer reducers mirror the volume controls (`colormap`, `contrast_limits`, `opacity`) into `volume.*`; no staging pass is required before toggles.
 
 Status: Worker toggles reuse ledger-backed caches; `_restoring_plane` scaffolding removed. ROI helpers now live with `render_snapshot`.
 
@@ -103,7 +104,7 @@ Status: Harness exercises toggles/plane restore/level switches. Still need focus
   - Build strictly from ledger; do not merge non‑ledger “scene bag” entries.
 
 - `src/napari_cuda/server/app/egl_headless_server.py`
-  - Continue to `_commit_level_snapshot(...)` and `_commit_applied_camera(...)` only from worker callbacks.
+- Continue to `reduce_level_update(...)` + `_apply_worker_camera_pose(...)` only from worker callbacks.
   - Introduce/propagate `scene.op_seq/op_state` with reducers for op gating.
 
 - `src/napari_cuda/server/control/control_channel_server.py`

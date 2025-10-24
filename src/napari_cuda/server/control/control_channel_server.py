@@ -56,7 +56,7 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.messages import NotifyDimsPayload, NotifyLayersPayload, NotifyScenePayload, NotifyStreamPayload
 from napari_cuda.protocol.messages import STATE_UPDATE_TYPE
-from napari_cuda.server.control.state_models import ClientStateUpdateRequest, ServerLedgerUpdate
+from napari_cuda.server.control.state_models import ClientStateUpdateRequest
 from napari_cuda.server.control.state_reducers import (
     clamp_level,
     clamp_opacity,
@@ -1117,7 +1117,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 origin="client.state.view",
             )
             server.use_volume = bool(result.value == 3)
-            server._stage_layer_controls_from_ledger()
 
             server._pixel_channel.broadcast.bypass_until_key = True
             server._pixel_channel.broadcast.waiting_for_keyframe = True
@@ -1531,11 +1530,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             result.value,
             result.version,
         )
-
-        server._schedule_coro(
-            _broadcast_state_update(server, result),
-            f'state-layer-{key}',
-        )
         return True
 
     # ----- volume scope -------------------------------------------------
@@ -1554,7 +1548,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
-            rebroadcast_tag = 'rebroadcast-volume-mode'
         elif key == 'contrast_limits':
             pair = value
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
@@ -1575,7 +1568,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
-            rebroadcast_tag = 'rebroadcast-volume-clim'
         elif key == 'colormap':
             name = value
             if not isinstance(name, str) or not name.strip():
@@ -1589,7 +1581,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
-            rebroadcast_tag = 'rebroadcast-volume-colormap'
         elif key == 'opacity':
             alpha = value
             try:
@@ -1605,7 +1596,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
-            rebroadcast_tag = 'rebroadcast-volume-opacity'
         elif key == 'sample_step':
             rel = value
             try:
@@ -1621,7 +1611,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
-            rebroadcast_tag = 'rebroadcast-volume-sample-step'
         else:
             logger.debug("state.update volume ignored key=%s", key)
             await _reject("state.invalid", f"unsupported volume key {key}", details={"scope": scope, "key": key})
@@ -1645,11 +1634,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             frame_id,
             key,
             result.value,
-        )
-
-        server._schedule_coro(
-            _broadcast_state_update(server, result),
-            f'state-volume-{key}',
         )
         return True
 
@@ -1683,7 +1667,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
                 timestamp=timestamp,
                 origin="client.state.multiscale",
             )
-            rebroadcast_tag = 'rebroadcast-ms-level'
             if server._worker is not None:
                 try:
                     levels_meta = multiscale_state.get('levels') or []
@@ -1718,10 +1701,6 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
             version=int(result.version),
         )
 
-        server._schedule_coro(
-            _broadcast_state_update(server, result),
-            f'state-multiscale-{key}',
-        )
         return True
 
     # ----- dims scope ---------------------------------------------------
@@ -1852,41 +1831,6 @@ def _log_volume_event(server: Any, fmt: str, *args: Any) -> None:
         logger.debug(fmt, *args)
     except Exception:
         logger.debug("volume fallback log failed", exc_info=True)
-
-
-async def _broadcast_state_update(
-    server: Any,
-    result: ServerLedgerUpdate,
-) -> None:
-    if result.scope in {"layer", "volume", "multiscale"}:
-        return
-
-    if result.scope == "dims":
-        # The render worker will emit notify.dims once it applies the update;
-        # avoid duplicating frames from the control plane.
-        return
-
-    if result.scope == "view" and result.key == "ndisplay":
-        # Mode switch is completed by the worker; rely on its notify.dims payload
-        # to propagate authoritative metadata instead of replaying cached data.
-        return
-
-    logger.debug(
-        "state update scope ignored by greenfield broadcaster scope=%s target=%s",
-        result.scope,
-        result.target,
-    )
-
-
-async def _broadcast_state_updates(
-    server: Any,
-    results: Sequence[ServerLedgerUpdate],
-) -> None:
-    for result in results:
-        await _broadcast_state_update(
-            server,
-            result,
-        )
 
 
 def _ndim_from_meta(meta: Mapping[str, Any]) -> int:
