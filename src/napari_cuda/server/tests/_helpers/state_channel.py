@@ -49,6 +49,7 @@ from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari_cuda.server.data.roi import plane_scale_for_level
 from napari.components import viewer_model
+from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 
 from napari_cuda.server.runtime import worker_runtime
 from napari_cuda.server.runtime import render_snapshot as snapshot_mod
@@ -248,7 +249,11 @@ class CaptureWorker:
         self.policy_calls: list[str] = []
         self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
-        self.use_volume = False
+        self.viewport_state = ViewportState(mode=RenderMode.PLANE)
+        self.viewport_state.plane.applied_level = 0
+        self.viewport_state.plane.target_level = 0
+        self.viewport_state.volume.level = 0
+        self.viewport_state.volume.scale = (1.0, 1.0, 1.0)
         self._is_ready = True
         self._data_wh = (640, 480)
         self._data_d = None
@@ -277,7 +282,6 @@ class CaptureWorker:
         self._level_downgraded = False
         self._render_tick_required = False
         self._emit_current_camera_pose = lambda *_args, **_kwargs: None
-        self._volume_scale = (1.0, 1.0, 1.0)
         self._hw_limits = SimpleNamespace(volume_max_bytes=None, volume_max_voxels=None)
         self._volume_max_bytes = None
         self._volume_max_voxels = None
@@ -317,6 +321,45 @@ class CaptureWorker:
     @property
     def is_ready(self) -> bool:
         return self._is_ready
+
+    # Viewport state bridge ---------------------------------------------------
+    @property
+    def use_volume(self) -> bool:
+        return self.viewport_state.mode is RenderMode.VOLUME
+
+    @use_volume.setter
+    def use_volume(self, value: bool) -> None:
+        self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
+
+    @property
+    def _volume_scale(self) -> tuple[float, float, float]:
+        scale = self.viewport_state.volume.scale
+        if scale is None:
+            return (1.0, 1.0, 1.0)
+        return scale
+
+    @_volume_scale.setter
+    def _volume_scale(self, value: tuple[float, float, float]) -> None:
+        self.viewport_state.volume.scale = tuple(float(component) for component in value)
+
+    @property
+    def _level_downgraded(self) -> bool:
+        return bool(self.viewport_state.volume.downgraded)
+
+    @_level_downgraded.setter
+    def _level_downgraded(self, value: bool) -> None:
+        self.viewport_state.volume.downgraded = bool(value)
+
+    @property
+    def _active_ms_level(self) -> int:
+        return int(self.viewport_state.plane.applied_level)
+
+    @_active_ms_level.setter
+    def _active_ms_level(self, value: int) -> None:
+        level = int(value)
+        self.viewport_state.plane.applied_level = level
+        self.viewport_state.plane.target_level = level
+        self.viewport_state.volume.level = level
 
     # ViewerSceneManager ledger adapters --------------------------------------------------
     def _ledger_axis_labels(self) -> tuple[str, ...]:

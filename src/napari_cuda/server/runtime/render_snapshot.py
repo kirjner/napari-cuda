@@ -7,29 +7,29 @@ never observes a partially-updated dims state.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence, Dict
 import logging
 import time
 from contextlib import contextmanager
+from dataclasses import replace
+from typing import Any
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
-from dataclasses import replace
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.level_budget import select_volume_level
 from napari_cuda.server.data.roi import (
-    plane_scale_for_level,
     plane_wh_for_level,
-    viewport_debug_snapshot,
     resolve_worker_viewport_roi,
+    viewport_debug_snapshot,
+)
+from napari_cuda.server.runtime.render_ledger_snapshot import (
+    RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.roi_math import (
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
 )
+from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
 from napari_cuda.server.runtime.scene_types import SliceROI
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def viewport_roi_for_level(
 
     data_wh = worker._data_wh
 
-    def _snapshot() -> Dict[str, Any]:
+    def _snapshot() -> dict[str, Any]:
         return viewport_debug_snapshot(
             view=view,
             canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
@@ -160,17 +160,17 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     the toggle back to 2D or 3D. Camera and level application are handled by
     the worker helpers invoked from within the dims application.
     """
-    viewer = worker._viewer  # noqa: SLF001
+    viewer = worker._viewer
     assert viewer is not None, "RenderTxn requires an active viewer"
 
-    signature = worker._dims_signature(snapshot)  # noqa: SLF001
+    signature = worker._dims_signature(snapshot)
     dims_changed = signature != getattr(worker, "_last_dims_signature", None)
 
     if dims_changed:
         with _suspend_fit_callbacks(viewer):
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.begin: suppress fit; applying dims")
-            worker._apply_dims_from_snapshot(snapshot, signature=signature)  # noqa: SLF001
+            worker._apply_dims_from_snapshot(snapshot, signature=signature)
             _apply_snapshot_multiscale(worker, snapshot)
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
@@ -179,12 +179,12 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
 
 
 __all__ = [
-    "apply_render_snapshot",
     "apply_plane_slice_roi",
-    "viewport_roi_for_level",
-    "apply_volume_level",
+    "apply_render_snapshot",
     "apply_slice_level",
+    "apply_volume_level",
     "stage_level_context",
+    "viewport_roi_for_level",
 ]
 
 
@@ -194,7 +194,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
     target_volume = nd >= 3
 
-    source = worker._ensure_scene_source()  # noqa: SLF001
+    source = worker._ensure_scene_source()
     prev_level = int(worker._active_ms_level)
     target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
     level_changed = target_level != prev_level
@@ -209,7 +209,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         entering_volume = not worker.use_volume
         if entering_volume:
             worker.use_volume = True
-            worker._last_dims_signature = None  # noqa: SLF001
+            worker._last_dims_signature = None
 
         runner = worker._viewport_runner
         if runner is not None and entering_volume:
@@ -300,7 +300,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.use_volume:
         worker.use_volume = False
         worker._configure_camera_for_mode()
-        worker._last_dims_signature = None  # noqa: SLF001
+        worker._last_dims_signature = None
     worker._level_downgraded = False
     _apply_plane_camera_pose(worker, snapshot)
     apply_slice_level(worker, source, applied_context)
@@ -314,6 +314,8 @@ def _apply_volume_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> No
     if not isinstance(cam, TurntableCamera):
         return
 
+    volume_state = worker.viewport_state.volume  # type: ignore[attr-defined]
+
     center = snapshot.center
     if center is not None and len(center) >= 3:
         cam.center = (
@@ -321,6 +323,7 @@ def _apply_volume_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> No
             float(center[1]),
             float(center[2]),
         )
+        volume_state.pose_center = (float(center[0]), float(center[1]), float(center[2]))
 
     angles = snapshot.angles
     if angles is not None and len(angles) >= 2:
@@ -328,11 +331,24 @@ def _apply_volume_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> No
         cam.elevation = float(angles[1])
         if len(angles) >= 3:
             cam.roll = float(angles[2])  # type: ignore[attr-defined]
+            if volume_state is not None:
+                volume_state.pose_angles = (
+                    float(angles[0]),
+                    float(angles[1]),
+                    float(angles[2]),
+                )
+        else:
+            prev_roll = 0.0
+            if volume_state.pose_angles is not None and len(volume_state.pose_angles) >= 3:
+                prev_roll = float(volume_state.pose_angles[2])
+            volume_state.pose_angles = (float(angles[0]), float(angles[1]), prev_roll)
 
     if snapshot.distance is not None:
         cam.distance = float(snapshot.distance)
+        volume_state.pose_distance = float(snapshot.distance)
     if snapshot.fov is not None:
         cam.fov = float(snapshot.fov)
+        volume_state.pose_fov = float(snapshot.fov)
 
 
 def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
@@ -343,6 +359,8 @@ def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> Non
     if not isinstance(cam, PanZoomCamera):
         return
 
+    plane_state = worker.viewport_state.plane  # type: ignore[attr-defined]
+
     rect = snapshot.rect
     if rect is not None and len(rect) >= 4:
         cam.rect = Rect(
@@ -351,6 +369,7 @@ def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> Non
             float(rect[2]),
             float(rect[3]),
         )
+        plane_state.camera_rect = (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
 
     center = snapshot.center
     if center is not None and len(center) >= 2:
@@ -358,6 +377,11 @@ def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> Non
             float(center[0]),
             float(center[1]),
         )
+        plane_state.camera_center = (float(center[0]), float(center[1]))
+
+    if snapshot.zoom is not None and hasattr(cam, "zoom"):
+        cam.zoom = float(snapshot.zoom)
+        plane_state.camera_zoom = float(snapshot.zoom)
 
 def stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> None:
     viewer = getattr(worker, "_viewer", None)
@@ -368,7 +392,7 @@ def stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> 
         viewer.dims.current_step = tuple(int(v) for v in context.step)
 
     descriptor = source.level_descriptors[int(context.level)]
-    worker._update_level_metadata(descriptor, context)  # noqa: SLF001
+    worker._update_level_metadata(descriptor, context)
 
 
 def apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> None:
@@ -377,11 +401,11 @@ def apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> N
     while len(scales) < 3:
         scales.insert(0, 1.0)
     scale_tuple = (float(scales[-3]), float(scales[-2]), float(scales[-1]))
-    worker._volume_scale = scale_tuple  # noqa: SLF001
+    worker._volume_scale = scale_tuple
 
-    volume = worker._get_level_volume(source, applied.level)  # noqa: SLF001
+    volume = worker._get_level_volume(source, applied.level)
     cam = worker.view.camera if getattr(worker, "view", None) is not None else None
-    ctx = worker._build_scene_state_context(cam)  # noqa: SLF001
+    ctx = worker._build_scene_state_context(cam)
     if ctx.volume_scale is None:
         ctx = replace(ctx, volume_scale=scale_tuple)
 
@@ -390,8 +414,8 @@ def apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> N
         volume=volume,
         contrast=applied.contrast,
     )
-    worker._data_wh = data_wh  # noqa: SLF001
-    worker._data_d = data_d  # noqa: SLF001
+    worker._data_wh = data_wh
+    worker._data_d = data_d
 
     shape = (
         (int(data_d), int(data_wh[1]), int(data_wh[0]))
@@ -399,14 +423,14 @@ def apply_volume_level(worker: Any, source: Any, applied: lod.LevelContext) -> N
         else (int(data_wh[1]), int(data_wh[0]))
     )
 
-    worker._layer_logger.log(  # noqa: SLF001
-        enabled=worker._log_layer_debug,  # noqa: SLF001
+    worker._layer_logger.log(
+        enabled=worker._log_layer_debug,
         mode="volume",
         level=applied.level,
         z_index=None,
         shape=shape,
         contrast=applied.contrast,
-        downgraded=worker._level_downgraded,  # noqa: SLF001
+        downgraded=worker._level_downgraded,
     )
 
 
@@ -424,39 +448,39 @@ def apply_slice_level(worker: Any, source: Any, applied: lod.LevelContext) -> No
     roi = viewport_roi_for_level(worker, source, int(applied.level))
     chunk_shape = chunk_shape_for_level(source, int(applied.level))
     aligned_roi = roi
-    if worker._roi_align_chunks and chunk_shape is not None:  # noqa: SLF001
+    if worker._roi_align_chunks and chunk_shape is not None:
         aligned_roi = align_roi_to_chunk_grid(
             roi,
             chunk_shape,
-            int(worker._roi_pad_chunks),  # noqa: SLF001
+            int(worker._roi_pad_chunks),
             height=full_h,
             width=full_w,
         )
     if not worker.use_volume:
-        worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
+        worker._emit_current_camera_pose("slice-apply")
     height_px, width_px = apply_plane_slice_roi(
         worker,
         source,
         int(applied.level),
         aligned_roi,
-        update_contrast=not worker._sticky_contrast,  # noqa: SLF001
+        update_contrast=not worker._sticky_contrast,
     )
 
-    if not worker._preserve_view_on_switch:  # noqa: SLF001
+    if not worker._preserve_view_on_switch:
         world_w = float(full_w) * float(max(1e-12, sx))
         world_h = float(full_h) * float(max(1e-12, sy))
         view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
 
-    worker._layer_logger.log(  # noqa: SLF001
-        enabled=worker._log_layer_debug,  # noqa: SLF001
+    worker._layer_logger.log(
+        enabled=worker._log_layer_debug,
         mode="slice",
         level=applied.level,
-        z_index=worker._z_index,  # noqa: SLF001
+        z_index=worker._z_index,
         shape=(int(height_px), int(width_px)),
         contrast=applied.contrast,
-        downgraded=worker._level_downgraded,  # noqa: SLF001
+        downgraded=worker._level_downgraded,
     )
 
-    runner = worker._viewport_runner  # noqa: SLF001
+    runner = worker._viewport_runner
     if runner is not None:
         runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)

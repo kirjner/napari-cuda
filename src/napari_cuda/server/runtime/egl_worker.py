@@ -16,14 +16,16 @@ encoded packets back to the asyncio side through callbacks.
 
 from __future__ import annotations
 
-import os
-import time
 import logging
-from typing import Any, Callable, Dict, Optional, Mapping, Sequence, Tuple
-import threading
 import math
+import os
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Optional
 
 import numpy as np
+
 try:
     import dask.array as da  # type: ignore
 except Exception as _da_err:
@@ -34,62 +36,79 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
+import pycuda.driver as cuda  # type: ignore
 from vispy import scene  # type: ignore
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
-from napari.components.viewer_model import ViewerModel
-from napari._vispy.layers.image import VispyImageLayer, _napari_cmap_to_vispy
-
-import pycuda.driver as cuda  # type: ignore
-# Bitstream packing happens in the server layer
-from napari_cuda.server.rendering.patterns import make_rgba_image
-from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
-from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
-from napari_cuda.server.runtime.camera_animator import animate_if_enabled
-import napari_cuda.server.data.policy as level_policy
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.level_budget import LevelBudgetError, select_volume_level
+import napari_cuda.server.data.policy as level_policy
+from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
-from napari_cuda.server.rendering.egl_context import EglContext
-from napari_cuda.server.rendering.encoder import Encoder
-from napari_cuda.server.rendering.capture import CaptureFacade, FrameTimings, encode_frame
-from napari_cuda.server.runtime.runtime_loop import run_render_tick
+from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.data.hw_limits import get_hw_limits
+from napari_cuda.server.data.level_budget import (
+    LevelBudgetError,
+)
+from napari_cuda.server.data.level_logging import (
+    LayerAssignmentLogger,
+    LevelSwitchLogger,
+)
+
 # No direct use of roi_applier here; slice application goes through SceneStateApplier.
 from napari_cuda.server.data.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
 )
-from napari_cuda.server.runtime.scene_state_applier import (
-    SceneStateApplier,
-    SceneStateApplyContext,
-    SceneDrainResult,
+from napari_cuda.server.data.zarr_source import ZarrSceneSource
+from napari_cuda.server.rendering.capture import (
+    CaptureFacade,
+    FrameTimings,
+    encode_frame,
 )
-from napari_cuda.server.runtime.camera_controller import process_camera_deltas as _process_camera_deltas
+from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
+from napari_cuda.server.rendering.egl_context import EglContext
+from napari_cuda.server.rendering.encoder import Encoder
+
+# Bitstream packing happens in the server layer
+from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
+from napari_cuda.server.runtime.camera_animator import animate_if_enabled
+from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
+from napari_cuda.server.runtime.camera_controller import (
+    process_camera_deltas as _process_camera_deltas,
+)
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.intents import LevelSwitchIntent
+from napari_cuda.server.runtime.render_ledger_snapshot import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.render_snapshot import (
-    apply_render_snapshot,
     apply_plane_slice_roi,
+    apply_render_snapshot,
     apply_slice_level,
     apply_volume_level,
     stage_level_context,
     viewport_roi_for_level,
 )
-from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdate,
     RenderUpdateMailbox,
 )
-from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
+from napari_cuda.server.runtime.runtime_loop import run_render_tick
+from napari_cuda.server.runtime.scene_state_applier import (
+    SceneDrainResult,
+    SceneStateApplier,
+    SceneStateApplyContext,
+)
+from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 from napari_cuda.server.runtime.viewport_runner import ViewportRunner
-from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
-from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.runtime.intents import LevelSwitchIntent
-from napari_cuda.server.runtime.worker_runtime import ensure_scene_source, reset_worker_camera
+from napari_cuda.server.runtime.worker_runtime import (
+    ensure_scene_source,
+    reset_worker_camera,
+)
+from napari_cuda.server.scene import CameraDeltaCommand
+
 logger = logging.getLogger(__name__)
 
 
@@ -113,7 +132,6 @@ select_level = lod.select_level
 
 class _LevelBudgetError(RuntimeError):
     """Raised when a multiscale level exceeds memory/voxel budgets."""
-    pass
 
 
 class EGLRendererWorker:
@@ -144,7 +162,6 @@ class EGLRendererWorker:
     ) -> None:
         self.width = int(width)
         self.height = int(height)
-        self.use_volume = bool(use_volume)
         self._budget_error_cls = _LevelBudgetError
         self.fps = int(fps)
         self.volume_depth = int(volume_depth)
@@ -156,6 +173,11 @@ class EGLRendererWorker:
         self._debug_policy_logged = False
         self._env: Optional[Mapping[str, str]] = dict(env) if env is not None else None
 
+        # Viewport state shared between runner and worker.
+        self._viewport_state = ViewportState()
+        self.use_volume = bool(use_volume)
+        self._viewport_runner = ViewportRunner(self._viewport_state.plane)
+
         self._configure_animation(animate, animate_dps)
         self._init_render_components()
         self._init_scene_state()
@@ -164,10 +186,9 @@ class EGLRendererWorker:
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
-        self._viewport_runner = ViewportRunner()
         self._configure_budget_limits()
         self._last_dims_signature: Optional[tuple] = None
-        self._applied_versions: Dict[tuple[str, str, str], int] = {}
+        self._applied_versions: dict[tuple[str, str, str], int] = {}
 
         if policy_name:
             try:
@@ -201,6 +222,49 @@ class EGLRendererWorker:
         callback: Callable[[CameraPoseApplied], None],
     ) -> None:
         self._camera_pose_callback = callback
+
+    @property
+    def viewport_state(self) -> ViewportState:
+        return self._viewport_state
+
+    @property
+    def use_volume(self) -> bool:
+        return self._viewport_state.mode is RenderMode.VOLUME
+
+    @use_volume.setter
+    def use_volume(self, value: bool) -> None:
+        self._viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
+
+    @property
+    def _active_ms_level(self) -> int:
+        if self.use_volume:
+            return int(self._viewport_state.volume.level)
+        return int(self._viewport_state.plane.applied_level)
+
+    @_active_ms_level.setter
+    def _active_ms_level(self, value: int) -> None:
+        level = int(value)
+        self._viewport_state.plane.applied_level = level
+        self._viewport_state.volume.level = level
+
+    @property
+    def _volume_scale(self) -> tuple[float, float, float]:
+        scale = self._viewport_state.volume.scale
+        if scale is None:
+            return (1.0, 1.0, 1.0)
+        return scale
+
+    @_volume_scale.setter
+    def _volume_scale(self, value: tuple[float, float, float]) -> None:
+        self._viewport_state.volume.scale = tuple(float(component) for component in value)
+
+    @property
+    def _level_downgraded(self) -> bool:
+        return bool(self._viewport_state.volume.downgraded)
+
+    @_level_downgraded.setter
+    def _level_downgraded(self, value: bool) -> None:
+        self._viewport_state.volume.downgraded = bool(value)
 
     def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
         """Choose stable initial center and distance for TurntableCamera.
@@ -321,7 +385,7 @@ class EGLRendererWorker:
             logger.exception("Adapter scene initialization failed (legacy path removed)")
             # Fail fast: adapter is mandatory
             raise
-        
+
     # --- Multiscale: request switch (thread-safe) ---
     def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
         """Emit a manual level intent back to the controller."""
@@ -494,7 +558,7 @@ class EGLRendererWorker:
                 cam.center = (cx, cy, cz)  # type: ignore[attr-defined]
                 cam.azimuth = float(az)  # type: ignore[attr-defined]
                 cam.elevation = float(el)  # type: ignore[attr-defined]
-                setattr(cam, "roll", float(rl))
+                cam.roll = float(rl)
                 cam.distance = float(dist.value)  # type: ignore[attr-defined]
                 cam.fov = float(fov.value)  # type: ignore[attr-defined]
         self._request_encoder_idr()
@@ -611,7 +675,7 @@ class EGLRendererWorker:
         self._pose_seq: int = 1
         # Track highest command_seq observed from camera deltas
         self._max_camera_command_seq: int = 0
-        
+
 
     def _init_locks(
         self,
@@ -664,8 +728,8 @@ class EGLRendererWorker:
         self._oversampling_hysteresis = float(getattr(policy_cfg, "oversampling_hysteresis", 0.1))
 
     def _configure_roi_settings(self) -> None:
-        self._roi_cache: Dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
-        self._roi_log_state: Dict[int, tuple[SliceROI, float]] = {}
+        self._roi_cache: dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
+        self._roi_log_state: dict[int, tuple[SliceROI, float]] = {}
         worker_dbg = self._debug_policy.worker
         self._roi_edge_threshold = int(worker_dbg.roi_edge_threshold)
         self._roi_align_chunks = bool(worker_dbg.roi_align_chunks)
@@ -679,8 +743,8 @@ class EGLRendererWorker:
         self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
 
-    def snapshot_dims_metadata(self) -> Dict[str, Any]:
-        meta: Dict[str, Any] = {}
+    def snapshot_dims_metadata(self) -> dict[str, Any]:
+        meta: dict[str, Any] = {}
 
         axes = self._ledger_axis_labels()
         if axes:
@@ -831,7 +895,7 @@ class EGLRendererWorker:
         requested_level: Optional[int],
     ) -> level_policy.LevelSelectionContext:
         levels = tuple(source.level_descriptors)
-        overs_map: Dict[int, float] = {}
+        overs_map: dict[int, float] = {}
         for descriptor in levels:
             try:
                 lvl = int(descriptor.index)
@@ -928,12 +992,12 @@ class EGLRendererWorker:
         *,
         prev_level: Optional[int] = None,
     ) -> lod.LevelContext:
-        runner_step: Optional[Tuple[int, ...]] = None
+        runner_step: Optional[tuple[int, ...]] = None
         if self._viewport_runner is not None:
             runner_step = self._viewport_runner.state.target_step
 
         if runner_step is not None:
-            step_hint: Optional[Tuple[int, ...]] = runner_step
+            step_hint: Optional[tuple[int, ...]] = runner_step
         else:
             recorded = self._ledger_step()
             step_hint = (
@@ -1019,14 +1083,13 @@ class EGLRendererWorker:
         if shape is None:
             return None
         z, y, x = shape
-        try:
-            sz, sy, sx = self._volume_scale
-        except Exception:
-            sz = sy = sx = 1.0
+        sz, sy, sx = self._volume_scale
         width = float(x) * float(sx)
         height = float(y) * float(sy)
         depth = float(z) * float(sz)
-        return (width, height, depth)
+        extents = (width, height, depth)
+        self._viewport_state.volume.world_extents = extents
+        return extents
 
     def _init_capture(self) -> None:
         self._capture.ensure()
@@ -1175,7 +1238,7 @@ class EGLRendererWorker:
 
         layer_values = None
         if state.layer_values:
-            values: Dict[str, Dict[str, object]] = {}
+            values: dict[str, dict[str, object]] = {}
             for layer_id, props in state.layer_values.items():
                 if not props:
                     continue
@@ -1185,11 +1248,11 @@ class EGLRendererWorker:
 
         layer_versions = None
         if state.layer_versions:
-            versions: Dict[str, Dict[str, int]] = {}
+            versions: dict[str, dict[str, int]] = {}
             for layer_id, props in state.layer_versions.items():
                 if not props:
                     continue
-                mapped: Dict[str, int] = {}
+                mapped: dict[str, int] = {}
                 for key, version in props.items():
                     mapped[str(key)] = int(version)
                 if mapped:
@@ -1257,7 +1320,7 @@ class EGLRendererWorker:
             for key, version in state.camera_versions.items():
                 self._applied_versions[("camera", "main", str(key))] = int(version)
 
-        layer_changes: Dict[str, Dict[str, Any]] = {}
+        layer_changes: dict[str, dict[str, Any]] = {}
         layer_versions = state.layer_versions or {}
         if state.layer_values:
             for raw_layer_id, props in state.layer_values.items():
@@ -1379,6 +1442,9 @@ class EGLRendererWorker:
                 return None
             return tuple(float(component) for component in center_value)
 
+        volume_state = self._viewport_state.volume
+        plane_state = self._viewport_state.plane
+
         if isinstance(cam, TurntableCamera):
             center_tuple = _center_tuple(cam)
             distance_val = float(cam.distance)
@@ -1386,6 +1452,11 @@ class EGLRendererWorker:
             azimuth = float(cam.azimuth)
             elevation = float(cam.elevation)
             roll = float(getattr(cam, "roll", 0.0))
+            if center_tuple is not None:
+                volume_state.pose_center = tuple(float(v) for v in center_tuple)
+            volume_state.pose_distance = distance_val
+            volume_state.pose_fov = fov_val
+            volume_state.pose_angles = (azimuth, elevation, roll)
             return CameraPoseApplied(
                 target=str(target or "main"),
                 command_seq=int(command_seq),
@@ -1411,8 +1482,13 @@ class EGLRendererWorker:
                 )
             zoom_attr = cam.zoom
             if callable(zoom_attr):
-                zoom_attr = getattr(cam, "_zoom", 1.0)
+                zoom_attr = cam._zoom if hasattr(cam, "_zoom") else 1.0  # type: ignore[attr-defined]
             zoom_val = float(zoom_attr)
+            if rect_tuple is not None:
+                plane_state.camera_rect = rect_tuple
+            if center_tuple is not None and len(center_tuple) >= 2:
+                plane_state.camera_center = (float(center_tuple[0]), float(center_tuple[1]))
+            plane_state.camera_zoom = zoom_val
             return CameraPoseApplied(
                 target=str(target or "main"),
                 command_seq=int(command_seq),
@@ -1581,7 +1657,7 @@ class EGLRendererWorker:
 
         source = self._scene_source or self._ensure_scene_source()
 
-        def _resolve(level: int, _rect: Tuple[float, float, float, float]) -> SliceROI:
+        def _resolve(level: int, _rect: tuple[float, float, float, float]) -> SliceROI:
             return viewport_roi_for_level(self, source, int(level), quiet=True)
 
         intent = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
@@ -1681,7 +1757,7 @@ class EGLRendererWorker:
                     self._volume_budget_allows(scene, level)
                 else:
                     self._slice_budget_allows(scene, level)
-            except _LevelBudgetError as exc:  # noqa: SLF001
+            except _LevelBudgetError as exc:
                 raise LevelBudgetError(str(exc)) from exc
 
         decision = lod.enforce_budgets(

@@ -4,8 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime import render_snapshot as snapshot_mod
+from napari_cuda.server.runtime.render_ledger_snapshot import (
+    RenderLedgerSnapshot,
+)
+from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 
 
 class _FakeDescriptor:
@@ -43,8 +46,15 @@ class _StubPanZoomCamera:
 
 class _StubWorker:
     def __init__(self, *, use_volume: bool, level: int) -> None:
-        self.use_volume = use_volume
-        self._active_ms_level = level
+        self.viewport_state = ViewportState(mode=RenderMode.VOLUME if use_volume else RenderMode.PLANE)
+        self.viewport_state.plane.applied_level = level
+        self.viewport_state.plane.target_level = level
+        self.viewport_state.volume.level = level
+        self.viewport_state.volume.scale = (1.0, 1.0, 1.0)
+        self.viewport_state.volume.pose_angles = (0.0, 0.0, 0.0)
+        self.viewport_state.volume.pose_center = (0.0, 0.0, 0.0)
+        self.viewport_state.volume.pose_distance = 0.0
+        self.viewport_state.volume.pose_fov = 45.0
         self.configure_calls = 0
         self._last_dims_signature: tuple[int, ...] | None = None
         self._scene_source = _FakeSource()
@@ -83,6 +93,43 @@ class _StubWorker:
 
     def _update_level_metadata(self, descriptor, context) -> None:
         self._level_metadata = (descriptor, context)
+
+    @property
+    def use_volume(self) -> bool:
+        return self.viewport_state.mode is RenderMode.VOLUME
+
+    @use_volume.setter
+    def use_volume(self, value: bool) -> None:
+        self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
+
+    @property
+    def _active_ms_level(self) -> int:
+        return int(self.viewport_state.plane.applied_level)
+
+    @_active_ms_level.setter
+    def _active_ms_level(self, value: int) -> None:
+        level = int(value)
+        self.viewport_state.plane.applied_level = level
+        self.viewport_state.volume.level = level
+        self.viewport_state.plane.target_level = level
+
+    @property
+    def _volume_scale(self) -> tuple[float, float, float]:
+        scale = self.viewport_state.volume.scale
+        assert scale is not None
+        return scale
+
+    @_volume_scale.setter
+    def _volume_scale(self, value: tuple[float, float, float]) -> None:
+        self.viewport_state.volume.scale = tuple(float(component) for component in value)
+
+    @property
+    def _level_downgraded(self) -> bool:
+        return bool(self.viewport_state.volume.downgraded)
+
+    @_level_downgraded.setter
+    def _level_downgraded(self, value: bool) -> None:
+        self.viewport_state.volume.downgraded = bool(value)
 
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,6 +170,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
     assert calls["build"] == (2, 1, (5, 0, 0))
     assert calls["volume"] == 2
     assert call_order == ["volume", "configure"]
+    assert worker.viewport_state.mode is RenderMode.VOLUME
 
 
 def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,6 +203,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
     assert worker.configure_calls == 0
     assert prepare_called is False  # no load performed
     assert volume_called is False
+    assert worker.viewport_state.mode is RenderMode.VOLUME
 
 
 def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,6 +233,7 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
     assert worker.configure_calls == 1
     assert calls["build"] == (1, 1, (3, 0, 0))
     assert calls["slice"] == (1, (3, 0, 0))
+    assert worker.viewport_state.mode is RenderMode.PLANE
 
 
 def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytest.MonkeyPatch) -> None:

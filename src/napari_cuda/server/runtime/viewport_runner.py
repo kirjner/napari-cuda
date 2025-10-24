@@ -8,15 +8,19 @@ The runner keeps the authoritative view of:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any, Optional
 
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_ledger_snapshot import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.roi_math import (
     chunk_shape_for_level,
     roi_chunk_signature,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.state_structs import PlaneState
 
 
 @dataclass(frozen=True)
@@ -27,54 +31,22 @@ class ViewportIntent:
     zoom_hint: Optional[float] = None
 
 
-@dataclass
-class ViewportRunnerState:
-    # Controller intent (from the latest snapshot)
-    target_level: int = 0
-    target_ndisplay: int = 2
-    target_step: Optional[Tuple[int, ...]] = None
-    applied_step: Optional[Tuple[int, ...]] = None
-    awaiting_level_confirm: bool = False
-    snapshot_level: Optional[int] = None
-
-    # Camera pose snapshot we base ROI decisions on
-    camera_rect: Optional[Tuple[float, float, float, float]] = None
-
-    # Applied state on the worker
-    applied_level: int = 0
-    applied_roi: Optional[SliceROI] = None
-    applied_roi_signature: Optional[Tuple[int, int, int, int]] = None
-
-    # Pending work captured during plan_tick
-    pending_roi: Optional[SliceROI] = None
-    pending_roi_signature: Optional[Tuple[int, int, int, int]] = None
-
-    # Reload flags / logging
-    level_reload_required: bool = False
-    roi_reload_required: bool = False
-    pose_reason: Optional[str] = None
-
-    # Latest zoom factor from camera deltas (consumed once per plan)
-    zoom_hint: Optional[float] = None
-    camera_pose_dirty: bool = False
-
-
 class ViewportRunner:
     """Local decision surface for level and ROI application."""
 
-    def __init__(self) -> None:
-        self._state = ViewportRunnerState()
+    def __init__(self, plane_state: Optional[PlaneState] = None) -> None:
+        self._plane = plane_state if plane_state is not None else PlaneState()
         self._snapshot_pending: Optional[RenderLedgerSnapshot] = None
 
     @property
-    def state(self) -> ViewportRunnerState:
-        return self._state
+    def state(self) -> PlaneState:
+        return self._plane
 
     def ingest_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
         """Record controller intent for the upcoming plan."""
 
         self._snapshot_pending = snapshot
-        state = self._state
+        state = self._plane
 
         snapshot_level: Optional[int] = None
         if snapshot.current_level is not None:
@@ -136,8 +108,7 @@ class ViewportRunner:
 
         if not commands:
             return
-
-        state = self._state
+        state = self._plane
         dirty = state.camera_pose_dirty
         for command in commands:
             if getattr(command, "kind", None) != "zoom":
@@ -153,7 +124,7 @@ class ViewportRunner:
 
     def request_level(self, level: int) -> bool:
         level = int(level)
-        state = self._state
+        state = self._plane
         if state.target_level == level:
             if state.level_reload_required:
                 return False
@@ -164,24 +135,23 @@ class ViewportRunner:
         state.awaiting_level_confirm = True
         state.pose_reason = "level-reload"
         if state.target_ndisplay >= 3:
-            level_change = False
             state.awaiting_level_confirm = False
         return True
 
-    def update_camera_rect(self, rect: Optional[Tuple[float, float, float, float]]) -> None:
+    def update_camera_rect(self, rect: Optional[tuple[float, float, float, float]]) -> None:
         """Record the current camera rect (called after apply)."""
 
-        self._state.camera_rect = tuple(float(v) for v in rect) if rect is not None else None
+        self._plane.camera_rect = tuple(float(v) for v in rect) if rect is not None else None
 
     def plan_tick(
         self,
         *,
         source: Any,
-        roi_resolver: Callable[[int, Tuple[float, float, float, float]], SliceROI],
+        roi_resolver: Callable[[int, tuple[float, float, float, float]], SliceROI],
     ) -> ViewportIntent:
         """Decide what needs to change during the next render tick."""
 
-        state = self._state
+        state = self._plane
         pose_reason = state.pose_reason
         intent_zoom_hint = state.zoom_hint
         state.zoom_hint = None
@@ -248,7 +218,7 @@ class ViewportRunner:
     def mark_level_applied(self, level: int) -> None:
         """Clear level reload state once the worker finishes applying it."""
 
-        state = self._state
+        state = self._plane
         state.applied_level = int(level)
         state.level_reload_required = False
         state.awaiting_level_confirm = False
@@ -260,11 +230,11 @@ class ViewportRunner:
         self,
         roi: SliceROI,
         *,
-        chunk_shape: Optional[Tuple[int, int]],
+        chunk_shape: Optional[tuple[int, int]],
     ) -> None:
         """Clear ROI reload state once the worker finishes applying it."""
 
-        state = self._state
+        state = self._plane
         state.applied_roi = roi
         state.applied_roi_signature = roi_chunk_signature(roi, chunk_shape)
         state.roi_reload_required = False
