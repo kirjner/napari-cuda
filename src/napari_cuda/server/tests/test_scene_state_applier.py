@@ -84,7 +84,7 @@ def _load_slice(_source: _StubSceneSource, _level: int, z_index: int):
     return np.array([[base + 0, base + 1], [base + 2, base + 3]], dtype=float)
 
 
-def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
+def test_apply_dims_and_slice_updates_viewer_and_source_metadata() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
     visual = _StubVisual()
@@ -119,19 +119,19 @@ def test_apply_dims_and_slice_updates_layer_and_camera() -> None:
     result = SceneStateApplier.apply_dims_and_slice(ctx, current_step=(1, 1, 1))
 
     assert viewer.dims.current_step == (1, 1, 1)
-    assert layer.data is not None and np.all(layer.data == np.array([[10, 11], [12, 13]], dtype=float))
-    assert layer.translate == (1.0, 1.5)
-    assert layer.visible is True
-    assert layer.opacity == 1.0
-    assert layer.blending == "opaque"
-    assert layer.contrast_limits == [10.0, 13.0]
-    assert visual.data is not None and np.all(visual.data == layer.data)
+    assert layer.data is None
+    assert layer.translate == (0.0, 0.0)
+    assert layer.visible is False
+    assert layer.opacity == 0.0
+    assert layer.blending == ""
+    assert layer.contrast_limits == [0.0, 1.0]
+    assert visual.data is None
     assert camera.ranges == []
     assert len(mark_calls) == 1
     assert len(idr_requests) == 1
     assert result.z_index == 1
-    assert result.data_wh == (2, 2)
     assert result.last_step == (1, 1, 1)
+    assert source.current_step == (1, 0, 0)
 
 
 def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> None:
@@ -162,9 +162,12 @@ def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> No
         mark_render_tick_needed=lambda: None,
     )
 
-    SceneStateApplier.apply_dims_and_slice(ctx, current_step=(2, 3, 4))
+    result = SceneStateApplier.apply_dims_and_slice(ctx, current_step=(2, 3, 4))
 
     assert camera.ranges == []
+    assert layer.data is None
+    assert result.z_index == 2
+    assert result.last_step == (2, 3, 4)
 
 
 def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
@@ -201,8 +204,8 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
     result = SceneStateApplier.apply_dims_and_slice(ctx, current_step=(1, 2, 3))
 
     assert mark_calls == [None]
-    assert result.z_index is None
-    assert result.last_step is None
+    assert result.z_index == 1
+    assert result.last_step == (1, 2, 3)
 
 
 def test_apply_volume_params_sets_visual_fields() -> None:
@@ -436,7 +439,7 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
     result = SceneStateApplier.drain_updates(ctx, state=state, mailbox=queue)
 
     assert result.z_index == 1
-    assert result.data_wh == (2, 2)
+    assert result.data_wh is None
     assert result.render_marked is True
     assert result.policy_refresh_needed is True
     assert camera.center == (5.0, 6.0, 7.0)

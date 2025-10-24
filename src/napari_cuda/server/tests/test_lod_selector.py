@@ -232,7 +232,6 @@ def test_build_level_context_uses_z_hint() -> None:
         source=source,  # type: ignore[arg-type]
         prev_level=0,
         last_step=(3, 1, 2),
-        step_authoritative=False,
     )
 
     assert ctx.level == 1

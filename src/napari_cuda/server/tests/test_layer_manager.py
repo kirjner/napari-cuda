@@ -58,6 +58,15 @@ class _StubWorker:
             step=step,
             use_volume=use_volume,
         )
+        self._axis_labels = tuple(str(a) for a in axes_tuple)
+        self._order = tuple(range(len(self._axis_labels)))
+        self._step = tuple(0 for _ in range(len(self._axis_labels)))
+        self._level_shapes = (tuple(int(v) for v in shape_tuple),)
+        self._current_level = 0
+        self._ndisplay = 3 if use_volume else 2
+        count = min(self._ndisplay, len(self._axis_labels))
+        self._displayed = tuple(range(count))
+        self._active_ms_level = self._current_level
 
     @property
     def is_ready(self) -> bool:
@@ -65,6 +74,27 @@ class _StubWorker:
 
     def viewer_model(self):
         return None
+
+    def _ledger_axis_labels(self) -> tuple[str, ...]:
+        return self._axis_labels
+
+    def _ledger_order(self) -> tuple[int, ...]:
+        return self._order
+
+    def _ledger_step(self) -> tuple[int, ...]:
+        return self._step
+
+    def _ledger_level(self) -> int:
+        return self._current_level
+
+    def _ledger_level_shapes(self) -> tuple[tuple[int, ...], ...]:
+        return self._level_shapes
+
+    def _ledger_ndisplay(self) -> int:
+        return self._ndisplay
+
+    def _ledger_displayed(self) -> tuple[int, ...]:
+        return self._displayed
 
 
 class _StubSceneState:

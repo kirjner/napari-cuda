@@ -76,6 +76,7 @@ from napari_cuda.server.runtime.render_snapshot import (
     apply_plane_slice_roi,
     apply_slice_level,
     apply_volume_level,
+    stage_level_context,
     viewport_roi_for_level,
 )
 from napari_cuda.server.scene import CameraDeltaCommand
@@ -84,6 +85,7 @@ from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdateMailbox,
 )
 from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
+from napari_cuda.server.runtime.viewport_runner import ViewportRunner
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
@@ -162,6 +164,7 @@ class EGLRendererWorker:
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
+        self._viewport_runner = ViewportRunner()
         self._configure_budget_limits()
         self._last_dims_signature: Optional[tuple] = None
         self._applied_versions: Dict[tuple[str, str, str], int] = {}
@@ -362,8 +365,8 @@ class EGLRendererWorker:
             source=source,
             prev_level=int(self._active_ms_level),
             last_step=last_step,
-            step_authoritative=False,
         )
+        stage_level_context(self, source, context)
 
         intent = LevelSwitchIntent(
             desired_level=int(target),
@@ -387,7 +390,7 @@ class EGLRendererWorker:
                 intent.downgraded,
             )
 
-        self._level_switch_pending = True
+        self._viewport_runner.ingest_snapshot(RenderLedgerSnapshot(current_level=int(context.level)))
         self._last_interaction_ts = time.perf_counter()
         callback(intent)
         self._mark_render_tick_needed()
@@ -441,8 +444,8 @@ class EGLRendererWorker:
             source=source,
             prev_level=int(self._active_ms_level),
             last_step=last_step,
-            step_authoritative=False,
         )
+        stage_level_context(self, source, context)
 
         # Defer level application to the controller transaction.
         self.use_volume = True
@@ -466,8 +469,9 @@ class EGLRendererWorker:
             intent.reason,
             intent.downgraded,
         )
-        self._level_switch_pending = True
-        self._level_intent_callback(intent)
+        requested = self._viewport_runner.request_level(int(context.level))
+        if requested and self._level_intent_callback is not None:
+            self._level_intent_callback(intent)
 
         self._configure_camera_for_mode()
         if logger.isEnabledFor(logging.INFO):
@@ -528,10 +532,6 @@ class EGLRendererWorker:
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             cam.rect = Rect(*rect)
 
-        if self._level_switch_pending:
-            logger.debug("plane restore skipped (pending intent)")
-            return
-
         decision = lod.LevelDecision(
             desired_level=int(lvl_idx),
             selected_level=int(lvl_idx),
@@ -544,8 +544,8 @@ class EGLRendererWorker:
             source=source,
             prev_level=int(self._active_ms_level),
             last_step=step_tuple,
-            step_authoritative=True,
         )
+        stage_level_context(self, source, context)
         intent = LevelSwitchIntent(
             desired_level=int(lvl_idx),
             selected_level=int(context.level),
@@ -562,8 +562,9 @@ class EGLRendererWorker:
             logger.debug("plane restore intent dropped (no callback)")
             return
 
-        self._level_switch_pending = True
-        callback(intent)
+        requested = self._viewport_runner.request_level(int(context.level))
+        if requested:
+            callback(intent)
         self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
@@ -628,7 +629,6 @@ class EGLRendererWorker:
             raise ValueError("EGLRendererWorker requires camera_pose callback")
         self._camera_pose_callback = camera_pose_cb
         self._level_intent_callback = level_intent_cb
-        self._level_switch_pending = False
 
     def _configure_debug_flags(self) -> None:
         worker_dbg = self._debug_policy.worker
@@ -672,7 +672,6 @@ class EGLRendererWorker:
         self._roi_ensure_contains_viewport = bool(worker_dbg.roi_ensure_contains_viewport)
         self._roi_pad_chunks = 1
         self._idr_on_z = False
-        self._last_roi: Optional[tuple[int, SliceROI]] = None
 
     def _configure_budget_limits(self) -> None:
         cfg = self._ctx.cfg
@@ -810,11 +809,6 @@ class EGLRendererWorker:
         z_idx: int,
     ) -> np.ndarray:
         roi = viewport_roi_for_level(self, source, level)
-        # Remember ROI used for this level so we can place the slab in world coords
-        try:
-            self._last_roi = (int(level), roi)
-        except Exception:
-            self._last_roi = None
         slab = source.slice(level, z_idx, compute=True, roi=roi)
         if not isinstance(slab, np.ndarray):
             slab = np.asarray(slab, dtype=np.float32)
@@ -934,7 +928,37 @@ class EGLRendererWorker:
         *,
         prev_level: Optional[int] = None,
     ) -> lod.LevelContext:
-        return apply_worker_level(self, source, level, prev_level=prev_level)
+        runner_step: Optional[Tuple[int, ...]] = None
+        if self._viewport_runner is not None:
+            runner_step = self._viewport_runner.state.target_step
+
+        if runner_step is not None:
+            step_hint: Optional[Tuple[int, ...]] = runner_step
+        else:
+            recorded = self._ledger_step()
+            step_hint = (
+                tuple(int(v) for v in recorded)
+                if recorded is not None
+                else None
+            )
+
+        decision = lod.LevelDecision(
+            desired_level=int(level),
+            selected_level=int(level),
+            reason="direct",
+            timestamp=time.perf_counter(),
+            oversampling={},
+            downgraded=False,
+        )
+
+        context = lod.build_level_context(
+            decision,
+            source=source,
+            prev_level=prev_level,
+            last_step=step_hint,
+        )
+        stage_level_context(self, source, context)
+        return context
 
     def _apply_volume_level(
         self,
@@ -1255,6 +1279,9 @@ class EGLRendererWorker:
                         self._applied_versions[key] = version_value
                     layer_changes.setdefault(layer_id, {})[prop] = value
 
+        if self._viewport_runner is not None:
+            self._viewport_runner.ingest_snapshot(state)
+
         signature_changed = self._render_mailbox.update_state_signature(state)
 
         if signature_changed:
@@ -1266,60 +1293,44 @@ class EGLRendererWorker:
                 ctx = self._build_scene_state_context(view.camera)
                 SceneStateApplier.apply_layer_updates(ctx, layer_changes)
 
-    def _apply_camera_commands(self, commands: Sequence[CameraDeltaCommand]) -> bool:
-        outcome = _process_camera_deltas(self, commands)
-        policy_triggered = bool(outcome.policy_triggered)
+    def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
+        if not commands:
+            return
 
+        outcome = _process_camera_deltas(self, commands)
         last_seq = getattr(outcome, "last_command_seq", None)
         if last_seq is not None:
             last_seq_int = int(last_seq)
             self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
             self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
 
-        if not self.use_volume:
-            source = self._scene_source or self._ensure_scene_source()
-            roi = viewport_roi_for_level(self, source, int(self._active_ms_level))
-            last_roi_entry = self._last_roi
-            last_roi_obj = last_roi_entry[1] if last_roi_entry is not None else None
-            if last_roi_obj is None or roi != last_roi_obj:
-                apply_plane_slice_roi(
-                    self,
-                    source,
-                    int(self._active_ms_level),
-                    roi,
-                    update_contrast=False,
-                )
-
+        self._viewport_runner.ingest_camera_deltas(commands)
+        self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
         self._mark_render_tick_needed()
         self._user_interaction_seen = True
         self._last_interaction_ts = time.perf_counter()
-        self._record_zoom_hint(commands)
-        self._emit_current_camera_pose(reason="camera-delta")
 
-        return policy_triggered
+        self._run_viewport_tick()
 
-    def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
-        if not commands:
-            return
-        policy_triggered = self._apply_camera_commands(commands)
-        if policy_triggered and not self.use_volume:
+        if bool(getattr(outcome, "policy_triggered", False)) and not self.use_volume:
             self._evaluate_level_policy()
+
+    def _record_zoom_hint(self, commands: Sequence[CameraDeltaCommand]) -> None:
+        """Legacy hook kept for tests; delegates to render mailbox."""
+
+        for command in reversed(commands):
+            if getattr(command, "kind", None) != "zoom":
+                continue
+            factor = getattr(command, "factor", None)
+            if factor is None:
+                continue
+            factor = float(factor)
+            if factor > 0.0:
+                self._render_mailbox.record_zoom_hint(factor)
+                break
 
     def _apply_camera_reset(self, cam) -> None:
         reset_worker_camera(self, cam)
-
-    def _record_zoom_hint(self, commands: Sequence[CameraDeltaCommand]) -> None:
-        for command in reversed(commands):
-            if command.kind != "zoom":
-                continue
-            if command.factor is None:
-                continue
-            factor = float(command.factor)
-            if factor <= 0.0:
-                continue
-            hint = factor
-            self._render_mailbox.record_zoom_hint(hint)
-            break
 
     def _emit_current_camera_pose(self, reason: str) -> None:
         """Snapshot and emit the current camera pose for ledger sync."""
@@ -1423,7 +1434,25 @@ class EGLRendererWorker:
             rect=None,
         )
 
+    def _current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
+        view = self.view
+        if view is None:
+            return None
+        cam = view.camera
+        if not isinstance(cam, PanZoomCamera):
+            return None
+        rect = cam.rect
+        if rect is None:
+            return None
+        return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
+
     def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
+        applied_roi = self._viewport_runner.state.applied_roi
+        applied_level = self._viewport_runner.state.applied_level
+        last_roi_tuple = None
+        if applied_roi is not None:
+            last_roi_tuple = (int(applied_level), applied_roi)
+
         return SceneStateApplyContext(
             use_volume=bool(self.use_volume),
             viewer=self._viewer,
@@ -1433,7 +1462,7 @@ class EGLRendererWorker:
             scene_source=self._scene_source,
             active_ms_level=int(self._active_ms_level),
             z_index=self._z_index,
-            last_roi=self._last_roi,
+            last_roi=last_roi_tuple,
             preserve_view_on_switch=self._preserve_view_on_switch,
             sticky_contrast=self._sticky_contrast,
             idr_on_z=self._idr_on_z,
@@ -1453,6 +1482,8 @@ class EGLRendererWorker:
         if state is None:
             return
 
+        self._viewport_runner.ingest_snapshot(state)
+
         view = self.view
         assert view is not None, "drain_scene_updates requires an active VisPy view"
         cam = view.camera
@@ -1468,7 +1499,11 @@ class EGLRendererWorker:
             self._z_index = int(drain_res.z_index)
         if drain_res.data_wh is not None:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
-        self._level_switch_pending = False
+
+        self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
+        if int(self._active_ms_level) == int(self._viewport_runner.state.target_level):
+            self._viewport_runner.mark_level_applied(self._active_ms_level)
+
         if drain_res.policy_refresh_needed and not self.use_volume:
             self._evaluate_level_policy()
 
@@ -1514,12 +1549,80 @@ class EGLRendererWorker:
     def _drain_camera_ops_then_scene_updates(self) -> None:
         commands = self._camera_queue.pop_all()
         policy_triggered = False
+
         if commands:
-            policy_triggered = self._apply_camera_commands(commands)
+            outcome = _process_camera_deltas(self, commands)
+            policy_triggered = bool(getattr(outcome, "policy_triggered", False))
+            last_seq = getattr(outcome, "last_command_seq", None)
+            if last_seq is not None:
+                last_seq_int = int(last_seq)
+                self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
+                self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
+
+            self._viewport_runner.ingest_camera_deltas(commands)
+            self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
+            self._mark_render_tick_needed()
+            self._user_interaction_seen = True
+            self._last_interaction_ts = time.perf_counter()
 
         self.drain_scene_updates()
+        self._run_viewport_tick()
+
         if policy_triggered and not self.use_volume:
             self._evaluate_level_policy()
+
+    def _run_viewport_tick(self) -> None:
+        if self.use_volume:
+            runner = self._viewport_runner
+            if runner is not None:
+                runner.state.pose_reason = None
+                runner.state.zoom_hint = None
+            return
+
+        source = self._scene_source or self._ensure_scene_source()
+
+        def _resolve(level: int, _rect: Tuple[float, float, float, float]) -> SliceROI:
+            return viewport_roi_for_level(self, source, int(level), quiet=True)
+
+        intent = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
+
+        if intent.zoom_hint is not None:
+            self._render_mailbox.record_zoom_hint(float(intent.zoom_hint))
+
+        level_applied = False
+
+        if intent.level_change:
+            target_level = int(self._viewport_runner.state.target_level)
+            prev_level = int(self._active_ms_level)
+            applied_context = self._apply_level(
+                source,
+                target_level,
+                prev_level=prev_level,
+            )
+
+            self._active_ms_level = int(applied_context.level)
+            if self.use_volume:
+                self._apply_volume_level(source, applied_context)
+            else:
+                self._apply_slice_level(source, applied_context)
+            level_applied = True
+            self._viewport_runner.mark_level_applied(int(applied_context.level))
+
+        if intent.roi_change and not self.use_volume and not level_applied:
+            pending = self._viewport_runner.state.pending_roi
+            if pending is not None:
+                apply_plane_slice_roi(
+                    self,
+                    source,
+                    int(self._viewport_runner.state.target_level),
+                    pending,
+                    update_contrast=False,
+                )
+
+        self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
+        if intent.pose_reason is not None:
+            self._emit_current_camera_pose(intent.pose_reason)
+
 
     # ---- C6 selection (napari-anchored) -------------------------------------
     def _evaluate_level_policy(self) -> None:
@@ -1591,23 +1694,14 @@ class EGLRendererWorker:
 
         self._last_level_switch_ts = float(decision.timestamp)
 
-        if self._level_switch_pending:
-            logger.debug(
-                "level intent suppressed (pending) prev=%d target=%d reason=%s",
-                int(current),
-                int(decision.selected_level),
-                decision.reason,
-            )
-            return
-
         step_hint = self._ledger_step()
         context = lod.build_level_context(
             decision,
             source=source,
             prev_level=current,
             last_step=step_hint,
-            step_authoritative=False,
         )
+        stage_level_context(self, source, context)
 
         intent = LevelSwitchIntent(
             desired_level=int(decision.desired_level),
@@ -1630,13 +1724,18 @@ class EGLRendererWorker:
             intent.downgraded,
         )
 
+        requested = self._viewport_runner.request_level(int(context.level))
+        if not requested:
+            logger.debug("level intent suppressed (runner already pending)")
+            return
+
         callback = self._level_intent_callback
         if callback is None:
             logger.debug("level intent callback missing; skipping emission")
             return
 
-        self._level_switch_pending = True
         callback(intent)
+        self._mark_render_tick_needed()
 
     # (packer is now provided by bitstream.py)
 

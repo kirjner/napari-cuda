@@ -93,19 +93,6 @@ class SceneStateApplier:
         if ctx.use_volume or current_step is None:
             return SceneStateApplyResult()
 
-        src_step = None
-        try:
-            if ctx.scene_source is not None:
-                src_step = tuple(int(x) for x in (ctx.scene_source.current_step or ()))
-        except Exception:
-            src_step = None
-
-        viewer_before = None
-        try:
-            viewer_before = tuple(int(x) for x in (ctx.viewer.dims.current_step or ()))  # type: ignore[attr-defined]
-        except Exception:
-            viewer_before = None
-
         steps = tuple(int(x) for x in current_step)
 
         viewer = ctx.viewer
@@ -121,9 +108,16 @@ class SceneStateApplier:
             if zi < len(steps):
                 z_new = int(steps[zi])
 
-        if z_new is None or (ctx.z_index is not None and int(z_new) == int(ctx.z_index)):
+        if z_new is None:
             ctx.mark_render_tick_needed()
-            return SceneStateApplyResult()
+            return SceneStateApplyResult(last_step=steps if steps else None)
+
+        if ctx.z_index is not None and int(z_new) == int(ctx.z_index):
+            ctx.mark_render_tick_needed()
+            return SceneStateApplyResult(
+                z_index=int(z_new),
+                last_step=steps,
+            )
 
         # Update the source step preserving other indices
         axes = source.axes
@@ -136,36 +130,15 @@ class SceneStateApplier:
         with ctx.state_lock:
             _ = source.set_current_slice(tuple(int(x) for x in base), ctx.active_ms_level)
 
-        # Load slab and update layer/visual
-        slab = ctx.load_slice(source, ctx.active_ms_level, int(z_new))
-
-        roi_for_layer = None
-        if ctx.last_roi is not None and int(ctx.last_roi[0]) == int(ctx.active_ms_level):
-            roi_for_layer = ctx.last_roi[1]
-
-        sy, sx = SceneStateApplier.apply_slice_to_layer(
-            ctx,
-            source=source,
-            slab=slab,
-            roi=roi_for_layer,
-            update_contrast=not ctx.sticky_contrast,
-        )
-
-        # Layer.data update above is sufficient; napari's vispy adapter will
-        # propagate the change to the visual. Avoid calling visual.set_data
-        # here to prevent transient transform resets that can misalign the
-        # viewport ROI.
-
-        # Do not call cam.set_range here; preserving the current PanZoom rect
-        # avoids recentring the view on Z-step changes.
-
         if ctx.idr_on_z and ctx.request_encoder_idr is not None:
             ctx.request_encoder_idr()
 
         ctx.mark_render_tick_needed()
 
-        h, w = int(slab.shape[0]), int(slab.shape[1])
-        return SceneStateApplyResult(z_index=int(z_new), data_wh=(w, h), last_step=steps)
+        return SceneStateApplyResult(
+            z_index=int(z_new),
+            last_step=steps,
+        )
 
     @staticmethod
     def apply_slice_to_layer(
@@ -372,7 +345,7 @@ class SceneStateApplier:
             raise ValueError("RenderUpdateMailbox instance required")
 
         z_index = ctx.z_index
-        data_wh = ctx.data_wh
+        data_wh: Optional[Tuple[int, int]] = None
         last_step: Optional[Tuple[int, ...]] = None
 
         if not ctx.use_volume and state.current_step is not None:
@@ -429,7 +402,7 @@ class SceneStateApplier:
 
         return SceneDrainResult(
             z_index=int(z_index) if z_index is not None else None,
-            data_wh=(int(data_wh[0]), int(data_wh[1])) if data_wh is not None else None,
+            data_wh=data_wh,
             last_step=last_step,
             render_marked=render_marked,
             policy_refresh_needed=render_marked,

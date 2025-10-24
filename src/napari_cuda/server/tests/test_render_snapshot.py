@@ -54,6 +54,8 @@ class _StubWorker:
         self._budget_error_cls = RuntimeError
         camera = _StubTurntableCamera() if use_volume else _StubPanZoomCamera()
         self.view = type("V", (), {"camera": camera})()
+        self._viewport_runner = None
+        self._level_metadata = None
 
     def _ensure_scene_source(self) -> object:
         return self._scene_source
@@ -79,6 +81,9 @@ class _StubWorker:
         downgraded = coarsest != int(requested_level)
         return int(coarsest), downgraded
 
+    def _update_level_metadata(self, descriptor, context) -> None:
+        self._level_metadata = (descriptor, context)
+
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
@@ -86,20 +91,20 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
     calls: dict[str, object] = {}
     call_order: list[str] = []
 
-    def _fake_build(_worker, _source, level, *, prev_level, ledger_step):
-        calls["build"] = (level, prev_level, ledger_step)
+    def _fake_build(decision, *, source, prev_level, last_step):
+        calls["build"] = (decision.selected_level, prev_level, last_step)
         return SimpleNamespace(
-            level=level,
+            level=decision.selected_level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=ledger_step,
+            step=last_step,
         )
 
     def _fake_volume(_worker, _source, context):
         calls["volume"] = context.level
         call_order.append("volume")
 
-    monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
+    monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
@@ -126,21 +131,21 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
     prepare_called = False
     volume_called = False
 
-    def _fake_build(_worker, _source, level, *, prev_level, ledger_step):
+    def _fake_build(decision, *, source, prev_level, last_step):
         nonlocal prepare_called
         prepare_called = True
         return SimpleNamespace(
-            level=level,
+            level=decision.selected_level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=ledger_step,
+            step=last_step,
         )
 
     def _fake_volume(_worker, _source, context):
         nonlocal volume_called
         volume_called = True
 
-    monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
+    monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
@@ -157,19 +162,19 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
     snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(3, 0, 0))
     calls: dict[str, object] = {}
 
-    def _fake_build(_worker, _source, level, *, prev_level, ledger_step):
-        calls["build"] = (level, prev_level, ledger_step)
+    def _fake_build(decision, *, source, prev_level, last_step):
+        calls["build"] = (decision.selected_level, prev_level, last_step)
         return SimpleNamespace(
-            level=level,
+            level=decision.selected_level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=ledger_step,
+            step=last_step,
         )
 
     def _fake_slice(_worker, _source, context):
         calls["slice"] = (context.level, context.step)
 
-    monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
+    monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", _fake_slice)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
 
@@ -187,19 +192,19 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=0, current_step=(7, 0, 0))
     calls: dict[str, object] = {}
 
-    def _fake_build(_worker, _source, level, *, prev_level, ledger_step):
-        calls.setdefault("build", []).append((level, prev_level, ledger_step))
+    def _fake_build(decision, *, source, prev_level, last_step):
+        calls.setdefault("build", []).append((decision.selected_level, prev_level, last_step))
         return SimpleNamespace(
-            level=level,
+            level=decision.selected_level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=ledger_step,
+            step=last_step,
         )
 
     def _fake_volume(_worker, _source, context):
         calls.setdefault("volume", []).append(context.level)
 
-    monkeypatch.setattr(snapshot_mod, "_build_level_context", _fake_build)
+    monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 

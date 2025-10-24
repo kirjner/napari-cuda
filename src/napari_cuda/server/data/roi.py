@@ -16,6 +16,10 @@ import time
 from vispy import scene
 
 from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.roi_math import (
+    align_roi_to_chunk_grid,
+    chunk_shape_for_level,
+)
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
 
@@ -143,28 +147,18 @@ def compute_viewport_roi(
     viewport_bounds = (y_start, y_stop, x_start, x_stop)
     roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
 
-    if not for_policy and align_chunks:
-        arr = source.get_level(level)
-        chunks = getattr(arr, "chunks", None)
-        if chunks is not None:
-            axes_lower = [str(ax).lower() for ax in source.axes]
-            y_pos = _axis_index(axes_lower, "y", max(0, len(chunks) - 2))
-            x_pos = _axis_index(axes_lower, "x", max(0, len(chunks) - 1))
-            cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-            cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-            cy = max(1, cy)
-            cx = max(1, cx)
-            ys = (roi.y_start // cy) * cy
-            ye = ((roi.y_stop + cy - 1) // cy) * cy
-            xs = (roi.x_start // cx) * cx
-            xe = ((roi.x_stop + cx - 1) // cx) * cx
-            pad = max(0, int(chunk_pad))
-            if pad:
-                ys = max(0, ys - pad * cy)
-                ye = min(h, ye + pad * cy)
-                xs = max(0, xs - pad * cx)
-                xe = min(w, xe + pad * cx)
-            roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
+    chunk_shape: Optional[Tuple[int, int]] = None
+    if align_chunks:
+        chunk_shape = chunk_shape_for_level(source, level)
+
+    if not for_policy and chunk_shape is not None:
+        roi = align_roi_to_chunk_grid(
+            roi,
+            chunk_shape,
+            chunk_pad,
+            height=h,
+            width=w,
+        )
 
     if not for_policy and prev_roi is not None and edge_threshold > 0:
         thr = int(edge_threshold)
@@ -188,22 +182,16 @@ def compute_viewport_roi(
         ye = max(int(roi.y_stop), int(viewport_bounds[1]))
         xs = min(int(roi.x_start), int(viewport_bounds[2]))
         xe = max(int(roi.x_stop), int(viewport_bounds[3]))
-        if align_chunks:
-            arr = source.get_level(level)
-            chunks = getattr(arr, "chunks", None)
-            if chunks is not None:
-                axes_lower = [str(ax).lower() for ax in source.axes]
-                y_pos = _axis_index(axes_lower, "y", max(0, len(chunks) - 2))
-                x_pos = _axis_index(axes_lower, "x", max(0, len(chunks) - 1))
-                cy = int(chunks[y_pos]) if 0 <= y_pos < len(chunks) else 1
-                cx = int(chunks[x_pos]) if 0 <= x_pos < len(chunks) else 1
-                cy = max(1, cy)
-                cx = max(1, cx)
-                ys = (ys // cy) * cy
-                ye = ((ye + cy - 1) // cy) * cy
-                xs = (xs // cx) * cx
-                xe = ((xe + cx - 1) // cx) * cx
-        roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
+        if chunk_shape is not None:
+            roi = align_roi_to_chunk_grid(
+                SliceROI(ys, ye, xs, xe),
+                chunk_shape,
+                0,
+                height=h,
+                width=w,
+            )
+        else:
+            roi = SliceROI(ys, ye, xs, xe).clamp(h, w)
 
     if roi.is_empty():
         return ViewportROIResult(SliceROI(0, h, 0, w), transform_signature)

@@ -339,7 +339,6 @@ def build_level_context(
     source: ZarrSceneSource,
     prev_level: Optional[int],
     last_step: Optional[Sequence[int]],
-    step_authoritative: bool = False,
 ) -> LevelContext:
     """Build an immutable context describing the chosen level."""
 
@@ -352,29 +351,7 @@ def build_level_context(
     if prev_level is not None and 0 <= int(prev_level) < len(source.level_descriptors):
         prev_shape = source.level_descriptors[int(prev_level)].shape
 
-    cur_z = None
-    if last_step is not None and "z" in lower:
-        zi = lower.index("z")
-        if len(last_step) > zi:
-            try:
-                cur_z = int(last_step[zi])
-            except Exception:
-                cur_z = None
-
-    new_z = None
-    if not step_authoritative:
-        new_z = _proportional_z_remap(
-            prev_level=prev_level,
-            prev_shape=prev_shape,
-            new_shape=desc.shape,
-            axes=axes,
-            current_step=last_step,
-            current_z=cur_z,
-        )
-    elif cur_z is not None:
-        new_z = cur_z
-
-    step = _build_step_tuple(desc.shape, last_step, new_z, axes, step_authoritative=step_authoritative)
+    step = _remap_step(prev_shape, desc.shape, axes, last_step)
 
     contrast = source.ensure_contrast(level=level_idx)
     sy, sx = plane_scale_for_level(source, level_idx)
@@ -400,79 +377,70 @@ def build_level_context(
     )
 
 
-def _build_step_tuple(
-    shape: Sequence[int],
-    last_step: Optional[Sequence[int]],
-    new_z: Optional[int],
-    axes: Sequence[str],
-    *,
-    step_authoritative: bool,
-) -> tuple[int, ...]:
-    step = [0] * len(shape)
-    if last_step is not None:
-        for idx in range(min(len(step), len(last_step))):
-            try:
-                bound = max(0, int(shape[idx]) - 1)
-            except Exception:
-                bound = 0
-            try:
-                value = int(last_step[idx])
-            except Exception:
-                value = 0
-            step[idx] = max(0, min(bound, value))
-
-    if not step_authoritative and new_z is not None:
-        lower = [a.lower() for a in axes]
-        if "z" in lower:
-            zi = lower.index("z")
-            if 0 <= zi < len(step):
-                bound = max(0, int(shape[zi]) - 1)
-                step[zi] = max(0, min(bound, int(new_z)))
-        elif step:
-            bound = max(0, int(shape[0]) - 1)
-            step[0] = max(0, min(bound, int(new_z)))
-
-    return tuple(int(x) for x in step)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _proportional_z_remap(
-    *,
-    prev_level: Optional[int],
+def _remap_step(
     prev_shape: Optional[Sequence[int]],
     new_shape: Sequence[int],
     axes: Sequence[str],
-    current_step: Optional[Sequence[int]],
-    current_z: Optional[int],
-) -> Optional[int]:
+    last_step: Optional[Sequence[int]],
+) -> tuple[int, ...]:
+    step = _clamp_step(new_shape, last_step)
+
+    if prev_shape is None:
+        return tuple(step)
+
     lower = [str(a).lower() for a in axes]
     if "z" not in lower:
-        return current_z
-    try:
-        zi = lower.index("z")
-    except Exception:
-        return current_z
-    try:
-        z_src = int(prev_shape[zi]) if prev_shape is not None else None
-    except Exception:
-        z_src = None
-    try:
-        z_tgt = int(new_shape[zi])
-    except Exception:
-        return current_z
-    if z_src is None or z_src <= 1 or z_tgt <= 1:
-        return 0 if z_tgt > 0 and current_z is None else current_z
-    if current_z is None:
-        if current_step is not None and len(current_step) > zi:
-            current_z = int(current_step[zi])
-        else:
-            current_z = 0
-    new_z = int(round(float(current_z) * float(max(0, z_tgt - 1)) / float(max(1, z_src - 1))))
-    return max(0, min(int(new_z), int(z_tgt - 1)))
+        return tuple(step)
+
+    zi = lower.index("z")
+    if zi >= len(step) or zi >= len(prev_shape):
+        return tuple(step)
+
+    prev_len = int(prev_shape[zi])
+    new_len = int(new_shape[zi])
+    if prev_len <= 0 or new_len <= 0 or prev_len == new_len:
+        return tuple(step)
+
+    source_index = step[zi]
+    if last_step is not None and len(last_step) > zi:
+        try:
+            source_index = int(last_step[zi])
+        except Exception:
+            source_index = step[zi]
+
+    source_index = max(0, min(prev_len - 1, source_index)) if prev_len > 0 else source_index
+
+    step[zi] = _proportional_z_remap(prev_len, new_len, source_index)
+    return tuple(step)
+
+
+def _clamp_step(
+    shape: Sequence[int],
+    values: Optional[Sequence[int]],
+) -> list[int]:
+    clamped: list[int] = []
+    for idx, dim in enumerate(shape):
+        bound = max(0, int(dim) - 1)
+        value = 0
+        if values is not None and idx < len(values):
+            try:
+                value = int(values[idx])
+            except Exception:
+                value = 0
+        clamped.append(max(0, min(bound, value)))
+    return clamped
+
+
+def _proportional_z_remap(prev_len: int, new_len: int, index: int) -> int:
+    if new_len <= 0:
+        return 0
+
+    if prev_len <= 1 or new_len <= 1:
+        return max(0, min(new_len - 1, index))
+
+    ratio = float(new_len - 1) / float(prev_len - 1)
+    mapped = int(round(float(index) * ratio))
+    return max(0, min(new_len - 1, mapped))
 
 
 def format_oversampling(overs_map: Mapping[int, float]) -> str:

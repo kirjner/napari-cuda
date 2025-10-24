@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from types import SimpleNamespace
 from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.camera_controller import CameraDeltaOutcome
@@ -37,6 +38,14 @@ class _StubWorker:
         self._pose_seq = 1
         self._max_camera_command_seq = 0
         self._evaluate_level_policy = lambda: None
+        self._viewport_runner = SimpleNamespace(
+            ingest_camera_deltas=lambda _commands: None,
+            update_camera_rect=lambda _rect: None,
+        )
+        self._run_viewport_tick = lambda: self._emit_current_camera_pose("camera-delta")
+
+    def _current_panzoom_rect(self):
+        return None
 
     def _mark_render_tick_needed(self) -> None:
         pass
@@ -72,6 +81,11 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     def _fake_process(self, commands):
         self._mark_render_tick_needed()
         self._user_interaction_seen = True
+        for command in commands:
+            if getattr(command, "kind", None) == "zoom" and command.factor not in (None, 0):
+                ratio = 1.0 / float(command.factor)
+                self._render_mailbox.record_zoom_hint(ratio)
+                self._zoom_hints.append(ratio)
         return CameraDeltaOutcome(
             camera_changed=True,
             policy_triggered=True,

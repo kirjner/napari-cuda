@@ -270,7 +270,6 @@ class CaptureWorker:
         self._roi_ensure_contains_viewport = False
         self._roi_pad_chunks = 0
         self._idr_on_z = False
-        self._last_roi: Optional[tuple[int, SliceROI]] = None
         self._sticky_contrast = False
         self._preserve_view_on_switch = False
         self._layer_logger = LayerAssignmentLogger(logging.getLogger(__name__))
@@ -286,7 +285,6 @@ class CaptureWorker:
         self._z_index = 0
         self._pose_seq = 0
         self._max_camera_command_seq = 0
-        self._level_switch_pending = False
         self._last_dims_signature = None
         from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 
@@ -409,7 +407,7 @@ class CaptureWorker:
             scene_source=self._ensure_scene_source(),
             active_ms_level=int(self._active_ms_level),
             z_index=self._z_index,
-            last_roi=self._last_roi,
+            last_roi=None,
             preserve_view_on_switch=self._preserve_view_on_switch,
             sticky_contrast=self._sticky_contrast,
             idr_on_z=self._idr_on_z,

@@ -26,6 +26,10 @@ from napari_cuda.server.data.roi import (
     viewport_debug_snapshot,
     resolve_worker_viewport_roi,
 )
+from napari_cuda.server.runtime.roi_math import (
+    align_roi_to_chunk_grid,
+    chunk_shape_for_level,
+)
 from napari_cuda.server.runtime.scene_types import SliceROI
 
 logger = logging.getLogger(__name__)
@@ -135,7 +139,15 @@ def apply_plane_slice_roi(
     width_px = int(slab.shape[1])
     worker._data_wh = (int(width_px), int(height_px))
     worker._data_d = None
-    worker._last_roi = (int(level), roi)
+
+    runner = worker._viewport_runner
+    if runner is not None:
+        chunk_shape = chunk_shape_for_level(source, int(level))
+        if not worker.use_volume:
+            runner.mark_roi_applied(roi, chunk_shape=chunk_shape)
+            runner.mark_level_applied(int(level))
+            rect = worker._current_panzoom_rect()
+            runner.update_camera_rect(rect)
     worker._mark_render_tick_needed()
     return height_px, width_px
 
@@ -172,6 +184,7 @@ __all__ = [
     "viewport_roi_for_level",
     "apply_volume_level",
     "apply_slice_level",
+    "stage_level_context",
 ]
 
 
@@ -198,6 +211,19 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
             worker.use_volume = True
             worker._last_dims_signature = None  # noqa: SLF001
 
+        runner = worker._viewport_runner
+        if runner is not None and entering_volume:
+            state = runner.state
+            state.level_reload_required = False
+            state.awaiting_level_confirm = False
+            state.roi_reload_required = False
+            state.pending_roi = None
+            state.pending_roi_signature = None
+            state.applied_roi = None
+            state.applied_roi_signature = None
+            state.pose_reason = None
+            state.camera_pose_dirty = False
+
         requested_level = int(target_level)
         selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
         effective_level = int(selected_level)
@@ -205,14 +231,36 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         load_needed = entering_volume or (int(effective_level) != prev_level)
 
         if load_needed:
-            applied_context = _build_level_context(
-                worker,
-                source,
-                int(effective_level),
-                prev_level=prev_level,
-                ledger_step=ledger_step,
+            if ledger_step is not None:
+                step_hint = tuple(int(v) for v in ledger_step)
+            else:
+                recorded_step = worker._ledger_step()
+                step_hint = (
+                    tuple(int(v) for v in recorded_step)
+                    if recorded_step is not None
+                    else None
+                )
+
+            decision = lod.LevelDecision(
+                desired_level=int(effective_level),
+                selected_level=int(effective_level),
+                reason="direct",
+                timestamp=time.perf_counter(),
+                oversampling={},
+                downgraded=False,
             )
+            applied_context = lod.build_level_context(
+                decision,
+                source=source,
+                prev_level=prev_level,
+                last_step=step_hint,
+            )
+            stage_level_context(worker, source, applied_context)
             apply_volume_level(worker, source, applied_context)
+            if runner is not None:
+                runner.mark_level_applied(int(applied_context.level))
+                rect = worker._current_panzoom_rect()
+                runner.update_camera_rect(rect)
             target_level = int(applied_context.level)
             level_changed = target_level != prev_level
             worker._configure_camera_for_mode()
@@ -223,13 +271,31 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.use_volume and not target_volume:
         stage_prev_level = target_level
 
-    applied_context = _build_level_context(
-        worker,
-        source,
-        int(target_level),
-        prev_level=stage_prev_level,
-        ledger_step=ledger_step,
+    if ledger_step is not None:
+        step_hint = tuple(int(v) for v in ledger_step)
+    else:
+        recorded_step = worker._ledger_step()
+        step_hint = (
+            tuple(int(v) for v in recorded_step)
+            if recorded_step is not None
+            else None
+        )
+
+    decision = lod.LevelDecision(
+        desired_level=int(target_level),
+        selected_level=int(target_level),
+        reason="direct",
+        timestamp=time.perf_counter(),
+        oversampling={},
+        downgraded=False,
     )
+    applied_context = lod.build_level_context(
+        decision,
+        source=source,
+        prev_level=stage_prev_level,
+        last_step=step_hint,
+    )
+    stage_level_context(worker, source, applied_context)
 
     if worker.use_volume:
         worker.use_volume = False
@@ -293,58 +359,7 @@ def _apply_plane_camera_pose(worker: Any, snapshot: RenderLedgerSnapshot) -> Non
             float(center[1]),
         )
 
-
-
-def _build_level_context(
-    worker: Any,
-    source: Any,
-    level: int,
-    *,
-    prev_level: Optional[int],
-    ledger_step: Optional[Sequence[int]],
-) -> lod.LevelContext:
-    same_level = prev_level is None or int(prev_level) == int(level)
-    going_finer = (
-        ledger_step is not None
-        and prev_level is not None
-        and int(level) < int(prev_level)
-    )
-    step_authoritative = bool(
-        ledger_step is not None and (same_level or going_finer)
-    )
-
-    if ledger_step is not None:
-        step_hint: Optional[tuple[int, ...]] = tuple(int(v) for v in ledger_step)
-    else:
-        recorded_step = worker._ledger_step()
-        step_hint = (
-            tuple(int(v) for v in recorded_step)
-            if recorded_step is not None
-            else None
-        )
-
-    decision = lod.LevelDecision(
-        desired_level=int(level),
-        selected_level=int(level),
-        reason="direct",
-        timestamp=time.perf_counter(),
-        oversampling={},
-        downgraded=False,
-    )
-
-    context = lod.build_level_context(
-        decision,
-        source=source,
-        prev_level=prev_level,
-        last_step=step_hint,
-        step_authoritative=step_authoritative,
-    )
-
-    _stage_level_context(worker, source, context)
-    return context
-
-
-def _stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> None:
+def stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> None:
     viewer = getattr(worker, "_viewer", None)
     if viewer is not None:
         set_range = getattr(worker, "_set_dims_range_for_level", None)
@@ -405,18 +420,29 @@ def apply_slice_level(worker: Any, source: Any, applied: lod.LevelContext) -> No
     view = worker.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
+    full_h, full_w = plane_wh_for_level(source, int(applied.level))
     roi = viewport_roi_for_level(worker, source, int(applied.level))
-    worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
+    chunk_shape = chunk_shape_for_level(source, int(applied.level))
+    aligned_roi = roi
+    if worker._roi_align_chunks and chunk_shape is not None:  # noqa: SLF001
+        aligned_roi = align_roi_to_chunk_grid(
+            roi,
+            chunk_shape,
+            int(worker._roi_pad_chunks),  # noqa: SLF001
+            height=full_h,
+            width=full_w,
+        )
+    if not worker.use_volume:
+        worker._emit_current_camera_pose("slice-apply")  # noqa: SLF001
     height_px, width_px = apply_plane_slice_roi(
         worker,
         source,
         int(applied.level),
-        roi,
+        aligned_roi,
         update_contrast=not worker._sticky_contrast,  # noqa: SLF001
     )
 
     if not worker._preserve_view_on_switch:  # noqa: SLF001
-        full_h, full_w = plane_wh_for_level(source, int(applied.level))
         world_w = float(full_w) * float(max(1e-12, sx))
         world_h = float(full_h) * float(max(1e-12, sy))
         view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
@@ -430,3 +456,7 @@ def apply_slice_level(worker: Any, source: Any, applied: lod.LevelContext) -> No
         contrast=applied.contrast,
         downgraded=worker._level_downgraded,  # noqa: SLF001
     )
+
+    runner = worker._viewport_runner  # noqa: SLF001
+    if runner is not None:
+        runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
