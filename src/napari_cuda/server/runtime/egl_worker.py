@@ -82,13 +82,16 @@ from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.render_ledger_snapshot import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.render_snapshot import (
+from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
+from napari_cuda.server.runtime.plane_loader import (
     apply_plane_slice_roi,
-    apply_render_snapshot,
-    apply_slice_level,
-    apply_volume_level,
-    stage_level_context,
     viewport_roi_for_level,
+)
+from napari_cuda.server.runtime.plane_snapshot import apply_slice_level
+from napari_cuda.server.runtime.volume_snapshot import apply_volume_level
+from napari_cuda.server.runtime.viewer_stage import (
+    apply_plane_metadata,
+    apply_volume_metadata,
 )
 from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdate,
@@ -430,7 +433,7 @@ class EGLRendererWorker:
             prev_level=int(self._active_ms_level),
             last_step=last_step,
         )
-        stage_level_context(self, source, context)
+        apply_plane_metadata(self, source, context)
 
         intent = LevelSwitchIntent(
             desired_level=int(target),
@@ -509,7 +512,7 @@ class EGLRendererWorker:
             prev_level=int(self._active_ms_level),
             last_step=last_step,
         )
-        stage_level_context(self, source, context)
+        apply_volume_metadata(self, source, context)
 
         # Defer level application to the controller transaction.
         self.use_volume = True
@@ -609,7 +612,7 @@ class EGLRendererWorker:
             prev_level=int(self._active_ms_level),
             last_step=step_tuple,
         )
-        stage_level_context(self, source, context)
+        apply_plane_metadata(self, source, context)
         intent = LevelSwitchIntent(
             desired_level=int(lvl_idx),
             selected_level=int(context.level),
@@ -1021,7 +1024,10 @@ class EGLRendererWorker:
             prev_level=prev_level,
             last_step=step_hint,
         )
-        stage_level_context(self, source, context)
+        if self.use_volume:
+            apply_volume_metadata(self, source, context)
+        else:
+            apply_plane_metadata(self, source, context)
         return context
 
     def _apply_volume_level(
@@ -1029,7 +1035,12 @@ class EGLRendererWorker:
         source: ZarrSceneSource,
         applied: lod.LevelContext,
     ) -> None:
-        apply_volume_level(self, source, applied)
+        apply_volume_level(
+            self,
+            source,
+            applied,
+            downgraded=bool(self._level_downgraded),
+        )
 
     def _apply_slice_level(
         self,
@@ -1777,7 +1788,10 @@ class EGLRendererWorker:
             prev_level=current,
             last_step=step_hint,
         )
-        stage_level_context(self, source, context)
+        if self.use_volume:
+            apply_volume_metadata(self, source, context)
+        else:
+            apply_plane_metadata(self, source, context)
 
         intent = LevelSwitchIntent(
             desired_level=int(decision.desired_level),

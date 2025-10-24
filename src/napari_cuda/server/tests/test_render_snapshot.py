@@ -147,9 +147,10 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
             step=last_step,
         )
 
-    def _fake_volume(_worker, _source, context):
+    def _fake_volume(_worker, _source, context, *, downgraded: bool):
         calls["volume"] = context.level
         call_order.append("volume")
+        calls["downgraded"] = downgraded
 
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
@@ -189,7 +190,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
             step=last_step,
         )
 
-    def _fake_volume(_worker, _source, context):
+    def _fake_volume(_worker, _source, context, *, downgraded: bool):
         nonlocal volume_called
         volume_called = True
 
@@ -251,8 +252,8 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
             step=last_step,
         )
 
-    def _fake_volume(_worker, _source, context):
-        calls.setdefault("volume", []).append(context.level)
+    def _fake_volume(_worker, _source, context, *, downgraded: bool):
+        calls.setdefault("volume", []).append((context.level, downgraded))
 
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
@@ -263,4 +264,4 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     assert worker.use_volume is True
     assert worker.configure_calls == 1
     assert calls["build"] == [(2, 1, (7, 0, 0))]
-    assert calls["volume"] == [2]
+    assert calls["volume"] == [(2, True)]
