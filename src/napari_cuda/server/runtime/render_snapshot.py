@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Optional, Sequence, Dict
 import logging
 import time
+from contextlib import contextmanager
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
@@ -28,6 +29,22 @@ from napari_cuda.server.data.roi import (
 from napari_cuda.server.runtime.scene_types import SliceROI
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _suspend_fit_callbacks(viewer: Any):
+    """Disconnect fit callbacks while applying dims, then restore them."""
+
+    nd_event = viewer.dims.events.ndisplay
+    order_event = viewer.dims.events.order
+
+    nd_event.disconnect(viewer.fit_to_view)
+    order_event.disconnect(viewer.fit_to_view)
+    try:
+        yield
+    finally:
+        nd_event.connect(viewer.fit_to_view)
+        order_event.connect(viewer.fit_to_view)
 
 
 def viewport_roi_for_level(
@@ -134,30 +151,17 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     viewer = worker._viewer  # noqa: SLF001
     assert viewer is not None, "RenderTxn requires an active viewer"
 
-    # Suppress ONLY napari's fit_to_view during dims apply so that layer
-    # adapters still observe ndisplay/order events and can rebuild visuals.
-    # We temporarily disconnect the specific callback, apply dims, then
-    # reconnect.
-    import logging as _logging
-    _l = _logging.getLogger(__name__)
-
-    nd = viewer.dims.events.ndisplay
-    od = viewer.dims.events.order
-
     signature = worker._dims_signature(snapshot)  # noqa: SLF001
     dims_changed = signature != getattr(worker, "_last_dims_signature", None)
 
     if dims_changed:
-        nd.disconnect(viewer.fit_to_view)
-        od.disconnect(viewer.fit_to_view)
-        if _l.isEnabledFor(_logging.INFO):
-            _l.info("snapshot.apply.begin: suppress fit; applying dims")
-        worker._apply_dims_from_snapshot(snapshot, signature=signature)  # noqa: SLF001
-        _apply_snapshot_multiscale(worker, snapshot)
-        if _l.isEnabledFor(_logging.INFO):
-            _l.info("snapshot.apply.end: dims applied; resuming fit callbacks")
-        nd.connect(viewer.fit_to_view)
-        od.connect(viewer.fit_to_view)
+        with _suspend_fit_callbacks(viewer):
+            if logger.isEnabledFor(logging.INFO):
+                logger.info("snapshot.apply.begin: suppress fit; applying dims")
+            worker._apply_dims_from_snapshot(snapshot, signature=signature)  # noqa: SLF001
+            _apply_snapshot_multiscale(worker, snapshot)
+            if logger.isEnabledFor(logging.INFO):
+                logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
     else:
         _apply_snapshot_multiscale(worker, snapshot)
 

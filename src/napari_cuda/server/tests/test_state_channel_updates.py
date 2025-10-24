@@ -298,7 +298,6 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     levels_payload = tuple(dict(level) for level in baseline_dims.levels)
     reduce_bootstrap_state(
         server._state_ledger,
-        server._state_lock,
         step=tuple(int(v) for v in baseline_dims.current_step),
         axis_labels=axis_labels,
         order=order,
@@ -979,14 +978,12 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         server.use_volume = False
         reduce_layer_property(
             server._state_ledger,
-            server._state_lock,
             layer_id="layer-0",
             prop="opacity",
             value=0.25,
         )
         reduce_layer_property(
             server._state_ledger,
-            server._state_lock,
             layer_id="layer-0",
             prop="colormap",
             value="viridis",

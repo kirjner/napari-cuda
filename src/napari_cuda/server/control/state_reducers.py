@@ -6,7 +6,6 @@ import logging
 import uuid
 import time
 from dataclasses import replace
-from threading import Lock
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
@@ -16,13 +15,14 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 # ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.control.state_ledger import LedgerEntry, PropertyKey, ServerStateLedger
 from napari_cuda.server.control.transactions import (
     apply_bootstrap_transaction,
     apply_camera_update_transaction,
     apply_dims_step_transaction,
     apply_layer_property_transaction,
     apply_level_switch_transaction,
+    apply_plane_restore_transaction,
     apply_view_toggle_transaction,
 )
 logger = logging.getLogger(__name__)
@@ -229,7 +229,6 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
 
 def reduce_layer_property(
     ledger: ServerStateLedger,
-    lock: Lock,
     *,
     layer_id: str,
     prop: str,
@@ -280,7 +279,6 @@ def reduce_layer_property(
 
 def reduce_volume_render_mode(
     ledger: ServerStateLedger,
-    lock: Lock,
     mode: str,
     *,
     intent_id: Optional[str] = None,
@@ -318,7 +316,6 @@ def reduce_volume_render_mode(
 
 def reduce_volume_contrast_limits(
     ledger: ServerStateLedger,
-    lock: Lock,
     lo: float,
     hi: float,
     *,
@@ -358,7 +355,6 @@ def reduce_volume_contrast_limits(
 
 def reduce_volume_colormap(
     ledger: ServerStateLedger,
-    lock: Lock,
     name: str,
     *,
     intent_id: Optional[str] = None,
@@ -397,7 +393,6 @@ def reduce_volume_colormap(
 
 def reduce_volume_opacity(
     ledger: ServerStateLedger,
-    lock: Lock,
     alpha: float,
     *,
     intent_id: Optional[str] = None,
@@ -436,7 +431,6 @@ def reduce_volume_opacity(
 
 def reduce_volume_sample_step(
     ledger: ServerStateLedger,
-    lock: Lock,
     sample_step: float,
     *,
     intent_id: Optional[str] = None,
@@ -662,7 +656,6 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
 
 def reduce_bootstrap_state(
     ledger: ServerStateLedger,
-    lock: Lock,
     *,
     step: Sequence[int],
     axis_labels: Sequence[str],
@@ -799,7 +792,6 @@ def reduce_bootstrap_state(
 
 def reduce_dims_update(
     ledger: ServerStateLedger,
-    lock: Lock,
     *,
     axis: object,
     prop: str,
@@ -898,7 +890,6 @@ def reduce_dims_update(
 
 def reduce_view_update(
     ledger: ServerStateLedger,
-    lock: Lock,
     *,
     ndisplay: Optional[int] = None,
     order: Optional[Sequence[int]] = None,
@@ -979,9 +970,34 @@ def reduce_view_update(
     )
 
 
+def reduce_plane_restore(
+    ledger: ServerStateLedger,
+    *,
+    level: int,
+    step: Sequence[int],
+    center: Sequence[float],
+    zoom: float,
+    rect: Sequence[float],
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.view",
+) -> Dict[PropertyKey, LedgerEntry]:
+    ts = _now(timestamp)
+    stored = apply_plane_restore_transaction(
+        ledger=ledger,
+        level=int(level),
+        step=tuple(int(v) for v in step),
+        center=tuple(float(v) for v in center),
+        zoom=float(zoom),
+        rect=tuple(float(v) for v in rect),
+        origin=origin,
+        timestamp=ts,
+    )
+    return stored
+
+
 def reduce_level_update(
     ledger: ServerStateLedger,
-    lock: Lock,
     *,
     applied: Mapping[str, Any] | object,
     downgraded: Optional[bool] = None,
@@ -1182,6 +1198,7 @@ __all__ = [
     "reduce_volume_opacity",
     "reduce_volume_render_mode",
     "reduce_volume_sample_step",
+    "reduce_plane_restore",
     "reduce_view_update",
     "resolve_axis_index",
 ]

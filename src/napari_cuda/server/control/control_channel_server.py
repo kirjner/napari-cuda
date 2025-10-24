@@ -11,7 +11,7 @@ import uuid
 from contextlib import suppress
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Callable, Awaitable
 
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
@@ -67,6 +67,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_dims_update,
     reduce_layer_property,
     reduce_level_update,
+    reduce_plane_restore,
     reduce_volume_colormap,
     reduce_volume_contrast_limits,
     reduce_volume_opacity,
@@ -161,6 +162,874 @@ _SERVER_FEATURES: dict[str, FeatureToggle] = {
 }
 
 
+@dataclass(slots=True)
+class StateUpdateContext:
+    """Envelope metadata shared across state.update handlers."""
+
+    server: Any
+    ws: Any
+    scope: str
+    key: str
+    target: str
+    value: Any
+    session_id: str
+    frame_id: str
+    intent_id: str
+    timestamp: float | None
+
+
+async def _state_update_reject(
+    ctx: StateUpdateContext,
+    code: str,
+    message: str,
+    *,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    error_payload: Dict[str, Any] = {"code": code, "message": message}
+    if details:
+        error_payload["details"] = dict(details)
+    await _send_state_ack(
+        ctx.server,
+        ctx.ws,
+        session_id=ctx.session_id,
+        intent_id=ctx.intent_id,
+        in_reply_to=ctx.frame_id,
+        status="rejected",
+        error=error_payload,
+    )
+async def _state_update_ack(
+    ctx: StateUpdateContext,
+    *,
+    applied_value: Any,
+    version: int,
+) -> None:
+    await _send_state_ack(
+        ctx.server,
+        ctx.ws,
+        session_id=ctx.session_id,
+        intent_id=ctx.intent_id,
+        in_reply_to=ctx.frame_id,
+        status="accepted",
+        applied_value=applied_value,
+        version=int(version),
+    )
+
+
+def _camera_target_or_none(ctx: StateUpdateContext) -> Optional[str]:
+    cam_target = (ctx.target or "").lower()
+    if cam_target not in {"", "main"}:
+        return None
+    return cam_target or "main"
+
+
+def _camera_logger(server: Any) -> Callable[[str, Any], None]:
+    info_enabled = bool(getattr(server, "_log_cam_info", False))
+    debug_enabled = bool(getattr(server, "_log_cam_debug", False))
+
+    def _log(fmt: str, *args: Any) -> None:
+        if info_enabled:
+            logger.info(fmt, *args)
+        elif debug_enabled:
+            logger.debug(fmt, *args)
+
+    return _log
+
+
+def _camera_metrics(server: Any) -> Any:
+    return server.metrics if hasattr(server, "metrics") else None
+
+
+def _apply_plane_restore_from_ledger(
+    server: Any,
+    *,
+    timestamp: float | None,
+    intent_id: str,
+) -> bool:
+    ledger = server._state_ledger
+    with server._state_lock:
+        lvl_entry = ledger.get("view_cache", "plane", "level")
+        step_entry = ledger.get("view_cache", "plane", "step")
+        center_entry = ledger.get("camera_plane", "main", "center") or ledger.get("camera", "main", "center")
+        zoom_entry = ledger.get("camera_plane", "main", "zoom") or ledger.get("camera", "main", "zoom")
+        rect_entry = ledger.get("camera_plane", "main", "rect") or ledger.get("camera", "main", "rect")
+
+    missing: list[str] = []
+    if lvl_entry is None:
+        missing.append("view_cache.plane.level")
+    if step_entry is None:
+        missing.append("view_cache.plane.step")
+    if center_entry is None:
+        missing.append("camera_plane.center")
+    if zoom_entry is None:
+        missing.append("camera_plane.zoom")
+    if rect_entry is None:
+        missing.append("camera_plane.rect")
+
+    if missing:
+        logger.warning("plane_restore skipped due to missing ledger entries: %s", ", ".join(missing))
+        return False
+
+    reduce_plane_restore(
+        server._state_ledger,
+        level=int(lvl_entry.value),
+        step=tuple(step_entry.value),
+        center=tuple(center_entry.value),
+        zoom=float(zoom_entry.value),
+        rect=tuple(rect_entry.value),
+        intent_id=intent_id,
+        timestamp=timestamp,
+        origin="client.state.view",
+    )
+    return True
+
+
+async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    try:
+        raw_value = int(ctx.value) if ctx.value is not None else 2
+    except Exception:
+        logger.debug("state.update view ignored (non-integer ndisplay) value=%r", ctx.value)
+        await _state_update_reject(ctx, "state.invalid", "ndisplay must be integer")
+        return True
+
+    ndisplay = 3 if int(raw_value) >= 3 else 2
+    was_volume = bool(getattr(server, "use_volume", False))
+
+    if getattr(server, "_log_dims_info", False):
+        logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
+    else:
+        logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
+
+    try:
+        result = reduce_view_update(
+            server._state_ledger,
+            ndisplay=int(ndisplay),
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin="client.state.view",
+        )
+    except Exception:
+        logger.info("state.update view.set_ndisplay failed", exc_info=True)
+        await _state_update_reject(ctx, "state.error", "failed to apply ndisplay")
+        return True
+
+    assert result.version is not None, "view reducer must supply version"
+
+    server.use_volume = bool(result.value == 3)
+
+    broadcast = server._pixel_channel.broadcast
+    broadcast.bypass_until_key = True
+    broadcast.waiting_for_keyframe = True
+    pixel_channel.mark_stream_config_dirty(server._pixel_channel)
+    server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
+
+    if was_volume and ndisplay == 2:
+        _apply_plane_restore_from_ledger(
+            server,
+            timestamp=ctx.timestamp,
+            intent_id=ctx.intent_id,
+        )
+
+    await _state_update_ack(ctx, applied_value=int(result.value), version=int(result.version))
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "state.update view intent=%s frame=%s ndisplay=%s accepted",
+            ctx.intent_id,
+            ctx.frame_id,
+            int(ndisplay),
+        )
+
+    return True
+
+
+async def _handle_camera_zoom(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    target = _camera_target_or_none(ctx)
+    if target is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported camera target {ctx.target}",
+            details={"scope": ctx.scope, "target": ctx.target},
+        )
+        return True
+
+    payload = ctx.value if isinstance(ctx.value, Mapping) else None
+    if payload is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "camera.zoom requires mapping payload",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    factor = _positive_float(payload.get("factor"))
+    anchor = _float_pair(payload.get("anchor_px"))
+    if factor is None or anchor is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "zoom payload requires factor and anchor_px",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    ack_value = {"factor": factor, "anchor_px": [anchor[0], anchor[1]]}
+
+    log_camera = _camera_logger(server)
+    metrics = _camera_metrics(server)
+
+    log_camera("state: camera.zoom factor=%.4f anchor=(%.1f,%.1f)", factor, anchor[0], anchor[1])
+    if metrics is not None:
+        metrics.inc('napari_cuda_state_camera_updates')
+
+    seq = server._next_camera_command_seq(target)
+    await _state_update_ack(ctx, applied_value=ack_value, version=seq)
+    server._enqueue_camera_delta(
+        CameraDeltaCommand(
+            kind='zoom',
+            target=target,
+            command_seq=int(seq),
+            factor=factor,
+            anchor_px=anchor,
+        ),
+    )
+
+    server._schedule_coro(
+        _broadcast_camera_update(
+            server,
+            mode='zoom',
+            delta=ack_value,
+            intent_id=ctx.intent_id,
+            origin='state.update',
+        ),
+        'state-camera-zoom',
+    )
+    return True
+
+
+async def _handle_camera_pan(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    target = _camera_target_or_none(ctx)
+    if target is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported camera target {ctx.target}",
+            details={"scope": ctx.scope, "target": ctx.target},
+        )
+        return True
+
+    payload = ctx.value if isinstance(ctx.value, Mapping) else None
+    if payload is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "camera.pan requires mapping payload",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    dx = _float_value(payload.get('dx_px'))
+    dy = _float_value(payload.get('dy_px'))
+    if dx is None or dy is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "pan payload must provide numeric dx_px and dy_px",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    ack_value = {"dx_px": float(dx), "dy_px": float(dy)}
+
+    seq = server._next_camera_command_seq(target)
+    await _state_update_ack(ctx, applied_value=ack_value, version=seq)
+    if dx != 0.0 or dy != 0.0:
+        _camera_logger(server)("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
+        metrics = _camera_metrics(server)
+        if metrics is not None:
+            metrics.inc('napari_cuda_state_camera_updates')
+        server._enqueue_camera_delta(
+            CameraDeltaCommand(
+                kind='pan',
+                target=target,
+                command_seq=int(seq),
+                dx_px=float(dx),
+                dy_px=float(dy),
+            ),
+        )
+
+        server._schedule_coro(
+            _broadcast_camera_update(
+                server,
+                mode='pan',
+                delta=ack_value,
+                intent_id=ctx.intent_id,
+                origin='state.update',
+            ),
+            'state-camera-pan',
+        )
+    return True
+
+
+async def _handle_camera_orbit(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    target = _camera_target_or_none(ctx)
+    if target is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported camera target {ctx.target}",
+            details={"scope": ctx.scope, "target": ctx.target},
+        )
+        return True
+
+    payload = ctx.value if isinstance(ctx.value, Mapping) else None
+    if payload is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "camera.orbit requires mapping payload",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    d_az = _float_value(payload.get('d_az_deg'))
+    d_el = _float_value(payload.get('d_el_deg'))
+    if d_az is None or d_el is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "orbit payload must provide numeric d_az_deg and d_el_deg",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    ack_value = {"d_az_deg": float(d_az), "d_el_deg": float(d_el)}
+
+    seq = server._next_camera_command_seq(target)
+    await _state_update_ack(ctx, applied_value=ack_value, version=seq)
+    if d_az != 0.0 or d_el != 0.0:
+        _camera_logger(server)("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
+        metrics = _camera_metrics(server)
+        if metrics is not None:
+            metrics.inc('napari_cuda_state_camera_updates')
+        server._enqueue_camera_delta(
+            CameraDeltaCommand(
+                kind='orbit',
+                target=target,
+                command_seq=int(seq),
+                d_az_deg=float(d_az),
+                d_el_deg=float(d_el),
+            ),
+        )
+
+        server._schedule_coro(
+            _broadcast_camera_update(
+                server,
+                mode='orbit',
+                delta=ack_value,
+                intent_id=ctx.intent_id,
+                origin='state.update',
+            ),
+            'state-camera-orbit',
+        )
+    return True
+
+
+async def _handle_camera_reset(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    target = _camera_target_or_none(ctx)
+    if target is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported camera target {ctx.target}",
+            details={"scope": ctx.scope, "target": ctx.target},
+        )
+        return True
+
+    reason_value = None
+    if isinstance(ctx.value, Mapping):
+        raw = ctx.value.get('reason')
+        if isinstance(raw, str) and raw.strip():
+            reason_value = str(raw)
+    elif isinstance(ctx.value, str) and ctx.value.strip():
+        reason_value = str(ctx.value)
+    reason = reason_value if reason_value is not None else 'state.update'
+
+    metrics = _camera_metrics(server)
+    if metrics is not None:
+        metrics.inc('napari_cuda_state_camera_updates')
+
+    seq = server._next_camera_command_seq(target)
+    await _state_update_ack(ctx, applied_value={'reason': reason}, version=seq)
+    server._enqueue_camera_delta(
+        CameraDeltaCommand(kind='reset', target=target, command_seq=int(seq)),
+    )
+
+    if getattr(server, "_idr_on_reset", False) and server._worker is not None:
+        server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
+
+    server._schedule_coro(
+        _broadcast_camera_update(
+            server,
+            mode='reset',
+            delta={'reason': reason},
+            intent_id=ctx.intent_id,
+            origin='state.update',
+        ),
+        'state-camera-reset',
+    )
+    return True
+
+
+async def _handle_camera_set(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    target = _camera_target_or_none(ctx)
+    if target is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported camera target {ctx.target}",
+            details={"scope": ctx.scope, "target": ctx.target},
+        )
+        return True
+
+    payload = ctx.value if isinstance(ctx.value, Mapping) else None
+    if payload is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "camera.set requires mapping payload",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    center_tuple = _float_sequence(payload.get('center'))
+    zoom_float = _float_value(payload.get('zoom'))
+    angles_tuple = _float_triplet(payload.get('angles'))
+    rect_tuple = _float_rect(payload.get('rect'))
+
+    if (
+        center_tuple is None
+        and zoom_float is None
+        and angles_tuple is None
+        and rect_tuple is None
+    ):
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "camera.set payload must include center/zoom/angles/rect",
+            details={"scope": ctx.scope, "key": ctx.key},
+        )
+        return True
+
+    ack_components, ack_version = reduce_camera_update(
+        server._state_ledger,
+        center=center_tuple,
+        zoom=zoom_float,
+        angles=angles_tuple,
+        rect=rect_tuple,
+        timestamp=ctx.timestamp,
+        origin='client.state.camera',
+    )
+
+    await _state_update_ack(ctx, applied_value=ack_components, version=ack_version)
+
+    log_camera = _camera_logger(server)
+    log_camera(
+        "state: camera.set center=%s zoom=%s angles=%s",
+        ack_components.get('center'),
+        ack_components.get('zoom'),
+        ack_components.get('angles'),
+    )
+
+    metrics = _camera_metrics(server)
+    if metrics is not None:
+        metrics.inc('napari_cuda_state_camera_updates')
+
+    server._schedule_coro(
+        _broadcast_camera_update(
+            server,
+            mode='set',
+            delta=ack_components,
+            intent_id=ctx.intent_id,
+            origin='state.update',
+        ),
+        'state-camera-set',
+    )
+    return True
+
+
+async def _handle_layer_property(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    layer_id = ctx.target or "layer-0"
+    try:
+        result = reduce_layer_property(
+            server._state_ledger,
+            layer_id=layer_id,
+            prop=ctx.key,
+            value=ctx.value,
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.layer',
+        )
+    except KeyError:
+        logger.debug("state.update unknown layer prop=%s", ctx.key)
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported layer key {ctx.key}",
+            details={"scope": ctx.scope, "key": ctx.key, "target": layer_id},
+        )
+        return True
+    except Exception:
+        logger.debug(
+            "state.update failed for layer=%s key=%s",
+            layer_id,
+            ctx.key,
+            exc_info=True,
+        )
+        await _state_update_reject(
+            ctx,
+            "state.error",
+            "layer update failed",
+            details={"scope": ctx.scope, "key": ctx.key, "target": layer_id},
+        )
+        return True
+
+    assert result.version is not None, "layer reducer must supply version"
+    await _state_update_ack(ctx, applied_value=result.value, version=int(result.version))
+
+    logger.debug(
+        "state.update layer intent=%s frame=%s layer_id=%s key=%s value=%s version=%s",
+        ctx.intent_id,
+        ctx.frame_id,
+        layer_id,
+        ctx.key,
+        result.value,
+        result.version,
+    )
+    return True
+
+
+async def _handle_volume_update(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    key = ctx.key
+    value = ctx.value
+
+    if key == 'render_mode':
+        mode = str(value or '').lower().strip()
+        if not is_valid_render_mode(mode, server._allowed_render_modes):
+            logger.debug("state.update volume ignored invalid render_mode=%r", value)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "unknown render_mode",
+                details={"scope": ctx.scope, "key": key, "value": value},
+            )
+            return True
+        result = reduce_volume_render_mode(
+            server._state_ledger,
+            mode=mode,
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.volume',
+        )
+    elif key == 'contrast_limits':
+        pair = value
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            logger.debug("state.update volume ignored invalid contrast_limits=%r", pair)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "contrast_limits requires [lo, hi]",
+                details={"scope": ctx.scope, "key": key},
+            )
+            return True
+        try:
+            lo, hi = normalize_clim(pair[0], pair[1])
+        except (TypeError, ValueError):
+            logger.debug("state.update volume ignored invalid clim=%r", pair)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "contrast_limits invalid",
+                details={"scope": ctx.scope, "key": key},
+            )
+            return True
+        result = reduce_volume_contrast_limits(
+            server._state_ledger,
+            lo=lo,
+            hi=hi,
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.volume',
+        )
+    elif key == 'colormap':
+        name = value
+        if not isinstance(name, str) or not name.strip():
+            logger.debug("state.update volume ignored invalid colormap=%r", name)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "colormap must be non-empty",
+                details={"scope": ctx.scope, "key": key},
+            )
+            return True
+        result = reduce_volume_colormap(
+            server._state_ledger,
+            name=str(name),
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.volume',
+        )
+    elif key == 'opacity':
+        try:
+            norm_alpha = clamp_opacity(value)
+        except Exception:
+            logger.debug("state.update volume ignored invalid opacity=%r", value)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "opacity must be float",
+                details={"scope": ctx.scope, "key": key},
+            )
+            return True
+        result = reduce_volume_opacity(
+            server._state_ledger,
+            alpha=float(norm_alpha),
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.volume',
+        )
+    elif key == 'sample_step':
+        try:
+            norm_step = clamp_sample_step(value)
+        except Exception:
+            logger.debug("state.update volume ignored invalid sample_step=%r", value)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "sample_step must be float",
+                details={"scope": ctx.scope, "key": key},
+            )
+            return True
+        result = reduce_volume_sample_step(
+            server._state_ledger,
+            sample_step=float(norm_step),
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.volume',
+        )
+    else:
+        logger.debug("state.update volume ignored key=%s", key)
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported volume key {key}",
+            details={"scope": ctx.scope, "key": key},
+        )
+        return True
+
+    assert result.version is not None, "volume reducer must supply version"
+    await _state_update_ack(ctx, applied_value=result.value, version=int(result.version))
+
+    logger.debug(
+        "state.update volume intent=%s frame=%s key=%s value=%s",
+        ctx.intent_id,
+        ctx.frame_id,
+        key,
+        result.value,
+    )
+    return True
+
+
+async def _handle_multiscale_level(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    key = ctx.key
+
+    if key == 'policy':
+        logger.debug("state.update multiscale policy ignored (unsupported)")
+        await _state_update_reject(
+            ctx,
+            "state.unsupported",
+            "multiscale policy is no longer configurable",
+            details={"scope": ctx.scope, "key": key},
+        )
+        return True
+
+    if key != 'level':
+        logger.debug("state.update multiscale ignored key=%s", key)
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported multiscale key {key}",
+            details={"scope": ctx.scope, "key": key},
+        )
+        return True
+
+    multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+    levels = multiscale_state.get('levels') or []
+    try:
+        level = clamp_level(ctx.value, levels)
+    except (TypeError, ValueError):
+        logger.debug("state.update multiscale ignored invalid level=%r", ctx.value)
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "level out of range",
+            details={"scope": ctx.scope, "key": key},
+        )
+        return True
+
+    try:
+        result = reduce_level_update(
+            server._state_ledger,
+            applied={"level": int(level)},
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin='client.state.multiscale',
+        )
+    except Exception:
+        logger.exception("state.update multiscale level failed level=%s", level)
+        await _state_update_reject(
+            ctx,
+            "state.error",
+            "multiscale level update failed",
+            details={"scope": ctx.scope, "key": key},
+        )
+        return True
+
+    if server._worker is not None:
+        log_fn = logger.info if server._log_state_traces else logger.debug
+        try:
+            levels_meta = multiscale_state.get('levels') or []
+            path = None
+            if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
+                entry = levels_meta[int(level)]
+                if isinstance(entry, Mapping):
+                    path = entry.get('path')
+            log_fn("state: multiscale level -> worker.request start level=%s", level)
+            server._worker.request_multiscale_level(int(level), path)
+            log_fn("state: multiscale level -> worker.request done")
+            log_fn("state: multiscale level -> worker.force_idr start")
+            server._worker.force_idr()
+            log_fn("state: multiscale level -> worker.force_idr done")
+            server._pixel.bypass_until_key = True
+        except Exception:
+            logger.exception("multiscale level switch request failed")
+
+    assert result.version is not None, "multiscale reducer must supply version"
+    await _state_update_ack(ctx, applied_value=result.value, version=int(result.version))
+    return True
+
+
+async def _handle_dims_update(ctx: StateUpdateContext) -> bool:
+    server = ctx.server
+    key = ctx.key
+    target = ctx.target
+
+    if not target:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            "dims axis target required",
+            details={"scope": ctx.scope, "key": key},
+        )
+        return True
+
+    step_delta: Optional[int] = None
+    value_arg: Optional[int] = None
+
+    if key == 'index':
+        if isinstance(ctx.value, Integral):
+            value_arg = int(ctx.value)
+        else:
+            logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, ctx.value)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "index must be integer",
+                details={"scope": ctx.scope, "key": key, "target": target},
+            )
+            return True
+    elif key == 'step':
+        if isinstance(ctx.value, Integral):
+            step_delta = int(ctx.value)
+        else:
+            logger.debug("state.update dims ignored (non-integer step delta) axis=%s value=%r", target, ctx.value)
+            await _state_update_reject(
+                ctx,
+                "state.invalid",
+                "step delta must be integer",
+                details={"scope": ctx.scope, "key": key, "target": target},
+            )
+            return True
+    else:
+        logger.debug("state.update dims ignored (unsupported key) axis=%s key=%s", target, key)
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported dims key {key}",
+            details={"scope": ctx.scope, "key": key, "target": target},
+        )
+        return True
+
+    metadata: Dict[str, Any] = {}
+    if step_delta is not None:
+        metadata["step_delta"] = step_delta
+    if value_arg is not None:
+        metadata["value"] = value_arg
+
+    request = ClientStateUpdateRequest(
+        scope="dims",
+        target=str(target),
+        key=str(key),
+        value=value_arg,
+        intent_id=ctx.intent_id,
+        timestamp=ctx.timestamp,
+        metadata=metadata or None,
+    )
+
+    try:
+        result = reduce_dims_update(
+            server._state_ledger,
+            axis=request.target,
+            prop=request.key,
+            value=request.value,
+            step_delta=metadata.get("step_delta"),
+            intent_id=request.intent_id,
+            timestamp=request.timestamp,
+            origin='client.state.dims',
+        )
+    except Exception:
+        logger.exception("state.update dims failed axis=%s key=%s", target, key)
+        await _state_update_reject(
+            ctx,
+            "state.error",
+            "dims update failed",
+            details={"scope": ctx.scope, "key": key, "target": target},
+        )
+        return True
+
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "state.update dims applied: axis=%s key=%s step_delta=%s value=%s current_step=%s",
+            target,
+            key,
+            step_delta,
+            value_arg,
+            result.current_step,
+        )
+
+    assert result.version is not None, "dims reducer must supply version"
+    await _state_update_ack(ctx, applied_value=result.value, version=int(result.version))
+    return True
 async def _send_command_error(
     server: Any,
     ws: Any,
@@ -1070,723 +1939,42 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
     target = str(payload.target or "").strip()
     value = payload.value
 
-    async def _reject(code: str, message_text: str, *, details: Mapping[str, Any] | None = None) -> None:
-        error_payload: Dict[str, Any] = {"code": code, "message": message_text}
-        if details:
-            error_payload["details"] = dict(details)
-        await _send_state_ack(
-            server,
-            ws,
-            session_id=str(session_id),
-            intent_id=intent_id,
-            in_reply_to=frame_id,
-            status="rejected",
-            error=error_payload,
-        )
+    ctx = StateUpdateContext(
+        server=server,
+        ws=ws,
+        scope=scope,
+        key=key,
+        target=target,
+        value=value,
+        session_id=str(session_id),
+        frame_id=str(frame_id),
+        intent_id=str(intent_id),
+        timestamp=timestamp,
+    )
 
-    if not scope or not key or not target:
-        await _reject("state.invalid", "scope/key/target required", details={"scope": scope, "key": key, "target": target})
-        return True
-
-    # ----- view scope ---------------------------------------------------
-    if scope == 'view':
-        if key != 'ndisplay':
-            logger.debug("state.update view ignored key=%s", key)
-            await _reject("state.invalid", f"unsupported view key {key}", details={"scope": scope, "key": key})
-            return True
-        try:
-            raw_value = int(value) if value is not None else 2
-        except Exception:
-            logger.debug("state.update view ignored (non-integer ndisplay) value=%r", value)
-            await _reject("state.invalid", "ndisplay must be integer", details={"scope": scope, "key": key})
-            return True
-        ndisplay = 3 if int(raw_value) >= 3 else 2
-        was_volume = bool(server.use_volume)
-        try:
-            if server._log_dims_info:
-                logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
-            else:
-                logger.debug("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
-
-            result = reduce_view_update(
-                server._state_ledger,
-                server._state_lock,
-                ndisplay=int(ndisplay),
-                intent_id=intent_id,
-                timestamp=timestamp,
-                origin="client.state.view",
-            )
-            server.use_volume = bool(result.value == 3)
-
-            server._pixel_channel.broadcast.bypass_until_key = True
-            server._pixel_channel.broadcast.waiting_for_keyframe = True
-            pixel_channel.mark_stream_config_dirty(server._pixel_channel)
-            server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
-
-            if was_volume and ndisplay == 2:
-                ledger = server._state_ledger
-                if ledger is not None:
-                    with server._state_lock:
-                        lvl_entry = ledger.get("view_cache", "plane", "level")
-                        step_entry = ledger.get("view_cache", "plane", "step")
-                        center_entry = ledger.get("camera_plane", "main", "center") or ledger.get("camera", "main", "center")
-                        zoom_entry = ledger.get("camera_plane", "main", "zoom") or ledger.get("camera", "main", "zoom")
-                        rect_entry = ledger.get("camera_plane", "main", "rect") or ledger.get("camera", "main", "rect")
-
-                        missing: list[str] = []
-                        if lvl_entry is None:
-                            missing.append("view_cache.plane.level")
-                        if step_entry is None:
-                            missing.append("view_cache.plane.step")
-                        if center_entry is None:
-                            missing.append("camera_plane.center")
-                        if zoom_entry is None:
-                            missing.append("camera_plane.zoom")
-                        if rect_entry is None:
-                            missing.append("camera_plane.rect")
-
-                        if missing:
-                            logger.warning(
-                                "plane_restore skipped due to missing ledger entries: %s",
-                                ", ".join(missing),
-                            )
-                        else:
-                            apply_plane_restore_transaction(
-                                ledger=ledger,
-                                level=lvl_entry.value,
-                                step=step_entry.value,
-                                center=center_entry.value,
-                                zoom=zoom_entry.value,
-                                rect=rect_entry.value,
-                                origin="client.state.view",
-                                timestamp=timestamp,
-                            )
-        except Exception:
-            logger.info("state.update view.set_ndisplay failed", exc_info=True)
-            await _reject("state.error", "failed to apply ndisplay")
-            return True
-
-        assert result.version is not None, "view reducer must supply version"
-        await _send_state_ack(
-            server,
-            ws,
-            session_id=str(session_id),
-            intent_id=intent_id,
-            in_reply_to=frame_id,
-            status="accepted",
-            applied_value=int(result.value),
-            version=int(result.version),
-        )
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "state.update view intent=%s frame=%s ndisplay=%s accepted",
-                intent_id,
-                frame_id,
-                int(ndisplay),
-            )
-
-        return True
-
-    # ----- camera scope -------------------------------------------------
-    if scope == 'camera':
-        cam_target = target.lower()
-        if cam_target not in {"", "main"}:
-            await _reject(
-                "state.invalid",
-                f"unsupported camera target {target}",
-                details={"scope": scope, "target": target},
-            )
-            return True
-
-        async def _ack_camera(
-            applied_value: Mapping[str, Any] | str | None,
-            *,
-            version: int,
-        ) -> None:
-            await _send_state_ack(
-                server,
-                ws,
-                session_id=str(session_id),
-                intent_id=intent_id,
-                in_reply_to=frame_id,
-                status="accepted",
-                applied_value=applied_value,
-                version=int(version),
-            )
-
-        log_camera_info = bool(server._log_cam_info)
-        log_camera_debug = bool(server._log_cam_debug)
-
-        def _log_camera(fmt: str, *args: Any) -> None:
-            if log_camera_info:
-                logger.info(fmt, *args)
-            elif log_camera_debug:
-                logger.debug(fmt, *args)
-
-        metrics = server.metrics if hasattr(server, "metrics") else None
-
-        if key == 'zoom':
-            payload_map = value if isinstance(value, Mapping) else None
-            if payload_map is None:
-                await _reject(
-                    "state.invalid",
-                    "camera.zoom requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            factor = _positive_float(payload_map.get('factor'))
-            if factor is None:
-                await _reject(
-                    "state.invalid",
-                    "zoom factor must be positive",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            anchor = _float_pair(payload_map.get('anchor_px'))
-            if anchor is None:
-                await _reject(
-                    "state.invalid",
-                    "anchor_px requires numeric [x, y]",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-
-            ack_value = {
-                "factor": factor,
-                "anchor_px": [anchor[0], anchor[1]],
-            }
-
-            _log_camera(
-                "state: camera.zoom factor=%.4f anchor=(%.1f,%.1f)",
-                factor,
-                anchor[0],
-                anchor[1],
-            )
-            if metrics is not None:
-                metrics.inc('napari_cuda_state_camera_updates')
-
-            seq = server._next_camera_command_seq(cam_target or "main")
-            await _ack_camera(ack_value, version=seq)
-            server._enqueue_camera_delta(
-                CameraDeltaCommand(
-                    kind='zoom',
-                    target=cam_target or "main",
-                    command_seq=int(seq),
-                    factor=factor,
-                    anchor_px=anchor,
-                ),
-            )
-
-            server._schedule_coro(
-                _broadcast_camera_update(
-                    server,
-                    mode='zoom',
-                    delta=ack_value,
-                    intent_id=intent_id,
-                    origin='state.update',
-                ),
-                'state-camera-zoom',
-            )
-            return True
-
-        if key == 'pan':
-            if not isinstance(value, Mapping):
-                await _reject(
-                    "state.invalid",
-                    "camera.pan requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            dx = _float_value(value.get('dx_px'))
-            dy = _float_value(value.get('dy_px'))
-            if dx is None or dy is None:
-                await _reject(
-                    "state.invalid",
-                    "pan payload must provide numeric dx_px and dy_px",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-
-            ack_value = {"dx_px": float(dx), "dy_px": float(dy)}
-
-            seq = server._next_camera_command_seq(cam_target or "main")
-            await _ack_camera(ack_value, version=seq)
-            if dx != 0.0 or dy != 0.0:
-                _log_camera("state: camera.pan_px dx=%.2f dy=%.2f", dx, dy)
-                if metrics is not None:
-                    metrics.inc('napari_cuda_state_camera_updates')
-                server._enqueue_camera_delta(
-                    CameraDeltaCommand(
-                        kind='pan',
-                        target=cam_target or "main",
-                        command_seq=int(seq),
-                        dx_px=float(dx),
-                        dy_px=float(dy),
-                    ),
-                )
-
-                server._schedule_coro(
-                    _broadcast_camera_update(
-                        server,
-                        mode='pan',
-                        delta=ack_value,
-                        intent_id=intent_id,
-                        origin='state.update',
-                    ),
-                    'state-camera-pan',
-                )
-            return True
-
-        if key == 'orbit':
-            if not isinstance(value, Mapping):
-                await _reject(
-                    "state.invalid",
-                    "camera.orbit requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-            d_az = _float_value(value.get('d_az_deg'))
-            d_el = _float_value(value.get('d_el_deg'))
-            if d_az is None or d_el is None:
-                await _reject(
-                    "state.invalid",
-                    "orbit payload must provide numeric d_az_deg and d_el_deg",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-
-            ack_value = {"d_az_deg": float(d_az), "d_el_deg": float(d_el)}
-
-            seq = server._next_camera_command_seq(cam_target or "main")
-            await _ack_camera(ack_value, version=seq)
-            if d_az != 0.0 or d_el != 0.0:
-                _log_camera("state: camera.orbit daz=%.2f del=%.2f", d_az, d_el)
-                if metrics is not None:
-                    metrics.inc('napari_cuda_state_camera_updates')
-                server._enqueue_camera_delta(
-                    CameraDeltaCommand(
-                        kind='orbit',
-                        target=cam_target or "main",
-                        command_seq=int(seq),
-                        d_az_deg=float(d_az),
-                        d_el_deg=float(d_el),
-                    ),
-                )
-
-                server._schedule_coro(
-                    _broadcast_camera_update(
-                        server,
-                        mode='orbit',
-                        delta=ack_value,
-                        intent_id=intent_id,
-                        origin='state.update',
-                    ),
-                    'state-camera-orbit',
-                )
-            return True
-
-        if key == 'reset':
-            payload_map = value if isinstance(value, Mapping) else None
-            reason_value = None
-            if payload_map is not None:
-                raw = payload_map.get('reason')
-                if isinstance(raw, str) and raw.strip():
-                    reason_value = str(raw)
-            elif isinstance(value, str) and value.strip():
-                reason_value = str(value)
-            reason = reason_value if reason_value is not None else 'state.update'
-
-            _log_camera("state: camera.reset")
-            if metrics is not None:
-                metrics.inc('napari_cuda_state_camera_updates')
-            seq = server._next_camera_command_seq(cam_target or "main")
-            await _ack_camera({'reason': reason}, version=seq)
-            server._enqueue_camera_delta(
-                CameraDeltaCommand(kind='reset', target=cam_target or "main", command_seq=int(seq)),
-            )
-            if server._idr_on_reset and server._worker is not None:
-                server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
-
-            server._schedule_coro(
-                _broadcast_camera_update(
-                    server,
-                    mode='reset',
-                    delta={'reason': reason},
-                    intent_id=intent_id,
-                    origin='state.update',
-                ),
-                'state-camera-reset',
-            )
-            return True
-
-        if key == 'set':
-            if not isinstance(value, Mapping):
-                await _reject(
-                    "state.invalid",
-                    "camera.set requires mapping payload",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-
-            center_tuple = _float_sequence(value.get('center'))
-            zoom_float = _float_value(value.get('zoom'))
-            angles_tuple = _float_triplet(value.get('angles'))
-            rect_tuple = _float_rect(value.get('rect'))
-
-            if (
-                center_tuple is None
-                and zoom_float is None
-                and angles_tuple is None
-                and rect_tuple is None
-            ):
-                await _reject(
-                    "state.invalid",
-                    "camera.set payload must include center/zoom/angles/rect",
-                    details={"scope": scope, "key": key},
-                )
-                return True
-
-            ack_components, ack_version = reduce_camera_update(
-                server._state_ledger,
-                center=center_tuple,
-                zoom=zoom_float,
-                angles=angles_tuple,
-                rect=rect_tuple,
-                timestamp=timestamp,
-            )
-
-            await _ack_camera(ack_components, version=ack_version)
-
-            _log_camera(
-                "state: camera.set center=%s zoom=%s angles=%s",
-                ack_components.get('center'),
-                ack_components.get('zoom'),
-                ack_components.get('angles'),
-            )
-
-            if metrics is not None:
-                metrics.inc('napari_cuda_state_camera_updates')
-
-            server._schedule_coro(
-                _broadcast_camera_update(
-                    server,
-                    mode='set',
-                    delta=ack_components,
-                    intent_id=intent_id,
-                    origin='state.update',
-                ),
-                'state-camera-set',
-            )
-            return True
-
-        await _reject(
+    if not scope or not key:
+        await _state_update_reject(
+            ctx,
             "state.invalid",
-            f"unsupported camera key {key}",
+            "scope/key required",
+            details={"scope": scope, "key": key, "target": target},
+        )
+        return True
+
+    handler = _STATE_UPDATE_HANDLERS.get(f"{scope}:{key}")
+    if handler is None:
+        handler = _STATE_UPDATE_HANDLERS.get(f"{scope}:*")
+    if handler is None:
+        await _state_update_reject(
+            ctx,
+            "state.invalid",
+            f"unsupported {scope} key {key}",
             details={"scope": scope, "key": key},
         )
         return True
 
-    # ----- layer scope --------------------------------------------------
-    if scope == 'layer':
-        layer_id = target
-        try:
-            result = reduce_layer_property(
-                server._state_ledger,
-                server._state_lock,
-                layer_id=layer_id,
-                prop=key,
-                value=value,
-                intent_id=intent_id,
-                timestamp=timestamp,
-            )
-        except KeyError:
-            logger.debug("state.update unknown layer prop=%s", key)
-            await _reject("state.invalid", f"unsupported layer key {key}", details={"scope": scope, "key": key, "target": layer_id})
-            return True
-        except Exception:
-            logger.debug("state.update failed for layer=%s key=%s", layer_id, key, exc_info=True)
-            await _reject("state.error", "layer update failed", details={"scope": scope, "key": key, "target": layer_id})
-            return True
+    return await handler(ctx)
 
-        assert result.version is not None, "layer reducer must supply version"
-        await _send_state_ack(
-            server,
-            ws,
-            session_id=str(session_id),
-            intent_id=intent_id,
-            in_reply_to=frame_id,
-            status="accepted",
-            applied_value=result.value,
-            version=int(result.version),
-        )
-
-        logger.debug(
-            "state.update layer intent=%s frame=%s layer_id=%s key=%s value=%s version=%s",
-            intent_id,
-            frame_id,
-            layer_id,
-            key,
-            result.value,
-            result.version,
-        )
-        return True
-
-    # ----- volume scope -------------------------------------------------
-    if scope == 'volume':
-        ts = time.time()
-        if key == 'render_mode':
-            mode = str(value or '').lower().strip()
-            if not is_valid_render_mode(mode, server._allowed_render_modes):
-                logger.debug("state.update volume ignored invalid render_mode=%r", value)
-                await _reject("state.invalid", "unknown render_mode", details={"scope": scope, "key": key, "value": value})
-                return True
-            result = reduce_volume_render_mode(
-                server._state_ledger,
-                server._state_lock,
-                mode=mode,
-                intent_id=intent_id,
-                timestamp=timestamp,
-            )
-        elif key == 'contrast_limits':
-            pair = value
-            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
-                logger.debug("state.update volume ignored invalid contrast_limits=%r", pair)
-                await _reject("state.invalid", "contrast_limits requires [lo, hi]", details={"scope": scope, "key": key})
-                return True
-            try:
-                lo, hi = normalize_clim(pair[0], pair[1])
-            except (TypeError, ValueError):
-                logger.debug("state.update volume ignored invalid clim=%r", pair)
-                await _reject("state.invalid", "contrast_limits invalid", details={"scope": scope, "key": key})
-                return True
-            result = reduce_volume_contrast_limits(
-                server._state_ledger,
-                server._state_lock,
-                lo=lo,
-                hi=hi,
-                intent_id=intent_id,
-                timestamp=timestamp,
-            )
-        elif key == 'colormap':
-            name = value
-            if not isinstance(name, str) or not name.strip():
-                logger.debug("state.update volume ignored invalid colormap=%r", name)
-                await _reject("state.invalid", "colormap must be non-empty", details={"scope": scope, "key": key})
-                return True
-            result = reduce_volume_colormap(
-                server._state_ledger,
-                server._state_lock,
-                name=str(name),
-                intent_id=intent_id,
-                timestamp=timestamp,
-            )
-        elif key == 'opacity':
-            alpha = value
-            try:
-                norm_alpha = clamp_opacity(alpha)
-            except Exception:
-                logger.debug("state.update volume ignored invalid opacity=%r", alpha)
-                await _reject("state.invalid", "opacity must be float", details={"scope": scope, "key": key})
-                return True
-            result = reduce_volume_opacity(
-                server._state_ledger,
-                server._state_lock,
-                alpha=float(norm_alpha),
-                intent_id=intent_id,
-                timestamp=timestamp,
-            )
-        elif key == 'sample_step':
-            rel = value
-            try:
-                norm_step = clamp_sample_step(rel)
-            except Exception:
-                logger.debug("state.update volume ignored invalid sample_step=%r", rel)
-                await _reject("state.invalid", "sample_step must be float", details={"scope": scope, "key": key})
-                return True
-            result = reduce_volume_sample_step(
-                server._state_ledger,
-                server._state_lock,
-                sample_step=float(norm_step),
-                intent_id=intent_id,
-                timestamp=timestamp,
-            )
-        else:
-            logger.debug("state.update volume ignored key=%s", key)
-            await _reject("state.invalid", f"unsupported volume key {key}", details={"scope": scope, "key": key})
-            return True
-
-        assert result.version is not None, "volume reducer must supply version"
-        await _send_state_ack(
-            server,
-            ws,
-            session_id=str(session_id),
-            intent_id=intent_id,
-            in_reply_to=frame_id,
-            status="accepted",
-            applied_value=result.value,
-            version=int(result.version),
-        )
-
-        logger.debug(
-            "state.update volume intent=%s frame=%s key=%s value=%s",
-            intent_id,
-            frame_id,
-            key,
-            result.value,
-        )
-        return True
-
-    # ----- multiscale scope ---------------------------------------------
-    if scope == 'multiscale':
-        ts = time.time()
-        log_fn = logger.info if server._log_state_traces else logger.debug
-
-        if key == 'policy':
-            logger.debug("state.update multiscale policy ignored (unsupported)")
-            await _reject(
-                "state.unsupported",
-                "multiscale policy is no longer configurable",
-                details={"scope": scope, "key": key},
-            )
-            return True
-        elif key == 'level':
-            multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
-            levels = multiscale_state.get('levels') or []
-            try:
-                level = clamp_level(value, levels)
-            except (TypeError, ValueError):
-                logger.debug("state.update multiscale ignored invalid level=%r", value)
-                await _reject("state.invalid", "level out of range", details={"scope": scope, "key": key})
-                return True
-            result = reduce_level_update(
-                server._state_ledger,
-                server._state_lock,
-                applied={"level": int(level)},
-                intent_id=intent_id,
-                timestamp=timestamp,
-                origin="client.state.multiscale",
-            )
-            if server._worker is not None:
-                try:
-                    levels_meta = multiscale_state.get('levels') or []
-                    path = None
-                    if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
-                        entry = levels_meta[int(level)]
-                        if isinstance(entry, Mapping):
-                            path = entry.get('path')
-                    log_fn("state: multiscale level -> worker.request start level=%s", level)
-                    server._worker.request_multiscale_level(int(level), path)
-                    log_fn("state: multiscale level -> worker.request done")
-                    log_fn("state: multiscale level -> worker.force_idr start")
-                    server._worker.force_idr()
-                    log_fn("state: multiscale level -> worker.force_idr done")
-                    server._pixel.bypass_until_key = True
-                except Exception:
-                    logger.exception("multiscale level switch request failed")
-        else:
-            logger.debug("state.update multiscale ignored key=%s", key)
-            await _reject("state.invalid", f"unsupported multiscale key {key}", details={"scope": scope, "key": key})
-            return True
-
-        assert result.version is not None, "multiscale reducer must supply version"
-        await _send_state_ack(
-            server,
-            ws,
-            session_id=str(session_id),
-            intent_id=intent_id,
-            in_reply_to=frame_id,
-            status="accepted",
-            applied_value=result.value,
-            version=int(result.version),
-        )
-
-        return True
-
-    # ----- dims scope ---------------------------------------------------
-    if scope == 'dims':
-        step_delta: Optional[int] = None
-        value_arg: Optional[int] = None
-        norm_key = key
-        if key == 'index':
-            norm_key = 'index'
-            if isinstance(value, Integral):
-                value_arg = int(value)
-            else:
-                logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, value)
-                await _reject("state.invalid", "index must be integer", details={"scope": scope, "key": key, "target": target})
-                return True
-        elif key == 'step':
-            norm_key = 'step'
-            if isinstance(value, Integral):
-                step_delta = int(value)
-            else:
-                logger.debug("state.update dims ignored (non-integer step delta) axis=%s value=%r", target, value)
-                await _reject("state.invalid", "step delta must be integer", details={"scope": scope, "key": key, "target": target})
-                return True
-        else:
-            logger.debug("state.update dims ignored (unsupported key) axis=%s key=%s", target, key)
-            await _reject("state.invalid", f"unsupported dims key {key}", details={"scope": scope, "key": key, "target": target})
-            return True
-
-        metadata: Dict[str, Any] = {}
-        if step_delta is not None:
-            metadata["step_delta"] = step_delta
-        if value_arg is not None:
-            metadata["value"] = value_arg
-
-        request = ClientStateUpdateRequest(
-            scope="dims",
-            target=str(target),
-            key=str(norm_key),
-            value=value_arg,
-            intent_id=intent_id,
-            timestamp=timestamp,
-            metadata=metadata or None,
-        )
-
-        try:
-            result = reduce_dims_update(
-                server._state_ledger,
-                server._state_lock,
-                axis=request.target,
-                prop=request.key,
-                value=request.value,
-                step_delta=metadata.get("step_delta"),
-                intent_id=request.intent_id,
-                timestamp=request.timestamp,
-                origin="client.state.dims",
-            )
-        except Exception:
-            logger.exception("state.update dims failed axis=%s key=%s", target, key)
-            await _reject("state.error", "dims update failed", details={"scope": scope, "key": key, "target": target})
-            return True
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "state.update dims applied: axis=%s key=%s step_delta=%s value=%s current_step=%s",
-                target,
-                key,
-                step_delta,
-                value_arg,
-                result.current_step,
-            )
-
-        assert result.version is not None, "dims reducer must supply version"
-        await _send_state_ack(
-            server,
-            ws,
-            session_id=str(session_id),
-            intent_id=intent_id,
-            in_reply_to=frame_id,
-            status="accepted",
-            applied_value=result.value,
-            version=int(result.version),
-        )
-
-        return True
-
-    logger.debug("state.update unknown scope=%s", scope)
-    await _reject("state.invalid", f"unknown scope {scope}", details={"scope": scope})
     return True
 
 MESSAGE_HANDLERS: dict[str, StateMessageHandler] = {
@@ -2426,3 +2614,19 @@ async def _send_layer_baseline(server: Any, ws: Any) -> None:
             timestamp=time.time(),
             targets=[ws],
         )
+StateUpdateHandler = Callable[[StateUpdateContext], Awaitable[bool]]
+
+_STATE_UPDATE_HANDLERS: Dict[str, StateUpdateHandler] = {
+    "view:ndisplay": _handle_view_ndisplay,
+    "camera:zoom": _handle_camera_zoom,
+    "camera:pan": _handle_camera_pan,
+    "camera:orbit": _handle_camera_orbit,
+    "camera:reset": _handle_camera_reset,
+    "camera:set": _handle_camera_set,
+    "layer:*": _handle_layer_property,
+    "volume:*": _handle_volume_update,
+    "multiscale:level": _handle_multiscale_level,
+    "multiscale:policy": _handle_multiscale_level,
+    "dims:index": _handle_dims_update,
+    "dims:step": _handle_dims_update,
+}

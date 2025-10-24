@@ -122,14 +122,14 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
     harness = StateServerHarness(loop)
     from napari_cuda.server.control import control_channel_server as state_channel_handler
 
-    orig_plane_restore = state_channel_handler.apply_plane_restore_transaction
+    orig_plane_restore = state_channel_handler.reduce_plane_restore
     calls: list[dict[str, object]] = []
 
-    def _wrapped_plane_restore(**kwargs):  # type: ignore[no-untyped-def]
-        calls.append(kwargs)
-        return orig_plane_restore(**kwargs)
+    def _wrapped_plane_restore(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"args": args, "kwargs": kwargs})
+        return orig_plane_restore(*args, **kwargs)
 
-    state_channel_handler.apply_plane_restore_transaction = _wrapped_plane_restore  # type: ignore[assignment]
+    state_channel_handler.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -194,7 +194,7 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         assert ack_repeat["payload"]["status"] == "accepted"
         assert len(calls) == 1
     finally:
-        state_channel_handler.apply_plane_restore_transaction = orig_plane_restore  # type: ignore[assignment]
+        state_channel_handler.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
         await harness.stop()
 
 
@@ -207,14 +207,14 @@ async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
     harness = StateServerHarness(loop)
     from napari_cuda.server.control import control_channel_server as state_channel_handler
 
-    orig_plane_restore = state_channel_handler.apply_plane_restore_transaction
+    orig_plane_restore = state_channel_handler.reduce_plane_restore
     calls: list[dict[str, object]] = []
 
-    def _wrapped_plane_restore(**kwargs):  # type: ignore[no-untyped-def]
-        calls.append(kwargs)
-        return orig_plane_restore(**kwargs)
+    def _wrapped_plane_restore(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"args": args, "kwargs": kwargs})
+        return orig_plane_restore(*args, **kwargs)
 
-    state_channel_handler.apply_plane_restore_transaction = _wrapped_plane_restore  # type: ignore[assignment]
+    state_channel_handler.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -240,7 +240,7 @@ async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
         assert ack["payload"]["status"] == "accepted"
         assert calls == []
     finally:
-        state_channel_handler.apply_plane_restore_transaction = orig_plane_restore  # type: ignore[assignment]
+        state_channel_handler.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
         await harness.stop()
 
 

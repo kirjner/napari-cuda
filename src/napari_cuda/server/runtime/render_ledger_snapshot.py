@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from napari_cuda.server.control.state_ledger import ServerStateLedger, LedgerEntry
+from napari_cuda.server.scene_defaults import default_volume_state
 
 
 logger = logging.getLogger(__name__)
@@ -44,21 +45,13 @@ class RenderLedgerSnapshot:
     camera_versions: Optional[Dict[str, int]] = None
 
 
-DEFAULT_VOLUME_STATE = {
-    "mode": "mip",
-    "colormap": "gray",
-    "clim": (0.0, 1.0),
-    "opacity": 1.0,
-    "sample_step": 1.0,
-}
-
-
 def build_ledger_snapshot(
     ledger: ServerStateLedger,
+    snapshot: Dict[tuple[str, str, str], LedgerEntry] | None = None,
 ) -> RenderLedgerSnapshot:
     """Construct the render snapshot from confirmed ledger state."""
 
-    snapshot = ledger.snapshot()
+    snapshot = snapshot if snapshot is not None else ledger.snapshot()
 
     center_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "center"), float)
     zoom_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "zoom"))
@@ -89,7 +82,7 @@ def build_ledger_snapshot(
         None if multiscale_level_entry is None else _version_or_none(multiscale_level_entry.version)
     )
 
-    defaults = DEFAULT_VOLUME_STATE
+    defaults = default_volume_state()
     volume_mode = _string_or_none(
         _ledger_value(snapshot, "volume", "main", "render_mode"),
         fallback=defaults.get("mode"),

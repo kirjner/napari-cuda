@@ -382,7 +382,6 @@ class EGLHeadlessServer:
 
         reduce_level_update(
             self._state_ledger,
-            self._state_lock,
             applied=context,
             downgraded=downgraded,
             intent_id=None,
@@ -762,7 +761,6 @@ class EGLHeadlessServer:
         )
         reduce_bootstrap_state(
             self._state_ledger,
-            self._state_lock,
             step=bootstrap_meta.step,
             axis_labels=bootstrap_meta.axis_labels,
             order=bootstrap_meta.order,

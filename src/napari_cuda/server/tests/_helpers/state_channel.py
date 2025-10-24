@@ -717,7 +717,6 @@ class StateServerHarness:
         levels_payload = tuple(dict(level) for level in base_metrics.levels)
         reduce_bootstrap_state(
             server._state_ledger,
-            server._state_lock,
             step=tuple(int(v) for v in base_metrics.current_step),
             axis_labels=axis_labels,
             order=order,
@@ -808,7 +807,6 @@ class StateServerHarness:
         def _commit_level(applied, downgraded):
             reduce_level_update(
                 server._state_ledger,
-                server._state_lock,
                 applied=applied,
                 downgraded=bool(downgraded),
                 origin="harness.level",

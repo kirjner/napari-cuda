@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
 from napari_cuda.server.control.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.server.scene_defaults import default_volume_state
 
 
 CONTROL_KEYS: tuple[str, ...] = (
@@ -34,18 +35,6 @@ __all__ = [
     "volume_state_from_ledger",
     "multiscale_state_from_snapshot",
 ]
-
-
-def default_volume_state() -> Dict[str, Any]:
-    """Return the canonical defaults for volume render hints."""
-
-    return {
-        "mode": "mip",
-        "colormap": "gray",
-        "clim": [0.0, 1.0],
-        "opacity": 1.0,
-        "sample_step": 1.0,
-    }
 
 
 def multiscale_state_from_snapshot(
@@ -140,9 +129,10 @@ def build_render_scene_state(
 ) -> RenderLedgerSnapshot:
     """Build a render-scene snapshot from the ledger with optional overrides."""
 
-    base = build_ledger_snapshot(ledger)
+    snapshot_map = ledger.snapshot()
+    base = build_ledger_snapshot(ledger, snapshot_map)
 
-    volume_defaults = volume_state_from_ledger(ledger.snapshot())
+    volume_defaults = volume_state_from_ledger(snapshot_map)
     if not volume_defaults:
         volume_defaults = default_volume_state()
     default_mode = volume_defaults.get("mode")
