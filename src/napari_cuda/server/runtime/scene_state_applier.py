@@ -186,6 +186,8 @@ class SceneStateApplier:
     ) -> Tuple[Tuple[int, int], int]:
         layer = ctx.layer
         if layer is not None:
+            layer.depiction = "volume"  # type: ignore[assignment]
+            layer.rendering = NapariImageRendering.MIP.value  # type: ignore[assignment]
             layer.data = volume
             lo = float(contrast[0])
             hi = float(contrast[1])
@@ -307,8 +309,12 @@ class SceneStateApplier:
                     )
                     ctx.visual.cmap = _napari_cmap_to_vispy(cmap)
             elif prop == "depiction":
+                if ctx.use_volume:
+                    return
                 layer.depiction = str(value)  # type: ignore[assignment]
             elif prop == "rendering":
+                if ctx.use_volume:
+                    return
                 layer.rendering = str(value)  # type: ignore[assignment]
             elif prop == "attenuation":
                 layer.attenuation = float(value)  # type: ignore[assignment]

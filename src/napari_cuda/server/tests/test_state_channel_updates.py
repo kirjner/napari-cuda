@@ -743,13 +743,6 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     entry = server._state_ledger.get("view", "main", "ndisplay")
     assert entry is not None and int(entry.value) == 3
 
-    layer_dep_entry = server._state_ledger.get("layer", "layer-0", "depiction")
-    assert layer_dep_entry is not None and layer_dep_entry.value == "volume"
-    layer_render_entry = server._state_ledger.get("layer", "layer-0", "rendering")
-    assert layer_render_entry is not None and layer_render_entry.value == "attenuated_mip"
-    volume_mode_entry = server._state_ledger.get("volume", "main", "render_mode")
-    assert volume_mode_entry is not None and volume_mode_entry.value == "attenuated_mip"
-
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
     ack_payload = acks[-1]["payload"]

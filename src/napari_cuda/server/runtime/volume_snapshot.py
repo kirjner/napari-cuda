@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, replace
 from typing import Any, Optional, Tuple
 
@@ -12,9 +11,7 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
 
-from .state_structs import RenderMode
 from .volume_state import assign_pose_from_snapshot, update_level, update_scale
-from .viewer_stage import apply_volume_metadata
 
 
 @dataclass(frozen=True)
@@ -26,89 +23,6 @@ class VolumeApplyResult:
     data_wh: Tuple[int, int]
     data_d: Optional[int]
     scale: Tuple[float, float, float]
-
-
-def apply_volume_snapshot(
-    worker: Any,
-    source: Any,
-    snapshot: RenderLedgerSnapshot,
-) -> Optional[VolumeApplyResult]:
-    """Apply volume metadata, level selection, and camera pose from the snapshot."""
-
-    prev_level = int(worker._current_level_index())  # type: ignore[attr-defined]
-    target_level = (
-        int(snapshot.current_level) if snapshot.current_level is not None else prev_level
-    )
-
-    step_hint: Optional[tuple[int, ...]]
-    if snapshot.current_step is not None:
-        step_hint = tuple(int(v) for v in snapshot.current_step)
-    else:
-        recorded_step = worker._ledger_step()
-        step_hint = (
-            tuple(int(v) for v in recorded_step)
-            if recorded_step is not None
-            else None
-        )
-
-    was_volume = worker.viewport_state.mode is RenderMode.VOLUME  # type: ignore[attr-defined]
-    if not was_volume:
-        worker.viewport_state.mode = RenderMode.VOLUME  # type: ignore[attr-defined]
-        worker._last_dims_signature = None
-        if hasattr(worker, "_last_volume_pose"):
-            worker._last_volume_pose = None  # type: ignore[attr-defined]
-        runner = worker._viewport_runner
-        if runner is not None:
-            state = runner.state
-            state.level_reload_required = False
-            state.awaiting_level_confirm = False
-            state.roi_reload_required = False
-            state.pending_roi = None
-            state.pending_roi_signature = None
-            state.applied_roi = None
-            state.applied_roi_signature = None
-            state.pose_reason = None
-            state.camera_pose_dirty = False
-    else:
-        runner = worker._viewport_runner
-
-    requested_level = int(target_level)
-    selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
-    effective_level = int(selected_level)
-    worker.viewport_state.volume.downgraded = bool(downgraded)  # type: ignore[attr-defined]
-
-    load_needed = (not was_volume) or (int(effective_level) != prev_level)
-    result: Optional[VolumeApplyResult] = None
-    if load_needed:
-        decision = lod.LevelDecision(
-            desired_level=int(effective_level),
-            selected_level=int(effective_level),
-            reason="direct",
-            timestamp=time.perf_counter(),
-            oversampling={},
-            downgraded=bool(downgraded),
-        )
-        context = lod.build_level_context(
-            decision,
-            source=source,
-            prev_level=prev_level,
-            last_step=step_hint,
-        )
-        apply_volume_metadata(worker, source, context)
-        result = apply_volume_level(
-            worker,
-            source,
-            context,
-            downgraded=bool(downgraded),
-        )
-        if runner is not None:
-            runner.mark_level_applied(int(context.level))
-            rect = worker._current_panzoom_rect()
-            runner.update_camera_rect(rect)
-        worker._configure_camera_for_mode()
-
-    apply_volume_camera_pose(worker, snapshot)
-    return result
 
 
 def apply_volume_camera_pose(
@@ -175,15 +89,6 @@ def apply_volume_level(
         volume=volume,
         contrast=applied.contrast,
     )
-    layer_obj = ctx.layer
-    if layer_obj is not None:
-        layer_obj.depiction = "volume"
-        layer_obj.rendering = "attenuated_mip"
-        if hasattr(layer_obj, "_set_view_slice"):
-            layer_obj._set_view_slice()  # type: ignore[misc]
-        clear_visual = getattr(worker, "_clear_visual", None)
-        if callable(clear_visual):
-            clear_visual()
     worker._data_wh = data_wh
     worker._data_d = data_d
 
@@ -216,9 +121,4 @@ def apply_volume_level(
     )
 
 
-__all__ = [
-    "VolumeApplyResult",
-    "apply_volume_snapshot",
-    "apply_volume_camera_pose",
-    "apply_volume_level",
-]
+__all__ = ["VolumeApplyResult", "apply_volume_camera_pose", "apply_volume_level"]

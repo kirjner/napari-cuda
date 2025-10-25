@@ -47,7 +47,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
   - Computes aligned ROI, resolves chunk shape, loads slab via `plane_loader`.
   - Updates `PlaneState` (`applied_level`, `applied_roi`, `pending_roi`, etc.) and emits a `PlaneApplyResult`.
   - Emits pose once per intent and updates ledger metadata (through `viewer_stage` helpers).
-- Volume path executed by `volume_snapshot.apply_volume_snapshot(...)`:
+- Volume path executed by `render_snapshot._apply_snapshot_multiscale(...)` (volume branch):
   - Selects level (with downgrades), stages metadata, loads volume, applies camera pose, updates `VolumeState`.
 - Viewer metadata adjustments live in `viewer_stage.apply_plane_metadata` / `viewer_stage.apply_volume_metadata`, responsible for napari dims updates, camera range, and layer logging.
 

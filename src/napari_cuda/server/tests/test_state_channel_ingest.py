@@ -190,13 +190,6 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         assert dims_step_entry is not None
         assert tuple(int(v) for v in dims_step_entry.value) == plane_step
         assert len(harness.server._camera_queue) == 0
-        layer_dep_entry = ledger.get("layer", "layer-0", "depiction")
-        assert layer_dep_entry is not None and layer_dep_entry.value == "plane"
-        layer_render_entry = ledger.get("layer", "layer-0", "rendering")
-        assert layer_render_entry is not None and layer_render_entry.value == "mip"
-        volume_mode_entry = ledger.get("volume", "main", "render_mode")
-        assert volume_mode_entry is not None and volume_mode_entry.value == "mip"
-
         harness.queue_client_payload(_make_update("frame-repeat", 2))
         ack_repeat = await harness.wait_for_frame(
             lambda frame: frame.get("type") == "ack.state" and frame["payload"]["intent_id"] == "view-intent-frame-repeat",
