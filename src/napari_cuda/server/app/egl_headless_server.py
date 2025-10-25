@@ -12,7 +12,7 @@ import uuid
 import struct
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Awaitable, Dict, Optional, Sequence, Set, Mapping, TYPE_CHECKING, Any
 
 import websockets
@@ -22,7 +22,7 @@ from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.runtime.state_structs import RenderMode
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
     build_render_scene_state,
@@ -72,12 +72,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_contrast_limits,
     reduce_volume_opacity,
 )
-from napari_cuda.server.control.transactions.level_switch import (
-    apply_level_switch_transaction,
-)
-from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.data.level_budget import LevelBudgetError, select_volume_level
 from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
@@ -338,182 +333,47 @@ class EGLHeadlessServer:
             logger.debug("level intent dropped (no active worker)")
             return
 
-        self._apply_level_switch_transaction(worker, intent)
-
-    def _apply_level_switch_transaction(
-        self,
-        worker: "EGLRendererWorker",
-        intent: LevelSwitchIntent,
-    ) -> None:
         context = intent.context
+        if context is None:
+            logger.warning("level intent dropped (missing context)")
+            return
+
         intent_mode = intent.mode if intent.mode is not None else RenderMode.PLANE
         if not isinstance(intent_mode, RenderMode):
             try:
                 intent_mode = RenderMode[str(intent_mode).upper()]
             except Exception:
                 intent_mode = RenderMode.PLANE
-        plane_state = intent.plane_state
-        volume_state = intent.volume_state
-        controller_downgraded = bool(intent.downgraded)
-        level_shapes_entry = self._state_ledger.get("multiscale", "main", "level_shapes")
-        level_shapes_state: Sequence[Sequence[int]] = ()
-        if level_shapes_entry is not None and isinstance(level_shapes_entry.value, Sequence):
-            level_shapes_state = tuple(
-                tuple(int(dim) for dim in shape)
-                for shape in level_shapes_entry.value
-                if isinstance(shape, Sequence)
-            )
-        if level_shapes_state and getattr(context, "dtype", None):
-            max_bytes, max_voxels = self._volume_budget_caps()
-            resolved_level, controller_downgraded = select_volume_level(
-                source=worker._ensure_scene_source(),  # noqa: SLF001
-                requested_level=int(intent.desired_level),
-                max_voxels=max_voxels,
-                max_bytes=max_bytes,
-                error_cls=LevelBudgetError,
-            )
-            if resolved_level != int(context.level):
-                logger.warning(
-                    "controller clamp mismatch: intent_level=%d resolved=%d",
-                    int(context.level),
-                    int(resolved_level),
-                )
-        downgraded = bool(controller_downgraded)
-
-        plane_snapshot = plane_state if isinstance(plane_state, PlaneState) else None
-        volume_snapshot = volume_state if isinstance(volume_state, VolumeState) else None
-
-        context_step = None
-        if getattr(context, "step", None) is not None:
-            context_step = tuple(int(v) for v in context.step)
-
-        target_step: Optional[tuple[int, ...]] = None
-        if isinstance(plane_state, Mapping):
-            maybe_target = plane_state.get("target_step")
-            if isinstance(maybe_target, Sequence):
-                target_step = tuple(int(v) for v in maybe_target)
-        if plane_snapshot is not None and plane_snapshot.target_step is not None:
-            target_step = tuple(int(v) for v in plane_snapshot.target_step)
-
-        if intent_mode is RenderMode.VOLUME:
-            level_value = (
-                int(volume_snapshot.level)
-                if volume_snapshot is not None
-                else int(context.level)
-            )
-            downgraded = bool(volume_snapshot.downgraded) if volume_snapshot is not None else downgraded
-            step_source = context_step
-        else:
-            level_value = (
-                int(plane_snapshot.applied_level)
-                if plane_snapshot is not None and plane_snapshot.applied_level is not None
-                else int(context.level)
-            )
-            step_source = (
-                plane_snapshot.applied_step
-                if plane_snapshot is not None and plane_snapshot.applied_step is not None
-                else context_step
-            )
-            if step_source is None:
-                step_source = target_step
-
-        step_tuple = tuple(int(v) for v in step_source) if step_source is not None else tuple()
-
-        applied_payload: Dict[str, Any] = {"level": level_value}
-        if step_tuple:
-            applied_payload["step"] = step_tuple
-        if getattr(context, "shape", None) is not None:
-            applied_payload["shape"] = tuple(int(v) for v in context.shape)
 
         if logger.isEnabledFor(logging.INFO):
+            context_level = int(context.level)
             logger.info(
                 "apply.level_intent: prev=%d target=%d reason=%s downgraded=%s",
                 int(intent.previous_level),
-                int(context.level),
+                context_level,
                 intent.reason,
-                downgraded,
+                bool(intent.downgraded),
             )
-
-        normalized_plane_state = plane_state
-        canonical_step = step_tuple if step_tuple else target_step
-        if plane_snapshot is not None:
-            normalized_target_step = target_step if target_step is not None else (plane_snapshot.target_step or step_tuple)
-            normalized_applied_step = step_tuple or normalized_target_step
-            normalized_plane_state = replace(
-                plane_snapshot,
-                target_level=int(level_value),
-                applied_level=int(level_value),
-                snapshot_level=int(level_value),
-                target_step=normalized_target_step,
-                applied_step=normalized_applied_step,
-                level_reload_required=False,
-                awaiting_level_confirm=False,
-                roi_reload_required=False,
-                pose_reason=None,
-                camera_pose_dirty=False,
-            )
-        elif isinstance(plane_state, Mapping):
-            plane_payload = dict(plane_state)
-            if canonical_step:
-                plane_payload["target_step"] = canonical_step
-                plane_payload.setdefault("applied_step", canonical_step)
-            plane_payload["target_level"] = int(level_value)
-            plane_payload["applied_level"] = int(level_value)
-            plane_payload["snapshot_level"] = int(level_value)
-            plane_payload["level_reload_required"] = False
-            plane_payload["awaiting_level_confirm"] = False
-            plane_payload["roi_reload_required"] = False
-            plane_payload["pose_reason"] = None
-            plane_payload["camera_pose_dirty"] = False
-            if step_tuple:
-                plane_payload["applied_step"] = step_tuple
-            normalized_plane_state = plane_payload
-
-        normalized_volume_state = volume_state
-        if volume_snapshot is not None:
-            normalized_volume_state = replace(
-                volume_snapshot,
-                level=int(level_value),
-                downgraded=bool(downgraded),
-            )
-        elif isinstance(volume_state, Mapping):
-            volume_payload = dict(volume_state)
-            volume_payload["level"] = int(level_value)
-            volume_payload["downgraded"] = bool(downgraded)
-            normalized_volume_state = volume_payload
-
         reduce_level_update(
             self._state_ledger,
-            applied=applied_payload,
-            downgraded=downgraded,
+            applied=context,
+            downgraded=bool(intent.downgraded),
             intent_id=None,
             timestamp=None,
             origin="worker.state.level",
             mode=intent_mode,
-            plane_state=normalized_plane_state,
-            volume_state=normalized_volume_state,
+            plane_state=intent.plane_state,
+            volume_state=intent.volume_state,
         )
-        plane_state = plane_state if plane_snapshot is None else replace(
-            plane_snapshot,
-            target_level=int(level_value),
-            applied_level=int(level_value),
-            target_step=step_tuple or plane_snapshot.target_step,
-            applied_step=step_tuple or plane_snapshot.applied_step,
-            level_reload_required=False,
-            awaiting_level_confirm=False,
-            roi_reload_required=False,
-        )
-        # Keep the plane view cache in sync with the latest applied level/step
-        # when we are in 2D mode. This ensures 3D->2D restores pick the most
-        # recent plane level even if no camera interaction occurred since the
-        # level change.
-        with self._state_lock:
-            if intent_mode is RenderMode.PLANE:
-                cache_level = level_value
-                cache_step = step_tuple
-                cache_entries = [("view_cache", "plane", "level", int(cache_level))]
-                if cache_step:
-                    cache_entries.append(("view_cache", "plane", "step", cache_step))
+
+        if intent_mode is RenderMode.PLANE:
+            level_value = int(context.level)
+            step_values = context.step if context.step is not None else ()
+            step_tuple = tuple(int(v) for v in step_values)
+            cache_entries = [("view_cache", "plane", "level", level_value)]
+            if step_tuple:
+                cache_entries.append(("view_cache", "plane", "step", step_tuple))
+            with self._state_lock:
                 self._state_ledger.batch_record_confirmed(
                     cache_entries,
                     origin="worker.state.level",
@@ -526,12 +386,13 @@ class EGLHeadlessServer:
                 int(snapshot.current_level) if snapshot.current_level is not None else -1,
                 snapshot.current_step,
             )
+
         worker.enqueue_update(
             RenderUpdate(
                 scene_state=snapshot,
                 mode=intent_mode,
-                plane_state=plane_state,
-                volume_state=volume_state,
+                plane_state=intent.plane_state,
+                volume_state=intent.volume_state,
             )
         )
 
