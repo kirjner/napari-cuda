@@ -1021,6 +1021,16 @@ def reduce_view_update(
         origin,
     )
 
+    _record_viewport_state(
+        ledger,
+        mode=RenderMode.VOLUME if target_ndisplay >= 3 else RenderMode.PLANE,
+        plane_state=None,
+        volume_state=None,
+        origin=origin,
+        timestamp=ts,
+        metadata={"intent_id": resolved_intent_id},
+    )
+
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -1046,16 +1056,50 @@ def reduce_plane_restore(
     origin: str = "control.view",
 ) -> Dict[PropertyKey, LedgerEntry]:
     ts = _now(timestamp)
+    metadata = {"intent_id": intent_id} if intent_id else None
+    level_idx = int(level)
+    step_tuple = tuple(int(v) for v in step)
+    center_tuple = tuple(float(v) for v in center)
+    rect_tuple = tuple(float(v) for v in rect)
+    zoom_value = float(zoom)
+
     stored = apply_plane_restore_transaction(
         ledger=ledger,
-        level=int(level),
-        step=tuple(int(v) for v in step),
-        center=tuple(float(v) for v in center),
-        zoom=float(zoom),
-        rect=tuple(float(v) for v in rect),
+        level=level_idx,
+        step=step_tuple,
+        center=center_tuple,
+        zoom=zoom_value,
+        rect=rect_tuple,
         origin=origin,
         timestamp=ts,
     )
+
+    plane_entry = ledger.get("viewport", "plane", "state")
+    base_plane = PlaneState()
+    if plane_entry is not None and isinstance(plane_entry.value, Mapping):
+        plane_payload = _plain_plane_state(plane_entry.value)
+        if plane_payload is not None:
+            base_plane = PlaneState(**plane_payload)
+
+    base_plane.target_level = level_idx
+    base_plane.target_ndisplay = 2
+    base_plane.target_step = step_tuple
+    base_plane.applied_level = level_idx
+    base_plane.applied_step = step_tuple
+    base_plane.camera_rect = rect_tuple
+    base_plane.camera_center = (center_tuple[0], center_tuple[1])
+    base_plane.camera_zoom = zoom_value
+
+    _record_viewport_state(
+        ledger,
+        mode=RenderMode.PLANE,
+        plane_state=base_plane,
+        volume_state=None,
+        origin=origin,
+        timestamp=ts,
+        metadata=metadata,
+    )
+
     return stored
 
 
