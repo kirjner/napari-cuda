@@ -83,6 +83,7 @@ from napari_cuda.server.scene import (
     build_render_scene_state,
     multiscale_state_from_snapshot,
 )
+from napari_cuda.server.runtime.state_structs import RenderMode
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -293,7 +294,11 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
         return True
 
     ndisplay = 3 if int(raw_value) >= 3 else 2
-    was_volume = bool(getattr(server, "use_volume", False))
+    prev_entry = server._state_ledger.get("view", "main", "ndisplay")
+    prev_ndisplay = int(prev_entry.value) if prev_entry is not None and isinstance(prev_entry.value, int) else (
+        3 if server._initial_mode is RenderMode.VOLUME else 2
+    )
+    was_volume = prev_ndisplay >= 3
 
     if getattr(server, "_log_dims_info", False):
         logger.info("intent: view.set_ndisplay ndisplay=%d", int(ndisplay))
@@ -315,7 +320,7 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
 
     assert result.version is not None, "view reducer must supply version"
 
-    server.use_volume = bool(result.value == 3)
+    new_ndisplay = int(result.value)
 
     broadcast = server._pixel_channel.broadcast
     broadcast.bypass_until_key = True
@@ -323,21 +328,21 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
     pixel_channel.mark_stream_config_dirty(server._pixel_channel)
     server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
 
-    if was_volume and ndisplay == 2:
+    if was_volume and new_ndisplay == 2:
         _apply_plane_restore_from_ledger(
             server,
             timestamp=ctx.timestamp,
             intent_id=ctx.intent_id,
         )
 
-    await _state_update_ack(ctx, applied_value=int(result.value), version=int(result.version))
+    await _state_update_ack(ctx, applied_value=new_ndisplay, version=int(result.version))
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "state.update view intent=%s frame=%s ndisplay=%s accepted",
             ctx.intent_id,
             ctx.frame_id,
-            int(ndisplay),
+            new_ndisplay,
         )
 
     return True
@@ -1293,7 +1298,11 @@ def _viewer_settings(server: Any) -> Dict[str, Any]:
     width = int(server.width)
     height = int(server.height)
     fps = float(server.cfg.fps)
-    use_volume = bool(server.use_volume)
+    ndisplay_entry = server._state_ledger.get("view", "main", "ndisplay")
+    assert (
+        ndisplay_entry is not None and isinstance(ndisplay_entry.value, int)
+    ), "viewer settings require ledger ndisplay entry"
+    use_volume = int(ndisplay_entry.value) >= 3
 
     return {
         "fps_target": fps,

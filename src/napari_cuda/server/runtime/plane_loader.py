@@ -12,6 +12,7 @@ from napari_cuda.server.data.roi import (
 from napari_cuda.server.runtime.roi_math import chunk_shape_for_level
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
 from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.state_structs import RenderMode
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ def apply_plane_slice_roi(
     runner = worker._viewport_runner
     if runner is not None:
         chunk_shape = chunk_shape_for_level(source, int(level))
-        if not worker.use_volume:
+        if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
             runner.mark_roi_applied(roi, chunk_shape=chunk_shape)
             runner.mark_level_applied(int(level))
             rect = worker._current_panzoom_rect()

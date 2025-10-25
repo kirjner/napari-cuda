@@ -38,6 +38,7 @@ from napari_cuda.server.scene import (
     layer_controls_from_ledger,
     multiscale_state_from_snapshot,
 )
+from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
 from napari_cuda.server.control.state_ledger import ServerStateLedger
@@ -50,7 +51,6 @@ class _CaptureWorker:
         self.policy_calls: list[str] = []
         self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
-        self.use_volume = False
         self._is_ready = True
         self._data_wh = (640, 480)
         self._zarr_axes = "yx"
@@ -60,6 +60,7 @@ class _CaptureWorker:
         self._active_ms_level = 0
         self._last_step = (0, 0)
         self._scene_source = None
+        self.viewport_state = ViewportState(mode=RenderMode.PLANE)
         self._canonical_axes = canonical_axes_from_source(
             axes=("y", "x"),
             shape=(self._zarr_shape[0], self._zarr_shape[1]),
@@ -70,6 +71,9 @@ class _CaptureWorker:
         self._axis_order = (0, 1, 2)
         self._displayed = (1, 2)
         self._level_shapes = ((16, self._zarr_shape[0], self._zarr_shape[1]), (8, self._zarr_shape[0] // 2, self._zarr_shape[1] // 2))
+        self.viewport_state.plane.applied_level = self._active_ms_level
+        self.viewport_state.plane.applied_step = (0, 0)
+        self.viewport_state.volume.level = self._active_ms_level
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -86,6 +90,14 @@ class _CaptureWorker:
     @property
     def is_ready(self) -> bool:
         return self._is_ready
+
+    @property
+    def use_volume(self) -> bool:
+        return self.viewport_state.mode is RenderMode.VOLUME
+
+    @use_volume.setter
+    def use_volume(self, value: bool) -> None:
+        self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
 
 
     def _ledger_axis_labels(self) -> tuple[str, ...]:
@@ -142,7 +154,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server.width = 640
     server.height = 480
     server.cfg = SimpleNamespace(fps=60.0)
-    server.use_volume = False
+    server._initial_mode = RenderMode.PLANE
     server._latest_scene_snapshot: Optional[RenderLedgerSnapshot] = None
     scheduled: list[Coroutine[Any, Any, None]] = []
     captured: list[dict[str, Any]] = []
@@ -331,7 +343,14 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     ) -> ServerLedgerUpdate:
         value = 3 if int(ndisplay) >= 3 else 2
         server._ndisplay_calls.append(value)
-        server.use_volume = bool(value == 3)
+        server._state_ledger.record_confirmed(
+            "view",
+            "main",
+            "ndisplay",
+            value,
+            origin=origin,
+            timestamp=timestamp,
+        )
         server._update_scene_manager()
         return ServerLedgerUpdate(
             scope="view",
@@ -706,7 +725,8 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert view_entry is not None
     assert int(view_entry.value) == 3
     assert view_entry.version is not None
-    assert server.use_volume is True
+    entry = server._state_ledger.get("view", "main", "ndisplay")
+    assert entry is not None and int(entry.value) == 3
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
@@ -975,7 +995,13 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         asyncio.set_event_loop(loop)
 
         server, scheduled, captured = _make_server()
-        server.use_volume = False
+        server._state_ledger.record_confirmed(
+            "view",
+            "main",
+            "ndisplay",
+            2,
+            origin="test.reset",
+        )
         reduce_layer_property(
             server._state_ledger,
             layer_id="layer-0",

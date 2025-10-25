@@ -9,6 +9,7 @@ import numpy as np
 from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
+from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 
 
@@ -24,7 +25,8 @@ class _StubWorker:
         zarr_dtype: Optional[str] = None,
         volume_dtype: Optional[str] = None,
     ) -> None:
-        self.use_volume = use_volume
+        mode = RenderMode.VOLUME if use_volume else RenderMode.PLANE
+        self.viewport_state = ViewportState(mode=mode)
         self._data_wh = data_wh
         self._is_ready = True
         if data_d is not None:
@@ -67,6 +69,9 @@ class _StubWorker:
         count = min(self._ndisplay, len(self._axis_labels))
         self._displayed = tuple(range(count))
         self._active_ms_level = self._current_level
+        self.viewport_state.plane.applied_level = self._current_level
+        self.viewport_state.plane.applied_step = self._step
+        self.viewport_state.volume.level = self._current_level
 
     @property
     def is_ready(self) -> bool:

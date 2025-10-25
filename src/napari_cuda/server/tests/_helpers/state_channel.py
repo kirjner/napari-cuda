@@ -42,6 +42,7 @@ from napari_cuda.server.scene import (
     layer_controls_from_ledger,
     multiscale_state_from_snapshot,
 )
+from napari_cuda.server.runtime.state_structs import RenderMode
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext
@@ -361,6 +362,17 @@ class CaptureWorker:
         self.viewport_state.plane.target_level = level
         self.viewport_state.volume.level = level
 
+    def _current_level_index(self) -> int:
+        if self.viewport_state.mode is RenderMode.VOLUME:
+            return int(self.viewport_state.volume.level)
+        return int(self.viewport_state.plane.applied_level)
+
+    def _set_current_level_index(self, value: int) -> None:
+        level = int(value)
+        self.viewport_state.plane.applied_level = level
+        self.viewport_state.plane.target_level = level
+        self.viewport_state.volume.level = level
+
     # ViewerSceneManager ledger adapters --------------------------------------------------
     def _ledger_axis_labels(self) -> tuple[str, ...]:
         return self._axis_labels
@@ -625,7 +637,7 @@ class StateServerHarness:
         server.width = self.width
         server.height = self.height
         server.cfg = SimpleNamespace(fps=60.0)
-        server.use_volume = False
+        server._initial_mode = RenderMode.PLANE
         server._latest_scene_snapshot: Optional[RenderLedgerSnapshot] = None
         server._camera_seq: dict[str, int] = {}
 
@@ -781,7 +793,14 @@ class StateServerHarness:
         ) -> ServerLedgerUpdate:
             value = 3 if int(ndisplay) >= 3 else 2
             server._ndisplay_calls.append(value)
-            server.use_volume = bool(value == 3)
+            server._state_ledger.record_confirmed(
+                "view",
+                "main",
+                "ndisplay",
+                value,
+                origin=origin,
+                timestamp=timestamp,
+            )
             server._update_scene_manager()
             return ServerLedgerUpdate(
                 scope="view",

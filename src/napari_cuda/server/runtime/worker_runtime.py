@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
 import logging
 import time
+from typing import Any
+
 from vispy.geometry import Rect
 
-from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
+from napari_cuda.server.data.zarr_source import ZarrSceneSource
+from napari_cuda.server.runtime.state_structs import RenderMode
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,7 @@ def ensure_scene_source(worker: Any) -> ZarrSceneSource:
         step = source.set_current_slice(ledger_step, int(target_level))
 
     descriptor = source.level_descriptors[source.current_level]
-    worker._active_ms_level = int(source.current_level)  # type: ignore[attr-defined]
+    worker._set_current_level_index(int(source.current_level))  # type: ignore[attr-defined]
     worker._zarr_level = descriptor.path or None  # type: ignore[attr-defined]
     worker._zarr_axes = "".join(source.axes)  # type: ignore[attr-defined]
     worker._zarr_shape = descriptor.shape  # type: ignore[attr-defined]
@@ -79,7 +81,7 @@ def reset_worker_camera(worker: Any, cam: Any) -> None:
     width, height = data_wh
     data_depth = worker._data_d
 
-    if worker.use_volume:
+    if worker.viewport_state.mode is RenderMode.VOLUME:  # type: ignore[attr-defined]
         extent = worker._volume_world_extents()  # type: ignore[attr-defined]
         if extent is None:
             depth = data_depth or 1
@@ -95,8 +97,9 @@ def reset_worker_camera(worker: Any, cam: Any) -> None:
 
     source = worker._scene_source
     assert source is not None, "scene source must be initialised for 2D reset"
-    sy, sx = plane_scale_for_level(source, int(worker._active_ms_level))
-    full_h, full_w = plane_wh_for_level(source, int(worker._active_ms_level))
+    current_level = int(worker._current_level_index())  # type: ignore[attr-defined]
+    sy, sx = plane_scale_for_level(source, current_level)
+    full_h, full_w = plane_wh_for_level(source, current_level)
     world_w = float(full_w) * float(max(1e-12, sx))
     world_h = float(full_h) * float(max(1e-12, sy))
     cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))

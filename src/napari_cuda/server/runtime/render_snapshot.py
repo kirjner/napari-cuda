@@ -14,6 +14,7 @@ from typing import Any
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.state_structs import RenderMode
 
 from .plane_loader import (
     apply_plane_slice_roi as _apply_plane_slice_roi,
@@ -48,7 +49,7 @@ def _suspend_fit_callbacks(viewer: Any):
 def stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> None:
     """Legacy shim that now delegates to viewer_stage helpers."""
 
-    if worker.use_volume:
+    if worker.viewport_state.mode is RenderMode.VOLUME:  # type: ignore[attr-defined]
         apply_volume_metadata(worker, source, context)
     else:
         apply_plane_metadata(worker, source, context)
@@ -97,7 +98,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     target_volume = nd >= 3
 
     source = worker._ensure_scene_source()
-    prev_level = int(worker._active_ms_level)
+    prev_level = int(worker._current_level_index())  # type: ignore[attr-defined]
     target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
     level_changed = target_level != prev_level
 
@@ -107,10 +108,12 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         else None
     )
 
+    was_volume = worker.viewport_state.mode is RenderMode.VOLUME  # type: ignore[attr-defined]
+
     if target_volume:
-        entering_volume = not worker.use_volume
+        entering_volume = not was_volume
         if entering_volume:
-            worker.use_volume = True
+            worker.viewport_state.mode = RenderMode.VOLUME  # type: ignore[attr-defined]
             worker._last_dims_signature = None
 
         runner = worker._viewport_runner
@@ -129,7 +132,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         requested_level = int(target_level)
         selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
         effective_level = int(selected_level)
-        worker._level_downgraded = bool(downgraded)
+        worker.viewport_state.volume.downgraded = bool(downgraded)  # type: ignore[attr-defined]
         load_needed = entering_volume or (int(effective_level) != prev_level)
 
         if load_needed:
@@ -175,7 +178,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         return
 
     stage_prev_level = prev_level
-    if worker.use_volume and not target_volume:
+    if was_volume and not target_volume:
         stage_prev_level = target_level
 
     if ledger_step is not None:
@@ -202,11 +205,11 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         prev_level=stage_prev_level,
         last_step=step_hint,
     )
-    if worker.use_volume:
-        worker.use_volume = False
+    if was_volume:
+        worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
         worker._configure_camera_for_mode()
         worker._last_dims_signature = None
     apply_plane_metadata(worker, source, applied_context)
-    worker._level_downgraded = False
+    worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
     apply_plane_camera_pose(worker, snapshot)
     apply_slice_level(worker, source, applied_context)

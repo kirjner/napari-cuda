@@ -105,7 +105,6 @@ async def _test_ingest_state_applies_view_update() -> None:
         assert ack["payload"]["status"] == "accepted"
         entry = harness.server._state_ledger.get("view", "main", "ndisplay")
         assert entry is not None and int(entry.value) == 3
-        assert harness.server.use_volume is True
 
         await harness.drain_scheduled()
         assert harness.server._ensure_keyframe_calls >= 2
@@ -157,7 +156,13 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
             ],
             origin="test.seed",
         )
-        harness.server.use_volume = True
+        harness.server._state_ledger.record_confirmed(
+            "view",
+            "main",
+            "ndisplay",
+            3,
+            origin="test.seed",
+        )
 
         def _make_update(frame_id: str, value: int) -> dict[str, object]:
             return build_state_update(

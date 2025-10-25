@@ -46,7 +46,8 @@ class _StubPanZoomCamera:
 
 class _StubWorker:
     def __init__(self, *, use_volume: bool, level: int) -> None:
-        self.viewport_state = ViewportState(mode=RenderMode.VOLUME if use_volume else RenderMode.PLANE)
+        mode = RenderMode.VOLUME if use_volume else RenderMode.PLANE
+        self.viewport_state = ViewportState(mode=mode)
         self.viewport_state.plane.applied_level = level
         self.viewport_state.plane.target_level = level
         self.viewport_state.volume.level = level
@@ -72,7 +73,11 @@ class _StubWorker:
 
     def _configure_camera_for_mode(self) -> None:
         self.configure_calls += 1
-        camera = _StubTurntableCamera() if self.use_volume else _StubPanZoomCamera()
+        camera = (
+            _StubTurntableCamera()
+            if self.viewport_state.mode is RenderMode.VOLUME
+            else _StubPanZoomCamera()
+        )
         self.view.camera = camera
 
     def _estimate_level_bytes(self, source, level: int) -> tuple[int, int]:
@@ -94,24 +99,16 @@ class _StubWorker:
     def _update_level_metadata(self, descriptor, context) -> None:
         self._level_metadata = (descriptor, context)
 
-    @property
-    def use_volume(self) -> bool:
-        return self.viewport_state.mode is RenderMode.VOLUME
-
-    @use_volume.setter
-    def use_volume(self, value: bool) -> None:
-        self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
-
-    @property
-    def _active_ms_level(self) -> int:
+    def _current_level_index(self) -> int:
+        if self.viewport_state.mode is RenderMode.VOLUME:
+            return int(self.viewport_state.volume.level)
         return int(self.viewport_state.plane.applied_level)
 
-    @_active_ms_level.setter
-    def _active_ms_level(self, value: int) -> None:
+    def _set_current_level_index(self, value: int) -> None:
         level = int(value)
         self.viewport_state.plane.applied_level = level
-        self.viewport_state.volume.level = level
         self.viewport_state.plane.target_level = level
+        self.viewport_state.volume.level = level
 
     @property
     def _volume_scale(self) -> tuple[float, float, float]:
@@ -122,14 +119,6 @@ class _StubWorker:
     @_volume_scale.setter
     def _volume_scale(self, value: tuple[float, float, float]) -> None:
         self.viewport_state.volume.scale = tuple(float(component) for component in value)
-
-    @property
-    def _level_downgraded(self) -> bool:
-        return bool(self.viewport_state.volume.downgraded)
-
-    @_level_downgraded.setter
-    def _level_downgraded(self, value: bool) -> None:
-        self.viewport_state.volume.downgraded = bool(value)
 
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,7 +155,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 
-    assert worker.use_volume is True
+    assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
     assert calls["build"] == (2, 1, (5, 0, 0))
     assert calls["volume"] == 2
@@ -200,7 +189,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 
-    assert worker.use_volume is True
+    assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 0
     assert prepare_called is False  # no load performed
     assert volume_called is False
@@ -230,7 +219,7 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 
-    assert worker.use_volume is False
+    assert worker.viewport_state.mode is RenderMode.PLANE
     assert worker.configure_calls == 1
     assert calls["build"] == (1, 1, (3, 0, 0))
     assert calls["slice"] == (1, (3, 0, 0))
@@ -261,7 +250,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
 
     snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
 
-    assert worker.use_volume is True
+    assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
     assert calls["build"] == [(2, 1, (7, 0, 0))]
     assert calls["volume"] == [(2, True)]

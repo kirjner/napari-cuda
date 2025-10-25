@@ -14,6 +14,7 @@ from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_av
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
+from napari_cuda.server.runtime.state_structs import RenderMode
 from napari_cuda.server.scene import multiscale_state_from_snapshot
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
@@ -150,10 +151,17 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             policy_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
 
+            use_volume_entry = server._state_ledger.get("view", "main", "ndisplay")
+            use_volume_flag = False
+            if use_volume_entry is not None and isinstance(use_volume_entry.value, int):
+                use_volume_flag = int(use_volume_entry.value) >= 3
+            elif server._initial_mode is RenderMode.VOLUME:
+                use_volume_flag = True
+
             worker = EGLRendererWorker(
                 width=server.width,
                 height=server.height,
-                use_volume=server.use_volume,
+                use_volume=use_volume_flag,
                 fps=server.cfg.fps,
                 animate=server._animate,
                 animate_dps=server._animate_dps,

@@ -11,6 +11,7 @@ from napari_cuda.server.runtime.camera_controller import CameraDeltaOutcome
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.scene import CameraDeltaCommand
+from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 
 
 @dataclass
@@ -43,6 +44,9 @@ class _StubWorker:
             update_camera_rect=lambda _rect: None,
         )
         self._run_viewport_tick = lambda: self._emit_current_camera_pose("camera-delta")
+        self._viewport_state = ViewportState(mode=RenderMode.PLANE)
+        self._viewport_state.plane.applied_level = 0
+        self._viewport_state.plane.target_level = 0
 
     def _current_panzoom_rect(self):
         return None

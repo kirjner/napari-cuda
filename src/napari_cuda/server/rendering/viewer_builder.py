@@ -19,6 +19,7 @@ from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
+from napari_cuda.server.runtime.state_structs import RenderMode
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,8 @@ class ViewerBuilder:
         scene_src = "synthetic"
         scene_meta = ""
         applied_step: Optional[tuple[int, ...]] = None
+        viewport_state = self._bridge.viewport_state  # type: ignore[attr-defined]
+        is_volume_mode = viewport_state.mode is RenderMode.VOLUME
 
         if source is not None:
             levels = source.level_descriptors
@@ -141,7 +144,7 @@ class ViewerBuilder:
             applied_step = source.set_current_slice(step_hint, selected_level)
 
             self._bridge._scene_source = source
-            self._bridge._active_ms_level = selected_level
+            self._bridge._set_current_level_index(selected_level)  # type: ignore[attr-defined]
             self._bridge._zarr_level = descriptor.path if descriptor is not None and descriptor.path else None  # type: ignore[union-attr]
             self._bridge._zarr_axes = ''.join(source.axes)
             self._bridge._zarr_shape = tuple(int(dim) for dim in descriptor.shape) if descriptor is not None else None  # type: ignore[union-attr]
@@ -157,7 +160,7 @@ class ViewerBuilder:
                     z_index = int(applied_step[z_pos])
             self._bridge._z_index = int(z_index)
 
-            if self._bridge.use_volume:
+            if self._bridge.viewport_state.mode is RenderMode.VOLUME:
                 data = self._bridge._get_level_volume(source, selected_level)
                 level_scale = source.level_scale(selected_level)
                 scale_vals = [float(s) for s in level_scale]
@@ -247,7 +250,7 @@ class ViewerBuilder:
                 viewer.dims.current_step = tuple(int(v) for v in applied_step) if applied_step is not None else tuple()
 
         if layer is None:
-            if self._bridge.use_volume:
+            if is_volume_mode:
                 volume = rng.random((self._bridge.volume_depth, self._bridge.height, self._bridge.width), dtype=np.float32)
                 layer = viewer.add_image(volume, name="adapter-volume")
                 viewer.dims.ndisplay = 3

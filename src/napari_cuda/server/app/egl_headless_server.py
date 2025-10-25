@@ -131,7 +131,7 @@ class EGLHeadlessServer:
 
         self.width = width
         self.height = height
-        self.use_volume = use_volume
+        self._initial_mode = RenderMode.VOLUME if use_volume else RenderMode.PLANE
         self.host = host
         self.state_port = state_port
         self.pixel_port = pixel_port
@@ -726,7 +726,7 @@ class EGLHeadlessServer:
             raise RuntimeError("bootstrap requires zarr_path")
         bootstrap_meta = probe_scene_bootstrap(
             path=self._zarr_path,
-            use_volume=self.use_volume,
+            use_volume=self._initial_mode is RenderMode.VOLUME,
             preferred_level=self._zarr_level,
             axes_override=tuple(self._zarr_axes) if self._zarr_axes is not None else None,
             z_override=self._zarr_z,

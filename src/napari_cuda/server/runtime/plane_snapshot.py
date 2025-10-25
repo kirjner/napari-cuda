@@ -19,7 +19,7 @@ from napari_cuda.server.runtime.roi_math import (
 from napari_cuda.server.runtime.scene_types import SliceROI
 
 from .plane_loader import apply_plane_slice_roi, viewport_roi_for_level
-from .state_structs import PlaneState
+from .state_structs import PlaneState, RenderMode
 
 
 @dataclass(frozen=True)
@@ -105,7 +105,7 @@ def apply_slice_level(
             height=full_h,
             width=full_w,
         )
-    if not worker.use_volume:
+    if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
         worker._emit_current_camera_pose("slice-apply")
     height_px, width_px = apply_plane_slice_roi(
         worker,
@@ -127,7 +127,7 @@ def apply_slice_level(
         z_index=worker._z_index,
         shape=(int(height_px), int(width_px)),
         contrast=applied.contrast,
-        downgraded=worker._level_downgraded,
+        downgraded=worker.viewport_state.volume.downgraded,  # type: ignore[attr-defined]
     )
 
     plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]

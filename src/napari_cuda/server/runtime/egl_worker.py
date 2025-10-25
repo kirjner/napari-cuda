@@ -179,7 +179,7 @@ class EGLRendererWorker:
 
         # Viewport state shared between runner and worker.
         self._viewport_state = ViewportState()
-        self.use_volume = bool(use_volume)
+        self._viewport_state.mode = RenderMode.VOLUME if use_volume else RenderMode.PLANE
         self._viewport_runner = ViewportRunner(self._viewport_state.plane)
 
         self._configure_animation(animate, animate_dps)
@@ -231,22 +231,12 @@ class EGLRendererWorker:
     def viewport_state(self) -> ViewportState:
         return self._viewport_state
 
-    @property
-    def use_volume(self) -> bool:
-        return self._viewport_state.mode is RenderMode.VOLUME
-
-    @use_volume.setter
-    def use_volume(self, value: bool) -> None:
-        self._viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
-
-    @property
-    def _active_ms_level(self) -> int:
-        if self.use_volume:
+    def _current_level_index(self) -> int:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             return int(self._viewport_state.volume.level)
         return int(self._viewport_state.plane.applied_level)
 
-    @_active_ms_level.setter
-    def _active_ms_level(self, value: int) -> None:
+    def _set_current_level_index(self, value: int) -> None:
         level = int(value)
         self._viewport_state.plane.applied_level = level
         self._viewport_state.volume.level = level
@@ -261,14 +251,6 @@ class EGLRendererWorker:
     @_volume_scale.setter
     def _volume_scale(self, value: tuple[float, float, float]) -> None:
         self._viewport_state.volume.scale = tuple(float(component) for component in value)
-
-    @property
-    def _level_downgraded(self) -> bool:
-        return bool(self._viewport_state.volume.downgraded)
-
-    @_level_downgraded.setter
-    def _level_downgraded(self, value: bool) -> None:
-        self._viewport_state.volume.downgraded = bool(value)
 
     def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
         """Choose stable initial center and distance for TurntableCamera.
@@ -377,7 +359,7 @@ class EGLRendererWorker:
             try:
                 self._zarr_shape = source.level_shape(0)
                 self._zarr_dtype = str(source.dtype)
-                self._active_ms_level = source.current_level
+                self._set_current_level_index(source.current_level)
                 descriptor = source.level_descriptors[source.current_level]
                 self._zarr_level = descriptor.path or None
             except Exception:
@@ -414,10 +396,10 @@ class EGLRendererWorker:
             target = max(0, min(target, len(descriptors) - 1))
 
         downgraded = False
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             target, downgraded = self._resolve_volume_intent_level(source, target)
 
-        self._level_downgraded = bool(downgraded)
+        self._viewport_state.volume.downgraded = bool(downgraded)
 
         decision = lod.LevelDecision(
             desired_level=int(target),
@@ -431,7 +413,7 @@ class EGLRendererWorker:
         context = lod.build_level_context(
             decision,
             source=source,
-            prev_level=int(self._active_ms_level),
+            prev_level=int(self._current_level_index()),
             last_step=last_step,
         )
         apply_plane_metadata(self, source, context)
@@ -440,7 +422,7 @@ class EGLRendererWorker:
             desired_level=int(target),
             selected_level=int(context.level),
             reason="manual",
-            previous_level=int(self._active_ms_level),
+            previous_level=int(self._current_level_index()),
             context=context,
             oversampling={},
             timestamp=decision.timestamp,
@@ -455,7 +437,7 @@ class EGLRendererWorker:
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
-                int(self._active_ms_level),
+                int(self._current_level_index()),
                 int(context.level),
                 intent.reason,
                 intent.downgraded,
@@ -471,7 +453,7 @@ class EGLRendererWorker:
         if view is None:
             return
 
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
             extent = self._volume_world_extents()
             if extent is None:
@@ -489,7 +471,7 @@ class EGLRendererWorker:
             self._apply_camera_reset(view.camera)
 
     def _enter_volume_mode(self) -> None:
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             return
 
         if self._level_intent_callback is None:
@@ -499,7 +481,7 @@ class EGLRendererWorker:
         requested_level = _coarsest_level_index(source)
         assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
         selected_level, downgraded = self._resolve_volume_intent_level(source, int(requested_level))
-        self._level_downgraded = bool(downgraded)
+        self._viewport_state.volume.downgraded = bool(downgraded)
 
         decision = lod.LevelDecision(
             desired_level=int(requested_level),
@@ -513,19 +495,19 @@ class EGLRendererWorker:
         context = lod.build_level_context(
             decision,
             source=source,
-            prev_level=int(self._active_ms_level),
+            prev_level=int(self._current_level_index()),
             last_step=last_step,
         )
         apply_volume_metadata(self, source, context)
 
         # Defer level application to the controller transaction.
-        self.use_volume = True
+        self._viewport_state.mode = RenderMode.VOLUME
 
         intent = LevelSwitchIntent(
             desired_level=int(requested_level),
             selected_level=int(context.level),
             reason="ndisplay-3d",
-            previous_level=int(self._active_ms_level),
+            previous_level=int(self._current_level_index()),
             context=context,
             oversampling={},
             timestamp=decision.timestamp,
@@ -538,7 +520,7 @@ class EGLRendererWorker:
         )
         logger.info(
             "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
-            int(self._active_ms_level),
+            int(self._current_level_index()),
             int(context.level),
             intent.reason,
             intent.downgraded,
@@ -576,9 +558,9 @@ class EGLRendererWorker:
         self._emit_current_camera_pose(reason="enter-3d")
 
     def _exit_volume_mode(self) -> None:
-        if not self.use_volume:
+        if self._viewport_state.mode is not RenderMode.VOLUME:
             return
-        self.use_volume = False
+        self._viewport_state.mode = RenderMode.PLANE
         # Restore plane target level/step and plane camera rect from caches
         lvl_entry = self._ledger.get("view_cache", "plane", "level")
         step_entry = self._ledger.get("view_cache", "plane", "step")
@@ -616,7 +598,7 @@ class EGLRendererWorker:
         context = lod.build_level_context(
             decision,
             source=source,
-            prev_level=int(self._active_ms_level),
+            prev_level=int(self._current_level_index()),
             last_step=step_tuple,
         )
         apply_plane_metadata(self, source, context)
@@ -624,7 +606,7 @@ class EGLRendererWorker:
             desired_level=int(lvl_idx),
             selected_level=int(context.level),
             reason="ndisplay-2d",
-            previous_level=int(self._active_ms_level),
+            previous_level=int(self._current_level_index()),
             context=context,
             oversampling={},
             timestamp=decision.timestamp,
@@ -677,8 +659,8 @@ class EGLRendererWorker:
         self._viewer: Optional[ViewerModel] = None
         self._napari_layer = None
         self._scene_source: Optional[ZarrSceneSource] = None
-        self._active_ms_level = 0
-        self._level_downgraded = False
+        self._set_current_level_index(0)
+        self._viewport_state.volume.downgraded = False
         self._data_wh = (int(self.width), int(self.height))
         self._data_d = None
         self._volume_scale = (1.0, 1.0, 1.0)
@@ -821,7 +803,7 @@ class EGLRendererWorker:
     # ---- Level helpers ------------------------------------------------------
 
     def _update_level_metadata(self, descriptor, applied) -> None:
-        self._active_ms_level = applied.level
+        self._set_current_level_index(applied.level)
         self._z_index = applied.z_index
         self._zarr_level = descriptor.path or None
         self._zarr_shape = descriptor.shape
@@ -920,7 +902,7 @@ class EGLRendererWorker:
                 overs_map[lvl] = float('nan')
         return level_policy.LevelSelectionContext(
             levels=levels,
-            current_level=int(self._active_ms_level),
+            current_level=int(self._current_level_index()),
             requested_level=int(requested_level) if requested_level is not None else None,
             level_oversampling=overs_map,
             thresholds=self._oversampling_thresholds,
@@ -1034,7 +1016,7 @@ class EGLRendererWorker:
             prev_level=prev_level,
             last_step=step_hint,
         )
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             apply_volume_metadata(self, source, context)
         else:
             apply_plane_metadata(self, source, context)
@@ -1049,7 +1031,7 @@ class EGLRendererWorker:
             self,
             source,
             applied,
-            downgraded=bool(self._level_downgraded),
+            downgraded=bool(self._viewport_state.volume.downgraded),
         )
 
     def _apply_slice_level(
@@ -1060,7 +1042,7 @@ class EGLRendererWorker:
         apply_slice_level(self, source, applied)
 
     def _format_level_roi(self, source: ZarrSceneSource, level: int) -> str:
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             return "volume"
         roi = viewport_roi_for_level(self, source, level)
         if roi.is_empty():
@@ -1221,7 +1203,7 @@ class EGLRendererWorker:
                 step_tuple = step_tuple[:ndim]
             dims.current_step = step_tuple
         if snapshot.current_level is not None:
-            self._active_ms_level = int(snapshot.current_level)
+            self._set_current_level_index(int(snapshot.current_level))
 
         assert snapshot.order is not None, "ledger missing dims order"
         order_values = tuple(int(v) for v in snapshot.order)
@@ -1421,7 +1403,10 @@ class EGLRendererWorker:
 
         self._run_viewport_tick()
 
-        if bool(getattr(outcome, "policy_triggered", False)) and not self.use_volume:
+        if (
+            bool(getattr(outcome, "policy_triggered", False))
+            and self._viewport_state.mode is not RenderMode.VOLUME
+        ):
             self._evaluate_level_policy()
 
     def _record_zoom_hint(self, commands: Sequence[CameraDeltaCommand]) -> None:
@@ -1460,7 +1445,7 @@ class EGLRendererWorker:
             return
 
         if logger.isEnabledFor(logging.INFO):
-            mode = "volume" if self.use_volume else "plane"
+            mode = "volume" if self._viewport_state.mode is RenderMode.VOLUME else "plane"
             rect = pose.rect if pose.rect is not None else None
             logger.info(
                 "pose.emit: seq=%d reason=%s mode=%s rect=%s center=%s zoom=%s",
@@ -1576,13 +1561,13 @@ class EGLRendererWorker:
             last_roi_tuple = (int(applied_level), applied_roi)
 
         return SceneStateApplyContext(
-            use_volume=bool(self.use_volume),
+            use_volume=self._viewport_state.mode is RenderMode.VOLUME,
             viewer=self._viewer,
             camera=cam,
             visual=self._resolve_visual(),
             layer=self._napari_layer,
             scene_source=self._scene_source,
-            active_ms_level=int(self._active_ms_level),
+            active_ms_level=int(self._current_level_index()),
             z_index=self._z_index,
             last_roi=last_roi_tuple,
             preserve_view_on_switch=self._preserve_view_on_switch,
@@ -1629,10 +1614,10 @@ class EGLRendererWorker:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
 
         self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
-        if int(self._active_ms_level) == int(self._viewport_runner.state.target_level):
-            self._viewport_runner.mark_level_applied(self._active_ms_level)
+        if int(self._current_level_index()) == int(self._viewport_runner.state.target_level):
+            self._viewport_runner.mark_level_applied(self._current_level_index())
 
-        if drain_res.policy_refresh_needed and not self.use_volume:
+        if drain_res.policy_refresh_needed and self._viewport_state.mode is not RenderMode.VOLUME:
             self._evaluate_level_policy()
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
@@ -1696,11 +1681,11 @@ class EGLRendererWorker:
         self.drain_scene_updates()
         self._run_viewport_tick()
 
-        if policy_triggered and not self.use_volume:
+        if policy_triggered and self._viewport_state.mode is not RenderMode.VOLUME:
             self._evaluate_level_policy()
 
     def _run_viewport_tick(self) -> None:
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             runner = self._viewport_runner
             if runner is not None:
                 runner.state.pose_reason = None
@@ -1721,22 +1706,26 @@ class EGLRendererWorker:
 
         if intent.level_change:
             target_level = int(self._viewport_runner.state.target_level)
-            prev_level = int(self._active_ms_level)
+            prev_level = int(self._current_level_index())
             applied_context = self._apply_level(
                 source,
                 target_level,
                 prev_level=prev_level,
             )
 
-            self._active_ms_level = int(applied_context.level)
-            if self.use_volume:
+            self._set_current_level_index(int(applied_context.level))
+            if self._viewport_state.mode is RenderMode.VOLUME:
                 self._apply_volume_level(source, applied_context)
             else:
                 self._apply_slice_level(source, applied_context)
             level_applied = True
             self._viewport_runner.mark_level_applied(int(applied_context.level))
 
-        if intent.roi_change and not self.use_volume and not level_applied:
+        if (
+            intent.roi_change
+            and self._viewport_state.mode is not RenderMode.VOLUME
+            and not level_applied
+        ):
             pending = self._viewport_runner.state.pending_roi
             if pending is not None:
                 apply_plane_slice_roi(
@@ -1763,7 +1752,7 @@ class EGLRendererWorker:
             logger.debug("ensure_scene_source failed in selection", exc_info=True)
             return
 
-        current = int(self._active_ms_level)
+        current = int(self._current_level_index())
         zoom_hint = self._render_mailbox.consume_zoom_hint(max_age=0.5)
         zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
 
@@ -1805,7 +1794,7 @@ class EGLRendererWorker:
 
         def _budget_check(scene: ZarrSceneSource, level: int) -> None:
             try:
-                if self.use_volume:
+                if self._viewport_state.mode is RenderMode.VOLUME:
                     self._volume_budget_allows(scene, level)
                 else:
                     self._slice_budget_allows(scene, level)
@@ -1815,7 +1804,7 @@ class EGLRendererWorker:
         decision = lod.enforce_budgets(
             outcome,
             source=source,
-            use_volume=self.use_volume,
+            use_volume=self._viewport_state.mode is RenderMode.VOLUME,
             budget_check=_budget_check,
             log_layer_debug=self._log_layer_debug,
         )
@@ -1829,7 +1818,7 @@ class EGLRendererWorker:
             prev_level=current,
             last_step=step_hint,
         )
-        if self.use_volume:
+        if self._viewport_state.mode is RenderMode.VOLUME:
             apply_volume_metadata(self, source, context)
         else:
             apply_plane_metadata(self, source, context)
