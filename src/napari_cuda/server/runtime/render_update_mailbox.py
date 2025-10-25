@@ -23,6 +23,8 @@ class RenderUpdate:
     mode: Optional[RenderMode] = None
     plane_state: Optional[PlaneState] = None
     volume_state: Optional[VolumeState] = None
+    op_seq: Optional[int] = None
+    apply_camera_pose: bool = True
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,8 @@ class RenderUpdateMailbox:
     def __init__(self, *, time_fn: Callable[[], float] = time.perf_counter) -> None:
         self._time_fn = time_fn
         self._scene_state: Optional[RenderLedgerSnapshot] = None
+        self._scene_op_seq: Optional[int] = None
+        self._scene_apply_camera_pose: bool = True
         self._mode: Optional[RenderMode] = None
         self._plane_state: Optional[PlaneState] = None
         self._volume_state: Optional[VolumeState] = None
@@ -47,9 +51,20 @@ class RenderUpdateMailbox:
         self._last_signature: Optional[tuple] = None
         self._lock = threading.Lock()
 
-    def set_scene_state(self, state: RenderLedgerSnapshot) -> None:
+    def set_scene_state(self, state: RenderLedgerSnapshot, *, apply_camera_pose: bool = True) -> None:
+        op_seq = int(state.op_seq) if state.op_seq is not None else 0
         with self._lock:
+            if self._scene_op_seq is not None:
+                current_op = int(self._scene_op_seq)
+                if op_seq < current_op:
+                    return
+                if op_seq == current_op:
+                    signature = self._build_signature(state)
+                    if signature == self._last_signature:
+                        return
             self._scene_state = state
+            self._scene_op_seq = op_seq
+            self._scene_apply_camera_pose = bool(apply_camera_pose)
 
     def set_viewport_state(
         self,
@@ -65,16 +80,21 @@ class RenderUpdateMailbox:
 
     def drain(self) -> RenderUpdate:
         with self._lock:
+            op_seq = self._scene_op_seq
             drained = RenderUpdate(
                 scene_state=self._scene_state,
                 mode=self._mode,
                 plane_state=self._plane_state,
                 volume_state=self._volume_state,
+                op_seq=op_seq,
+                apply_camera_pose=self._scene_apply_camera_pose,
             )
             self._scene_state = None
             self._mode = None
             self._plane_state = None
             self._volume_state = None
+            self._scene_op_seq = op_seq
+            self._scene_apply_camera_pose = True
         return drained
 
     def record_zoom_hint(self, ratio: float, *, timestamp: Optional[float] = None) -> None:

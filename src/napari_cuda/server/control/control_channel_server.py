@@ -83,7 +83,8 @@ from napari_cuda.server.scene import (
     build_render_scene_state,
     multiscale_state_from_snapshot,
 )
-from napari_cuda.server.runtime.state_structs import RenderMode
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
+from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
     build_notify_layers_payload,
@@ -343,6 +344,39 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
             ctx.intent_id,
             ctx.frame_id,
             new_ndisplay,
+        )
+
+    worker = server._worker  # type: ignore[attr-defined]
+    if worker is not None and worker.is_ready:  # type: ignore[attr-defined]
+        base_state = worker.viewport_state  # type: ignore[attr-defined]
+        plane_state = replace(
+            base_state.plane,
+            target_ndisplay=int(new_ndisplay),
+        )
+        volume_state = replace(base_state.volume)
+        desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
+
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "view.toggle enqueue: mode=%s plane_target_level=%s volume_level=%s",
+                desired_mode.name,
+                plane_state.target_level,
+                volume_state.level,
+            )
+            logger.debug(
+                "view.toggle plane_state=%s volume_state=%s",
+                plane_state,
+                volume_state,
+            )
+
+        snapshot = build_render_scene_state(server._state_ledger)
+        worker.enqueue_update(  # type: ignore[attr-defined]
+            RenderUpdate(
+                scene_state=snapshot,
+                mode=desired_mode,
+                plane_state=plane_state,
+                volume_state=volume_state,
+            )
         )
 
     return True

@@ -6,6 +6,7 @@ import logging
 import uuid
 import time
 from dataclasses import asdict, replace
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
@@ -99,6 +100,73 @@ def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Option
     if isinstance(state, Mapping):
         return dict(state)
     raise TypeError(f"unsupported volume state payload: {type(state)!r}")
+
+
+def _camera_update_entries(
+    *,
+    center: Optional[Sequence[float]],
+    zoom: Optional[float],
+    angles: Optional[Sequence[float]],
+    distance: Optional[float],
+    fov: Optional[float],
+    rect: Optional[Sequence[float]],
+    metadata: Mapping[str, Any],
+) -> Tuple[list[tuple], Dict[str, Any]]:
+    ack: Dict[str, Any] = {}
+    entries: list[tuple] = []
+
+    metadata_dict = dict(metadata)
+    include_metadata = bool(metadata_dict)
+
+    def _entry(key: str, value: Any) -> tuple:
+        if include_metadata:
+            return ("camera", "main", key, value, metadata_dict)
+        return ("camera", "main", key, value)
+
+    if center is not None:
+        normalized_center = tuple(float(c) for c in center)
+        entries.append(_entry("center", normalized_center))
+        ack["center"] = [float(c) for c in normalized_center]
+
+    if zoom is not None:
+        zoom_value = float(zoom)
+        entries.append(_entry("zoom", zoom_value))
+        ack["zoom"] = zoom_value
+
+    if angles is not None:
+        if len(angles) < 3:
+            raise ValueError("camera angles require three components")
+        normalized_angles = (
+            float(angles[0]),
+            float(angles[1]),
+            float(angles[2]),
+        )
+        entries.append(_entry("angles", normalized_angles))
+        ack["angles"] = [float(a) for a in normalized_angles]
+
+    if distance is not None:
+        distance_val = float(distance)
+        entries.append(_entry("distance", distance_val))
+        ack["distance"] = distance_val
+
+    if fov is not None:
+        fov_val = float(fov)
+        entries.append(_entry("fov", fov_val))
+        ack["fov"] = fov_val
+
+    if rect is not None:
+        if len(rect) < 4:
+            raise ValueError("camera rect requires four components")
+        normalized_rect = (
+            float(rect[0]),
+            float(rect[1]),
+            float(rect[2]),
+            float(rect[3]),
+        )
+        entries.append(_entry("rect", normalized_rect))
+        ack["rect"] = [float(v) for v in normalized_rect]
+
+    return entries, ack
 
 
 def _record_viewport_state(
@@ -215,6 +283,13 @@ def _normalize_gamma(value: object) -> float:
     return val
 
 
+def _next_scene_op_seq(ledger: ServerStateLedger) -> int:
+    entry = ledger.get("scene", "main", "op_seq")
+    if entry is not None and isinstance(entry.value, int):
+        return int(entry.value) + 1
+    return 1
+
+
 def _normalize_string(value: object, *, allowed: Optional[set[str]] = None) -> str:
     if isinstance(value, str):
         lowered = value.strip()
@@ -315,12 +390,16 @@ def reduce_layer_property(
     elif prop == "opacity":
         updates.append(("volume", "main", "opacity", float(canonical)))
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=updates,
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+        op_seq=next_op_seq,
+        op_kind="layer-update",
     )
 
     primary_entry = stored_entries.get(("layer", layer_id, prop))
@@ -352,12 +431,16 @@ def reduce_volume_render_mode(
     metadata = {"intent_id": intent_id} if intent_id else None
     normalized = str(mode)
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=[("volume", "main", "render_mode", normalized)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+        op_seq=next_op_seq,
+        op_kind="volume-update",
     )
 
     entry = stored_entries.get(("volume", "main", "render_mode"))
@@ -391,12 +474,16 @@ def reduce_volume_contrast_limits(
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=[("volume", "main", "contrast_limits", pair)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+        op_seq=next_op_seq,
+        op_kind="volume-update",
     )
 
     entry = stored_entries.get(("volume", "main", "contrast_limits"))
@@ -429,12 +516,16 @@ def reduce_volume_colormap(
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=[("volume", "main", "colormap", normalized)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+        op_seq=next_op_seq,
+        op_kind="volume-update",
     )
 
     entry = stored_entries.get(("volume", "main", "colormap"))
@@ -467,12 +558,16 @@ def reduce_volume_opacity(
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=[("volume", "main", "opacity", value)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+        op_seq=next_op_seq,
+        op_kind="volume-update",
     )
 
     entry = stored_entries.get(("volume", "main", "opacity"))
@@ -505,12 +600,16 @@ def reduce_volume_sample_step(
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
         updates=[("volume", "main", "sample_step", value)],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+        op_seq=next_op_seq,
+        op_kind="volume-update",
     )
 
     entry = stored_entries.get(("volume", "main", "sample_step"))
@@ -915,12 +1014,16 @@ def reduce_dims_update(
         "axis_target": control_target,
     }
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=requested_step,
         metadata=step_metadata,
         origin=origin,
         timestamp=ts,
+        op_seq=next_op_seq,
+        op_kind="dims-update",
     )
 
     current_step_entry = stored_entries.get(("dims", "main", "current_step"))
@@ -1080,6 +1183,8 @@ def reduce_plane_restore(
 
     plane_payload = asdict(base_plane)
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored = apply_plane_restore_transaction(
         ledger=ledger,
         level=level_idx,
@@ -1091,6 +1196,8 @@ def reduce_plane_restore(
         viewport_metadata=metadata,
         origin=origin,
         timestamp=ts,
+        op_seq=next_op_seq,
+        op_kind="plane-restore",
     )
 
     return stored
@@ -1160,6 +1267,8 @@ def reduce_level_update(
     if mode is not None:
         mode_value = mode.name if isinstance(mode, RenderMode) else str(mode)
 
+    next_op_seq = _next_scene_op_seq(ledger)
+
     stored_entries = apply_level_switch_transaction(
         ledger=ledger,
         level=level,
@@ -1176,6 +1285,8 @@ def reduce_level_update(
         viewport_metadata=metadata,
         origin=origin,
         timestamp=ts,
+        op_seq=next_op_seq,
+        op_kind="level-update",
     )
 
     level_entry = stored_entries.get(("multiscale", "main", "level"))
@@ -1215,6 +1326,7 @@ def reduce_camera_update(
     rect: Optional[Sequence[float]] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.camera",
+    metadata: Mapping[str, Any] = MappingProxyType({}),
 ) -> Tuple[Dict[str, Any], int]:
     if (
         center is None
@@ -1227,64 +1339,31 @@ def reduce_camera_update(
         raise ValueError("camera reducer requires at least one property")
 
     ts = _now(timestamp)
-    ack: Dict[str, Any] = {}
-    updates: list[tuple[str, str, str, Any]] = []
+    updates, ack = _camera_update_entries(
+        center=center,
+        zoom=zoom,
+        angles=angles,
+        distance=distance,
+        fov=fov,
+        rect=rect,
+        metadata=metadata,
+    )
 
-    if center is not None:
-        normalized_center = tuple(float(c) for c in center)
-        updates.append(("camera", "main", "center", normalized_center))
-        ack["center"] = [float(c) for c in normalized_center]
-
-    if zoom is not None:
-        zoom_value = float(zoom)
-        updates.append(("camera", "main", "zoom", zoom_value))
-        ack["zoom"] = zoom_value
-
-    if angles is not None:
-        if len(angles) < 3:
-            raise ValueError("camera angles require three components")
-        normalized_angles = (
-            float(angles[0]),
-            float(angles[1]),
-            float(angles[2]),
-        )
-        updates.append(("camera", "main", "angles", normalized_angles))
-        ack["angles"] = [float(a) for a in normalized_angles]
-
-    if distance is not None:
-        distance_val = float(distance)
-        updates.append(("camera", "main", "distance", distance_val))
-        ack["distance"] = distance_val
-
-    if fov is not None:
-        fov_val = float(fov)
-        updates.append(("camera", "main", "fov", fov_val))
-        ack["fov"] = fov_val
-
-    if rect is not None:
-        if len(rect) < 4:
-            raise ValueError("camera rect requires four components")
-        normalized_rect = (
-            float(rect[0]),
-            float(rect[1]),
-            float(rect[2]),
-            float(rect[3]),
-        )
-        updates.append(("camera", "main", "rect", normalized_rect))
-        ack["rect"] = [float(v) for v in normalized_rect]
+    next_op_seq = _next_scene_op_seq(ledger)
 
     stored_entries = apply_camera_update_transaction(
         ledger=ledger,
         updates=updates,
         origin=origin,
         timestamp=ts,
+        op_seq=next_op_seq,
+        op_kind="camera-update",
     )
 
-    versions = [
-        int(entry.version)
-        for entry in stored_entries.values()
-        if entry.version is not None
-    ]
+    versions: list[int] = []
+    for (scope, _, _), entry in stored_entries.items():
+        if scope == "camera" and entry.version is not None:
+            versions.append(int(entry.version))
     assert versions, "camera transaction must return versioned entries"
     version = max(versions)
 

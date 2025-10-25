@@ -21,6 +21,9 @@ def apply_layer_property_transaction(
     origin: str = "control.layer",
     timestamp: Optional[float] = None,
     metadata: Optional[Mapping[str, object]] = None,
+    op_seq: Optional[int] = None,
+    op_state: Optional[str] = None,
+    op_kind: Optional[str] = None,
 ) -> Dict[PropertyKey, LedgerEntry]:
     """Record layer (and related) property updates in the ledger."""
 
@@ -33,6 +36,13 @@ def apply_layer_property_transaction(
 
     if not entries:
         return {}
+
+    if op_seq is not None:
+        entries.insert(0, ("scene", "main", "op_seq", int(op_seq)))
+        if op_state is not None:
+            entries.insert(1, ("scene", "main", "op_state", str(op_state)))
+        if op_kind is not None:
+            entries.insert(2, ("scene", "main", "op_kind", str(op_kind)))
 
     return ledger.batch_record_confirmed(
         entries,

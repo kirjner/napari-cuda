@@ -111,7 +111,11 @@ class ViewportRunner:
         state = self._plane
         dirty = state.camera_pose_dirty
         for command in commands:
-            if getattr(command, "kind", None) != "zoom":
+            kind = getattr(command, "kind", None)
+            if kind is None:
+                continue
+            dirty = True
+            if kind != "zoom":
                 continue
             factor = getattr(command, "factor", None)
             if factor is None:
@@ -119,7 +123,6 @@ class ViewportRunner:
             factor = float(factor)
             if factor > 0.0:
                 state.zoom_hint = factor
-                dirty = True
         state.camera_pose_dirty = dirty
 
     def request_level(self, level: int) -> bool:

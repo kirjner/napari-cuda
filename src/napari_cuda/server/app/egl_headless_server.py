@@ -12,7 +12,7 @@ import uuid
 import struct
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Dict, Optional, Sequence, Set, Mapping, TYPE_CHECKING, Any
 
 import websockets
@@ -434,6 +434,7 @@ class EGLHeadlessServer:
                 fov=pose.fov,
                 rect=pose.rect,
                 origin="worker.state.camera",
+                metadata={"pose_seq": seq},
             )
 
             # Persist per-mode camera caches for deterministic restores.
@@ -862,6 +863,7 @@ class EGLHeadlessServer:
                 fov=pose.fov,
                 rect=pose.rect,
                 origin="worker.state.camera",
+                metadata={"pose_seq": seq},
             )
 
             # Persist per-mode camera caches for deterministic restores.

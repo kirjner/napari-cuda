@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, Literal, Mapping, Optional, Sequence
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot, build_ledger_snapshot
@@ -145,7 +145,8 @@ def build_render_scene_state(
     default_opacity = volume_defaults.get("opacity")
     default_sample_step = volume_defaults.get("sample_step")
 
-    return RenderLedgerSnapshot(
+    return replace(
+        base,
         center=_coalesce_tuple(center, base.center, float),
         zoom=_coalesce_float(zoom, base.zoom),
         angles=_coalesce_tuple(angles, base.angles, float),
@@ -153,7 +154,11 @@ def build_render_scene_state(
         fov=_coalesce_float(fov, base.fov),
         rect=_coalesce_tuple(rect, base.rect, float),
         current_step=_coalesce_tuple(current_step, base.current_step, int),
-        volume_mode=_coalesce_string(volume_mode, base.volume_mode, fallback=default_mode),
+        volume_mode=_coalesce_string(
+            volume_mode,
+            base.volume_mode,
+            fallback=default_mode,
+        ),
         volume_colormap=_coalesce_string(
             volume_colormap,
             base.volume_colormap,
@@ -165,7 +170,11 @@ def build_render_scene_state(
             float,
             fallback=default_clim,
         ),
-        volume_opacity=_coalesce_float(volume_opacity, base.volume_opacity, fallback=default_opacity),
+        volume_opacity=_coalesce_float(
+            volume_opacity,
+            base.volume_opacity,
+            fallback=default_opacity,
+        ),
         volume_sample_step=_coalesce_float(
             volume_sample_step,
             base.volume_sample_step,

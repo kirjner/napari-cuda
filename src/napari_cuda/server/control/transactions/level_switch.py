@@ -28,12 +28,21 @@ def apply_level_switch_transaction(
     viewport_metadata: Optional[Mapping[str, object]] = None,
     origin: str = "worker.state.level",
     timestamp: Optional[float] = None,
+    op_seq: Optional[int] = None,
+    op_state: Optional[str] = None,
+    op_kind: Optional[str] = None,
 ) -> Dict[PropertyKey, LedgerEntry]:
     """Record the ledger updates for a level switch and return stored entries."""
 
     step_tuple = tuple(int(v) for v in step)
 
     batch_entries: list[tuple] = []
+    if op_seq is not None:
+        batch_entries.append(("scene", "main", "op_seq", int(op_seq)))
+        if op_state is not None:
+            batch_entries.append(("scene", "main", "op_state", str(op_state)))
+        if op_kind is not None:
+            batch_entries.append(("scene", "main", "op_kind", str(op_kind)))
     if level_metadata is None:
         batch_entries.append(("multiscale", "main", "level", int(level)))
     else:

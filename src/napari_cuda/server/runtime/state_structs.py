@@ -71,6 +71,7 @@ class ViewportState:
     plane: PlaneState = field(default_factory=PlaneState)
     volume: VolumeState = field(default_factory=VolumeState)
     mode: RenderMode = RenderMode.PLANE
+    op_seq: int = -1
 
 
 __all__ = ["PlaneState", "RenderMode", "ViewportState", "VolumeState"]

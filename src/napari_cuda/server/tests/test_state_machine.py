@@ -23,15 +23,32 @@ def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
     mailbox = RenderUpdateMailbox(time_fn=clock)
 
-    snapshot = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25)
+    snapshot = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25, op_seq=1)
     mailbox.set_scene_state(snapshot)
 
     updates = mailbox.drain()
     assert updates.scene_state == snapshot
+    assert updates.op_seq == 1
 
     # Second drain should be empty (one-shot semantics)
     updates_empty = mailbox.drain()
     assert updates_empty.scene_state is None
+    assert updates_empty.op_seq == 1
+
+
+def test_mailbox_drops_stale_sequence() -> None:
+    clock = _FakeClock()
+    mailbox = RenderUpdateMailbox(time_fn=clock)
+
+    fresh = RenderLedgerSnapshot(current_step=(1, 0, 0), op_seq=5)
+    stale = RenderLedgerSnapshot(current_step=(2, 0, 0), op_seq=3)
+
+    mailbox.set_scene_state(fresh)
+    mailbox.set_scene_state(stale)
+
+    update = mailbox.drain()
+    assert update.scene_state == fresh
+    assert update.op_seq == 5
 
 
 def test_zoom_hint_recent_then_stale() -> None:

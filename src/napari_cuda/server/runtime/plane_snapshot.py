@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -20,6 +21,7 @@ from napari_cuda.server.runtime.scene_types import SliceROI
 
 from .plane_loader import apply_plane_slice_roi, viewport_roi_for_level
 from .state_structs import PlaneState, RenderMode
+from .viewer_stage import apply_plane_metadata
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,61 @@ class PlaneApplyResult:
     chunk_shape: Optional[Tuple[int, int]]
     width_px: int
     height_px: int
+
+
+def apply_plane_snapshot(
+    worker: Any,
+    source: Any,
+    snapshot: RenderLedgerSnapshot,
+) -> PlaneApplyResult:
+    """Apply plane metadata, camera pose, and ROI from the snapshot."""
+
+    prev_level = int(worker._current_level_index())  # type: ignore[attr-defined]
+    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
+    snapshot_level = int(snapshot.current_level) if snapshot.current_level is not None else None
+    target_level = snapshot_level if snapshot_level is not None else prev_level
+    if plane_state.target_ndisplay < 3:
+        target_level = int(plane_state.target_level)
+
+    step_hint: Optional[tuple[int, ...]] = None
+    if plane_state.target_ndisplay < 3 and plane_state.target_step is not None:
+        step_hint = tuple(int(v) for v in plane_state.target_step)
+    elif snapshot.current_step is not None:
+        step_hint = tuple(int(v) for v in snapshot.current_step)
+    if step_hint is None:
+        recorded_step = worker._ledger_step()
+        if recorded_step is not None:
+            step_hint = tuple(int(v) for v in recorded_step)
+
+    was_volume = worker.viewport_state.mode is RenderMode.VOLUME  # type: ignore[attr-defined]
+    stage_prev_level = target_level if was_volume else prev_level
+
+    decision = lod.LevelDecision(
+        desired_level=int(target_level),
+        selected_level=int(target_level),
+        reason="direct",
+        timestamp=time.perf_counter(),
+        oversampling={},
+        downgraded=False,
+    )
+    applied_context = lod.build_level_context(
+        decision,
+        source=source,
+        prev_level=stage_prev_level,
+        last_step=step_hint,
+    )
+
+    if was_volume:
+        worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
+        worker._configure_camera_for_mode()
+        worker._last_dims_signature = None
+        if hasattr(worker, "_last_plane_pose"):
+            worker._last_plane_pose = None  # type: ignore[attr-defined]
+
+    apply_plane_metadata(worker, source, applied_context)
+    worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
+    apply_plane_camera_pose(worker, snapshot)
+    return apply_slice_level(worker, source, applied_context)
 
 
 def apply_plane_camera_pose(
@@ -84,11 +141,19 @@ def apply_slice_level(
 ) -> PlaneApplyResult:
     """Load the plane slice for ``applied`` and update worker metadata."""
 
+    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
     layer = getattr(worker, "_napari_layer", None)
     sy, sx = applied.scale_yx
 
     if layer is not None:
+        layer.depiction = "plane"
+        layer.rendering = "mip"
         layer.scale = (float(sy), float(sx))
+        if hasattr(layer, "_set_view_slice"):
+            layer._set_view_slice()  # type: ignore[misc]
+        clear_visual = getattr(worker, "_clear_visual", None)
+        if callable(clear_visual):
+            clear_visual()
 
     view = worker.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
@@ -130,7 +195,6 @@ def apply_slice_level(
         downgraded=worker.viewport_state.volume.downgraded,  # type: ignore[attr-defined]
     )
 
-    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
     plane_state.applied_level = int(applied.level)
     plane_state.applied_step = tuple(int(v) for v in applied.step)
     plane_state.applied_roi = aligned_roi
@@ -152,6 +216,7 @@ def apply_slice_level(
 
 __all__ = [
     "PlaneApplyResult",
+    "apply_plane_snapshot",
     "apply_plane_camera_pose",
     "apply_slice_level",
 ]

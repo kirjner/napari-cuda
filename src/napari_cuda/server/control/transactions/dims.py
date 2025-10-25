@@ -18,11 +18,20 @@ def apply_dims_step_transaction(
     metadata: Optional[Mapping[str, object]] = None,
     origin: str = "control.dims",
     timestamp: Optional[float] = None,
+    op_seq: Optional[int] = None,
+    op_state: Optional[str] = None,
+    op_kind: Optional[str] = None,
 ) -> Dict[PropertyKey, LedgerEntry]:
     """Record the requested dims step in the ledger and return stored entries."""
 
     step_tuple: Tuple[int, ...] = tuple(int(v) for v in step)
     entries: list[tuple] = []
+    if op_seq is not None:
+        entries.append(("scene", "main", "op_seq", int(op_seq)))
+        if op_state is not None:
+            entries.append(("scene", "main", "op_state", str(op_state)))
+        if op_kind is not None:
+            entries.append(("scene", "main", "op_kind", str(op_kind)))
     if metadata is None:
         entries.append(("dims", "main", "current_step", step_tuple))
     else:

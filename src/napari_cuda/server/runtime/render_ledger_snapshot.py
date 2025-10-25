@@ -43,6 +43,7 @@ class RenderLedgerSnapshot:
     layer_values: Optional[Dict[str, Dict[str, Any]]] = None
     layer_versions: Optional[Dict[str, Dict[str, int]]] = None
     camera_versions: Optional[Dict[str, int]] = None
+    op_seq: int = 0
 
 
 def build_ledger_snapshot(
@@ -129,6 +130,9 @@ def build_ledger_snapshot(
             camera_versions[str(camera_key)] = int(version_value)
     camera_versions_payload = camera_versions or None
 
+    op_seq_entry = snapshot.get(("scene", "main", "op_seq"))
+    op_seq_value = int(op_seq_entry.value) if op_seq_entry is not None and op_seq_entry.value is not None else 0
+
     return RenderLedgerSnapshot(
         center=center_tuple,
         zoom=zoom_float,
@@ -156,6 +160,7 @@ def build_ledger_snapshot(
         layer_values=layer_values or None,
         layer_versions=layer_versions or None,
         camera_versions=camera_versions_payload,
+        op_seq=op_seq_value,
     )
 
 

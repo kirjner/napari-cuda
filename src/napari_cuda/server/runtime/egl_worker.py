@@ -22,6 +22,7 @@ import os
 import threading
 import time
 from copy import deepcopy
+from dataclasses import replace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Optional
 
@@ -193,6 +194,8 @@ class EGLRendererWorker:
         self._configure_budget_limits()
         self._last_dims_signature: Optional[tuple] = None
         self._applied_versions: dict[tuple[str, str, str], int] = {}
+        self._last_plane_pose: Optional[tuple] = None
+        self._last_volume_pose: Optional[tuple] = None
 
         if policy_name:
             try:
@@ -1070,7 +1073,8 @@ class EGLRendererWorker:
             self._visual = child
             return child
 
-        assert False, "EGLRendererWorker could not locate an active VisPy visual"
+        logger.warning("EGLRendererWorker could not locate an active VisPy visual; proceeding without visual")
+        return None
 
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
         if self._data_d is not None and self._data_wh is not None:
@@ -1184,6 +1188,11 @@ class EGLRendererWorker:
         if order_src:
             ndim = max(ndim, len(tuple(int(v) for v in order_src)))
 
+        fallback_order: Optional[tuple[int, ...]] = None
+        current_order = getattr(dims, "order", None)
+        if current_order is not None:
+            fallback_order = tuple(int(v) for v in current_order)
+
         if snapshot.level_shapes and snapshot.current_level is not None:
             level_shapes = snapshot.level_shapes
             level_idx = int(snapshot.current_level)
@@ -1205,13 +1214,21 @@ class EGLRendererWorker:
         if snapshot.current_level is not None:
             self._set_current_level_index(int(snapshot.current_level))
 
-        assert snapshot.order is not None, "ledger missing dims order"
-        order_values = tuple(int(v) for v in snapshot.order)
+        if snapshot.order is not None:
+            order_values = tuple(int(v) for v in snapshot.order)
+        else:
+            assert fallback_order is not None, "ledger missing dims order"
+            order_values = fallback_order
         assert order_values, "ledger emitted empty dims order"
         dims.order = order_values
 
-        assert snapshot.displayed is not None, "ledger missing dims displayed"
-        displayed_tuple = tuple(int(v) for v in snapshot.displayed)
+        displayed_src = snapshot.displayed
+        if displayed_src is not None:
+            displayed_tuple = tuple(int(v) for v in displayed_src)
+        else:
+            current_displayed = getattr(dims, "displayed", None)
+            assert current_displayed is not None, "ledger missing dims displayed"
+            displayed_tuple = tuple(int(v) for v in current_displayed)
         assert displayed_tuple, "ledger emitted empty dims displayed"
         expected_displayed = tuple(order_values[-len(displayed_tuple):])
         assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
@@ -1272,6 +1289,38 @@ class EGLRendererWorker:
                 if state.current_step is not None
                 else None
             ),
+            dims_version=(int(state.dims_version) if state.dims_version is not None else None),
+            ndisplay=(int(state.ndisplay) if state.ndisplay is not None else None),
+            view_version=(int(state.view_version) if state.view_version is not None else None),
+            displayed=(
+                tuple(int(idx) for idx in state.displayed)
+                if state.displayed is not None
+                else None
+            ),
+            order=(
+                tuple(int(idx) for idx in state.order)
+                if state.order is not None
+                else None
+            ),
+            axis_labels=(
+                tuple(str(label) for label in state.axis_labels)
+                if state.axis_labels is not None
+                else None
+            ),
+            level_shapes=(
+                tuple(
+                    tuple(int(dim) for dim in shape)
+                    for shape in state.level_shapes
+                )
+                if state.level_shapes is not None
+                else None
+            ),
+            current_level=(int(state.current_level) if state.current_level is not None else None),
+            multiscale_level_version=(
+                int(state.multiscale_level_version)
+                if state.multiscale_level_version is not None
+                else None
+            ),
             volume_mode=(str(state.volume_mode) if state.volume_mode is not None else None),
             volume_colormap=(
                 str(state.volume_colormap) if state.volume_colormap is not None else None
@@ -1316,28 +1365,7 @@ class EGLRendererWorker:
             self._mark_render_tick_needed()
             return
 
-    def _apply_viewport_state_snapshot(
-        self,
-        *,
-        mode: Optional[RenderMode],
-        plane_state: Optional[PlaneState],
-        volume_state: Optional[VolumeState],
-    ) -> None:
-        if mode is not None:
-            self.viewport_state.mode = mode
-        if plane_state is not None:
-            self.viewport_state.plane = deepcopy(plane_state)
-        if volume_state is not None:
-            self.viewport_state.volume = deepcopy(volume_state)
-
-    def _consume_render_snapshot(
-        self,
-        state: RenderLedgerSnapshot,
-        *,
-        apply_camera_pose: bool = True,
-    ) -> None:
-        """Queue a complete scene state snapshot for the next frame."""
-
+    def _record_snapshot_versions(self, state: RenderLedgerSnapshot) -> None:
         if state.dims_version is not None:
             self._applied_versions[("dims", "main", "current_step")] = int(state.dims_version)
         if state.view_version is not None:
@@ -1348,41 +1376,44 @@ class EGLRendererWorker:
             for key, version in state.camera_versions.items():
                 self._applied_versions[("camera", "main", str(key))] = int(version)
 
+    def _extract_layer_changes(self, state: RenderLedgerSnapshot) -> dict[str, dict[str, Any]]:
         layer_changes: dict[str, dict[str, Any]] = {}
         layer_versions = state.layer_versions or {}
-        if state.layer_values:
-            for raw_layer_id, props in state.layer_values.items():
-                if not props:
-                    continue
-                layer_id = str(raw_layer_id)
-                version_map = layer_versions.get(layer_id)
-                if version_map is None and raw_layer_id in layer_versions:
-                    version_map = layer_versions[raw_layer_id]
-                for raw_prop, value in props.items():
-                    prop = str(raw_prop)
-                    version_value = None
-                    if version_map is not None and prop in version_map:
-                        version_value = int(version_map[prop])
-                        key = ("layer", layer_id, prop)
-                        previous = self._applied_versions.get(key)
-                        if previous is not None and previous == version_value:
-                            continue
-                        self._applied_versions[key] = version_value
-                    layer_changes.setdefault(layer_id, {})[prop] = value
+        if not state.layer_values:
+            return layer_changes
 
-        if self._viewport_runner is not None:
-            self._viewport_runner.ingest_snapshot(state)
+        for raw_layer_id, props in state.layer_values.items():
+            if not props:
+                continue
+            layer_id = str(raw_layer_id)
+            version_map = layer_versions.get(layer_id)
+            if version_map is None and raw_layer_id in layer_versions:
+                version_map = layer_versions[raw_layer_id]
+            for raw_prop, value in props.items():
+                prop = str(raw_prop)
+                version_value = None
+                if version_map is not None and prop in version_map:
+                    version_value = int(version_map[prop])
+                    key = ("layer", layer_id, prop)
+                    previous = self._applied_versions.get(key)
+                    if previous is not None and previous == version_value:
+                        continue
+                    self._applied_versions[key] = version_value
+                layer_changes.setdefault(layer_id, {})[prop] = value
+        return layer_changes
 
-        signature_changed = self._render_mailbox.update_state_signature(state)
+    def _consume_render_snapshot(
+        self,
+        state: RenderLedgerSnapshot,
+        *,
+        apply_camera_pose: bool = True,
+    ) -> None:
+        """Queue a complete scene state snapshot for the next frame."""
 
-        if signature_changed:
-            apply_render_snapshot(self, state)
-
-        if layer_changes:
-            view = self.view
-            if view is not None:
-                ctx = self._build_scene_state_context(view.camera)
-                SceneStateApplier.apply_layer_updates(ctx, layer_changes)
+        normalized = self._normalize_scene_state(state)
+        self._render_mailbox.set_scene_state(normalized, apply_camera_pose=apply_camera_pose)
+        self._mark_render_tick_needed()
+        self._last_interaction_ts = time.perf_counter()
 
     def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
         if not commands:
@@ -1437,12 +1468,37 @@ class EGLRendererWorker:
 
         base_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
         next_seq = base_seq + 1
-        self._pose_seq = int(next_seq)
         pose = self._snapshot_camera_pose("main", int(next_seq))
         if pose is None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("pose.emit skipped (no pose) reason=%s seq=%d", reason, int(self._pose_seq))
             return
+
+        if self._viewport_state.mode is RenderMode.VOLUME:
+            volume_key = (
+                tuple(float(v) for v in pose.center) if pose.center is not None else None,
+                tuple(float(v) for v in pose.angles) if pose.angles is not None else None,
+                float(pose.distance) if pose.distance is not None else None,
+                float(pose.fov) if pose.fov is not None else None,
+            )
+            if self._last_volume_pose == volume_key:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("pose.emit skipped (unchanged volume pose) reason=%s", reason)
+                return
+            self._last_volume_pose = volume_key
+        else:
+            plane_key = (
+                tuple(float(v) for v in pose.center) if pose.center is not None else None,
+                float(pose.zoom) if pose.zoom is not None else None,
+                tuple(float(v) for v in pose.rect) if pose.rect is not None else None,
+            )
+            if self._last_plane_pose == plane_key:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("pose.emit skipped (unchanged plane pose) reason=%s", reason)
+                return
+            self._last_plane_pose = plane_key
+
+        self._pose_seq = int(next_seq)
 
         if logger.isEnabledFor(logging.INFO):
             mode = "volume" if self._viewport_state.mode is RenderMode.VOLUME else "plane"
@@ -1583,19 +1639,116 @@ class EGLRendererWorker:
             request_encoder_idr=self._request_encoder_idr,
         )
 
-    def drain_scene_updates(self) -> None:
-        updates: RenderUpdate = self._render_mailbox.drain()
-        self._apply_viewport_state_snapshot(
-            mode=updates.mode,
-            plane_state=updates.plane_state,
-            volume_state=updates.volume_state,
-        )
+    def _apply_viewport_state_snapshot(
+        self,
+        *,
+        mode: Optional[RenderMode],
+        plane_state: Optional[PlaneState],
+        volume_state: Optional[VolumeState],
+    ) -> None:
+        """Apply a mailbox-only viewport update (no scene snapshot)."""
 
-        state = updates.scene_state
-        if state is None:
+        runner = self._viewport_runner
+        updated = False
+
+        if plane_state is not None:
+            self._viewport_state.plane = deepcopy(plane_state)
+            if runner is not None:
+                runner._plane = self._viewport_state.plane  # type: ignore[attr-defined]
+            updated = True
+
+        if volume_state is not None:
+            self._viewport_state.volume = deepcopy(volume_state)
+            updated = True
+
+        if mode is not None and mode is not self._viewport_state.mode:
+            self._viewport_state.mode = mode
+            self._configure_camera_for_mode()
+            updated = True
+
+        if not updated:
             return
 
-        self._viewport_runner.ingest_snapshot(state)
+        if runner is not None:
+            # Ensure runner sees latest camera rect when switching modes before the next snapshot.
+            rect = self._current_panzoom_rect()
+            runner.update_camera_rect(rect)
+
+    def drain_scene_updates(self) -> None:
+        updates: RenderUpdate = self._render_mailbox.drain()
+        state = updates.scene_state
+        if state is None:
+            self._apply_viewport_state_snapshot(
+                mode=updates.mode,
+                plane_state=updates.plane_state,
+                volume_state=updates.volume_state,
+            )
+            return
+
+        snapshot_op_seq = updates.op_seq
+        if snapshot_op_seq is None:
+            snapshot_op_seq = int(state.op_seq) if state.op_seq is not None else 0
+        if int(snapshot_op_seq) < int(self.viewport_state.op_seq):
+            logger.debug(
+                "render snapshot skipped: stale op_seq snapshot=%d latest=%d",
+                int(snapshot_op_seq),
+                int(self.viewport_state.op_seq),
+            )
+            return
+        self.viewport_state.op_seq = int(snapshot_op_seq)
+
+        self._record_snapshot_versions(state)
+        layer_changes = self._extract_layer_changes(state)
+
+        if layer_changes:
+            layer_version_subset: dict[str, dict[str, int]] = {}
+            original_versions = state.layer_versions or {}
+            for layer_id, props in layer_changes.items():
+                version_map = original_versions.get(layer_id, {})
+                subset: dict[str, int] = {}
+                for prop in props:
+                    if prop in version_map:
+                        subset[prop] = int(version_map[prop])
+                if subset:
+                    layer_version_subset[layer_id] = subset
+            state_for_apply = replace(
+                state,
+                layer_values=layer_changes,
+                layer_versions=layer_version_subset or None,
+            )
+        else:
+            state_for_apply = replace(state, layer_values=None, layer_versions=None)
+
+        if not updates.apply_camera_pose:
+            state_for_apply = replace(
+                state_for_apply,
+                center=None,
+                zoom=None,
+                angles=None,
+                distance=None,
+                fov=None,
+                rect=None,
+            )
+
+        if updates.plane_state is not None:
+            self._viewport_state.plane = deepcopy(updates.plane_state)
+            if self._viewport_runner is not None:
+                self._viewport_runner._plane = self._viewport_state.plane  # type: ignore[attr-defined]
+        if updates.volume_state is not None:
+            self._viewport_state.volume = deepcopy(updates.volume_state)
+
+        previous_mode = self._viewport_state.mode
+        signature_changed = self._render_mailbox.update_state_signature(state)
+        if signature_changed:
+            apply_render_snapshot(self, state_for_apply)
+
+        if updates.mode is not None:
+            self._viewport_state.mode = updates.mode
+        else:
+            self._viewport_state.mode = previous_mode
+
+        if signature_changed and self._viewport_runner is not None:
+            self._viewport_runner.ingest_snapshot(state)
 
         view = self.view
         assert view is not None, "drain_scene_updates requires an active VisPy view"
@@ -1604,7 +1757,7 @@ class EGLRendererWorker:
         ctx = self._build_scene_state_context(cam)
         drain_res: SceneDrainResult = SceneStateApplier.drain_updates(
             ctx,
-            state=state,
+            state=state_for_apply,
             mailbox=self._render_mailbox,
         )
 

@@ -85,6 +85,7 @@ class _CaptureWorker:
         self.viewport_state.plane.applied_level = self._active_ms_level
         self.viewport_state.plane.applied_step = (0, 0)
         self.viewport_state.volume.level = self._active_ms_level
+        self.enqueued_updates: list[Any] = []
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -109,6 +110,9 @@ class _CaptureWorker:
     @use_volume.setter
     def use_volume(self, value: bool) -> None:
         self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
+
+    def enqueue_update(self, update: Any) -> None:
+        self.enqueued_updates.append(update)
 
 
     def _ledger_axis_labels(self) -> tuple[str, ...]:
@@ -738,6 +742,13 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert view_entry.version is not None
     entry = server._state_ledger.get("view", "main", "ndisplay")
     assert entry is not None and int(entry.value) == 3
+
+    layer_dep_entry = server._state_ledger.get("layer", "layer-0", "depiction")
+    assert layer_dep_entry is not None and layer_dep_entry.value == "volume"
+    layer_render_entry = server._state_ledger.get("layer", "layer-0", "rendering")
+    assert layer_render_entry is not None and layer_render_entry.value == "attenuated_mip"
+    volume_mode_entry = server._state_ledger.get("volume", "main", "render_mode")
+    assert volume_mode_entry is not None and volume_mode_entry.value == "attenuated_mip"
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"

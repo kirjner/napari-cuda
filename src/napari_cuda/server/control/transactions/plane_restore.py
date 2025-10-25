@@ -52,6 +52,9 @@ def apply_plane_restore_transaction(
     viewport_metadata: Optional[Mapping[str, object]] = None,
     origin: str = "control.view.plane_restore",
     timestamp: Optional[float] = None,
+    op_seq: Optional[int] = None,
+    op_state: Optional[str] = None,
+    op_kind: Optional[str] = None,
 ) -> Dict[PropertyKey, LedgerEntry]:
     """Batch ledger writes for a plane camera restore.
 
@@ -75,18 +78,28 @@ def apply_plane_restore_transaction(
     rect_tuple = _as_rect(rect)
     zoom_value = float(zoom)
 
-    batch_entries: list[tuple] = [
-        ("multiscale", "main", "level", level_idx),
-        ("dims", "main", "current_step", step_tuple),
-        ("camera", "main", "center", center_tuple),
-        ("camera", "main", "zoom", zoom_value),
-        ("camera", "main", "rect", rect_tuple),
-        ("camera_plane", "main", "center", center_tuple),
-        ("camera_plane", "main", "zoom", zoom_value),
-        ("camera_plane", "main", "rect", rect_tuple),
-        ("view_cache", "plane", "level", level_idx),
-        ("view_cache", "plane", "step", step_tuple),
-    ]
+    batch_entries: list[tuple] = []
+    if op_seq is not None:
+        batch_entries.append(("scene", "main", "op_seq", int(op_seq)))
+        if op_state is not None:
+            batch_entries.append(("scene", "main", "op_state", str(op_state)))
+        if op_kind is not None:
+            batch_entries.append(("scene", "main", "op_kind", str(op_kind)))
+
+    batch_entries.extend(
+        [
+            ("multiscale", "main", "level", level_idx),
+            ("dims", "main", "current_step", step_tuple),
+            ("camera", "main", "center", center_tuple),
+            ("camera", "main", "zoom", zoom_value),
+            ("camera", "main", "rect", rect_tuple),
+            ("camera_plane", "main", "center", center_tuple),
+            ("camera_plane", "main", "zoom", zoom_value),
+            ("camera_plane", "main", "rect", rect_tuple),
+            ("view_cache", "plane", "level", level_idx),
+            ("view_cache", "plane", "step", step_tuple),
+        ]
+    )
 
     if viewport_plane_state is not None:
         payload = dict(viewport_plane_state)
