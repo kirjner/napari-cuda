@@ -1063,23 +1063,11 @@ def reduce_plane_restore(
     rect_tuple = tuple(float(v) for v in rect)
     zoom_value = float(zoom)
 
-    stored = apply_plane_restore_transaction(
-        ledger=ledger,
-        level=level_idx,
-        step=step_tuple,
-        center=center_tuple,
-        zoom=zoom_value,
-        rect=rect_tuple,
-        origin=origin,
-        timestamp=ts,
-    )
-
     plane_entry = ledger.get("viewport", "plane", "state")
     base_plane = PlaneState()
     if plane_entry is not None and isinstance(plane_entry.value, Mapping):
-        plane_payload = _plain_plane_state(plane_entry.value)
-        if plane_payload is not None:
-            base_plane = PlaneState(**plane_payload)
+        payload_value = dict(plane_entry.value)
+        base_plane = PlaneState(**payload_value)
 
     base_plane.target_level = level_idx
     base_plane.target_ndisplay = 2
@@ -1090,14 +1078,19 @@ def reduce_plane_restore(
     base_plane.camera_center = (center_tuple[0], center_tuple[1])
     base_plane.camera_zoom = zoom_value
 
-    _record_viewport_state(
-        ledger,
-        mode=RenderMode.PLANE,
-        plane_state=base_plane,
-        volume_state=None,
+    plane_payload = asdict(base_plane)
+
+    stored = apply_plane_restore_transaction(
+        ledger=ledger,
+        level=level_idx,
+        step=step_tuple,
+        center=center_tuple,
+        zoom=zoom_value,
+        rect=rect_tuple,
+        viewport_plane_state=plane_payload,
+        viewport_metadata=metadata,
         origin=origin,
         timestamp=ts,
-        metadata=metadata,
     )
 
     return stored
@@ -1161,6 +1154,12 @@ def reduce_level_update(
     step_metadata = {"source": "worker.level_update", "level": level}
     if intent_id is not None:
         step_metadata["intent_id"] = intent_id
+    plane_payload = _plain_plane_state(plane_state)
+    volume_payload = _plain_volume_state(volume_state)
+    mode_value: Optional[str] = None
+    if mode is not None:
+        mode_value = mode.name if isinstance(mode, RenderMode) else str(mode)
+
     stored_entries = apply_level_switch_transaction(
         ledger=ledger,
         level=level,
@@ -1171,18 +1170,12 @@ def reduce_level_update(
         level_metadata=metadata,
         level_shapes_metadata=metadata if metadata is not None and updated_level_shapes else None,
         downgraded_metadata=metadata if metadata is not None and downgraded is not None else None,
+        viewport_mode=mode_value,
+        viewport_plane_state=plane_payload,
+        viewport_volume_state=volume_payload,
+        viewport_metadata=metadata,
         origin=origin,
         timestamp=ts,
-    )
-
-    _record_viewport_state(
-        ledger,
-        mode=mode,
-        plane_state=plane_state,
-        volume_state=volume_state,
-        origin=origin,
-        timestamp=ts,
-        metadata=metadata,
     )
 
     level_entry = stored_entries.get(("multiscale", "main", "level"))

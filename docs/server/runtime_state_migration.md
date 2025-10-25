@@ -83,9 +83,9 @@ Single-source our render state so the worker, viewport runner, controller, and t
 4. Add targeted unit tests for the new helpers (`test_plane_snapshot.py`, `test_volume_snapshot.py`).
 
 ### Stage C — Controller/resume alignment
-1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/intents.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`).
-2. Update `worker_intent_mailbox`, `egl_headless_server`, and `ViewerSceneManager` to pull state from `ViewportState` rather than private worker fields.
-3. Propagate state snapshots through render mailboxes and resume tokens; update tests in `src/napari_cuda/server/tests/test_state_channel_ingest.py`, resume helpers, and history store.
+1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/intents.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`). ✅ Completed.
+2. Update `worker_intent_mailbox`, `egl_headless_server`, and `ViewerSceneManager` to pull state from `ViewportState` rather than private worker fields. ✅ Completed.
+3. Propagate state snapshots through render mailboxes and resume tokens; update tests in `src/napari_cuda/server/tests/test_state_channel_ingest.py`, resume helpers, and history store. ✅ Completed.
 
 ### Stage D — Shim removal
 1. Remove temporary properties (`worker.use_volume`, `_active_ms_level`) once all call sites consume the new state.

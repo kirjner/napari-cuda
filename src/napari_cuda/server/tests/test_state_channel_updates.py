@@ -38,12 +38,23 @@ from napari_cuda.server.scene import (
     layer_controls_from_ledger,
     multiscale_state_from_snapshot,
 )
-from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
+from napari_cuda.server.runtime.state_structs import (
+    PlaneState,
+    RenderMode,
+    ViewportState,
+    VolumeState,
+)
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_layer_property
+from napari_cuda.server.control.state_reducers import (
+    reduce_bootstrap_state,
+    reduce_layer_property,
+    reduce_level_update,
+    reduce_plane_restore,
+)
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
+from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
 
 
 class _CaptureWorker:
@@ -1071,6 +1082,83 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         loop.close()
 
 
+def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+
+        server, scheduled, captured = _make_server()
+        server._state_ledger.record_confirmed(
+            "view",
+            "main",
+            "ndisplay",
+            2,
+            origin="test.reset",
+        )
+        _drain_scheduled(scheduled)
+        captured.clear()
+
+        server._update_scene_manager()
+
+        server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
+        server._state_send = lambda _ws, text: captured.append(json.loads(text))
+        server._update_scene_manager = lambda: None
+        server._schedule_coro = lambda coro, _label: scheduled.append(coro)
+        server._pixel_channel = SimpleNamespace(last_avcc=None)
+        server._pixel_config = SimpleNamespace()
+
+        monkeypatch.setattr(state_channel_handler.pixel_channel, 'mark_stream_config_dirty', lambda *a, **k: None)
+
+        class _CaptureWS:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+        ws = _CaptureWS()
+        ws._napari_cuda_session = "baseline-session"
+        ws._napari_cuda_features = {
+            "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
+            "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+        }
+        ws._napari_cuda_sequencers = {}
+        ws._napari_cuda_resume_plan = {
+            state_channel_handler.NOTIFY_SCENE_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_SCENE_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[],
+            ),
+            state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[],
+            ),
+            state_channel_handler.NOTIFY_STREAM_TYPE: ResumePlan(
+                topic=state_channel_handler.NOTIFY_STREAM_TYPE,
+                decision=ResumeDecision.REPLAY,
+                deltas=[],
+            ),
+        }
+
+        loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
+        _drain_scheduled(scheduled)
+
+        layer_frames = _frames_of_type(captured, "notify.layers")
+        assert layer_frames, "expected notify.layers snapshot even with replay resume plan"
+        changes = layer_frames[-1]["payload"]["changes"]
+        assert changes["colormap"] == "gray"
+        entry = server._state_ledger.get("layer", "layer-0", "colormap")
+        assert entry is not None and entry.value == "gray"
+        volume_entry = server._state_ledger.get("volume", "main", "colormap")
+        assert volume_entry is not None and volume_entry.value == "gray"
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, EnvelopeSnapshot, EnvelopeSnapshot]:
     store: ResumableHistoryStore = server._resumable_store
     scene_payload = state_channel_handler.build_notify_scene_payload(
@@ -1226,3 +1314,147 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+
+
+def test_reduce_level_update_records_viewport_state() -> None:
+    server, scheduled, _captured = _make_server()
+    try:
+        ledger = server._state_ledger
+        plane_state = PlaneState(
+            target_level=1,
+            target_ndisplay=2,
+            target_step=(4, 0, 0),
+            applied_level=1,
+            applied_step=(4, 0, 0),
+            camera_rect=(0.0, 0.0, 10.0, 10.0),
+            camera_center=(5.0, 5.0),
+            camera_zoom=1.25,
+        )
+        volume_state = VolumeState(
+            level=1,
+            downgraded=False,
+            pose_center=(1.0, 2.0, 3.0),
+            pose_angles=(0.0, 0.0, 0.0),
+            pose_distance=50.0,
+            pose_fov=45.0,
+        )
+
+        reduce_level_update(
+            ledger,
+            applied={"level": 1, "step": (4, 0, 0), "shape": (16, 512, 512)},
+            downgraded=False,
+            intent_id="level-test",
+            origin="test.level",
+            mode=RenderMode.PLANE,
+            plane_state=plane_state,
+            volume_state=volume_state,
+        )
+
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+        mode_entry = ledger.get("viewport", "state", "mode")
+        assert mode_entry is not None
+        assert mode_entry.value == "PLANE"
+
+        plane_entry = ledger.get("viewport", "plane", "state")
+        assert plane_entry is not None
+        assert plane_entry.value is not None
+        assert plane_entry.value["applied_level"] == 1
+        assert tuple(plane_entry.value["applied_step"]) == (4, 0, 0)
+        assert pytest.approx(float(plane_entry.value["camera_zoom"])) == 1.25
+
+        volume_entry = ledger.get("viewport", "volume", "state")
+        assert volume_entry is not None
+        assert volume_entry.value is not None
+        assert volume_entry.value["level"] == 1
+        assert tuple(volume_entry.value["pose_center"]) == (1.0, 2.0, 3.0)
+
+        cache_level = ledger.get("view_cache", "plane", "level")
+        assert cache_level is not None and int(cache_level.value) == 1
+        cache_step = ledger.get("view_cache", "plane", "step")
+        assert cache_step is not None and tuple(int(v) for v in cache_step.value) == (4, 0, 0)
+    finally:
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+
+def test_notify_scene_payload_includes_viewport_state() -> None:
+    server, scheduled, _captured = _make_server()
+    try:
+        ledger = server._state_ledger
+        plane_state = PlaneState(
+            target_level=0,
+            target_ndisplay=2,
+            target_step=(2, 0, 0),
+            applied_level=0,
+            applied_step=(2, 0, 0),
+            camera_rect=(0.0, 0.0, 20.0, 20.0),
+            camera_center=(10.0, 10.0),
+            camera_zoom=2.0,
+        )
+        volume_state = VolumeState(level=0, downgraded=False, pose_center=(0.0, 0.0, 0.0))
+
+        reduce_level_update(
+            ledger,
+            applied={"level": 0, "step": (2, 0, 0), "shape": (32, 512, 512)},
+            downgraded=False,
+            origin="test.level",
+            mode=RenderMode.PLANE,
+            plane_state=plane_state,
+            volume_state=volume_state,
+        )
+
+        server._update_scene_manager()
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+        payload = build_notify_scene_payload(
+            server._scene_manager,
+            ledger_snapshot=ledger.snapshot(),
+            viewer_settings=None,
+        )
+
+        metadata = payload.metadata or {}
+        viewport_meta = metadata.get("viewport_state")
+        assert viewport_meta is not None
+        assert viewport_meta["mode"] == "PLANE"
+        assert tuple(viewport_meta["plane"]["applied_step"]) == (2, 0, 0)
+        assert viewport_meta["volume"]["level"] == 0
+    finally:
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+
+def test_reduce_plane_restore_updates_viewport_state() -> None:
+    server, scheduled, _captured = _make_server()
+    try:
+        ledger = server._state_ledger
+        reduce_plane_restore(
+            ledger,
+            level=2,
+            step=(6, 0, 0),
+            center=(12.0, 24.0, 0.0),
+            zoom=1.1,
+            rect=(0.0, 0.0, 40.0, 40.0),
+            intent_id="restore-test",
+            origin="test.restore",
+        )
+
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+        plane_entry = ledger.get("viewport", "plane", "state")
+        assert plane_entry is not None
+        assert plane_entry.value is not None
+        assert plane_entry.value["applied_level"] == 2
+        assert tuple(plane_entry.value["applied_step"]) == (6, 0, 0)
+        assert pytest.approx(float(plane_entry.value["camera_zoom"])) == 1.1
+
+        cache_level = ledger.get("view_cache", "plane", "level")
+        assert cache_level is not None and int(cache_level.value) == 2
+        cache_step = ledger.get("view_cache", "plane", "step")
+        assert cache_step is not None and tuple(int(v) for v in cache_step.value) == (6, 0, 0)
+    finally:
+        while scheduled:
+            asyncio.run(scheduled.pop(0))

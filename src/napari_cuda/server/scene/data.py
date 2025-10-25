@@ -34,6 +34,7 @@ __all__ = [
     "layer_controls_from_ledger",
     "volume_state_from_ledger",
     "multiscale_state_from_snapshot",
+    "viewport_state_from_ledger",
 ]
 
 
@@ -242,3 +243,32 @@ def volume_state_from_ledger(
         if entry is not None and entry.value is not None:
             mapping[field] = entry.value
     return mapping
+
+
+def viewport_state_from_ledger(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+) -> Dict[str, Any]:
+    """Extract viewport mode and plane/volume payloads from the ledger snapshot."""
+
+    def _clone(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(k): _clone(v) for k, v in value.items()}
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [_clone(v) for v in value]
+        return value
+
+    payload: Dict[str, Any] = {}
+
+    mode_entry = snapshot.get(("viewport", "state", "mode"))
+    if mode_entry is not None and mode_entry.value is not None:
+        payload["mode"] = str(mode_entry.value)
+
+    plane_entry = snapshot.get(("viewport", "plane", "state"))
+    if plane_entry is not None and plane_entry.value is not None:
+        payload["plane"] = _clone(plane_entry.value)
+
+    volume_entry = snapshot.get(("viewport", "volume", "state"))
+    if volume_entry is not None and volume_entry.value is not None:
+        payload["volume"] = _clone(volume_entry.value)
+
+    return payload

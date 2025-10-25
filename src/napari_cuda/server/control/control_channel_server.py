@@ -1662,7 +1662,8 @@ async def _emit_layer_baseline(
         if plan.deltas:
             for snapshot in plan.deltas:
                 await _send_layer_snapshot(server, ws, snapshot)
-        return
+            return
+        # No deltas to replay; fall through to emit the current defaults.
 
     if not default_controls:
         return
@@ -2470,8 +2471,64 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
                 controls.update({str(key): value for key, value in block_controls.items()})
             if controls:
                 default_controls.append((layer_id, controls))
+
     except Exception:
         logger.debug("Initial scene baseline prep failed", exc_info=True)
+
+    if default_controls and not (
+        layers_plan is not None
+        and layers_plan.decision == ResumeDecision.REPLAY
+        and layers_plan.deltas
+    ):
+        for layer_id, controls in default_controls:
+            for key, raw_value in controls.items():
+                entry = server._state_ledger.get("layer", layer_id, key)
+                if entry is not None:
+                    continue
+                if key == "contrast_limits" and isinstance(raw_value, (list, tuple)):
+                    lo, hi = float(raw_value[0]), float(raw_value[1])
+                    normalized_value: Any = (lo, hi)
+                elif key in {"opacity", "gamma"}:
+                    normalized_value = float(raw_value)
+                elif key in {"blending", "interpolation", "colormap"}:
+                    normalized_value = str(raw_value)
+                elif key == "visible":
+                    normalized_value = bool(raw_value)
+                elif isinstance(raw_value, list):
+                    normalized_value = tuple(raw_value)
+                else:
+                    normalized_value = raw_value
+                server._state_ledger.record_confirmed(
+                    "layer",
+                    layer_id,
+                    key,
+                    normalized_value,
+                    origin="bootstrap.layer_defaults",
+                )
+                if key == "colormap":
+                    server._state_ledger.record_confirmed(
+                        "volume",
+                        "main",
+                        "colormap",
+                        str(normalized_value),
+                        origin="bootstrap.layer_defaults",
+                    )
+                elif key == "contrast_limits":
+                    server._state_ledger.record_confirmed(
+                        "volume",
+                        "main",
+                        "contrast_limits",
+                        normalized_value,
+                        origin="bootstrap.layer_defaults",
+                    )
+                elif key == "opacity":
+                    server._state_ledger.record_confirmed(
+                        "volume",
+                        "main",
+                        "opacity",
+                        float(normalized_value),
+                        origin="bootstrap.layer_defaults",
+                    )
 
     try:
         await _emit_scene_baseline(

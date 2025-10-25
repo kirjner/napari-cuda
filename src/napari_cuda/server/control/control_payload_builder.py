@@ -6,7 +6,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
-from napari_cuda.server.scene import volume_state_from_ledger
+from napari_cuda.server.scene import volume_state_from_ledger, viewport_state_from_ledger
 from napari_cuda.server.control.state_ledger import LedgerEntry
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 
@@ -34,6 +34,13 @@ def build_notify_scene_payload(
 
     payload.policies = _build_policies_block(ledger_snapshot)
     payload.metadata = _merge_scene_metadata(snapshot.metadata, ledger_snapshot)
+
+    viewport_state = viewport_state_from_ledger(ledger_snapshot)
+    if viewport_state:
+        metadata_block = payload.metadata or {}
+        metadata_copy = dict(metadata_block)
+        metadata_copy["viewport_state"] = viewport_state
+        payload.metadata = metadata_copy
 
     return payload
 

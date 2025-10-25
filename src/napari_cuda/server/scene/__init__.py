@@ -9,6 +9,7 @@ from .data import (
     layer_controls_from_ledger,
     volume_state_from_ledger,
     multiscale_state_from_snapshot,
+    viewport_state_from_ledger,
 )
 from napari_cuda.server.scene_defaults import default_volume_state
 
@@ -20,4 +21,5 @@ __all__ = [
     "layer_controls_from_ledger",
     "volume_state_from_ledger",
     "multiscale_state_from_snapshot",
+    "viewport_state_from_ledger",
 ]
