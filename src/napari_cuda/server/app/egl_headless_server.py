@@ -380,14 +380,42 @@ class EGLHeadlessServer:
                 )
         downgraded = bool(controller_downgraded)
 
-        if intent_mode is RenderMode.VOLUME and isinstance(volume_state, VolumeState):
-            level_value = int(volume_state.level)
-            downgraded = bool(volume_state.downgraded)
-            step_source = getattr(context, "step", None)
+        plane_snapshot = plane_state if isinstance(plane_state, PlaneState) else None
+        volume_snapshot = volume_state if isinstance(volume_state, VolumeState) else None
+
+        context_step = None
+        if getattr(context, "step", None) is not None:
+            context_step = tuple(int(v) for v in context.step)
+
+        target_step: Optional[tuple[int, ...]] = None
+        if isinstance(plane_state, Mapping):
+            maybe_target = plane_state.get("target_step")
+            if isinstance(maybe_target, Sequence):
+                target_step = tuple(int(v) for v in maybe_target)
+        if plane_snapshot is not None and plane_snapshot.target_step is not None:
+            target_step = tuple(int(v) for v in plane_snapshot.target_step)
+
+        if intent_mode is RenderMode.VOLUME:
+            level_value = (
+                int(volume_snapshot.level)
+                if volume_snapshot is not None
+                else int(context.level)
+            )
+            downgraded = bool(volume_snapshot.downgraded) if volume_snapshot is not None else downgraded
+            step_source = context_step
         else:
-            plane_snapshot = plane_state if isinstance(plane_state, PlaneState) else None
-            level_value = int(plane_snapshot.applied_level) if plane_snapshot is not None else int(context.level)
-            step_source = plane_snapshot.applied_step if plane_snapshot and plane_snapshot.applied_step is not None else getattr(context, "step", None)
+            level_value = (
+                int(plane_snapshot.applied_level)
+                if plane_snapshot is not None and plane_snapshot.applied_level is not None
+                else int(context.level)
+            )
+            step_source = (
+                plane_snapshot.applied_step
+                if plane_snapshot is not None and plane_snapshot.applied_step is not None
+                else context_step
+            )
+            if step_source is None:
+                step_source = target_step
 
         step_tuple = tuple(int(v) for v in step_source) if step_source is not None else tuple()
 
@@ -406,6 +434,54 @@ class EGLHeadlessServer:
                 downgraded,
             )
 
+        normalized_plane_state = plane_state
+        canonical_step = step_tuple if step_tuple else target_step
+        if plane_snapshot is not None:
+            normalized_target_step = target_step if target_step is not None else (plane_snapshot.target_step or step_tuple)
+            normalized_applied_step = step_tuple or normalized_target_step
+            normalized_plane_state = replace(
+                plane_snapshot,
+                target_level=int(level_value),
+                applied_level=int(level_value),
+                snapshot_level=int(level_value),
+                target_step=normalized_target_step,
+                applied_step=normalized_applied_step,
+                level_reload_required=False,
+                awaiting_level_confirm=False,
+                roi_reload_required=False,
+                pose_reason=None,
+                camera_pose_dirty=False,
+            )
+        elif isinstance(plane_state, Mapping):
+            plane_payload = dict(plane_state)
+            if canonical_step:
+                plane_payload["target_step"] = canonical_step
+                plane_payload.setdefault("applied_step", canonical_step)
+            plane_payload["target_level"] = int(level_value)
+            plane_payload["applied_level"] = int(level_value)
+            plane_payload["snapshot_level"] = int(level_value)
+            plane_payload["level_reload_required"] = False
+            plane_payload["awaiting_level_confirm"] = False
+            plane_payload["roi_reload_required"] = False
+            plane_payload["pose_reason"] = None
+            plane_payload["camera_pose_dirty"] = False
+            if step_tuple:
+                plane_payload["applied_step"] = step_tuple
+            normalized_plane_state = plane_payload
+
+        normalized_volume_state = volume_state
+        if volume_snapshot is not None:
+            normalized_volume_state = replace(
+                volume_snapshot,
+                level=int(level_value),
+                downgraded=bool(downgraded),
+            )
+        elif isinstance(volume_state, Mapping):
+            volume_payload = dict(volume_state)
+            volume_payload["level"] = int(level_value)
+            volume_payload["downgraded"] = bool(downgraded)
+            normalized_volume_state = volume_payload
+
         reduce_level_update(
             self._state_ledger,
             applied=applied_payload,
@@ -414,8 +490,18 @@ class EGLHeadlessServer:
             timestamp=None,
             origin="worker.state.level",
             mode=intent_mode,
-            plane_state=plane_state,
-            volume_state=volume_state,
+            plane_state=normalized_plane_state,
+            volume_state=normalized_volume_state,
+        )
+        plane_state = plane_state if plane_snapshot is None else replace(
+            plane_snapshot,
+            target_level=int(level_value),
+            applied_level=int(level_value),
+            target_step=step_tuple or plane_snapshot.target_step,
+            applied_step=step_tuple or plane_snapshot.applied_step,
+            level_reload_required=False,
+            awaiting_level_confirm=False,
+            roi_reload_required=False,
         )
         # Keep the plane view cache in sync with the latest applied level/step
         # when we are in 2D mode. This ensures 3D->2D restores pick the most

@@ -1038,7 +1038,24 @@ class EGLRendererWorker:
             apply_volume_metadata(self, source, context)
         else:
             apply_plane_metadata(self, source, context)
+            self._synchronise_plane_state_from_context(context)
         return context
+
+    def _synchronise_plane_state_from_context(self, context: lod.LevelContext) -> None:
+        step_tuple = tuple(int(v) for v in context.step) if context.step else None
+        plane_state = self.viewport_state.plane
+        plane_state.target_level = int(context.level)
+        plane_state.applied_level = int(context.level)
+        plane_state.snapshot_level = int(context.level)
+        plane_state.target_step = step_tuple
+        plane_state.applied_step = step_tuple
+        plane_state.level_reload_required = False
+        plane_state.awaiting_level_confirm = False
+        plane_state.roi_reload_required = False
+        plane_state.pending_roi = None
+        plane_state.pending_roi_signature = None
+        plane_state.pose_reason = None
+        plane_state.camera_pose_dirty = False
 
     def _apply_volume_level(
         self,
