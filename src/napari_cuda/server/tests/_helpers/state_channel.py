@@ -15,7 +15,7 @@ import logging
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional, Sequence
 
@@ -42,9 +42,9 @@ from napari_cuda.server.scene import (
     layer_controls_from_ledger,
     multiscale_state_from_snapshot,
 )
-from napari_cuda.server.runtime.state_structs import RenderMode
 from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
@@ -306,6 +306,8 @@ class CaptureWorker:
             (16, self._zarr_shape[0], self._zarr_shape[1]),
             (8, self._zarr_shape[0] // 2, self._zarr_shape[1] // 2),
         )
+        self.render_updates: list[RenderUpdate] = []
+        self._last_scene_state: RenderLedgerSnapshot | None = None
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -491,6 +493,24 @@ class CaptureWorker:
 
     def _emit_current_camera_pose(self, _reason: str) -> None:
         self._pose_seq += 1
+
+    def enqueue_update(self, delta: RenderUpdate) -> None:
+        """Capture controller render updates for assertions without a render loop."""
+
+        self.render_updates.append(delta)
+
+        if delta.mode is not None:
+            self.viewport_state.mode = delta.mode
+
+        if delta.plane_state is not None:
+            self.viewport_state.plane = replace(delta.plane_state)
+
+        if delta.volume_state is not None:
+            self.viewport_state.volume = replace(delta.volume_state)
+
+        if delta.scene_state is not None:
+            self._last_scene_state = delta.scene_state
+            self._mark_render_tick_needed()
 
     def _update_level_metadata(self, descriptor: SimpleNamespace, applied: Any) -> None:
         self._active_ms_level = int(applied.level)

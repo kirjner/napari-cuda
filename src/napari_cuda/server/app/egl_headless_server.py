@@ -366,19 +366,6 @@ class EGLHeadlessServer:
             volume_state=intent.volume_state,
         )
 
-        if intent_mode is RenderMode.PLANE:
-            level_value = int(context.level)
-            step_values = context.step if context.step is not None else ()
-            step_tuple = tuple(int(v) for v in step_values)
-            cache_entries = [("view_cache", "plane", "level", level_value)]
-            if step_tuple:
-                cache_entries.append(("view_cache", "plane", "step", step_tuple))
-            with self._state_lock:
-                self._state_ledger.batch_record_confirmed(
-                    cache_entries,
-                    origin="worker.state.level",
-                )
-
         snapshot = build_render_scene_state(self._state_ledger)
         if logger.isEnabledFor(logging.INFO):
             logger.info(
@@ -438,46 +425,9 @@ class EGLHeadlessServer:
             )
 
             # Persist per-mode camera caches for deterministic restores.
-            # Plane cache: camera_plane.* and view_cache.plane.*
             # Volume cache: camera_volume.*
-            # Decide plane vs volume from presence of angles/distance/fov in applied pose.
-            if pose.angles is None and pose.distance is None and pose.fov is None:
-                # 2D plane pose expected: center, zoom, rect must be present
-                assert pose.center is not None, "plane pose requires center"
-                assert pose.zoom is not None, "plane pose requires zoom"
-                assert pose.rect is not None, "plane pose requires rect"
-
-                lvl_entry = self._state_ledger.get("multiscale", "main", "level")
-                assert lvl_entry is not None, "ledger missing multiscale/level"
-                lvl_value = int(lvl_entry.value)
-                step_entry = self._state_ledger.get("dims", "main", "current_step")
-                assert step_entry is not None, "ledger missing dims/current_step"
-                step_tuple = tuple(int(v) for v in step_entry.value)
-
-                plane_entries = [
-                    ("camera_plane", "main", "center", tuple(float(c) for c in pose.center)),
-                    ("camera_plane", "main", "zoom", float(pose.zoom)),
-                    ("camera_plane", "main", "rect", tuple(float(v) for v in pose.rect)),
-                ]
-                self._state_ledger.batch_record_confirmed(
-                    plane_entries,
-                    origin="worker.state.camera_plane",
-                )
-
-                view_cache_entries = [
-                    ("view_cache", "plane", "level", lvl_value),
-                    ("view_cache", "plane", "step", step_tuple),
-                ]
-                self._state_ledger.batch_record_confirmed(
-                    view_cache_entries,
-                    origin="worker.state.camera_plane",
-                )
-            else:
-                # 3D volume pose expected: center, angles, distance, fov must be present
+            if pose.angles is not None and pose.distance is not None and pose.fov is not None:
                 assert pose.center is not None, "volume pose requires center"
-                assert pose.angles is not None, "volume pose requires angles"
-                assert pose.distance is not None, "volume pose requires distance"
-                assert pose.fov is not None, "volume pose requires fov"
 
                 vol_entries = [
                     ("camera_volume", "main", "center", tuple(float(c) for c in pose.center)),
@@ -866,47 +816,9 @@ class EGLHeadlessServer:
                 metadata={"pose_seq": seq},
             )
 
-            # Persist per-mode camera caches for deterministic restores.
-            # Plane cache: camera_plane.* and view_cache.plane.*
             # Volume cache: camera_volume.*
-            # Decide plane vs volume from presence of angles/distance/fov in applied pose.
-            if pose.angles is None and pose.distance is None and pose.fov is None:
-                # 2D plane pose expected: center, zoom, rect must be present
-                assert pose.center is not None, "plane pose requires center"
-                assert pose.zoom is not None, "plane pose requires zoom"
-                assert pose.rect is not None, "plane pose requires rect"
-
-                lvl_entry = self._state_ledger.get("multiscale", "main", "level")
-                assert lvl_entry is not None, "ledger missing multiscale/level"
-                lvl_value = int(lvl_entry.value)
-                step_entry = self._state_ledger.get("dims", "main", "current_step")
-                assert step_entry is not None, "ledger missing dims/current_step"
-                step_tuple = tuple(int(v) for v in step_entry.value)
-
-                plane_entries = [
-                    ("camera_plane", "main", "center", tuple(float(c) for c in pose.center)),
-                    ("camera_plane", "main", "zoom", float(pose.zoom)),
-                    ("camera_plane", "main", "rect", tuple(float(v) for v in pose.rect)),
-                ]
-                self._state_ledger.batch_record_confirmed(
-                    plane_entries,
-                    origin="worker.state.camera_plane",
-                )
-
-                view_cache_entries = [
-                    ("view_cache", "plane", "level", lvl_value),
-                    ("view_cache", "plane", "step", step_tuple),
-                ]
-                self._state_ledger.batch_record_confirmed(
-                    view_cache_entries,
-                    origin="worker.state.camera_plane",
-                )
-            else:
-                # 3D volume pose expected: center, angles, distance, fov must be present
+            if pose.angles is not None and pose.distance is not None and pose.fov is not None:
                 assert pose.center is not None, "volume pose requires center"
-                assert pose.angles is not None, "volume pose requires angles"
-                assert pose.distance is not None, "volume pose requires distance"
-                assert pose.fov is not None, "volume pose requires fov"
 
                 vol_entries = [
                     ("camera_volume", "main", "center", tuple(float(c) for c in pose.center)),

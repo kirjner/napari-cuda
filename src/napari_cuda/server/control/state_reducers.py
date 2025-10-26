@@ -82,6 +82,125 @@ def clamp_sample_step(rel: object) -> float:
     return max(0.1, min(4.0, val))
 
 
+def _metadata_from_intent(intent_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not intent_id:
+        return None
+    return {"intent_id": intent_id}
+
+
+def _current_ndisplay(ledger: ServerStateLedger) -> int:
+    entry = ledger.get("view", "main", "ndisplay")
+    if entry is not None and isinstance(entry.value, int):
+        return int(entry.value)
+    return 2
+
+
+def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
+    entry = ledger.get("viewport", "plane", "state")
+    if entry is not None and isinstance(entry.value, Mapping):
+        payload = dict(entry.value)
+        return PlaneState(**payload)
+    return PlaneState()
+
+
+def _plane_from_payload(value: PlaneState | Mapping[str, Any] | None) -> PlaneState:
+    if value is None:
+        return PlaneState()
+    if isinstance(value, PlaneState):
+        return PlaneState(**dict(value.__dict__))
+    if isinstance(value, Mapping):
+        return PlaneState(**dict(value))
+    raise TypeError(f"unsupported plane state payload: {type(value)!r}")
+
+
+def _store_plane_state(
+    ledger: ServerStateLedger,
+    plane_state: PlaneState,
+    *,
+    origin: str,
+    timestamp: float,
+    metadata: Optional[Mapping[str, Any]],
+) -> None:
+    payload = asdict(plane_state)
+    entries: list[tuple] = []
+    if metadata:
+        meta = dict(metadata)
+        entries.append(("viewport", "plane", "state", payload, meta))
+    else:
+        entries.append(("viewport", "plane", "state", payload))
+
+    if plane_state.applied_level is not None:
+        level_value = int(plane_state.applied_level)
+        if metadata:
+            entries.append(("view_cache", "plane", "level", level_value, dict(metadata)))
+        else:
+            entries.append(("view_cache", "plane", "level", level_value))
+    if plane_state.applied_step is not None:
+        step_value = tuple(int(v) for v in plane_state.applied_step)
+        if metadata:
+            entries.append(("view_cache", "plane", "step", step_value, dict(metadata)))
+        else:
+            entries.append(("view_cache", "plane", "step", step_value))
+
+    ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
+
+
+def _metadata_from_intent(intent_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not intent_id:
+        return None
+    return {"intent_id": intent_id}
+
+
+def _current_ndisplay(ledger: ServerStateLedger) -> int:
+    entry = ledger.get("view", "main", "ndisplay")
+    if entry is not None and isinstance(entry.value, int):
+        return int(entry.value)
+    return 2
+
+
+def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
+    entry = ledger.get("viewport", "plane", "state")
+    if entry is not None and isinstance(entry.value, Mapping):
+        payload = dict(entry.value)
+        try:
+            return PlaneState(**payload)
+        except Exception:
+            logger.debug("failed to deserialize plane state payload", exc_info=True)
+    return PlaneState()
+
+
+def _store_plane_state(
+    ledger: ServerStateLedger,
+    plane_state: PlaneState,
+    *,
+    origin: str,
+    timestamp: float,
+    metadata: Optional[Mapping[str, Any]],
+) -> None:
+    payload = asdict(plane_state)
+    entries: list[tuple] = []
+    if metadata:
+        meta = dict(metadata)
+        entries.append(("viewport", "plane", "state", payload, meta))
+    else:
+        entries.append(("viewport", "plane", "state", payload))
+
+    if plane_state.applied_level is not None:
+        level_value = int(plane_state.applied_level)
+        if metadata:
+            entries.append(("view_cache", "plane", "level", level_value, dict(metadata)))
+        else:
+            entries.append(("view_cache", "plane", "level", level_value))
+    if plane_state.applied_step is not None:
+        step_value = tuple(int(v) for v in plane_state.applied_step)
+        if metadata:
+            entries.append(("view_cache", "plane", "step", step_value, dict(metadata)))
+        else:
+            entries.append(("view_cache", "plane", "step", step_value))
+
+    ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
+
+
 def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
     if state is None:
         return None
@@ -1040,6 +1159,32 @@ def reduce_dims_update(
         origin,
     )
 
+    if _current_ndisplay(ledger) < 3:
+        plane_state = _load_plane_state(ledger)
+        level_idx = int(payload.current_level)
+        step_tuple = tuple(int(v) for v in requested_step)
+        plane_state.target_ndisplay = 2
+        plane_state.target_level = level_idx
+        plane_state.target_step = step_tuple
+        plane_state.applied_level = level_idx
+        plane_state.applied_step = step_tuple
+        plane_state.awaiting_level_confirm = False
+        plane_state.camera_pose_dirty = False
+        plane_state.applied_roi = None
+        plane_state.applied_roi_signature = None
+        plane_state.pending_roi = None
+        plane_state.pending_roi_signature = None
+        plane_state.roi_reload_required = True
+        plane_state.level_reload_required = False
+        metadata = _metadata_from_intent(resolved_intent_id)
+        _store_plane_state(
+            ledger,
+            plane_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=metadata,
+        )
+
     return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
@@ -1077,6 +1222,24 @@ def reduce_view_update(
 
     baseline_step = tuple(int(v) for v in dims_payload.current_step) if dims_payload.current_step else None
     baseline_order = tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None
+
+    if target_ndisplay >= 3 and baseline_step is not None:
+        plane_state = _load_plane_state(ledger)
+        level_idx = int(dims_payload.current_level)
+        step_tuple = tuple(int(v) for v in baseline_step)
+        plane_state.target_ndisplay = 2
+        plane_state.target_level = level_idx
+        plane_state.target_step = step_tuple
+        plane_state.applied_level = level_idx
+        plane_state.applied_step = step_tuple
+        plane_state.awaiting_level_confirm = False
+        _store_plane_state(
+            ledger,
+            plane_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=_metadata_from_intent(resolved_intent_id),
+        )
 
     ndim = 0
     if baseline_step is not None:
@@ -1180,8 +1343,13 @@ def reduce_plane_restore(
     base_plane.camera_rect = rect_tuple
     base_plane.camera_center = (center_tuple[0], center_tuple[1])
     base_plane.camera_zoom = zoom_value
-
-    plane_payload = asdict(base_plane)
+    base_plane.applied_roi = None
+    base_plane.applied_roi_signature = None
+    base_plane.pending_roi = None
+    base_plane.pending_roi_signature = None
+    base_plane.roi_reload_required = True
+    base_plane.level_reload_required = False
+    base_plane.camera_pose_dirty = False
 
     next_op_seq = _next_scene_op_seq(ledger)
 
@@ -1192,12 +1360,18 @@ def reduce_plane_restore(
         center=center_tuple,
         zoom=zoom_value,
         rect=rect_tuple,
-        viewport_plane_state=plane_payload,
-        viewport_metadata=metadata,
         origin=origin,
         timestamp=ts,
         op_seq=next_op_seq,
         op_kind="plane-restore",
+    )
+
+    _store_plane_state(
+        ledger,
+        base_plane,
+        origin=origin,
+        timestamp=ts,
+        metadata=metadata,
     )
 
     return stored
@@ -1261,7 +1435,9 @@ def reduce_level_update(
     step_metadata = {"source": "worker.level_update", "level": level}
     if intent_id is not None:
         step_metadata["intent_id"] = intent_id
-    plane_payload = _plain_plane_state(plane_state)
+    plane_struct: Optional[PlaneState] = None
+    if plane_state is not None:
+        plane_struct = _plane_from_payload(plane_state)
     volume_payload = _plain_volume_state(volume_state)
     mode_value: Optional[str] = None
     if mode is not None:
@@ -1280,7 +1456,7 @@ def reduce_level_update(
         level_shapes_metadata=metadata if metadata is not None and updated_level_shapes else None,
         downgraded_metadata=metadata if metadata is not None and downgraded is not None else None,
         viewport_mode=mode_value,
-        viewport_plane_state=plane_payload,
+        viewport_plane_state=None,
         viewport_volume_state=volume_payload,
         viewport_metadata=metadata,
         origin=origin,
@@ -1299,6 +1475,15 @@ def reduce_level_update(
         level_version,
         origin,
     )
+
+    if plane_struct is not None and _current_ndisplay(ledger) < 3 and int(plane_struct.target_ndisplay) == 2:
+        _store_plane_state(
+            ledger,
+            plane_struct,
+            origin=origin,
+            timestamp=ts,
+            metadata=_metadata_from_intent(intent_id),
+        )
 
     return ServerLedgerUpdate(
         scope="multiscale",
@@ -1366,6 +1551,41 @@ def reduce_camera_update(
             versions.append(int(entry.version))
     assert versions, "camera transaction must return versioned entries"
     version = max(versions)
+
+    if _current_ndisplay(ledger) < 3:
+        plane_state = _load_plane_state(ledger)
+        dims_payload = _ledger_dims_payload(ledger)
+        plane_state.target_ndisplay = 2
+        plane_state.target_level = int(dims_payload.current_level)
+        plane_state.applied_level = int(dims_payload.current_level)
+        if dims_payload.current_step:
+            step_tuple = tuple(int(v) for v in dims_payload.current_step)
+            plane_state.target_step = step_tuple
+            plane_state.applied_step = step_tuple
+        if center is not None and len(center) >= 2:
+            plane_state.camera_center = (float(center[0]), float(center[1]))
+        if zoom is not None:
+            plane_state.camera_zoom = float(zoom)
+        if rect is not None and len(rect) >= 4:
+            plane_state.camera_rect = (
+                float(rect[0]),
+                float(rect[1]),
+                float(rect[2]),
+                float(rect[3]),
+            )
+        plane_state.camera_pose_dirty = False
+        plane_state.applied_roi = None
+        plane_state.applied_roi_signature = None
+        plane_state.pending_roi = None
+        plane_state.pending_roi_signature = None
+        plane_state.roi_reload_required = True
+        _store_plane_state(
+            ledger,
+            plane_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=metadata,
+        )
 
     return ack, version
 

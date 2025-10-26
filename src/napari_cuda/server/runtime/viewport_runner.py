@@ -144,7 +144,9 @@ class ViewportRunner:
     def update_camera_rect(self, rect: Optional[tuple[float, float, float, float]]) -> None:
         """Record the current camera rect (called after apply)."""
 
-        self._plane.camera_rect = tuple(float(v) for v in rect) if rect is not None else None
+        if rect is None:
+            return
+        self._plane.camera_rect = tuple(float(v) for v in rect)
 
     def plan_tick(
         self,

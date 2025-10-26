@@ -106,55 +106,6 @@ def apply_level_switch_transaction(
                     dict(viewport_metadata),
                 ),
             )
-    if viewport_plane_state is not None:
-        payload = dict(viewport_plane_state)
-        if viewport_metadata is None:
-            batch_entries.append(
-                ("viewport", "plane", "state", payload),
-            )
-        else:
-            batch_entries.append(
-                (
-                    "viewport",
-                    "plane",
-                    "state",
-                    payload,
-                    dict(viewport_metadata),
-                ),
-            )
-        applied_level = payload.get("applied_level")
-        if applied_level is not None:
-            if viewport_metadata is None:
-                batch_entries.append(
-                    ("view_cache", "plane", "level", int(applied_level)),
-                )
-            else:
-                batch_entries.append(
-                    (
-                        "view_cache",
-                        "plane",
-                        "level",
-                        int(applied_level),
-                        dict(viewport_metadata),
-                    ),
-                )
-        applied_step = payload.get("applied_step")
-        if applied_step is not None:
-            step_tuple = tuple(int(v) for v in applied_step)
-            if viewport_metadata is None:
-                batch_entries.append(
-                    ("view_cache", "plane", "step", step_tuple),
-                )
-            else:
-                batch_entries.append(
-                    (
-                        "view_cache",
-                        "plane",
-                        "step",
-                        step_tuple,
-                        dict(viewport_metadata),
-                    ),
-                )
     if viewport_volume_state is not None:
         payload = dict(viewport_volume_state)
         if viewport_metadata is None:

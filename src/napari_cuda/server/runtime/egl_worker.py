@@ -470,8 +470,30 @@ class EGLRendererWorker:
             )
             self._frame_volume_camera(extent[0], extent[1], extent[2])
         else:
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            self._apply_camera_reset(view.camera)
+            cam = scene.cameras.PanZoomCamera(aspect=1.0)
+            view.camera = cam
+            plane_state = self.viewport_state.plane
+            rect = plane_state.camera_rect
+            center = plane_state.camera_center
+            zoom = plane_state.camera_zoom
+
+            if rect is not None and len(rect) >= 4:
+                cam.rect = Rect(
+                    float(rect[0]),
+                    float(rect[1]),
+                    float(rect[2]),
+                    float(rect[3]),
+                )
+            else:
+                self._apply_camera_reset(cam)
+
+            if center is not None and len(center) >= 2:
+                cam.center = (
+                    float(center[0]),
+                    float(center[1]),
+                )
+            if zoom is not None:
+                cam.zoom = float(zoom)
 
     def _enter_volume_mode(self) -> None:
         if self._viewport_state.mode is RenderMode.VOLUME:
@@ -575,9 +597,12 @@ class EGLRendererWorker:
             )
         source = self._ensure_scene_source()
         lvl_idx = int(lvl_entry.value)
-        rect_entry = self._ledger.get("camera_plane", "main", "rect")
-        assert rect_entry is not None, "plane camera cache missing rect"
-        rect = tuple(float(v) for v in rect_entry.value)
+        plane_entry = self._ledger.get("viewport", "plane", "state")
+        assert plane_entry is not None and isinstance(plane_entry.value, Mapping), "plane camera cache missing viewport state"
+        plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
+        self._viewport_state.plane = PlaneState(**dict(plane_entry.value))  # sync worker cache
+        assert plane_state.camera_rect is not None, "plane camera cache missing rect"
+        rect = tuple(float(v) for v in plane_state.camera_rect)
         step_tuple = tuple(int(v) for v in step_entry.value)
 
         view = self.view
@@ -590,6 +615,11 @@ class EGLRendererWorker:
             world_h = float(h_full) * float(max(1e-12, sy))
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             cam.rect = Rect(*rect)
+            if plane_state.camera_center is not None:
+                cx, cy = plane_state.camera_center
+                cam.center = (float(cx), float(cy), 0.0)  # type: ignore[attr-defined]
+            if plane_state.camera_zoom is not None:
+                cam.zoom = float(plane_state.camera_zoom)
 
         decision = lod.LevelDecision(
             desired_level=int(lvl_idx),
@@ -673,6 +703,8 @@ class EGLRendererWorker:
         self._pose_seq: int = 1
         # Track highest command_seq observed from camera deltas
         self._max_camera_command_seq: int = 0
+        self._ledger: Optional[ServerStateLedger] = None
+        self._level_policy_suppressed = False
 
 
     def _init_locks(
@@ -1427,7 +1459,13 @@ class EGLRendererWorker:
             self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
 
         self._viewport_runner.ingest_camera_deltas(commands)
-        self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
+        if (
+            self._viewport_runner is not None
+            and self._viewport_state.mode is RenderMode.PLANE
+        ):
+            rect = self._current_panzoom_rect()
+            if rect is not None:
+                self._viewport_runner.update_camera_rect(rect)
         self._mark_render_tick_needed()
         self._user_interaction_seen = True
         self._last_interaction_ts = time.perf_counter()
@@ -1671,8 +1709,10 @@ class EGLRendererWorker:
 
         if runner is not None:
             # Ensure runner sees latest camera rect when switching modes before the next snapshot.
-            rect = self._current_panzoom_rect()
-            runner.update_camera_rect(rect)
+            if self._viewport_state.mode is RenderMode.PLANE:
+                rect = self._current_panzoom_rect()
+                if rect is not None:
+                    runner.update_camera_rect(rect)
 
     def drain_scene_updates(self) -> None:
         updates: RenderUpdate = self._render_mailbox.drain()
@@ -1747,6 +1787,11 @@ class EGLRendererWorker:
         else:
             self._viewport_state.mode = previous_mode
 
+        if self._viewport_state.mode is RenderMode.VOLUME:
+            self._level_policy_suppressed = False
+        elif updates.mode is RenderMode.PLANE or previous_mode is RenderMode.VOLUME:
+            self._level_policy_suppressed = True
+
         if signature_changed and self._viewport_runner is not None:
             self._viewport_runner.ingest_snapshot(state)
 
@@ -1766,12 +1811,31 @@ class EGLRendererWorker:
         if drain_res.data_wh is not None:
             self._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
 
-        self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
-        if int(self._current_level_index()) == int(self._viewport_runner.state.target_level):
+        if (
+            self._viewport_runner is not None
+            and self._viewport_state.mode is RenderMode.PLANE
+        ):
+            rect = self._current_panzoom_rect()
+            if rect is not None:
+                self._viewport_runner.update_camera_rect(rect)
+            if int(self._current_level_index()) == int(self._viewport_runner.state.target_level):
+                self._viewport_runner.mark_level_applied(self._current_level_index())
+        elif self._viewport_runner is not None and int(self._current_level_index()) == int(self._viewport_runner.state.target_level):
             self._viewport_runner.mark_level_applied(self._current_level_index())
 
-        if drain_res.policy_refresh_needed and self._viewport_state.mode is not RenderMode.VOLUME:
+        if (
+            drain_res.policy_refresh_needed
+            and self._viewport_state.mode is not RenderMode.VOLUME
+            and not self._level_policy_suppressed
+        ):
             self._evaluate_level_policy()
+
+        if self._level_policy_suppressed:
+            ledger = self._ledger
+            assert ledger is not None, "ledger must be attached before rendering"
+            op_kind_entry = ledger.get("scene", "main", "op_kind")
+            if op_kind_entry is not None and str(op_kind_entry.value) == "dims-update":
+                self._level_policy_suppressed = False
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return self._capture.pipeline.capture_blit_gpu_ns()
@@ -1826,18 +1890,33 @@ class EGLRendererWorker:
                 self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
 
             self._viewport_runner.ingest_camera_deltas(commands)
-            self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
+            if self._viewport_state.mode is RenderMode.PLANE:
+                rect = self._current_panzoom_rect()
+                if rect is not None:
+                    self._viewport_runner.update_camera_rect(rect)
             self._mark_render_tick_needed()
             self._user_interaction_seen = True
             self._last_interaction_ts = time.perf_counter()
+            self._level_policy_suppressed = False
 
         self.drain_scene_updates()
         self._run_viewport_tick()
 
-        if policy_triggered and self._viewport_state.mode is not RenderMode.VOLUME:
+        if (
+            policy_triggered
+            and self._viewport_state.mode is not RenderMode.VOLUME
+            and not self._level_policy_suppressed
+        ):
             self._evaluate_level_policy()
 
     def _run_viewport_tick(self) -> None:
+        if self._level_policy_suppressed:
+            runner = self._viewport_runner
+            if runner is not None:
+                runner.state.pose_reason = None
+                runner.state.zoom_hint = None
+            return
+
         if self._viewport_state.mode is RenderMode.VOLUME:
             runner = self._viewport_runner
             if runner is not None:
@@ -1889,7 +1968,9 @@ class EGLRendererWorker:
                     update_contrast=False,
                 )
 
-        self._viewport_runner.update_camera_rect(self._current_panzoom_rect())
+        rect = self._current_panzoom_rect()
+        if rect is not None:
+            self._viewport_runner.update_camera_rect(rect)
         if intent.pose_reason is not None:
             self._emit_current_camera_pose(intent.pose_reason)
 

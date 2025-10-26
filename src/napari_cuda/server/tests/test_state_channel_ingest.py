@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import napari_cuda.server.data.lod as lod
 from napari_cuda.protocol import build_state_update
 from napari_cuda.protocol.envelopes import build_session_hello
@@ -138,19 +140,24 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         ledger = harness.server._state_ledger
         plane_level = 0
         plane_step = (120, 0, 0)
-        plane_center = (12.5, 20.0, 3.0)
+        plane_center = (12.5, 20.0)
         plane_zoom = 1.5
         plane_rect = (0.0, 0.0, 256.0, 256.0)
+        plane_state = {
+            "target_level": plane_level,
+            "target_ndisplay": 2,
+            "target_step": plane_step,
+            "applied_level": plane_level,
+            "applied_step": plane_step,
+            "camera_center": plane_center,
+            "camera_zoom": plane_zoom,
+            "camera_rect": plane_rect,
+        }
         ledger.batch_record_confirmed(
             [
                 ("view_cache", "plane", "level", plane_level),
                 ("view_cache", "plane", "step", plane_step),
-                ("camera_plane", "main", "center", plane_center),
-                ("camera_plane", "main", "zoom", plane_zoom),
-                ("camera_plane", "main", "rect", plane_rect),
-                ("camera", "main", "center", plane_center),
-                ("camera", "main", "zoom", plane_zoom),
-                ("camera", "main", "rect", plane_rect),
+                ("viewport", "plane", "state", plane_state),
                 ("multiscale", "main", "level", 1),
                 ("dims", "main", "current_step", (60, 0, 0)),
             ],
@@ -245,6 +252,91 @@ async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
         assert calls == []
     finally:
         state_channel_handler.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
+        await harness.stop()
+
+
+def test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
+    asyncio.run(_test_view_toggle_restores_plane_pose_from_viewport_state())
+
+
+async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
+    loop = asyncio.get_running_loop()
+    harness = StateServerHarness(loop)
+    try:
+        harness.queue_client_payload(_hello_payload())
+        await harness.start()
+        welcome = await harness.wait_for_frame(lambda frame: frame.get("type") == "session.welcome", timeout=3.0)
+        session_id = welcome["payload"]["session"]["id"]
+
+        ledger = harness.server._state_ledger
+        level = 2
+        step = (136, 0, 0)
+        cached_plane_state = {
+            "target_level": level,
+            "target_ndisplay": 2,
+            "target_step": step,
+            "applied_level": level,
+            "applied_step": step,
+            "camera_rect": (10.0, 20.0, 30.0, 40.0),
+            "camera_center": (50.0, 60.0),
+            "camera_zoom": 2.5,
+        }
+
+        ledger.record_confirmed(
+            "viewport",
+            "plane",
+            "state",
+            cached_plane_state,
+            origin="test.seed",
+        )
+        ledger.batch_record_confirmed(
+            [
+                ("view_cache", "plane", "level", level),
+                ("view_cache", "plane", "step", step),
+                ("multiscale", "main", "level", 0),
+                ("dims", "main", "current_step", (0, 0, 0)),
+            ],
+            origin="test.seed",
+        )
+        ledger.record_confirmed(
+            "view",
+            "main",
+            "ndisplay",
+            3,
+            origin="test.seed",
+        )
+
+        update = build_state_update(
+            session_id=session_id,
+            intent_id="view-intent-plane",
+            frame_id="frame-plane",
+            payload={
+                "scope": "view",
+                "target": "main",
+                "key": "ndisplay",
+                "value": 2,
+            },
+        )
+        harness.queue_client_payload(update.to_dict())
+
+        ack = await harness.wait_for_frame(
+            lambda frame: frame.get("type") == "ack.state" and frame["payload"]["intent_id"] == "view-intent-plane",
+            timeout=3.0,
+        )
+        assert ack["payload"]["status"] == "accepted"
+
+        restored_center = ledger.get("camera", "main", "center")
+        restored_zoom = ledger.get("camera", "main", "zoom")
+        restored_rect = ledger.get("camera", "main", "rect")
+
+        assert restored_center is not None
+        assert restored_zoom is not None
+        assert restored_rect is not None
+
+        assert tuple(float(v) for v in restored_center.value) == (50.0, 60.0, 0.0)
+        assert float(restored_zoom.value) == pytest.approx(2.5)
+        assert tuple(float(v) for v in restored_rect.value) == (10.0, 20.0, 30.0, 40.0)
+    finally:
         await harness.stop()
 
 

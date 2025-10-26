@@ -169,8 +169,10 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
             )
             if runner is not None:
                 runner.mark_level_applied(int(applied_context.level))
-                rect = worker._current_panzoom_rect()
-                runner.update_camera_rect(rect)
+                if worker.viewport_state.mode is RenderMode.PLANE:  # type: ignore[attr-defined]
+                    rect = worker._current_panzoom_rect()
+                    if rect is not None:
+                        runner.update_camera_rect(rect)
             target_level = int(applied_context.level)
             level_changed = target_level != prev_level
             worker._configure_camera_for_mode()

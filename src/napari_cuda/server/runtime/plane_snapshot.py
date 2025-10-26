@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -183,7 +184,29 @@ def apply_slice_level(
     if not worker._preserve_view_on_switch:
         world_w = float(full_w) * float(max(1e-12, sx))
         world_h = float(full_h) * float(max(1e-12, sy))
-        view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+        cached_rect = getattr(plane_state, "camera_rect", None)
+        if cached_rect is None:
+            view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
+        else:
+            logger = logging.getLogger(__name__)
+            if logger.isEnabledFor(logging.INFO):
+                logger.info("plane.slice preserve view using cached rect=%s", cached_rect)
+        cached_center = getattr(plane_state, "camera_center", None)
+        cached_zoom = getattr(plane_state, "camera_zoom", None)
+        if cached_rect is not None and len(cached_rect) >= 4:
+            view.camera.rect = Rect(
+                float(cached_rect[0]),
+                float(cached_rect[1]),
+                float(cached_rect[2]),
+                float(cached_rect[3]),
+            )
+        if cached_center is not None and len(cached_center) >= 2:
+            view.camera.center = (
+                float(cached_center[0]),
+                float(cached_center[1]),
+            )
+        if cached_zoom is not None:
+            view.camera.zoom = float(cached_zoom)
 
     worker._layer_logger.log(
         enabled=worker._log_layer_debug,

@@ -119,7 +119,8 @@ def apply_plane_slice_roi(
             runner.mark_roi_applied(roi, chunk_shape=chunk_shape)
             runner.mark_level_applied(int(level))
             rect = worker._current_panzoom_rect()
-            runner.update_camera_rect(rect)
+            if rect is not None:
+                runner.update_camera_rect(rect)
     worker._mark_render_tick_needed()
     return height_px, width_px
 
