@@ -196,6 +196,7 @@ class EGLRendererWorker:
         self._applied_versions: dict[tuple[str, str, str], int] = {}
         self._last_plane_pose: Optional[tuple] = None
         self._last_volume_pose: Optional[tuple] = None
+        self._skip_camera_pose: bool = False
 
         if policy_name:
             try:
@@ -464,7 +465,6 @@ class EGLRendererWorker:
                 z=(0.0, max(1.0, extent[2])),
             )
             self._frame_volume_camera(extent[0], extent[1], extent[2])
-            self._emit_current_camera_pose("bootstrap-volume")
         else:
             cam = scene.cameras.PanZoomCamera(aspect=1.0)
             view.camera = cam
@@ -550,7 +550,20 @@ class EGLRendererWorker:
         if requested and self._level_intent_callback is not None:
             self._level_intent_callback(intent)
 
+        volume_pose_cached = False
+        if self._ledger.get("camera_volume", "main", "center") is not None:
+            center_entry = self._ledger.get("camera_volume", "main", "center")
+            angles_entry = self._ledger.get("camera_volume", "main", "angles")
+            distance_entry = self._ledger.get("camera_volume", "main", "distance")
+            fov_entry = self._ledger.get("camera_volume", "main", "fov")
+            volume_pose_cached = all(
+                entry is not None and entry.value is not None
+                for entry in (center_entry, angles_entry, distance_entry, fov_entry)
+            )
+
         self._configure_camera_for_mode()
+        if not volume_pose_cached:
+            self._emit_current_camera_pose("enter-3d")
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "toggle.enter_3d: requested_level=%d selected_level=%d downgraded=%s",
@@ -558,25 +571,8 @@ class EGLRendererWorker:
                 int(selected_level),
                 bool(downgraded),
             )
-        # Apply cached 3D camera pose if present
-        cam = self.view.camera if self.view is not None else None
-        if cam is not None:
-            cen = self._ledger.get("camera_volume", "main", "center")
-            ang = self._ledger.get("camera_volume", "main", "angles")
-            dist = self._ledger.get("camera_volume", "main", "distance")
-            fov = self._ledger.get("camera_volume", "main", "fov")
-            if cen is not None and ang is not None and dist is not None and fov is not None:
-                cx, cy, cz = tuple(float(v) for v in cen.value)
-                az, el, rl = tuple(float(v) for v in ang.value)
-                cam.center = (cx, cy, cz)  # type: ignore[attr-defined]
-                cam.azimuth = float(az)  # type: ignore[attr-defined]
-                cam.elevation = float(el)  # type: ignore[attr-defined]
-                cam.roll = float(rl)
-                cam.distance = float(dist.value)  # type: ignore[attr-defined]
-                cam.fov = float(fov.value)  # type: ignore[attr-defined]
         self._request_encoder_idr()
         self._mark_render_tick_needed()
-        self._emit_current_camera_pose(reason="enter-3d")
 
     def _exit_volume_mode(self) -> None:
         if self._viewport_state.mode is not RenderMode.VOLUME:
@@ -1410,7 +1406,7 @@ class EGLRendererWorker:
             self._last_interaction_ts = time.perf_counter()
             scene_state = self._normalize_scene_state(delta.scene_state)
         if scene_state is not None:
-            self._render_mailbox.set_scene_state(scene_state)
+            self._render_mailbox.set_scene_state(scene_state, apply_camera_pose=delta.apply_camera_pose)
             self._mark_render_tick_needed()
             return
 
@@ -1499,6 +1495,9 @@ class EGLRendererWorker:
         self._mark_render_tick_needed()
         self._user_interaction_seen = True
         self._last_interaction_ts = time.perf_counter()
+
+        if outcome.camera_changed and self._viewport_state.mode is RenderMode.VOLUME:
+            self._emit_current_camera_pose("camera-delta")
 
         self._run_viewport_tick()
 
@@ -1793,18 +1792,6 @@ class EGLRendererWorker:
         else:
             state_for_apply = replace(state, layer_values=None, layer_versions=None)
 
-        if not updates.apply_camera_pose:
-            state_for_apply = replace(
-                state_for_apply,
-                plane_center=None,
-                plane_zoom=None,
-                plane_rect=None,
-                volume_center=None,
-                volume_angles=None,
-                volume_distance=None,
-                volume_fov=None,
-            )
-
         if updates.plane_state is not None:
             self._viewport_state.plane = deepcopy(updates.plane_state)
             if self._viewport_runner is not None:
@@ -1815,7 +1802,9 @@ class EGLRendererWorker:
         previous_mode = self._viewport_state.mode
         signature_changed = self._render_mailbox.update_state_signature(state)
         if signature_changed:
+            self._skip_camera_pose = not updates.apply_camera_pose
             apply_render_snapshot(self, state_for_apply)
+            self._skip_camera_pose = False
 
         if updates.mode is not None:
             self._viewport_state.mode = updates.mode
@@ -1933,6 +1922,9 @@ class EGLRendererWorker:
             self._user_interaction_seen = True
             self._last_interaction_ts = time.perf_counter()
             self._level_policy_suppressed = False
+
+            if outcome.camera_changed and self._viewport_state.mode is RenderMode.VOLUME:
+                self._emit_current_camera_pose("camera-delta")
 
         self.drain_scene_updates()
         self._run_viewport_tick()

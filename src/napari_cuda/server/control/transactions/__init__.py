@@ -12,6 +12,7 @@ from .layer import LayerLedgerUpdate, apply_layer_property_transaction
 from .level_switch import apply_level_switch_transaction
 from .bootstrap import apply_bootstrap_transaction
 from .plane_restore import apply_plane_restore_transaction
+from .volume_restore import apply_volume_restore_transaction
 from .view_toggle import apply_view_toggle_transaction
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "apply_layer_property_transaction",
     "apply_level_switch_transaction",
     "apply_plane_restore_transaction",
+    "apply_volume_restore_transaction",
     "apply_view_toggle_transaction",
 ]

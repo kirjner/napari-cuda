@@ -11,7 +11,7 @@ import uuid
 from contextlib import suppress
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Callable, Awaitable
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
@@ -68,6 +68,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_layer_property,
     reduce_level_update,
     reduce_plane_restore,
+    reduce_volume_restore,
     reduce_volume_colormap,
     reduce_volume_contrast_limits,
     reduce_volume_opacity,
@@ -336,6 +337,101 @@ def _apply_plane_restore_from_ledger(
     return True
 
 
+def _apply_volume_restore_from_ledger(
+    server: Any,
+    *,
+    timestamp: float | None,
+    intent_id: str,
+) -> Optional[VolumeState]:
+    ledger = server._state_ledger
+    with server._state_lock:
+        volume_entry = ledger.get("viewport", "volume", "state")
+        level_entry = ledger.get("multiscale", "main", "level")
+        center_entry = ledger.get("camera_volume", "main", "center")
+        angles_entry = ledger.get("camera_volume", "main", "angles")
+        distance_entry = ledger.get("camera_volume", "main", "distance")
+        fov_entry = ledger.get("camera_volume", "main", "fov")
+
+    if volume_entry is None or not isinstance(volume_entry.value, Mapping):
+        logger.warning("volume_restore skipped due to missing viewport volume state")
+        return None
+
+    volume_state = VolumeState(**dict(volume_entry.value))  # type: ignore[arg-type]
+
+    level_value: Optional[int] = volume_state.level
+    if level_value is None and level_entry is not None and isinstance(level_entry.value, int):
+        level_value = int(level_entry.value)
+
+    center_value = volume_state.pose.center
+    if (center_value is None or len(center_value) < 3) and center_entry is not None and center_entry.value is not None:
+        center_payload = tuple(float(v) for v in center_entry.value)
+        if len(center_payload) >= 3:
+            center_value = center_payload  # type: ignore[assignment]
+
+    angles_value = volume_state.pose.angles
+    if (angles_value is None or len(angles_value) < 3) and angles_entry is not None and angles_entry.value is not None:
+        angles_payload = tuple(float(v) for v in angles_entry.value)
+        if len(angles_payload) >= 2:
+            roll_component = float(angles_payload[2]) if len(angles_payload) >= 3 else 0.0
+            angles_value = (float(angles_payload[0]), float(angles_payload[1]), roll_component)
+
+    distance_value = volume_state.pose.distance
+    if distance_value is None and distance_entry is not None and distance_entry.value is not None:
+        distance_value = float(distance_entry.value)
+
+    fov_value = volume_state.pose.fov
+    if fov_value is None and fov_entry is not None and fov_entry.value is not None:
+        fov_value = float(fov_entry.value)
+
+    if (
+        level_value is None
+        or center_value is None
+        or len(center_value) < 3
+        or angles_value is None
+        or len(angles_value) < 2
+        or distance_value is None
+        or fov_value is None
+    ):
+        logger.debug("volume_restore skipped (pose missing); awaiting worker emit")
+        return None
+
+    level_idx = int(level_value)
+    center_tuple = (
+        float(center_value[0]),
+        float(center_value[1]),
+        float(center_value[2]),
+    )
+    roll_component = float(angles_value[2]) if len(angles_value) >= 3 else 0.0
+    angles_tuple = (
+        float(angles_value[0]),
+        float(angles_value[1]),
+        roll_component,
+    )
+    distance_float = float(distance_value)
+    fov_float = float(fov_value)
+
+    volume_state.level = level_idx
+    volume_state.update_pose(
+        center=center_tuple,
+        angles=angles_tuple,
+        distance=distance_float,
+        fov=fov_float,
+    )
+
+    reduce_volume_restore(
+        ledger,
+        level=level_idx,
+        center=center_tuple,
+        angles=angles_tuple,
+        distance=distance_float,
+        fov=fov_float,
+        intent_id=intent_id,
+        timestamp=timestamp,
+        origin="client.state.view",
+    )
+    return volume_state
+
+
 async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
     server = ctx.server
     try:
@@ -379,6 +475,13 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
     pixel_channel.mark_stream_config_dirty(server._pixel_channel)
     server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
 
+    restored_volume_state: Optional[VolumeState] = None
+    if new_ndisplay >= 3:
+        restored_volume_state = _apply_volume_restore_from_ledger(
+            server,
+            timestamp=ctx.timestamp,
+            intent_id=ctx.intent_id,
+        )
     if was_volume and new_ndisplay == 2:
         _apply_plane_restore_from_ledger(
             server,
@@ -403,8 +506,9 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
             base_state.plane,
             target_ndisplay=int(new_ndisplay),
         )
-        volume_state = replace(base_state.volume)
+        volume_state = replace(restored_volume_state) if restored_volume_state is not None else replace(base_state.volume)
         desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
+        apply_camera_pose = bool(restored_volume_state is not None or new_ndisplay < 3)
 
         if logger.isEnabledFor(logging.INFO):
             logger.info(
@@ -426,6 +530,7 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
                 mode=desired_mode,
                 plane_state=plane_state,
                 volume_state=volume_state,
+                apply_camera_pose=apply_camera_pose,
             )
         )
 

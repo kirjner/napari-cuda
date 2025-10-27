@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 import time
 from dataclasses import asdict, replace
@@ -24,6 +25,7 @@ from napari_cuda.server.control.transactions import (
     apply_layer_property_transaction,
     apply_level_switch_transaction,
     apply_plane_restore_transaction,
+    apply_volume_restore_transaction,
     apply_view_toggle_transaction,
 )
 from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
@@ -1186,26 +1188,37 @@ def reduce_view_update(
         target_ndisplay = int(entry.value) if entry is not None and isinstance(entry.value, int) else 2
 
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
+    metadata = _metadata_from_intent(resolved_intent_id)
 
     baseline_step = tuple(int(v) for v in dims_payload.current_step) if dims_payload.current_step else None
     baseline_order = tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None
 
-    if target_ndisplay >= 3 and baseline_step is not None:
+    if target_ndisplay >= 3:
         plane_state = _load_plane_state(ledger)
         level_idx = int(dims_payload.current_level)
-        step_tuple = tuple(int(v) for v in baseline_step)
+        if baseline_step is not None:
+            step_tuple = tuple(int(v) for v in baseline_step)
+            plane_state.target_step = step_tuple
+            plane_state.applied_step = step_tuple
         plane_state.target_ndisplay = 2
         plane_state.target_level = level_idx
-        plane_state.target_step = step_tuple
         plane_state.applied_level = level_idx
-        plane_state.applied_step = step_tuple
         plane_state.awaiting_level_confirm = False
         _store_plane_state(
             ledger,
             plane_state,
             origin=origin,
             timestamp=ts,
-            metadata=_metadata_from_intent(resolved_intent_id),
+            metadata=metadata,
+        )
+
+        volume_state = _load_volume_state(ledger)
+        _store_volume_state(
+            ledger,
+            volume_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=metadata,
         )
 
     ndim = 0
@@ -1261,7 +1274,7 @@ def reduce_view_update(
         volume_state=None,
         origin=origin,
         timestamp=ts,
-        metadata={"intent_id": resolved_intent_id},
+        metadata=metadata,
     )
 
     return ServerLedgerUpdate(
@@ -1338,6 +1351,73 @@ def reduce_plane_restore(
     _store_plane_state(
         ledger,
         base_plane,
+        origin=origin,
+        timestamp=ts,
+        metadata=metadata,
+    )
+
+    return stored
+
+
+def reduce_volume_restore(
+    ledger: ServerStateLedger,
+    *,
+    level: int,
+    center: Sequence[float],
+    angles: Sequence[float],
+    distance: float,
+    fov: float,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.view",
+) -> Dict[PropertyKey, LedgerEntry]:
+    ts = _now(timestamp)
+    metadata = {"intent_id": intent_id} if intent_id else None
+
+    if len(center) < 3:
+        raise ValueError("volume restore center requires three components")
+    if len(angles) < 2:
+        raise ValueError("volume restore angles require at least two components")
+
+    center_tuple = (float(center[0]), float(center[1]), float(center[2]))
+    roll_value = float(angles[2]) if len(angles) >= 3 else 0.0
+    angles_tuple = (float(angles[0]), float(angles[1]), roll_value)
+    distance_value = float(distance)
+    fov_value = float(fov)
+    level_idx = int(level)
+
+    volume_entry = ledger.get("viewport", "volume", "state")
+    base_volume = VolumeState()
+    if volume_entry is not None and isinstance(volume_entry.value, Mapping):
+        payload_value = dict(volume_entry.value)
+        base_volume = VolumeState(**payload_value)
+
+    base_volume.level = level_idx
+    base_volume.update_pose(
+        center=center_tuple,
+        angles=angles_tuple,
+        distance=distance_value,
+        fov=fov_value,
+    )
+
+    next_op_seq = _next_scene_op_seq(ledger)
+
+    stored = apply_volume_restore_transaction(
+        ledger=ledger,
+        level=level_idx,
+        center=center_tuple,
+        angles=angles_tuple,
+        distance=distance_value,
+        fov=fov_value,
+        origin=origin,
+        timestamp=ts,
+        op_seq=next_op_seq,
+        op_kind="volume-restore",
+    )
+
+    _store_volume_state(
+        ledger,
+        base_volume,
         origin=origin,
         timestamp=ts,
         metadata=metadata,
@@ -1637,6 +1717,7 @@ __all__ = [
     "reduce_volume_render_mode",
     "reduce_volume_sample_step",
     "reduce_plane_restore",
+    "reduce_volume_restore",
     "reduce_view_update",
     "resolve_axis_index",
 ]
