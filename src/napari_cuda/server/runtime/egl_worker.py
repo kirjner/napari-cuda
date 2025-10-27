@@ -1679,9 +1679,7 @@ class EGLRendererWorker:
 
     def _pose_from_camera(self, camera, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
         def _center_tuple(camera) -> Optional[tuple[float, ...]]:
-            center_value = getattr(camera, "center", None)
-            if callable(center_value):
-                center_value = center_value()
+            center_value = camera.center
             if center_value is None:
                 return None
             return tuple(float(component) for component in center_value)
@@ -1692,7 +1690,7 @@ class EGLRendererWorker:
             fov_val = float(camera.fov)
             azimuth = float(camera.azimuth)
             elevation = float(camera.elevation)
-            roll = float(getattr(camera, "roll", 0.0))
+            roll = float(camera.roll)
             volume_state = self._viewport_state.volume
             volume_state.update_pose(
                 center=center_tuple,
@@ -1724,15 +1722,13 @@ class EGLRendererWorker:
                     float(rect_obj.width),
                     float(rect_obj.height),
                 )
-            zoom_attr = camera.zoom
-            if callable(zoom_attr):
-                zoom_attr = camera._zoom if hasattr(camera, "_zoom") else 1.0  # type: ignore[attr-defined]
-            zoom_val = float(zoom_attr)
+            zoom_val = float(camera.zoom_factor)
             plane_state = self._viewport_state.plane
             update_kwargs = {"zoom": zoom_val}
             if rect_tuple is not None:
                 update_kwargs["rect"] = rect_tuple
-            if center_tuple is not None and len(center_tuple) >= 2:
+            if center_tuple is not None:
+                # PanZoomCamera.center may include a z component; normalise to XY.
                 update_kwargs["center"] = (float(center_tuple[0]), float(center_tuple[1]))
             plane_state.update_pose(**update_kwargs)
             return CameraPoseApplied(
@@ -1753,29 +1749,6 @@ class EGLRendererWorker:
         if view is None:
             return None
         return self._pose_from_camera(view.camera, target, command_seq)
-            if center_tuple is not None and len(center_tuple) >= 2:
-                update_kwargs["center"] = (float(center_tuple[0]), float(center_tuple[1]))
-            plane_state.update_pose(**update_kwargs)
-            return CameraPoseApplied(
-                target=str(target or "main"),
-                command_seq=int(command_seq),
-                center=center_tuple,
-                zoom=zoom_val,
-                angles=None,
-                distance=None,
-                fov=None,
-                rect=rect_tuple,
-            )
-        return CameraPoseApplied(
-            target=str(target or "main"),
-            command_seq=int(command_seq),
-            center=_center_tuple(cam),
-            zoom=None,
-            angles=None,
-            distance=None,
-            fov=None,
-            rect=None,
-        )
 
     def _current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
         view = self.view
