@@ -309,6 +309,23 @@ class CaptureWorker:
         )
         self.render_updates: list[RenderUpdate] = []
         self._last_scene_state: RenderLedgerSnapshot | None = None
+        self._plane_visual_node = SimpleNamespace(
+            gamma=1.0,
+            clim=(0.0, 1.0),
+            cmap=None,
+            method="mip",
+            opacity=1.0,
+            visible=False,
+        )
+        self._volume_visual_node = SimpleNamespace(
+            gamma=1.0,
+            clim=(0.0, 1.0),
+            cmap=None,
+            method="mip",
+            opacity=1.0,
+            relative_step_size=1.0,
+            visible=False,
+        )
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -453,12 +470,27 @@ class CaptureWorker:
             camera=_HarnessTurntableCamera() if self.use_volume else _HarnessPanZoomCamera()
         )
 
+    def _register_plane_visual(self, node: Any) -> None:
+        self._plane_visual_node = node
+
+    def _register_volume_visual(self, node: Any) -> None:
+        self._volume_visual_node = node
+
+    def _ensure_plane_visual(self) -> Any:
+        self._volume_visual_node.visible = False
+        self._plane_visual_node.visible = True
+        return self._plane_visual_node
+
+    def _ensure_volume_visual(self) -> Any:
+        self._plane_visual_node.visible = False
+        self._volume_visual_node.visible = True
+        return self._volume_visual_node
+
     def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
         return SceneStateApplyContext(
             use_volume=bool(self.use_volume),
             viewer=self._viewer,
             camera=cam,
-            visual=None,
             layer=self._napari_layer,
             scene_source=self._ensure_scene_source(),
             active_ms_level=int(self._active_ms_level),
@@ -474,6 +506,8 @@ class CaptureWorker:
             plane_scale_for_level=plane_scale_for_level,
             load_slice=self._load_slice,
             mark_render_tick_needed=self._mark_render_tick_needed,
+            ensure_plane_visual=self._ensure_plane_visual,
+            ensure_volume_visual=self._ensure_volume_visual,
             request_encoder_idr=self._request_encoder_idr,
         )
 
@@ -483,9 +517,6 @@ class CaptureWorker:
     def _get_level_volume(self, source: _HarnessSceneSource, level: int) -> np.ndarray:
         shape = source.level_shape(level)
         return np.zeros(shape, dtype=np.float32)
-
-    def _resolve_visual(self):
-        return None
 
     def _request_encoder_idr(self) -> None:
         return None

@@ -52,6 +52,8 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
             self._layer_logger = logger
             self._log_layer_debug = True
             self.view = SimpleNamespace(camera=None)
+            self._plane_visual_node = SimpleNamespace()
+            self._volume_visual_node = SimpleNamespace()
 
         def _get_level_volume(self, _source: object, level: int) -> object:
             return ("volume", level)
@@ -61,7 +63,6 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
                 use_volume=True,
                 viewer=None,
                 camera=cam,
-                visual=None,
                 layer=None,
                 scene_source=None,
                 active_ms_level=0,
@@ -77,6 +78,8 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
                 plane_scale_for_level=lambda *_args: (1.0, 1.0),
                 load_slice=lambda *_args: None,
                 mark_render_tick_needed=lambda: None,
+                ensure_plane_visual=lambda: self._plane_visual_node,
+                ensure_volume_visual=lambda: self._volume_visual_node,
                 request_encoder_idr=None,
             )
 

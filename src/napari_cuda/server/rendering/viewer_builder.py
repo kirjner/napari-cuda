@@ -298,32 +298,21 @@ class ViewerBuilder:
 
         self._bridge._viewer = viewer
         self._bridge._napari_layer = layer
-
-        def _ensure_node_registered() -> None:
-            n = adapter.node
-            if getattr(n, 'parent', None) is not view.scene:
-                view.add(n)  # ensures proper ViewBox registration
-            n.visible = True
-            if hasattr(n, 'opacity'):
-                n.opacity = 1.0
-            if hasattr(adapter, 'order'):
-                adapter.order = 10_000  # type: ignore[attr-defined]
+        def _sync_visual_handles() -> None:
+            plane_node = adapter._layer_node.get_node(2)
+            volume_node = adapter._layer_node.get_node(3)
+            self._bridge._register_plane_visual(plane_node)
+            self._bridge._register_volume_visual(volume_node)
+            if self._bridge.viewport_state.mode is RenderMode.VOLUME:
+                self._bridge._ensure_volume_visual()
             else:
-                setattr(n, 'order', 10_000)
-            self._bridge._visual = n
+                self._bridge._ensure_plane_visual()
 
-        _ensure_node_registered()
+        _sync_visual_handles()
 
-        # Re-assert parent/order whenever napari swaps node on display/data change
-        try:
-            layer.events.set_data.connect(lambda e=None: _ensure_node_registered())  # type: ignore[attr-defined]
-            layer.events.display.connect(lambda e=None: _ensure_node_registered())  # type: ignore[attr-defined]
-            layer.events.visible.connect(lambda e=None: _ensure_node_registered())  # type: ignore[attr-defined]
-        except Exception:
-            logger.debug("adapter: connecting layer events failed", exc_info=True)
-
-        self._bridge._visual = adapter.node
-        
+        layer.events.set_data.connect(lambda e=None: _sync_visual_handles())  # type: ignore[attr-defined]
+        layer.events.display.connect(lambda e=None: _sync_visual_handles())  # type: ignore[attr-defined]
+        layer.events.visible.connect(lambda e=None: _sync_visual_handles())  # type: ignore[attr-defined]
 
         if self._bridge._log_layer_debug:
             n = adapter.node

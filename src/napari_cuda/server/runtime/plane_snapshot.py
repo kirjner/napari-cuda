@@ -144,7 +144,7 @@ def apply_slice_level(
     """Load the plane slice for ``applied`` and update worker metadata."""
 
     plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
-    layer = getattr(worker, "_napari_layer", None)
+    layer = worker._napari_layer  # type: ignore[attr-defined]
     sy, sx = applied.scale_yx
 
     if layer is not None:
@@ -153,9 +153,7 @@ def apply_slice_level(
         layer.scale = (float(sy), float(sx))
         if hasattr(layer, "_set_view_slice"):
             layer._set_view_slice()  # type: ignore[misc]
-        clear_visual = getattr(worker, "_clear_visual", None)
-        if callable(clear_visual):
-            clear_visual()
+        worker._ensure_plane_visual()  # type: ignore[attr-defined]
 
     view = worker.view
     assert view is not None, "VisPy view must be initialised for 2D apply"

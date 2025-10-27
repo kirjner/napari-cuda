@@ -87,7 +87,7 @@ def _load_slice(_source: _StubSceneSource, _level: int, z_index: int):
 def test_apply_dims_and_slice_updates_viewer_and_source_metadata() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
-    visual = _StubVisual()
+    plane_visual = _StubVisual()
     camera = _StubCamera()
     source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
 
@@ -98,7 +98,6 @@ def test_apply_dims_and_slice_updates_viewer_and_source_metadata() -> None:
         use_volume=False,
         viewer=viewer,
         camera=camera,
-        visual=visual,
         layer=layer,
         scene_source=source,
         active_ms_level=0,
@@ -113,6 +112,8 @@ def test_apply_dims_and_slice_updates_viewer_and_source_metadata() -> None:
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
         mark_render_tick_needed=lambda: mark_calls.append(None),
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: SimpleNamespace(),
         request_encoder_idr=lambda: idr_requests.append(None),
     )
 
@@ -125,7 +126,6 @@ def test_apply_dims_and_slice_updates_viewer_and_source_metadata() -> None:
     assert layer.opacity == 0.0
     assert layer.blending == ""
     assert layer.contrast_limits == [0.0, 1.0]
-    assert visual.data is None
     assert camera.ranges == []
     assert len(mark_calls) == 1
     assert len(idr_requests) == 1
@@ -137,7 +137,7 @@ def test_apply_dims_and_slice_updates_viewer_and_source_metadata() -> None:
 def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
-    visual = _StubVisual()
+    plane_visual = _StubVisual()
     camera = _StubCamera()
     source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
 
@@ -145,7 +145,6 @@ def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> No
         use_volume=False,
         viewer=viewer,
         camera=camera,
-        visual=visual,
         layer=layer,
         scene_source=source,
         active_ms_level=0,
@@ -160,6 +159,8 @@ def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> No
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
         mark_render_tick_needed=lambda: None,
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: SimpleNamespace(),
     )
 
     result = SceneStateApplier.apply_dims_and_slice(ctx, current_step=(2, 3, 4))
@@ -173,7 +174,7 @@ def test_apply_dims_and_slice_does_not_reset_camera_when_preserving_view() -> No
 def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
-    visual = _StubVisual()
+    plane_visual = _StubVisual()
     camera = _StubCamera()
     source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
 
@@ -183,7 +184,6 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
         use_volume=False,
         viewer=viewer,
         camera=camera,
-        visual=visual,
         layer=layer,
         scene_source=source,
         active_ms_level=0,
@@ -198,6 +198,8 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
         mark_render_tick_needed=lambda: mark_calls.append(None),
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: SimpleNamespace(),
         request_encoder_idr=lambda: (_ for _ in ()).throw(RuntimeError("should not be called")),
     )
 
@@ -211,12 +213,12 @@ def test_apply_dims_and_slice_when_z_unchanged_marks_render_only() -> None:
 def test_apply_volume_params_sets_visual_fields() -> None:
     viewer = _StubViewer()
     visual = SimpleNamespace(method="", cmap=None, clim=None, opacity=0.0, relative_step_size=1.0)
+    plane_visual = SimpleNamespace()
 
     ctx = SceneStateApplyContext(
         use_volume=True,
         viewer=viewer,
         camera=None,
-        visual=visual,
         layer=None,
         scene_source=None,
         active_ms_level=0,
@@ -231,6 +233,8 @@ def test_apply_volume_params_sets_visual_fields() -> None:
         plane_scale_for_level=lambda *_: (1.0, 1.0),
         load_slice=lambda *_: None,
         mark_render_tick_needed=lambda: None,
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: visual,
         request_encoder_idr=None,
     )
 
@@ -255,12 +259,12 @@ def test_apply_volume_params_sets_visual_fields() -> None:
 def test_apply_volume_params_accepts_named_colormap() -> None:
     viewer = _StubViewer()
     visual = SimpleNamespace(method="", cmap=None, clim=None, opacity=0.0, relative_step_size=1.0)
+    plane_visual = SimpleNamespace()
 
     ctx = SceneStateApplyContext(
         use_volume=True,
         viewer=viewer,
         camera=None,
-        visual=visual,
         layer=None,
         scene_source=None,
         active_ms_level=0,
@@ -275,6 +279,8 @@ def test_apply_volume_params_accepts_named_colormap() -> None:
         plane_scale_for_level=lambda *_: (1.0, 1.0),
         load_slice=lambda *_: None,
         mark_render_tick_needed=lambda: None,
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: visual,
         request_encoder_idr=None,
     )
 
@@ -289,12 +295,12 @@ def test_apply_layer_updates_sets_gamma_on_visual() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
     visual = SimpleNamespace(gamma=1.0)
+    plane_visual = SimpleNamespace(gamma=1.0)
 
     ctx = SceneStateApplyContext(
         use_volume=True,
         viewer=viewer,
         camera=None,
-        visual=visual,
         layer=layer,
         scene_source=None,
         active_ms_level=0,
@@ -309,6 +315,8 @@ def test_apply_layer_updates_sets_gamma_on_visual() -> None:
         plane_scale_for_level=lambda *_: (1.0, 1.0),
         load_slice=lambda *_: None,
         mark_render_tick_needed=lambda: None,
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: visual,
         request_encoder_idr=None,
     )
 
@@ -330,12 +338,13 @@ def test_apply_volume_layer_resets_translate() -> None:
     camera = _StubCamera()
     source = _StubSceneSource(("z", "y", "x"), (3, 4, 5))
     layer = SimpleNamespace(translate=(5.0, 6.0, 7.0), contrast_limits=[0.0, 1.0], data=None, scale=(1.0, 1.0, 1.0))
+    plane_visual = SimpleNamespace()
+    volume_visual = SimpleNamespace()
 
     ctx = SceneStateApplyContext(
         use_volume=True,
         viewer=viewer,
         camera=camera,
-        visual=None,
         layer=layer,
         scene_source=source,
         active_ms_level=0,
@@ -350,6 +359,8 @@ def test_apply_volume_layer_resets_translate() -> None:
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
         mark_render_tick_needed=lambda: None,
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: volume_visual,
     )
 
     data = np.ones((3, 4, 5), dtype=float)
@@ -361,7 +372,7 @@ def test_apply_volume_layer_resets_translate() -> None:
 def test_drain_updates_records_render_and_policy_without_camera() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
-    visual = _StubVisual()
+    plane_visual = _StubVisual()
     source = _StubSceneSource(("z", "y", "x"), (4, 4, 4))
 
     marks: list[None] = []
@@ -370,7 +381,6 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
         use_volume=False,
         viewer=viewer,
         camera=None,
-        visual=visual,
         layer=layer,
         scene_source=source,
         active_ms_level=0,
@@ -385,6 +395,8 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
         mark_render_tick_needed=lambda: marks.append(None),
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: SimpleNamespace(),
         request_encoder_idr=None,
     )
 
@@ -402,7 +414,7 @@ def test_drain_updates_records_render_and_policy_without_camera() -> None:
 def test_drain_updates_applies_camera_fields_and_signature() -> None:
     viewer = _StubViewer()
     layer = _StubLayer()
-    visual = _StubVisual()
+    plane_visual = _StubVisual()
     camera = _StubCamera()
     source = _StubSceneSource(("z", "y", "x"), (4, 4, 4))
 
@@ -410,7 +422,6 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
         use_volume=False,
         viewer=viewer,
         camera=camera,
-        visual=visual,
         layer=layer,
         scene_source=source,
         active_ms_level=0,
@@ -425,6 +436,8 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
         plane_scale_for_level=_plane_scale_for_level,
         load_slice=_load_slice,
         mark_render_tick_needed=lambda: None,
+        ensure_plane_visual=lambda: plane_visual,
+        ensure_volume_visual=lambda: SimpleNamespace(),
         request_encoder_idr=None,
     )
 

@@ -38,7 +38,6 @@ class SceneStateApplyContext:
     use_volume: bool
     viewer: Any  # napari ViewerModel or None
     camera: Any  # vispy camera or None
-    visual: Any  # vispy visual (Image/Volume) or None
     layer: Any   # napari layer (for 2D slab) or None
 
     # Source and level selection
@@ -63,6 +62,8 @@ class SceneStateApplyContext:
     plane_scale_for_level: Callable[[Any, int], Tuple[float, float]]
     load_slice: Callable[[Any, int, int], Any]
     mark_render_tick_needed: Callable[[], None]
+    ensure_plane_visual: Callable[[], Any]
+    ensure_volume_visual: Callable[[], Any]
     request_encoder_idr: Optional[Callable[[], None]] = None
     volume_scale: Optional[Tuple[float, float, float]] = None
 
@@ -171,9 +172,7 @@ class SceneStateApplier:
                 else:
                     layer.contrast_limits = [smin, smax]  # type: ignore[assignment]
 
-        visual = ctx.visual
-        if visual is not None and hasattr(visual, "set_data"):
-            visual.set_data(slab)
+        ctx.ensure_plane_visual()
 
         return sy, sx
 
@@ -184,6 +183,7 @@ class SceneStateApplier:
         volume: Any,
         contrast: Tuple[float, float],
     ) -> Tuple[Tuple[int, int], int]:
+        ctx.ensure_volume_visual()
         layer = ctx.layer
         if layer is not None:
             layer.depiction = "volume"  # type: ignore[assignment]
@@ -239,9 +239,7 @@ class SceneStateApplier:
     ) -> None:
         if not ctx.use_volume:
             return
-        vis = ctx.visual
-        if vis is None:
-            return
+        vis = ctx.ensure_volume_visual()
         if mode:
             token = str(mode).strip().lower()
             mm = NapariImageRendering(token).value
@@ -274,6 +272,9 @@ class SceneStateApplier:
         if layer is None or not updates:
             return
 
+        def active_visual() -> Any:
+            return ctx.ensure_volume_visual() if ctx.use_volume else ctx.ensure_plane_visual()
+
         def _apply(prop: str, value: Any) -> None:
             if prop == "visible":
                 layer.visible = bool(value)  # type: ignore[assignment]
@@ -288,8 +289,8 @@ class SceneStateApplier:
                 if not gamma > 0.0:
                     raise ValueError("gamma must be positive")
                 layer.gamma = gamma  # type: ignore[assignment]
-                if ctx.visual is not None:
-                    ctx.visual.gamma = gamma  # type: ignore[assignment]
+                visual = active_visual()
+                visual.gamma = gamma  # type: ignore[assignment]
             elif prop == "contrast_limits":
                 if not isinstance(value, (list, tuple)) or len(value) < 2:
                     raise ValueError("contrast_limits must be a length-2 sequence")
@@ -298,16 +299,16 @@ class SceneStateApplier:
                 if hi < lo:
                     lo, hi = hi, lo
                 layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
-                if ctx.visual is not None:
-                    ctx.visual.clim = (lo, hi)  # type: ignore[attr-defined]
+                visual = active_visual()
+                visual.clim = (lo, hi)  # type: ignore[attr-defined]
             elif prop == "colormap":
                 cmap = ensure_colormap(value)
                 layer.colormap = cmap  # type: ignore[assignment]
-                if ctx.visual is not None:
-                    logger.debug(
-                        "apply_layer_updates: updating visual colormap to %s", cmap.name
-                    )
-                    ctx.visual.cmap = _napari_cmap_to_vispy(cmap)
+                visual = active_visual()
+                logger.debug(
+                    "apply_layer_updates: updating visual colormap to %s", cmap.name
+                )
+                visual.cmap = _napari_cmap_to_vispy(cmap)
             elif prop == "depiction":
                 if ctx.use_volume:
                     return

@@ -117,6 +117,31 @@ from napari_cuda.server.scene import CameraDeltaCommand
 logger = logging.getLogger(__name__)
 
 
+class _VisualHandle:
+    """Explicit handle for a VisPy visual node managed by the worker."""
+
+    def __init__(self, node: Any, order: int) -> None:
+        self.node = node
+        self.order = order
+        self._attached = False
+
+    def attach(self, view: Any) -> None:
+        scene_parent = view.scene
+        if self.node.parent is not scene_parent:
+            view.add(self.node)
+        self.node.order = self.order
+        self.node.visible = True
+        self._attached = True
+
+    def detach(self) -> None:
+        self.node.visible = False
+        self.node.parent = None
+        self._attached = False
+
+    def is_attached(self) -> bool:
+        return self._attached
+
+
 def _rect_to_tuple(rect: Rect) -> tuple[float, float, float, float]:
     """Normalize a VisPy Rect into (left, bottom, width, height)."""
 
@@ -760,7 +785,8 @@ class EGLRendererWorker:
         self.cuda_ctx: Optional[cuda.Context] = None
         self.canvas: Optional[scene.SceneCanvas] = None
         self.view = None
-        self._visual = None
+        self._plane_visual_handle: Optional[_VisualHandle] = None
+        self._volume_visual_handle: Optional[_VisualHandle] = None
         self._egl = EglContext(self.width, self.height)
         self._capture = CaptureFacade(width=self.width, height=self.height)
         self._encoder: Optional[Encoder] = None
@@ -1161,32 +1187,31 @@ class EGLRendererWorker:
             return "full"
         return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
-    def _clear_visual(self) -> None:
-        if self._visual is None:
-            return
-        visual = self._visual
-        if visual.__class__.__name__ == "VolumeVisual":
-            visual.parent = None  # type: ignore[attr-defined]
-        self._visual = None
+    def _register_plane_visual(self, node: Any) -> None:
+        self._plane_visual_handle = _VisualHandle(node, order=10_000)
 
-    def _resolve_visual(self) -> Any:
-        if self._visual is not None:
-            return self._visual
+    def _register_volume_visual(self, node: Any) -> None:
+        self._volume_visual_handle = _VisualHandle(node, order=10_010)
 
+    def _ensure_plane_visual(self) -> Any:
         view = self.view
-        assert view is not None, "VisPy view must exist before resolving the active visual"
+        assert view is not None, "VisPy view must exist before activating the plane visual"
+        handle = self._plane_visual_handle
+        assert handle is not None, "plane visual not registered"
+        if self._volume_visual_handle is not None:
+            self._volume_visual_handle.detach()
+        handle.attach(view)
+        return handle.node
 
-        children = getattr(view.scene, "children", None) or ()
-        for child in children:
-            if not hasattr(child, "set_data"):
-                continue
-            if not (hasattr(child, "cmap") or hasattr(child, "clim")):
-                continue
-            self._visual = child
-            return child
-
-        logger.warning("EGLRendererWorker could not locate an active VisPy visual; proceeding without visual")
-        return None
+    def _ensure_volume_visual(self) -> Any:
+        view = self.view
+        assert view is not None, "VisPy view must exist before activating the volume visual"
+        handle = self._volume_visual_handle
+        assert handle is not None, "volume visual not registered"
+        if self._plane_visual_handle is not None:
+            self._plane_visual_handle.detach()
+        handle.attach(view)
+        return handle.node
 
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
         if self._data_d is not None and self._data_wh is not None:
@@ -1776,7 +1801,6 @@ class EGLRendererWorker:
             use_volume=self._viewport_state.mode is RenderMode.VOLUME,
             viewer=self._viewer,
             camera=cam,
-            visual=self._resolve_visual(),
             layer=self._napari_layer,
             scene_source=self._scene_source,
             active_ms_level=int(self._current_level_index()),
@@ -1793,6 +1817,8 @@ class EGLRendererWorker:
             load_slice=self._load_slice,
             mark_render_tick_needed=self._mark_render_tick_needed,
             request_encoder_idr=self._request_encoder_idr,
+            ensure_plane_visual=self._ensure_plane_visual,
+            ensure_volume_visual=self._ensure_volume_visual,
         )
 
     def _apply_viewport_state_snapshot(
@@ -2235,6 +2261,12 @@ class EGLRendererWorker:
         self.canvas = None
         self._viewer = None
         self._napari_layer = None
+        if self._plane_visual_handle is not None:
+            self._plane_visual_handle.detach()
+        if self._volume_visual_handle is not None:
+            self._volume_visual_handle.detach()
+        self._plane_visual_handle = None
+        self._volume_visual_handle = None
 
         self._egl.cleanup()
         self._is_ready = False
