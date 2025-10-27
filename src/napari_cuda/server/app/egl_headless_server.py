@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any
 
+import numpy as np
 import websockets
 import importlib.resources as ilr
 import socket
@@ -579,16 +580,25 @@ class EGLHeadlessServer:
 
     def _refresh_scene_snapshot(self, render_state: Optional[RenderLedgerSnapshot] = None) -> None:
         worker = self._worker
-        if worker is None or not worker.is_ready:
-            return
+        worker_ready = worker is not None and worker.is_ready
 
         ledger_snapshot = self._state_ledger.snapshot()
-        render_snapshot = render_state or snapshot_render_state(self._state_ledger)
 
-        scene_source = getattr(worker, "_scene_source", None)
+        render_snapshot = render_state
+        if render_snapshot is None:
+            if worker_ready:
+                render_snapshot = snapshot_render_state(self._state_ledger)
+            elif self._bootstrap_snapshot is not None:
+                render_snapshot = self._bootstrap_snapshot
+            else:
+                render_snapshot = snapshot_render_state(self._state_ledger)
+
+        scene_source = getattr(worker, "_scene_source", None) if worker_ready else None
         multiscale_state = snapshot_multiscale_state(ledger_snapshot)
         volume_state = snapshot_volume_state(ledger_snapshot)
         layer_controls = snapshot_layer_controls(ledger_snapshot)
+
+        thumbnail_provider = self._layer_thumbnail if worker_ready else None
 
         self._scene_snapshot = snapshot_scene(
             render_state=render_snapshot,
@@ -603,6 +613,7 @@ class EGLHeadlessServer:
             layer_controls=layer_controls,
             multiscale_state=multiscale_state,
             volume_state=volume_state,
+            thumbnail_provider=thumbnail_provider,
         )
 
     def _default_layer_id(self) -> Optional[str]:
@@ -610,6 +621,41 @@ class EGLHeadlessServer:
         if snapshot is None or not snapshot.layers:
             return DEFAULT_LAYER_ID
         return snapshot.layers[0].layer_id
+
+    def _layer_thumbnail(self, layer_id: str) -> Optional[np.ndarray]:
+        worker = self._worker
+        if worker is None:
+            return None
+        viewer = worker.viewer_model()
+        if viewer is None or not viewer.layers:
+            return None
+        layer = None
+        if not viewer.layers:
+            return None
+        if len(viewer.layers) == 1:
+            layer = viewer.layers[0]
+        else:
+            for candidate in viewer.layers:
+                if candidate.name == layer_id:
+                    layer = candidate
+                    break
+            if layer is None:
+                layer = viewer.layers[0]
+        if layer is None:
+            return None
+        layer._update_thumbnail()
+        thumbnail = layer.thumbnail
+        if thumbnail is None:
+            return None
+        if isinstance(thumbnail, np.ndarray):
+            arr = thumbnail
+        elif isinstance(thumbnail, (list, tuple)):
+            arr = np.asarray(thumbnail)
+        else:
+            return None
+        if arr.size == 0:
+            return None
+        return arr
 
     def _current_ndisplay(self) -> int:
         ledger = self._state_ledger

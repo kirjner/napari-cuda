@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
+
+import numpy as np
 
 from napari_cuda.server.scene import (
     snapshot_render_state,
@@ -126,3 +128,25 @@ def test_snapshot_scene_volume_camera() -> None:
 
     meta = snapshot_dims_metadata(scene)
     assert meta["controls"]["visible"] is True
+
+
+def test_snapshot_scene_thumbnail_provider() -> None:
+    ledger = _seed_plane_ledger()
+    render_state = snapshot_render_state(ledger)
+    thumbnail = np.ones((4, 4), dtype=np.uint8)
+
+    def provider(_layer_id: str) -> Optional[np.ndarray]:
+        return thumbnail
+
+    scene = snapshot_scene(
+        render_state=render_state,
+        ledger_snapshot=ledger.snapshot(),
+        canvas_size=(320, 240),
+        fps_target=30.0,
+        thumbnail_provider=provider,
+    )
+
+    layer_metadata = scene.layers[0].block.get("metadata")
+    assert layer_metadata is not None
+    expected_thumbnail = np.stack([thumbnail, thumbnail, thumbnail], axis=-1).tolist()
+    assert layer_metadata.get("thumbnail") == expected_thumbnail

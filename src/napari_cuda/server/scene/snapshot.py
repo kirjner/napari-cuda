@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
+
+import numpy as np
+
+import numpy as np
 
 from napari_cuda.protocol.axis_labels import normalize_axis_labels
 from napari_cuda.protocol.snapshots import (
@@ -287,6 +291,7 @@ def snapshot_scene(
     layer_controls: Optional[Mapping[str, Mapping[str, Any]]] = None,
     multiscale_state: Optional[Dict[str, Any]] = None,
     volume_state: Optional[Dict[str, Any]] = None,
+    thumbnail_provider: Optional[Callable[[str], Optional[Any]]] = None,
 ) -> SceneSnapshot:
     """Build a ``SceneSnapshot`` suitable for ``notify.scene`` baselines."""
 
@@ -332,6 +337,15 @@ def snapshot_scene(
         "controls": controls_block,
         "level_shapes": geometry.level_shapes,
     }
+
+    layer_metadata: Dict[str, Any] = {}
+    if thumbnail_provider is not None:
+        raw_thumbnail = thumbnail_provider(default_layer_id)
+        normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
+        if normalized_thumb is not None:
+            layer_metadata["thumbnail"] = normalized_thumb.tolist()
+    if layer_metadata:
+        layer_block["metadata"] = layer_metadata
 
     multiscale_block = _build_multiscale_block(multiscale_state, base_shape=geometry.shape)
     if multiscale_block:
@@ -771,3 +785,24 @@ def _normalize_scalar(value: Any) -> Any:
     if isinstance(value, (int, float, str, bool)):
         return value
     return value
+
+
+def _normalize_thumbnail_array(data: Any) -> Optional[np.ndarray]:
+    if data is None:
+        return None
+
+    if isinstance(data, np.ndarray):
+        arr = data
+    elif isinstance(data, (list, tuple)):
+        arr = np.asarray(data)
+    else:
+        return None
+
+    if arr.size == 0:
+        return None
+    arr = np.squeeze(arr)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    if arr.ndim != 3:
+        return None
+    return arr
