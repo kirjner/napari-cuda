@@ -1162,6 +1162,11 @@ class EGLRendererWorker:
         return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
     def _clear_visual(self) -> None:
+        if self._visual is None:
+            return
+        visual = self._visual
+        if visual.__class__.__name__ == "VolumeVisual":
+            visual.parent = None  # type: ignore[attr-defined]
         self._visual = None
 
     def _resolve_visual(self) -> Any:
