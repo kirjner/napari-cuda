@@ -4,7 +4,7 @@ The client no longer hydrates legacy `LayerSpec` dataclasses. Instead, the
 control channel delivers authoritative layer snapshots via `notify.scene`
 frames. The flow is:
 
-1. **Server** (`ViewerSceneManager`)
+1. **Server** (`snapshot_scene` helpers)
    - Builds a `SceneSnapshot` whose `layers` tuple contains JSON-safe blocks for
      each remote layer. These blocks include shape, axis labels, multiscale
      metadata, controls, and a compact `source` section when the worker exposes

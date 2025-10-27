@@ -2,20 +2,20 @@
 
 ## Goals
 - Embed the FastMCP tool surface directly into the EGL headless server so agents can automate layer and camera workflows without a GUI napari viewer.
-- Reuse existing headless primitives (`ViewerSceneManager`, the ledger-backed `RenderLedgerSnapshot`, `RenderUpdateMailbox`) instead of instantiating Qt objects.
+- Reuse existing headless primitives (the ledger-backed `RenderLedgerSnapshot`, `snapshot_scene`, `RenderUpdateMailbox`) instead of instantiating Qt objects.
 - Provide a secure, minimal tool set (layer CRUD, camera/dims controls, code execution hook) suitable for research automation.
 - Leave screenshots and other GUI-only behaviors out of scope for this phase.
 
 ## Deployment Model
 - **Process**: run the MCP service inside the `EGLHeadlessServer` process; the server already owns the asyncio loop that coordinates WebSocket traffic.
 - **Event loop**: attach the FastMCP application to the main asyncio loop during `EGLHeadlessServer.start()` and keep it running until shutdown.
-- **Threading**: continue to run the EGL renderer in its dedicated worker thread; the MCP handlers operate on ledger-backed scene snapshots (`RenderLedgerSnapshot`, `ViewerSceneManager`) through existing locks.
+- **Threading**: continue to run the EGL renderer in its dedicated worker thread; the MCP handlers operate on ledger-backed scene snapshots (`RenderLedgerSnapshot`, `snapshot_scene`) through existing locks.
 - **Ports**: expose MCP on a configurable HTTP port (default disabled) to avoid interfering with existing state/pixel sockets.
 
 ## Architectural Touchpoints
 - **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should route state changes through the same reducers and mailboxes (`RenderUpdateMailbox`, ledger-driven dims/camera updates) that the WebSocket state channel uses.
-- **Scene metadata**: `ViewerSceneManager` can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into it instead of reading napari Viewer objects.
-- **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation functions in `layer_manager.py` or a new helper module that create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
+- **Scene metadata**: the `snapshot_scene` helpers can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into them instead of reading napari Viewer objects.
+- **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation helpers in `napari_cuda.server.scene.snapshot` (or a dedicated adapter) should create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
 - **Camera/dims controls**: reuse `_enqueue_camera_delta` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.
 - **Code execution**: limit the `execute_code` tool to a constrained namespace that mirrors what the worker already exposes (e.g., viewer metadata snapshot, metrics hooks). Avoid letting the tool mutate global module state directly.
 
@@ -34,7 +34,7 @@
    - Provide a `start_mcp_service(server: EGLHeadlessServer, loop: asyncio.AbstractEventLoop, port: int)` helper that spins up `FastMCP` with the adapted tools and returns a shutdown coroutine.
 2. **Headless tool bindings**
    - Implement tool methods using existing server helpers:
-     - Layer queries: call `server._scene_manager.scene_snapshot()` or `update_from_sources` to build listings.
+     - Layer queries: call `server._refresh_scene_snapshot()` and consume `server._scene_snapshot` to build listings.
      - Mutations: enqueue updates through the ledger-driven reducers, `_enqueue_camera_delta`, and the worker's request queues.
      - Outputs: use the existing `_store_output` utility or a simplified variant for command transcripts.
 3. **Server wiring**

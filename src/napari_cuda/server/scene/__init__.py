@@ -1,25 +1,29 @@
-"""Shared scene data helpers for server control/runtime."""
+"""Shared scene snapshot helpers for server control/runtime."""
 
 from __future__ import annotations
 
-from .data import (
+from .snapshot import (
     CONTROL_KEYS,
     CameraDeltaCommand,
-    build_render_scene_state,
-    layer_controls_from_ledger,
-    volume_state_from_ledger,
-    multiscale_state_from_snapshot,
-    viewport_state_from_ledger,
+    default_volume_state,
+    snapshot_dims_metadata,
+    snapshot_layer_controls,
+    snapshot_multiscale_state,
+    snapshot_render_state,
+    snapshot_scene,
+    snapshot_viewport_state,
+    snapshot_volume_state,
 )
-from napari_cuda.server.scene_defaults import default_volume_state
 
 __all__ = [
     "CONTROL_KEYS",
     "CameraDeltaCommand",
     "default_volume_state",
-    "build_render_scene_state",
-    "layer_controls_from_ledger",
-    "volume_state_from_ledger",
-    "multiscale_state_from_snapshot",
-    "viewport_state_from_ledger",
+    "snapshot_dims_metadata",
+    "snapshot_render_state",
+    "snapshot_layer_controls",
+    "snapshot_volume_state",
+    "snapshot_multiscale_state",
+    "snapshot_scene",
+    "snapshot_viewport_state",
 ]

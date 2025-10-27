@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional, Sequence
+from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional
 
 import numpy as np
 from websockets.exceptions import ConnectionClosedOK
@@ -25,6 +25,7 @@ from websockets.protocol import State
 
 from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.protocol.messages import NotifyDimsPayload, SessionHello
+from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
@@ -37,12 +38,12 @@ from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
 from napari_cuda.server.rendering import pixel_broadcaster
 from napari_cuda.server.scene import (
-    build_render_scene_state,
-    default_volume_state,
-    layer_controls_from_ledger,
-    multiscale_state_from_snapshot,
+    snapshot_render_state,
+    snapshot_layer_controls,
+    snapshot_multiscale_state,
+    snapshot_scene,
+    snapshot_volume_state,
 )
-from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext
@@ -375,7 +376,6 @@ class CaptureWorker:
         self.viewport_state.plane.target_level = level
         self.viewport_state.volume.level = level
 
-    # ViewerSceneManager ledger adapters --------------------------------------------------
     def _ledger_axis_labels(self) -> tuple[str, ...]:
         return self._axis_labels
 
@@ -628,23 +628,9 @@ class StateServerHarness:
     def _build_server(self) -> SimpleNamespace:
         """Create the stub server object expected by control_channel_server."""
 
-        manager = ViewerSceneManager((self.width, self.height))
         worker = CaptureWorker()
-        manager.update_from_sources(
-            worker=worker,
-            scene_state=None,
-            multiscale_state=None,
-            volume_state=None,
-            current_step=None,
-            ndisplay=2,
-            zarr_path=None,
-            scene_source=worker._ensure_scene_source(),
-            viewer_model=worker._viewer,
-            layer_controls=None,
-        )
 
         server = SimpleNamespace()
-        server._scene_manager = manager
         server._state_lock = threading.RLock()
         server._worker = worker
         server._log_state_traces = False
@@ -657,7 +643,8 @@ class StateServerHarness:
         server.height = self.height
         server.cfg = SimpleNamespace(fps=60.0)
         server._initial_mode = RenderMode.PLANE
-        server._latest_scene_snapshot: Optional[RenderLedgerSnapshot] = None
+        server._scene_snapshot: Optional[SceneSnapshot] = None
+        server._latest_render_snapshot: Optional[RenderLedgerSnapshot] = None
         server._camera_seq: dict[str, int] = {}
 
         def _next_camera_command_seq(target: str) -> int:
@@ -675,58 +662,41 @@ class StateServerHarness:
 
         base_metrics = NotifyDimsPayload.from_dict(_default_dims_snapshot())
 
-        def _update_scene_manager() -> None:
-            snapshot = build_render_scene_state(server._state_ledger)
-            multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
-            current_step = list(snapshot.current_step) if snapshot.current_step is not None else None
+        def _current_ndisplay() -> int:
+            entry = server._state_ledger.get("view", "main", "ndisplay")
+            if entry is None or entry.value is None:
+                return int(base_metrics.ndisplay)
+            value = int(entry.value)
+            return 3 if value >= 3 else 2
 
-            defaults = default_volume_state()
-            default_clim = defaults.get("clim", [0.0, 1.0])
-            if isinstance(default_clim, Sequence):
-                default_clim_list = [float(v) for v in default_clim]
-            else:
-                default_clim_list = [0.0, 1.0]
+        server._current_ndisplay = _current_ndisplay
 
-            clim_values = snapshot.volume_clim
-            clim_list = [float(v) for v in clim_values] if clim_values is not None else default_clim_list
-
-            volume_state = {
-                "mode": snapshot.volume_mode or defaults.get("mode"),
-                "colormap": snapshot.volume_colormap or defaults.get("colormap"),
-                "clim": clim_list,
-                "opacity": float(
-                    snapshot.volume_opacity
-                    if snapshot.volume_opacity is not None
-                    else defaults.get("opacity", 1.0)
-                ),
-                "sample_step": float(
-                    snapshot.volume_sample_step
-                    if snapshot.volume_sample_step is not None
-                    else defaults.get("sample_step", 1.0)
-                ),
-            }
-
-            layer_controls = layer_controls_from_ledger(server._state_ledger.snapshot())
-
-            manager.update_from_sources(
-                worker=worker,
-                scene_state=snapshot,
-                multiscale_state=multiscale_state or None,
-                volume_state=volume_state,
-                current_step=current_step,
-                ndisplay=int(snapshot.ndisplay) if snapshot.ndisplay is not None else int(base_metrics.ndisplay),
+        def _refresh_scene_snapshot(render_state: Optional[RenderLedgerSnapshot] = None) -> None:
+            render_snapshot = render_state or snapshot_render_state(server._state_ledger)
+            ledger_snapshot = server._state_ledger.snapshot()
+            scene_snapshot = snapshot_scene(
+                render_state=render_snapshot,
+                ledger_snapshot=ledger_snapshot,
+                canvas_size=(self.width, self.height),
+                fps_target=float(server.cfg.fps),
+                default_layer_id="layer-0",
+                default_layer_name="napari-cuda",
+                ndisplay=_current_ndisplay(),
                 zarr_path=None,
                 scene_source=worker._ensure_scene_source(),
-                viewer_model=worker._viewer,
-                layer_controls=layer_controls or None,
+                layer_controls=snapshot_layer_controls(ledger_snapshot),
+                multiscale_state=snapshot_multiscale_state(ledger_snapshot),
+                volume_state=snapshot_volume_state(ledger_snapshot),
             )
-            server._latest_scene_snapshot = snapshot
+            server._scene_snapshot = scene_snapshot
+            server._latest_render_snapshot = render_snapshot
 
-        server._update_scene_manager = _update_scene_manager
+        server._refresh_scene_snapshot = _refresh_scene_snapshot
+        server._update_scene_manager = _refresh_scene_snapshot
 
         def _mirror_apply(payload: NotifyDimsPayload) -> None:
             _ = payload
-            server._update_scene_manager()
+            server._refresh_scene_snapshot()
 
         server._resumable_store = ResumableHistoryStore(
             {
@@ -767,7 +737,7 @@ class StateServerHarness:
             )
 
         def _default_layer_id() -> Optional[str]:
-            snapshot = server._scene_manager.scene_snapshot()
+            snapshot = server._scene_snapshot
             if snapshot is None or not snapshot.layers:
                 return None
             return snapshot.layers[0].layer_id
@@ -799,7 +769,7 @@ class StateServerHarness:
             origin="harness.bootstrap",
         )
 
-        server._update_scene_manager()
+        server._refresh_scene_snapshot()
 
         server._ndisplay_calls: list[int] = []
 
@@ -820,7 +790,7 @@ class StateServerHarness:
                 origin=origin,
                 timestamp=timestamp,
             )
-            server._update_scene_manager()
+            server._refresh_scene_snapshot()
             return ServerLedgerUpdate(
                 scope="view",
                 target="main",
@@ -890,15 +860,15 @@ class StateServerHarness:
                 downgraded=bool(downgraded),
                 origin="harness.level",
             )
-            server._update_scene_manager()
-            snapshot = server._latest_scene_snapshot
+            server._refresh_scene_snapshot()
+            snapshot = server._latest_render_snapshot
             assert snapshot is not None, "harness scene snapshot unavailable"
             assert server._worker._viewer is not None, "harness worker viewer not initialised"
             snapshot_mod.apply_render_snapshot(server._worker, snapshot)
 
         server._commit_level = _commit_level
         server._pending_tasks = self.scheduled
-        server._update_scene_manager()
+        server._refresh_scene_snapshot()
         return server
 
     def _state_send(self, _ws: Any, text: str) -> None:

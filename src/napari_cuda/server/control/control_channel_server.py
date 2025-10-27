@@ -81,8 +81,8 @@ from napari_cuda.server.control.transactions.plane_restore import (
 )
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
-    build_render_scene_state,
-    multiscale_state_from_snapshot,
+    snapshot_render_state,
+    snapshot_multiscale_state,
 )
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, VolumeState
@@ -91,7 +91,7 @@ from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_payload,
     build_notify_scene_payload,
 )
-from napari_cuda.protocol.snapshots import LayerDelta
+from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
@@ -522,7 +522,7 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
                 volume_state,
             )
 
-        snapshot = build_render_scene_state(server._state_ledger)
+        snapshot = snapshot_render_state(server._state_ledger)
         worker.enqueue_update(  # type: ignore[attr-defined]
             RenderUpdate(
                 scene_state=snapshot,
@@ -1065,7 +1065,7 @@ async def _handle_multiscale_level(ctx: StateUpdateContext) -> bool:
         )
         return True
 
-    multiscale_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+    multiscale_state = snapshot_multiscale_state(server._state_ledger.snapshot())
     levels = multiscale_state.get('levels') or []
     try:
         level = clamp_level(ctx.value, levels)
@@ -1355,6 +1355,15 @@ def _history_store(server: Any) -> Optional[ResumableHistoryStore]:
     if isinstance(store, ResumableHistoryStore):
         return store
     return None
+
+
+def _ensure_scene_snapshot(server: Any) -> SceneSnapshot:
+    refresher = getattr(server, "_refresh_scene_snapshot", None)
+    if callable(refresher):
+        refresher()
+    snapshot = getattr(server, "_scene_snapshot", None)
+    assert isinstance(snapshot, SceneSnapshot), "scene snapshot unavailable"
+    return snapshot
 
 
 def _mark_client_activity(ws: Any) -> None:
@@ -1795,8 +1804,9 @@ async def _emit_scene_baseline(
         need_reset = plan is not None and plan.decision == ResumeDecision.RESET
         if snapshot is None or need_reset:
             if payload is None:
+                scene_snapshot = _ensure_scene_snapshot(server)
                 payload = build_notify_scene_payload(
-                    server._scene_manager,
+                    scene_snapshot=scene_snapshot,
                     ledger_snapshot=server._state_ledger.snapshot(),
                     viewer_settings=_viewer_settings(server),
                 )
@@ -1812,8 +1822,9 @@ async def _emit_scene_baseline(
         await _send_scene_snapshot_from_cache(server, ws, snapshot)
     else:
         if payload is None:
+            scene_snapshot = _ensure_scene_snapshot(server)
             payload = build_notify_scene_payload(
-                server._scene_manager,
+                scene_snapshot=scene_snapshot,
                 ledger_snapshot=server._state_ledger.snapshot(),
                 viewer_settings=_viewer_settings(server),
             )
@@ -2626,19 +2637,10 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
     default_controls: list[tuple[str, Mapping[str, Any]]] = []
 
     try:
-        try:
-            if hasattr(server, "_update_scene_manager"):
-                server._update_scene_manager()
-        except Exception:
-            logger.debug("Initial scene manager sync failed", exc_info=True)
-
-        with server._state_lock:
-            snapshot = server._scene_manager.scene_snapshot()
-        assert snapshot is not None, "scene snapshot unavailable"
-
+        scene_snapshot = _ensure_scene_snapshot(server)
         ledger_snapshot = server._state_ledger.snapshot()
         scene_payload = build_notify_scene_payload(
-            server._scene_manager,
+            scene_snapshot=scene_snapshot,
             ledger_snapshot=ledger_snapshot,
             viewer_settings=_viewer_settings(server),
         )
@@ -2649,7 +2651,7 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
             layer_controls_map = mirror.latest_controls()
         else:
             logger.debug("layer mirror not initialised; falling back to scene snapshot controls")
-        for layer_snapshot in snapshot.layers:
+        for layer_snapshot in scene_snapshot.layers:
             layer_id = layer_snapshot.layer_id
             controls: Dict[str, Any] = dict(layer_controls_map.get(layer_id, {}))
             if not controls and "controls" in layer_snapshot.block:
@@ -2759,8 +2761,9 @@ async def _send_scene_snapshot_direct(server: Any, ws: Any, *, reason: str) -> N
         logger.debug("Skipping notify.scene send without session id")
         return
 
+    scene_snapshot = _ensure_scene_snapshot(server)
     payload = build_notify_scene_payload(
-                server._scene_manager,
+        scene_snapshot=scene_snapshot,
         ledger_snapshot=server._state_ledger.snapshot(),
         viewer_settings=_viewer_settings(server),
     )
@@ -2794,8 +2797,10 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
     clients = list(server._state_clients)
     if not clients:
         return
+    scene_snapshot = _ensure_scene_snapshot(server)
     payload = build_notify_scene_payload(
-                server._scene_manager,
+        scene_snapshot=scene_snapshot,
+        ledger_snapshot=server._state_ledger.snapshot(),
         viewer_settings=_viewer_settings(server),
     )
     timestamp = time.time()
@@ -2840,15 +2845,14 @@ async def broadcast_scene_snapshot(server: Any, *, reason: str) -> None:
 async def _send_layer_baseline(server: Any, ws: Any) -> None:
     """Send canonical layer controls for all known layers to *ws*."""
 
-    manager = server._scene_manager
-    snapshot = manager.scene_snapshot()
-    if snapshot is None or not snapshot.layers:
+    scene_snapshot = _ensure_scene_snapshot(server)
+    if not scene_snapshot.layers:
         return
 
-    snapshot_state = build_render_scene_state(server._state_ledger)
+    snapshot_state = snapshot_render_state(server._state_ledger)
     latest_values = snapshot_state.layer_values or {}
 
-    for layer in snapshot.layers:
+    for layer in scene_snapshot.layers:
         layer_id = layer.layer_id
         if not layer_id:
             continue

@@ -13,7 +13,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Awaitable, Dict, Optional, Sequence, Set, Mapping, TYPE_CHECKING, Any
+from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any
 
 import websockets
 import importlib.resources as ilr
@@ -21,17 +21,19 @@ import socket
 from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
+from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.state_structs import RenderMode
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
-    build_render_scene_state,
-    default_volume_state,
-    layer_controls_from_ledger,
-    multiscale_state_from_snapshot,
+    snapshot_dims_metadata,
+    snapshot_layer_controls,
+    snapshot_multiscale_state,
+    snapshot_render_state,
+    snapshot_scene,
+    snapshot_volume_state,
 )
 from napari_cuda.server.control.state_reducers import reduce_level_update
-from napari_cuda.server.scene.layer_manager import ViewerSceneManager
 from napari_cuda.server.rendering.bitstream import ParamCache, configure_bitstream
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.utils.env import env_bool
@@ -90,6 +92,9 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumableRetention,
 )
 logger = logging.getLogger(__name__)
+
+DEFAULT_LAYER_ID = "layer-0"
+DEFAULT_LAYER_NAME = "napari-cuda"
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
@@ -202,7 +207,7 @@ class EGLHeadlessServer:
         self._worker_lifecycle = WorkerLifecycleState()
         self._worker_intents = WorkerIntentMailbox()
         self._camera_queue = CameraCommandQueue()
-        self._scene_manager = ViewerSceneManager((self.width, self.height))
+        self._scene_snapshot: Optional[SceneSnapshot] = None
         self._state_ledger = ServerStateLedger()
         # Bitstream parameter cache and config tracking (server-side)
         self._param_cache = ParamCache()
@@ -230,7 +235,7 @@ class EGLHeadlessServer:
             _ = payload  # dims mirror ensures ledger is already updated
             loop = self._control_loop
             if loop is not None:
-                loop.call_soon_threadsafe(self._update_scene_manager)
+                loop.call_soon_threadsafe(self._refresh_scene_snapshot)
 
         self._dims_mirror = ServerDimsMirror(
             ledger=self._state_ledger,
@@ -366,7 +371,7 @@ class EGLHeadlessServer:
             volume_state=intent.volume_state,
         )
 
-        snapshot = build_render_scene_state(self._state_ledger)
+        snapshot = snapshot_render_state(self._state_ledger)
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "level.intent snapshot: level=%d step=%s",
@@ -566,76 +571,44 @@ class EGLHeadlessServer:
 
     # --- Helper to compute dims metadata for piggyback on dims_update ---------
     def _dims_metadata(self) -> dict:
-        self._update_scene_manager()
-        return self._scene_manager.dims_metadata()
+        self._refresh_scene_snapshot()
+        snapshot = self._scene_snapshot
+        if snapshot is None:
+            return {}
+        return snapshot_dims_metadata(snapshot)
 
-    def _update_scene_manager(self) -> None:
+    def _refresh_scene_snapshot(self, render_state: Optional[RenderLedgerSnapshot] = None) -> None:
         worker = self._worker
         if worker is None or not worker.is_ready:
             return
 
         ledger_snapshot = self._state_ledger.snapshot()
-        snapshot = build_render_scene_state(self._state_ledger)
-        current_step = list(snapshot.current_step) if snapshot.current_step is not None else None
+        render_snapshot = render_state or snapshot_render_state(self._state_ledger)
 
-        multiscale_state = multiscale_state_from_snapshot(ledger_snapshot)
+        scene_source = getattr(worker, "_scene_source", None)
+        multiscale_state = snapshot_multiscale_state(ledger_snapshot)
+        volume_state = snapshot_volume_state(ledger_snapshot)
+        layer_controls = snapshot_layer_controls(ledger_snapshot)
 
-        source = getattr(worker, '_scene_source', None)
-        if not multiscale_state and source is not None:
-            # Fallback for early bootstrap before ledger seeds level metadata.
-            descriptors = getattr(source, "level_descriptors", [])
-            multiscale_state = {
-                "policy": "auto",
-                "index_space": "base",
-                "current_level": int(getattr(source, "current_level", 0)),
-                "levels": [
-                    {
-                        "path": getattr(desc, "path", ""),
-                        "shape": [int(x) for x in getattr(desc, "shape", ())],
-                        "downsample": list(getattr(desc, "downsample", ())),
-                    }
-                    for desc in descriptors
-                ],
-            }
-
-        volume_defaults = default_volume_state()
-        clim_source = snapshot.volume_clim or volume_defaults['clim']
-        if isinstance(clim_source, Sequence):
-            clim_list = [float(v) for v in clim_source]
-        else:
-            clim_list = [float(volume_defaults['clim'][0]), float(volume_defaults['clim'][1])]
-        volume_state = {
-            'mode': snapshot.volume_mode or volume_defaults['mode'],
-            'colormap': snapshot.volume_colormap or volume_defaults['colormap'],
-            'clim': clim_list,
-            'opacity': float(snapshot.volume_opacity if snapshot.volume_opacity is not None else volume_defaults['opacity']),
-            'sample_step': float(
-                snapshot.volume_sample_step if snapshot.volume_sample_step is not None else volume_defaults['sample_step']
-            ),
-        }
-
-        layer_controls = layer_controls_from_ledger(ledger_snapshot)
-        if not layer_controls and snapshot.layer_values:
-            layer_controls = {layer_id: dict(props) for layer_id, props in snapshot.layer_values.items()}
-
-        viewer_model = worker.viewer_model()
-        self._scene_manager.update_from_sources(
-            worker=worker,
-            scene_state=snapshot,
-            multiscale_state=multiscale_state,
-            volume_state=volume_state,
-            current_step=current_step,
+        self._scene_snapshot = snapshot_scene(
+            render_state=render_snapshot,
+            ledger_snapshot=ledger_snapshot,
+            canvas_size=(self.width, self.height),
+            fps_target=float(self.cfg.fps),
+            default_layer_id=DEFAULT_LAYER_ID,
+            default_layer_name=DEFAULT_LAYER_NAME,
             ndisplay=self._current_ndisplay(),
             zarr_path=self._zarr_path,
-            scene_source=source,
-            viewer_model=viewer_model,
+            scene_source=scene_source,
             layer_controls=layer_controls,
+            multiscale_state=multiscale_state,
+            volume_state=volume_state,
         )
 
     def _default_layer_id(self) -> Optional[str]:
-        snapshot = self._scene_manager.scene_snapshot()
+        snapshot = self._scene_snapshot
         if snapshot is None or not snapshot.layers:
-            return "layer-0"
+            return DEFAULT_LAYER_ID
         return snapshot.layers[0].layer_id
 
     def _current_ndisplay(self) -> int:
@@ -705,10 +678,7 @@ class EGLHeadlessServer:
         self._dims_mirror.start()
         self._layer_mirror.start()
         self._start_worker(loop)
-        try:
-            self._update_scene_manager()
-        except Exception:
-            logger.debug("Initial scene manager sync failed", exc_info=True)
+        self._refresh_scene_snapshot()
         # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
         async def state_handler(ws: websockets.WebSocketServerProtocol) -> None:
             await ingest_state(self, ws)
@@ -856,28 +826,23 @@ class EGLHeadlessServer:
         )
 
     def _scene_snapshot_json(self) -> Optional[str]:
-        try:
-            self._update_scene_manager()
-        except Exception:
-            logger.debug("scene manager update failed before notify.scene", exc_info=True)
-
-        try:
-            payload = build_notify_scene_payload(
-                self._scene_manager,
-                ledger_snapshot=self._state_ledger.snapshot(),
-            )
-            json_payload = json.dumps(payload.to_dict())
-        except Exception:
-            logger.debug("scene notify snapshot build failed", exc_info=True)
+        self._refresh_scene_snapshot()
+        snapshot = self._scene_snapshot
+        if snapshot is None:
             return None
 
+        payload = build_notify_scene_payload(
+            scene_snapshot=snapshot,
+            ledger_snapshot=self._state_ledger.snapshot(),
+        )
+        json_payload = json.dumps(payload.to_dict())
+
         if self._log_dims_info:
-            snapshot = self._scene_manager.scene_snapshot()
-            dims = snapshot.viewer.dims if snapshot is not None else {}
+            dims = snapshot.viewer.dims
             logger.info(
                 "notify.scene dims: level_shapes=%s current_level=%s",
-                dims.get('level_shapes'),
-                dims.get('current_level'),
+                dims.get("level_shapes"),
+                dims.get("current_level"),
             )
 
         return json_payload

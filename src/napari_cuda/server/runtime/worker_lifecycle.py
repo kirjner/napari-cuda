@@ -15,7 +15,7 @@ from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapsh
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.runtime.state_structs import RenderMode
-from napari_cuda.server.scene import multiscale_state_from_snapshot
+from napari_cuda.server.scene import snapshot_multiscale_state
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.rendering.debug_tools import DebugDumper
@@ -149,7 +149,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     pose,
                 )
 
-            policy_state = multiscale_state_from_snapshot(server._state_ledger.snapshot())
+            policy_state = snapshot_multiscale_state(server._state_ledger.snapshot())
 
             use_volume_entry = server._state_ledger.get("view", "main", "ndisplay")
             use_volume_flag = False

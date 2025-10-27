@@ -43,7 +43,7 @@ Offensive coding tenet: remove try/except scaffolding that hides bugs.
    - Extract resume/history logic into `history_store.py`.
 3. **Scene apply consolidation**
    - Merge duplicated logic between `scene_state_applier.py` and
-     `layer_manager.py`; create projection classes ahead of architecture change.
+     `scene/snapshot.py`; create projection classes ahead of architecture change.
 4. **Config normalization**
    - Ensure all modules consume a single `ServerConfig` object rather than
      reading env vars directly.

@@ -25,8 +25,8 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - `ensure_scene_source` and `reset_worker_camera` (server/runtime/worker_runtime.py) mutate `worker._active_ms_level`, `_zarr_*`, `_data_wh`, and depend on `worker.use_volume` to branch camera resets (`worker_runtime.py:16`–`worker_runtime.py:105`).
 
 ### 1.5 Controller + resume surface
-- `ViewerSceneManager._snapshot_worker` reads `worker.use_volume`, `_active_ms_level`, `_ledger_*` helpers, and napari viewer metadata (`src/napari_cuda/server/scene/layer_manager.py:605`–`layer_manager.py:658`).
-- `egl_headless_server._update_scene_manager` invokes the scene manager and derives volume state from `snapshot.volume_*` plus `worker.viewer_model()` (`src/napari_cuda/server/app/egl_headless_server.py:641`–`egl_headless_server.py:702`).
+- The snapshot helpers in `napari_cuda.server.scene.snapshot` read `worker.use_volume`, `_active_ms_level`, `_ledger_*` helpers, and napari viewer metadata when constructing `SceneSnapshot` payloads.
+- `egl_headless_server._refresh_scene_snapshot` builds scene snapshots directly from the ledger, deriving volume state from `snapshot.volume_*` plus any worker metadata (`src/napari_cuda/server/app/egl_headless_server.py:580`–`egl_headless_server.py:648`).
 - State-channel tests seed ledger caches (`view_cache.plane`, `camera_plane.*`) and expect mode switches to drive a single ROI apply and pose emit (`src/napari_cuda/server/tests/test_state_channel_ingest.py:79` and `_helpers/state_channel.py:251`).
 - The shared `camera.*` namespace is now deprecated; reducers and restore transactions emit only scoped `camera_plane.*` and `camera_volume.*` entries so plane ACKs return `[x, y]` centers while volume ACKs preserve full 3‑D pose.
 
@@ -85,7 +85,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 
 ### Stage C — Controller/resume alignment
 1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/intents.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`). ✅ Completed.
-2. Update `worker_intent_mailbox`, `egl_headless_server`, and `ViewerSceneManager` to pull state from `ViewportState` rather than private worker fields. ✅ Completed.
+2. Update `worker_intent_mailbox`, `egl_headless_server`, and the snapshot helpers to pull state from `ViewportState` rather than private worker fields. ✅ Completed.
 3. Propagate state snapshots through render mailboxes and resume tokens; update tests in `src/napari_cuda/server/tests/test_state_channel_ingest.py`, resume helpers, and history store. ✅ Completed.
 
 ### Stage D — Shim removal

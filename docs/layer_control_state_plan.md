@@ -23,8 +23,8 @@ This document captures the ongoing work to make layer intents (opacity, visibili
    - Layer snapshot blocks (the payload of `notify.scene`) now include a dedicated `controls` map plus a lean `source` section; transport metadata (source path, volume flags, policy metrics) lives under the scene-level `metadata` block.
    - Renderer-only toggles (shade/sample-step) stay under the `render` mapping so UI controls are not duplicated.
 
-5. **ViewerSceneManager** ✅
-   - `update_from_sources` receives the control state and merges it before querying the napari adapter, guaranteeing the emitted `notify.scene` snapshot reflects the canonical values even if the worker has not yet mutated the layer object.
+5. **Scene snapshot helpers** ✅
+   - `snapshot_scene` receives the control state and merges it before querying the worker metadata, guaranteeing the emitted `notify.scene` snapshot reflects the canonical values even if the worker has not yet mutated the layer object.
 
 6. **Testing**
    - ✅ Regression coverage added for intent helpers and spec builders; manual smoke confirms opacity persists.
@@ -40,6 +40,6 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 ## Next steps
 
 1. Implement `LayerControlState` and migrate intent helpers to it. ✅
-2. Update `SceneStateApplier` / `ViewerSceneManager` to consume the canonical bag. ✅
+2. Update `SceneStateApplier` / `snapshot_scene` to consume the canonical bag. ✅
 3. Rename `extras` → `controls` in `LayerSpec` and strip mirrored fields. ✅
 4. Roll client changes so the bridge and registry rely solely on the new map. ✅

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.render_ledger_snapshot import build_ledger_snapshot
-from napari_cuda.server.scene import build_render_scene_state
+from napari_cuda.server.scene import snapshot_render_state
 
 
-def test_build_render_scene_state_preserves_dims_metadata() -> None:
+def test_snapshot_render_state_preserves_dims_metadata() -> None:
     ledger = ServerStateLedger()
     ledger.batch_record_confirmed(
         [
@@ -21,7 +21,7 @@ def test_build_render_scene_state_preserves_dims_metadata() -> None:
     )
 
     base = build_ledger_snapshot(ledger)
-    result = build_render_scene_state(ledger, plane_center=(1, 2))
+    result = snapshot_render_state(ledger, plane_center=(1, 2))
 
     assert result.order == base.order
     assert result.displayed == base.displayed

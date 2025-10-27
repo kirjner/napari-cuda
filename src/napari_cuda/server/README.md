@@ -5,7 +5,7 @@
 The server now advertises its authoritative scene through `notify.scene`
 snapshots. When a state websocket client connects:
 
-1. `EGLHeadlessServer` asks `ViewerSceneManager` for a `SceneSnapshot`. The
+1. `EGLHeadlessServer` builds a `SceneSnapshot` via `snapshot_scene`. The
    snapshot contains JSON-safe layer blocks plus viewer metadata (dims/camera).
 2. The server sends `notify.scene(seq=0)` with that payload. Each layer block
    carries shape, dtype, axis labels, multiscale levels, a `source` section, and
@@ -15,7 +15,7 @@ snapshots. When a state websocket client connects:
    - per-layer updates → `notify.layers`
    - dims metadata → `notify.dims`
 
-`ViewerSceneManager.dims_metadata()` still underpins the HUD, and the latest dims
+`snapshot_dims_metadata()` still underpins the HUD, and the latest dims
 snapshot is pulled directly from the server ledger via `ServerDimsMirror`.
 
 A typical `notify.scene` payload looks like:

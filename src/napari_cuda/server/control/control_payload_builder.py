@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
-from napari_cuda.server.scene.layer_manager import ViewerSceneManager
-from napari_cuda.server.scene import volume_state_from_ledger, viewport_state_from_ledger
+from napari_cuda.protocol.snapshots import SceneSnapshot
+from napari_cuda.server.scene import snapshot_volume_state, snapshot_viewport_state
 from napari_cuda.server.control.state_ledger import LedgerEntry
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 
@@ -16,26 +16,23 @@ from napari_cuda.server.control.state_models import ServerLedgerUpdate
 
 
 def build_notify_scene_payload(
-    manager: ViewerSceneManager,
     *,
+    scene_snapshot: SceneSnapshot,
     ledger_snapshot: Mapping[tuple[str, str, str], LedgerEntry],
     viewer_settings: Optional[Mapping[str, Any]] = None,
 ) -> NotifyScenePayload:
     """Build a ``notify.scene`` payload aligned with the greenfield schema."""
 
-    snapshot = manager.scene_snapshot()
-    assert snapshot is not None, "viewer scene manager not initialised"
-
-    payload = snapshot.to_notify_scene_payload()
+    payload = scene_snapshot.to_notify_scene_payload()
 
     if viewer_settings:
         settings = payload.viewer.setdefault("settings", {})
         settings.update({str(key): _normalize_value(value) for key, value in viewer_settings.items()})
 
     payload.policies = _build_policies_block(ledger_snapshot)
-    payload.metadata = _merge_scene_metadata(snapshot.metadata, ledger_snapshot)
+    payload.metadata = _merge_scene_metadata(scene_snapshot.metadata, ledger_snapshot)
 
-    viewport_state = viewport_state_from_ledger(ledger_snapshot)
+    viewport_state = snapshot_viewport_state(ledger_snapshot)
     if viewport_state:
         metadata_block = payload.metadata or {}
         metadata_copy = dict(metadata_block)
@@ -84,10 +81,11 @@ def _build_policies_block(
 
     level_entry = snapshot.get(("multiscale", "main", "level"))
     if level_entry is not None and level_entry.value is not None:
-        try:
-            policy_payload["active_level"] = int(level_entry.value)
-        except Exception:
-            policy_payload["active_level"] = level_entry.value
+        level_value = level_entry.value
+        if isinstance(level_value, (int, float)):
+            policy_payload["active_level"] = int(level_value)
+        else:
+            policy_payload["active_level"] = level_value
 
     downgraded_entry = snapshot.get(("multiscale", "main", "downgraded"))
     if downgraded_entry is not None and downgraded_entry.value is not None:
@@ -118,7 +116,7 @@ def _merge_scene_metadata(
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = dict(snapshot_metadata)
 
-    volume_state = volume_state_from_ledger(snapshot)
+    volume_state = snapshot_volume_state(snapshot)
     if volume_state:
         metadata.setdefault("volume_state", {})
         metadata["volume_state"].update({str(k): _normalize_value(v) for k, v in volume_state.items()})
