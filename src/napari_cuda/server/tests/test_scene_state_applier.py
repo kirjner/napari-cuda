@@ -431,9 +431,8 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
     queue = RenderUpdateMailbox()
     state = RenderLedgerSnapshot(
         current_step=(1, 0, 0),
-        center=(5.0, 6.0, 7.0),
-        zoom=0.5,
-        angles=(10.0, 20.0, 30.0),
+        plane_center=(5.0, 6.0),
+        plane_zoom=0.5,
     )
 
     result = SceneStateApplier.drain_updates(ctx, state=state, mailbox=queue)
@@ -442,6 +441,5 @@ def test_drain_updates_applies_camera_fields_and_signature() -> None:
     assert result.data_wh is None
     assert result.render_marked is True
     assert result.policy_refresh_needed is True
-    assert camera.center == (5.0, 6.0, 7.0)
+    assert camera.center == (5.0, 6.0)
     assert camera.zoom == 0.5
-    assert camera.angles == (10.0, 20.0, 30.0)

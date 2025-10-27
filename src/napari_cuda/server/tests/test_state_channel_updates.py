@@ -945,30 +945,22 @@ def test_camera_set_updates_latest_state() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
     _drain_scheduled(scheduled)
 
-    center_entry = server._state_ledger.get("camera", "main", "center")
-    zoom_entry = server._state_ledger.get("camera", "main", "zoom")
-    angles_entry = server._state_ledger.get("camera", "main", "angles")
+    center_entry = server._state_ledger.get("camera_plane", "main", "center")
+    zoom_entry = server._state_ledger.get("camera_plane", "main", "zoom")
 
-    assert center_entry is not None and center_entry.value == (1.0, 2.0, 3.0)
+    assert center_entry is not None and center_entry.value == (1.0, 2.0)
     assert zoom_entry is not None and zoom_entry.value == 2.5
-    assert angles_entry is not None and angles_entry.value == (0.1, 0.2, 0.3)
     assert center_entry.version is not None
     assert zoom_entry.version is not None
-    assert angles_entry.version is not None
-    expected_version = max(
-        int(center_entry.version),
-        int(zoom_entry.version),
-        int(angles_entry.version),
-    )
+    expected_version = max(int(center_entry.version), int(zoom_entry.version))
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks
     payload = acks[-1]["payload"]
     applied = payload["applied_value"]
     assert applied == {
-        "center": [1.0, 2.0, 3.0],
+        "center": [1.0, 2.0],
         "zoom": 2.5,
-        "angles": [0.1, 0.2, 0.3],
     }
     assert payload["version"] == expected_version
 

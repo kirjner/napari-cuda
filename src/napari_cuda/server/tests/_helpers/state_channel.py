@@ -421,8 +421,7 @@ class CaptureWorker:
         if snapshot.order is not None:
             dims.order = tuple(int(v) for v in snapshot.order)  # type: ignore[assignment]
 
-        if snapshot.displayed is not None:
-            dims.displayed = tuple(int(v) for v in snapshot.displayed)  # type: ignore[assignment]
+        # napari derives `displayed` from order/ndisplay; no direct setter is available.
 
         if snapshot.current_step is not None:
             step_tuple = tuple(int(v) for v in snapshot.current_step)

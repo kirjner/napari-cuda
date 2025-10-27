@@ -20,13 +20,15 @@ def _as_step(step: Sequence[int | float | str]) -> Tuple[int, ...]:
 
 
 def _as_center(center: Sequence[float | int | str]) -> Tuple[float, float, float]:
-    if len(center) < 3:
-        raise ValueError("plane restore center requires three components")
-    return (
-        float(center[0]),
-        float(center[1]),
-        float(center[2]),
-    )
+    if len(center) < 2:
+        raise ValueError("plane restore center requires at least two components")
+    if len(center) >= 3:
+        return (
+            float(center[0]),
+            float(center[1]),
+            float(center[2]),
+        )
+    return (float(center[0]), float(center[1]), 0.0)
 
 
 def _as_rect(rect: Sequence[float | int | str]) -> Tuple[float, float, float, float]:
@@ -75,6 +77,7 @@ def apply_plane_restore_transaction(
     center_tuple = _as_center(center)
     rect_tuple = _as_rect(rect)
     zoom_value = float(zoom)
+    plane_center_tuple = (float(center_tuple[0]), float(center_tuple[1]))
 
     batch_entries: list[tuple] = []
     if op_seq is not None:
@@ -88,10 +91,7 @@ def apply_plane_restore_transaction(
         [
             ("multiscale", "main", "level", level_idx),
             ("dims", "main", "current_step", step_tuple),
-            ("camera", "main", "center", center_tuple),
-            ("camera", "main", "zoom", zoom_value),
-            ("camera", "main", "rect", rect_tuple),
-            ("camera_plane", "main", "center", center_tuple),
+            ("camera_plane", "main", "center", plane_center_tuple),
             ("camera_plane", "main", "zoom", zoom_value),
             ("camera_plane", "main", "rect", rect_tuple),
         ]

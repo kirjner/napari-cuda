@@ -115,12 +115,13 @@ class CameraDeltaCommand:
 def build_render_scene_state(
     ledger: ServerStateLedger,
     *,
-    center: Any = None,
-    zoom: Any = None,
-    angles: Any = None,
-    distance: Any = None,
-    fov: Any = None,
-    rect: Any = None,
+    plane_center: Any = None,
+    plane_zoom: Any = None,
+    plane_rect: Any = None,
+    volume_center: Any = None,
+    volume_angles: Any = None,
+    volume_distance: Any = None,
+    volume_fov: Any = None,
     current_step: Any = None,
     volume_mode: Any = None,
     volume_colormap: Any = None,
@@ -145,35 +146,36 @@ def build_render_scene_state(
     default_opacity = volume_defaults.get("opacity")
     default_sample_step = volume_defaults.get("sample_step")
 
-    return RenderLedgerSnapshot(
-        center=_coalesce_tuple(center, base.center, float),
-        zoom=_coalesce_float(zoom, base.zoom),
-        angles=_coalesce_tuple(angles, base.angles, float),
-        distance=_coalesce_float(distance, base.distance),
-        fov=_coalesce_float(fov, base.fov),
-        rect=_coalesce_tuple(rect, base.rect, float),
-        current_step=_coalesce_tuple(current_step, base.current_step, int),
-        volume_mode=_coalesce_string(volume_mode, base.volume_mode, fallback=default_mode),
-        volume_colormap=_coalesce_string(
+    overrides = {
+        "plane_center": _coalesce_tuple(plane_center, base.plane_center, float),
+        "plane_zoom": _coalesce_float(plane_zoom, base.plane_zoom),
+        "plane_rect": _coalesce_tuple(plane_rect, base.plane_rect, float),
+        "volume_center": _coalesce_tuple(volume_center, base.volume_center, float),
+        "volume_angles": _coalesce_tuple(volume_angles, base.volume_angles, float),
+        "volume_distance": _coalesce_float(volume_distance, base.volume_distance),
+        "volume_fov": _coalesce_float(volume_fov, base.volume_fov),
+        "current_step": _coalesce_tuple(current_step, base.current_step, int),
+        "volume_mode": _coalesce_string(volume_mode, base.volume_mode, fallback=default_mode),
+        "volume_colormap": _coalesce_string(
             volume_colormap,
             base.volume_colormap,
             fallback=default_colormap,
         ),
-        volume_clim=_coalesce_tuple(
+        "volume_clim": _coalesce_tuple(
             volume_clim,
             base.volume_clim,
             float,
             fallback=default_clim,
         ),
-        volume_opacity=_coalesce_float(volume_opacity, base.volume_opacity, fallback=default_opacity),
-        volume_sample_step=_coalesce_float(
+        "volume_opacity": _coalesce_float(volume_opacity, base.volume_opacity, fallback=default_opacity),
+        "volume_sample_step": _coalesce_float(
             volume_sample_step,
             base.volume_sample_step,
             fallback=default_sample_step,
         ),
-        layer_values=base.layer_values,
-        layer_versions=base.layer_versions,
-    )
+    }
+
+    return replace(base, **overrides)
 
 
 def _coalesce_tuple(

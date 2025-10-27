@@ -21,7 +21,7 @@ def test_build_render_scene_state_preserves_dims_metadata() -> None:
     )
 
     base = build_ledger_snapshot(ledger)
-    result = build_render_scene_state(ledger, center=(1, 2, 3))
+    result = build_render_scene_state(ledger, plane_center=(1, 2))
 
     assert result.order == base.order
     assert result.displayed == base.displayed
@@ -30,4 +30,4 @@ def test_build_render_scene_state_preserves_dims_metadata() -> None:
     assert result.multiscale_level_version == base.multiscale_level_version
     assert result.level_shapes == base.level_shapes
     assert result.op_seq == base.op_seq
-    assert result.center == (1.0, 2.0, 3.0)
+    assert result.plane_center == (1.0, 2.0)

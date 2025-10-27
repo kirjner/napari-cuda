@@ -197,12 +197,15 @@ class RenderUpdateMailbox:
         else:
             camera_token = (
                 "cvals",
-                _canonical(state.center),
-                _canonical(state.zoom),
-                _canonical(state.angles),
-                _canonical(state.distance),
-                _canonical(state.fov),
-                _canonical(state.rect),
+                (
+                    _canonical(state.plane_center),
+                    _canonical(state.plane_zoom),
+                    _canonical(state.plane_rect),
+                    _canonical(state.volume_center),
+                    _canonical(state.volume_angles),
+                    _canonical(state.volume_distance),
+                    _canonical(state.volume_fov),
+                ),
             )
 
         layer_token = None

@@ -1310,9 +1310,29 @@ class EGLRendererWorker:
                 layer_versions = versions
 
         return RenderLedgerSnapshot(
-            center=(tuple(float(c) for c in state.center) if state.center is not None else None),
-            zoom=(float(state.zoom) if state.zoom is not None else None),
-            angles=(tuple(float(a) for a in state.angles) if state.angles is not None else None),
+            plane_center=(
+                tuple(float(c) for c in state.plane_center)
+                if getattr(state, "plane_center", None) is not None
+                else None
+            ),
+            plane_zoom=(float(state.plane_zoom) if getattr(state, "plane_zoom", None) is not None else None),
+            plane_rect=(
+                tuple(float(v) for v in state.plane_rect)
+                if getattr(state, "plane_rect", None) is not None
+                else None
+            ),
+            volume_center=(
+                tuple(float(c) for c in state.volume_center)
+                if getattr(state, "volume_center", None) is not None
+                else None
+            ),
+            volume_angles=(
+                tuple(float(a) for a in state.volume_angles)
+                if getattr(state, "volume_angles", None) is not None
+                else None
+            ),
+            volume_distance=(float(state.volume_distance) if getattr(state, "volume_distance", None) is not None else None),
+            volume_fov=(float(state.volume_fov) if getattr(state, "volume_fov", None) is not None else None),
             current_step=(
                 tuple(int(s) for s in state.current_step)
                 if state.current_step is not None
@@ -1776,12 +1796,13 @@ class EGLRendererWorker:
         if not updates.apply_camera_pose:
             state_for_apply = replace(
                 state_for_apply,
-                center=None,
-                zoom=None,
-                angles=None,
-                distance=None,
-                fov=None,
-                rect=None,
+                plane_center=None,
+                plane_zoom=None,
+                plane_rect=None,
+                volume_center=None,
+                volume_angles=None,
+                volume_distance=None,
+                volume_fov=None,
             )
 
         if updates.plane_state is not None:

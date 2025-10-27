@@ -390,21 +390,24 @@ class SceneStateApplier:
                 policy_refresh_needed=True,
             )
 
-        if state.center is not None:
-            cam.center = state.center  # type: ignore[attr-defined]
-        if state.zoom is not None:
-            cam.zoom = state.zoom  # type: ignore[attr-defined]
-        if state.angles is not None:
-            if isinstance(cam, TurntableCamera):
-                az, el, roll = state.angles
+        if state.plane_center is not None and hasattr(cam, "center") and not isinstance(cam, TurntableCamera):
+            cam.center = tuple(float(v) for v in state.plane_center)  # type: ignore[attr-defined]
+        if state.plane_zoom is not None and hasattr(cam, "zoom") and not isinstance(cam, TurntableCamera):
+            cam.zoom = float(state.plane_zoom)  # type: ignore[attr-defined]
+
+        if isinstance(cam, TurntableCamera):
+            if state.volume_center is not None:
+                cx, cy, cz = state.volume_center
+                cam.center = (float(cx), float(cy), float(cz))
+            if state.volume_angles is not None:
+                az, el, roll = state.volume_angles
                 cam.azimuth = float(az)  # type: ignore[attr-defined]
                 cam.elevation = float(el)  # type: ignore[attr-defined]
                 cam.roll = float(roll)  # type: ignore[attr-defined]
-            elif isinstance(cam, PanZoomCamera):
-                # PanZoomCamera does not use angles; ignore to keep legacy behaviour.
-                pass
-            else:
-                cam.angles = state.angles  # type: ignore[attr-defined]
+            if state.volume_distance is not None:
+                cam.distance = float(state.volume_distance)
+            if state.volume_fov is not None:
+                cam.fov = float(state.volume_fov)
 
         return SceneDrainResult(
             z_index=int(z_index) if z_index is not None else None,

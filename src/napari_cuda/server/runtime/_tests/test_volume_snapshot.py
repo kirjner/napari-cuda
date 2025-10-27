@@ -164,10 +164,10 @@ def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch)
     )
 
     snapshot = RenderLedgerSnapshot(
-        center=(10.0, 20.0, 30.0),
-        angles=(45.0, 30.0),
-        distance=200.0,
-        fov=45.0,
+        volume_center=(10.0, 20.0, 30.0),
+        volume_angles=(45.0, 30.0, 3.0),
+        volume_distance=200.0,
+        volume_fov=45.0,
     )
 
     apply_volume_camera_pose(worker, snapshot)

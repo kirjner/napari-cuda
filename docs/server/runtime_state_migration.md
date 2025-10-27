@@ -28,6 +28,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - `ViewerSceneManager._snapshot_worker` reads `worker.use_volume`, `_active_ms_level`, `_ledger_*` helpers, and napari viewer metadata (`src/napari_cuda/server/scene/layer_manager.py:605`–`layer_manager.py:658`).
 - `egl_headless_server._update_scene_manager` invokes the scene manager and derives volume state from `snapshot.volume_*` plus `worker.viewer_model()` (`src/napari_cuda/server/app/egl_headless_server.py:641`–`egl_headless_server.py:702`).
 - State-channel tests seed ledger caches (`view_cache.plane`, `camera_plane.*`) and expect mode switches to drive a single ROI apply and pose emit (`src/napari_cuda/server/tests/test_state_channel_ingest.py:79` and `_helpers/state_channel.py:251`).
+- The shared `camera.*` namespace is now deprecated; reducers and restore transactions emit only scoped `camera_plane.*` and `camera_volume.*` entries so plane ACKs return `[x, y]` centers while volume ACKs preserve full 3‑D pose.
 
 ### 1.6 Tests that directly hit these internals
 - `test_render_snapshot.py` stubs `worker.use_volume`/`_active_ms_level` to validate multi-scale transitions (`src/napari_cuda/server/tests/test_render_snapshot.py:45`–`test_apply_snapshot_multiscale_exit_volume`).

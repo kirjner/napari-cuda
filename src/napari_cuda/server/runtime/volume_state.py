@@ -16,7 +16,12 @@ def assign_pose_from_snapshot(
     """Populate volume pose fields from a controller snapshot."""
 
     update_kwargs: dict[str, object] = {}
-    center = snapshot.volume_center if snapshot.volume_center is not None else snapshot.center
+    # The snapshot may omit components the worker already applied (e.g. a
+    # distance-only update); merge in the cached pose so we do not stomp fields
+    # the controller did not touch.
+    center = snapshot.volume_center
+    if center is None and state.pose.center is not None:
+        center = state.pose.center
     if center is not None and len(center) >= 3:
         update_kwargs["center"] = (
             float(center[0]),
@@ -24,7 +29,9 @@ def assign_pose_from_snapshot(
             float(center[2]),
         )
 
-    angles = snapshot.volume_angles if snapshot.volume_angles is not None else snapshot.angles
+    angles = snapshot.volume_angles
+    if angles is None and state.pose.angles is not None:
+        angles = state.pose.angles
     if angles is not None and len(angles) >= 2:
         roll: float
         if len(angles) >= 3:
@@ -40,10 +47,15 @@ def assign_pose_from_snapshot(
             roll,
         )
 
-    distance_value = snapshot.volume_distance if snapshot.volume_distance is not None else snapshot.distance
+    distance_value = snapshot.volume_distance
+    if distance_value is None and state.pose.distance is not None:
+        distance_value = state.pose.distance
     if distance_value is not None:
         update_kwargs["distance"] = float(distance_value)
-    fov_value = snapshot.volume_fov if snapshot.volume_fov is not None else snapshot.fov
+
+    fov_value = snapshot.volume_fov
+    if fov_value is None and state.pose.fov is not None:
+        fov_value = state.pose.fov
     if fov_value is not None:
         update_kwargs["fov"] = float(fov_value)
 

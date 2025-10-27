@@ -101,15 +101,12 @@ class ViewportRunner:
             state.pending_roi_signature = None
 
         if target_ndisplay < 3:
-            rect_source = snapshot.plane_rect if snapshot.plane_rect is not None else snapshot.rect
-            if rect_source is not None:
-                state.update_pose(rect=tuple(float(v) for v in rect_source))
-            center_source = snapshot.plane_center if snapshot.plane_center is not None else snapshot.center
-            if center_source is not None and len(center_source) >= 2:
-                state.update_pose(center=(float(center_source[0]), float(center_source[1])))
-            zoom_source = snapshot.plane_zoom if snapshot.plane_zoom is not None else snapshot.zoom
-            if zoom_source is not None:
-                state.update_pose(zoom=float(zoom_source))
+            if snapshot.plane_rect is not None:
+                state.update_pose(rect=tuple(float(v) for v in snapshot.plane_rect))
+            if snapshot.plane_center is not None and len(snapshot.plane_center) >= 2:
+                state.update_pose(center=(float(snapshot.plane_center[0]), float(snapshot.plane_center[1])))
+            if snapshot.plane_zoom is not None:
+                state.update_pose(zoom=float(snapshot.plane_zoom))
 
     def ingest_camera_deltas(self, commands: Sequence[Any]) -> None:
         """Fold camera deltas into cached info (zoom hints only)."""
@@ -172,15 +169,12 @@ class ViewportRunner:
         snapshot = self._snapshot_pending
         if snapshot is not None and state.target_ndisplay < 3:
             self._snapshot_pending = None
-            rect_source = snapshot.plane_rect if snapshot.plane_rect is not None else snapshot.rect
-            if rect_source is not None:
-                state.update_pose(rect=tuple(float(v) for v in rect_source))
-            center_source = snapshot.plane_center if snapshot.plane_center is not None else snapshot.center
-            if center_source is not None and len(center_source) >= 2:
-                state.update_pose(center=(float(center_source[0]), float(center_source[1])))
-            zoom_source = snapshot.plane_zoom if snapshot.plane_zoom is not None else snapshot.zoom
-            if zoom_source is not None:
-                state.update_pose(zoom=float(zoom_source))
+            if snapshot.plane_rect is not None:
+                state.update_pose(rect=tuple(float(v) for v in snapshot.plane_rect))
+            if snapshot.plane_center is not None and len(snapshot.plane_center) >= 2:
+                state.update_pose(center=(float(snapshot.plane_center[0]), float(snapshot.plane_center[1])))
+            if snapshot.plane_zoom is not None:
+                state.update_pose(zoom=float(snapshot.plane_zoom))
 
         level_change = bool(state.level_reload_required and not state.awaiting_level_confirm)
         roi_change = False

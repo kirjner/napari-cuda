@@ -28,10 +28,9 @@ def _make_snapshot(
         ndisplay=ndisplay,
         current_level=level,
         current_step=(0, 0, 0),
-        rect=rect,
-        center=(0.0, 0.0, 0.0),
-        zoom=1.0,
-        angles=(0.0, 0.0, 0.0),
+        plane_rect=rect,
+        plane_center=(0.0, 0.0),
+        plane_zoom=1.0,
         layer_values=None,
         layer_versions=None,
     )

@@ -17,12 +17,6 @@ logger = logging.getLogger(__name__)
 class RenderLedgerSnapshot:
     """Authoritative scene state consumed by the render thread."""
 
-    center: Optional[tuple[float, float, float]] = None
-    zoom: Optional[float] = None
-    angles: Optional[tuple[float, float, float]] = None
-    distance: Optional[float] = None
-    fov: Optional[float] = None
-    rect: Optional[tuple[float, float, float, float]] = None
     plane_center: Optional[tuple[float, float]] = None
     plane_zoom: Optional[float] = None
     plane_rect: Optional[tuple[float, float, float, float]] = None
@@ -61,12 +55,6 @@ def build_ledger_snapshot(
 
     snapshot = snapshot if snapshot is not None else ledger.snapshot()
 
-    def _first_value(*candidates):
-        for candidate in candidates:
-            if candidate is not None:
-                return candidate
-        return None
-
     plane_center_tuple = _tuple_or_none(
         _ledger_value(snapshot, "camera_plane", "main", "center"),
         float,
@@ -87,47 +75,6 @@ def build_ledger_snapshot(
     )
     volume_distance_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "distance"))
     volume_fov_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "fov"))
-
-    center_tuple = _tuple_or_none(
-        _first_value(
-            plane_center_tuple,
-            _ledger_value(snapshot, "camera", "main", "center"),
-            volume_center_tuple,
-        ),
-        float,
-    )
-    zoom_float = _float_or_none(
-        _first_value(
-            plane_zoom_float,
-            _ledger_value(snapshot, "camera", "main", "zoom"),
-        )
-    )
-    rect_tuple = _tuple_or_none(
-        _first_value(
-            plane_rect_tuple,
-            _ledger_value(snapshot, "camera", "main", "rect"),
-        ),
-        float,
-    )
-    angles_tuple = _tuple_or_none(
-        _first_value(
-            volume_angles_tuple,
-            _ledger_value(snapshot, "camera", "main", "angles"),
-        ),
-        float,
-    )
-    distance_float = _float_or_none(
-        _first_value(
-            volume_distance_float,
-            _ledger_value(snapshot, "camera", "main", "distance"),
-        )
-    )
-    fov_float = _float_or_none(
-        _first_value(
-            volume_fov_float,
-            _ledger_value(snapshot, "camera", "main", "fov"),
-        )
-    )
 
     dims_entry = snapshot.get(("dims", "main", "current_step"))
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
@@ -189,7 +136,7 @@ def build_ledger_snapshot(
             versions[prop] = version_value
 
     camera_versions: Dict[str, int] = {}
-    for scope_name, prefix in (("camera_plane", "plane"), ("camera_volume", "volume"), ("camera", "legacy")):
+    for scope_name, prefix in (("camera_plane", "plane"), ("camera_volume", "volume")):
         for camera_key in ("center", "zoom", "angles", "distance", "fov", "rect"):
             entry = snapshot.get((scope_name, "main", camera_key))
             if entry is None:
@@ -203,13 +150,6 @@ def build_ledger_snapshot(
     op_seq_value = int(op_seq_entry.value) if op_seq_entry is not None and op_seq_entry.value is not None else 0
 
     return RenderLedgerSnapshot(
-        center=center_tuple,
-        zoom=zoom_float,
-        angles=angles_tuple,
-        current_step=current_step,
-        distance=distance_float,
-        fov=fov_float,
-        rect=rect_tuple,
         plane_center=plane_center_tuple if plane_center_tuple is not None else None,
         plane_zoom=plane_zoom_float,
         plane_rect=plane_rect_tuple if plane_rect_tuple is not None else None,
@@ -217,6 +157,7 @@ def build_ledger_snapshot(
         volume_angles=volume_angles_tuple if volume_angles_tuple is not None else None,
         volume_distance=volume_distance_float,
         volume_fov=volume_fov_float,
+        current_step=current_step,
         ndisplay=ndisplay_val,
         view_version=_version_or_none(view_entry.version) if view_entry is not None else None,
         displayed=displayed_axes,

@@ -255,73 +255,6 @@ def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Option
     raise TypeError(f"unsupported volume state payload: {type(state)!r}")
 
 
-def _camera_update_entries(
-    *,
-    center: Optional[Sequence[float]],
-    zoom: Optional[float],
-    angles: Optional[Sequence[float]],
-    distance: Optional[float],
-    fov: Optional[float],
-    rect: Optional[Sequence[float]],
-    metadata: Mapping[str, Any],
-) -> Tuple[list[tuple], Dict[str, Any]]:
-    ack: Dict[str, Any] = {}
-    entries: list[tuple] = []
-
-    metadata_dict = dict(metadata)
-    include_metadata = bool(metadata_dict)
-
-    def _entry(key: str, value: Any) -> tuple:
-        if include_metadata:
-            return ("camera", "main", key, value, metadata_dict)
-        return ("camera", "main", key, value)
-
-    if center is not None:
-        normalized_center = tuple(float(c) for c in center)
-        entries.append(_entry("center", normalized_center))
-        ack["center"] = [float(c) for c in normalized_center]
-
-    if zoom is not None:
-        zoom_value = float(zoom)
-        entries.append(_entry("zoom", zoom_value))
-        ack["zoom"] = zoom_value
-
-    if angles is not None:
-        if len(angles) < 3:
-            raise ValueError("camera angles require three components")
-        normalized_angles = (
-            float(angles[0]),
-            float(angles[1]),
-            float(angles[2]),
-        )
-        entries.append(_entry("angles", normalized_angles))
-        ack["angles"] = [float(a) for a in normalized_angles]
-
-    if distance is not None:
-        distance_val = float(distance)
-        entries.append(_entry("distance", distance_val))
-        ack["distance"] = distance_val
-
-    if fov is not None:
-        fov_val = float(fov)
-        entries.append(_entry("fov", fov_val))
-        ack["fov"] = fov_val
-
-    if rect is not None:
-        if len(rect) < 4:
-            raise ValueError("camera rect requires four components")
-        normalized_rect = (
-            float(rect[0]),
-            float(rect[1]),
-            float(rect[2]),
-            float(rect[3]),
-        )
-        entries.append(_entry("rect", normalized_rect))
-        ack["rect"] = [float(v) for v in normalized_rect]
-
-    return entries, ack
-
-
 def _record_viewport_state(
     ledger: ServerStateLedger,
     *,
@@ -1560,31 +1493,19 @@ def reduce_camera_update(
         raise ValueError("camera reducer requires at least one property")
 
     ts = _now(timestamp)
-    updates, ack = _camera_update_entries(
-        center=center,
-        zoom=zoom,
-        angles=angles,
-        distance=distance,
-        fov=fov,
-        rect=rect,
-        metadata=metadata,
-    )
-
     next_op_seq = _next_scene_op_seq(ledger)
 
-    ledger_updates = list(updates)
-    scoped_updates: list[tuple] = []
+    metadata_dict = dict(metadata)
+    include_metadata = bool(metadata_dict)
 
-    def _scoped_entries(scope_name: str) -> list[tuple]:
-        scoped: list[tuple] = []
-        for entry in ledger_updates:
-            if not entry or entry[0] != "camera":
-                continue
-            if len(entry) == 5:
-                scoped.append((scope_name, entry[1], entry[2], entry[3], entry[4]))
-            else:
-                scoped.append((scope_name, entry[1], entry[2], entry[3]))
-        return scoped
+    ledger_updates: list[tuple] = []
+    ack: Dict[str, Any] = {}
+
+    def _append_entry(scope: str, key: str, value: Any) -> None:
+        if include_metadata:
+            ledger_updates.append((scope, "main", key, value, metadata_dict))
+        else:
+            ledger_updates.append((scope, "main", key, value))
 
     if _current_ndisplay(ledger) < 3:
         plane_state = _load_plane_state(ledger)
@@ -1596,20 +1517,30 @@ def reduce_camera_update(
             step_tuple = tuple(int(v) for v in dims_payload.current_step)
             plane_state.target_step = step_tuple
             plane_state.applied_step = step_tuple
-        pose_updates: dict[str, object] = {}
-        if center is not None and len(center) >= 2:
-            pose_updates["center"] = (float(center[0]), float(center[1]))
+        if center is not None:
+            if len(center) < 2:
+                raise ValueError("plane camera center requires at least two components")
+            plane_center = (float(center[0]), float(center[1]))
+            plane_state.update_pose(center=plane_center)
+            ack["center"] = [plane_center[0], plane_center[1]]
+            _append_entry("camera_plane", "center", plane_center)
         if zoom is not None:
-            pose_updates["zoom"] = float(zoom)
-        if rect is not None and len(rect) >= 4:
-            pose_updates["rect"] = (
+            zoom_value = float(zoom)
+            plane_state.update_pose(zoom=zoom_value)
+            ack["zoom"] = zoom_value
+            _append_entry("camera_plane", "zoom", zoom_value)
+        if rect is not None:
+            if len(rect) < 4:
+                raise ValueError("plane camera rect requires four components")
+            rect_tuple = (
                 float(rect[0]),
                 float(rect[1]),
                 float(rect[2]),
                 float(rect[3]),
             )
-        if pose_updates:
-            plane_state.update_pose(**pose_updates)
+            plane_state.update_pose(rect=rect_tuple)
+            ack["rect"] = [rect_tuple[0], rect_tuple[1], rect_tuple[2], rect_tuple[3]]
+            _append_entry("camera_plane", "rect", rect_tuple)
         plane_state.camera_pose_dirty = False
         plane_state.applied_roi = None
         plane_state.applied_roi_signature = None
@@ -1623,25 +1554,36 @@ def reduce_camera_update(
             timestamp=ts,
             metadata=metadata,
         )
-        scoped_updates = _scoped_entries("camera_plane")
     else:
         volume_state = _load_volume_state(ledger)
         pose_updates: dict[str, object] = {}
-        if center is not None and len(center) >= 3:
+        if center is not None:
+            if len(center) < 3:
+                raise ValueError("volume camera center requires three components")
             pose_updates["center"] = (
                 float(center[0]),
                 float(center[1]),
                 float(center[2]),
             )
-        if angles is not None and len(angles) >= 2:
+            ack["center"] = [float(center[0]), float(center[1]), float(center[2])]
+            _append_entry("camera_volume", "center", pose_updates["center"])
+        if angles is not None:
+            if len(angles) < 2:
+                raise ValueError("volume camera angles require at least two components")
             roll_val = float(angles[2]) if len(angles) >= 3 else (
                 float(volume_state.pose.angles[2]) if volume_state.pose.angles is not None and len(volume_state.pose.angles) >= 3 else 0.0
             )
             pose_updates["angles"] = (float(angles[0]), float(angles[1]), roll_val)
+            ack["angles"] = [float(angles[0]), float(angles[1]), float(pose_updates["angles"][2])]
+            _append_entry("camera_volume", "angles", pose_updates["angles"])
         if distance is not None:
             pose_updates["distance"] = float(distance)
+            ack["distance"] = float(distance)
+            _append_entry("camera_volume", "distance", float(distance))
         if fov is not None:
             pose_updates["fov"] = float(fov)
+            ack["fov"] = float(fov)
+            _append_entry("camera_volume", "fov", float(fov))
         if pose_updates:
             volume_state.update_pose(**pose_updates)
             _store_volume_state(
@@ -1651,10 +1593,9 @@ def reduce_camera_update(
                 timestamp=ts,
                 metadata=metadata,
             )
-        scoped_updates = _scoped_entries("camera_volume")
 
-    if scoped_updates:
-        ledger_updates.extend(scoped_updates)
+    if not ledger_updates:
+        raise ValueError("camera reducer failed to build scoped ledger updates")
 
     stored_entries = apply_camera_update_transaction(
         ledger=ledger,
@@ -1667,7 +1608,7 @@ def reduce_camera_update(
 
     versions: list[int] = []
     for (scope, _, _), entry in stored_entries.items():
-        if scope == "camera" and entry.version is not None:
+        if scope in {"camera_plane", "camera_volume"} and entry.version is not None:
             versions.append(int(entry.version))
     assert versions, "camera transaction must return versioned entries"
     version = max(versions)

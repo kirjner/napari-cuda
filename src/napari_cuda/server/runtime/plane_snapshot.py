@@ -107,7 +107,7 @@ def apply_plane_camera_pose(
 
     plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
 
-    rect_source = snapshot.plane_rect if snapshot.plane_rect is not None else snapshot.rect
+    rect_source = snapshot.plane_rect
     if rect_source is None and plane_state.pose.rect is not None:
         rect_source = plane_state.pose.rect
     assert rect_source is not None and len(rect_source) >= 4, "plane snapshot missing rect"
@@ -119,14 +119,14 @@ def apply_plane_camera_pose(
     )
     cam.rect = Rect(*rect_tuple)
 
-    center_source = snapshot.plane_center if snapshot.plane_center is not None else snapshot.center
+    center_source = snapshot.plane_center
     if center_source is None and plane_state.pose.center is not None:
         center_source = plane_state.pose.center
     assert center_source is not None and len(center_source) >= 2, "plane snapshot missing center"
     center_tuple = (float(center_source[0]), float(center_source[1]))
     cam.center = center_tuple
 
-    zoom_source = snapshot.plane_zoom if snapshot.plane_zoom is not None else snapshot.zoom
+    zoom_source = snapshot.plane_zoom
     if zoom_source is None and plane_state.pose.zoom is not None:
         zoom_source = plane_state.pose.zoom
     assert zoom_source is not None, "plane snapshot missing zoom"

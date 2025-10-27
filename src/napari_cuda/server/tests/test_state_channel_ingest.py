@@ -329,15 +329,15 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
         )
         assert ack["payload"]["status"] == "accepted"
 
-        restored_center = ledger.get("camera", "main", "center")
-        restored_zoom = ledger.get("camera", "main", "zoom")
-        restored_rect = ledger.get("camera", "main", "rect")
+        restored_center = ledger.get("camera_plane", "main", "center")
+        restored_zoom = ledger.get("camera_plane", "main", "zoom")
+        restored_rect = ledger.get("camera_plane", "main", "rect")
 
         assert restored_center is not None
         assert restored_zoom is not None
         assert restored_rect is not None
 
-        assert tuple(float(v) for v in restored_center.value) == (50.0, 60.0, 0.0)
+        assert tuple(float(v) for v in restored_center.value) == (50.0, 60.0)
         assert float(restored_zoom.value) == pytest.approx(2.5)
         assert tuple(float(v) for v in restored_rect.value) == (10.0, 20.0, 30.0, 40.0)
     finally:

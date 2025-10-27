@@ -23,7 +23,7 @@ def test_drain_pending_updates_returns_last_values() -> None:
     clock = _FakeClock()
     mailbox = RenderUpdateMailbox(time_fn=clock)
 
-    snapshot = RenderLedgerSnapshot(center=(1.0, 2.0, 3.0), zoom=1.25, op_seq=1)
+    snapshot = RenderLedgerSnapshot(plane_center=(1.0, 2.0), plane_zoom=1.25, op_seq=1)
     mailbox.set_scene_state(snapshot)
 
     updates = mailbox.drain()
