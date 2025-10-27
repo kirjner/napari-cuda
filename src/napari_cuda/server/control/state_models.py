@@ -17,6 +17,9 @@ class BootstrapSceneMetadata:
     levels: tuple[dict[str, Any], ...]
     current_level: int
     ndisplay: int
+    plane_rect: Optional[tuple[float, float, float, float]] = None
+    plane_center: Optional[tuple[float, float]] = None
+    plane_zoom: Optional[float] = None
 
 
 @dataclass(frozen=True)

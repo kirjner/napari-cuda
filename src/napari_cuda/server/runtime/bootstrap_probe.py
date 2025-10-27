@@ -128,6 +128,11 @@ def probe_scene_bootstrap(
     order = tuple(range(ndim))
     ndisplay = 3 if use_volume and ndim >= 3 else min(2, ndim)
 
+    plane_h, plane_w = plane_wh_for_level(source, int(selected_level))
+    rect = (0.0, 0.0, float(plane_w), float(plane_h))
+    center = (float(plane_w) * 0.5, float(plane_h) * 0.5)
+    zoom = 1.0
+
     return BootstrapSceneMetadata(
         step=resolved_step,
         axis_labels=axes if axes else tuple(f"axis-{idx}" for idx in range(ndim)),
@@ -136,6 +141,9 @@ def probe_scene_bootstrap(
         levels=levels,
         current_level=int(selected_level),
         ndisplay=int(ndisplay),
+        plane_rect=rect,
+        plane_center=center,
+        plane_zoom=zoom,
     )
 
 

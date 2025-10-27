@@ -91,6 +91,9 @@ def apply_plane_restore_transaction(
             ("camera", "main", "center", center_tuple),
             ("camera", "main", "zoom", zoom_value),
             ("camera", "main", "rect", rect_tuple),
+            ("camera_plane", "main", "center", center_tuple),
+            ("camera_plane", "main", "zoom", zoom_value),
+            ("camera_plane", "main", "rect", rect_tuple),
         ]
     )
 

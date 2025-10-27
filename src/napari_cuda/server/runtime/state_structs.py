@@ -17,6 +17,15 @@ class RenderMode(Enum):
 
 
 @dataclass
+class PlanePose:
+    """Cached plane camera pose (rect/center/zoom)."""
+
+    rect: Optional[tuple[float, float, float, float]] = None
+    center: Optional[tuple[float, float]] = None
+    zoom: Optional[float] = None
+
+
+@dataclass
 class PlaneState:
     """Controller targets, applied state, and reload flags for plane rendering."""
 
@@ -26,11 +35,7 @@ class PlaneState:
     target_step: Optional[tuple[int, ...]] = None
     snapshot_level: Optional[int] = None
     awaiting_level_confirm: bool = False
-
-    # Camera metadata
-    camera_rect: Optional[tuple[float, float, float, float]] = None
-    camera_center: Optional[tuple[float, float]] = None
-    camera_zoom: Optional[float] = None
+    pose: PlanePose = field(default_factory=PlanePose)
 
     # Applied state
     applied_level: int = 0
@@ -49,6 +54,38 @@ class PlaneState:
     zoom_hint: Optional[float] = None
     camera_pose_dirty: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.pose, PlanePose):
+            payload = dict(self.pose) if isinstance(self.pose, dict) else {}
+            self.pose = PlanePose(**payload)
+
+    def update_pose(
+        self,
+        *,
+        rect: Optional[tuple[float, float, float, float]] = None,
+        center: Optional[tuple[float, float]] = None,
+        zoom: Optional[float] = None,
+    ) -> None:
+        if rect is not None:
+            self.pose.rect = tuple(float(v) for v in rect)
+        if center is not None:
+            self.pose.center = tuple(float(v) for v in center)
+        if zoom is not None:
+            self.pose.zoom = float(zoom)
+
+    def clear_pose(self) -> None:
+        self.pose = PlanePose()
+
+
+@dataclass
+class VolumePose:
+    """Cached volume camera pose (center/angles/distance/fov)."""
+
+    center: Optional[tuple[float, float, float]] = None
+    angles: Optional[tuple[float, float, float]] = None
+    distance: Optional[float] = None
+    fov: Optional[float] = None
+
 
 @dataclass
 class VolumeState:
@@ -56,12 +93,34 @@ class VolumeState:
 
     level: int = 0
     downgraded: bool = False
-    pose_center: Optional[tuple[float, float, float]] = None
-    pose_angles: Optional[tuple[float, float, float]] = None
-    pose_distance: Optional[float] = None
-    pose_fov: Optional[float] = None
     scale: Optional[tuple[float, float, float]] = None
     world_extents: Optional[tuple[float, float, float]] = None
+    pose: VolumePose = field(default_factory=VolumePose)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pose, VolumePose):
+            payload = dict(self.pose) if isinstance(self.pose, dict) else {}
+            self.pose = VolumePose(**payload)
+
+    def update_pose(
+        self,
+        *,
+        center: Optional[tuple[float, float, float]] = None,
+        angles: Optional[tuple[float, float, float]] = None,
+        distance: Optional[float] = None,
+        fov: Optional[float] = None,
+    ) -> None:
+        if center is not None:
+            self.pose.center = tuple(float(v) for v in center)
+        if angles is not None:
+            self.pose.angles = tuple(float(v) for v in angles)
+        if distance is not None:
+            self.pose.distance = float(distance)
+        if fov is not None:
+            self.pose.fov = float(fov)
+
+    def clear_pose(self) -> None:
+        self.pose = VolumePose()
 
 
 @dataclass
@@ -74,4 +133,4 @@ class ViewportState:
     op_seq: int = -1
 
 
-__all__ = ["PlaneState", "RenderMode", "ViewportState", "VolumeState"]
+__all__ = ["PlanePose", "PlaneState", "RenderMode", "ViewportState", "VolumePose", "VolumeState"]

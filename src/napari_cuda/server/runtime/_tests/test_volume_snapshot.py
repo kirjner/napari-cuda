@@ -155,7 +155,7 @@ class _FakeTurntableCamera:
 def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("napari_cuda.server.runtime.volume_snapshot.TurntableCamera", _FakeTurntableCamera)
     viewport_state = ViewportState()
-    viewport_state.volume.pose_angles = (1.0, 2.0, 3.0)
+    viewport_state.volume.update_pose(angles=(1.0, 2.0, 3.0))
 
     camera = _FakeTurntableCamera()
     worker = SimpleNamespace(
@@ -173,10 +173,10 @@ def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch)
     apply_volume_camera_pose(worker, snapshot)
 
     vol_state = viewport_state.volume
-    assert vol_state.pose_center == (10.0, 20.0, 30.0)
-    assert vol_state.pose_angles == (45.0, 30.0, 3.0)
-    assert vol_state.pose_distance == 200.0
-    assert vol_state.pose_fov == 45.0
+    assert vol_state.pose.center == (10.0, 20.0, 30.0)
+    assert vol_state.pose.angles == (45.0, 30.0, 3.0)
+    assert vol_state.pose.distance == 200.0
+    assert vol_state.pose.fov == 45.0
 
     assert camera.center == (10.0, 20.0, 30.0)
     assert camera.azimuth == 45.0

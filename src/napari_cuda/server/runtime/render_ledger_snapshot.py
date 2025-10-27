@@ -23,6 +23,13 @@ class RenderLedgerSnapshot:
     distance: Optional[float] = None
     fov: Optional[float] = None
     rect: Optional[tuple[float, float, float, float]] = None
+    plane_center: Optional[tuple[float, float]] = None
+    plane_zoom: Optional[float] = None
+    plane_rect: Optional[tuple[float, float, float, float]] = None
+    volume_center: Optional[tuple[float, float, float]] = None
+    volume_angles: Optional[tuple[float, float, float]] = None
+    volume_distance: Optional[float] = None
+    volume_fov: Optional[float] = None
     current_step: Optional[tuple[int, ...]] = None
     dims_version: Optional[int] = None
     ndisplay: Optional[int] = None
@@ -54,12 +61,73 @@ def build_ledger_snapshot(
 
     snapshot = snapshot if snapshot is not None else ledger.snapshot()
 
-    center_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "center"), float)
-    zoom_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "zoom"))
-    angles_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "angles"), float)
-    distance_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "distance"))
-    fov_float = _float_or_none(_ledger_value(snapshot, "camera", "main", "fov"))
-    rect_tuple = _tuple_or_none(_ledger_value(snapshot, "camera", "main", "rect"), float)
+    def _first_value(*candidates):
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+        return None
+
+    plane_center_tuple = _tuple_or_none(
+        _ledger_value(snapshot, "camera_plane", "main", "center"),
+        float,
+    )
+    plane_zoom_float = _float_or_none(_ledger_value(snapshot, "camera_plane", "main", "zoom"))
+    plane_rect_tuple = _tuple_or_none(
+        _ledger_value(snapshot, "camera_plane", "main", "rect"),
+        float,
+    )
+
+    volume_center_tuple = _tuple_or_none(
+        _ledger_value(snapshot, "camera_volume", "main", "center"),
+        float,
+    )
+    volume_angles_tuple = _tuple_or_none(
+        _ledger_value(snapshot, "camera_volume", "main", "angles"),
+        float,
+    )
+    volume_distance_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "distance"))
+    volume_fov_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "fov"))
+
+    center_tuple = _tuple_or_none(
+        _first_value(
+            plane_center_tuple,
+            _ledger_value(snapshot, "camera", "main", "center"),
+            volume_center_tuple,
+        ),
+        float,
+    )
+    zoom_float = _float_or_none(
+        _first_value(
+            plane_zoom_float,
+            _ledger_value(snapshot, "camera", "main", "zoom"),
+        )
+    )
+    rect_tuple = _tuple_or_none(
+        _first_value(
+            plane_rect_tuple,
+            _ledger_value(snapshot, "camera", "main", "rect"),
+        ),
+        float,
+    )
+    angles_tuple = _tuple_or_none(
+        _first_value(
+            volume_angles_tuple,
+            _ledger_value(snapshot, "camera", "main", "angles"),
+        ),
+        float,
+    )
+    distance_float = _float_or_none(
+        _first_value(
+            volume_distance_float,
+            _ledger_value(snapshot, "camera", "main", "distance"),
+        )
+    )
+    fov_float = _float_or_none(
+        _first_value(
+            volume_fov_float,
+            _ledger_value(snapshot, "camera", "main", "fov"),
+        )
+    )
 
     dims_entry = snapshot.get(("dims", "main", "current_step"))
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
@@ -121,13 +189,14 @@ def build_ledger_snapshot(
             versions[prop] = version_value
 
     camera_versions: Dict[str, int] = {}
-    for camera_key in ("center", "zoom", "angles", "distance", "fov", "rect"):
-        entry = snapshot.get(("camera", "main", camera_key))
-        if entry is None:
-            continue
-        version_value = _version_or_none(entry.version)
-        if version_value is not None:
-            camera_versions[str(camera_key)] = int(version_value)
+    for scope_name, prefix in (("camera_plane", "plane"), ("camera_volume", "volume"), ("camera", "legacy")):
+        for camera_key in ("center", "zoom", "angles", "distance", "fov", "rect"):
+            entry = snapshot.get((scope_name, "main", camera_key))
+            if entry is None:
+                continue
+            version_value = _version_or_none(entry.version)
+            if version_value is not None:
+                camera_versions[f"{prefix}.{camera_key}"] = int(version_value)
     camera_versions_payload = camera_versions or None
 
     op_seq_entry = snapshot.get(("scene", "main", "op_seq"))
@@ -141,6 +210,13 @@ def build_ledger_snapshot(
         distance=distance_float,
         fov=fov_float,
         rect=rect_tuple,
+        plane_center=plane_center_tuple if plane_center_tuple is not None else None,
+        plane_zoom=plane_zoom_float,
+        plane_rect=plane_rect_tuple if plane_rect_tuple is not None else None,
+        volume_center=volume_center_tuple if volume_center_tuple is not None else None,
+        volume_angles=volume_angles_tuple if volume_angles_tuple is not None else None,
+        volume_distance=volume_distance_float,
+        volume_fov=volume_fov_float,
         ndisplay=ndisplay_val,
         view_version=_version_or_none(view_entry.version) if view_entry is not None else None,
         displayed=displayed_axes,

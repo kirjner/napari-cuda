@@ -149,9 +149,11 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
             "target_step": plane_step,
             "applied_level": plane_level,
             "applied_step": plane_step,
-            "camera_center": plane_center,
-            "camera_zoom": plane_zoom,
-            "camera_rect": plane_rect,
+            "pose": {
+                "center": plane_center,
+                "zoom": plane_zoom,
+                "rect": plane_rect,
+            },
         }
         ledger.batch_record_confirmed(
             [
@@ -277,9 +279,11 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
             "target_step": step,
             "applied_level": level,
             "applied_step": step,
-            "camera_rect": (10.0, 20.0, 30.0, 40.0),
-            "camera_center": (50.0, 60.0),
-            "camera_zoom": 2.5,
+            "pose": {
+                "rect": (10.0, 20.0, 30.0, 40.0),
+                "center": (50.0, 60.0),
+                "zoom": 2.5,
+            },
         }
 
         ledger.record_confirmed(

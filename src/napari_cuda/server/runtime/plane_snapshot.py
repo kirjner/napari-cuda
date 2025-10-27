@@ -107,32 +107,33 @@ def apply_plane_camera_pose(
 
     plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
 
-    rect = snapshot.rect
-    if rect is not None and len(rect) >= 4:
-        cam.rect = Rect(
-            float(rect[0]),
-            float(rect[1]),
-            float(rect[2]),
-            float(rect[3]),
-        )
-        plane_state.camera_rect = (
-            float(rect[0]),
-            float(rect[1]),
-            float(rect[2]),
-            float(rect[3]),
-        )
+    rect_source = snapshot.plane_rect if snapshot.plane_rect is not None else snapshot.rect
+    if rect_source is None and plane_state.pose.rect is not None:
+        rect_source = plane_state.pose.rect
+    assert rect_source is not None and len(rect_source) >= 4, "plane snapshot missing rect"
+    rect_tuple = (
+        float(rect_source[0]),
+        float(rect_source[1]),
+        float(rect_source[2]),
+        float(rect_source[3]),
+    )
+    cam.rect = Rect(*rect_tuple)
 
-    center = snapshot.center
-    if center is not None and len(center) >= 2:
-        cam.center = (
-            float(center[0]),
-            float(center[1]),
-        )
-        plane_state.camera_center = (float(center[0]), float(center[1]))
+    center_source = snapshot.plane_center if snapshot.plane_center is not None else snapshot.center
+    if center_source is None and plane_state.pose.center is not None:
+        center_source = plane_state.pose.center
+    assert center_source is not None and len(center_source) >= 2, "plane snapshot missing center"
+    center_tuple = (float(center_source[0]), float(center_source[1]))
+    cam.center = center_tuple
 
-    if snapshot.zoom is not None and hasattr(cam, "zoom"):
-        cam.zoom = float(snapshot.zoom)
-        plane_state.camera_zoom = float(snapshot.zoom)
+    zoom_source = snapshot.plane_zoom if snapshot.plane_zoom is not None else snapshot.zoom
+    if zoom_source is None and plane_state.pose.zoom is not None:
+        zoom_source = plane_state.pose.zoom
+    assert zoom_source is not None, "plane snapshot missing zoom"
+    zoom_value = float(zoom_source)
+    cam.zoom = zoom_value
+
+    plane_state.update_pose(rect=rect_tuple, center=center_tuple, zoom=zoom_value)
 
 
 def apply_slice_level(
@@ -184,27 +185,26 @@ def apply_slice_level(
     if not worker._preserve_view_on_switch:
         world_w = float(full_w) * float(max(1e-12, sx))
         world_h = float(full_h) * float(max(1e-12, sy))
-        cached_rect = getattr(plane_state, "camera_rect", None)
+        cached_rect = plane_state.pose.rect
         if cached_rect is None:
             view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
         else:
             logger = logging.getLogger(__name__)
             if logger.isEnabledFor(logging.INFO):
                 logger.info("plane.slice preserve view using cached rect=%s", cached_rect)
-        cached_center = getattr(plane_state, "camera_center", None)
-        cached_zoom = getattr(plane_state, "camera_zoom", None)
-        if cached_rect is not None and len(cached_rect) >= 4:
             view.camera.rect = Rect(
                 float(cached_rect[0]),
                 float(cached_rect[1]),
                 float(cached_rect[2]),
                 float(cached_rect[3]),
             )
+        cached_center = plane_state.pose.center
         if cached_center is not None and len(cached_center) >= 2:
             view.camera.center = (
                 float(cached_center[0]),
                 float(cached_center[1]),
             )
+        cached_zoom = plane_state.pose.zoom
         if cached_zoom is not None:
             view.camera.zoom = float(cached_zoom)
 

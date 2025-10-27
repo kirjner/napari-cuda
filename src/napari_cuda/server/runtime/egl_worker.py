@@ -304,12 +304,7 @@ class EGLRendererWorker:
         cam = self.view.camera
         if cam is not None:
             self._apply_camera_reset(cam)
-            # Persist initial camera pose so plane caches exist deterministically
-            callback = self._camera_pose_callback
-            if callback is not None:
-                pose = self._snapshot_camera_pose("main", 1)
-                if pose is not None:
-                    callback(pose)
+            self._emit_current_camera_pose("bootstrap")
 
     def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
         """Set napari dims.range to match the chosen level shape.
@@ -469,13 +464,14 @@ class EGLRendererWorker:
                 z=(0.0, max(1.0, extent[2])),
             )
             self._frame_volume_camera(extent[0], extent[1], extent[2])
+            self._emit_current_camera_pose("bootstrap-volume")
         else:
             cam = scene.cameras.PanZoomCamera(aspect=1.0)
             view.camera = cam
             plane_state = self.viewport_state.plane
-            rect = plane_state.camera_rect
-            center = plane_state.camera_center
-            zoom = plane_state.camera_zoom
+            rect = plane_state.pose.rect
+            center = plane_state.pose.center
+            zoom = plane_state.pose.zoom
 
             if rect is not None and len(rect) >= 4:
                 cam.rect = Rect(
@@ -600,9 +596,10 @@ class EGLRendererWorker:
         plane_entry = self._ledger.get("viewport", "plane", "state")
         assert plane_entry is not None and isinstance(plane_entry.value, Mapping), "plane camera cache missing viewport state"
         plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
-        self._viewport_state.plane = PlaneState(**dict(plane_entry.value))  # sync worker cache
-        assert plane_state.camera_rect is not None, "plane camera cache missing rect"
-        rect = tuple(float(v) for v in plane_state.camera_rect)
+        self._viewport_state.plane = PlaneState(**dict(plane_entry.value))
+        rect_pose = plane_state.pose.rect
+        assert rect_pose is not None, "plane camera cache missing rect"
+        rect = tuple(float(v) for v in rect_pose)
         step_tuple = tuple(int(v) for v in step_entry.value)
 
         view = self.view
@@ -615,11 +612,11 @@ class EGLRendererWorker:
             world_h = float(h_full) * float(max(1e-12, sy))
             cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
             cam.rect = Rect(*rect)
-            if plane_state.camera_center is not None:
-                cx, cy = plane_state.camera_center
+            if plane_state.pose.center is not None:
+                cx, cy = plane_state.pose.center
                 cam.center = (float(cx), float(cy), 0.0)  # type: ignore[attr-defined]
-            if plane_state.camera_zoom is not None:
-                cam.zoom = float(plane_state.camera_zoom)
+            if plane_state.pose.zoom is not None:
+                cam.zoom = float(plane_state.pose.zoom)
 
         decision = lod.LevelDecision(
             desired_level=int(lvl_idx),
@@ -1406,7 +1403,20 @@ class EGLRendererWorker:
             self._applied_versions[("multiscale", "main", "level")] = int(state.multiscale_level_version)
         if state.camera_versions:
             for key, version in state.camera_versions.items():
-                self._applied_versions[("camera", "main", str(key))] = int(version)
+                scope = "camera"
+                attr = str(key)
+                if "." in attr:
+                    prefix, remainder = attr.split(".", 1)
+                    if prefix == "plane":
+                        scope = "camera_plane"
+                        attr = remainder
+                    elif prefix == "volume":
+                        scope = "camera_volume"
+                        attr = remainder
+                    elif prefix == "legacy":
+                        scope = "camera"
+                        attr = remainder
+                self._applied_versions[(scope, "main", attr)] = int(version)
 
     def _extract_layer_changes(self, state: RenderLedgerSnapshot) -> dict[str, dict[str, Any]]:
         layer_changes: dict[str, dict[str, Any]] = {}
@@ -1577,11 +1587,14 @@ class EGLRendererWorker:
             azimuth = float(cam.azimuth)
             elevation = float(cam.elevation)
             roll = float(getattr(cam, "roll", 0.0))
+            volume_update: dict[str, object] = {
+                "angles": (azimuth, elevation, roll),
+                "distance": distance_val,
+                "fov": fov_val,
+            }
             if center_tuple is not None:
-                volume_state.pose_center = tuple(float(v) for v in center_tuple)
-            volume_state.pose_distance = distance_val
-            volume_state.pose_fov = fov_val
-            volume_state.pose_angles = (azimuth, elevation, roll)
+                volume_update["center"] = tuple(float(v) for v in center_tuple)
+            volume_state.update_pose(**volume_update)
             return CameraPoseApplied(
                 target=str(target or "main"),
                 command_seq=int(command_seq),
@@ -1609,11 +1622,12 @@ class EGLRendererWorker:
             if callable(zoom_attr):
                 zoom_attr = cam._zoom if hasattr(cam, "_zoom") else 1.0  # type: ignore[attr-defined]
             zoom_val = float(zoom_attr)
+            update_kwargs = {"zoom": zoom_val}
             if rect_tuple is not None:
-                plane_state.camera_rect = rect_tuple
+                update_kwargs["rect"] = rect_tuple
             if center_tuple is not None and len(center_tuple) >= 2:
-                plane_state.camera_center = (float(center_tuple[0]), float(center_tuple[1]))
-            plane_state.camera_zoom = zoom_val
+                update_kwargs["center"] = (float(center_tuple[0]), float(center_tuple[1]))
+            plane_state.update_pose(**update_kwargs)
             return CameraPoseApplied(
                 target=str(target or "main"),
                 command_seq=int(command_seq),

@@ -169,6 +169,17 @@ def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
     return PlaneState()
 
 
+def _load_volume_state(ledger: ServerStateLedger) -> VolumeState:
+    entry = ledger.get("viewport", "volume", "state")
+    if entry is not None and isinstance(entry.value, Mapping):
+        payload = dict(entry.value)
+        try:
+            return VolumeState(**payload)
+        except Exception:
+            logger.debug("failed to deserialize volume state payload", exc_info=True)
+    return VolumeState()
+
+
 def _store_plane_state(
     ledger: ServerStateLedger,
     plane_state: PlaneState,
@@ -199,6 +210,29 @@ def _store_plane_state(
             entries.append(("view_cache", "plane", "step", step_value))
 
     ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
+
+
+def _store_volume_state(
+    ledger: ServerStateLedger,
+    volume_state: VolumeState,
+    *,
+    origin: str,
+    timestamp: float,
+    metadata: Optional[Mapping[str, Any]],
+) -> None:
+    payload = asdict(volume_state)
+    if metadata:
+        ledger.batch_record_confirmed(
+            [("viewport", "volume", "state", payload, dict(metadata))],
+            origin=origin,
+            timestamp=timestamp,
+        )
+    else:
+        ledger.batch_record_confirmed(
+            [("viewport", "volume", "state", payload)],
+            origin=origin,
+            timestamp=timestamp,
+        )
 
 
 def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
@@ -1340,9 +1374,11 @@ def reduce_plane_restore(
     base_plane.target_step = step_tuple
     base_plane.applied_level = level_idx
     base_plane.applied_step = step_tuple
-    base_plane.camera_rect = rect_tuple
-    base_plane.camera_center = (center_tuple[0], center_tuple[1])
-    base_plane.camera_zoom = zoom_value
+    base_plane.update_pose(
+        rect=rect_tuple,
+        center=(center_tuple[0], center_tuple[1]),
+        zoom=zoom_value,
+    )
     base_plane.applied_roi = None
     base_plane.applied_roi_signature = None
     base_plane.pending_roi = None
@@ -1536,21 +1572,19 @@ def reduce_camera_update(
 
     next_op_seq = _next_scene_op_seq(ledger)
 
-    stored_entries = apply_camera_update_transaction(
-        ledger=ledger,
-        updates=updates,
-        origin=origin,
-        timestamp=ts,
-        op_seq=next_op_seq,
-        op_kind="camera-update",
-    )
+    ledger_updates = list(updates)
+    scoped_updates: list[tuple] = []
 
-    versions: list[int] = []
-    for (scope, _, _), entry in stored_entries.items():
-        if scope == "camera" and entry.version is not None:
-            versions.append(int(entry.version))
-    assert versions, "camera transaction must return versioned entries"
-    version = max(versions)
+    def _scoped_entries(scope_name: str) -> list[tuple]:
+        scoped: list[tuple] = []
+        for entry in ledger_updates:
+            if not entry or entry[0] != "camera":
+                continue
+            if len(entry) == 5:
+                scoped.append((scope_name, entry[1], entry[2], entry[3], entry[4]))
+            else:
+                scoped.append((scope_name, entry[1], entry[2], entry[3]))
+        return scoped
 
     if _current_ndisplay(ledger) < 3:
         plane_state = _load_plane_state(ledger)
@@ -1562,17 +1596,20 @@ def reduce_camera_update(
             step_tuple = tuple(int(v) for v in dims_payload.current_step)
             plane_state.target_step = step_tuple
             plane_state.applied_step = step_tuple
+        pose_updates: dict[str, object] = {}
         if center is not None and len(center) >= 2:
-            plane_state.camera_center = (float(center[0]), float(center[1]))
+            pose_updates["center"] = (float(center[0]), float(center[1]))
         if zoom is not None:
-            plane_state.camera_zoom = float(zoom)
+            pose_updates["zoom"] = float(zoom)
         if rect is not None and len(rect) >= 4:
-            plane_state.camera_rect = (
+            pose_updates["rect"] = (
                 float(rect[0]),
                 float(rect[1]),
                 float(rect[2]),
                 float(rect[3]),
             )
+        if pose_updates:
+            plane_state.update_pose(**pose_updates)
         plane_state.camera_pose_dirty = False
         plane_state.applied_roi = None
         plane_state.applied_roi_signature = None
@@ -1586,6 +1623,54 @@ def reduce_camera_update(
             timestamp=ts,
             metadata=metadata,
         )
+        scoped_updates = _scoped_entries("camera_plane")
+    else:
+        volume_state = _load_volume_state(ledger)
+        pose_updates: dict[str, object] = {}
+        if center is not None and len(center) >= 3:
+            pose_updates["center"] = (
+                float(center[0]),
+                float(center[1]),
+                float(center[2]),
+            )
+        if angles is not None and len(angles) >= 2:
+            roll_val = float(angles[2]) if len(angles) >= 3 else (
+                float(volume_state.pose.angles[2]) if volume_state.pose.angles is not None and len(volume_state.pose.angles) >= 3 else 0.0
+            )
+            pose_updates["angles"] = (float(angles[0]), float(angles[1]), roll_val)
+        if distance is not None:
+            pose_updates["distance"] = float(distance)
+        if fov is not None:
+            pose_updates["fov"] = float(fov)
+        if pose_updates:
+            volume_state.update_pose(**pose_updates)
+            _store_volume_state(
+                ledger,
+                volume_state,
+                origin=origin,
+                timestamp=ts,
+                metadata=metadata,
+            )
+        scoped_updates = _scoped_entries("camera_volume")
+
+    if scoped_updates:
+        ledger_updates.extend(scoped_updates)
+
+    stored_entries = apply_camera_update_transaction(
+        ledger=ledger,
+        updates=ledger_updates,
+        origin=origin,
+        timestamp=ts,
+        op_seq=next_op_seq,
+        op_kind="camera-update",
+    )
+
+    versions: list[int] = []
+    for (scope, _, _), entry in stored_entries.items():
+        if scope == "camera" and entry.version is not None:
+            versions.append(int(entry.version))
+    assert versions, "camera transaction must return versioned entries"
+    version = max(versions)
 
     return ack, version
 

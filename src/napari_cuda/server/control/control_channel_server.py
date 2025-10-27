@@ -275,12 +275,12 @@ def _apply_plane_restore_from_ledger(
             step_value = tuple(int(v) for v in plane_state.target_step)
 
     center_value: Optional[tuple[float, float, float]] = None
-    if plane_state.camera_center is not None:
-        cx, cy = plane_state.camera_center
+    if plane_state.pose.center is not None:
+        cx, cy = plane_state.pose.center
         center_value = (float(cx), float(cy), 0.0)
 
-    zoom_value = plane_state.camera_zoom
-    rect_value = plane_state.camera_rect
+    zoom_value = plane_state.pose.zoom
+    rect_value = plane_state.pose.rect
 
     missing: list[str] = []
     if level_value is None:
@@ -288,11 +288,11 @@ def _apply_plane_restore_from_ledger(
     if step_value is None:
         missing.append("view_cache.plane.step")
     if center_value is None:
-        missing.append("viewport.plane.state.camera_center")
+        missing.append("viewport.plane.state.pose.center")
     if zoom_value is None:
-        missing.append("viewport.plane.state.camera_zoom")
+        missing.append("viewport.plane.state.pose.zoom")
     if rect_value is None:
-        missing.append("viewport.plane.state.camera_rect")
+        missing.append("viewport.plane.state.pose.rect")
 
     if missing:
         logger.warning("plane_restore skipped due to missing ledger entries: %s", ", ".join(missing))

@@ -52,10 +52,12 @@ class _StubWorker:
         self.viewport_state.plane.target_level = level
         self.viewport_state.volume.level = level
         self.viewport_state.volume.scale = (1.0, 1.0, 1.0)
-        self.viewport_state.volume.pose_angles = (0.0, 0.0, 0.0)
-        self.viewport_state.volume.pose_center = (0.0, 0.0, 0.0)
-        self.viewport_state.volume.pose_distance = 0.0
-        self.viewport_state.volume.pose_fov = 45.0
+        self.viewport_state.volume.update_pose(
+            center=(0.0, 0.0, 0.0),
+            angles=(0.0, 0.0, 0.0),
+            distance=0.0,
+            fov=45.0,
+        )
         self.configure_calls = 0
         self._last_dims_signature: tuple[int, ...] | None = None
         self._scene_source = _FakeSource()

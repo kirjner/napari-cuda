@@ -37,28 +37,27 @@ def apply_plane_metadata(
 
     _apply_dims_and_metadata(worker, source, context)
 
-    plane_state = getattr(getattr(worker, "viewport_state", None), "plane", None)
-    view = getattr(worker, "view", None)
-    cam = getattr(view, "camera", None)
-    if plane_state is None or not isinstance(cam, PanZoomCamera):
+    viewport_state = worker.viewport_state
+    plane_state = viewport_state.plane
+    view = worker.view
+    cam = view.camera
+    if not isinstance(cam, PanZoomCamera):
         return
 
-    rect = getattr(plane_state, "camera_rect", None)
-    center = getattr(plane_state, "camera_center", None)
-    zoom = getattr(plane_state, "camera_zoom", None)
+    pose = plane_state.pose
+    assert pose.rect is not None, "plane pose missing rect"
+    assert pose.center is not None, "plane pose missing center"
+    assert pose.zoom is not None, "plane pose missing zoom"
 
-    restored = False
-    if rect is not None and len(rect) >= 4:
-        cam.rect = Rect(float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
-        restored = True
-    if center is not None and len(center) >= 2:
-        cam.center = (float(center[0]), float(center[1]))
-        restored = True
-    if zoom is not None:
-        cam.zoom = float(zoom)
-        restored = True
+    rect = pose.rect
+    center = pose.center
+    zoom = pose.zoom
 
-    if restored and logging.getLogger(__name__).isEnabledFor(logging.INFO):
+    cam.rect = Rect(float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+    cam.center = (float(center[0]), float(center[1]))
+    cam.zoom = float(zoom)
+
+    if logging.getLogger(__name__).isEnabledFor(logging.INFO):
         logging.getLogger(__name__).info(
             "plane.metadata restored camera rect=%s center=%s zoom=%s",
             rect,

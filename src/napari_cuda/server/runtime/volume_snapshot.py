@@ -41,25 +41,34 @@ def apply_volume_camera_pose(
     volume_state = worker.viewport_state.volume  # type: ignore[attr-defined]
     assign_pose_from_snapshot(volume_state, snapshot)
 
-    center = volume_state.pose_center
-    if center is not None and len(center) >= 3:
-        cam.center = (
-            float(center[0]),
-            float(center[1]),
-            float(center[2]),
-        )
+    center_source = snapshot.volume_center if snapshot.volume_center is not None else volume_state.pose.center
+    assert center_source is not None and len(center_source) >= 3, "volume snapshot missing center"
+    center = (
+        float(center_source[0]),
+        float(center_source[1]),
+        float(center_source[2]),
+    )
+    cam.center = center
 
-    angles = volume_state.pose_angles
-    if angles is not None and len(angles) >= 2:
-        cam.azimuth = float(angles[0])
-        cam.elevation = float(angles[1])
-        if len(angles) >= 3:
-            cam.roll = float(angles[2])  # type: ignore[attr-defined]
 
-    if volume_state.pose_distance is not None:
-        cam.distance = float(volume_state.pose_distance)
-    if volume_state.pose_fov is not None:
-        cam.fov = float(volume_state.pose_fov)
+    angles_source = snapshot.volume_angles if snapshot.volume_angles is not None else volume_state.pose.angles
+    assert angles_source is not None and len(angles_source) >= 2, "volume snapshot missing angles"
+    roll_value = float(angles_source[2]) if len(angles_source) >= 3 else float(volume_state.pose.angles[2]) if volume_state.pose.angles is not None and len(volume_state.pose.angles) >= 3 else 0.0
+    angles = (float(angles_source[0]), float(angles_source[1]), roll_value)
+    cam.azimuth = angles[0]
+    cam.elevation = angles[1]
+    cam.roll = angles[2]
+
+    distance_source = snapshot.volume_distance if snapshot.volume_distance is not None else volume_state.pose.distance
+    assert distance_source is not None, "volume snapshot missing distance"
+    distance_val = float(distance_source)
+    cam.distance = distance_val
+    fov_source = snapshot.volume_fov if snapshot.volume_fov is not None else volume_state.pose.fov
+    assert fov_source is not None, "volume snapshot missing fov"
+    fov_val = float(fov_source)
+    cam.fov = fov_val
+
+    volume_state.update_pose(center=center, angles=angles, distance=distance_val, fov=fov_val)
 
 
 def apply_volume_level(
