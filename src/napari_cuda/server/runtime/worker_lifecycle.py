@@ -288,10 +288,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     bool(has_camera_deltas),
                     server._animate,
                 )
-                worker._consume_render_snapshot(
-                    frame_state,
-                    apply_camera_pose=not has_camera_deltas,
-                )
+                worker._consume_render_snapshot(frame_state)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 

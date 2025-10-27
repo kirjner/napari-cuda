@@ -1587,7 +1587,15 @@ def reduce_camera_update(
         else:
             ledger_updates.append((scope, "main", key, value))
 
-    if _current_ndisplay(ledger) < 3:
+    use_volume_path = False
+    if distance is not None or fov is not None:
+        use_volume_path = True
+    elif angles is not None and len(angles) >= 2:
+        use_volume_path = True
+    elif _current_ndisplay(ledger) >= 3:
+        use_volume_path = True
+
+    if not use_volume_path:
         plane_state = _load_plane_state(ledger)
         dims_payload = _ledger_dims_payload(ledger)
         plane_state.target_ndisplay = 2

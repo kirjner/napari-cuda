@@ -196,7 +196,6 @@ class EGLRendererWorker:
         self._applied_versions: dict[tuple[str, str, str], int] = {}
         self._last_plane_pose: Optional[tuple] = None
         self._last_volume_pose: Optional[tuple] = None
-        self._skip_camera_pose: bool = False
 
         if policy_name:
             try:
@@ -300,12 +299,13 @@ class EGLRendererWorker:
         self.canvas = canvas
         self.view = view
         self._viewer = viewer
-        # Ensure the camera frames current data extents on first init
+        # Ensure both plane and volume camera poses are bootstrapped so restores are deterministic.
         assert self.view is not None, "adapter must supply a VisPy view"
-        cam = self.view.camera
-        if cam is not None:
-            self._apply_camera_reset(cam)
-            self._emit_current_camera_pose("bootstrap")
+        active_mode = self._viewport_state.mode
+        self._bootstrap_camera_pose(RenderMode.PLANE, source, reason="bootstrap-plane")
+        self._bootstrap_camera_pose(RenderMode.VOLUME, source, reason="bootstrap-volume")
+        self._viewport_state.mode = active_mode
+        self._configure_camera_for_mode()
 
     def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
         """Set napari dims.range to match the chosen level shape.
@@ -446,6 +446,90 @@ class EGLRendererWorker:
         self._last_interaction_ts = time.perf_counter()
         callback(intent)
         self._mark_render_tick_needed()
+
+    def _bootstrap_camera_pose(
+        self,
+        mode: RenderMode,
+        source: Optional[ZarrSceneSource],
+        *,
+        reason: str,
+    ) -> None:
+        """Frame and emit an initial pose for the requested render mode."""
+
+        if self.view is None:
+            return
+
+        original_mode = self._viewport_state.mode
+        original_camera = self.view.camera
+
+        if mode is RenderMode.PLANE:
+            self._viewport_state.mode = RenderMode.PLANE
+            self._configure_camera_for_mode()
+            plane_state = self.viewport_state.plane
+            rect = plane_state.pose.rect
+            center = plane_state.pose.center
+            zoom = plane_state.pose.zoom
+            cam = self.view.camera
+            assert isinstance(cam, PanZoomCamera)
+            if rect is not None and len(rect) >= 4:
+                cam.rect = Rect(
+                    float(rect[0]),
+                    float(rect[1]),
+                    float(rect[2]),
+                    float(rect[3]),
+                )
+            else:
+                self._apply_camera_reset(cam)
+            if center is not None and len(center) >= 2:
+                cam.center = (
+                    float(center[0]),
+                    float(center[1]),
+                )
+            if zoom is not None:
+                cam.zoom = float(zoom)
+            self._emit_current_camera_pose(reason)
+
+        else:
+            source = self._ensure_scene_source()
+            coarse_level = _coarsest_level_index(source)
+            assert coarse_level is not None and coarse_level >= 0, "volume bootstrap requires multiscale levels"
+            prev_mode = self._viewport_state.mode
+            prev_level = self._current_level_index()
+            prev_step = self._ledger_step()
+            self._viewport_state.mode = RenderMode.VOLUME
+            self._set_current_level_index(int(coarse_level))
+            applied_context = lod.build_level_context(
+                lod.LevelDecision(
+                    desired_level=int(coarse_level),
+                    selected_level=int(coarse_level),
+                    reason="bootstrap-volume",
+                    timestamp=time.perf_counter(),
+                    oversampling={},
+                    downgraded=False,
+                ),
+                source=source,
+                prev_level=int(prev_level),
+                last_step=prev_step,
+            )
+            apply_volume_metadata(self, source, applied_context)
+            apply_volume_level(
+                self,
+                source,
+                applied_context,
+                downgraded=False,
+            )
+            extent = self._volume_world_extents()
+            if extent is None:
+                raise RuntimeError("volume bootstrap failed to determine world extents")
+            self._configure_camera_for_mode()
+            self._emit_current_camera_pose(reason)
+            self._set_current_level_index(int(prev_level))
+            self._viewport_state.mode = prev_mode
+
+        self._viewport_state.mode = original_mode
+        if original_camera is not None:
+            self.view.camera = original_camera
+        self._configure_camera_for_mode()
 
     def _configure_camera_for_mode(self) -> None:
         view = self.view
@@ -1406,7 +1490,7 @@ class EGLRendererWorker:
             self._last_interaction_ts = time.perf_counter()
             scene_state = self._normalize_scene_state(delta.scene_state)
         if scene_state is not None:
-            self._render_mailbox.set_scene_state(scene_state, apply_camera_pose=delta.apply_camera_pose)
+            self._render_mailbox.set_scene_state(scene_state)
             self._mark_render_tick_needed()
             return
 
@@ -1463,13 +1547,11 @@ class EGLRendererWorker:
     def _consume_render_snapshot(
         self,
         state: RenderLedgerSnapshot,
-        *,
-        apply_camera_pose: bool = True,
     ) -> None:
         """Queue a complete scene state snapshot for the next frame."""
 
         normalized = self._normalize_scene_state(state)
-        self._render_mailbox.set_scene_state(normalized, apply_camera_pose=apply_camera_pose)
+        self._render_mailbox.set_scene_state(normalized)
         self._mark_render_tick_needed()
         self._last_interaction_ts = time.perf_counter()
 
@@ -1525,7 +1607,18 @@ class EGLRendererWorker:
         reset_worker_camera(self, cam)
 
     def _emit_current_camera_pose(self, reason: str) -> None:
-        """Snapshot and emit the current camera pose for ledger sync."""
+        """Emit the active camera pose for ledger sync."""
+
+        cam = self.view.camera if self.view is not None else None
+        if cam is None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("pose.emit skipped (no active camera) reason=%s", reason)
+            return
+
+        self._emit_pose_from_camera(cam, reason)
+
+    def _emit_pose_from_camera(self, camera, reason: str) -> None:
+        """Emit the pose derived from ``camera`` without mutating the render camera."""
 
         callback = self._camera_pose_callback
         if callback is None:
@@ -1533,15 +1626,16 @@ class EGLRendererWorker:
                 logger.debug("pose.emit skipped (no callback) reason=%s", reason)
             return
 
+        target = "main"
         base_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
         next_seq = base_seq + 1
-        pose = self._snapshot_camera_pose("main", int(next_seq))
+        pose = self._pose_from_camera(camera, target, int(next_seq))
         if pose is None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("pose.emit skipped (no pose) reason=%s seq=%d", reason, int(self._pose_seq))
             return
 
-        if self._viewport_state.mode is RenderMode.VOLUME:
+        if pose.angles is not None or pose.distance is not None:
             volume_key = (
                 tuple(float(v) for v in pose.center) if pose.center is not None else None,
                 tuple(float(v) for v in pose.angles) if pose.angles is not None else None,
@@ -1568,7 +1662,7 @@ class EGLRendererWorker:
         self._pose_seq = int(next_seq)
 
         if logger.isEnabledFor(logging.INFO):
-            mode = "volume" if self._viewport_state.mode is RenderMode.VOLUME else "plane"
+            mode = "volume" if pose.angles is not None or pose.distance is not None else "plane"
             rect = pose.rect if pose.rect is not None else None
             logger.info(
                 "pose.emit: seq=%d reason=%s mode=%s rect=%s center=%s zoom=%s",
@@ -1583,11 +1677,7 @@ class EGLRendererWorker:
         callback(pose)
         self._max_camera_command_seq = max(int(self._max_camera_command_seq), int(next_seq))
 
-    def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
-        view = self.view
-        if view is None:
-            return None
-        cam = view.camera
+    def _pose_from_camera(self, camera, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
         def _center_tuple(camera) -> Optional[tuple[float, ...]]:
             center_value = getattr(camera, "center", None)
             if callable(center_value):
@@ -1596,24 +1686,20 @@ class EGLRendererWorker:
                 return None
             return tuple(float(component) for component in center_value)
 
-        volume_state = self._viewport_state.volume
-        plane_state = self._viewport_state.plane
-
-        if isinstance(cam, TurntableCamera):
-            center_tuple = _center_tuple(cam)
-            distance_val = float(cam.distance)
-            fov_val = float(cam.fov)
-            azimuth = float(cam.azimuth)
-            elevation = float(cam.elevation)
-            roll = float(getattr(cam, "roll", 0.0))
-            volume_update: dict[str, object] = {
-                "angles": (azimuth, elevation, roll),
-                "distance": distance_val,
-                "fov": fov_val,
-            }
-            if center_tuple is not None:
-                volume_update["center"] = tuple(float(v) for v in center_tuple)
-            volume_state.update_pose(**volume_update)
+        if isinstance(camera, TurntableCamera):
+            center_tuple = _center_tuple(camera)
+            distance_val = float(camera.distance)
+            fov_val = float(camera.fov)
+            azimuth = float(camera.azimuth)
+            elevation = float(camera.elevation)
+            roll = float(getattr(camera, "roll", 0.0))
+            volume_state = self._viewport_state.volume
+            volume_state.update_pose(
+                center=center_tuple,
+                angles=(azimuth, elevation, roll),
+                distance=distance_val,
+                fov=fov_val,
+            )
             return CameraPoseApplied(
                 target=str(target or "main"),
                 command_seq=int(command_seq),
@@ -1624,9 +1710,10 @@ class EGLRendererWorker:
                 fov=fov_val,
                 rect=None,
             )
-        if isinstance(cam, PanZoomCamera):
-            center_tuple = _center_tuple(cam)
-            rect_obj = cam.rect
+
+        if isinstance(camera, PanZoomCamera):
+            center_tuple = _center_tuple(camera)
+            rect_obj = camera.rect
             rect_tuple: Optional[tuple[float, float, float, float]]
             if rect_obj is None:
                 rect_tuple = None
@@ -1637,13 +1724,35 @@ class EGLRendererWorker:
                     float(rect_obj.width),
                     float(rect_obj.height),
                 )
-            zoom_attr = cam.zoom
+            zoom_attr = camera.zoom
             if callable(zoom_attr):
-                zoom_attr = cam._zoom if hasattr(cam, "_zoom") else 1.0  # type: ignore[attr-defined]
+                zoom_attr = camera._zoom if hasattr(camera, "_zoom") else 1.0  # type: ignore[attr-defined]
             zoom_val = float(zoom_attr)
+            plane_state = self._viewport_state.plane
             update_kwargs = {"zoom": zoom_val}
             if rect_tuple is not None:
                 update_kwargs["rect"] = rect_tuple
+            if center_tuple is not None and len(center_tuple) >= 2:
+                update_kwargs["center"] = (float(center_tuple[0]), float(center_tuple[1]))
+            plane_state.update_pose(**update_kwargs)
+            return CameraPoseApplied(
+                target=str(target or "main"),
+                command_seq=int(command_seq),
+                center=center_tuple,
+                zoom=zoom_val,
+                angles=None,
+                distance=None,
+                fov=None,
+                rect=rect_tuple,
+            )
+
+        return None
+
+    def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
+        view = self.view
+        if view is None:
+            return None
+        return self._pose_from_camera(view.camera, target, command_seq)
             if center_tuple is not None and len(center_tuple) >= 2:
                 update_kwargs["center"] = (float(center_tuple[0]), float(center_tuple[1]))
             plane_state.update_pose(**update_kwargs)
@@ -1802,9 +1911,7 @@ class EGLRendererWorker:
         previous_mode = self._viewport_state.mode
         signature_changed = self._render_mailbox.update_state_signature(state)
         if signature_changed:
-            self._skip_camera_pose = not updates.apply_camera_pose
             apply_render_snapshot(self, state_for_apply)
-            self._skip_camera_pose = False
 
         if updates.mode is not None:
             self._viewport_state.mode = updates.mode

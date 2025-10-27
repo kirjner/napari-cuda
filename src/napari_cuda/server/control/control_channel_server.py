@@ -508,7 +508,6 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
         )
         volume_state = replace(restored_volume_state) if restored_volume_state is not None else replace(base_state.volume)
         desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
-        apply_camera_pose = bool(restored_volume_state is not None or new_ndisplay < 3)
 
         if logger.isEnabledFor(logging.INFO):
             logger.info(
@@ -530,7 +529,6 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
                 mode=desired_mode,
                 plane_state=plane_state,
                 volume_state=volume_state,
-                apply_camera_pose=apply_camera_pose,
             )
         )
 

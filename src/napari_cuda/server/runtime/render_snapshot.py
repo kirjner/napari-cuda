@@ -179,15 +179,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         elif entering_volume:
             worker._configure_camera_for_mode()
 
-        if entering_volume:
-            pose_missing = any(
-                getattr(snapshot, field) is None
-                for field in ("volume_center", "volume_angles", "volume_distance", "volume_fov")
-            )
-            if pose_missing:
-                worker._emit_current_camera_pose("bootstrap-volume")
-        if not worker._skip_camera_pose:
-            apply_volume_camera_pose(worker, snapshot)
+        apply_volume_camera_pose(worker, snapshot)
         return
 
     stage_prev_level = prev_level
@@ -224,6 +216,5 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         worker._last_dims_signature = None
     apply_plane_metadata(worker, source, applied_context)
     worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
-    if not worker._skip_camera_pose:
-        apply_plane_camera_pose(worker, snapshot)
+    apply_plane_camera_pose(worker, snapshot)
     apply_slice_level(worker, source, applied_context)

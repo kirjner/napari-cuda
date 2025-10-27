@@ -291,7 +291,6 @@ class CaptureWorker:
         self._pose_seq = 0
         self._max_camera_command_seq = 0
         self._last_dims_signature = None
-        self._skip_camera_pose = False
         from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 
         self._canonical_axes = canonical_axes_from_source(
