@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
-from napari_cuda.server.runtime.viewport import PoseEvent, ViewportPlan, ViewportRunner
+from napari_cuda.server.runtime.viewport import PoseEvent, ViewportOps, ViewportRunner
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.scene_types import SliceROI
 
@@ -42,14 +42,14 @@ def _roi_resolver(level: int, rect: Tuple[float, float, float, float]) -> SliceR
     return SliceROI(int(y0 // 4) * 4, int(y1 // 4) * 4, int(x0 // 4) * 4, int(x1 // 4) * 4)
 
 
-def _apply_plan(runner: ViewportRunner, plan: ViewportPlan) -> None:
-    if plan.level_change:
+def _apply_ops(runner: ViewportRunner, ops: ViewportOps) -> None:
+    if ops.level_change:
         target_level = (
-            plan.slice_task.level if plan.slice_task is not None else runner.state.request.level
+            ops.slice_task.level if ops.slice_task is not None else runner.state.request.level
         )
         runner.mark_level_applied(target_level)
-    if plan.slice_task is not None:
-        runner.mark_slice_applied(plan.slice_task)
+    if ops.slice_task is not None:
+        runner.mark_slice_applied(ops.slice_task)
 
 
 def test_level_switch_sets_level_change_flag() -> None:
@@ -57,11 +57,11 @@ def test_level_switch_sets_level_change_flag() -> None:
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=2))
 
-    plan = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
 
-    assert isinstance(plan, ViewportPlan)
-    assert plan.level_change is True
-    _apply_plan(runner, plan)
+    assert isinstance(ops, ViewportOps)
+    assert ops.level_change is True
+    _apply_ops(runner, ops)
     follow_up = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
     assert follow_up.level_change is False
 
@@ -71,12 +71,12 @@ def test_repeated_roi_within_chunk_skips_reload() -> None:
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(rect=(0.0, 0.0, 64.0, 64.0)))
     first = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
-    _apply_plan(runner, first)
+    _apply_ops(runner, first)
 
     runner.ingest_snapshot(_make_snapshot(rect=(2.0, 2.0, 62.0, 62.0)))
-    plan = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
 
-    assert plan.slice_task is None
+    assert ops.slice_task is None
 
 
 def test_roi_reload_triggers_on_chunk_change() -> None:
@@ -84,21 +84,21 @@ def test_roi_reload_triggers_on_chunk_change() -> None:
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(rect=(0.0, 0.0, 32.0, 32.0)))
     first = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
-    _apply_plan(runner, first)
+    _apply_ops(runner, first)
 
     runner.ingest_snapshot(_make_snapshot(rect=(64.0, 0.0, 96.0, 32.0)))
-    plan = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
 
-    assert plan.slice_task is not None
+    assert ops.slice_task is not None
 
 
 def test_volume_mode_disables_roi_reload() -> None:
     runner = ViewportRunner()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
 
-    plan = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
 
-    assert plan.slice_task is None
+    assert ops.slice_task is None
 
 
 def test_volume_level_request_does_not_wait_for_confirm() -> None:
@@ -109,9 +109,9 @@ def test_volume_level_request_does_not_wait_for_confirm() -> None:
     requested = runner.request_level(2)
     assert requested is True
 
-    plan = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
-    assert plan.level_change is True
-    _apply_plan(runner, plan)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    assert ops.level_change is True
+    _apply_ops(runner, ops)
     assert runner.state.applied.level == 2
 
 
@@ -120,9 +120,9 @@ def test_volume_pose_emits_only_on_dirty_events() -> None:
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
     runner.request_level(2)
-    plan = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
-    _apply_plan(runner, plan)
-    assert plan.pose_event is PoseEvent.LEVEL_RELOAD
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    _apply_ops(runner, ops)
+    assert ops.pose_event is PoseEvent.LEVEL_RELOAD
 
     second = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
     assert second.pose_event is None
@@ -142,6 +142,6 @@ def test_zoom_hint_consumed_once() -> None:
     runner.ingest_camera_deltas(commands)
     assert runner.state.zoom_hint == 0.85
 
-    plan = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
-    assert plan.zoom_hint == 0.85
+    ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
+    assert ops.zoom_hint == 0.85
     assert runner.state.zoom_hint is None

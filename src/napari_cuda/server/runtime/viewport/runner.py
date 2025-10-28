@@ -35,8 +35,8 @@ class SliceTask:
 
 
 @dataclass(frozen=True)
-class ViewportPlan:
-    """Planned work for the next render tick."""
+class ViewportOps:
+    """Work orders for the next render tick."""
 
     level_change: bool
     slice_task: Optional[SliceTask]
@@ -176,7 +176,7 @@ class ViewportRunner:
         *,
         source: Any,
         roi_resolver: Callable[[int, tuple[float, float, float, float]], SliceROI],
-    ) -> ViewportPlan:
+    ) -> ViewportOps:
         """Decide what needs to change during the next render tick."""
 
         state = self._plane
@@ -214,7 +214,7 @@ class ViewportRunner:
             if pose_event is None and state.camera_dirty:
                 pose_event = PoseEvent.CAMERA_DELTA
                 state.camera_dirty = False
-            return ViewportPlan(level_change_ready, None, pose_event, intent_zoom_hint)
+            return ViewportOps(level_change_ready, None, pose_event, intent_zoom_hint)
 
         if level_change_ready:
             self._slice_reload_required = False
@@ -226,7 +226,7 @@ class ViewportRunner:
             if pose_event is None and state.camera_dirty:
                 pose_event = PoseEvent.CAMERA_DELTA
                 state.camera_dirty = False
-            return ViewportPlan(False, None, pose_event, intent_zoom_hint)
+            return ViewportOps(False, None, pose_event, intent_zoom_hint)
 
         rect = state.pose.rect
         if rect is not None:
@@ -260,7 +260,7 @@ class ViewportRunner:
             pose_event = PoseEvent.CAMERA_DELTA
             state.camera_dirty = False
 
-        return ViewportPlan(level_change_ready, slice_out, pose_event, intent_zoom_hint)
+        return ViewportOps(level_change_ready, slice_out, pose_event, intent_zoom_hint)
 
     def mark_level_applied(self, level: int) -> None:
         """Clear level reload state once the worker finishes applying it."""

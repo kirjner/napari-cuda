@@ -11,7 +11,7 @@ from .state import (
     VolumePose,
     VolumeState,
 )
-from .runner import SliceTask, ViewportPlan, ViewportRunner
+from .runner import SliceTask, ViewportOps, ViewportRunner
 
 __all__ = [
     "PlaneRequest",
@@ -21,7 +21,7 @@ __all__ = [
     "PoseEvent",
     "RenderMode",
     "SliceTask",
-    "ViewportPlan",
+    "ViewportOps",
     "ViewportRunner",
     "ViewportState",
     "VolumePose",
