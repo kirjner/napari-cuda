@@ -20,14 +20,27 @@ from napari_cuda.server.runtime.roi_math import (
     roi_chunk_signature,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
-from .state import PlaneState
+from .state import PlaneRequest, PlaneResult, PlaneState, PoseEvent
 
 
 @dataclass(frozen=True)
-class ViewportIntent:
+class SliceTask:
+    """Aligned slice data the worker should apply."""
+
+    level: int
+    step: Optional[tuple[int, ...]]
+    roi: SliceROI
+    chunk_shape: tuple[int, int]
+    signature: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class ViewportPlan:
+    """Planned work for the next render tick."""
+
     level_change: bool
-    roi_change: bool
-    pose_reason: Optional[str]
+    slice_task: Optional[SliceTask]
+    pose_event: Optional[PoseEvent]
     zoom_hint: Optional[float] = None
 
 
@@ -37,6 +50,10 @@ class ViewportRunner:
     def __init__(self, plane_state: Optional[PlaneState] = None) -> None:
         self._plane = plane_state if plane_state is not None else PlaneState()
         self._snapshot_pending: Optional[RenderLedgerSnapshot] = None
+        self._level_reload_required: bool = False
+        self._slice_reload_required: bool = False
+        self._pending_slice: Optional[SliceTask] = None
+        self._pending_pose_event: Optional[PoseEvent] = None
 
     @property
     def state(self) -> PlaneState:
@@ -47,27 +64,30 @@ class ViewportRunner:
 
         self._snapshot_pending = snapshot
         state = self._plane
+        request = state.request
+        applied = state.applied
 
         snapshot_level: Optional[int] = None
         if snapshot.current_level is not None:
             snapshot_level = int(snapshot.current_level)
-            state.snapshot_level = snapshot_level
-            if state.level_reload_required:
-                state.awaiting_level_confirm = snapshot_level != state.target_level
+            request.snapshot_level = snapshot_level
+            if self._level_reload_required:
+                request.awaiting_level_confirm = snapshot_level != request.level
             else:
-                state.target_level = snapshot_level
-                if state.applied_level != snapshot_level:
-                    state.level_reload_required = True
-                    state.awaiting_level_confirm = False
-                    state.pose_reason = "level-reload"
+                request.level = snapshot_level
+                if applied.level != snapshot_level:
+                    self._level_reload_required = True
+                    request.awaiting_level_confirm = False
+                    if self._pending_pose_event is None:
+                        self._pending_pose_event = PoseEvent.LEVEL_RELOAD
                 else:
-                    state.level_reload_required = False
-                    state.awaiting_level_confirm = False
+                    self._level_reload_required = False
+                    request.awaiting_level_confirm = False
         else:
-            state.level_reload_required = state.applied_level != state.target_level
-            state.awaiting_level_confirm = state.level_reload_required
+            self._level_reload_required = applied.level != request.level
+            request.awaiting_level_confirm = self._level_reload_required
 
-        target_level = state.target_level
+        target_level = request.level
         target_ndisplay = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
         target_step = (
             tuple(int(v) for v in snapshot.current_step)
@@ -75,32 +95,17 @@ class ViewportRunner:
             else None
         )
 
-        state.target_level = target_level
-        state.target_ndisplay = target_ndisplay
-        state.target_step = target_step
+        request.level = target_level
+        request.ndisplay = target_ndisplay
+        request.step = target_step
 
         if target_ndisplay >= 3:
             # Volume snapshots do not require ROI tracking.
-            state.roi_reload_required = False
-            state.pending_roi = None
-            state.pending_roi_signature = None
-            state.applied_roi = None
-            state.applied_roi_signature = None
-            state.applied_step = None
-
-        if target_level == state.applied_level and not state.level_reload_required:
-            state.awaiting_level_confirm = False
-
-        if (
-            target_step is not None
-            and target_step != state.applied_step
-            and not state.awaiting_level_confirm
-        ):
-            state.roi_reload_required = True
-            state.pending_roi = None
-            state.pending_roi_signature = None
-
-        if target_ndisplay < 3:
+            self._slice_reload_required = False
+            self._pending_slice = None
+            state.applied = PlaneResult(level=applied.level, step=None, roi_signature=None)
+            request.awaiting_level_confirm = False
+        else:
             if snapshot.plane_rect is not None:
                 state.update_pose(rect=tuple(float(v) for v in snapshot.plane_rect))
             if snapshot.plane_center is not None and len(snapshot.plane_center) >= 2:
@@ -108,13 +113,24 @@ class ViewportRunner:
             if snapshot.plane_zoom is not None:
                 state.update_pose(zoom=float(snapshot.plane_zoom))
 
+        if target_level == applied.level and not self._level_reload_required:
+            request.awaiting_level_confirm = False
+
+        if (
+            target_step is not None
+            and target_step != applied.step
+            and not request.awaiting_level_confirm
+        ):
+            self._slice_reload_required = True
+            self._pending_slice = None
+
     def ingest_camera_deltas(self, commands: Sequence[Any]) -> None:
         """Fold camera deltas into cached info (zoom hints only)."""
 
         if not commands:
             return
         state = self._plane
-        dirty = state.camera_pose_dirty
+        dirty = state.camera_dirty
         for command in commands:
             kind = getattr(command, "kind", None)
             if kind is None:
@@ -128,22 +144,24 @@ class ViewportRunner:
             factor = float(factor)
             if factor > 0.0:
                 state.zoom_hint = factor
-        state.camera_pose_dirty = dirty
+        state.camera_dirty = dirty
 
     def request_level(self, level: int) -> bool:
         level = int(level)
         state = self._plane
-        if state.target_level == level:
-            if state.level_reload_required:
+        request = state.request
+        applied = state.applied
+        if request.level == level:
+            if self._level_reload_required:
                 return False
-            if state.applied_level == level:
+            if applied.level == level:
                 return False
-        state.target_level = level
-        state.level_reload_required = True
-        state.awaiting_level_confirm = True
-        state.pose_reason = "level-reload"
-        if state.target_ndisplay >= 3:
-            state.awaiting_level_confirm = False
+        request.level = level
+        self._level_reload_required = True
+        request.awaiting_level_confirm = True
+        self._pending_pose_event = PoseEvent.LEVEL_RELOAD
+        if request.ndisplay >= 3:
+            request.awaiting_level_confirm = False
         return True
 
     def update_camera_rect(self, rect: Optional[tuple[float, float, float, float]]) -> None:
@@ -158,16 +176,21 @@ class ViewportRunner:
         *,
         source: Any,
         roi_resolver: Callable[[int, tuple[float, float, float, float]], SliceROI],
-    ) -> ViewportIntent:
+    ) -> ViewportPlan:
         """Decide what needs to change during the next render tick."""
 
         state = self._plane
-        pose_reason = state.pose_reason
+        intent_state = state.request
+        applied = state.applied
+
+        pose_event = self._pending_pose_event
+        self._pending_pose_event = None
+
         intent_zoom_hint = state.zoom_hint
         state.zoom_hint = None
 
         snapshot = self._snapshot_pending
-        if snapshot is not None and state.target_ndisplay < 3:
+        if snapshot is not None and intent_state.ndisplay < 3:
             self._snapshot_pending = None
             if snapshot.plane_rect is not None:
                 state.update_pose(rect=tuple(float(v) for v in snapshot.plane_rect))
@@ -176,84 +199,104 @@ class ViewportRunner:
             if snapshot.plane_zoom is not None:
                 state.update_pose(zoom=float(snapshot.plane_zoom))
 
-        level_change = bool(state.level_reload_required and not state.awaiting_level_confirm)
-        roi_change = False
+        level_change_ready = bool(self._level_reload_required and not intent_state.awaiting_level_confirm)
+        slice_out: Optional[SliceTask] = self._pending_slice if self._slice_reload_required else None
 
-        if state.target_ndisplay >= 3:
-            state.level_reload_required = False
-            state.awaiting_level_confirm = False
-            state.roi_reload_required = False
-            state.pending_roi = None
-            state.pending_roi_signature = None
-            pose_reason_out = pose_reason
-            if pose_reason_out is None and level_change:
-                pose_reason_out = "level-reload"
-            if pose_reason_out is None and state.camera_pose_dirty:
-                pose_reason_out = "camera-delta"
-                state.camera_pose_dirty = False
-            if state.applied_level != state.target_level:
-                state.applied_level = state.target_level
-            if state.pose_reason == "level-reload":
-                state.pose_reason = None
-            return ViewportIntent(level_change, False, pose_reason_out, intent_zoom_hint)
+        if intent_state.ndisplay >= 3:
+            self._level_reload_required = False
+            intent_state.awaiting_level_confirm = False
+            self._slice_reload_required = False
+            self._pending_slice = None
+            if applied.level != intent_state.level:
+                applied.level = intent_state.level
+            if pose_event is None and level_change_ready:
+                pose_event = PoseEvent.LEVEL_RELOAD
+            if pose_event is None and state.camera_dirty:
+                pose_event = PoseEvent.CAMERA_DELTA
+                state.camera_dirty = False
+            return ViewportPlan(level_change_ready, None, pose_event, intent_zoom_hint)
 
-        if level_change:
-            state.roi_reload_required = False
-            state.pending_roi = None
-            state.pending_roi_signature = None
+        if level_change_ready:
+            self._slice_reload_required = False
+            self._pending_slice = None
+            if pose_event is None:
+                pose_event = PoseEvent.LEVEL_RELOAD
 
-        if state.awaiting_level_confirm:
-            return ViewportIntent(False, False, pose_reason, intent_zoom_hint)
+        if intent_state.awaiting_level_confirm:
+            if pose_event is None and state.camera_dirty:
+                pose_event = PoseEvent.CAMERA_DELTA
+                state.camera_dirty = False
+            return ViewportPlan(False, None, pose_event, intent_zoom_hint)
 
         rect = state.pose.rect
         if rect is not None:
-            chunk_shape = chunk_shape_for_level(source, state.target_level)
-            target_roi = roi_resolver(state.target_level, rect)
+            chunk_shape_src = chunk_shape_for_level(source, intent_state.level)
+            chunk_shape = (int(chunk_shape_src[0]), int(chunk_shape_src[1]))
+            target_roi = roi_resolver(intent_state.level, rect)
             signature = roi_chunk_signature(target_roi, chunk_shape)
 
-            step_mismatch = state.target_step != state.applied_step
-            if state.applied_roi_signature != signature or step_mismatch or state.roi_reload_required:
-                state.roi_reload_required = True
-                state.pending_roi = target_roi
-                state.pending_roi_signature = signature
-                roi_change = True
-                if pose_reason is None:
-                    pose_reason = "roi-reload"
+            step_mismatch = intent_state.step != applied.step
+            if (
+                signature != applied.roi_signature
+                or step_mismatch
+                or self._slice_reload_required
+            ):
+                slice_candidate = SliceTask(
+                    level=intent_state.level,
+                    step=intent_state.step,
+                    roi=target_roi,
+                    chunk_shape=chunk_shape,
+                    signature=signature,
+                )
+                self._pending_slice = slice_candidate
+                self._slice_reload_required = True
+                slice_out = slice_candidate
+                if pose_event is None:
+                    pose_event = PoseEvent.ROI_RELOAD
+            elif slice_out is not None:
+                slice_out = self._pending_slice
 
-        pose_reason_out = pose_reason
-        camera_dirty = state.camera_pose_dirty
-        if pose_reason_out is None and camera_dirty:
-            pose_reason_out = "camera-delta"
-            camera_dirty = False
-        state.camera_pose_dirty = camera_dirty
+        if pose_event is None and state.camera_dirty:
+            pose_event = PoseEvent.CAMERA_DELTA
+            state.camera_dirty = False
 
-        return ViewportIntent(level_change, roi_change, pose_reason_out, intent_zoom_hint)
+        return ViewportPlan(level_change_ready, slice_out, pose_event, intent_zoom_hint)
 
     def mark_level_applied(self, level: int) -> None:
         """Clear level reload state once the worker finishes applying it."""
 
         state = self._plane
-        state.applied_level = int(level)
-        state.level_reload_required = False
-        state.awaiting_level_confirm = False
-        state.target_level = state.applied_level
-        if state.pose_reason == "level-reload":
-            state.pose_reason = None
+        request = state.request
+        applied = state.applied
+        applied.level = int(level)
+        self._level_reload_required = False
+        request.awaiting_level_confirm = False
+        request.level = applied.level
 
-    def mark_roi_applied(
-        self,
-        roi: SliceROI,
-        *,
-        chunk_shape: Optional[tuple[int, int]],
-    ) -> None:
+    def mark_slice_applied(self, slice_task: SliceTask) -> None:
         """Clear ROI reload state once the worker finishes applying it."""
 
         state = self._plane
-        state.applied_roi = roi
-        state.applied_roi_signature = roi_chunk_signature(roi, chunk_shape)
-        state.roi_reload_required = False
-        state.pending_roi = None
-        state.pending_roi_signature = None
-        state.applied_step = state.target_step
-        if state.pose_reason == "roi-reload":
-            state.pose_reason = None
+        applied = state.applied
+        applied.step = slice_task.step
+        applied.roi_signature = slice_task.signature
+        self._slice_reload_required = False
+        self._pending_slice = None
+        state.applied_roi = slice_task.roi
+
+    def reset_for_volume(self) -> None:
+        """Reset plane-specific intent when switching into volume mode."""
+
+        state = self._plane
+        request = state.request
+        applied = state.applied
+        self._level_reload_required = False
+        self._slice_reload_required = False
+        self._pending_slice = None
+        self._pending_pose_event = None
+        request.awaiting_level_confirm = False
+        applied.step = None
+        applied.roi_signature = None
+        state.applied_roi = None
+        state.zoom_hint = None
+        state.camera_dirty = False

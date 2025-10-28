@@ -25,39 +25,56 @@ class PlanePose:
     zoom: Optional[float] = None
 
 
+class PoseEvent(Enum):
+    """Signals that the current camera pose should be emitted."""
+
+    LEVEL_RELOAD = "level-reload"
+    ROI_RELOAD = "roi-reload"
+    CAMERA_DELTA = "camera-delta"
+
+
+@dataclass
+class PlaneRequest:
+    """Controller request for plane rendering."""
+
+    level: int = 0
+    step: Optional[tuple[int, ...]] = None
+    ndisplay: int = 2
+    snapshot_level: Optional[int] = None
+    awaiting_level_confirm: bool = False
+
+
+@dataclass
+class PlaneResult:
+    """Last applied plane state on the worker."""
+
+    level: int = 0
+    step: Optional[tuple[int, ...]] = None
+    roi_signature: Optional[tuple[int, int, int, int]] = None
+
+
 @dataclass
 class PlaneState:
     """Controller targets, applied state, and reload flags for plane rendering."""
 
-    # Controller intent (latest snapshot)
-    target_level: int = 0
-    target_ndisplay: int = 2
-    target_step: Optional[tuple[int, ...]] = None
-    snapshot_level: Optional[int] = None
-    awaiting_level_confirm: bool = False
+    request: PlaneRequest = field(default_factory=PlaneRequest)
+    applied: PlaneResult = field(default_factory=PlaneResult)
     pose: PlanePose = field(default_factory=PlanePose)
-
-    # Applied state
-    applied_level: int = 0
-    applied_step: Optional[tuple[int, ...]] = None
-    applied_roi: Optional[SliceROI] = None
-    applied_roi_signature: Optional[tuple[int, int, int, int]] = None
-
-    # Pending reload work
-    pending_roi: Optional[SliceROI] = None
-    pending_roi_signature: Optional[tuple[int, int, int, int]] = None
-    level_reload_required: bool = False
-    roi_reload_required: bool = False
-
-    # Camera pose signals
-    pose_reason: Optional[str] = None
     zoom_hint: Optional[float] = None
-    camera_pose_dirty: bool = False
+    camera_dirty: bool = False
+    _last_roi: Optional[SliceROI] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.pose, PlanePose):
             payload = dict(self.pose) if isinstance(self.pose, dict) else {}
             self.pose = PlanePose(**payload)
+        if not isinstance(self.request, PlaneRequest):
+            if not isinstance(self.request, dict):
+                raise TypeError(f"Expected mapping for PlaneRequest, got {type(self.request)!r}")
+            self.request = PlaneRequest(**dict(self.request))
+        if not isinstance(self.applied, PlaneResult):
+            payload = dict(self.applied) if isinstance(self.applied, dict) else {}
+            self.applied = PlaneResult(**payload)
 
     def update_pose(
         self,
@@ -75,6 +92,87 @@ class PlaneState:
 
     def clear_pose(self) -> None:
         self.pose = PlanePose()
+
+    # Convenience accessors for legacy call sites ---------------------------------
+    @property
+    def target_level(self) -> int:
+        return int(self.request.level)
+
+    @target_level.setter
+    def target_level(self, value: int) -> None:
+        self.request.level = int(value)
+
+    @property
+    def target_ndisplay(self) -> int:
+        return int(self.request.ndisplay)
+
+    @target_ndisplay.setter
+    def target_ndisplay(self, value: int) -> None:
+        self.request.ndisplay = int(value)
+
+    @property
+    def target_step(self) -> Optional[tuple[int, ...]]:
+        return self.request.step
+
+    @target_step.setter
+    def target_step(self, value: Optional[tuple[int, ...]]) -> None:
+        self.request.step = tuple(int(v) for v in value) if value is not None else None
+
+    @property
+    def snapshot_level(self) -> Optional[int]:
+        return self.request.snapshot_level
+
+    @snapshot_level.setter
+    def snapshot_level(self, value: Optional[int]) -> None:
+        self.request.snapshot_level = int(value) if value is not None else None
+
+    @property
+    def awaiting_level_confirm(self) -> bool:
+        return bool(self.request.awaiting_level_confirm)
+
+    @awaiting_level_confirm.setter
+    def awaiting_level_confirm(self, value: bool) -> None:
+        self.request.awaiting_level_confirm = bool(value)
+
+    @property
+    def applied_level(self) -> int:
+        return int(self.applied.level)
+
+    @applied_level.setter
+    def applied_level(self, value: int) -> None:
+        self.applied.level = int(value)
+
+    @property
+    def applied_step(self) -> Optional[tuple[int, ...]]:
+        return self.applied.step
+
+    @applied_step.setter
+    def applied_step(self, value: Optional[tuple[int, ...]]) -> None:
+        self.applied.step = tuple(int(v) for v in value) if value is not None else None
+
+    @property
+    def applied_roi_signature(self) -> Optional[tuple[int, int, int, int]]:
+        return self.applied.roi_signature
+
+    @applied_roi_signature.setter
+    def applied_roi_signature(self, value: Optional[tuple[int, int, int, int]]) -> None:
+        self.applied.roi_signature = tuple(int(v) for v in value) if value is not None else None
+
+    @property
+    def applied_roi(self) -> Optional[SliceROI]:
+        return self._last_roi
+
+    @applied_roi.setter
+    def applied_roi(self, value: Optional[SliceROI]) -> None:
+        self._last_roi = value
+
+    @property
+    def camera_pose_dirty(self) -> bool:
+        return bool(self.camera_dirty)
+
+    @camera_pose_dirty.setter
+    def camera_pose_dirty(self, value: bool) -> None:
+        self.camera_dirty = bool(value)
 
 
 @dataclass
@@ -133,4 +231,14 @@ class ViewportState:
     op_seq: int = -1
 
 
-__all__ = ["PlanePose", "PlaneState", "RenderMode", "ViewportState", "VolumePose", "VolumeState"]
+__all__ = [
+    "PlaneResult",
+    "PlaneRequest",
+    "PlanePose",
+    "PlaneState",
+    "PoseEvent",
+    "RenderMode",
+    "ViewportState",
+    "VolumePose",
+    "VolumeState",
+]

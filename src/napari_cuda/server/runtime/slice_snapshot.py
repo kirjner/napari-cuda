@@ -18,7 +18,7 @@ from napari_cuda.server.runtime.roi_math import (
     roi_chunk_signature,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.runtime.viewport import PlaneState, RenderMode
+from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, SliceTask
 from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
 from napari_cuda.server.runtime.viewport.plane_ops import (
@@ -196,7 +196,23 @@ def apply_slice_level(
 
     runner = worker._viewport_runner
     if runner is not None:
-        runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
+        applied_step = (
+            tuple(int(v) for v in applied.step) if applied.step is not None else None
+        )
+        chunk_tuple = (
+            (int(chunk_shape[0]), int(chunk_shape[1]))
+            if chunk_shape is not None
+            else (0, 0)
+        )
+        runner.mark_slice_applied(
+            SliceTask(
+                level=int(applied.level),
+                step=applied_step,
+                roi=aligned_roi,
+                chunk_shape=chunk_tuple,
+                signature=roi_signature,
+            )
+        )
 
     worker._last_slice_signature = (
         int(applied.level),
@@ -264,7 +280,20 @@ def apply_slice_roi(
     runner = worker._viewport_runner
     if runner is not None:
         if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
-            runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
+            chunk_tuple = (
+                (int(chunk_shape[0]), int(chunk_shape[1]))
+                if chunk_shape is not None
+                else (0, 0)
+            )
+            runner.mark_slice_applied(
+                SliceTask(
+                    level=int(level),
+                    step=step_tuple,
+                    roi=aligned_roi,
+                    chunk_shape=chunk_tuple,
+                    signature=roi_signature,
+                )
+            )
             runner.mark_level_applied(int(level))
             rect = worker._current_panzoom_rect()
             if rect is not None:

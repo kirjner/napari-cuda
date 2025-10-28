@@ -2049,14 +2049,12 @@ class EGLRendererWorker:
         if self._level_policy_suppressed:
             runner = self._viewport_runner
             if runner is not None:
-                runner.state.pose_reason = None
                 runner.state.zoom_hint = None
             return
 
         if self._viewport_state.mode is RenderMode.VOLUME:
             runner = self._viewport_runner
             if runner is not None:
-                runner.state.pose_reason = None
                 runner.state.zoom_hint = None
             return
 
@@ -2065,25 +2063,25 @@ class EGLRendererWorker:
         def _resolve(level: int, _rect: tuple[float, float, float, float]) -> SliceROI:
             return viewport_roi_for_level(self, source, int(level), quiet=True)
 
-        intent = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
+        plan = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "viewport.tick intent level_change=%s roi_change=%s pose_reason=%s target_level=%d applied_level=%d awaiting=%s",
-                intent.level_change,
-                intent.roi_change,
-                intent.pose_reason,
+                "viewport.tick plan level_change=%s slice=%s pose_event=%s target_level=%d applied_level=%d awaiting=%s",
+                plan.level_change,
+                plan.slice_task.signature if plan.slice_task is not None else None,
+                plan.pose_event.value if plan.pose_event is not None else None,
                 int(self._viewport_runner.state.target_level),
                 int(self._viewport_runner.state.applied_level),
                 self._viewport_runner.state.awaiting_level_confirm,
             )
 
-        if intent.zoom_hint is not None:
-            self._render_mailbox.record_zoom_hint(float(intent.zoom_hint))
+        if plan.zoom_hint is not None:
+            self._render_mailbox.record_zoom_hint(float(plan.zoom_hint))
 
         level_applied = False
 
-        if intent.level_change:
-            target_level = int(self._viewport_runner.state.target_level)
+        if plan.level_change:
+            target_level = int(self._viewport_runner.state.request.level)
             prev_level = int(self._current_level_index())
             applied_context = self._apply_level(
                 source,
@@ -2100,47 +2098,39 @@ class EGLRendererWorker:
             self._viewport_runner.mark_level_applied(int(applied_context.level))
 
         if (
-            intent.roi_change
+            plan.slice_task is not None
             and self._viewport_state.mode is not RenderMode.VOLUME
             and not level_applied
         ):
-            pending = self._viewport_runner.state.pending_roi
-            if pending is not None:
-                level_int = int(self._viewport_runner.state.target_level)
-                step_source = self._viewport_runner.state.target_step
-                step_tuple = (
-                    tuple(int(v) for v in step_source) if step_source is not None else None
-                )
-                aligned_roi, chunk_shape, roi_signature = self._aligned_roi_signature(
+            slice_task = plan.slice_task
+            level_int = int(slice_task.level)
+            step_tuple = tuple(int(v) for v in slice_task.step) if slice_task.step is not None else None
+            signature_token = (level_int, step_tuple, slice_task.signature)
+            if self._last_slice_signature == signature_token:
+                self._viewport_runner.mark_slice_applied(slice_task)
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "viewport tick skipped roi apply: level=%s step=%s sig=%s",
+                        level_int,
+                        step_tuple,
+                        slice_task.signature,
+                    )
+            else:
+                apply_slice_roi(
+                    self,
                     source,
                     level_int,
-                    pending,
+                    slice_task.roi,
+                    update_contrast=False,
+                    step=step_tuple,
                 )
-                signature_token = (level_int, step_tuple, roi_signature)
-                if self._last_slice_signature == signature_token:
-                    self._viewport_runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
-                    if logger.isEnabledFor(logging.INFO):
-                        logger.info(
-                            "viewport tick skipped roi apply: level=%s step=%s sig=%s",
-                            level_int,
-                            step_tuple,
-                            roi_signature,
-                        )
-                else:
-                    apply_slice_roi(
-                        self,
-                        source,
-                        level_int,
-                        aligned_roi,
-                        update_contrast=False,
-                        step=step_tuple,
-                    )
+                self._viewport_runner.mark_slice_applied(slice_task)
 
         rect = self._current_panzoom_rect()
         if rect is not None:
             self._viewport_runner.update_camera_rect(rect)
-        if intent.pose_reason is not None:
-            self._emit_current_camera_pose(intent.pose_reason)
+        if plan.pose_event is not None:
+            self._emit_current_camera_pose(plan.pose_event.value)
 
 
     # ---- C6 selection (napari-anchored) -------------------------------------

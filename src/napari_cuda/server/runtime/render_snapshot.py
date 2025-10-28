@@ -14,7 +14,7 @@ from typing import Any
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.runtime.viewport import RenderMode, SliceTask
 
 from .slice_snapshot import (
     apply_slice_camera_pose,
@@ -110,16 +110,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
 
         runner = worker._viewport_runner
         if runner is not None and entering_volume:
-            state = runner.state
-            state.level_reload_required = False
-            state.awaiting_level_confirm = False
-            state.roi_reload_required = False
-            state.pending_roi = None
-            state.pending_roi_signature = None
-            state.applied_roi = None
-            state.applied_roi_signature = None
-            state.pose_reason = None
-            state.camera_pose_dirty = False
+            runner.reset_for_volume()
 
         requested_level = int(target_level)
         selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
@@ -222,11 +213,23 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     apply_plane_metadata(worker, source, applied_context)
     worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
     apply_slice_camera_pose(worker, snapshot)
+    chunk_tuple = (
+        (int(chunk_shape[0]), int(chunk_shape[1]))
+        if chunk_shape is not None
+        else (0, 0)
+    )
+    slice_task = SliceTask(
+        level=level_int,
+        step=step_tuple,
+        roi=aligned_roi,
+        chunk_shape=chunk_tuple,
+        signature=roi_signature,
+    )
     if skip_slice:
         runner = worker._viewport_runner
         if runner is not None:
             runner.mark_level_applied(level_int)
-            runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
+            runner.mark_slice_applied(slice_task)
     else:
         apply_slice_level(worker, source, applied_context)
     worker._last_snapshot_signature = snapshot_signature
