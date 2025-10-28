@@ -869,8 +869,6 @@ class EGLRendererWorker:
         self._oversampling_hysteresis = float(getattr(policy_cfg, "oversampling_hysteresis", 0.1))
 
     def _configure_roi_settings(self) -> None:
-        self._roi_cache: dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
-        self._roi_log_state: dict[int, tuple[SliceROI, float]] = {}
         worker_dbg = self._debug_policy.worker
         self._roi_edge_threshold = int(worker_dbg.roi_edge_threshold)
         self._roi_align_chunks = bool(worker_dbg.roi_align_chunks)

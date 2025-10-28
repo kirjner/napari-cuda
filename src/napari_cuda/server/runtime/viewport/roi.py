@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
@@ -30,8 +30,7 @@ def viewport_roi_for_level(
     edge_threshold = int(worker._roi_edge_threshold)
     chunk_pad = int(worker._roi_pad_chunks)
 
-    roi_log = worker._roi_log_state
-    log_state = roi_log if isinstance(roi_log, dict) else None
+    prev_roi: Optional[SliceROI] = worker.viewport_state.plane.applied_roi  # type: ignore[attr-defined]
 
     data_wh = worker._data_wh
 
@@ -44,8 +43,6 @@ def viewport_roi_for_level(
         )
 
     reason = "policy-roi" if for_policy else "roi-request"
-    roi_cache = worker._roi_cache
-
     roi = resolve_worker_viewport_roi(
         view=view,
         canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
@@ -56,8 +53,7 @@ def viewport_roi_for_level(
         ensure_contains_viewport=ensure_contains,
         edge_threshold=edge_threshold,
         for_policy=for_policy,
-        roi_cache=roi_cache,
-        roi_log_state=log_state,
+        prev_roi=prev_roi,
         snapshot_cb=_snapshot,
         log_layer_debug=worker._log_layer_debug,
         quiet=quiet,
@@ -65,11 +61,6 @@ def viewport_roi_for_level(
         reason=reason,
         logger_ref=logger,
     )
-
-    if log_state is not None:
-        log_state["roi"] = roi
-        log_state["level"] = int(level)
-        log_state["requested"] = (align_chunks, ensure_contains, chunk_pad)
 
     return roi
 
