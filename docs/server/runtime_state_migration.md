@@ -117,3 +117,56 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - New: `test_state_structs.py`, `test_slice_snapshot.py`, `test_volume_snapshot.py`, `test_volume_state.py`.
 
 Keep this document updated as we advance; it is the working contract between code and desired architecture.
+
+## Appendix A – Target Runtime Layout
+
+```
+src/napari_cuda/server/runtime/
+├── __init__.py
+├── api.py
+├── camera/
+│   ├── __init__.py
+│   ├── animator.py
+│   ├── controller.py
+│   └── service.py
+├── core/
+│   ├── __init__.py
+│   ├── bootstrap.py         # worker bootstrap context (prev renderer_context)
+│   ├── roi_utils.py         # shared ROI math helpers (prev roi_math)
+│   └── snapshot_pipeline.py # snapshot orchestrator (prev render_snapshot)
+├── data/
+│   ├── __init__.py
+│   ├── lod.py
+│   ├── roi.py               # shared viewport ROI cache/helpers
+│   └── zarr_source.py
+├── ipc/
+│   ├── __init__.py
+│   ├── mailboxes.py
+│   └── protocols.py
+├── loop/
+│   ├── __init__.py
+│   └── tick.py
+├── snapshots/
+│   ├── __init__.py
+│   ├── apply_plane.py
+│   ├── apply_volume.py
+│   ├── bootstrap.py
+│   ├── ledger.py
+│   └── viewer.py
+├── viewport/
+│   ├── __init__.py
+│   ├── layers.py
+│   ├── plane_ops.py
+│   ├── roi.py               # worker ROI resolver shim
+│   ├── runner.py
+│   ├── state.py
+│   └── updates.py
+├── worker/
+│   ├── __init__.py
+│   ├── capture.py
+│   ├── core.py
+│   ├── lifecycle.py
+│   ├── loop.py
+│   └── stage.py
+└── worker_intent_mailbox.py      # legacy shim to be folded into ipc/mailboxes
+```

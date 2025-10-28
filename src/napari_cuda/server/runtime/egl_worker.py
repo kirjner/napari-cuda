@@ -17,6 +17,7 @@ encoded packets back to the asyncio side through callbacks.
 from __future__ import annotations
 
 import logging
+import traceback
 import math
 import os
 import threading
@@ -90,6 +91,11 @@ from napari_cuda.server.runtime.slice_snapshot import (
     apply_slice_roi,
 )
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
+from napari_cuda.server.runtime.roi_math import (
+    align_roi_to_chunk_grid,
+    chunk_shape_for_level,
+    roi_chunk_signature,
+)
 from napari_cuda.server.runtime.volume_snapshot import apply_volume_level
 from napari_cuda.server.runtime.viewer_stage import (
     apply_plane_metadata,
@@ -212,6 +218,10 @@ class EGLRendererWorker:
         self._init_scene_state()
         self._camera_queue = camera_queue
         self._init_locks(camera_pose_cb, level_intent_cb)
+        self._last_slice_signature: Optional[
+            tuple[int, Optional[tuple[int, ...]], Optional[tuple[int, int, int, int]]]
+        ] = None
+        self._last_snapshot_signature: Optional[tuple] = None
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
@@ -954,6 +964,8 @@ class EGLRendererWorker:
                 applied.z_index,
                 descriptor.shape,
             )
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("worker level applied stack trace:\n%s", "".join(traceback.format_stack(limit=8)))
 
     def set_policy(self, name: str) -> None:
         new_name = str(name or '').strip().lower()
@@ -1210,6 +1222,36 @@ class EGLRendererWorker:
             self._plane_visual_handle.detach()
         handle.attach(view)
         return handle.node
+
+    def _aligned_roi_signature(
+        self,
+        source: ZarrSceneSource,
+        level: int,
+        roi: SliceROI,
+    ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
+        """Return chunk-aligned ROI and its signature for comparison."""
+
+        chunk_shape = chunk_shape_for_level(source, int(level))
+        aligned_roi = roi
+        if self._roi_align_chunks and chunk_shape is not None:
+            full_h, full_w = plane_wh_for_level(source, int(level))
+            aligned_roi = align_roi_to_chunk_grid(
+                roi,
+                chunk_shape,
+                int(self._roi_pad_chunks),
+                height=full_h,
+                width=full_w,
+            )
+        signature = roi_chunk_signature(aligned_roi, chunk_shape)
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "aligned roi signature: level=%s roi=%s chunk_shape=%s signature=%s",
+                level,
+                aligned_roi,
+                chunk_shape,
+                signature,
+            )
+        return aligned_roi, chunk_shape, signature
 
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
         if self._data_d is not None and self._data_wh is not None:
@@ -2024,6 +2066,16 @@ class EGLRendererWorker:
             return viewport_roi_for_level(self, source, int(level), quiet=True)
 
         intent = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "viewport.tick intent level_change=%s roi_change=%s pose_reason=%s target_level=%d applied_level=%d awaiting=%s",
+                intent.level_change,
+                intent.roi_change,
+                intent.pose_reason,
+                int(self._viewport_runner.state.target_level),
+                int(self._viewport_runner.state.applied_level),
+                self._viewport_runner.state.awaiting_level_confirm,
+            )
 
         if intent.zoom_hint is not None:
             self._render_mailbox.record_zoom_hint(float(intent.zoom_hint))
@@ -2054,13 +2106,35 @@ class EGLRendererWorker:
         ):
             pending = self._viewport_runner.state.pending_roi
             if pending is not None:
-                apply_slice_roi(
-                    self,
-                    source,
-                    int(self._viewport_runner.state.target_level),
-                    pending,
-                    update_contrast=False,
+                level_int = int(self._viewport_runner.state.target_level)
+                step_source = self._viewport_runner.state.target_step
+                step_tuple = (
+                    tuple(int(v) for v in step_source) if step_source is not None else None
                 )
+                aligned_roi, chunk_shape, roi_signature = self._aligned_roi_signature(
+                    source,
+                    level_int,
+                    pending,
+                )
+                signature_token = (level_int, step_tuple, roi_signature)
+                if self._last_slice_signature == signature_token:
+                    self._viewport_runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            "viewport tick skipped roi apply: level=%s step=%s sig=%s",
+                            level_int,
+                            step_tuple,
+                            roi_signature,
+                        )
+                else:
+                    apply_slice_roi(
+                        self,
+                        source,
+                        level_int,
+                        aligned_roi,
+                        update_contrast=False,
+                        step=step_tuple,
+                    )
 
         rect = self._current_panzoom_rect()
         if rect is not None:
@@ -2146,6 +2220,12 @@ class EGLRendererWorker:
             prev_level=current,
             last_step=step_hint,
         )
+
+        requested = self._viewport_runner.request_level(int(context.level))
+        if not requested:
+            logger.debug("level intent suppressed (no change or already pending)")
+            return
+
         if self._viewport_state.mode is RenderMode.VOLUME:
             apply_volume_metadata(self, source, context)
         else:
@@ -2174,11 +2254,6 @@ class EGLRendererWorker:
             decision.reason,
             intent.downgraded,
         )
-
-        requested = self._viewport_runner.request_level(int(context.level))
-        if not requested:
-            logger.debug("level intent suppressed (runner already pending)")
-            return
 
         callback = self._level_intent_callback
         if callback is None:

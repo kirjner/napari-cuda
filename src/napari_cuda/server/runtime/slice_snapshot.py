@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 from vispy.scene.cameras import PanZoomCamera
 
@@ -163,6 +163,7 @@ def apply_slice_level(
         int(applied.level),
         aligned_roi,
         update_contrast=not worker._sticky_contrast,
+        step=applied.step,
     )
 
     pose = plane_state.pose
@@ -197,6 +198,12 @@ def apply_slice_level(
     if runner is not None:
         runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
 
+    worker._last_slice_signature = (
+        int(applied.level),
+        tuple(int(v) for v in applied.step),
+        roi_signature,
+    )
+
     return SliceApplyResult(
         level=int(applied.level),
         roi=roi,
@@ -205,6 +212,8 @@ def apply_slice_level(
         width_px=int(width_px),
         height_px=int(height_px),
     )
+
+
 def apply_slice_roi(
     worker: Any,
     source: Any,
@@ -212,11 +221,27 @@ def apply_slice_roi(
     roi: SliceROI,
     *,
     update_contrast: bool,
+    step: Optional[Sequence[int]] = None,
 ) -> Tuple[int, int]:
     """Load and apply a slice for the given ROI."""
 
+    aligned_roi, chunk_shape, roi_signature = worker._aligned_roi_signature(
+        source,
+        int(level),
+        roi,
+    )
+
+    step_source: Optional[Sequence[int]] = step
+    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
+    if step_source is None:
+        if plane_state.target_step is not None:
+            step_source = plane_state.target_step
+        else:
+            step_source = plane_state.applied_step
+    step_tuple = tuple(int(v) for v in step_source) if step_source is not None else None
+
     z_idx = int(worker._z_index or 0)
-    slab = source.slice(int(level), z_idx, compute=True, roi=roi)
+    slab = source.slice(int(level), z_idx, compute=True, roi=aligned_roi)
 
     layer = worker._napari_layer
     if layer is not None:
@@ -227,7 +252,7 @@ def apply_slice_roi(
             source=source,
             level=int(level),
             slab=slab,
-            roi=roi,
+            roi=aligned_roi,
             update_contrast=bool(update_contrast),
         )
 
@@ -238,13 +263,25 @@ def apply_slice_roi(
 
     runner = worker._viewport_runner
     if runner is not None:
-        chunk_shape = chunk_shape_for_level(source, int(level))
         if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
-            runner.mark_roi_applied(roi, chunk_shape=chunk_shape)
+            runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
             runner.mark_level_applied(int(level))
             rect = worker._current_panzoom_rect()
             if rect is not None:
                 runner.update_camera_rect(rect)
+
+    worker._last_slice_signature = (
+        int(level),
+        step_tuple,
+        roi_signature,
+    )
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "updated last slice signature: level=%s step=%s roi_sig=%s",
+            int(level),
+            step_tuple,
+            roi_signature,
+        )
     worker._mark_render_tick_needed()
     return height_px, width_px
 

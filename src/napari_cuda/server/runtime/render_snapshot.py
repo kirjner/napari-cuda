@@ -202,6 +202,19 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         prev_level=stage_prev_level,
         last_step=step_hint,
     )
+    step_tuple = tuple(int(v) for v in applied_context.step)
+    level_int = int(applied_context.level)
+    roi_current = viewport_roi_for_level(worker, source, level_int)
+    aligned_roi, chunk_shape, roi_signature = worker._aligned_roi_signature(source, level_int, roi_current)
+    signature_token = (level_int, step_tuple, roi_signature)
+    last_slice_signature = getattr(worker, "_last_slice_signature", None)
+    skip_slice = not level_changed and last_slice_signature == signature_token
+    snapshot_signature = (
+        snapshot.dims_version,
+        snapshot.view_version,
+        snapshot.multiscale_level_version,
+        signature_token,
+    )
     if was_volume:
         worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
         worker._configure_camera_for_mode()
@@ -209,4 +222,11 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     apply_plane_metadata(worker, source, applied_context)
     worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
     apply_slice_camera_pose(worker, snapshot)
-    apply_slice_level(worker, source, applied_context)
+    if skip_slice:
+        runner = worker._viewport_runner
+        if runner is not None:
+            runner.mark_level_applied(level_int)
+            runner.mark_roi_applied(aligned_roi, chunk_shape=chunk_shape)
+    else:
+        apply_slice_level(worker, source, applied_context)
+    worker._last_snapshot_signature = snapshot_signature
