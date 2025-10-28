@@ -105,7 +105,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 
 ### 4.2 Side-effects to preserve during refactors
 - Napari fit suppression in `apply_render_snapshot`.
-- Ledger staging via `stage_level_context` (update dims range, metadata) until `viewer_stage` subsumes it.
+- Ledger staging via viewer metadata helpers
 - ROI logging and `chunk_shape` alignment for `plane_loader`.
 - Camera pose emission (`_emit_current_camera_pose`) once per intent.
 - Policy evaluation triggers (`_evaluate_level_policy`) when ROI reload marks render.

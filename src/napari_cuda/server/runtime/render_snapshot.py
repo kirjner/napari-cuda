@@ -46,15 +46,6 @@ def _suspend_fit_callbacks(viewer: Any):
         order_event.connect(viewer.fit_to_view)
 
 
-def stage_level_context(worker: Any, source: Any, context: lod.LevelContext) -> None:
-    """Legacy shim that now delegates to viewer_stage helpers."""
-
-    if worker.viewport_state.mode is RenderMode.VOLUME:  # type: ignore[attr-defined]
-        apply_volume_metadata(worker, source, context)
-    else:
-        apply_plane_metadata(worker, source, context)
-
-
 def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     """Apply the snapshot atomically, suppressing napari auto-fit during dims.
 
@@ -86,7 +77,6 @@ __all__ = [
     "apply_render_snapshot",
     "apply_slice_level",
     "apply_volume_level",
-    "stage_level_context",
     "viewport_roi_for_level",
 ]
 
