@@ -16,17 +16,19 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.state_structs import RenderMode
 
-from .plane_loader import (
-    apply_plane_slice_roi as _apply_plane_slice_roi,
+from .slice_snapshot import (
+    apply_slice_camera_pose,
+    apply_slice_level,
+    apply_slice_roi as _apply_slice_roi,
     viewport_roi_for_level as _viewport_roi_for_level,
 )
-from .plane_snapshot import apply_plane_camera_pose, apply_slice_level
 from .volume_snapshot import apply_volume_camera_pose, apply_volume_level
 from .viewer_stage import apply_plane_metadata, apply_volume_metadata
 
 logger = logging.getLogger(__name__)
 
-apply_plane_slice_roi = _apply_plane_slice_roi
+apply_slice_roi = _apply_slice_roi
+apply_plane_slice_roi = apply_slice_roi
 viewport_roi_for_level = _viewport_roi_for_level
 
 
@@ -74,6 +76,7 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
 
 __all__ = [
     "apply_plane_slice_roi",
+    "apply_slice_roi",
     "apply_render_snapshot",
     "apply_slice_level",
     "apply_volume_level",
@@ -206,5 +209,5 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         worker._last_dims_signature = None
     apply_plane_metadata(worker, source, applied_context)
     worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
-    apply_plane_camera_pose(worker, snapshot)
+    apply_slice_camera_pose(worker, snapshot)
     apply_slice_level(worker, source, applied_context)

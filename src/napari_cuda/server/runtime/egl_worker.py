@@ -85,11 +85,11 @@ from napari_cuda.server.runtime.render_ledger_snapshot import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
-from napari_cuda.server.runtime.plane_loader import (
-    apply_plane_slice_roi,
+from napari_cuda.server.runtime.slice_snapshot import (
+    apply_slice_level,
+    apply_slice_roi,
     viewport_roi_for_level,
 )
-from napari_cuda.server.runtime.plane_snapshot import apply_slice_level
 from napari_cuda.server.runtime.volume_snapshot import apply_volume_level
 from napari_cuda.server.runtime.viewer_stage import (
     apply_plane_metadata,
@@ -2096,7 +2096,7 @@ class EGLRendererWorker:
         ):
             pending = self._viewport_runner.state.pending_roi
             if pending is not None:
-                apply_plane_slice_roi(
+                apply_slice_roi(
                     self,
                     source,
                     int(self._viewport_runner.state.target_level),

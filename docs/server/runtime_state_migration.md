@@ -44,8 +44,8 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - `ViewportState.mode` (enum) replaces `worker.use_volume`.
 
 ### 2.2 Snapshot helpers
-- Plane path handled by `plane_snapshot.apply_plane_snapshot(snapshot, viewport_state, source, *, worker)`:
-  - Computes aligned ROI, resolves chunk shape, loads slab via `plane_loader`.
+- Plane path handled by `slice_snapshot.apply_slice_snapshot(snapshot, viewport_state, source, *, worker)`:
+  - Computes aligned ROI, resolves chunk shape, loads slab via `slice_snapshot` helpers.
   - Updates `PlaneState` (`applied_level`, `applied_roi`, `pending_roi`, etc.) and emits a `PlaneApplyResult`.
   - Emits pose once per intent and updates ledger metadata (through `viewer_stage` helpers).
 - Volume path executed by `render_snapshot._apply_snapshot_multiscale(...)` (volume branch):
@@ -78,10 +78,10 @@ Single-source our render state so the worker, viewport runner, controller, and t
    ✅ Render snapshot tests and viewport runner suite cover mode/level/pose updates; state-channel harness adoption remains as a follow-up.
 
 ### Stage B — Snapshot/application split
-1. Factor plane and volume helpers into `plane_snapshot.py`, `plane_loader.py`, `volume_snapshot.py`, and `viewer_stage.py`.
+1. Factor plane and volume helpers into `slice_snapshot.py`, `volume_snapshot.py`, and `viewer_stage.py`.
 2. Ensure `SceneStateApplier` continues to read `viewport_state` for last ROI/camera data; update `SceneStateApplyContext` accordingly.
 3. Keep `apply_render_snapshot` delegating through the new modules while preserving the existing logging and fit suppression order.
-4. Add targeted unit tests for the new helpers (`test_plane_snapshot.py`, `test_volume_snapshot.py`).
+4. Add targeted unit tests for the new helpers (`test_slice_snapshot.py`, `test_volume_snapshot.py`).
 
 ### Stage C — Controller/resume alignment
 1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/intents.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`). ✅ Completed.
@@ -106,12 +106,12 @@ Single-source our render state so the worker, viewport runner, controller, and t
 ### 4.2 Side-effects to preserve during refactors
 - Napari fit suppression in `apply_render_snapshot`.
 - Ledger staging via viewer metadata helpers
-- ROI logging and `chunk_shape` alignment for `plane_loader`.
+- ROI logging and `chunk_shape` alignment for slice snapshot helpers.
 - Camera pose emission (`_emit_current_camera_pose`) once per intent.
 - Policy evaluation triggers (`_evaluate_level_policy`) when ROI reload marks render.
 
 ### 4.3 Tests to expand
 - Existing: `test_render_snapshot.py`, `test_scene_state_applier.py`, `test_egl_worker_camera.py`, `test_state_channel_ingest.py`.
-- New: `test_state_structs.py`, `test_plane_snapshot.py`, `test_volume_snapshot.py`, `test_plane_loader.py`, `test_volume_state.py`.
+- New: `test_state_structs.py`, `test_slice_snapshot.py`, `test_volume_snapshot.py`, `test_volume_state.py`.
 
 Keep this document updated as we advance; it is the working contract between code and desired architecture.
