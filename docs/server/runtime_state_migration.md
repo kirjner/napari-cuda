@@ -5,13 +5,13 @@ Single-source our render state so the worker, viewport runner, controller, and t
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply
-- `render_snapshot.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_snapshot.py:155`) is the only public entry. It gates napari fit callbacks, applies dims, then dispatches to `_apply_snapshot_multiscale`.
-- `_apply_snapshot_multiscale` toggles `worker.use_volume`, stages level metadata, and calls either `apply_volume_level` or `apply_slice_level` (`render_snapshot.py:191`–`render_snapshot.py:307`). Plane ROI alignment, runner notifications, and pose emission all live inside these helpers.
-- Volume pose handling is embedded in `_apply_volume_camera_pose` (`render_snapshot.py:309`) and plane pose in `_apply_plane_camera_pose` (`render_snapshot.py:322`).
+- `render_snapshot.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_snapshot.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
+- `_resolve_snapshot_ops` computes the per-mode metadata (level intent, ROI alignment, slice signature) and `_apply_snapshot_ops` performs the actual mutations, invoking `apply_volume_level` or `apply_slice_level` as needed.
+- Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
 ### 1.2 Worker fields mutated during apply
 - Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`render_snapshot.py:209`, `render_snapshot.py:298`).
-- Plane metadata: `_data_wh`, `_roi_cache`, `_roi_pad_chunks`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_snapshot.py:120`–`render_snapshot.py:150`, `render_snapshot.py:418`).
+- Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_snapshot.py:120`–`render_snapshot.py:150`, `render_snapshot.py:418`).
 - Volume metadata: `_volume_scale`, `_data_d` (`render_snapshot.py:404`), plus logging via `_layer_logger`.
 - Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_snapshot.py:430`, `egl_worker.py:1623`).
 
@@ -43,13 +43,12 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - `VolumeState` owns: current level, cached pose (`center`, `angles`, `distance`, `fov`), downgrade flag, and any cached extents/scale.
 - `ViewportState.mode` (enum) replaces `worker.use_volume`.
 
-### 2.2 Snapshot helpers
-- Plane path handled by `slice_snapshot.apply_slice_snapshot(snapshot, viewport_state, source, *, worker)`:
-  - Computes aligned ROI, resolves chunk shape, loads slab via `slice_snapshot` helpers.
-  - Updates `PlaneState` (`applied_level`, `applied_roi`, `pending_roi`, etc.) and emits a `PlaneApplyResult`.
-  - Emits pose once per intent and updates ledger metadata (through `viewer_stage` helpers).
-- Volume path executed by `render_snapshot._apply_snapshot_multiscale(...)` (volume branch):
-  - Selects level (with downgrades), stages metadata, loads volume, applies camera pose, updates `VolumeState`.
+-### 2.2 Snapshot helpers
+- Plane path resolved by `_resolve_snapshot_ops` (plane branch) and applied via `_apply_snapshot_ops` plus `slice_snapshot.apply_slice_level`:
+  - Computes aligned ROI, resolves chunk shape, loads slab through `slice_snapshot` helpers, and writes `PlaneState.applied_*`.
+  - Emits pose once per intent and updates ledger metadata with `viewer_stage.apply_plane_metadata`.
+- Volume path uses the same `_resolve_snapshot_ops` / `_apply_snapshot_ops` pairing:
+  - Selects level (with downgrades), stages metadata, loads volume, applies camera pose, and updates `VolumeState`.
 - Viewer metadata adjustments live in `viewer_stage.apply_plane_metadata` / `viewer_stage.apply_volume_metadata`, responsible for napari dims updates, camera range, and layer logging.
 
 ### 2.3 Controller alignment
@@ -91,7 +90,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 
 ### Stage D — Shim removal
 1. Remove temporary properties (`worker.use_volume`, `_active_ms_level`) once all call sites consume the new state.
-2. Delete legacy ROI/logging flags that are redundant (`_level_downgraded`, `_roi_cache` duplicates) after verifying new plane loader handles them.
+2. Delete legacy ROI/logging flags that are redundant (`_level_downgraded`, `_roi_cache` duplicates) after verifying new plane loader handles them. ✅ Completed.
 3. Run full test suite (`uv run pytest src/napari_cuda/server -q`), `make pre`, and `tox -e mypy`.
 4. Drop the `preserve_view_on_switch` policy flag; cached `PlaneState.pose` now drives every restore.
 
@@ -101,7 +100,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - Controller targets: `target_level`, `target_ndisplay`, `target_step`, `awaiting_level_confirm`, `snapshot_level`.
 - Plane pose: `pose.rect`, `pose.center`, `pose.zoom`, `zoom_hint`, `camera_pose_dirty`.
 - Applied plane state: `applied_level`, `applied_step`, `applied_roi`, `applied_roi_signature`.
-- Pending plane reload: `pending_roi`, `pending_roi_signature`, `level_reload_required`, `roi_reload_required`, `pose_reason`.
+- Plane reload bookkeeping: `camera_dirty`, `zoom_hint`, `_last_roi`.
 - Volume state: `current_level`, `downgraded`, `pose` (center, angles, distance, fov), `scale`, `world_extents`.
 - Shared metadata: `mode` (`PLANE` | `VOLUME`), `last_pose_reason`, `last_zoom_hint`.
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any
-import traceback
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
@@ -38,8 +37,6 @@ class SliceDataApplier:
                 "roi.apply: roi=(y:%d..%d x:%d..%d) scale=(%.6f,%.6f) translate=(%.3f,%.3f)",
                 int(roi.y_start), int(roi.y_stop), int(roi.x_start), int(roi.x_stop), float(sy), float(sx), translate[0], translate[1]
             )
-        if logger.isEnabledFor(logging.INFO):
-            logger.info("roi.apply stack trace:\n%s", "".join(traceback.format_stack(limit=8)))
         if not hasattr(self._layer, "translate"):
             raise AttributeError("napari layer must expose a 'translate' attribute")
         self._layer.translate = translate  # type: ignore[assignment]

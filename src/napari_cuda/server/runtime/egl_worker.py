@@ -17,7 +17,6 @@ encoded packets back to the asyncio side through callbacks.
 from __future__ import annotations
 
 import logging
-import traceback
 import math
 import os
 import threading
@@ -962,8 +961,6 @@ class EGLRendererWorker:
                 applied.z_index,
                 descriptor.shape,
             )
-        if logger.isEnabledFor(logging.INFO):
-            logger.info("worker level applied stack trace:\n%s", "".join(traceback.format_stack(limit=8)))
 
     def set_policy(self, name: str) -> None:
         new_name = str(name or '').strip().lower()
@@ -1241,14 +1238,6 @@ class EGLRendererWorker:
                 width=full_w,
             )
         signature = roi_chunk_signature(aligned_roi, chunk_shape)
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "aligned roi signature: level=%s roi=%s chunk_shape=%s signature=%s",
-                level,
-                aligned_roi,
-                chunk_shape,
-                signature,
-            )
         return aligned_roi, chunk_shape, signature
 
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
@@ -2106,13 +2095,6 @@ class EGLRendererWorker:
             signature_token = (level_int, step_tuple, slice_task.signature)
             if self._last_slice_signature == signature_token:
                 self._viewport_runner.mark_slice_applied(slice_task)
-                if logger.isEnabledFor(logging.INFO):
-                    logger.info(
-                        "viewport tick skipped roi apply: level=%s step=%s sig=%s",
-                        level_int,
-                        step_tuple,
-                        slice_task.signature,
-                    )
             else:
                 apply_slice_roi(
                     self,

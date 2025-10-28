@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Dict, Tuple
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
@@ -58,19 +58,26 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     viewer = worker._viewer
     assert viewer is not None, "RenderTxn requires an active viewer"
 
-    signature = worker._dims_signature(snapshot)
-    dims_changed = signature != getattr(worker, "_last_dims_signature", None)
+    snapshot_ops = _resolve_snapshot_ops(worker, snapshot)
+    ops_signature = snapshot_ops["signature"]
+    if ops_signature == getattr(worker, "_last_snapshot_signature", None):
+        return
+
+    dims_signature = worker._dims_signature(snapshot)
+    dims_changed = dims_signature != getattr(worker, "_last_dims_signature", None)
 
     if dims_changed:
         with _suspend_fit_callbacks(viewer):
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.begin: suppress fit; applying dims")
-            worker._apply_dims_from_snapshot(snapshot, signature=signature)
-            _apply_snapshot_multiscale(worker, snapshot)
+            worker._apply_dims_from_snapshot(snapshot, signature=dims_signature)
+            _apply_snapshot_ops(worker, snapshot, snapshot_ops)
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
     else:
-        _apply_snapshot_multiscale(worker, snapshot)
+        _apply_snapshot_ops(worker, snapshot, snapshot_ops)
+
+    worker._last_snapshot_signature = ops_signature
 
 
 __all__ = [
@@ -83,8 +90,10 @@ __all__ = [
 ]
 
 
-def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
-    """Apply multiscale state reflected in a controller-authored snapshot."""
+def _resolve_snapshot_ops(
+    worker: Any, snapshot: RenderLedgerSnapshot
+) -> Dict[str, Any]:
+    """Compute the metadata and slice ops before mutating worker state."""
 
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
     target_volume = nd >= 3
@@ -101,34 +110,38 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     )
 
     was_volume = worker.viewport_state.mode is RenderMode.VOLUME  # type: ignore[attr-defined]
+    ledger_step = (
+        tuple(int(v) for v in snapshot.current_step)
+        if snapshot.current_step is not None
+        else None
+    )
+
+    ops: Dict[str, Any] = {
+        "source": source,
+        "target_volume": target_volume,
+        "was_volume": was_volume,
+        "signature": None,
+        "plane": None,
+        "volume": None,
+    }
 
     if target_volume:
-        entering_volume = not was_volume
-        if entering_volume:
-            worker.viewport_state.mode = RenderMode.VOLUME  # type: ignore[attr-defined]
-            worker._last_dims_signature = None
-
-        runner = worker._viewport_runner
-        if runner is not None and entering_volume:
-            runner.reset_for_volume()
-
         requested_level = int(target_level)
         selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
         effective_level = int(selected_level)
-        worker.viewport_state.volume.downgraded = bool(downgraded)  # type: ignore[attr-defined]
-        load_needed = entering_volume or (int(effective_level) != prev_level)
+        load_needed = (effective_level != prev_level) or (not was_volume)
+        if ledger_step is not None:
+            step_hint = ledger_step
+        else:
+            recorded_step = worker._ledger_step()
+            step_hint = (
+                tuple(int(v) for v in recorded_step)
+                if recorded_step is not None
+                else None
+            )
 
+        applied_context = None
         if load_needed:
-            if ledger_step is not None:
-                step_hint = tuple(int(v) for v in ledger_step)
-            else:
-                recorded_step = worker._ledger_step()
-                step_hint = (
-                    tuple(int(v) for v in recorded_step)
-                    if recorded_step is not None
-                    else None
-                )
-
             decision = lod.LevelDecision(
                 desired_level=int(effective_level),
                 selected_level=int(effective_level),
@@ -143,34 +156,31 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
                 prev_level=prev_level,
                 last_step=step_hint,
             )
-            apply_volume_metadata(worker, source, applied_context)
-            apply_volume_level(
-                worker,
-                source,
-                applied_context,
-                downgraded=bool(downgraded),
-            )
-            if runner is not None:
-                runner.mark_level_applied(int(applied_context.level))
-                if worker.viewport_state.mode is RenderMode.PLANE:  # type: ignore[attr-defined]
-                    rect = worker._current_panzoom_rect()
-                    if rect is not None:
-                        runner.update_camera_rect(rect)
-            target_level = int(applied_context.level)
-            level_changed = target_level != prev_level
-            worker._configure_camera_for_mode()
-        elif entering_volume:
-            worker._configure_camera_for_mode()
 
-        apply_volume_camera_pose(worker, snapshot)
-        return
+        signature_token: Tuple[Any, ...] = ("volume", int(effective_level), step_hint)
+        ops["signature"] = (
+            snapshot.dims_version,
+            snapshot.view_version,
+            snapshot.multiscale_level_version,
+            signature_token,
+        )
+        ops["volume"] = {
+            "entering_volume": not was_volume,
+            "downgraded": bool(downgraded),
+            "load_needed": load_needed,
+            "applied_context": applied_context,
+            "effective_level": int(effective_level),
+            "step_hint": step_hint,
+            "prev_level": prev_level,
+        }
+        return ops
 
     stage_prev_level = prev_level
     if was_volume and not target_volume:
         stage_prev_level = target_level
 
     if ledger_step is not None:
-        step_hint = tuple(int(v) for v in ledger_step)
+        step_hint = ledger_step
     else:
         recorded_step = worker._ledger_step()
         step_hint = (
@@ -199,6 +209,7 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     aligned_roi, chunk_shape, roi_signature = worker._aligned_roi_signature(source, level_int, roi_current)
     signature_token = (level_int, step_tuple, roi_signature)
     last_slice_signature = getattr(worker, "_last_slice_signature", None)
+    level_changed = target_level != prev_level
     skip_slice = not level_changed and last_slice_signature == signature_token
     snapshot_signature = (
         snapshot.dims_version,
@@ -206,13 +217,6 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         snapshot.multiscale_level_version,
         signature_token,
     )
-    if was_volume:
-        worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
-        worker._configure_camera_for_mode()
-        worker._last_dims_signature = None
-    apply_plane_metadata(worker, source, applied_context)
-    worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
-    apply_slice_camera_pose(worker, snapshot)
     chunk_tuple = (
         (int(chunk_shape[0]), int(chunk_shape[1]))
         if chunk_shape is not None
@@ -225,11 +229,82 @@ def _apply_snapshot_multiscale(worker: Any, snapshot: RenderLedgerSnapshot) -> N
         chunk_shape=chunk_tuple,
         signature=roi_signature,
     )
-    if skip_slice:
+    ops["signature"] = snapshot_signature
+    ops["plane"] = {
+        "applied_context": applied_context,
+        "aligned_roi": aligned_roi,
+        "chunk_shape": chunk_shape,
+        "slice_task": slice_task,
+        "skip_slice": skip_slice,
+        "level_int": level_int,
+        "level_changed": level_changed,
+        "was_volume": was_volume,
+    }
+    return ops
+
+
+def _apply_snapshot_ops(
+    worker: Any,
+    snapshot: RenderLedgerSnapshot,
+    ops: Dict[str, Any],
+) -> None:
+    """Apply the precomputed snapshot plan."""
+
+    source = ops["source"]
+
+    if ops["target_volume"]:
+        volume_ops = ops["volume"]
+        assert volume_ops is not None
+        entering_volume = volume_ops["entering_volume"]
+        if entering_volume:
+            worker.viewport_state.mode = RenderMode.VOLUME  # type: ignore[attr-defined]
+            worker._last_dims_signature = None
+
+        runner = worker._viewport_runner
+        if runner is not None and entering_volume:
+            runner.reset_for_volume()
+
+        worker.viewport_state.volume.downgraded = bool(volume_ops["downgraded"])  # type: ignore[attr-defined]
+        if volume_ops["load_needed"]:
+            applied_context = volume_ops["applied_context"]
+            assert applied_context is not None
+            apply_volume_metadata(worker, source, applied_context)
+            apply_volume_level(
+                worker,
+                source,
+                applied_context,
+                downgraded=bool(volume_ops["downgraded"]),
+            )
+            if runner is not None:
+                runner.mark_level_applied(int(applied_context.level))
+                if worker.viewport_state.mode is RenderMode.PLANE:  # type: ignore[attr-defined]
+                    rect = worker._current_panzoom_rect()
+                    if rect is not None:
+                        runner.update_camera_rect(rect)
+            worker._configure_camera_for_mode()
+        elif entering_volume:
+            worker._configure_camera_for_mode()
+
+        apply_volume_camera_pose(worker, snapshot)
+        return
+
+    plane_ops = ops["plane"]
+    assert plane_ops is not None
+
+    if plane_ops["was_volume"]:
+        worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
+        worker._configure_camera_for_mode()
+        worker._last_dims_signature = None
+
+    apply_plane_metadata(worker, source, plane_ops["applied_context"])
+    worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
+    apply_slice_camera_pose(worker, snapshot)
+
+    if plane_ops["skip_slice"]:
         runner = worker._viewport_runner
         if runner is not None:
-            runner.mark_level_applied(level_int)
-            runner.mark_slice_applied(slice_task)
-    else:
-        apply_slice_level(worker, source, applied_context)
-    worker._last_snapshot_signature = snapshot_signature
+            runner.mark_level_applied(plane_ops["slice_task"].level)
+            runner.mark_slice_applied(plane_ops["slice_task"])
+        return
+
+    apply_slice_level(worker, source, plane_ops["applied_context"])
