@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Optional, Tuple
 
-import numpy as np
 from vispy.scene.cameras import TurntableCamera
-from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-
-from .volume_state import assign_pose_from_snapshot, update_level, update_scale
-
-logger = logging.getLogger(__name__)
+from napari_cuda.server.runtime.viewport.layers import apply_volume_layer_data
+from napari_cuda.server.runtime.viewport.volume_ops import (
+    assign_pose_from_snapshot,
+    apply_pose_to_camera,
+    update_level,
+    update_scale,
+)
 
 
 @dataclass(frozen=True)
@@ -43,36 +43,14 @@ def apply_volume_camera_pose(
         return
 
     volume_state = worker.viewport_state.volume  # type: ignore[attr-defined]
-    assign_pose_from_snapshot(volume_state, snapshot)
-
-    center_source = snapshot.volume_center if snapshot.volume_center is not None else volume_state.pose.center
-    assert center_source is not None and len(center_source) >= 3, "volume snapshot missing center"
-    center = (
-        float(center_source[0]),
-        float(center_source[1]),
-        float(center_source[2]),
+    center, angles, distance, fov = assign_pose_from_snapshot(volume_state, snapshot)
+    apply_pose_to_camera(
+        cam,
+        center=(float(center[0]), float(center[1]), float(center[2])),
+        angles=(float(angles[0]), float(angles[1]), float(angles[2])),
+        distance=float(distance),
+        fov=float(fov),
     )
-    cam.center = center
-
-
-    angles_source = snapshot.volume_angles if snapshot.volume_angles is not None else volume_state.pose.angles
-    assert angles_source is not None and len(angles_source) >= 2, "volume snapshot missing angles"
-    roll_value = float(angles_source[2]) if len(angles_source) >= 3 else float(volume_state.pose.angles[2]) if volume_state.pose.angles is not None and len(volume_state.pose.angles) >= 3 else 0.0
-    angles = (float(angles_source[0]), float(angles_source[1]), roll_value)
-    cam.azimuth = angles[0]
-    cam.elevation = angles[1]
-    cam.roll = angles[2]
-
-    distance_source = snapshot.volume_distance if snapshot.volume_distance is not None else volume_state.pose.distance
-    assert distance_source is not None, "volume snapshot missing distance"
-    distance_val = float(distance_source)
-    cam.distance = distance_val
-    fov_source = snapshot.volume_fov if snapshot.volume_fov is not None else volume_state.pose.fov
-    assert fov_source is not None, "volume snapshot missing fov"
-    fov_val = float(fov_source)
-    cam.fov = fov_val
-
-    volume_state.update_pose(center=center, angles=angles, distance=distance_val, fov=fov_val)
 
 
 def apply_volume_level(
@@ -93,7 +71,7 @@ def apply_volume_level(
 
     volume = worker._get_level_volume(source, applied.level)
     cam = worker.view.camera if getattr(worker, "view", None) is not None else None
-    data_wh, data_d = _apply_volume_to_layer(
+    data_wh, data_d = apply_volume_layer_data(
         layer=getattr(worker, "_napari_layer", None),
         volume=volume,
         contrast=applied.contrast,
@@ -133,56 +111,3 @@ def apply_volume_level(
 
 
 __all__ = ["VolumeApplyResult", "apply_volume_camera_pose", "apply_volume_level"]
-
-
-def _apply_volume_to_layer(
-    *,
-    layer: Any,
-    volume: Any,
-    contrast: Tuple[float, float],
-    scale: Tuple[float, float, float],
-    ensure_volume_visual: Optional[Callable[[], Any]] = None,
-) -> Tuple[Tuple[int, int], Optional[int]]:
-    """Apply the provided volume data to the active napari layer."""
-
-    if ensure_volume_visual is not None:
-        ensure_volume_visual()
-    if layer is not None:
-        layer.depiction = "volume"  # type: ignore[assignment]
-        layer.rendering = NapariImageRendering.MIP.value  # type: ignore[assignment]
-        layer.data = volume
-
-        lo = float(contrast[0])
-        hi = float(contrast[1])
-        if hi <= lo:
-            hi = lo + 1.0
-
-        layer.translate = tuple(0.0 for _ in range(int(volume.ndim)))  # type: ignore[assignment]
-
-        data_min = float(np.nanmin(volume)) if hasattr(np, "nanmin") else float(np.min(volume))
-        data_max = float(np.nanmax(volume)) if hasattr(np, "nanmax") else float(np.max(volume))
-        normalized = (-0.05 <= data_min <= 1.05) and (-0.05 <= data_max <= 1.05)
-        logger.debug(
-            "volume.apply stats: min=%.6f max=%.6f contrast=(%.6f, %.6f) normalized=%s",
-            data_min,
-            data_max,
-            lo,
-            hi,
-            normalized,
-        )
-        if normalized:
-            layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
-        else:
-            layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
-
-        scale_vals: Tuple[float, ...] = tuple(float(s) for s in scale)
-        if len(scale_vals) < int(volume.ndim):
-            pad = int(volume.ndim) - len(scale_vals)
-            scale_vals = tuple(1.0 for _ in range(pad)) + scale_vals
-        scale_vals = tuple(scale_vals[-int(volume.ndim):])
-        layer.scale = scale_vals  # type: ignore[assignment]
-
-    depth = int(volume.shape[0])
-    height = int(volume.shape[1]) if int(volume.ndim) >= 2 else int(volume.shape[-1])
-    width = int(volume.shape[2]) if int(volume.ndim) >= 3 else int(volume.shape[-1])
-    return (int(width), int(height)), depth

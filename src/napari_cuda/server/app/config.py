@@ -361,7 +361,6 @@ class LevelPolicySettings:
     fine_threshold: float = 1.05
     cooldown_ms: float = 150.0
     log_policy_eval: bool = False
-    preserve_view_on_switch: bool = True
     sticky_contrast: bool = True
     oversampling_thresholds: Optional[Mapping[int, float]] = None
     oversampling_hysteresis: float = 0.1
@@ -477,7 +476,6 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
     policy_fine_threshold = max(policy_threshold_in, policy_fine_threshold)
     policy_cooldown_ms = _cfg_float(policy_cfg.get("cooldown_ms") if policy_cfg else None, 150.0)
     policy_log_eval = debug_policy.logging.log_policy_eval
-    policy_preserve_view = _cfg_bool(policy_cfg.get("preserve_view_on_switch") if policy_cfg else None, True)
     policy_sticky_contrast = _cfg_bool(policy_cfg.get("sticky_contrast") if policy_cfg else None, True)
 
     overs_cfg = policy_cfg.get("oversampling") if isinstance(policy_cfg, dict) else {}
@@ -500,7 +498,6 @@ def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:
         fine_threshold=float(policy_fine_threshold),
         cooldown_ms=float(policy_cooldown_ms),
         log_policy_eval=bool(policy_log_eval),
-        preserve_view_on_switch=bool(policy_preserve_view),
         sticky_contrast=bool(policy_sticky_contrast),
         oversampling_thresholds=oversampling_thresholds,
         oversampling_hysteresis=float(oversampling_hysteresis),

@@ -4,23 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
-import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-import numpy as np
-
-from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.roi import (
-    plane_scale_for_level,
-    plane_wh_for_level,
-    resolve_worker_viewport_roi,
-    viewport_debug_snapshot,
-)
-from napari_cuda.server.data.roi_applier import SliceDataApplier
+from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.roi_math import (
     align_roi_to_chunk_grid,
@@ -29,9 +19,14 @@ from napari_cuda.server.runtime.roi_math import (
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport import PlaneState, RenderMode
+from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
+from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
+from napari_cuda.server.runtime.viewport.plane_ops import (
+    assign_pose_from_snapshot,
+    apply_pose_to_camera,
+    mark_slice_applied,
+)
 from napari_cuda.server.runtime.viewer_stage import apply_plane_metadata
-
-from napari.layers.base._base_constants import Blending as NapariBlending
 
 logger = logging.getLogger(__name__)
 
@@ -117,34 +112,13 @@ def apply_slice_camera_pose(
         return
 
     plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
-
-    rect_source = snapshot.plane_rect
-    if rect_source is None and plane_state.pose.rect is not None:
-        rect_source = plane_state.pose.rect
-    assert rect_source is not None and len(rect_source) >= 4, "slice snapshot missing rect"
-    rect_tuple = (
-        float(rect_source[0]),
-        float(rect_source[1]),
-        float(rect_source[2]),
-        float(rect_source[3]),
+    rect_tuple, center_tuple, zoom_value = assign_pose_from_snapshot(plane_state, snapshot)
+    apply_pose_to_camera(
+        cam,
+        rect=rect_tuple,
+        center=center_tuple,
+        zoom=zoom_value,
     )
-    cam.rect = Rect(*rect_tuple)
-
-    center_source = snapshot.plane_center
-    if center_source is None and plane_state.pose.center is not None:
-        center_source = plane_state.pose.center
-    assert center_source is not None and len(center_source) >= 2, "slice snapshot missing center"
-    center_tuple = (float(center_source[0]), float(center_source[1]))
-    cam.center = center_tuple
-
-    zoom_source = snapshot.plane_zoom
-    if zoom_source is None and plane_state.pose.zoom is not None:
-        zoom_source = plane_state.pose.zoom
-    assert zoom_source is not None, "slice snapshot missing zoom"
-    zoom_value = float(zoom_source)
-    cam.zoom = zoom_value
-
-    plane_state.update_pose(rect=rect_tuple, center=center_tuple, zoom=zoom_value)
 
 
 def apply_slice_level(
@@ -191,30 +165,14 @@ def apply_slice_level(
         update_contrast=not worker._sticky_contrast,
     )
 
-    if not worker._preserve_view_on_switch:
-        world_w = float(full_w) * float(max(1e-12, sx))
-        world_h = float(full_h) * float(max(1e-12, sy))
-        cached_rect = plane_state.pose.rect
-        if cached_rect is None:
-            view.camera.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-        else:
-            if logger.isEnabledFor(logging.INFO):
-                logger.info("slice.apply preserve view using cached rect=%s", cached_rect)
-            view.camera.rect = Rect(
-                float(cached_rect[0]),
-                float(cached_rect[1]),
-                float(cached_rect[2]),
-                float(cached_rect[3]),
-            )
-        cached_center = plane_state.pose.center
-        if cached_center is not None and len(cached_center) >= 2:
-            view.camera.center = (
-                float(cached_center[0]),
-                float(cached_center[1]),
-            )
-        cached_zoom = plane_state.pose.zoom
-        if cached_zoom is not None:
-            view.camera.zoom = float(cached_zoom)
+    pose = plane_state.pose
+    assert pose.rect is not None and pose.center is not None and pose.zoom is not None, "plane pose must be cached before slice level apply"
+    apply_pose_to_camera(
+        view.camera,
+        rect=pose.rect,
+        center=pose.center,
+        zoom=pose.zoom,
+    )
 
     worker._layer_logger.log(
         enabled=worker._log_layer_debug,
@@ -226,10 +184,14 @@ def apply_slice_level(
         downgraded=worker.viewport_state.volume.downgraded,  # type: ignore[attr-defined]
     )
 
-    plane_state.applied_level = int(applied.level)
-    plane_state.applied_step = tuple(int(v) for v in applied.step)
-    plane_state.applied_roi = aligned_roi
-    plane_state.applied_roi_signature = roi_chunk_signature(aligned_roi, chunk_shape)
+    roi_signature = roi_chunk_signature(aligned_roi, chunk_shape)
+    mark_slice_applied(
+        plane_state,
+        level=int(applied.level),
+        step=applied.step,
+        roi=aligned_roi,
+        roi_signature=roi_signature,
+    )
 
     runner = worker._viewport_runner
     if runner is not None:
@@ -243,68 +205,6 @@ def apply_slice_level(
         width_px=int(width_px),
         height_px=int(height_px),
     )
-
-
-def viewport_roi_for_level(
-    worker: Any,
-    source: Any,
-    level: int,
-    *,
-    quiet: bool = False,
-    for_policy: bool = False,
-) -> SliceROI:
-    """Compute the viewport ROI for the requested multiscale level."""
-
-    view = worker.view
-    align_chunks = (not for_policy) and bool(worker._roi_align_chunks)
-    ensure_contains = (not for_policy) and bool(worker._roi_ensure_contains_viewport)
-    edge_threshold = int(worker._roi_edge_threshold)
-    chunk_pad = int(worker._roi_pad_chunks)
-
-    roi_log = worker._roi_log_state
-    log_state = roi_log if isinstance(roi_log, dict) else None
-
-    data_wh = worker._data_wh
-
-    def _snapshot() -> dict[str, Any]:
-        return viewport_debug_snapshot(
-            view=view,
-            canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
-            data_wh=data_wh,
-            data_depth=worker._data_d,
-        )
-
-    reason = "policy-roi" if for_policy else "roi-request"
-    roi_cache = worker._roi_cache
-
-    roi = resolve_worker_viewport_roi(
-        view=view,
-        canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
-        source=source,
-        level=int(level),
-        align_chunks=align_chunks,
-        chunk_pad=chunk_pad,
-        ensure_contains_viewport=ensure_contains,
-        edge_threshold=edge_threshold,
-        for_policy=for_policy,
-        roi_cache=roi_cache,
-        roi_log_state=log_state,
-        snapshot_cb=_snapshot,
-        log_layer_debug=worker._log_layer_debug,
-        quiet=quiet,
-        data_wh=data_wh,
-        reason=reason,
-        logger_ref=logger,
-    )
-
-    if log_state is not None:
-        log_state["roi"] = roi
-        log_state["level"] = int(level)
-        log_state["requested"] = (align_chunks, ensure_contains, chunk_pad)
-
-    return roi
-
-
 def apply_slice_roi(
     worker: Any,
     source: Any,
@@ -322,7 +222,7 @@ def apply_slice_roi(
     if layer is not None:
         view = worker.view
         assert view is not None, "VisPy view required for slice apply"
-        _apply_slice_to_layer(
+        apply_slice_layer_data(
             layer=layer,
             source=source,
             level=int(level),
@@ -349,43 +249,10 @@ def apply_slice_roi(
     return height_px, width_px
 
 
-def _apply_slice_to_layer(
-    *,
-    layer: Any,
-    source: Any,
-    level: int,
-    slab: Any,
-    roi: Optional[SliceROI],
-    update_contrast: bool,
-) -> Tuple[float, float]:
-    """Apply the requested image slab to the active napari layer."""
-
-    sy, sx = plane_scale_for_level(source, int(level))
-    roi_to_apply = roi or SliceROI(0, int(slab.shape[0]), 0, int(slab.shape[1]))
-    SliceDataApplier(layer=layer).apply(slab=slab, roi=roi_to_apply, scale=(sy, sx))
-    layer.visible = True  # type: ignore[assignment]
-    layer.opacity = 1.0  # type: ignore[assignment]
-    if not getattr(layer, "blending", None):
-        layer.blending = NapariBlending.OPAQUE.value  # type: ignore[assignment]
-
-    if update_contrast:
-        smin = float(np.nanmin(slab)) if hasattr(np, "nanmin") else float(np.min(slab))
-        smax = float(np.nanmax(slab)) if hasattr(np, "nanmax") else float(np.max(slab))
-        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
-            layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
-        elif 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
-            layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
-        else:
-            layer.contrast_limits = [smin, smax]  # type: ignore[assignment]
-
-    return float(sy), float(sx)
-
-
 __all__ = [
     "SliceApplyResult",
     "apply_slice_snapshot",
     "apply_slice_camera_pose",
     "apply_slice_level",
     "apply_slice_roi",
-    "viewport_roi_for_level",
 ]

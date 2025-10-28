@@ -13,6 +13,9 @@ from napari_cuda.server.runtime.viewport import ViewportState
 class _FakeCamera:
     def __init__(self) -> None:
         self.range_calls: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        self.rect = None
+        self.center = None
+        self.zoom = None
 
     def set_range(self, *, x: tuple[float, float], y: tuple[float, float]) -> None:
         self.range_calls.append((x, y))
@@ -67,7 +70,6 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
             self._sticky_contrast = False
             self._roi_align_chunks = False
             self._roi_pad_chunks = 0
-            self._preserve_view_on_switch = False
             self._layer_logger = logger
             self._log_layer_debug = True
             self._z_index = 5
@@ -78,6 +80,11 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
             self._napari_layer = None
 
     worker = _Worker()
+    viewport_state.plane.update_pose(
+        rect=(0.0, 0.0, 80.0, 40.0),
+        center=(20.0, 10.0),
+        zoom=1.5,
+    )
 
     roi = SliceROI(2, 6, 4, 12)
 
@@ -134,4 +141,8 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
     assert logger.calls[-1]["level"] == 3
     assert logger.calls[-1]["shape"] == (roi.height, roi.width)
 
-    assert camera.range_calls == [((0.0, 80.0), (0.0, 40.0))]
+    assert camera.range_calls == []
+    assert camera.rect.pos == (0.0, 0.0)
+    assert camera.rect.size == (80.0, 40.0)
+    assert camera.center == (20.0, 10.0)
+    assert camera.zoom == 1.5

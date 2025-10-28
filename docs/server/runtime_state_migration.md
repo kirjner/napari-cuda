@@ -81,7 +81,8 @@ Single-source our render state so the worker, viewport runner, controller, and t
 1. Factor plane and volume helpers into `slice_snapshot.py`, `volume_snapshot.py`, and `viewer_stage.py`.
 2. Inline the former `SceneStateApplier` logic so slice/volume helpers and the worker read from `ViewportState` directly (no intermediate context).
 3. Keep `apply_render_snapshot` delegating through the new modules while preserving the existing logging and fit suppression order.
-4. Add targeted unit tests for the new helpers (`test_slice_snapshot.py`, `test_volume_snapshot.py`).
+4. Add targeted unit tests for the new helpers (`test_slice_snapshot.py`, `test_volume_snapshot.py`, `test_plane_ops.py`, `test_viewport_layers.py`).
+5. Isolate shared viewport utilities under `runtime/viewport/` (`layers.py`, `roi.py`, `plane_ops.py`, `volume_ops.py`) so worker and snapshot code consume a single surface.
 
 ### Stage C — Controller/resume alignment
 1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/intents.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`). ✅ Completed.
@@ -92,6 +93,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 1. Remove temporary properties (`worker.use_volume`, `_active_ms_level`) once all call sites consume the new state.
 2. Delete legacy ROI/logging flags that are redundant (`_level_downgraded`, `_roi_cache` duplicates) after verifying new plane loader handles them.
 3. Run full test suite (`uv run pytest src/napari_cuda/server -q`), `make pre`, and `tox -e mypy`.
+4. Drop the `preserve_view_on_switch` policy flag; cached `PlaneState.pose` now drives every restore.
 
 ## 4. Checklists
 

@@ -88,8 +88,8 @@ from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
 from napari_cuda.server.runtime.slice_snapshot import (
     apply_slice_level,
     apply_slice_roi,
-    viewport_roi_for_level,
 )
+from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
 from napari_cuda.server.runtime.volume_snapshot import apply_volume_level
 from napari_cuda.server.runtime.viewer_stage import (
     apply_plane_metadata,
@@ -848,7 +848,6 @@ class EGLRendererWorker:
         self._level_threshold_out = float(policy_cfg.threshold_out)
         self._level_hysteresis = float(policy_cfg.hysteresis)
         self._level_fine_threshold = float(policy_cfg.fine_threshold)
-        self._preserve_view_on_switch = bool(policy_cfg.preserve_view_on_switch)
         self._sticky_contrast = bool(policy_cfg.sticky_contrast)
         self._level_switch_cooldown_ms = float(policy_cfg.cooldown_ms)
         self._last_level_switch_ts = 0.0

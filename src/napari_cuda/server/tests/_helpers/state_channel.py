@@ -276,7 +276,6 @@ class CaptureWorker:
         self._roi_pad_chunks = 0
         self._idr_on_z = False
         self._sticky_contrast = False
-        self._preserve_view_on_switch = False
         self._layer_logger = LayerAssignmentLogger(logging.getLogger(__name__))
         self._log_layer_debug = False
         self._level_downgraded = False

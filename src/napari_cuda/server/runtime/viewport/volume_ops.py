@@ -1,24 +1,26 @@
-"""Helpers for mutating :class:`VolumeState` from runtime snapshots."""
+"""Helpers for mutating :class:`VolumeState` during snapshot application."""
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Tuple
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 
-from napari_cuda.server.runtime.viewport import VolumeState
+from .state import VolumeState
 
 
 def assign_pose_from_snapshot(
     state: VolumeState,
     snapshot: RenderLedgerSnapshot,
-) -> None:
-    """Populate volume pose fields from a controller snapshot."""
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+    float,
+    float,
+]:
+    """Populate volume pose fields from a controller snapshot and return the pose."""
 
     update_kwargs: dict[str, object] = {}
-    # The snapshot may omit components the worker already applied (e.g. a
-    # distance-only update); merge in the cached pose so we do not stomp fields
-    # the controller did not touch.
     center = snapshot.volume_center
     if center is None and state.pose.center is not None:
         center = state.pose.center
@@ -61,6 +63,16 @@ def assign_pose_from_snapshot(
 
     if update_kwargs:
         state.update_pose(**update_kwargs)
+    assert state.pose.center is not None, "volume pose missing center"
+    assert state.pose.angles is not None, "volume pose missing angles"
+    assert state.pose.distance is not None, "volume pose missing distance"
+    assert state.pose.fov is not None, "volume pose missing fov"
+    return (
+        state.pose.center,
+        state.pose.angles,
+        float(state.pose.distance),
+        float(state.pose.fov),
+    )
 
 
 def update_level(
@@ -87,5 +99,23 @@ def update_scale(
         float(scale[2]),
     )
 
+def apply_pose_to_camera(
+    camera,
+    *,
+    center: tuple[float, float, float],
+    angles: tuple[float, float, float],
+    distance: float,
+    fov: float,
+) -> None:
+    """Apply the provided pose data to a turntable camera."""
 
-__all__ = ["assign_pose_from_snapshot", "update_level", "update_scale"]
+    camera.center = center  # type: ignore[attr-defined]
+    camera.azimuth = float(angles[0])  # type: ignore[attr-defined]
+    camera.elevation = float(angles[1])  # type: ignore[attr-defined]
+    roll_value = float(angles[2]) if len(angles) >= 3 else 0.0
+    camera.roll = roll_value  # type: ignore[attr-defined]
+    camera.distance = float(distance)  # type: ignore[attr-defined]
+    camera.fov = float(fov)  # type: ignore[attr-defined]
+
+
+__all__ = ["assign_pose_from_snapshot", "update_level", "update_scale", "apply_pose_to_camera"]

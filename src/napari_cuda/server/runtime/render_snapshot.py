@@ -20,16 +20,15 @@ from .slice_snapshot import (
     apply_slice_camera_pose,
     apply_slice_level,
     apply_slice_roi as _apply_slice_roi,
-    viewport_roi_for_level as _viewport_roi_for_level,
 )
 from .volume_snapshot import apply_volume_camera_pose, apply_volume_level
 from .viewer_stage import apply_plane_metadata, apply_volume_metadata
+from .viewport.roi import viewport_roi_for_level
 
 logger = logging.getLogger(__name__)
 
 apply_slice_roi = _apply_slice_roi
 apply_plane_slice_roi = apply_slice_roi
-viewport_roi_for_level = _viewport_roi_for_level
 
 
 @contextmanager

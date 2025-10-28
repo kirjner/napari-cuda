@@ -35,7 +35,6 @@ def test_load_server_ctx_honours_env_overrides() -> None:
                 "hysteresis": 0.05,
                 "fine_threshold": 1.4,
                 "cooldown_ms": 80.0,
-                "preserve_view_on_switch": False,
                 "sticky_contrast": False,
                 "oversampling": {
                     "thresholds": {"0": 1.3, "1": 2.7},
@@ -93,7 +92,6 @@ def test_load_server_ctx_honours_env_overrides() -> None:
     assert policy.hysteresis == 0.05
     assert policy.fine_threshold == 1.4
     assert policy.cooldown_ms == 80.0
-    assert policy.preserve_view_on_switch is False
     assert policy.sticky_contrast is False
     assert policy.oversampling_thresholds == {0: 1.3, 1: 2.7}
     assert policy.oversampling_hysteresis == 0.25

@@ -76,10 +76,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         calls["ensure_volume_visual"] = ensure_volume_visual
         return (128, 256), 64
 
-    monkeypatch.setattr(
-        "napari_cuda.server.runtime.volume_snapshot._apply_volume_to_layer",
-        _fake_apply_volume_layer,
-    )
+    monkeypatch.setattr("napari_cuda.server.runtime.volume_snapshot.apply_volume_layer_data", _fake_apply_volume_layer)
 
     class _Source:
         axes = ("z", "y", "x")
