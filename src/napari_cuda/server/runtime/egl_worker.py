@@ -90,6 +90,11 @@ from napari_cuda.server.runtime.slice_snapshot import (
     apply_slice_roi,
 )
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
+from napari_cuda.server.runtime.roi_math import (
+    align_roi_to_chunk_grid,
+    chunk_shape_for_level,
+    roi_chunk_signature,
+)
 from napari_cuda.server.runtime.volume_snapshot import apply_volume_level
 from napari_cuda.server.runtime.viewer_stage import (
     apply_plane_metadata,
@@ -212,6 +217,10 @@ class EGLRendererWorker:
         self._init_scene_state()
         self._camera_queue = camera_queue
         self._init_locks(camera_pose_cb, level_intent_cb)
+        self._last_slice_signature: Optional[
+            tuple[int, Optional[tuple[int, ...]], Optional[tuple[int, int, int, int]]]
+        ] = None
+        self._last_snapshot_signature: Optional[tuple] = None
         self._configure_debug_flags()
         self._configure_policy(self._ctx.policy)
         self._configure_roi_settings()
@@ -859,8 +868,6 @@ class EGLRendererWorker:
         self._oversampling_hysteresis = float(getattr(policy_cfg, "oversampling_hysteresis", 0.1))
 
     def _configure_roi_settings(self) -> None:
-        self._roi_cache: dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
-        self._roi_log_state: dict[int, tuple[SliceROI, float]] = {}
         worker_dbg = self._debug_policy.worker
         self._roi_edge_threshold = int(worker_dbg.roi_edge_threshold)
         self._roi_align_chunks = bool(worker_dbg.roi_align_chunks)
@@ -1210,6 +1217,28 @@ class EGLRendererWorker:
             self._plane_visual_handle.detach()
         handle.attach(view)
         return handle.node
+
+    def _aligned_roi_signature(
+        self,
+        source: ZarrSceneSource,
+        level: int,
+        roi: SliceROI,
+    ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
+        """Return chunk-aligned ROI and its signature for comparison."""
+
+        chunk_shape = chunk_shape_for_level(source, int(level))
+        aligned_roi = roi
+        if self._roi_align_chunks and chunk_shape is not None:
+            full_h, full_w = plane_wh_for_level(source, int(level))
+            aligned_roi = align_roi_to_chunk_grid(
+                roi,
+                chunk_shape,
+                int(self._roi_pad_chunks),
+                height=full_h,
+                width=full_w,
+            )
+        signature = roi_chunk_signature(aligned_roi, chunk_shape)
+        return aligned_roi, chunk_shape, signature
 
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
         if self._data_d is not None and self._data_wh is not None:
@@ -2007,14 +2036,12 @@ class EGLRendererWorker:
         if self._level_policy_suppressed:
             runner = self._viewport_runner
             if runner is not None:
-                runner.state.pose_reason = None
                 runner.state.zoom_hint = None
             return
 
         if self._viewport_state.mode is RenderMode.VOLUME:
             runner = self._viewport_runner
             if runner is not None:
-                runner.state.pose_reason = None
                 runner.state.zoom_hint = None
             return
 
@@ -2023,15 +2050,25 @@ class EGLRendererWorker:
         def _resolve(level: int, _rect: tuple[float, float, float, float]) -> SliceROI:
             return viewport_roi_for_level(self, source, int(level), quiet=True)
 
-        intent = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
+        plan = self._viewport_runner.plan_tick(source=source, roi_resolver=_resolve)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "viewport.tick plan level_change=%s slice=%s pose_event=%s target_level=%d applied_level=%d awaiting=%s",
+                plan.level_change,
+                plan.slice_task.signature if plan.slice_task is not None else None,
+                plan.pose_event.value if plan.pose_event is not None else None,
+                int(self._viewport_runner.state.target_level),
+                int(self._viewport_runner.state.applied_level),
+                self._viewport_runner.state.awaiting_level_confirm,
+            )
 
-        if intent.zoom_hint is not None:
-            self._render_mailbox.record_zoom_hint(float(intent.zoom_hint))
+        if plan.zoom_hint is not None:
+            self._render_mailbox.record_zoom_hint(float(plan.zoom_hint))
 
         level_applied = False
 
-        if intent.level_change:
-            target_level = int(self._viewport_runner.state.target_level)
+        if plan.level_change:
+            target_level = int(self._viewport_runner.state.request.level)
             prev_level = int(self._current_level_index())
             applied_context = self._apply_level(
                 source,
@@ -2048,25 +2085,32 @@ class EGLRendererWorker:
             self._viewport_runner.mark_level_applied(int(applied_context.level))
 
         if (
-            intent.roi_change
+            plan.slice_task is not None
             and self._viewport_state.mode is not RenderMode.VOLUME
             and not level_applied
         ):
-            pending = self._viewport_runner.state.pending_roi
-            if pending is not None:
+            slice_task = plan.slice_task
+            level_int = int(slice_task.level)
+            step_tuple = tuple(int(v) for v in slice_task.step) if slice_task.step is not None else None
+            signature_token = (level_int, step_tuple, slice_task.signature)
+            if self._last_slice_signature == signature_token:
+                self._viewport_runner.mark_slice_applied(slice_task)
+            else:
                 apply_slice_roi(
                     self,
                     source,
-                    int(self._viewport_runner.state.target_level),
-                    pending,
+                    level_int,
+                    slice_task.roi,
                     update_contrast=False,
+                    step=step_tuple,
                 )
+                self._viewport_runner.mark_slice_applied(slice_task)
 
         rect = self._current_panzoom_rect()
         if rect is not None:
             self._viewport_runner.update_camera_rect(rect)
-        if intent.pose_reason is not None:
-            self._emit_current_camera_pose(intent.pose_reason)
+        if plan.pose_event is not None:
+            self._emit_current_camera_pose(plan.pose_event.value)
 
 
     # ---- C6 selection (napari-anchored) -------------------------------------
@@ -2146,6 +2190,12 @@ class EGLRendererWorker:
             prev_level=current,
             last_step=step_hint,
         )
+
+        requested = self._viewport_runner.request_level(int(context.level))
+        if not requested:
+            logger.debug("level intent suppressed (no change or already pending)")
+            return
+
         if self._viewport_state.mode is RenderMode.VOLUME:
             apply_volume_metadata(self, source, context)
         else:
@@ -2174,11 +2224,6 @@ class EGLRendererWorker:
             decision.reason,
             intent.downgraded,
         )
-
-        requested = self._viewport_runner.request_level(int(context.level))
-        if not requested:
-            logger.debug("level intent suppressed (runner already pending)")
-            return
 
         callback = self._level_intent_callback
         if callback is None:

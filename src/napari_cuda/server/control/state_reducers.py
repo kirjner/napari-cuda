@@ -101,6 +101,8 @@ def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
     entry = ledger.get("viewport", "plane", "state")
     if entry is not None and isinstance(entry.value, Mapping):
         payload = dict(entry.value)
+        if "intent" in payload and "request" not in payload:
+            payload["request"] = payload.pop("intent")
         return PlaneState(**payload)
     return PlaneState()
 
@@ -111,7 +113,10 @@ def _plane_from_payload(value: PlaneState | Mapping[str, Any] | None) -> PlaneSt
     if isinstance(value, PlaneState):
         return PlaneState(**dict(value.__dict__))
     if isinstance(value, Mapping):
-        return PlaneState(**dict(value))
+        payload = dict(value)
+        if "intent" in payload and "request" not in payload:
+            payload["request"] = payload.pop("intent")
+        return PlaneState(**payload)
     raise TypeError(f"unsupported plane state payload: {type(value)!r}")
 
 
@@ -1141,10 +1146,6 @@ def reduce_dims_update(
         plane_state.camera_pose_dirty = False
         plane_state.applied_roi = None
         plane_state.applied_roi_signature = None
-        plane_state.pending_roi = None
-        plane_state.pending_roi_signature = None
-        plane_state.roi_reload_required = True
-        plane_state.level_reload_required = False
         metadata = _metadata_from_intent(resolved_intent_id)
         _store_plane_state(
             ledger,
@@ -1327,10 +1328,6 @@ def reduce_plane_restore(
     )
     base_plane.applied_roi = None
     base_plane.applied_roi_signature = None
-    base_plane.pending_roi = None
-    base_plane.pending_roi_signature = None
-    base_plane.roi_reload_required = True
-    base_plane.level_reload_required = False
     base_plane.camera_pose_dirty = False
 
     next_op_seq = _next_scene_op_seq(ledger)
@@ -1632,9 +1629,6 @@ def reduce_camera_update(
         plane_state.camera_pose_dirty = False
         plane_state.applied_roi = None
         plane_state.applied_roi_signature = None
-        plane_state.pending_roi = None
-        plane_state.pending_roi_signature = None
-        plane_state.roi_reload_required = True
         _store_plane_state(
             ledger,
             plane_state,

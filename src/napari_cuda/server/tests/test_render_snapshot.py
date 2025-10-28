@@ -8,7 +8,16 @@ from napari_cuda.server.runtime import render_snapshot as snapshot_mod
 from napari_cuda.server.runtime.render_ledger_snapshot import (
     RenderLedgerSnapshot,
 )
+from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
+
+
+class _NoopEvent:
+    def connect(self, *_args, **_kwargs) -> None:
+        return None
+
+    def disconnect(self, *_args, **_kwargs) -> None:
+        return None
 
 
 class _FakeDescriptor:
@@ -25,6 +34,15 @@ class _FakeSource:
             _FakeDescriptor((2, 2, 2)),
         ]
         self.dtype = "float32"
+        self.axes = ("z", "y", "x")
+
+    def ensure_contrast(self, level: int, **_kwargs) -> tuple[float, float]:
+        _ = level
+        return (0.0, 1.0)
+
+    def level_scale(self, level: int) -> tuple[float, float, float]:
+        _ = level
+        return (1.0, 1.0, 1.0)
 
 
 class _StubTurntableCamera:
@@ -69,6 +87,18 @@ class _StubWorker:
         self.view = type("V", (), {"camera": camera})()
         self._viewport_runner = None
         self._level_metadata = None
+        event = _NoopEvent()
+        self._viewer = SimpleNamespace(dims=SimpleNamespace(events=SimpleNamespace(ndisplay=event, order=event)))
+        self._apply_dims_calls = 0
+        self._roi_align_chunks = False
+        self._roi_ensure_contains_viewport = False
+        self._roi_edge_threshold = 0
+        self._roi_pad_chunks = 0
+        self._data_wh = (10, 10)
+        self._data_d = 10
+        self.width = 640
+        self.height = 480
+        self._log_layer_debug = False
 
     def _ensure_scene_source(self) -> object:
         return self._scene_source
@@ -101,6 +131,9 @@ class _StubWorker:
     def _update_level_metadata(self, descriptor, context) -> None:
         self._level_metadata = (descriptor, context)
 
+    def _ledger_step(self):
+        return self.viewport_state.plane.applied.step
+
     def _current_level_index(self) -> int:
         if self.viewport_state.mode is RenderMode.VOLUME:
             return int(self.viewport_state.volume.level)
@@ -121,6 +154,29 @@ class _StubWorker:
     @_volume_scale.setter
     def _volume_scale(self, value: tuple[float, float, float]) -> None:
         self.viewport_state.volume.scale = tuple(float(component) for component in value)
+
+    def _current_panzoom_rect(self):
+        return self.viewport_state.plane.pose.rect
+
+    def _aligned_roi_signature(self, source, level, roi):
+        _ = source  # unused in stub
+        level_int = int(level)
+        signature = (
+            int(roi.y_start),
+            int(roi.y_stop) - 1,
+            int(roi.x_start),
+            int(roi.x_stop) - 1,
+        )
+        return roi, None, signature
+
+    def _dims_signature(self, snapshot):
+        step = tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None
+        return (snapshot.ndisplay, snapshot.current_level, step)
+
+    def _apply_dims_from_snapshot(self, snapshot, *, signature):
+        _ = snapshot
+        self._apply_dims_calls += 1
+        self._last_dims_signature = signature
 
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,6 +202,8 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
+    monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
     original_configure = worker._configure_camera_for_mode
 
@@ -155,7 +213,8 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     worker._configure_camera_for_mode = _wrapped_configure  # type: ignore[assignment]
 
-    snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
+    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
+    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
@@ -189,7 +248,8 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
-    snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
+    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
+    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 0
@@ -218,8 +278,10 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", _fake_slice)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
-    snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
+    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
+    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.PLANE
     assert worker.configure_calls == 1
@@ -249,10 +311,31 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
+    monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
-    snapshot_mod._apply_snapshot_multiscale(worker, snapshot)
+    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
+    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
     assert calls["build"] == [(2, 1, (7, 0, 0))]
     assert calls["volume"] == [(2, True)]
+
+
+def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = _StubWorker(use_volume=False, level=1)
+    snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(5, 0, 0))
+
+    monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
+
+    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
+    worker._last_snapshot_signature = ops["signature"]
+    worker._last_dims_signature = worker._dims_signature(snapshot)
+
+    def _fail_apply(*_args, **_kwargs) -> None:
+        raise AssertionError("apply_snapshot_ops should not be invoked when signature matches")
+
+    monkeypatch.setattr(snapshot_mod, "_apply_snapshot_ops", _fail_apply)
+
+    snapshot_mod.apply_render_snapshot(worker, snapshot)
+    assert worker._apply_dims_calls == 0

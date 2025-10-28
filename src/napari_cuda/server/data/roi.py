@@ -8,10 +8,9 @@ worker sheds its bespoke implementations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Optional, Sequence, Tuple
 import logging
 import math
-import time
 
 from vispy import scene
 
@@ -269,62 +268,6 @@ def viewport_debug_snapshot(
     return info
 
 
-def cached_viewport_roi(
-    *,
-    view: Any,
-    canvas_size: Tuple[int, int],
-    source: ZarrSceneSource,
-    level: int,
-    align_chunks: bool,
-    chunk_pad: int,
-    ensure_contains_viewport: bool,
-    edge_threshold: int,
-    for_policy: bool,
-    cache: MutableMapping[int, tuple[Optional[tuple[float, ...]], SliceROI]] | None,
-    log_state: MutableMapping[int, tuple[SliceROI, float]] | None,
-    clock: Callable[[], float] = time.perf_counter,
-    transform_signature: Optional[tuple[float, ...]] = None,
-) -> SliceROI:
-    """Compute or reuse viewport ROI while maintaining cache/log state."""
-
-    if cache is not None and transform_signature is not None:
-        cached = cache.get(int(level))
-        if cached is not None and cached[0] == transform_signature:
-            return cached[1]
-
-    prev_logged: Optional[SliceROI] = None
-    if not for_policy and log_state is not None:
-        logged = log_state.get(int(level))
-        if logged is not None:
-            prev_logged = logged[0]
-
-    result = compute_viewport_roi(
-        view=view,
-        canvas_size=canvas_size,
-        source=source,
-        level=level,
-        align_chunks=align_chunks,
-        chunk_pad=chunk_pad,
-        ensure_contains_viewport=ensure_contains_viewport,
-        edge_threshold=edge_threshold,
-        prev_roi=prev_logged,
-        for_policy=for_policy,
-        transform_signature=transform_signature,
-    )
-
-    roi = result.roi
-    if roi.is_empty():
-        raise RuntimeError("cached_viewport_roi produced an empty ROI")
-
-    if cache is not None and result.transform_signature is not None:
-        cache[int(level)] = (result.transform_signature, roi)
-
-    if not for_policy and log_state is not None:
-        log_state[int(level)] = (roi, clock())
-
-    return roi
-
-
 def resolve_viewport_roi(
     *,
     view: Any,
@@ -336,8 +279,7 @@ def resolve_viewport_roi(
     ensure_contains_viewport: bool,
     edge_threshold: int,
     for_policy: bool,
-    cache: MutableMapping[int, tuple[Optional[tuple[float, ...]], SliceROI]] | None,
-    log_state: MutableMapping[int, tuple[SliceROI, float]] | None,
+    prev_roi: Optional[SliceROI],
     snapshot_cb: Callable[[], dict[str, Any]],
     log_layer_debug: bool,
     quiet: bool,
@@ -362,7 +304,7 @@ def resolve_viewport_roi(
 
     signature = _transform_signature(view)
 
-    return cached_viewport_roi(
+    result = compute_viewport_roi(
         view=view,
         canvas_size=canvas_size,
         source=source,
@@ -371,12 +313,16 @@ def resolve_viewport_roi(
         chunk_pad=chunk_pad,
         ensure_contains_viewport=ensure_contains_viewport,
         edge_threshold=edge_threshold,
+        prev_roi=prev_roi,
         for_policy=for_policy,
-        cache=cache,
-        log_state=log_state,
-        clock=time.perf_counter,
         transform_signature=signature,
     )
+
+    roi = result.roi
+    if roi.is_empty():
+        raise RuntimeError("resolve_viewport_roi produced an empty ROI")
+
+    return roi
 
 
 def ensure_panzoom_camera(
@@ -430,8 +376,7 @@ def resolve_worker_viewport_roi(
     ensure_contains_viewport: bool,
     edge_threshold: int,
     for_policy: bool,
-    roi_cache: MutableMapping[int, tuple[Optional[tuple[float, ...]], SliceROI]] | None,
-    roi_log_state: MutableMapping[int, tuple[SliceROI, float]] | None,
+    prev_roi: Optional[SliceROI],
     snapshot_cb: Callable[[], dict[str, Any]],
     log_layer_debug: bool,
     quiet: bool,
@@ -467,8 +412,7 @@ def resolve_worker_viewport_roi(
         ensure_contains_viewport=ensure_contains_viewport,
         edge_threshold=edge_threshold,
         for_policy=for_policy,
-        cache=roi_cache,
-        log_state=roi_log_state,
+        prev_roi=prev_roi,
         snapshot_cb=snapshot_cb,
         log_layer_debug=log_layer_debug,
         quiet=quiet,
@@ -483,7 +427,6 @@ __all__ = [
     "plane_wh_for_level",
     "viewport_debug_snapshot",
     "resolve_viewport_roi",
-    "cached_viewport_roi",
     "ensure_panzoom_camera",
     "resolve_worker_viewport_roi",
 ]

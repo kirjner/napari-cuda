@@ -268,8 +268,6 @@ class CaptureWorker:
         self.volume_dtype = "float32"
         self._active_ms_level = 0
         self._last_step = (0, 0)
-        self._roi_cache: dict[int, tuple[Optional[tuple[float, ...]], SliceROI]] = {}
-        self._roi_log_state: dict[int, tuple[SliceROI, float]] = {}
         self._roi_edge_threshold = 0
         self._roi_align_chunks = False
         self._roi_ensure_contains_viewport = False

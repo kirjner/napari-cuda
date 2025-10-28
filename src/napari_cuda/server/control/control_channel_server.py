@@ -502,10 +502,8 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
     worker = server._worker  # type: ignore[attr-defined]
     if worker is not None and worker.is_ready:  # type: ignore[attr-defined]
         base_state = worker.viewport_state  # type: ignore[attr-defined]
-        plane_state = replace(
-            base_state.plane,
-            target_ndisplay=int(new_ndisplay),
-        )
+        plane_state = replace(base_state.plane)
+        plane_state.target_ndisplay = int(new_ndisplay)
         volume_state = replace(restored_volume_state) if restored_volume_state is not None else replace(base_state.volume)
         desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
 

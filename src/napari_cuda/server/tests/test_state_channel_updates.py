@@ -1289,13 +1289,12 @@ def test_reduce_level_update_records_viewport_state() -> None:
     server, scheduled, _captured = _make_server()
     try:
         ledger = server._state_ledger
-        plane_state = PlaneState(
-            target_level=1,
-            target_ndisplay=2,
-            target_step=(4, 0, 0),
-            applied_level=1,
-            applied_step=(4, 0, 0),
-        )
+        plane_state = PlaneState()
+        plane_state.target_level = 1
+        plane_state.target_ndisplay = 2
+        plane_state.target_step = (4, 0, 0)
+        plane_state.applied_level = 1
+        plane_state.applied_step = (4, 0, 0)
         plane_state.update_pose(rect=(0.0, 0.0, 10.0, 10.0), center=(5.0, 5.0), zoom=1.25)
         volume_state = VolumeState(
             level=1,
@@ -1324,9 +1323,10 @@ def test_reduce_level_update_records_viewport_state() -> None:
         plane_entry = ledger.get("viewport", "plane", "state")
         assert plane_entry is not None
         assert plane_entry.value is not None
-        assert plane_entry.value["applied_level"] == 1
-        assert tuple(plane_entry.value["applied_step"]) == (4, 0, 0)
-        assert pytest.approx(float(plane_entry.value["pose"]["zoom"])) == 1.25
+        plane_snapshot = plane_entry.value
+        assert plane_snapshot["applied"]["level"] == 1
+        assert tuple(plane_snapshot["applied"]["step"]) == (4, 0, 0)
+        assert pytest.approx(float(plane_snapshot["pose"]["zoom"])) == 1.25
 
         volume_entry = ledger.get("viewport", "volume", "state")
         assert volume_entry is not None
@@ -1347,13 +1347,12 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
     server, scheduled, _captured = _make_server()
     try:
         ledger = server._state_ledger
-        plane_state = PlaneState(
-            target_level=0,
-            target_ndisplay=2,
-            target_step=(2, 0, 0),
-            applied_level=0,
-            applied_step=(2, 0, 0),
-        )
+        plane_state = PlaneState()
+        plane_state.target_level = 0
+        plane_state.target_ndisplay = 2
+        plane_state.target_step = (2, 0, 0)
+        plane_state.applied_level = 0
+        plane_state.applied_step = (2, 0, 0)
         plane_state.update_pose(rect=(0.0, 0.0, 20.0, 20.0), center=(10.0, 10.0), zoom=2.0)
         volume_state = VolumeState(level=0, downgraded=False)
         volume_state.update_pose(center=(0.0, 0.0, 0.0))
@@ -1385,7 +1384,7 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
         viewport_meta = metadata.get("viewport_state")
         assert viewport_meta is not None
         assert viewport_meta["mode"] == "PLANE"
-        assert tuple(viewport_meta["plane"]["applied_step"]) == (2, 0, 0)
+        assert tuple(viewport_meta["plane"]["applied"]["step"]) == (2, 0, 0)
         assert viewport_meta["volume"]["level"] == 0
     finally:
         while scheduled:
@@ -1413,9 +1412,10 @@ def test_reduce_plane_restore_updates_viewport_state() -> None:
         plane_entry = ledger.get("viewport", "plane", "state")
         assert plane_entry is not None
         assert plane_entry.value is not None
-        assert plane_entry.value["applied_level"] == 2
-        assert tuple(plane_entry.value["applied_step"]) == (6, 0, 0)
-        assert pytest.approx(float(plane_entry.value["pose"]["zoom"])) == 1.1
+        plane_snapshot = plane_entry.value
+        assert plane_snapshot["applied"]["level"] == 2
+        assert tuple(plane_snapshot["applied"]["step"]) == (6, 0, 0)
+        assert pytest.approx(float(plane_snapshot["pose"]["zoom"])) == 1.1
 
         cache_level = ledger.get("view_cache", "plane", "level")
         assert cache_level is not None and int(cache_level.value) == 2

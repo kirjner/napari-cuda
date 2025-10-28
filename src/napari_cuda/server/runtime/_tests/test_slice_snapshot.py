@@ -101,6 +101,7 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         roi_in: SliceROI,
         *,
         update_contrast: bool,
+        step: object = None,
     ) -> tuple[int, int]:
         result_cache["level"] = level
         result_cache["roi"] = roi_in
