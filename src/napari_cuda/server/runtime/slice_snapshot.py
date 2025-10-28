@@ -4,28 +4,34 @@ from __future__ import annotations
 
 import logging
 import time
+import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
+
+import numpy as np
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.roi import (
+    plane_scale_for_level,
     plane_wh_for_level,
     resolve_worker_viewport_roi,
     viewport_debug_snapshot,
 )
+from napari_cuda.server.data.roi_applier import SliceDataApplier
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.roi_math import (
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from napari_cuda.server.runtime.scene_state_applier import SceneStateApplier
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode
 from napari_cuda.server.runtime.viewer_stage import apply_plane_metadata
+
+from napari.layers.base._base_constants import Blending as NapariBlending
 
 logger = logging.getLogger(__name__)
 
@@ -316,10 +322,10 @@ def apply_slice_roi(
     if layer is not None:
         view = worker.view
         assert view is not None, "VisPy view required for slice apply"
-        ctx = worker._build_scene_state_context(view.camera)
-        SceneStateApplier.apply_slice_to_layer(
-            ctx,
+        _apply_slice_to_layer(
+            layer=layer,
             source=source,
+            level=int(level),
             slab=slab,
             roi=roi,
             update_contrast=bool(update_contrast),
@@ -341,6 +347,38 @@ def apply_slice_roi(
                 runner.update_camera_rect(rect)
     worker._mark_render_tick_needed()
     return height_px, width_px
+
+
+def _apply_slice_to_layer(
+    *,
+    layer: Any,
+    source: Any,
+    level: int,
+    slab: Any,
+    roi: Optional[SliceROI],
+    update_contrast: bool,
+) -> Tuple[float, float]:
+    """Apply the requested image slab to the active napari layer."""
+
+    sy, sx = plane_scale_for_level(source, int(level))
+    roi_to_apply = roi or SliceROI(0, int(slab.shape[0]), 0, int(slab.shape[1]))
+    SliceDataApplier(layer=layer).apply(slab=slab, roi=roi_to_apply, scale=(sy, sx))
+    layer.visible = True  # type: ignore[assignment]
+    layer.opacity = 1.0  # type: ignore[assignment]
+    if not getattr(layer, "blending", None):
+        layer.blending = NapariBlending.OPAQUE.value  # type: ignore[assignment]
+
+    if update_contrast:
+        smin = float(np.nanmin(slab)) if hasattr(np, "nanmin") else float(np.min(slab))
+        smax = float(np.nanmax(slab)) if hasattr(np, "nanmax") else float(np.max(slab))
+        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
+            layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
+        elif 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
+            layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
+        else:
+            layer.contrast_limits = [smin, smax]  # type: ignore[assignment]
+
+    return float(sy), float(sx)
 
 
 __all__ = [

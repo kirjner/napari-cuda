@@ -79,7 +79,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 
 ### Stage B — Snapshot/application split
 1. Factor plane and volume helpers into `slice_snapshot.py`, `volume_snapshot.py`, and `viewer_stage.py`.
-2. Ensure `SceneStateApplier` continues to read `viewport_state` for last ROI/camera data; update `SceneStateApplyContext` accordingly.
+2. Inline the former `SceneStateApplier` logic so slice/volume helpers and the worker read from `ViewportState` directly (no intermediate context).
 3. Keep `apply_render_snapshot` delegating through the new modules while preserving the existing logging and fit suppression order.
 4. Add targeted unit tests for the new helpers (`test_slice_snapshot.py`, `test_volume_snapshot.py`).
 

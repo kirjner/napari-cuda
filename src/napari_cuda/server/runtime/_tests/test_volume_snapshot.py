@@ -6,7 +6,6 @@ import pytest
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext, SceneStateApplier
 from napari_cuda.server.runtime.state_structs import ViewportState
 from napari_cuda.server.runtime.volume_snapshot import apply_volume_camera_pose, apply_volume_level
 
@@ -58,42 +57,29 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         def _get_level_volume(self, _source: object, level: int) -> object:
             return ("volume", level)
 
-        def _build_scene_state_context(self, cam: object) -> SceneStateApplyContext:
-            return SceneStateApplyContext(
-                use_volume=True,
-                viewer=None,
-                camera=cam,
-                layer=None,
-                scene_source=None,
-                active_ms_level=0,
-                z_index=None,
-                last_roi=None,
-                preserve_view_on_switch=False,
-                sticky_contrast=False,
-                idr_on_z=False,
-                data_wh=(0, 0),
-                volume_scale=None,
-                state_lock=None,
-                ensure_scene_source=lambda: None,
-                plane_scale_for_level=lambda *_args: (1.0, 1.0),
-                load_slice=lambda *_args: None,
-                mark_render_tick_needed=lambda: None,
-                ensure_plane_visual=lambda: self._plane_visual_node,
-                ensure_volume_visual=lambda: self._volume_visual_node,
-                request_encoder_idr=None,
-            )
-
     worker = _Worker()
 
     calls: dict[str, object] = {}
 
-    def _fake_apply_volume_layer(ctx: SceneStateApplyContext, *, volume: object, contrast: tuple[float, float]) -> tuple[tuple[int, int], int]:
-        calls["ctx"] = ctx
+    def _fake_apply_volume_layer(
+        *,
+        layer: object,
+        volume: object,
+        contrast: tuple[float, float],
+        scale: tuple[float, float, float],
+        ensure_volume_visual: object,
+    ) -> tuple[tuple[int, int], int]:
+        calls["layer"] = layer
         calls["volume"] = volume
         calls["contrast"] = contrast
+        calls["scale"] = scale
+        calls["ensure_volume_visual"] = ensure_volume_visual
         return (128, 256), 64
 
-    monkeypatch.setattr(SceneStateApplier, "apply_volume_layer", staticmethod(_fake_apply_volume_layer))
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.volume_snapshot._apply_volume_to_layer",
+        _fake_apply_volume_layer,
+    )
 
     class _Source:
         axes = ("z", "y", "x")
@@ -139,8 +125,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
     assert logger.calls[-1]["shape"] == (64, 256, 128)
     assert logger.calls[-1]["downgraded"] is True
 
-    ctx: SceneStateApplyContext = calls["ctx"]  # type: ignore[assignment]
-    assert ctx.volume_scale == (0.5, 1.5, 3.0)
+    assert calls["scale"] == (0.5, 1.5, 3.0)
     assert calls["volume"] == ("volume", 2)
     assert calls["contrast"] == (0.0, 1.0)
 

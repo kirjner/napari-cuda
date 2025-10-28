@@ -4,7 +4,7 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 
 ## Motivations
 
-- **Stability:** Layer opacity currently reverts to legacy defaults when the worker refreshes the napari adapter layer. This is caused by scattered state (extras vs render hints) and defensive resets inside `SceneStateApplier`.
+- **Stability:** Layer opacity currently reverts to legacy defaults when the worker refreshes the napari adapter layer. This is caused by scattered state (extras vs render hints) and defensive resets inside the legacy layer-apply helpers.
 - **Consistency:** Volume and planar pipelines expose the same surface to the user yet write to different payload slots, leading to subtle client regressions (e.g., the bridge seeing 1.0 in `render.opacity`).
 - **Reuse:** Future intent surfaces (MCP tools, dashboards) need a well-defined structure rather than ad-hoc dicts.
 
@@ -17,7 +17,7 @@ This document captures the ongoing work to make layer intents (opacity, visibili
    - `control/state_reducers.py` write confirmed values via transactions (`apply_layer_property_transaction`), so mirrors/tests rebuild control maps from the ledger snapshot.
 
 3. **Worker application** ✅
-   - `runtime/scene_state_applier.py` pulls values from the control state when mutating the napari adapter layer (planar) or volume visual (3D), eliminating hard-coded resets.
+   - The runtime worker now applies layer controls directly (planar and volume paths) using the `egl_worker` helpers, eliminating the defensive resets from the legacy class.
 
 4. **Snapshot emission** ✅
    - Layer snapshot blocks (the payload of `notify.scene`) now include a dedicated `controls` map plus a lean `source` section; transport metadata (source path, volume flags, policy metrics) lives under the scene-level `metadata` block.
@@ -40,6 +40,6 @@ This document captures the ongoing work to make layer intents (opacity, visibili
 ## Next steps
 
 1. Implement `LayerControlState` and migrate intent helpers to it. ✅
-2. Update `SceneStateApplier` / `snapshot_scene` to consume the canonical bag. ✅
+2. Update the worker layer-apply helpers / `snapshot_scene` to consume the canonical bag. ✅
 3. Rename `extras` → `controls` in `LayerSpec` and strip mirrored fields. ✅
 4. Roll client changes so the bridge and registry rely solely on the new map. ✅

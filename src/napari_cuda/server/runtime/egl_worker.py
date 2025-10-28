@@ -4,7 +4,7 @@
 the neutral module name reflects its broader responsibilities:
 
 * bootstrap the napari Viewer/VisPy canvas and keep it on the worker thread,
-* drain `RenderUpdateMailbox` updates and apply them through `SceneStateApplier`,
+* drain `RenderUpdateMailbox` updates and apply them to the viewer/visuals,
 * drive the render loop, including camera animation and policy evaluation,
 * capture frames via `CaptureFacade`, hand them to the encoder, and surface
   timing metadata for downstream metrics.
@@ -22,7 +22,7 @@ import os
 import threading
 import time
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Optional
 
@@ -57,7 +57,7 @@ from napari_cuda.server.data.level_logging import (
     LevelSwitchLogger,
 )
 
-# No direct use of roi_applier here; slice application goes through SceneStateApplier.
+# ROI helpers manage slicing via slice_snapshot utilities.
 from napari_cuda.server.data.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
@@ -100,11 +100,6 @@ from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdateMailbox,
 )
 from napari_cuda.server.runtime.runtime_loop import run_render_tick
-from napari_cuda.server.runtime.scene_state_applier import (
-    SceneDrainResult,
-    SceneStateApplier,
-    SceneStateApplyContext,
-)
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode, ViewportState, VolumeState
 from napari_cuda.server.runtime.viewport_runner import ViewportRunner
@@ -113,6 +108,9 @@ from napari_cuda.server.runtime.worker_runtime import (
     reset_worker_camera,
 )
 from napari_cuda.server.scene import CameraDeltaCommand
+from napari._vispy.layers.image import _napari_cmap_to_vispy
+from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
+from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +138,15 @@ class _VisualHandle:
 
     def is_attached(self) -> bool:
         return self._attached
+
+
+@dataclass(frozen=True)
+class _DrainOutcome:
+    """Result of applying pending viewer/layer updates."""
+
+    z_index: Optional[int] = None
+    data_wh: Optional[tuple[int, int]] = None
+    render_marked: bool = False
 
 
 def _rect_to_tuple(rect: Rect) -> tuple[float, float, float, float]:
@@ -1790,37 +1797,6 @@ class EGLRendererWorker:
             return None
         return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
 
-    def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
-        applied_roi = self._viewport_runner.state.applied_roi
-        applied_level = self._viewport_runner.state.applied_level
-        last_roi_tuple = None
-        if applied_roi is not None:
-            last_roi_tuple = (int(applied_level), applied_roi)
-
-        return SceneStateApplyContext(
-            use_volume=self._viewport_state.mode is RenderMode.VOLUME,
-            viewer=self._viewer,
-            camera=cam,
-            layer=self._napari_layer,
-            scene_source=self._scene_source,
-            active_ms_level=int(self._current_level_index()),
-            z_index=self._z_index,
-            last_roi=last_roi_tuple,
-            preserve_view_on_switch=self._preserve_view_on_switch,
-            sticky_contrast=self._sticky_contrast,
-            idr_on_z=self._idr_on_z,
-            data_wh=self._data_wh,
-            volume_scale=self._volume_scale,
-            state_lock=self._state_lock,
-            ensure_scene_source=self._ensure_scene_source,
-            plane_scale_for_level=plane_scale_for_level,
-            load_slice=self._load_slice,
-            mark_render_tick_needed=self._mark_render_tick_needed,
-            request_encoder_idr=self._request_encoder_idr,
-            ensure_plane_visual=self._ensure_plane_visual,
-            ensure_volume_visual=self._ensure_volume_visual,
-        )
-
     def _apply_viewport_state_snapshot(
         self,
         *,
@@ -1928,16 +1904,7 @@ class EGLRendererWorker:
         if signature_changed and self._viewport_runner is not None:
             self._viewport_runner.ingest_snapshot(state)
 
-        view = self.view
-        assert view is not None, "drain_scene_updates requires an active VisPy view"
-        cam = view.camera
-
-        ctx = self._build_scene_state_context(cam)
-        drain_res: SceneDrainResult = SceneStateApplier.drain_updates(
-            ctx,
-            state=state_for_apply,
-            mailbox=self._render_mailbox,
-        )
+        drain_res = self._drain_render_state(state_for_apply)
 
         if drain_res.z_index is not None:
             self._z_index = int(drain_res.z_index)
@@ -1957,7 +1924,7 @@ class EGLRendererWorker:
             self._viewport_runner.mark_level_applied(self._current_level_index())
 
         if (
-            drain_res.policy_refresh_needed
+            drain_res.render_marked
             and self._viewport_state.mode is not RenderMode.VOLUME
             and not self._level_policy_suppressed
         ):
@@ -2346,3 +2313,207 @@ class EGLRendererWorker:
             if shapes:
                 return tuple(shapes)
         return None
+    def _apply_dims_step(self, current_step: Sequence[int]) -> tuple[Optional[int], bool]:
+        """Update viewer dims and source slice from the provided step."""
+
+        if self._viewport_state.mode is RenderMode.VOLUME:
+            return None, False
+
+        steps = tuple(int(x) for x in current_step)
+        viewer = self._viewer
+        assert viewer is not None, "viewer must exist before applying dims"
+        viewer.dims.current_step = steps  # type: ignore[attr-defined]
+
+        source = self._ensure_scene_source()
+        axes = getattr(source, "axes", ())
+        if isinstance(axes, str):
+            axes = tuple(axes)
+
+        z_index: Optional[int] = None
+        if isinstance(axes, (list, tuple)) and "z" in axes:
+            zi = axes.index("z")
+            if zi < len(steps):
+                z_index = int(steps[zi])
+
+        if z_index is None:
+            self._mark_render_tick_needed()
+            return None, True
+
+        if self._z_index is not None and int(z_index) == int(self._z_index):
+            self._mark_render_tick_needed()
+            return int(z_index), True
+
+        zi = axes.index("z") if isinstance(axes, (list, tuple)) and "z" in axes else 0
+        base = list(getattr(source, "current_step", steps) or steps)
+        level_idx = int(self._current_level_index())
+        lvl_shape = source.level_shape(level_idx)
+        if len(base) < len(lvl_shape):
+            base.extend(0 for _ in range(len(lvl_shape) - len(base)))
+        base[zi] = int(z_index)
+
+        with self._state_lock:
+            source.set_current_slice(tuple(int(x) for x in base), level_idx)
+
+        if self._idr_on_z and self._request_encoder_idr is not None:
+            self._request_encoder_idr()
+
+        self._mark_render_tick_needed()
+        return int(z_index), True
+
+    def _apply_volume_visual_params(self, state: RenderLedgerSnapshot) -> None:
+        """Update volume visual properties from the snapshot."""
+
+        if self._viewport_state.mode is not RenderMode.VOLUME:
+            return
+
+        visual = self._ensure_volume_visual()
+
+        if state.volume_mode:
+            token = str(state.volume_mode).strip().lower()
+            visual.method = NapariImageRendering(token).value  # type: ignore[attr-defined]
+
+        if state.volume_colormap is not None:
+            cmap = ensure_colormap(state.volume_colormap)
+            visual.cmap = _napari_cmap_to_vispy(cmap)  # type: ignore[attr-defined]
+
+        clim = state.volume_clim
+        if isinstance(clim, tuple) and len(clim) >= 2:
+            lo = float(clim[0])
+            hi = float(clim[1])
+            if hi < lo:
+                lo, hi = hi, lo
+            visual.clim = (lo, hi)  # type: ignore[attr-defined]
+
+        if state.volume_opacity is not None:
+            visual.opacity = float(max(0.0, min(1.0, float(state.volume_opacity))))  # type: ignore[attr-defined]
+
+        if state.volume_sample_step is not None:
+            if hasattr(visual, "relative_step_size"):
+                visual.relative_step_size = float(  # type: ignore[attr-defined]
+                    max(0.1, min(4.0, float(state.volume_sample_step)))
+                )
+            else:
+                logger.debug(
+                    "volume params: visual %s missing relative_step_size; skipping sample_step update",
+                    type(visual).__name__,
+                )
+
+    def _apply_layer_updates(self, updates: Mapping[str, Mapping[str, Any]]) -> bool:
+        """Apply layer property updates from the snapshot."""
+
+        layer = self._napari_layer
+        if layer is None or not updates:
+            return False
+
+        def _active_visual() -> Any:
+            if self._viewport_state.mode is RenderMode.VOLUME:
+                return self._ensure_volume_visual()
+            return self._ensure_plane_visual()
+
+        for props in updates.values():
+            for key, value in props.items():
+                if key == "visible":
+                    layer.visible = bool(value)  # type: ignore[assignment]
+                elif key == "opacity":
+                    layer.opacity = float(max(0.0, min(1.0, float(value))))  # type: ignore[assignment]
+                elif key == "blending":
+                    layer.blending = str(value)  # type: ignore[assignment]
+                elif key == "interpolation":
+                    layer.interpolation = str(value)  # type: ignore[assignment]
+                elif key == "gamma":
+                    gamma = float(value)
+                    if not gamma > 0.0:
+                        raise ValueError("gamma must be positive")
+                    layer.gamma = gamma  # type: ignore[assignment]
+                    visual = _active_visual()
+                    visual.gamma = gamma  # type: ignore[attr-defined]
+                elif key == "contrast_limits":
+                    if not isinstance(value, (list, tuple)) or len(value) < 2:
+                        raise ValueError("contrast_limits must be a length-2 sequence")
+                    lo = float(value[0])
+                    hi = float(value[1])
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
+                    visual = _active_visual()
+                    visual.clim = (lo, hi)  # type: ignore[attr-defined]
+                elif key == "colormap":
+                    cmap = ensure_colormap(value)
+                    layer.colormap = cmap  # type: ignore[assignment]
+                    visual = _active_visual()
+                    logger.debug("layer updates: updating visual colormap to %s", cmap.name)
+                    visual.cmap = _napari_cmap_to_vispy(cmap)
+                elif key == "depiction":
+                    if self._viewport_state.mode is RenderMode.VOLUME:
+                        continue
+                    layer.depiction = str(value)  # type: ignore[assignment]
+                elif key == "rendering":
+                    if self._viewport_state.mode is RenderMode.VOLUME:
+                        continue
+                    layer.rendering = str(value)  # type: ignore[assignment]
+                elif key == "attenuation":
+                    layer.attenuation = float(value)  # type: ignore[assignment]
+                elif key == "iso_threshold":
+                    layer.iso_threshold = float(value)  # type: ignore[assignment]
+                else:
+                    raise KeyError(f"Unsupported layer property '{key}'")
+
+        self._mark_render_tick_needed()
+        return True
+
+    def _apply_camera_overrides(self, state: RenderLedgerSnapshot) -> None:
+        """Sync camera state from the snapshot when provided."""
+
+        view = self.view
+        if view is None:
+            return
+        cam = view.camera
+        if cam is None:
+            return
+
+        if state.plane_center is not None and not isinstance(cam, TurntableCamera) and hasattr(cam, "center"):
+            cam.center = tuple(float(v) for v in state.plane_center)  # type: ignore[attr-defined]
+        if state.plane_zoom is not None and not isinstance(cam, TurntableCamera) and hasattr(cam, "zoom"):
+            cam.zoom = float(state.plane_zoom)  # type: ignore[attr-defined]
+
+        if isinstance(cam, TurntableCamera):
+            if state.volume_center is not None:
+                cx, cy, cz = state.volume_center
+                cam.center = (float(cx), float(cy), float(cz))
+            if state.volume_angles is not None:
+                az, el, roll = state.volume_angles
+                cam.azimuth = float(az)  # type: ignore[attr-defined]
+                cam.elevation = float(el)  # type: ignore[attr-defined]
+                cam.roll = float(roll)  # type: ignore[attr-defined]
+            if state.volume_distance is not None:
+                cam.distance = float(state.volume_distance)
+            if state.volume_fov is not None:
+                cam.fov = float(state.volume_fov)
+
+    def _drain_render_state(self, state: RenderLedgerSnapshot) -> _DrainOutcome:
+        """Apply viewer, visual, and camera updates from the snapshot."""
+
+        assert self.view is not None, "drain_render_state requires an active VisPy view"
+
+        z_index_update: Optional[int] = None
+        render_marked = False
+
+        if self._viewport_state.mode is not RenderMode.VOLUME and state.current_step is not None:
+            z_idx, marked = self._apply_dims_step(state.current_step)
+            if z_idx is not None:
+                z_index_update = z_idx
+            render_marked = render_marked or marked
+
+        if self._viewport_state.mode is RenderMode.VOLUME:
+            self._apply_volume_visual_params(state)
+
+        if state.layer_values:
+            if self._apply_layer_updates(state.layer_values):
+                render_marked = True
+
+        self._apply_camera_overrides(state)
+
+        return _DrainOutcome(
+            z_index=z_index_update,
+            render_marked=render_marked,
+        )

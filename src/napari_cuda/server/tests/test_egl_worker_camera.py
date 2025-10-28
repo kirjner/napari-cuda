@@ -44,6 +44,8 @@ class _StubWorker:
             update_camera_rect=lambda _rect: None,
         )
         self._run_viewport_tick = lambda: self._emit_current_camera_pose("camera-delta")
+        self._last_plane_pose = None
+        self._last_volume_pose = None
         self._viewport_state = ViewportState(mode=RenderMode.PLANE)
         self._viewport_state.plane.applied_level = 0
         self._viewport_state.plane.target_level = 0
@@ -81,6 +83,8 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     worker._camera_pose_callback = captured.append
     worker._snapshot_camera_pose = EGLRendererWorker._snapshot_camera_pose.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
     worker._emit_current_camera_pose = EGLRendererWorker._emit_current_camera_pose.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
+    worker._emit_pose_from_camera = EGLRendererWorker._emit_pose_from_camera.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
+    worker._pose_from_camera = EGLRendererWorker._pose_from_camera.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
 
     def _fake_process(self, commands):
         self._mark_render_tick_needed()
@@ -116,6 +120,8 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
 
     worker._apply_camera_commands = _apply  # type: ignore[assignment]
 
+    expected_zoom = worker.view.camera.zoom_factor
+
     command = CameraDeltaCommand(kind="zoom", factor=1.25, command_seq=9)
     EGLRendererWorker.process_camera_deltas(worker, [command])  # type: ignore[arg-type]
 
@@ -127,6 +133,6 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     pose = captured[0]
     assert pose.command_seq == 10
     assert pose.target == "main"
-    assert pose.zoom == pytest.approx(2.0)
+    assert pose.zoom == pytest.approx(expected_zoom)
     assert pose.center is not None
     assert tuple(pose.center[:2]) == pytest.approx((12.0, 34.0))

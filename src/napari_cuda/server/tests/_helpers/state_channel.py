@@ -46,10 +46,8 @@ from napari_cuda.server.scene import (
 )
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
-from napari_cuda.server.runtime.scene_state_applier import SceneStateApplyContext
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
-from napari_cuda.server.data.roi import plane_scale_for_level
 from napari.components import viewer_model
 from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
 
@@ -485,31 +483,6 @@ class CaptureWorker:
         self._plane_visual_node.visible = False
         self._volume_visual_node.visible = True
         return self._volume_visual_node
-
-    def _build_scene_state_context(self, cam) -> SceneStateApplyContext:
-        return SceneStateApplyContext(
-            use_volume=bool(self.use_volume),
-            viewer=self._viewer,
-            camera=cam,
-            layer=self._napari_layer,
-            scene_source=self._ensure_scene_source(),
-            active_ms_level=int(self._active_ms_level),
-            z_index=self._z_index,
-            last_roi=None,
-            preserve_view_on_switch=self._preserve_view_on_switch,
-            sticky_contrast=self._sticky_contrast,
-            idr_on_z=self._idr_on_z,
-            data_wh=self._data_wh,
-            volume_scale=self._volume_scale,
-            state_lock=self._state_lock,
-            ensure_scene_source=self._ensure_scene_source,
-            plane_scale_for_level=plane_scale_for_level,
-            load_slice=self._load_slice,
-            mark_render_tick_needed=self._mark_render_tick_needed,
-            ensure_plane_visual=self._ensure_plane_visual,
-            ensure_volume_visual=self._ensure_volume_visual,
-            request_encoder_idr=self._request_encoder_idr,
-        )
 
     def _load_slice(self, source: _HarnessSceneSource, level: int, z_index: int):
         return source.slice(level, z_index, compute=True)
