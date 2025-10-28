@@ -311,7 +311,6 @@ class ViewerBuilder:
         _sync_visual_handles()
 
         layer.events.set_data.connect(lambda e=None: _sync_visual_handles())  # type: ignore[attr-defined]
-        layer.events.display.connect(lambda e=None: _sync_visual_handles())  # type: ignore[attr-defined]
         layer.events.visible.connect(lambda e=None: _sync_visual_handles())  # type: ignore[attr-defined]
 
         if self._bridge._log_layer_debug:
