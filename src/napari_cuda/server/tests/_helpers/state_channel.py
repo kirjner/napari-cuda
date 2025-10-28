@@ -49,7 +49,7 @@ from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari.components import viewer_model
-from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
+from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 from napari_cuda.server.runtime import worker_runtime
 from napari_cuda.server.runtime import render_snapshot as snapshot_mod

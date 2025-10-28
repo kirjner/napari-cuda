@@ -8,7 +8,7 @@ from napari_cuda.server.runtime import render_snapshot as snapshot_mod
 from napari_cuda.server.runtime.render_ledger_snapshot import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
+from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 
 class _FakeDescriptor:

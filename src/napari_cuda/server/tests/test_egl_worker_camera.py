@@ -11,7 +11,7 @@ from napari_cuda.server.runtime.camera_controller import CameraDeltaOutcome
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.scene import CameraDeltaCommand
-from napari_cuda.server.runtime.state_structs import RenderMode, ViewportState
+from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 
 @dataclass

@@ -28,7 +28,7 @@ from napari_cuda.server.runtime.roi_math import (
     roi_chunk_signature,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.runtime.state_structs import PlaneState, RenderMode
+from napari_cuda.server.runtime.viewport import PlaneState, RenderMode
 from napari_cuda.server.runtime.viewer_stage import apply_plane_metadata
 
 from napari.layers.base._base_constants import Blending as NapariBlending

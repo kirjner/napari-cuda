@@ -10,7 +10,7 @@ from vispy.geometry import Rect
 
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.runtime.state_structs import RenderMode
+from napari_cuda.server.runtime.viewport import RenderMode
 
 logger = logging.getLogger(__name__)
 

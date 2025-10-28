@@ -7,7 +7,7 @@ import pytest
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.slice_snapshot import apply_slice_level
 from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.runtime.state_structs import ViewportState
+from napari_cuda.server.runtime.viewport import ViewportState
 
 
 class _FakeCamera:

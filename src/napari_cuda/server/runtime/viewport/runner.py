@@ -20,7 +20,7 @@ from napari_cuda.server.runtime.roi_math import (
     roi_chunk_signature,
 )
 from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.runtime.state_structs import PlaneState
+from .state import PlaneState
 
 
 @dataclass(frozen=True)

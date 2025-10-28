@@ -16,8 +16,8 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_snapshot.py:430`, `egl_worker.py:1623`).
 
 ### 1.3 Viewport runner internals
-- The runner maintains plane targets (`target_level`, `target_step`, `pose`, `pending_roi`, reload flags, pose reason) and short-circuits volume handling by clearing reload flags when `target_ndisplay >= 3` (`src/napari_cuda/server/runtime/viewport_runner.py`).
-- ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport_runner.py:214`).
+- The runner maintains plane targets (`target_level`, `target_step`, `pose`, `pending_roi`, reload flags, pose reason) and short-circuits volume handling by clearing reload flags when `target_ndisplay >= 3` (`src/napari_cuda/server/runtime/viewport/runner.py`).
+- ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport/runner.py:214`).
 
 ### 1.4 Worker loop interactions
 - `_run_viewport_tick` sends `ViewportIntent`s to the apply helpers. If `intent.roi_change` and we are still in plane mode, it calls `apply_plane_slice_roi` directly (`src/napari_cuda/server/runtime/egl_worker.py:1574`–`egl_worker.py:1624`).
@@ -38,7 +38,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 ## 2. Desired End State (steady-state architecture)
 
 ### 2.1 Unified runtime state
-- Replace ad-hoc `ViewportRunnerState` + worker fields with a shared `ViewportState` dataclass containing `PlaneState` and `VolumeState`. This struct should sit in a new `src/napari_cuda/server/runtime/state_structs.py`.
+- Replace ad-hoc `ViewportRunnerState` + worker fields with a shared `ViewportState` dataclass containing `PlaneState` and `VolumeState`. This struct should sit in `src/napari_cuda/server/runtime/viewport/state.py`.
 - `PlaneState` owns: controller target (`target_level`, `target_step`, `pose`), applied (`applied_level`, `applied_roi`, signatures), pending reload flags, pose reason, and zoom hints.
 - `VolumeState` owns: current level, cached pose (`center`, `angles`, `distance`, `fov`), downgrade flag, and any cached extents/scale.
 - `ViewportState.mode` (enum) replaces `worker.use_volume`.
@@ -65,7 +65,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 
 ### Stage A — State migration (runner + worker)
 1. Introduce `ViewportState`, `PlaneState`, `VolumeState`, and a `RenderMode` enum.
-   ✅ Completed (`fixtures live in src/napari_cuda/server/runtime/state_structs.py`).
+   ✅ Completed (`fixtures live in src/napari_cuda/server/runtime/viewport/state.py`).
 2. Port `ViewportRunner` to use `ViewportState.plane`, deleting its private state dataclass.
    ✅ Completed (runner now mutates the shared plane state and tests remain green).
 3. Seed `ViewportState` in `EGLRendererWorker.__init__` (`src/napari_cuda/server/runtime/egl_worker.py:128`). Shim properties:

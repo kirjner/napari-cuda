@@ -39,7 +39,7 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.runtime.state_structs import (
+from napari_cuda.server.runtime.viewport import (
     PlaneState,
     RenderMode,
     ViewportState,

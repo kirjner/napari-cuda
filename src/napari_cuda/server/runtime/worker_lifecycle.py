@@ -14,7 +14,7 @@ from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_av
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
-from napari_cuda.server.runtime.state_structs import RenderMode
+from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import snapshot_multiscale_state
 from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent

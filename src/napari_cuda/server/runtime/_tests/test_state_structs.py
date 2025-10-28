@@ -1,4 +1,4 @@
-from napari_cuda.server.runtime.state_structs import ViewportState
+from napari_cuda.server.runtime.viewport import ViewportState
 
 
 def test_viewport_state_defaults() -> None:

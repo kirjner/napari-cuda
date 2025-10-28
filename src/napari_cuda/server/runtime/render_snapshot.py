@@ -14,7 +14,7 @@ from typing import Any
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.state_structs import RenderMode
+from napari_cuda.server.runtime.viewport import RenderMode
 
 from .slice_snapshot import (
     apply_slice_camera_pose,

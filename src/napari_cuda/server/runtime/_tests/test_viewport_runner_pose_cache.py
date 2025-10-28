@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from napari_cuda.server.runtime.state_structs import PlaneState
-from napari_cuda.server.runtime.viewport_runner import ViewportRunner
+from napari_cuda.server.runtime.viewport import PlaneState, ViewportRunner
 
 
 def test_update_camera_rect_ignores_none() -> None:

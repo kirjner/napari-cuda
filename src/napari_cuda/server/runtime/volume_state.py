@@ -6,7 +6,7 @@ from typing import Optional, Sequence, Tuple
 
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
 
-from .state_structs import VolumeState
+from napari_cuda.server.runtime.viewport import VolumeState
 
 
 def assign_pose_from_snapshot(
