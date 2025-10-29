@@ -129,7 +129,7 @@ that behaviour.
   `_roi_edge_threshold`, `_roi_align_chunks`, `_roi_pad_chunks`,
   `_roi_ensure_contains_viewport`, `_slice_max_bytes`, `_volume_*` limits,
   `_hw_limits`, `_log_layer_debug`, `_layer_logger`, `_switch_logger`.
-- **Dependencies:** `level_policy` module (`data/policy.py`), ROI helpers,
+- **Dependencies:** `level_policy` module (`runtime/worker/level_policy.py`), ROI helpers,
   `ViewportRunner`, `LevelSwitchIntent`, `lod.LevelDecision` contexts,
   `ServerStateLedger` (for step/order/axes hints), `viewport_roi_for_level`,
   `apply_plane_metadata`, `apply_volume_metadata`.

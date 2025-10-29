@@ -39,14 +39,10 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 from vispy import scene  # type: ignore
 
 import napari_cuda.server.data.lod as lod
-import napari_cuda.server.data.policy as level_policy
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.data.level_budget import (
-    LevelBudgetError,
-)
 from napari_cuda.server.data.level_logging import (
     LayerAssignmentLogger,
     LevelSwitchLogger,
@@ -73,6 +69,7 @@ from napari_cuda.server.runtime.worker.snapshots import (
     apply_volume_metadata,
 )
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
+from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.runtime.data import (
     SliceROI,
     align_roi_to_chunk_grid,
@@ -101,18 +98,10 @@ from napari_cuda.server.runtime.viewport import (
 )
 from napari_cuda.server.scene import CameraDeltaCommand
 from . import render_updates as _render_updates
+from . import level_policy
 from . import viewer as _viewer
 
 logger = logging.getLogger(__name__)
-
-
-# Back-compat for tests patching the selector directly
-select_level = lod.select_level
-
-## Camera ops now live in napari_cuda.server.runtime.camera.ops as free functions.
-
-class _LevelBudgetError(RuntimeError):
-    """Raised when a multiscale level exceeds memory/voxel budgets."""
 
 
 class EGLRendererWorker:
@@ -143,7 +132,7 @@ class EGLRendererWorker:
     ) -> None:
         self.width = int(width)
         self.height = int(height)
-        self._budget_error_cls = _LevelBudgetError
+        self._budget_error_cls = level_policy.BudgetGuardError
         self.fps = int(fps)
         self.volume_depth = int(volume_depth)
         self.volume_dtype = str(volume_dtype)
@@ -321,7 +310,7 @@ class EGLRendererWorker:
 
         downgraded = False
         if self._viewport_state.mode is RenderMode.VOLUME:
-            target, downgraded = self._resolve_volume_intent_level(source, target)
+            target, downgraded = level_policy.resolve_volume_intent_level(self, source, target)
 
         self._viewport_state.volume.downgraded = bool(downgraded)
 
@@ -452,7 +441,7 @@ class EGLRendererWorker:
         self._orbit_el_max = float(worker_dbg.orbit_el_max)
 
     def _configure_policy(self, policy_cfg: LevelPolicySettings) -> None:
-        self._policy_func = level_policy.resolve_policy('oversampling')
+        self._policy_func = lod.select_level
         self._policy_name = 'oversampling'
         self._last_interaction_ts = time.perf_counter()
         policy_logging = self._debug_policy.logging
@@ -630,8 +619,8 @@ class EGLRendererWorker:
         if new_name not in allowed:
             raise ValueError(f"Unsupported policy: {new_name}")
         self._policy_name = new_name
-        # Map all aliases to the same selector
-        self._policy_func = level_policy.resolve_policy(new_name)
+        # Map all aliases to the default selector
+        self._policy_func = lod.select_level
         # No history maintenance; snapshot excludes history
         if self._log_layer_debug:
             logger.info("policy set: name=%s", new_name)
@@ -650,20 +639,6 @@ class EGLRendererWorker:
             return (1.0, values[0], values[1])
         # single element; reuse across axes
         return (values[0], values[0], values[0])
-
-    def _oversampling_for_level(self, source: ZarrSceneSource, level: int) -> float:
-        try:
-            roi = viewport_roi_for_level(self, source, level, quiet=True, for_policy=True)
-            if roi.is_empty():
-                h, w = plane_wh_for_level(source, level)
-            else:
-                h, w = roi.height, roi.width
-        except Exception:
-            h, w = self.height, self.width
-        vh = max(1, int(self.height))
-        vw = max(1, int(self.width))
-        return float(max(h / vh, w / vw))
-
 
     def _load_slice(
         self,
@@ -686,172 +661,6 @@ class EGLRendererWorker:
         if not isinstance(volume, np.ndarray):
             volume = np.asarray(volume, dtype=np.float32)
         return volume
-
-    def _build_policy_context(
-        self,
-        source: ZarrSceneSource,
-        *,
-        requested_level: Optional[int],
-    ) -> level_policy.LevelSelectionContext:
-        levels = tuple(source.level_descriptors)
-        overs_map: dict[int, float] = {}
-        for descriptor in levels:
-            try:
-                lvl = int(descriptor.index)
-            except Exception:
-                lvl = int(levels.index(descriptor))
-            try:
-                overs_map[lvl] = float(self._oversampling_for_level(source, lvl))
-            except Exception:
-                overs_map[lvl] = float('nan')
-        return level_policy.LevelSelectionContext(
-            levels=levels,
-            current_level=int(self._current_level_index()),
-            requested_level=int(requested_level) if requested_level is not None else None,
-            level_oversampling=overs_map,
-            thresholds=self._oversampling_thresholds,
-            hysteresis=self._oversampling_hysteresis,
-        )
-
-    def _estimate_level_bytes(self, source: ZarrSceneSource, level: int) -> tuple[int, int]:
-        descriptor = source.level_descriptors[level]
-        voxels = 1
-        for dim in descriptor.shape:
-            voxels *= max(1, int(dim))
-        dtype_size = np.dtype(source.dtype).itemsize
-        return int(voxels), int(voxels * dtype_size)
-
-    def _volume_budget_allows(self, source: ZarrSceneSource, level: int) -> None:
-        voxels, bytes_est = self._estimate_level_bytes(source, level)
-        limit_bytes = self._volume_max_bytes or self._hw_limits.volume_max_bytes
-        limit_voxels = self._volume_max_voxels or self._hw_limits.volume_max_voxels
-        if limit_voxels and voxels > limit_voxels:
-            msg = f"voxels={voxels} exceeds cap={limit_voxels}"
-            if self._log_layer_debug:
-                logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> REJECT: %s", level, voxels, bytes_est, msg)
-            raise _LevelBudgetError(msg)
-        if limit_bytes and bytes_est > limit_bytes:
-            msg = f"bytes={bytes_est} exceeds cap={limit_bytes}"
-            if self._log_layer_debug:
-                logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> REJECT: %s", level, voxels, bytes_est, msg)
-            raise _LevelBudgetError(msg)
-        if self._log_layer_debug:
-            logger.info("budget check (volume): level=%d voxels=%d bytes=%d -> OK", level, voxels, bytes_est)
-
-    def _resolve_volume_intent_level(
-        self,
-        source: ZarrSceneSource,
-        requested_level: int,
-    ) -> tuple[int, bool]:
-        # Volume rendering always uses the coarsest level for now, bypassing budgets/clamps.
-        descriptors = source.level_descriptors
-        if not descriptors:
-            return int(requested_level), False
-        coarsest = max(0, len(descriptors) - 1)
-        return int(coarsest), bool(coarsest != int(requested_level))
-
-    def _slice_budget_allows(self, source: ZarrSceneSource, level: int) -> None:
-        """Enforce optional max-bytes budget for a single 2D slice.
-
-        Uses YX plane dimensions and the source dtype size. Only applies when
-        NAPARI_CUDA_MAX_SLICE_BYTES is non-zero.
-        """
-        limit_bytes = int(self._slice_max_bytes or 0)
-        if limit_bytes <= 0:
-            return
-        h, w = plane_wh_for_level(source, level)
-        dtype_size = int(np.dtype(source.dtype).itemsize)
-        bytes_est = int(h) * int(w) * dtype_size
-        if bytes_est > limit_bytes:
-            msg = f"slice bytes={bytes_est} exceeds cap={limit_bytes} at level={level}"
-            if self._log_layer_debug:
-                logger.info(
-                    "budget check (slice): level=%d h=%d w=%d dtype=%s bytes=%d -> REJECT: %s",
-                    level, h, w, str(source.dtype), bytes_est, msg,
-                )
-            raise _LevelBudgetError(msg)
-        if self._log_layer_debug:
-            logger.info(
-                "budget check (slice): level=%d h=%d w=%d dtype=%s bytes=%d -> OK",
-                level, h, w, str(source.dtype), bytes_est,
-            )
-
-    def _get_level_volume(
-        self,
-        source: ZarrSceneSource,
-        level: int,
-    ) -> np.ndarray:
-        self._volume_budget_allows(source, level)
-        return self._load_volume(source, level)
-
-    def _apply_level(
-        self,
-        source: ZarrSceneSource,
-        level: int,
-        *,
-        prev_level: Optional[int] = None,
-    ) -> lod.LevelContext:
-        runner_step: Optional[tuple[int, ...]] = None
-        if self._viewport_runner is not None:
-            runner_step = self._viewport_runner.state.target_step
-
-        if runner_step is not None:
-            step_hint: Optional[tuple[int, ...]] = runner_step
-        else:
-            recorded = ledger_step(ledger)
-            step_hint = (
-                tuple(int(v) for v in recorded)
-                if recorded is not None
-                else None
-            )
-
-        decision = lod.LevelDecision(
-            desired_level=int(level),
-            selected_level=int(level),
-            reason="direct",
-            timestamp=time.perf_counter(),
-            oversampling={},
-            downgraded=False,
-        )
-
-        context = lod.build_level_context(
-            decision,
-            source=source,
-            prev_level=prev_level,
-            last_step=step_hint,
-        )
-        if self._viewport_state.mode is RenderMode.VOLUME:
-            apply_volume_metadata(self, source, context)
-        else:
-            apply_plane_metadata(self, source, context)
-        return context
-
-    def _apply_volume_level(
-        self,
-        source: ZarrSceneSource,
-        applied: lod.LevelContext,
-    ) -> None:
-        apply_volume_level(
-            self,
-            source,
-            applied,
-            downgraded=bool(self._viewport_state.volume.downgraded),
-        )
-
-    def _apply_slice_level(
-        self,
-        source: ZarrSceneSource,
-        applied: lod.LevelContext,
-    ) -> None:
-        apply_slice_level(self, source, applied)
-
-    def _format_level_roi(self, source: ZarrSceneSource, level: int) -> str:
-        if self._viewport_state.mode is RenderMode.VOLUME:
-            return "volume"
-        roi = viewport_roi_for_level(self, source, level)
-        if roi.is_empty():
-            return "full"
-        return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
 
     def _aligned_roi_signature(
         self,
@@ -1202,17 +1011,25 @@ class EGLRendererWorker:
         if plan.level_change:
             target_level = int(self._viewport_runner.state.request.level)
             prev_level = int(self._current_level_index())
-            applied_context = self._apply_level(
+            applied_context = level_policy.build_level_context(
+                self,
                 source,
-                target_level,
+                level=target_level,
                 prev_level=prev_level,
             )
 
             self._set_current_level_index(int(applied_context.level))
             if self._viewport_state.mode is RenderMode.VOLUME:
-                self._apply_volume_level(source, applied_context)
+                apply_volume_metadata(self, source, applied_context)
+                apply_volume_level(
+                    self,
+                    source,
+                    applied_context,
+                    downgraded=bool(self._viewport_state.volume.downgraded),
+                )
             else:
-                self._apply_slice_level(source, applied_context)
+                apply_plane_metadata(self, source, applied_context)
+                apply_slice_level(self, source, applied_context)
             level_applied = True
             self._viewport_runner.mark_level_applied(int(applied_context.level))
 
@@ -1248,81 +1065,18 @@ class EGLRendererWorker:
     # ---- C6 selection (napari-anchored) -------------------------------------
     def _evaluate_level_policy(self) -> None:
         """Evaluate multiscale policy inputs and perform a level switch if needed."""
-        if not self._zarr_path:
-            return
-        try:
-            source = self._ensure_scene_source()
-        except Exception:
-            logger.debug("ensure_scene_source failed in selection", exc_info=True)
+
+        current_level = int(self._current_level_index())
+        evaluation = level_policy.evaluate(self)
+        if evaluation is None:
             return
 
-        current = int(self._current_level_index())
-        zoom_hint = self._render_mailbox.consume_zoom_hint(max_age=0.5)
-        zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
-
-        config = lod.LevelPolicyConfig(
-            threshold_in=float(self._level_threshold_in),
-            threshold_out=float(self._level_threshold_out),
-            fine_threshold=float(self._level_fine_threshold),
-            hysteresis=float(self._level_hysteresis),
-            cooldown_ms=float(self._level_switch_cooldown_ms),
-        )
-
-        outcome = lod.evaluate_policy(
-            source=source,
-            current_level=current,
-            oversampling_for_level=self._oversampling_for_level,
-            zoom_ratio=zoom_ratio,
-            lock_level=self._lock_level,
-            last_switch_ts=float(self._last_level_switch_ts),
-            config=config,
-            log_policy_eval=self._log_policy_eval,
-            select_level_fn=select_level,
-            logger_ref=logger,
-        )
-
-        if logger.isEnabledFor(logging.DEBUG):
-            try:
-                current_overs = self._oversampling_for_level(source, current)
-            except Exception:
-                current_overs = float("nan")
-            logger.debug(
-                "policy.evaluate: level=%d zoom_hint=%s overs_current=%.3f",
-                current,
-                f"{zoom_ratio:.3f}" if zoom_ratio is not None else None,
-                current_overs,
-            )
-
-        if outcome is None:
-            return
-
-        def _budget_check(scene: ZarrSceneSource, level: int) -> None:
-            try:
-                if self._viewport_state.mode is RenderMode.VOLUME:
-                    self._volume_budget_allows(scene, level)
-                else:
-                    self._slice_budget_allows(scene, level)
-            except _LevelBudgetError as exc:
-                raise LevelBudgetError(str(exc)) from exc
-
-        decision = lod.enforce_budgets(
-            outcome,
-            source=source,
-            use_volume=self._viewport_state.mode is RenderMode.VOLUME,
-            budget_check=_budget_check,
-            log_layer_debug=self._log_layer_debug,
-        )
+        decision = evaluation.decision
+        context = evaluation.context
+        source = evaluation.source
+        zoom_ratio = evaluation.zoom_ratio
 
         self._last_level_switch_ts = float(decision.timestamp)
-
-        ledger = self._ledger
-        step_hint = ledger_step(ledger)
-        context = lod.build_level_context(
-            decision,
-            source=source,
-            prev_level=current,
-            last_step=step_hint,
-        )
 
         requested = self._viewport_runner.request_level(int(context.level))
         if not requested:
@@ -1338,7 +1092,7 @@ class EGLRendererWorker:
             desired_level=int(decision.desired_level),
             selected_level=int(context.level),
             reason=decision.reason,
-            previous_level=current,
+            previous_level=current_level,
             context=context,
             oversampling=decision.oversampling,
             timestamp=decision.timestamp,
@@ -1352,7 +1106,7 @@ class EGLRendererWorker:
 
         logger.info(
             "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
-            int(current),
+            int(current_level),
             int(context.level),
             decision.reason,
             intent.downgraded,

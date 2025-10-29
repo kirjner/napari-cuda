@@ -56,8 +56,11 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
             self.view = SimpleNamespace(camera=None)
             self._plane_visual_node = SimpleNamespace()
             self._volume_visual_node = SimpleNamespace()
+            self._volume_max_bytes = None
+            self._volume_max_voxels = None
+            self._hw_limits = SimpleNamespace(volume_max_bytes=None, volume_max_voxels=None)
 
-        def _get_level_volume(self, _source: object, level: int) -> object:
+        def _load_volume(self, _source: object, level: int) -> object:
             return ("volume", level)
 
     worker = _Worker()
@@ -86,6 +89,8 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
 
     class _Source:
         axes = ("z", "y", "x")
+        level_descriptors = [SimpleNamespace(shape=(64, 256, 128)) for _ in range(3)]
+        dtype = "float32"
 
         def level_scale(self, level: int) -> tuple[float, float, float]:
             return (0.5, 1.5, 3.0)

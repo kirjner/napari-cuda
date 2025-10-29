@@ -31,7 +31,7 @@ from napari_cuda.server.runtime.core import (
     ledger_order,
     ledger_step,
 )
-from napari_cuda.server.runtime.worker import render_updates as _render_updates
+from napari_cuda.server.runtime.worker import level_policy, render_updates as _render_updates
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import ZarrSceneSource
@@ -294,7 +294,11 @@ def _enter_volume_mode(worker: "EGLRendererWorker") -> None:
     source = worker._ensure_scene_source()
     requested_level = _coarsest_level_index(source)
     assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
-    selected_level, downgraded = worker._resolve_volume_intent_level(source, int(requested_level))
+    selected_level, downgraded = level_policy.resolve_volume_intent_level(
+        worker,
+        source,
+        int(requested_level),
+    )
     worker._viewport_state.volume.downgraded = bool(downgraded)
 
     decision = lod.LevelDecision(

@@ -532,6 +532,9 @@ class CaptureWorker:
         shape = source.level_shape(level)
         return np.zeros(shape, dtype=np.float32)
 
+    def _load_volume(self, source: _HarnessSceneSource, level: int) -> np.ndarray:
+        return self._get_level_volume(source, level)
+
     def _request_encoder_idr(self) -> None:
         return None
 

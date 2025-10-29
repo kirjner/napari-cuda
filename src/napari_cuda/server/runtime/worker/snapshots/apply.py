@@ -16,6 +16,7 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.worker import level_policy
 from .plane import (
     apply_slice_camera_pose,
     apply_slice_level,
@@ -103,7 +104,7 @@ def _resolve_snapshot_ops(
     target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
     level_changed = target_level != prev_level
 
-    ledger_step = (
+    snapshot_step = (
         tuple(int(v) for v in snapshot.current_step)
         if snapshot.current_step is not None
         else None
@@ -127,11 +128,15 @@ def _resolve_snapshot_ops(
 
     if target_volume:
         requested_level = int(target_level)
-        selected_level, downgraded = worker._resolve_volume_intent_level(source, requested_level)
+        selected_level, downgraded = level_policy.resolve_volume_intent_level(
+            worker,
+            source,
+            requested_level,
+        )
         effective_level = int(selected_level)
         load_needed = (effective_level != prev_level) or (not was_volume)
-        if ledger_step is not None:
-            step_hint = ledger_step
+        if snapshot_step is not None:
+            step_hint = snapshot_step
         else:
             recorded_step = ledger_step(worker._ledger)
             step_hint = (

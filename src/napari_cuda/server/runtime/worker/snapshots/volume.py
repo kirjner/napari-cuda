@@ -16,6 +16,7 @@ from napari_cuda.server.runtime.viewport.volume_ops import (
     update_scale,
 )
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.worker import level_policy
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def apply_volume_level(
     scale_tuple = (float(scales[-3]), float(scales[-2]), float(scales[-1]))
     worker._volume_scale = scale_tuple
 
-    volume = worker._get_level_volume(source, applied.level)
+    volume = level_policy.load_volume(worker, source, applied.level)
     cam = worker.view.camera if getattr(worker, "view", None) is not None else None
     data_wh, data_d = apply_volume_layer_data(
         layer=getattr(worker, "_napari_layer", None),
