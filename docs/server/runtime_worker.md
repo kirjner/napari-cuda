@@ -125,7 +125,7 @@ that behaviour.
   `_volume_world_extents`, `_evaluate_level_policy`, `_mark_render_tick_needed`,
   `_mark_render_tick_complete`, `_mark_render_loop_started`,
   `request_multiscale_level`, `_enter_volume_mode`, `_exit_volume_mode`,
-  `_mark_render_tick_needed`, `_run_viewport_tick`.
+  `_mark_render_tick_needed`, `worker.viewport_tick.run`.
 - **Shared state:** Policy thresholds, `_viewport_runner`, `_viewport_state`,
   `_level_policy_suppressed`, `_last_level_switch_ts`,
   `_oversampling_thresholds`, `_oversampling_hysteresis`,
@@ -143,7 +143,7 @@ that behaviour.
 
 ### 6. Render Loop & Capture/Encode
 - **Entry points:** `render_tick`, `_drain_camera_ops_then_scene_updates`,
-  `_run_viewport_tick`, `capture_and_encode_packet`, `_capture_blit_gpu_ns`,
+  `worker.viewport_tick.run`, `capture_and_encode_packet`, `_capture_blit_gpu_ns`,
   `_mark_render_tick_needed`, `_mark_render_tick_complete`,
   `_mark_render_loop_started`.
 - **Shared state:** `_capture`, `_encoder`, `_enc_lock`, `_render_tick_required`,
