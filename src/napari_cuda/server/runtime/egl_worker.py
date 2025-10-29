@@ -74,12 +74,14 @@ from napari_cuda.server.rendering.encoder import Encoder
 
 # Bitstream packing happens in the server layer
 from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
-from napari_cuda.server.runtime.camera_animator import animate_if_enabled
-from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
-from napari_cuda.server.runtime.camera_controller import (
+from napari_cuda.server.runtime.camera import (
+    CameraCommandQueue,
+    CameraPoseApplied,
+)
+from napari_cuda.server.runtime.camera.animator import animate_if_enabled
+from napari_cuda.server.runtime.camera.controller import (
     process_camera_deltas as _process_camera_deltas,
 )
-from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.render_ledger_snapshot import (
     RenderLedgerSnapshot,
@@ -162,7 +164,7 @@ def _coarsest_level_index(source: ZarrSceneSource) -> Optional[int]:
 # Back-compat for tests patching the selector directly
 select_level = lod.select_level
 
-## Camera ops now live in napari_cuda.server.runtime.camera_ops as free functions.
+## Camera ops now live in napari_cuda.server.runtime.camera.ops as free functions.
 
 class _LevelBudgetError(RuntimeError):
     """Raised when a multiscale level exceeds memory/voxel budgets."""

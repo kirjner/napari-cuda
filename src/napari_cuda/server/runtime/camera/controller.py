@@ -13,7 +13,7 @@ import logging
 
 from vispy import scene  # type: ignore
 
-from napari_cuda.server.runtime import camera_ops as camops
+from napari_cuda.server.runtime.camera import ops as camops
 from napari_cuda.server.scene import CameraDeltaCommand
 
 

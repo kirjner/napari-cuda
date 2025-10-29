@@ -53,7 +53,7 @@ from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 from napari_cuda.server.runtime import worker_runtime
 from napari_cuda.server.runtime import render_snapshot as snapshot_mod
-from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
+from napari_cuda.server.runtime.camera import CameraCommandQueue
 
 
 _SENTINEL = object()

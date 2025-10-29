@@ -81,13 +81,13 @@ from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.render_ledger_snapshot import pull_render_snapshot
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
 from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
-from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
+from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
-from napari_cuda.server.runtime.camera_pose import CameraPoseApplied
+from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,

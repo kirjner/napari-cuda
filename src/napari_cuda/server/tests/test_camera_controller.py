@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from napari_cuda.server.runtime.camera_controller import (
+from napari_cuda.server.runtime.camera.controller import (
     CameraDeltaOutcome,
     CameraDebugFlags,
     apply_camera_deltas,
@@ -38,8 +38,8 @@ def _patch_camops(monkeypatch):
     def _pan_2d(cam, dx, dy, canvas, view):  # type: ignore[unused-ignore]
         cam.pan_calls.append((float(dx), float(dy)))
 
-    monkeypatch.setattr("napari_cuda.server.runtime.camera_controller.camops.apply_zoom_2d", _zoom_2d)
-    monkeypatch.setattr("napari_cuda.server.runtime.camera_controller.camops.apply_pan_2d", _pan_2d)
+    monkeypatch.setattr("napari_cuda.server.runtime.camera.controller.camops.apply_zoom_2d", _zoom_2d)
+    monkeypatch.setattr("napari_cuda.server.runtime.camera.controller.camops.apply_pan_2d", _pan_2d)
     yield
 
 

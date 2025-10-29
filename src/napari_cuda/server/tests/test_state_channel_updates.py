@@ -30,7 +30,7 @@ from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 from napari_cuda.server.control import control_channel_server as state_channel_handler
 from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
-from napari_cuda.server.runtime.camera_command_queue import CameraCommandQueue
+from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.scene import (
     snapshot_render_state,
     snapshot_layer_controls,

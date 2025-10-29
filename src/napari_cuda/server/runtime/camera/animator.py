@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from napari_cuda.server.runtime import camera_ops as camops
+from napari_cuda.server.runtime.camera import ops as camops
 
 
 def animate_if_enabled(
