@@ -10,6 +10,7 @@ from vispy.scene.cameras import PanZoomCamera
 from napari_cuda.server.runtime.camera.controller import CameraDeltaOutcome
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 from napari_cuda.server.runtime.worker import EGLRendererWorker
+from napari_cuda.server.runtime.worker.ticks import camera as camera_tick
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
@@ -43,12 +44,12 @@ class _StubWorker:
             ingest_camera_deltas=lambda _commands: None,
             update_camera_rect=lambda _rect: None,
         )
-        self._run_viewport_tick = lambda: self._emit_current_camera_pose("camera-delta")
         self._last_plane_pose = None
         self._last_volume_pose = None
         self._viewport_state = ViewportState(mode=RenderMode.PLANE)
         self._viewport_state.plane.applied_level = 0
         self._viewport_state.plane.target_level = 0
+        self._level_policy_suppressed = False
 
     def _current_panzoom_rect(self):
         return None
@@ -59,10 +60,6 @@ class _StubWorker:
     def _apply_camera_reset(self, _camera) -> None:
         pass
 
-    def _record_zoom_hint(self, commands) -> None:  # pragma: no cover - replaced during test
-        pass
-
-
 def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     worker = _StubWorker()
     camera = worker.view.camera
@@ -71,7 +68,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
 
     captured = []
 
-    def _record_zoom_hint(commands) -> None:
+    def _record_zoom_hint(_worker, commands) -> None:
         for command in commands:
             if command.kind == "zoom" and command.factor is not None and command.factor > 0.0:
                 factor = float(command.factor)
@@ -79,7 +76,12 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
                 worker._zoom_hints.append(ratio)
                 worker._render_mailbox.record_zoom_hint(ratio)
 
-    worker._record_zoom_hint = _record_zoom_hint  # type: ignore[assignment]
+    monkeypatch.setattr(camera_tick, "record_zoom_hint", _record_zoom_hint)
+    monkeypatch.setattr(
+        camera_tick.viewport,
+        "run",
+        lambda w: w._emit_current_camera_pose("camera-delta"),
+    )
     worker._camera_pose_callback = captured.append
     worker._snapshot_camera_pose = EGLRendererWorker._snapshot_camera_pose.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
     worker._emit_current_camera_pose = EGLRendererWorker._emit_current_camera_pose.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
@@ -102,28 +104,14 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.worker.egl._process_camera_deltas",
+        "napari_cuda.server.runtime.worker.ticks.camera._process_camera_deltas",
         _fake_process,
     )
-
-    def _apply(commands):
-        _fake_process(worker, commands)
-        worker._mark_render_tick_needed()
-        worker._user_interaction_seen = True
-        worker._last_interaction_ts = 1.0
-        last_seq = commands[-1].command_seq
-        if last_seq is not None:
-            worker._max_camera_command_seq = max(worker._max_camera_command_seq, int(last_seq))
-        worker._record_zoom_hint(commands)
-        worker._emit_current_camera_pose("camera-delta")
-        return True
-
-    worker._apply_camera_commands = _apply  # type: ignore[assignment]
 
     expected_zoom = worker.view.camera.zoom_factor
 
     command = CameraDeltaCommand(kind="zoom", factor=1.25, command_seq=9)
-    EGLRendererWorker.process_camera_deltas(worker, [command])  # type: ignore[arg-type]
+    camera_tick.process_commands(worker, [command])
 
     assert worker._user_interaction_seen is True
     assert worker._last_interaction_ts > 0.0

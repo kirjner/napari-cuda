@@ -79,8 +79,9 @@ that behaviour.
   `_frame_volume_camera`, `_enter_volume_mode`, `_exit_volume_mode`,
   `_apply_camera_reset`, `_emit_current_camera_pose`, `_emit_pose_from_camera`,
   `_pose_from_camera`, `_snapshot_camera_pose`, `_current_panzoom_rect`,
-  `render_updates.apply_viewport_state_snapshot`, `process_camera_deltas`,
-  `_drain_camera_ops_then_scene_updates`, `_record_zoom_hint`,
+  `render_updates.apply_viewport_state_snapshot`,
+  `ticks.camera.process_commands`, `ticks.camera.drain`,
+  `ticks.camera.record_zoom_hint`,
   `render_updates.drain_scene_updates`.
 - **Shared state:** `_viewport_state`, `_viewport_runner`, `_camera_queue`,
   `_camera_pose_callback`, `_last_plane_pose`, `_last_volume_pose`,
@@ -89,9 +90,9 @@ that behaviour.
   (`runtime/camera/controller.py`), `ViewportRunner`, ledger accessors,
   `napari.components.viewer_model.ViewerModel`, VisPy cameras.
 - **Notes:** Camera helpers straddle both the render thread (actual camera
-  mutation) and controller notifications (callbacks back to asyncio). They are
-  natural candidates for a dedicated `viewer.py` module that takes explicit
-  hooks for mailbox updates and ledger reads.
+  mutation) and controller notifications (callbacks back to asyncio). The
+  render-thread plumbing now lives in `runtime/worker/ticks/camera.py`, which
+  ties the controller outcome to the viewport runner and policy evaluation.
 
 ### 4. Snapshot Ingestion & Ledger Coordination
 - **Entry points:** `enqueue_update`,
@@ -104,7 +105,7 @@ that behaviour.
   `snapshots.plane.dims_signature`,
   `snapshots.plane.apply_dims_from_snapshot`,
   `snapshots.plane.update_z_index_from_snapshot`,
-  `snapshot_dims_metadata`, `_set_dims_range_for_level`, `_record_zoom_hint`.
+  `snapshot_dims_metadata`, `_set_dims_range_for_level`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.core.ledger_access`).
@@ -125,7 +126,7 @@ that behaviour.
   `_volume_world_extents`, `_evaluate_level_policy`, `_mark_render_tick_needed`,
   `_mark_render_tick_complete`, `_mark_render_loop_started`,
   `request_multiscale_level`, `_enter_volume_mode`, `_exit_volume_mode`,
-  `_mark_render_tick_needed`, `worker.viewport_tick.run`.
+  `_mark_render_tick_needed`, `worker.ticks.viewport.run`.
 - **Shared state:** Policy thresholds, `_viewport_runner`, `_viewport_state`,
   `_level_policy_suppressed`, `_last_level_switch_ts`,
   `_oversampling_thresholds`, `_oversampling_hysteresis`,
@@ -142,8 +143,8 @@ that behaviour.
   functions that accept a worker façade.
 
 ### 6. Render Loop & Capture/Encode
-- **Entry points:** `render_tick`, `_drain_camera_ops_then_scene_updates`,
-  `worker.viewport_tick.run`, `capture_and_encode_packet`, `_capture_blit_gpu_ns`,
+- **Entry points:** `render_tick`, `ticks.camera.drain`,
+  `worker.ticks.viewport.run`, `capture_and_encode_packet`, `_capture_blit_gpu_ns`,
   `_mark_render_tick_needed`, `_mark_render_tick_complete`,
   `_mark_render_loop_started`.
 - **Shared state:** `_capture`, `_encoder`, `_enc_lock`, `_render_tick_required`,
@@ -157,11 +158,11 @@ that behaviour.
 - **Notes:** `capture_and_encode_packet` glues together GPU capture, encoder
   access, and metrics collection. Splitting this code requires preserving the
   locking discipline (`_enc_lock`) and the ordering guarantees around
-  `_drain_camera_ops_then_scene_updates`.
+  `ticks.camera.drain`.
 
 ### 7. Debugging, Metrics & Misc Utilities
 - **Entry points:** `_log_debug_policy_once`, `snapshot_dims_metadata`,
-  `_record_zoom_hint`, `_capture_blit_gpu_ns`, `force_idr`, `_request_encoder_idr`,
+  `_capture_blit_gpu_ns`, `force_idr`, `_request_encoder_idr`,
   `reset_encoder`.
 - **Shared state:** `_debug`, `_debug_config`, `_debug_policy_logged`,
   `_raw_dump_budget`, `_render_mailbox` zoom hints, encoder format caches,
@@ -196,7 +197,7 @@ that behaviour.
 1. Controller snapshot fetched (`pull_render_snapshot`) and passed to
    `render_updates.consume_render_snapshot`.
 2. `capture_and_encode_packet` performs:
-   - `_drain_camera_ops_then_scene_updates` → `_process_camera_deltas` →
+   - `ticks.camera.drain` → `_process_camera_deltas` →
      `_viewport_runner.ingest_camera_deltas` and `render_updates.drain_scene_updates`.
    - `render_tick` → `run_render_tick` to render the VisPy canvas and mark tick
      completion.
@@ -214,7 +215,7 @@ that behaviour.
 
 ### Camera Delta Flow
 1. `CameraCommandQueue.pop_all()` retrieves commands during
-   `_drain_camera_ops_then_scene_updates`.
+   `ticks.camera.drain`.
 2. `_process_camera_deltas` (from `camera/controller.py`) mutates VisPy cameras,
    marks render ticks, and emits policy triggers.
 3. `_viewport_runner.update_camera_rect` stores the rect for ROI planning;

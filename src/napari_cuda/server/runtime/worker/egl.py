@@ -21,7 +21,7 @@ import os
 import threading
 import time
 from copy import deepcopy
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from typing import Any, Optional
 
 import numpy as np
@@ -49,15 +49,11 @@ from napari_cuda.server.data.level_logging import (
 )
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.rendering.capture import FrameTimings, encode_frame
+from napari_cuda.server.rendering.capture import FrameTimings
 from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
 from napari_cuda.server.runtime.camera import (
     CameraCommandQueue,
     CameraPoseApplied,
-)
-from napari_cuda.server.runtime.camera.animator import animate_if_enabled
-from napari_cuda.server.runtime.camera.controller import (
-    process_camera_deltas as _process_camera_deltas,
 )
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
@@ -79,7 +75,6 @@ from napari_cuda.server.runtime.core import (
     ledger_order,
     ledger_step,
 )
-from napari_cuda.server.runtime.worker.loop import run_render_tick
 from napari_cuda.server.runtime.worker.resources import WorkerResources
 from napari_cuda.server.runtime.viewport import (
     PlaneState,
@@ -88,11 +83,11 @@ from napari_cuda.server.runtime.viewport import (
     ViewportState,
     VolumeState,
 )
-from . import viewport_tick
-from napari_cuda.server.scene import CameraDeltaCommand
 from . import render_updates as _render_updates
 from . import level_policy
 from . import viewer as _viewer
+from .ticks import camera as camera_tick
+from .ticks import capture as capture_tick
 
 logger = logging.getLogger(__name__)
 
@@ -708,131 +703,14 @@ class EGLRendererWorker:
             self._mark_render_tick_needed()
             return
 
-    def process_camera_deltas(self, commands: Sequence[CameraDeltaCommand]) -> None:
-        if not commands:
-            return
-
-        outcome = _process_camera_deltas(self, commands)
-        last_seq = getattr(outcome, "last_command_seq", None)
-        if last_seq is not None:
-            last_seq_int = int(last_seq)
-            self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
-            self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
-
-        self._viewport_runner.ingest_camera_deltas(commands)
-        if (
-            self._viewport_runner is not None
-            and self._viewport_state.mode is RenderMode.PLANE
-        ):
-            rect = self._current_panzoom_rect()
-            if rect is not None:
-                self._viewport_runner.update_camera_rect(rect)
-        self._mark_render_tick_needed()
-        self._user_interaction_seen = True
-        self._last_interaction_ts = time.perf_counter()
-
-        if outcome.camera_changed and self._viewport_state.mode is RenderMode.VOLUME:
-            self._emit_current_camera_pose("camera-delta")
-
-        self._run_viewport_tick()
-
-        if (
-            bool(getattr(outcome, "policy_triggered", False))
-            and self._viewport_state.mode is not RenderMode.VOLUME
-        ):
-            self._evaluate_level_policy()
-
-    def _record_zoom_hint(self, commands: Sequence[CameraDeltaCommand]) -> None:
-        """Legacy hook kept for tests; delegates to render mailbox."""
-
-        for command in reversed(commands):
-            if getattr(command, "kind", None) != "zoom":
-                continue
-            factor = getattr(command, "factor", None)
-            if factor is None:
-                continue
-            factor = float(factor)
-            if factor > 0.0:
-                self._render_mailbox.record_zoom_hint(factor)
-                break
-
     def _capture_blit_gpu_ns(self) -> Optional[int]:
-        return self._resources.capture.pipeline.capture_blit_gpu_ns()
-
+        return capture_tick.capture_blit_gpu_ns(self)
 
     def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int, int]:
-        """Same as capture_and_encode, but also returns the packet and flags.
-
-        Flags bit 0x01 indicates keyframe (IDR/CRA).
-        """
-        encoded = encode_frame(
-            capture=self._resources.capture,
-            render_frame=self.render_tick,
-            obtain_encoder=lambda: self._resources.encoder,
-            encoder_lock=self._resources.enc_lock,
-            debug_dumper=self._debug,
-        )
-
-        return encoded.timings, encoded.packet, encoded.flags, encoded.sequence
+        return capture_tick.capture_and_encode_packet(self)
 
     def render_tick(self) -> float:
-        canvas = self.canvas
-        assert canvas is not None, "render_tick requires an initialized canvas"
-
-        return run_render_tick(
-            animate_camera=lambda: animate_if_enabled(
-                enabled=bool(self._animate),
-                view=getattr(self, "view", None),
-                width=self.width,
-                height=self.height,
-                animate_dps=float(self._animate_dps),
-                anim_start=float(self._anim_start),
-            ),
-            drain_scene_updates=lambda: self._drain_camera_ops_then_scene_updates(),
-            render_canvas=canvas.render,
-            evaluate_policy_if_needed=lambda: None,
-            mark_tick_complete=self._mark_render_tick_complete,
-            mark_loop_started=self._mark_render_loop_started,
-        )
-
-    def _drain_camera_ops_then_scene_updates(self) -> None:
-        commands = self._camera_queue.pop_all()
-        policy_triggered = False
-
-        if commands:
-            outcome = _process_camera_deltas(self, commands)
-            policy_triggered = bool(getattr(outcome, "policy_triggered", False))
-            last_seq = getattr(outcome, "last_command_seq", None)
-            if last_seq is not None:
-                last_seq_int = int(last_seq)
-                self._max_camera_command_seq = max(int(self._max_camera_command_seq), last_seq_int)
-                self._pose_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
-
-            self._viewport_runner.ingest_camera_deltas(commands)
-            if self._viewport_state.mode is RenderMode.PLANE:
-                rect = self._current_panzoom_rect()
-                if rect is not None:
-                    self._viewport_runner.update_camera_rect(rect)
-            self._mark_render_tick_needed()
-            self._user_interaction_seen = True
-            self._last_interaction_ts = time.perf_counter()
-            self._level_policy_suppressed = False
-
-            if outcome.camera_changed and self._viewport_state.mode is RenderMode.VOLUME:
-                self._emit_current_camera_pose("camera-delta")
-
-        _render_updates.drain_scene_updates(self)
-        self._run_viewport_tick()
-
-        if (
-            policy_triggered
-            and self._viewport_state.mode is not RenderMode.VOLUME
-            and not self._level_policy_suppressed
-        ):
-            self._evaluate_level_policy()
-
-    def _run_viewport_tick(self) -> None:
-        viewport_tick.run(self)
+        return capture_tick.render_tick(self)
 
 
     # ---- C6 selection (napari-anchored) -------------------------------------
