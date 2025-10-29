@@ -7,7 +7,7 @@ from typing import Optional, Sequence
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
 from napari_cuda.server.runtime.scene_types import SliceROI
 
 from .state import PlaneState

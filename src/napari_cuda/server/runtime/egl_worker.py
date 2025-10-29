@@ -57,7 +57,7 @@ from napari_cuda.server.data.level_logging import (
     LevelSwitchLogger,
 )
 
-# ROI helpers manage slicing via slice_snapshot utilities.
+# ROI helpers manage slicing via snapshots.plane utilities.
 from napari_cuda.server.data.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
@@ -83,24 +83,20 @@ from napari_cuda.server.runtime.camera.controller import (
     process_camera_deltas as _process_camera_deltas,
 )
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
-from napari_cuda.server.runtime.render_ledger_snapshot import (
+from napari_cuda.server.runtime.snapshots import (
     RenderLedgerSnapshot,
-)
-from napari_cuda.server.runtime.render_snapshot import apply_render_snapshot
-from napari_cuda.server.runtime.slice_snapshot import (
+    apply_plane_metadata,
+    apply_render_snapshot,
     apply_slice_level,
     apply_slice_roi,
+    apply_volume_level,
+    apply_volume_metadata,
 )
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
 from napari_cuda.server.runtime.roi_math import (
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
-)
-from napari_cuda.server.runtime.volume_snapshot import apply_volume_level
-from napari_cuda.server.runtime.viewer_stage import (
-    apply_plane_metadata,
-    apply_volume_metadata,
 )
 from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdate,

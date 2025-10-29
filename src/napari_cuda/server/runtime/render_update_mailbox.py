@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
 from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
 
 logger = logging.getLogger(__name__)

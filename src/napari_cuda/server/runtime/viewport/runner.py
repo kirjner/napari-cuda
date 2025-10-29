@@ -12,9 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from napari_cuda.server.runtime.render_ledger_snapshot import (
-    RenderLedgerSnapshot,
-)
+from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
 from napari_cuda.server.runtime.roi_math import (
     chunk_shape_for_level,
     roi_chunk_signature,

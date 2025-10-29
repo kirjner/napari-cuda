@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from vispy.geometry import Rect
 
-from napari_cuda.server.runtime.render_ledger_snapshot import RenderLedgerSnapshot
+from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
 from napari_cuda.server.runtime.viewport import PlaneState
 from napari_cuda.server.runtime.viewport.plane_ops import (
     assign_pose_from_snapshot,

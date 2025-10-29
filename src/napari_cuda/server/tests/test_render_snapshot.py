@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from napari_cuda.server.runtime import render_snapshot as snapshot_mod
-from napari_cuda.server.runtime.render_ledger_snapshot import (
+from napari_cuda.server.runtime.snapshots import (
     RenderLedgerSnapshot,
 )
+from napari_cuda.server.runtime.snapshots import render as snapshot_mod
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.slice_snapshot import apply_slice_level
+from napari_cuda.server.runtime.snapshots.plane import apply_slice_level
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport import ViewportState
 
@@ -110,9 +110,9 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         worker._data_d = None
         return (roi_in.height, roi_in.width)
 
-    monkeypatch.setattr("napari_cuda.server.runtime.slice_snapshot.plane_wh_for_level", _fake_plane_wh)
-    monkeypatch.setattr("napari_cuda.server.runtime.slice_snapshot.viewport_roi_for_level", _fake_roi)
-    monkeypatch.setattr("napari_cuda.server.runtime.slice_snapshot.apply_slice_roi", _fake_apply)
+    monkeypatch.setattr("napari_cuda.server.runtime.snapshots.plane.plane_wh_for_level", _fake_plane_wh)
+    monkeypatch.setattr("napari_cuda.server.runtime.snapshots.plane.viewport_roi_for_level", _fake_roi)
+    monkeypatch.setattr("napari_cuda.server.runtime.snapshots.plane.apply_slice_roi", _fake_apply)
 
     context = lod.LevelContext(
         level=3,
