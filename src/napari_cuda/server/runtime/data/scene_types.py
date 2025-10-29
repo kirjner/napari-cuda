@@ -9,7 +9,7 @@ import numpy as np
 import dask.array as da
 
 if TYPE_CHECKING:
-    from .zarr_source import LevelDescriptor
+    from napari_cuda.server.data.zarr_source import LevelDescriptor
 
 
 @dataclass(frozen=True)

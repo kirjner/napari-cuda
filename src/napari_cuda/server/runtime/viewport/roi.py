@@ -9,7 +9,7 @@ from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
     viewport_debug_snapshot,
 )
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 logger = logging.getLogger(__name__)
 

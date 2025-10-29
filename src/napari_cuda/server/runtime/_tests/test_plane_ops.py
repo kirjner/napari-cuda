@@ -10,7 +10,7 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
     apply_pose_to_camera,
     mark_slice_applied,
 )
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 
 def test_assign_pose_from_snapshot_prefers_snapshot() -> None:

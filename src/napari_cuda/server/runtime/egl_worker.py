@@ -93,7 +93,8 @@ from napari_cuda.server.runtime.snapshots import (
     apply_volume_metadata,
 )
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
-from napari_cuda.server.runtime.roi_math import (
+from napari_cuda.server.runtime.data import (
+    SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
@@ -107,7 +108,6 @@ from napari_cuda.server.runtime.core import (
     reset_worker_camera,
 )
 from napari_cuda.server.runtime.worker.loop import run_render_tick
-from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport import (
     PlaneState,
     RenderMode,

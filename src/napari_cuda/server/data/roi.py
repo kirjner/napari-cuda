@@ -14,8 +14,8 @@ import math
 
 from vispy import scene
 
-from napari_cuda.server.runtime.scene_types import SliceROI
-from napari_cuda.server.runtime.roi_math import (
+from napari_cuda.server.runtime.data import (
+    SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
 )

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from napari_cuda.server.runtime.roi_math import (
+from napari_cuda.server.runtime.data import (
+    SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from napari_cuda.server.runtime.scene_types import SliceROI
 
 
 class _StubLevelArray:

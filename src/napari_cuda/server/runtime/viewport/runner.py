@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
-from napari_cuda.server.runtime.roi_math import (
+from napari_cuda.server.runtime.data import (
+    SliceROI,
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from napari_cuda.server.runtime.scene_types import SliceROI
 from .state import PlaneRequest, PlaneResult, PlaneState, PoseEvent
 
 

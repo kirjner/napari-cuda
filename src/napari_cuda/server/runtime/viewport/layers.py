@@ -12,7 +12,7 @@ from napari.layers.image._image_constants import ImageRendering as NapariImageRe
 
 from napari_cuda.server.data.roi import plane_scale_for_level
 from napari_cuda.server.data.roi_applier import SliceDataApplier
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 logger = logging.getLogger(__name__)
 

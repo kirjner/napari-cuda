@@ -8,8 +8,7 @@ from __future__ import annotations
 
 from typing import Optional, Sequence, Tuple
 
-from napari_cuda.server.runtime.scene_types import SliceROI
-
+from .scene_types import SliceROI
 
 __all__ = [
     "chunk_shape_for_level",
@@ -31,8 +30,8 @@ def chunk_shape_for_level(source: object, level: int) -> Optional[Tuple[int, int
 
     When chunk metadata is unavailable we return ``None`` so callers can
     gracefully skip alignment. Axis lookup mirrors the legacy worker logic:
-    defaulting to the final two axes when we cannot find explicit ``"y"`` or
-    ``"x"`` labels.
+    defaulting to the final two axes when we cannot find explicit ``\"y\"`` or
+    ``\"x\"`` labels.
     """
 
     try:

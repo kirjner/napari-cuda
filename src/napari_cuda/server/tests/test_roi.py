@@ -7,7 +7,7 @@ import pytest
 from vispy import scene
 
 from napari_cuda.server.data.roi import compute_viewport_roi
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 
 class _DummyTransform:

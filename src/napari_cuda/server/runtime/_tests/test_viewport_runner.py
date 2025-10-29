@@ -5,7 +5,7 @@ from typing import Optional, Sequence, Tuple
 
 from napari_cuda.server.runtime.viewport import PoseEvent, ViewportOps, ViewportRunner
 from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 
 @dataclass

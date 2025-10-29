@@ -8,7 +8,7 @@ import pytest
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
 
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 from napari_cuda.server.runtime.viewport.layers import (
     apply_slice_layer_data,

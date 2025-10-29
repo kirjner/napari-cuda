@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Any
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 
 class SliceDataApplier:

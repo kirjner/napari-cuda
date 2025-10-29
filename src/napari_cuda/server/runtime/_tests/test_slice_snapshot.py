@@ -6,7 +6,7 @@ import pytest
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.snapshots.plane import apply_slice_level
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import ViewportState
 
 

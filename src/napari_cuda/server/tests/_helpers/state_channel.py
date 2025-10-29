@@ -46,7 +46,12 @@ from napari_cuda.server.scene import (
 )
 from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import (
+    SliceROI,
+    align_roi_to_chunk_grid,
+    chunk_shape_for_level,
+    roi_chunk_signature,
+)
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari.components import viewer_model
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
@@ -54,11 +59,6 @@ from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 from napari_cuda.server.runtime.snapshots import render as snapshot_mod
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.data.roi import plane_wh_for_level
-from napari_cuda.server.runtime.roi_math import (
-    align_roi_to_chunk_grid,
-    chunk_shape_for_level,
-    roi_chunk_signature,
-)
 
 
 _SENTINEL = object()

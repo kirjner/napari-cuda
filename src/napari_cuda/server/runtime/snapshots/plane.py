@@ -11,12 +11,12 @@ from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.roi import plane_wh_for_level
-from napari_cuda.server.runtime.roi_math import (
+from napari_cuda.server.runtime.data import (
+    SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
 from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level

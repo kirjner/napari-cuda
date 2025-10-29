@@ -8,7 +8,7 @@ from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
-from napari_cuda.server.runtime.scene_types import SliceROI
+from napari_cuda.server.runtime.data import SliceROI
 
 from .state import PlaneState
 
