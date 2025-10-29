@@ -53,6 +53,12 @@ from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 from napari_cuda.server.runtime.snapshots import render as snapshot_mod
 from napari_cuda.server.runtime.camera import CameraCommandQueue
+from napari_cuda.server.data.roi import plane_wh_for_level
+from napari_cuda.server.runtime.roi_math import (
+    align_roi_to_chunk_grid,
+    chunk_shape_for_level,
+    roi_chunk_signature,
+)
 
 
 _SENTINEL = object()
@@ -178,6 +184,15 @@ class _HarnessLayer:
         self.data = np.zeros((1, 1), dtype=np.float32)
 
 
+class _HarnessViewTransform:
+    def __init__(self) -> None:
+        self.matrix = np.identity(4, dtype=float)
+
+    def imap(self, coords: tuple[float, float, float]) -> tuple[float, float, float]:
+        x, y, z = coords
+        return (float(x), float(y), float(z))
+
+
 class _HarnessSceneSource:
     def __init__(self) -> None:
         self.axes = ("z", "y", "x")
@@ -253,11 +268,21 @@ class CaptureWorker:
         self.viewport_state.plane.target_level = 0
         self.viewport_state.volume.level = 0
         self.viewport_state.volume.scale = (1.0, 1.0, 1.0)
+        self.viewport_state.plane.update_pose(
+            rect=(0.0, 0.0, float(640), float(480)),
+            center=(320.0, 240.0),
+            zoom=1.0,
+        )
         self._is_ready = True
         self._data_wh = (640, 480)
         self._data_d = None
+        self.width = 640
+        self.height = 480
         self._viewer = viewer_model.ViewerModel()
-        self.view = SimpleNamespace(camera=_HarnessPanZoomCamera())
+        self.view = SimpleNamespace(
+            camera=_HarnessPanZoomCamera(),
+            scene=SimpleNamespace(transform=_HarnessViewTransform()),
+        )
         self._napari_layer = _HarnessLayer()
         self._scene_source = _HarnessSceneSource()
         self._state_lock = threading.RLock()
@@ -332,6 +357,26 @@ class CaptureWorker:
 
     def viewer_model(self) -> None:  # pragma: no cover - interface stub
         return None
+
+    def _aligned_roi_signature(
+        self,
+        source: Any,
+        level: int,
+        roi: SliceROI,
+    ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
+        chunk_shape = chunk_shape_for_level(source, int(level))
+        aligned_roi = roi
+        if self._roi_align_chunks and chunk_shape is not None:
+            full_h, full_w = plane_wh_for_level(source, int(level))
+            aligned_roi = align_roi_to_chunk_grid(
+                roi,
+                chunk_shape,
+                int(self._roi_pad_chunks),
+                height=full_h,
+                width=full_w,
+            )
+        signature = roi_chunk_signature(aligned_roi, chunk_shape)
+        return aligned_roi, chunk_shape, signature
 
     @property
     def is_ready(self) -> bool:

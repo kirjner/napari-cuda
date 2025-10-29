@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 
 import pytest
 
@@ -9,6 +10,7 @@ from napari_cuda.protocol import build_state_update
 from napari_cuda.protocol.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.runtime.snapshots import render as snapshot_mod
+from napari_cuda.server.runtime.viewport.state import PlaneState
 from napari_cuda.server.tests._helpers.state_channel import StateServerHarness
 
 
@@ -52,6 +54,24 @@ async def _test_ingest_state_handshake_sends_baseline() -> None:
         await harness.drain_scheduled()
     finally:
         await harness.stop()
+
+
+def _plane_state_payload(
+    *,
+    level: int,
+    step: tuple[int, ...],
+    rect: tuple[float, float, float, float],
+    center: tuple[float, float],
+    zoom: float,
+) -> dict[str, object]:
+    plane_state = PlaneState()
+    plane_state.target_level = level
+    plane_state.target_step = step
+    plane_state.target_ndisplay = 2
+    plane_state.applied_level = level
+    plane_state.applied_step = step
+    plane_state.update_pose(rect=rect, center=center, zoom=zoom)
+    return asdict(plane_state)
 
 
 def test_ingest_state_rejects_missing_features() -> None:
@@ -142,18 +162,13 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         plane_center = (12.5, 20.0)
         plane_zoom = 1.5
         plane_rect = (0.0, 0.0, 256.0, 256.0)
-        plane_state = {
-            "target_level": plane_level,
-            "target_ndisplay": 2,
-            "target_step": plane_step,
-            "applied_level": plane_level,
-            "applied_step": plane_step,
-            "pose": {
-                "center": plane_center,
-                "zoom": plane_zoom,
-                "rect": plane_rect,
-            },
-        }
+        plane_state = _plane_state_payload(
+            level=plane_level,
+            step=plane_step,
+            rect=plane_rect,
+            center=plane_center,
+            zoom=plane_zoom,
+        )
         ledger.batch_record_confirmed(
             [
                 ("view_cache", "plane", "level", plane_level),
@@ -272,18 +287,13 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
         ledger = harness.server._state_ledger
         level = 2
         step = (136, 0, 0)
-        cached_plane_state = {
-            "target_level": level,
-            "target_ndisplay": 2,
-            "target_step": step,
-            "applied_level": level,
-            "applied_step": step,
-            "pose": {
-                "rect": (10.0, 20.0, 30.0, 40.0),
-                "center": (50.0, 60.0),
-                "zoom": 2.5,
-            },
-        }
+        cached_plane_state = _plane_state_payload(
+            level=level,
+            step=step,
+            rect=(10.0, 20.0, 30.0, 40.0),
+            center=(50.0, 60.0),
+            zoom=2.5,
+        )
 
         ledger.record_confirmed(
             "viewport",
