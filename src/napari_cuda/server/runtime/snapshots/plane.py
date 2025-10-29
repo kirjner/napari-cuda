@@ -25,7 +25,7 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
     apply_pose_to_camera,
     mark_slice_applied,
 )
-from .ledger import RenderLedgerSnapshot
+from .build import RenderLedgerSnapshot
 from .viewer import apply_plane_metadata
 
 logger = logging.getLogger(__name__)

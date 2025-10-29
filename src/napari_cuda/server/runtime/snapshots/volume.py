@@ -15,7 +15,7 @@ from napari_cuda.server.runtime.viewport.volume_ops import (
     update_level,
     update_scale,
 )
-from .ledger import RenderLedgerSnapshot
+from .build import RenderLedgerSnapshot
 
 
 @dataclass(frozen=True)

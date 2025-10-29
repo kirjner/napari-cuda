@@ -5,15 +5,15 @@ Single-source our render state so the worker, viewport runner, controller, and t
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply
-- `render_snapshot.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_snapshot.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
+- `snapshots.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/snapshots/apply.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
 - `_resolve_snapshot_ops` computes the per-mode metadata (level intent, ROI alignment, slice signature) and `_apply_snapshot_ops` performs the actual mutations, invoking `apply_volume_level` or `apply_slice_level` as needed.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
 ### 1.2 Worker fields mutated during apply
-- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`render_snapshot.py:209`, `render_snapshot.py:298`).
-- Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_snapshot.py:120`–`render_snapshot.py:150`, `render_snapshot.py:418`).
-- Volume metadata: `_volume_scale`, `_data_d` (`render_snapshot.py:404`), plus logging via `_layer_logger`.
-- Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`snapshots/render.py:430`, `worker/egl.py:1623`).
+- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`snapshots/apply.py:209`, `snapshots/apply.py:298`).
+- Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`snapshots/apply.py:120`–`snapshots/apply.py:150`, `snapshots/apply.py:418`).
+- Volume metadata: `_volume_scale`, `_data_d` (`snapshots/apply.py:404`), plus logging via `_layer_logger`.
+- Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`snapshots/apply.py:430`, `worker/egl.py:1623`).
 
 ### 1.3 Viewport runner internals
 - The runner maintains plane targets (`target_level`, `target_step`, `pose`, `pending_roi`, reload flags, pose reason) and short-circuits volume handling by clearing reload flags when `target_ndisplay >= 3` (`src/napari_cuda/server/runtime/viewport/runner.py`).
@@ -148,10 +148,10 @@ src/napari_cuda/server/runtime/
 │       └── level_switch.py
 ├── snapshots/
 │   ├── __init__.py
-│   ├── apply_plane.py
-│   ├── apply_volume.py
-│   ├── bootstrap.py
-│   ├── ledger.py
+│   ├── apply.py
+│   ├── build.py
+│   ├── plane.py
+│   ├── volume.py
 │   └── viewer.py
 ├── viewport/
 │   ├── __init__.py

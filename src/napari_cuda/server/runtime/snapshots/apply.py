@@ -15,7 +15,7 @@ from typing import Any, Dict, Tuple, TYPE_CHECKING
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.viewport.state import RenderMode
 
-from .ledger import RenderLedgerSnapshot
+from .build import RenderLedgerSnapshot
 from .plane import (
     apply_slice_camera_pose,
     apply_slice_level,
