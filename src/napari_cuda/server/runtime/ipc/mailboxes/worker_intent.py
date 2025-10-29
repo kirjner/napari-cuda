@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
 import threading
+from typing import Optional
 
-from .intents import LevelSwitchIntent
+from ..messages.level_switch import LevelSwitchIntent
 
 
 class WorkerIntentMailbox:

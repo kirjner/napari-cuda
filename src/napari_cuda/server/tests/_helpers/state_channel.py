@@ -45,7 +45,7 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.data import (
     SliceROI,
     align_roi_to_chunk_grid,

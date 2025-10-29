@@ -77,10 +77,9 @@ from napari_cuda.server.control.state_reducers import (
 )
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.runtime.core import probe_scene_bootstrap
-from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.snapshots import pull_render_snapshot
-from napari_cuda.server.runtime.intents import LevelSwitchIntent
-from napari_cuda.server.runtime.worker_intent_mailbox import WorkerIntentMailbox
+from napari_cuda.server.runtime.ipc import LevelSwitchIntent, WorkerIntentMailbox
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.runtime.worker_lifecycle import (
     WorkerLifecycleState,

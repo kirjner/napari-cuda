@@ -19,7 +19,7 @@ from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import snapshot_multiscale_state
 from napari_cuda.server.runtime.camera import CameraPoseApplied
-from napari_cuda.server.runtime.intents import LevelSwitchIntent
+from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 
 

@@ -84,8 +84,8 @@ Single-source our render state so the worker, viewport runner, controller, and t
 5. Isolate shared viewport utilities under `runtime/viewport/` (`layers.py`, `roi.py`, `plane_ops.py`, `volume_ops.py`) so worker and snapshot code consume a single surface.
 
 ### Stage C — Controller/resume alignment
-1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/intents.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`). ✅ Completed.
-2. Update `worker_intent_mailbox`, `egl_headless_server`, and the snapshot helpers to pull state from `ViewportState` rather than private worker fields. ✅ Completed.
+1. Expand intent schema and transactions to consume `ViewportState` (update `runtime/ipc/messages/level_switch.py`, `control/transactions/level_switch.py`, `plane_restore.py`, `control/state_reducers.py`). ✅ Completed.
+2. Update `ipc/mailboxes/worker_intent.py`, `egl_headless_server`, and the snapshot helpers to pull state from `ViewportState` rather than private worker fields. ✅ Completed.
 3. Propagate state snapshots through render mailboxes and resume tokens; update tests in `src/napari_cuda/server/tests/test_state_channel_ingest.py`, resume helpers, and history store. ✅ Completed.
 
 ### Stage D — Shim removal
@@ -135,16 +135,17 @@ src/napari_cuda/server/runtime/
 │   └── snapshot_pipeline.py # snapshot orchestrator (prev render_snapshot)
 ├── data/
 │   ├── __init__.py
-│   ├── lod.py
-│   ├── roi.py               # shared viewport ROI cache/helpers
-│   └── zarr_source.py
+│   ├── roi_math.py
+│   └── scene_types.py
 ├── ipc/
 │   ├── __init__.py
-│   ├── mailboxes.py
-│   └── protocols.py
-├── loop/
-│   ├── __init__.py
-│   └── tick.py
+│   ├── mailboxes/
+│   │   ├── __init__.py
+│   │   ├── render_update.py
+│   │   └── worker_intent.py
+│   └── messages/
+│       ├── __init__.py
+│       └── level_switch.py
 ├── snapshots/
 │   ├── __init__.py
 │   ├── apply_plane.py
@@ -167,5 +168,4 @@ src/napari_cuda/server/runtime/
 │   ├── lifecycle.py
 │   ├── loop.py
 │   └── stage.py
-└── worker_intent_mailbox.py      # legacy shim to be folded into ipc/mailboxes
 ```

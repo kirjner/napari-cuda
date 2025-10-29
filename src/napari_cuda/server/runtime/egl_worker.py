@@ -82,7 +82,7 @@ from napari_cuda.server.runtime.camera.animator import animate_if_enabled
 from napari_cuda.server.runtime.camera.controller import (
     process_camera_deltas as _process_camera_deltas,
 )
-from napari_cuda.server.runtime.intents import LevelSwitchIntent
+from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.snapshots import (
     RenderLedgerSnapshot,
     apply_plane_metadata,
@@ -99,10 +99,7 @@ from napari_cuda.server.runtime.data import (
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from napari_cuda.server.runtime.render_update_mailbox import (
-    RenderUpdate,
-    RenderUpdateMailbox,
-)
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate, RenderUpdateMailbox
 from napari_cuda.server.runtime.core import (
     ensure_scene_source,
     reset_worker_camera,

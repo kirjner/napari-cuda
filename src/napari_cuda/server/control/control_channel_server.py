@@ -84,7 +84,7 @@ from napari_cuda.server.scene import (
     snapshot_render_state,
     snapshot_multiscale_state,
 )
-from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,

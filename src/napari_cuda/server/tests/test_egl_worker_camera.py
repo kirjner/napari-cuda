@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.camera.controller import CameraDeltaOutcome
-from napari_cuda.server.runtime.render_update_mailbox import RenderUpdateMailbox
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
