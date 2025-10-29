@@ -181,26 +181,22 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             state.worker = worker
             worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
 
-            worker._init_cuda()
             worker._init_vispy_scene()
             worker._init_egl()
-            worker._init_capture()
-            worker._init_cuda_interop()
-            worker._init_encoder()
 
             worker._debug = DebugDumper(worker._debug_config)
             if worker._debug.cfg.enabled:
                 worker._debug.log_env_once()
                 worker._debug.ensure_out_dir()
-            worker._capture.pipeline.set_debug(worker._debug)
-            worker._capture.pipeline.set_raw_dump_budget(worker._raw_dump_budget)
-            worker._capture.cuda.set_force_tight_pitch(worker._debug_policy.worker.force_tight_pitch)
+            worker.resources.capture.pipeline.set_debug(worker._debug)
+            worker.resources.capture.pipeline.set_raw_dump_budget(worker._raw_dump_budget)
+            worker.resources.capture.cuda.set_force_tight_pitch(worker._debug_policy.worker.force_tight_pitch)
             worker._log_debug_policy_once()
             logger.info(
                 "EGL renderer initialized: %dx%d, GL fmt=RGBA8, NVENC fmt=%s, fps=%d, animate=%s, zarr=%s",
                 worker.width,
                 worker.height,
-                worker._capture.pipeline.enc_input_format,
+                worker.resources.capture.pipeline.enc_input_format,
                 worker.fps,
                 worker._animate,
                 bool(worker._zarr_path),

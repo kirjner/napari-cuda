@@ -38,7 +38,6 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
-import pycuda.driver as cuda  # type: ignore
 from vispy import scene  # type: ignore
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
@@ -63,14 +62,8 @@ from napari_cuda.server.data.roi import (
     plane_wh_for_level,
 )
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.rendering.capture import (
-    CaptureFacade,
-    FrameTimings,
-    encode_frame,
-)
+from napari_cuda.server.rendering.capture import FrameTimings, encode_frame
 from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
-from napari_cuda.server.rendering.egl_context import EglContext
-from napari_cuda.server.rendering.encoder import Encoder
 
 # Bitstream packing happens in the server layer
 from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
@@ -105,6 +98,7 @@ from napari_cuda.server.runtime.core import (
     reset_worker_camera,
 )
 from napari_cuda.server.runtime.worker.loop import run_render_tick
+from napari_cuda.server.runtime.worker.resources import WorkerResources
 from napari_cuda.server.runtime.viewport import (
     PlaneState,
     RenderMode,
@@ -353,14 +347,11 @@ class EGLRendererWorker:
     # Legacy _apply_zoom_based_level_switch removed
 
     def _init_egl(self) -> None:
-        self._egl.ensure()
+        self.cuda_ctx = self._resources.bootstrap(server_ctx=self._ctx, fps_hint=int(self.fps))
 
     def _init_cuda(self) -> None:
-        cuda.init()
-        dev = cuda.Device(0)
-        ctx = dev.retain_primary_context()
-        ctx.push()
-        self.cuda_ctx = ctx
+        # CUDA context is established during bootstrap; nothing additional required.
+        return
 
     def _create_scene_source(self) -> Optional[ZarrSceneSource]:
         if self._zarr_path is None:
@@ -785,14 +776,18 @@ class EGLRendererWorker:
         self._anim_start = time.perf_counter()
 
     def _init_render_components(self) -> None:
-        self.cuda_ctx: Optional[cuda.Context] = None
+        self._resources = WorkerResources(width=self.width, height=self.height)
+        self.cuda_ctx = None
         self.canvas: Optional[scene.SceneCanvas] = None
         self.view = None
         self._plane_visual_handle: Optional[_VisualHandle] = None
         self._volume_visual_handle: Optional[_VisualHandle] = None
-        self._egl = EglContext(self.width, self.height)
-        self._capture = CaptureFacade(width=self.width, height=self.height)
-        self._encoder: Optional[Encoder] = None
+
+    @property
+    def resources(self) -> WorkerResources:
+        """Expose render resources owned by the worker."""
+
+        return self._resources
 
     def _init_scene_state(self) -> None:
         self._viewer: Optional[ViewerModel] = None
@@ -818,7 +813,6 @@ class EGLRendererWorker:
         camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]],
         level_intent_cb: Optional[Callable[[LevelSwitchIntent], None]] = None,
     ) -> None:
-        self._enc_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._render_mailbox = RenderUpdateMailbox()
         self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
@@ -1257,49 +1251,15 @@ class EGLRendererWorker:
         self._viewport_state.volume.world_extents = extents
         return extents
 
-    def _init_capture(self) -> None:
-        self._capture.ensure()
-
-    def _init_cuda_interop(self) -> None:
-        """Init CUDA-GL interop and allocate destination via one-time DLPack bridge."""
-        self._capture.initialize_cuda_interop()
-
-    def _init_encoder(self) -> None:
-        with self._enc_lock:
-            if self._encoder is None:
-                self._encoder = Encoder(
-                    self.width,
-                    self.height,
-                    fps_hint=int(self.fps),
-                )
-            encoder = self._encoder
-            encoder.set_fps_hint(int(self.fps))
-            encoder.setup(self._ctx)
-            self._capture.pipeline.set_enc_input_format(encoder.input_format)
-
     def reset_encoder(self) -> None:
-        with self._enc_lock:
-            encoder = self._encoder
-            if encoder is None:
-                return
-            encoder.set_fps_hint(int(self.fps))
-            encoder.reset(self._ctx)
-            self._enc_input_fmt = encoder.input_format
+        self._resources.reset_encoder(fps_hint=int(self.fps), server_ctx=self._ctx)
 
     def force_idr(self) -> None:
         logger.debug("Requesting encoder force IDR")
-        with self._enc_lock:
-            encoder = self._encoder
-            if encoder is None:
-                return
-            encoder.force_idr()
+        self._resources.force_idr()
 
     def _request_encoder_idr(self) -> None:
-        with self._enc_lock:
-            encoder = self._encoder
-            if encoder is None:
-                return
-            encoder.request_idr()
+        self._resources.request_idr()
 
     def render_frame(self, azimuth_deg: Optional[float] = None) -> None:
         if azimuth_deg is not None:
@@ -1953,7 +1913,7 @@ class EGLRendererWorker:
                 self._level_policy_suppressed = False
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
-        return self._capture.pipeline.capture_blit_gpu_ns()
+        return self._resources.capture.pipeline.capture_blit_gpu_ns()
 
 
     def capture_and_encode_packet(self) -> tuple[FrameTimings, Optional[bytes], int, int]:
@@ -1962,10 +1922,10 @@ class EGLRendererWorker:
         Flags bit 0x01 indicates keyframe (IDR/CRA).
         """
         encoded = encode_frame(
-            capture=self._capture,
+            capture=self._resources.capture,
             render_frame=self.render_tick,
-            obtain_encoder=lambda: self._encoder,
-            encoder_lock=self._enc_lock,
+            obtain_encoder=lambda: self._resources.encoder,
+            encoder_lock=self._resources.enc_lock,
             debug_dumper=self._debug,
         )
 
@@ -2233,22 +2193,7 @@ class EGLRendererWorker:
     # Removed legacy _torch_from_cupy helper (unused)
 
     def cleanup(self) -> None:
-        try:
-            self._capture.cleanup()
-        except Exception:
-            logger.debug("Cleanup: capture cleanup failed", exc_info=True)
-
-        with self._enc_lock:
-            encoder = self._encoder
-            if encoder is not None:
-                encoder.shutdown()
-
-        try:
-            if self.cuda_ctx is not None:
-                self.cuda_ctx.pop()
-                self.cuda_ctx.detach()
-        except Exception:
-            logger.debug("Cleanup: CUDA context pop/detach failed", exc_info=True)
+        self._resources.cleanup()
         self.cuda_ctx = None
 
         try:
@@ -2266,7 +2211,6 @@ class EGLRendererWorker:
         self._plane_visual_handle = None
         self._volume_visual_handle = None
 
-        self._egl.cleanup()
         self._is_ready = False
 
     def viewer_model(self) -> Optional[ViewerModel]:
