@@ -18,9 +18,13 @@ from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker import level_policy
 from .plane import (
+    aligned_roi_signature,
+    apply_dims_from_snapshot,
     apply_slice_camera_pose,
     apply_slice_level,
     apply_slice_roi as _apply_slice_roi,
+    dims_signature,
+    update_z_index_from_snapshot,
 )
 from .volume import apply_volume_camera_pose, apply_volume_level
 from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
@@ -64,14 +68,14 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     if ops_signature == getattr(worker, "_last_snapshot_signature", None):
         return
 
-    dims_signature = worker._dims_signature(snapshot)
-    dims_changed = dims_signature != getattr(worker, "_last_dims_signature", None)
+    signature = dims_signature(snapshot)
+    dims_changed = signature != getattr(worker, "_last_dims_signature", None)
 
     if dims_changed:
         with _suspend_fit_callbacks(viewer):
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.begin: suppress fit; applying dims")
-            worker._apply_dims_from_snapshot(snapshot, signature=dims_signature)
+            apply_dims_from_snapshot(worker, snapshot, signature=signature)
             _apply_snapshot_ops(worker, snapshot, snapshot_ops)
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
@@ -211,7 +215,12 @@ def _resolve_snapshot_ops(
     step_tuple = tuple(int(v) for v in applied_context.step)
     level_int = int(applied_context.level)
     roi_current = viewport_roi_for_level(worker, source, level_int)
-    aligned_roi, chunk_shape, roi_signature = worker._aligned_roi_signature(source, level_int, roi_current)
+    aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
+        worker,
+        source,
+        level_int,
+        roi_current,
+    )
     signature_token = (level_int, step_tuple, roi_signature)
     last_slice_signature = getattr(worker, "_last_slice_signature", None)
     level_changed = target_level != prev_level
@@ -312,8 +321,10 @@ def _apply_snapshot_ops(
             slice_task = SliceTask(**plane_ops["slice_payload"])
             runner.mark_level_applied(slice_task.level)
             runner.mark_slice_applied(slice_task)
+        update_z_index_from_snapshot(worker, snapshot)
         return
 
     apply_slice_level(worker, source, plane_ops["applied_context"])
+    update_z_index_from_snapshot(worker, snapshot)
     if TYPE_CHECKING:
         from napari_cuda.server.runtime.viewport.runner import SliceTask

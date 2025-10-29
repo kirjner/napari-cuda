@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
 
+import numpy as np
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
@@ -42,6 +43,165 @@ class SliceApplyResult:
     chunk_shape: Optional[Tuple[int, int]]
     width_px: int
     height_px: int
+
+
+def load_slice(
+    worker: Any,
+    source: Any,
+    level: int,
+    z_index: int,
+) -> np.ndarray:
+    """Load a slice for ``level`` using the worker viewport ROI."""
+
+    roi = viewport_roi_for_level(worker, source, int(level))
+    slab = source.slice(int(level), int(z_index), compute=True, roi=roi)
+    if not isinstance(slab, np.ndarray):
+        slab = np.asarray(slab, dtype=np.float32)
+    return slab
+
+
+def aligned_roi_signature(
+    worker: Any,
+    source: Any,
+    level: int,
+    roi: Optional[SliceROI] = None,
+) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
+    """Align ``roi`` to the chunk grid (if enabled) and return its signature."""
+
+    roi_val = roi or viewport_roi_for_level(worker, source, int(level))
+    chunk_shape = chunk_shape_for_level(source, int(level))
+    aligned_roi = roi_val
+    if worker._roi_align_chunks and chunk_shape is not None:  # type: ignore[attr-defined]
+        full_h, full_w = plane_wh_for_level(source, int(level))
+        aligned_roi = align_roi_to_chunk_grid(
+            roi_val,
+            chunk_shape,
+            int(worker._roi_pad_chunks),  # type: ignore[attr-defined]
+            height=full_h,
+            width=full_w,
+        )
+    signature = roi_chunk_signature(aligned_roi, chunk_shape)
+    return aligned_roi, chunk_shape, signature
+
+
+def dims_signature(snapshot: RenderLedgerSnapshot) -> tuple:
+    """Compute a signature for snapshot dims updates."""
+
+    return (
+        int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
+        tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
+        tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
+        tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None,
+        int(snapshot.current_level) if snapshot.current_level is not None else None,
+        tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
+    )
+
+
+def apply_dims_from_snapshot(
+    worker: Any,
+    snapshot: RenderLedgerSnapshot,
+    *,
+    signature: tuple,
+) -> None:
+    """Apply dims metadata from ``snapshot`` back onto the worker viewer."""
+
+    viewer = worker._viewer  # type: ignore[attr-defined]
+    if viewer is None:
+        return
+
+    worker._last_dims_signature = signature  # type: ignore[attr-defined]
+
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "dims.apply: ndisplay=%s order=%s displayed=%s current_step=%s",
+            str(snapshot.ndisplay),
+            str(snapshot.order),
+            str(snapshot.displayed),
+            str(snapshot.current_step),
+        )
+
+    dims = viewer.dims
+    ndim = int(getattr(dims, "ndim", 0) or 0)
+
+    axis_labels_src = snapshot.axis_labels
+    if axis_labels_src:
+        labels = tuple(str(v) for v in axis_labels_src)
+        dims.axis_labels = labels
+        ndim = max(ndim, len(labels))
+
+    order_src = snapshot.order
+    if order_src:
+        ndim = max(ndim, len(tuple(int(v) for v in order_src)))
+
+    fallback_order: Optional[tuple[int, ...]] = None
+    current_order = getattr(dims, "order", None)
+    if current_order is not None:
+        fallback_order = tuple(int(v) for v in current_order)
+
+    if snapshot.level_shapes and snapshot.current_level is not None:
+        level_shapes = snapshot.level_shapes
+        level_idx = int(snapshot.current_level)
+        if level_shapes and 0 <= level_idx < len(level_shapes):
+            ndim = max(ndim, len(level_shapes[level_idx]))
+
+    if ndim <= 0:
+        ndim = max(len(dims.current_step), len(dims.axis_labels)) or 1
+    if dims.ndim != ndim:
+        dims.ndim = ndim
+
+    if snapshot.current_step is not None:
+        step_tuple = tuple(int(v) for v in snapshot.current_step)
+        if len(step_tuple) < ndim:
+            step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))
+        elif len(step_tuple) > ndim:
+            step_tuple = step_tuple[:ndim]
+        dims.current_step = step_tuple
+    if snapshot.current_level is not None:
+        worker._set_current_level_index(int(snapshot.current_level))  # type: ignore[attr-defined]
+
+    if snapshot.order is not None:
+        order_values = tuple(int(v) for v in snapshot.order)
+    else:
+        assert fallback_order is not None, "ledger missing dims order"
+        order_values = fallback_order
+    assert order_values, "ledger emitted empty dims order"
+    dims.order = order_values
+
+    displayed_src = snapshot.displayed
+    if displayed_src is not None:
+        displayed_tuple = tuple(int(v) for v in displayed_src)
+    else:
+        current_displayed = getattr(dims, "displayed", None)
+        assert current_displayed is not None, "ledger missing dims displayed"
+        displayed_tuple = tuple(int(v) for v in current_displayed)
+    assert displayed_tuple, "ledger emitted empty dims displayed"
+    expected_displayed = tuple(order_values[-len(displayed_tuple):])
+    assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
+
+    if snapshot.ndisplay is not None:
+        dims.ndisplay = max(1, int(snapshot.ndisplay))
+
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "dims.applied: ndim=%d order=%s displayed=%s ndisplay=%d",
+            int(dims.ndim),
+            str(tuple(dims.order)),
+            str(tuple(dims.displayed)),
+            int(dims.ndisplay),
+        )
+
+
+def update_z_index_from_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
+    """Update the cached z-index if the snapshot provides axis labels."""
+
+    if snapshot.axis_labels is None or snapshot.current_step is None:
+        return
+    labels = [str(label).lower() for label in snapshot.axis_labels]
+    if "z" not in labels:
+        return
+    idx = labels.index("z")
+    if idx < len(snapshot.current_step):
+        worker._z_index = int(snapshot.current_step[idx])  # type: ignore[attr-defined]
 
 
 def apply_slice_snapshot(
@@ -144,18 +304,13 @@ def apply_slice_level(
     view = worker.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
-    full_h, full_w = plane_wh_for_level(source, int(applied.level))
     roi = viewport_roi_for_level(worker, source, int(applied.level))
-    chunk_shape = chunk_shape_for_level(source, int(applied.level))
-    aligned_roi = roi
-    if worker._roi_align_chunks and chunk_shape is not None:
-        aligned_roi = align_roi_to_chunk_grid(
-            roi,
-            chunk_shape,
-            int(worker._roi_pad_chunks),
-            height=full_h,
-            width=full_w,
-        )
+    aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
+        worker,
+        source,
+        int(applied.level),
+        roi,
+    )
     if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
         worker._emit_current_camera_pose("slice-apply")
     height_px, width_px = apply_slice_roi(
@@ -186,7 +341,6 @@ def apply_slice_level(
         downgraded=worker.viewport_state.volume.downgraded,  # type: ignore[attr-defined]
     )
 
-    roi_signature = roi_chunk_signature(aligned_roi, chunk_shape)
     mark_slice_applied(
         plane_state,
         level=int(applied.level),
@@ -242,11 +396,7 @@ def apply_slice_roi(
 ) -> Tuple[int, int]:
     """Load and apply a slice for the given ROI."""
 
-    aligned_roi, chunk_shape, roi_signature = worker._aligned_roi_signature(
-        source,
-        int(level),
-        roi,
-    )
+    aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(worker, source, int(level), roi)
 
     step_source: Optional[Sequence[int]] = step
     plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
@@ -317,11 +467,16 @@ def apply_slice_roi(
 
 
 __all__ = [
+    "aligned_roi_signature",
+    "apply_dims_from_snapshot",
     "SliceApplyResult",
     "apply_slice_snapshot",
     "apply_slice_camera_pose",
     "apply_slice_level",
     "apply_slice_roi",
+    "dims_signature",
+    "load_slice",
+    "update_z_index_from_snapshot",
 ]
 def _create_slice_task(
     *,

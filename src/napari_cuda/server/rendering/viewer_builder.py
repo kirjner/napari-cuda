@@ -20,6 +20,7 @@ from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.worker import level_policy
+from napari_cuda.server.runtime.worker.snapshots import plane as plane_snapshots
 from napari_cuda.server.runtime.viewport import RenderMode
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ class ViewerBuilder:
             else:
                 # Bootstrap: request a full-slab ROI for the first slice load
                 self._bridge._bootstrap_full_roi = True
-                slice_array = self._bridge._load_slice(source, selected_level, int(z_index))
+                slice_array = plane_snapshots.load_slice(self._bridge, source, selected_level, int(z_index))
                 if self._bridge._log_layer_debug:
                     smin = float(np.nanmin(slice_array))
                     smax = float(np.nanmax(slice_array))

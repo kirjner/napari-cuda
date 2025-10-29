@@ -101,7 +101,9 @@ that behaviour.
   `render_updates.extract_layer_changes`,
   `render_updates.apply_viewport_state_snapshot`,
   `render_updates.drain_scene_updates`,
-  `_apply_dims_from_snapshot`, `_update_z_index_from_snapshot`,
+  `snapshots.plane.dims_signature`,
+  `snapshots.plane.apply_dims_from_snapshot`,
+  `snapshots.plane.update_z_index_from_snapshot`,
   `snapshot_dims_metadata`, `_set_dims_range_for_level`, `_record_zoom_hint`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
@@ -116,9 +118,10 @@ that behaviour.
 
 ### 5. Level Selection, ROI, and Policy Evaluation
 - **Entry points:** `_configure_policy`, `set_policy`,
-  `_build_policy_context`, `_estimate_level_bytes`, `_volume_budget_allows`,
-  `_slice_budget_allows`, `_resolve_volume_intent_level`, `_apply_volume_level`,
-  `_apply_slice_level`, `_format_level_roi`, `_aligned_roi_signature`,
+  `level_policy.build_level_context`, `level_policy.volume_budget_allows`,
+  `level_policy.slice_budget_allows`, `level_policy.resolve_volume_intent_level`,
+  `level_policy.load_volume`, `snapshots.plane.apply_slice_level`,
+  `snapshots.plane.aligned_roi_signature`,
   `_volume_world_extents`, `_evaluate_level_policy`, `_mark_render_tick_needed`,
   `_mark_render_tick_complete`, `_mark_render_loop_started`,
   `request_multiscale_level`, `_enter_volume_mode`, `_exit_volume_mode`,

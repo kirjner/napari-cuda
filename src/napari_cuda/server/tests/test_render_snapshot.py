@@ -6,6 +6,7 @@ import pytest
 
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply as snapshot_mod
+from napari_cuda.server.runtime.worker.snapshots import plane as plane_mod
 from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
@@ -156,26 +157,6 @@ class _StubWorker:
     def _current_panzoom_rect(self):
         return self.viewport_state.plane.pose.rect
 
-    def _aligned_roi_signature(self, source, level, roi):
-        _ = source  # unused in stub
-        level_int = int(level)
-        signature = (
-            int(roi.y_start),
-            int(roi.y_stop) - 1,
-            int(roi.x_start),
-            int(roi.x_stop) - 1,
-        )
-        return roi, None, signature
-
-    def _dims_signature(self, snapshot):
-        step = tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None
-        return (snapshot.ndisplay, snapshot.current_level, step)
-
-    def _apply_dims_from_snapshot(self, snapshot, *, signature):
-        _ = snapshot
-        self._apply_dims_calls += 1
-        self._last_dims_signature = signature
-
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
@@ -324,11 +305,18 @@ def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch:
     worker = _StubWorker(use_volume=False, level=1)
     snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(5, 0, 0))
 
+    original_apply_dims = plane_mod.apply_dims_from_snapshot
+
+    def _track_apply_dims(worker_obj, snapshot_obj, *, signature):
+        worker_obj._apply_dims_calls += 1
+        original_apply_dims(worker_obj, snapshot_obj, signature=signature)
+
+    monkeypatch.setattr(plane_mod, "apply_dims_from_snapshot", _track_apply_dims)
     monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
     ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
     worker._last_snapshot_signature = ops["signature"]
-    worker._last_dims_signature = worker._dims_signature(snapshot)
+    worker._last_dims_signature = plane_mod.dims_signature(snapshot)
 
     def _fail_apply(*_args, **_kwargs) -> None:
         raise AssertionError("apply_snapshot_ops should not be invoked when signature matches")

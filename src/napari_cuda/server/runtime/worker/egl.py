@@ -69,13 +69,7 @@ from napari_cuda.server.runtime.worker.snapshots import (
     apply_volume_metadata,
 )
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
-from napari_cuda.server.data.roi import plane_wh_for_level
-from napari_cuda.server.runtime.data import (
-    SliceROI,
-    align_roi_to_chunk_grid,
-    chunk_shape_for_level,
-    roi_chunk_signature,
-)
+from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate, RenderUpdateMailbox
 from napari_cuda.server.runtime.core import (
     ensure_scene_source,
@@ -640,18 +634,6 @@ class EGLRendererWorker:
         # single element; reuse across axes
         return (values[0], values[0], values[0])
 
-    def _load_slice(
-        self,
-        source: ZarrSceneSource,
-        level: int,
-        z_idx: int,
-    ) -> np.ndarray:
-        roi = viewport_roi_for_level(self, source, level)
-        slab = source.slice(level, z_idx, compute=True, roi=roi)
-        if not isinstance(slab, np.ndarray):
-            slab = np.asarray(slab, dtype=np.float32)
-        return slab
-
     def _load_volume(
         self,
         source: ZarrSceneSource,
@@ -661,28 +643,6 @@ class EGLRendererWorker:
         if not isinstance(volume, np.ndarray):
             volume = np.asarray(volume, dtype=np.float32)
         return volume
-
-    def _aligned_roi_signature(
-        self,
-        source: ZarrSceneSource,
-        level: int,
-        roi: SliceROI,
-    ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
-        """Return chunk-aligned ROI and its signature for comparison."""
-
-        chunk_shape = chunk_shape_for_level(source, int(level))
-        aligned_roi = roi
-        if self._roi_align_chunks and chunk_shape is not None:
-            full_h, full_w = plane_wh_for_level(source, int(level))
-            aligned_roi = align_roi_to_chunk_grid(
-                roi,
-                chunk_shape,
-                int(self._roi_pad_chunks),
-                height=full_h,
-                width=full_w,
-            )
-        signature = roi_chunk_signature(aligned_roi, chunk_shape)
-        return aligned_roi, chunk_shape, signature
 
     def _volume_shape_for_view(self) -> Optional[tuple[int, int, int]]:
         if self._data_d is not None and self._data_wh is not None:
@@ -725,107 +685,6 @@ class EGLRendererWorker:
         self.canvas.render()
         self._render_tick_required = False
         self._render_loop_started = True
-
-    def _dims_signature(self, snapshot: RenderLedgerSnapshot) -> tuple:
-        return (
-            int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
-            tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
-            tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
-            tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None,
-            int(snapshot.current_level) if snapshot.current_level is not None else None,
-            tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
-        )
-
-    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot, *, signature: tuple) -> None:
-        viewer = self._viewer
-        if viewer is None:
-            return
-
-        self._last_dims_signature = signature
-
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "dims.apply: ndisplay=%s order=%s displayed=%s current_step=%s",
-                str(snapshot.ndisplay), str(snapshot.order), str(snapshot.displayed), str(snapshot.current_step)
-            )
-
-        dims = viewer.dims
-        ndim = int(getattr(dims, "ndim", 0) or 0)
-
-        axis_labels_src = snapshot.axis_labels
-        if axis_labels_src:
-            labels = tuple(str(v) for v in axis_labels_src)
-            dims.axis_labels = labels
-            ndim = max(ndim, len(labels))
-
-        order_src = snapshot.order
-        if order_src:
-            ndim = max(ndim, len(tuple(int(v) for v in order_src)))
-
-        fallback_order: Optional[tuple[int, ...]] = None
-        current_order = getattr(dims, "order", None)
-        if current_order is not None:
-            fallback_order = tuple(int(v) for v in current_order)
-
-        if snapshot.level_shapes and snapshot.current_level is not None:
-            level_shapes = snapshot.level_shapes
-            level_idx = int(snapshot.current_level)
-            if level_shapes and 0 <= level_idx < len(level_shapes):
-                ndim = max(ndim, len(level_shapes[level_idx]))
-
-        if ndim <= 0:
-            ndim = max(len(dims.current_step), len(dims.axis_labels)) or 1
-        if dims.ndim != ndim:
-            dims.ndim = ndim
-
-        if snapshot.current_step is not None:
-            step_tuple = tuple(int(v) for v in snapshot.current_step)
-            if len(step_tuple) < ndim:
-                step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))
-            elif len(step_tuple) > ndim:
-                step_tuple = step_tuple[:ndim]
-            dims.current_step = step_tuple
-        if snapshot.current_level is not None:
-            self._set_current_level_index(int(snapshot.current_level))
-
-        if snapshot.order is not None:
-            order_values = tuple(int(v) for v in snapshot.order)
-        else:
-            assert fallback_order is not None, "ledger missing dims order"
-            order_values = fallback_order
-        assert order_values, "ledger emitted empty dims order"
-        dims.order = order_values
-
-        displayed_src = snapshot.displayed
-        if displayed_src is not None:
-            displayed_tuple = tuple(int(v) for v in displayed_src)
-        else:
-            current_displayed = getattr(dims, "displayed", None)
-            assert current_displayed is not None, "ledger missing dims displayed"
-            displayed_tuple = tuple(int(v) for v in current_displayed)
-        assert displayed_tuple, "ledger emitted empty dims displayed"
-        expected_displayed = tuple(order_values[-len(displayed_tuple):])
-        assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
-
-        if snapshot.ndisplay is not None:
-            dims.ndisplay = max(1, int(snapshot.ndisplay))
-
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "dims.applied: ndim=%d order=%s displayed=%s ndisplay=%d",
-                int(dims.ndim), str(tuple(dims.order)), str(tuple(dims.displayed)), int(dims.ndisplay)
-            )
-
-
-    def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
-        if snapshot.axis_labels is None or snapshot.current_step is None:
-            return
-        labels = [str(label).lower() for label in snapshot.axis_labels]
-        if "z" not in labels:
-            return
-        idx = labels.index("z")
-        if idx < len(snapshot.current_step):
-            self._z_index = int(snapshot.current_step[idx])
 
     def enqueue_update(self, delta: RenderUpdate) -> None:
         """Normalize and enqueue a render delta for the worker mailbox."""
