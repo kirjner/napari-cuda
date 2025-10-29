@@ -102,7 +102,11 @@ from napari_cuda.server.runtime.render_update_mailbox import (
     RenderUpdate,
     RenderUpdateMailbox,
 )
-from napari_cuda.server.runtime.runtime_loop import run_render_tick
+from napari_cuda.server.runtime.core import (
+    ensure_scene_source,
+    reset_worker_camera,
+)
+from napari_cuda.server.runtime.worker.loop import run_render_tick
 from napari_cuda.server.runtime.scene_types import SliceROI
 from napari_cuda.server.runtime.viewport import (
     PlaneState,
@@ -112,10 +116,6 @@ from napari_cuda.server.runtime.viewport import (
     VolumeState,
 )
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
-from napari_cuda.server.runtime.worker_runtime import (
-    ensure_scene_source,
-    reset_worker_camera,
-)
 from napari_cuda.server.scene import CameraDeltaCommand
 
 logger = logging.getLogger(__name__)

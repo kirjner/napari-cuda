@@ -51,7 +51,6 @@ from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari.components import viewer_model
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
-from napari_cuda.server.runtime import worker_runtime
 from napari_cuda.server.runtime.snapshots import render as snapshot_mod
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 

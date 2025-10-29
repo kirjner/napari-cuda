@@ -76,7 +76,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_opacity,
 )
 from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.runtime.bootstrap_probe import probe_scene_bootstrap
+from napari_cuda.server.runtime.core import probe_scene_bootstrap
 from napari_cuda.server.runtime.render_update_mailbox import RenderUpdate
 from napari_cuda.server.runtime.snapshots import pull_render_snapshot
 from napari_cuda.server.runtime.intents import LevelSwitchIntent
