@@ -23,7 +23,7 @@ Recent reorganisations landed the top-level split called out in the future-struc
 - Client runtime/app/rendering separation matches the target layout; `proxy_viewer` is now thin and bridges live in `client/state`.
 - Server rendering owns encoder + worker code after moving the PyAV encoder from the shared codec layer (`src/napari_cuda/server/rendering/h264_encoder.py`).
 - Protocol, docs, and tools directories match the published draft (no more greenfield shims).
-- Server runtime package introduced (`server/runtime/egl_worker.py`, `runtime/worker/loop.py`, `runtime/ipc/mailboxes/render_update.py`, `runtime/core/*`), isolating orchestration from rendering helpers.
+- Server runtime package introduced (`server/runtime/worker/egl.py`, `runtime/worker/loop.py`, `runtime/ipc/mailboxes/render_update.py`, `runtime/core/*`), isolating orchestration from rendering helpers.
 
 ## Outstanding Organisation Work
 

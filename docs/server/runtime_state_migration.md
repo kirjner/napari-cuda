@@ -13,14 +13,14 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`render_snapshot.py:209`, `render_snapshot.py:298`).
 - Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_snapshot.py:120`–`render_snapshot.py:150`, `render_snapshot.py:418`).
 - Volume metadata: `_volume_scale`, `_data_d` (`render_snapshot.py:404`), plus logging via `_layer_logger`.
-- Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_snapshot.py:430`, `egl_worker.py:1623`).
+- Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`snapshots/render.py:430`, `worker/egl.py:1623`).
 
 ### 1.3 Viewport runner internals
 - The runner maintains plane targets (`target_level`, `target_step`, `pose`, `pending_roi`, reload flags, pose reason) and short-circuits volume handling by clearing reload flags when `target_ndisplay >= 3` (`src/napari_cuda/server/runtime/viewport/runner.py`).
 - ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport/runner.py:214`).
 
 ### 1.4 Worker loop interactions
-- `_run_viewport_tick` sends `ViewportIntent`s to the apply helpers. If `intent.roi_change` and we are still in plane mode, it calls `apply_plane_slice_roi` directly (`src/napari_cuda/server/runtime/egl_worker.py:1574`–`egl_worker.py:1624`).
+- `_run_viewport_tick` asks the `ViewportRunner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it calls `apply_plane_slice_roi` directly (`src/napari_cuda/server/runtime/worker/egl.py:1574`–`worker/egl.py:1624`).
 - Snapshot drain (`egl_worker.py:1488`) rebuilds `SceneStateApplyContext`, updates `_z_index`, `_data_wh`, and mirrors runner state by calling `mark_level_applied` when the staged level matches the target.
 - `ensure_scene_source` and `reset_worker_camera` (server/runtime/worker_runtime.py) mutate `worker._active_ms_level`, `_zarr_*`, `_data_wh`, and depend on `worker.use_volume` to branch camera resets (`worker_runtime.py:16`–`worker_runtime.py:105`).
 
@@ -67,7 +67,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
    ✅ Completed (`fixtures live in src/napari_cuda/server/runtime/viewport/state.py`).
 2. Port `ViewportRunner` to use `ViewportState.plane`, deleting its private state dataclass.
    ✅ Completed (runner now mutates the shared plane state and tests remain green).
-3. Seed `ViewportState` in `EGLRendererWorker.__init__` (`src/napari_cuda/server/runtime/egl_worker.py:128`). Shim properties:
+3. Seed `ViewportState` in `EGLRendererWorker.__init__` (`src/napari_cuda/server/runtime/worker/egl.py:128`). Shim properties:
    - `@property use_volume` → `self.viewport_state.mode is RenderMode.VOLUME`
    - `_active_ms_level` → proxy to `viewport_state.plane.applied_level`.
    ✅ Implemented along with shims for `_level_downgraded` and `_volume_scale`.

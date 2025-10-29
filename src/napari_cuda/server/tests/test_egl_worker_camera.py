@@ -9,7 +9,7 @@ from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.camera.controller import CameraDeltaOutcome
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
-from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
+from napari_cuda.server.runtime.worker import EGLRendererWorker
 from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
@@ -102,7 +102,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.egl_worker._process_camera_deltas",
+        "napari_cuda.server.runtime.worker.egl._process_camera_deltas",
         _fake_process,
     )
 

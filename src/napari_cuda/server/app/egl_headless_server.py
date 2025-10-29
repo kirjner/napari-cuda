@@ -81,7 +81,7 @@ from napari_cuda.server.runtime.snapshots import pull_render_snapshot
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent, WorkerIntentMailbox
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.camera import CameraCommandQueue
-from napari_cuda.server.runtime.worker_lifecycle import (
+from napari_cuda.server.runtime.worker import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
@@ -97,7 +97,7 @@ DEFAULT_LAYER_ID = "layer-0"
 DEFAULT_LAYER_NAME = "napari-cuda"
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
-    from napari_cuda.server.runtime.egl_worker import EGLRendererWorker
+    from napari_cuda.server.runtime.worker import EGLRendererWorker
 
 
 @dataclass
