@@ -12,7 +12,7 @@ that behaviour.
 - `start_worker` (`runtime/worker/lifecycle.py:45`) constructs the worker, then
   drives `_init_cuda`, `_init_vispy_scene`, `_init_egl`, `_init_capture`,
   `_init_cuda_interop`, `_init_encoder`, and seeds the first snapshot.
-- The render thread loops over `_consume_render_snapshot`, then
+- The render thread loops over `render_updates.consume_render_snapshot`, then
   `capture_and_encode_packet`; the latter calls `render_tick`, which runs
   `run_render_tick` (`runtime/worker/loop.py:9`) with worker callbacks.
 - Shutdown runs `cleanup`, reclaiming CUDA/GL resources, encoder state, VisPy
@@ -79,8 +79,9 @@ that behaviour.
   `_frame_volume_camera`, `_enter_volume_mode`, `_exit_volume_mode`,
   `_apply_camera_reset`, `_emit_current_camera_pose`, `_emit_pose_from_camera`,
   `_pose_from_camera`, `_snapshot_camera_pose`, `_current_panzoom_rect`,
-  `_apply_viewport_state_snapshot`, `process_camera_deltas`,
-  `_drain_camera_ops_then_scene_updates`, `_record_zoom_hint`.
+  `render_updates.apply_viewport_state_snapshot`, `process_camera_deltas`,
+  `_drain_camera_ops_then_scene_updates`, `_record_zoom_hint`,
+  `render_updates.drain_scene_updates`.
 - **Shared state:** `_viewport_state`, `_viewport_runner`, `_camera_queue`,
   `_camera_pose_callback`, `_last_plane_pose`, `_last_volume_pose`,
   `_pose_seq`, `_max_camera_command_seq`, `_render_mailbox` zoom hints.
@@ -93,22 +94,25 @@ that behaviour.
   hooks for mailbox updates and ledger reads.
 
 ### 4. Snapshot Ingestion & Ledger Coordination
-- **Entry points:** `enqueue_update`, `drain_scene_updates`,
-  `_consume_render_snapshot`, `_normalize_scene_state`,
-  `_record_snapshot_versions`, `_extract_layer_changes`, `_apply_dims_from_snapshot`,
-  `_apply_viewport_state_snapshot`, `_update_z_index_from_snapshot`,
+- **Entry points:** `enqueue_update`,
+  `render_updates.consume_render_snapshot`,
+  `render_updates.normalize_scene_state`,
+  `render_updates.record_snapshot_versions`,
+  `render_updates.extract_layer_changes`,
+  `render_updates.apply_viewport_state_snapshot`,
+  `render_updates.drain_scene_updates`,
+  `_apply_dims_from_snapshot`, `_update_z_index_from_snapshot`,
   `snapshot_dims_metadata`, `_set_dims_range_for_level`, `_record_zoom_hint`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
-  `_z_index`, `_data_wh`, `_ledger`, ledger accessor helpers (`_ledger_*`).
-- **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` and the
-  helpers in `runtime.snapshots.apply/build/plane/volume`, `viewport.updates`,
+  `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.core.ledger_access`).
+- **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
+  `runtime.core.snapshot_build`), `runtime.worker.snapshots.*`,
+  `runtime.worker.render_updates`, `viewport.updates`,
   ledger interfaces in `ServerStateLedger`.
-- **Notes:** This block is where external updates enter the worker. A
-  `snapshots.py` helper can accept the worker plus the shared mailbox and ledger
-  structures, then delegate to `snapshots.apply.*`. The ledger accessor helpers
-  currently live at the bottom of `egl.py` (`egl.py:2280-2340`) and should move
-  alongside.
+- **Notes:** This block is where external updates enter the worker. The
+  render-thread snapshot helpers now live under `runtime/worker/snapshots/`,
+  while shared ledger readers reside in `runtime/core/ledger_access.py`.
 
 ### 5. Level Selection, ROI, and Policy Evaluation
 - **Entry points:** `_configure_policy`, `set_policy`,
@@ -182,15 +186,15 @@ that behaviour.
 2. Worker thread calls `_init_cuda`, `_init_vispy_scene`, `_init_egl`,
    `_init_capture`, `_init_cuda_interop`, `_init_encoder`.
 3. Initial snapshot pulled via `pull_render_snapshot`, handed to
-   `_consume_render_snapshot`, then `drain_scene_updates` hydrates the mailbox
-   and viewport runner.
+   `render_updates.consume_render_snapshot`, then
+   `render_updates.drain_scene_updates` hydrates the mailbox and viewport runner.
 
 ### Per-frame Loop
 1. Controller snapshot fetched (`pull_render_snapshot`) and passed to
-   `_consume_render_snapshot`.
+   `render_updates.consume_render_snapshot`.
 2. `capture_and_encode_packet` performs:
    - `_drain_camera_ops_then_scene_updates` → `_process_camera_deltas` →
-     `_viewport_runner.ingest_camera_deltas` and `drain_scene_updates`.
+     `_viewport_runner.ingest_camera_deltas` and `render_updates.drain_scene_updates`.
    - `render_tick` → `run_render_tick` to render the VisPy canvas and mark tick
      completion.
    - `encode_frame` to map, copy, convert, and encode GPU output.

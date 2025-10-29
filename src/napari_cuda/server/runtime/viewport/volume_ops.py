@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 
 from .state import VolumeState
 

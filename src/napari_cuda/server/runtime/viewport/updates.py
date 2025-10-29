@@ -11,7 +11,7 @@ from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
-from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.viewport.state import RenderMode
 
 logger = logging.getLogger(__name__)

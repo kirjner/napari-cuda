@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.runtime.snapshots import build_ledger_snapshot
+from napari_cuda.server.runtime.core.snapshot_build import build_ledger_snapshot
 from napari_cuda.server.scene import snapshot_render_state
 
 

@@ -25,8 +25,9 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
     apply_pose_to_camera,
     mark_slice_applied,
 )
-from .build import RenderLedgerSnapshot
-from .viewer import apply_plane_metadata
+from napari_cuda.server.runtime.core import ledger_step
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from .viewer_metadata import apply_plane_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def apply_slice_snapshot(
     elif snapshot.current_step is not None:
         step_hint = tuple(int(v) for v in snapshot.current_step)
     if step_hint is None:
-        recorded_step = worker._ledger_step()
+        recorded_step = ledger_step(worker._ledger)
         if recorded_step is not None:
             step_hint = tuple(int(v) for v in recorded_step)
 

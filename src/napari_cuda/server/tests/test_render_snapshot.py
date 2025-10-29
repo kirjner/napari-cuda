@@ -4,10 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from napari_cuda.server.runtime.snapshots import (
-    RenderLedgerSnapshot,
-)
-from napari_cuda.server.runtime.snapshots import apply as snapshot_mod
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.worker.snapshots import apply as snapshot_mod
 from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 

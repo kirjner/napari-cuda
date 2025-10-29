@@ -18,12 +18,20 @@ from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.core import reset_worker_camera
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.snapshots import (
+from napari_cuda.server.runtime.worker.snapshots import (
     apply_plane_metadata,
     apply_volume_level,
     apply_volume_metadata,
 )
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
+from napari_cuda.server.runtime.core import (
+    ledger_axis_labels,
+    ledger_level,
+    ledger_ndisplay,
+    ledger_order,
+    ledger_step,
+)
+from napari_cuda.server.runtime.worker import render_updates as _render_updates
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import ZarrSceneSource
@@ -121,11 +129,12 @@ def _ensure_volume_visual(worker: "EGLRendererWorker") -> Any:
 
 def _init_viewer_scene(worker: "EGLRendererWorker", source: Optional["ZarrSceneSource"]) -> None:
     builder = ViewerBuilder(worker)
-    step_hint = worker._ledger_step()
-    level_hint = worker._ledger_level()
-    axis_labels = worker._ledger_axis_labels()
-    order = worker._ledger_order()
-    ndisplay = worker._ledger_ndisplay()
+    ledger = worker._ledger
+    step_hint = ledger_step(ledger)
+    level_hint = ledger_level(ledger)
+    axis_labels = ledger_axis_labels(ledger)
+    order = ledger_order(ledger)
+    ndisplay = ledger_ndisplay(ledger)
     canvas, view, viewer = builder.build(
         source,
         level=level_hint,
@@ -238,7 +247,7 @@ def _bootstrap_camera_pose(
         assert coarse_level is not None and coarse_level >= 0, "volume bootstrap requires multiscale levels"
         prev_mode = worker._viewport_state.mode
         prev_level = worker._current_level_index()
-        prev_step = worker._ledger_step()
+        prev_step = ledger_step(worker._ledger)
         worker._viewport_state.mode = RenderMode.VOLUME
         worker._set_current_level_index(int(coarse_level))
         applied_context = lod.build_level_context(
@@ -296,7 +305,7 @@ def _enter_volume_mode(worker: "EGLRendererWorker") -> None:
         oversampling={},
         downgraded=bool(downgraded),
     )
-    last_step = worker._ledger_step()
+    last_step = ledger_step(worker._ledger)
     context = lod.build_level_context(
         decision,
         source=source,

@@ -14,15 +14,15 @@ from typing import Any, Dict, Tuple, TYPE_CHECKING
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.viewport.state import RenderMode
-
-from .build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.core import ledger_step
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from .plane import (
     apply_slice_camera_pose,
     apply_slice_level,
     apply_slice_roi as _apply_slice_roi,
 )
 from .volume import apply_volume_camera_pose, apply_volume_level
-from .viewer import apply_plane_metadata, apply_volume_metadata
+from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
 
 logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ def _resolve_snapshot_ops(
         if ledger_step is not None:
             step_hint = ledger_step
         else:
-            recorded_step = worker._ledger_step()
+            recorded_step = ledger_step(worker._ledger)
             step_hint = (
                 tuple(int(v) for v in recorded_step)
                 if recorded_step is not None
@@ -182,7 +182,7 @@ def _resolve_snapshot_ops(
     if ledger_step is not None:
         step_hint = ledger_step
     else:
-        recorded_step = worker._ledger_step()
+        recorded_step = ledger_step(worker._ledger)
         step_hint = (
             tuple(int(v) for v in recorded_step)
             if recorded_step is not None

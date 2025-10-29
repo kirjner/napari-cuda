@@ -11,10 +11,11 @@ from typing import Optional
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
-from napari_cuda.server.runtime.snapshots import (
+from napari_cuda.server.runtime.core.snapshot_build import (
     RenderLedgerSnapshot,
     pull_render_snapshot,
 )
+from . import render_updates as _render_updates
 from .egl import EGLRendererWorker
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import snapshot_multiscale_state
@@ -207,8 +208,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 initial_snapshot = pull_render_snapshot(server)
             else:
                 server._bootstrap_snapshot = None  # type: ignore[attr-defined]
-            worker._consume_render_snapshot(initial_snapshot)
-            worker.drain_scene_updates()
+            _render_updates.consume_render_snapshot(worker, initial_snapshot)
+            _render_updates.drain_scene_updates(worker)
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -286,7 +287,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     bool(has_camera_deltas),
                     server._animate,
                 )
-                worker._consume_render_snapshot(frame_state)
+                _render_updates.consume_render_snapshot(worker, frame_state)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 

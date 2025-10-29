@@ -1,13 +1,8 @@
-"""Snapshot pipeline helpers for capturing and applying render state."""
+"""Render worker snapshot helpers."""
 
 from __future__ import annotations
 
-from .build import (
-    RenderLedgerSnapshot,
-    build_ledger_snapshot,
-    pull_render_snapshot,
-)
-from .apply import apply_render_snapshot
+from .apply import apply_render_snapshot, apply_slice_roi as apply_plane_slice_roi
 from .plane import (
     SliceApplyResult,
     apply_slice_camera_pose,
@@ -19,14 +14,13 @@ from .volume import (
     apply_volume_camera_pose,
     apply_volume_level,
 )
-from .viewer import apply_plane_metadata, apply_volume_metadata
+from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
 
 __all__ = [
-    "RenderLedgerSnapshot",
-    "build_ledger_snapshot",
     "SliceApplyResult",
     "VolumeApplyResult",
     "apply_plane_metadata",
+    "apply_plane_slice_roi",
     "apply_render_snapshot",
     "apply_slice_camera_pose",
     "apply_slice_level",
@@ -34,5 +28,4 @@ __all__ = [
     "apply_volume_camera_pose",
     "apply_volume_level",
     "apply_volume_metadata",
-    "pull_render_snapshot",
 ]

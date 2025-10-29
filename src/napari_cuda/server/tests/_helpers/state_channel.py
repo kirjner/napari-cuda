@@ -44,7 +44,7 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
-from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.data import (
     SliceROI,
@@ -56,7 +56,7 @@ from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari.components import viewer_model
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
-from napari_cuda.server.runtime.snapshots import apply as snapshot_mod
+from napari_cuda.server.runtime.worker.snapshots import apply as snapshot_mod
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.data.roi import plane_wh_for_level
 

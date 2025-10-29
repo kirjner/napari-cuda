@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.snapshots import RenderLedgerSnapshot
-from napari_cuda.server.runtime.snapshots.volume import (
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.worker.snapshots.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
 )
@@ -79,7 +79,10 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         calls["ensure_volume_visual"] = ensure_volume_visual
         return (128, 256), 64
 
-    monkeypatch.setattr("napari_cuda.server.runtime.snapshots.volume.apply_volume_layer_data", _fake_apply_volume_layer)
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.worker.snapshots.volume.apply_volume_layer_data",
+        _fake_apply_volume_layer,
+    )
 
     class _Source:
         axes = ("z", "y", "x")
@@ -141,7 +144,10 @@ class _FakeTurntableCamera:
 
 
 def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("napari_cuda.server.runtime.snapshots.volume.TurntableCamera", _FakeTurntableCamera)
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.worker.snapshots.volume.TurntableCamera",
+        _FakeTurntableCamera,
+    )
     viewport_state = ViewportState()
     viewport_state.volume.update_pose(angles=(1.0, 2.0, 3.0))
 
