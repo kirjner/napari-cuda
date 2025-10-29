@@ -17,7 +17,6 @@ encoded packets back to the asyncio side through callbacks.
 from __future__ import annotations
 
 import logging
-import math
 import os
 import threading
 import time
@@ -39,8 +38,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
 from vispy import scene  # type: ignore
-from vispy.geometry import Rect
-from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
 import napari_cuda.server.data.lod as lod
 import napari_cuda.server.data.policy as level_policy
@@ -56,17 +53,9 @@ from napari_cuda.server.data.level_logging import (
     LevelSwitchLogger,
 )
 
-# ROI helpers manage slicing via snapshots.plane utilities.
-from napari_cuda.server.data.roi import (
-    plane_scale_for_level,
-    plane_wh_for_level,
-)
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.rendering.capture import FrameTimings, encode_frame
 from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
-
-# Bitstream packing happens in the server layer
-from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
 from napari_cuda.server.runtime.camera import (
     CameraCommandQueue,
     CameraPoseApplied,
@@ -93,10 +82,7 @@ from napari_cuda.server.runtime.data import (
     roi_chunk_signature,
 )
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate, RenderUpdateMailbox
-from napari_cuda.server.runtime.core import (
-    ensure_scene_source,
-    reset_worker_camera,
-)
+from napari_cuda.server.runtime.core import ensure_scene_source
 from napari_cuda.server.runtime.worker.loop import run_render_tick
 from napari_cuda.server.runtime.worker.resources import WorkerResources
 from napari_cuda.server.runtime.viewport import (
@@ -108,44 +94,9 @@ from napari_cuda.server.runtime.viewport import (
 )
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
 from napari_cuda.server.scene import CameraDeltaCommand
+from . import viewer as _viewer
 
 logger = logging.getLogger(__name__)
-
-
-class _VisualHandle:
-    """Explicit handle for a VisPy visual node managed by the worker."""
-
-    def __init__(self, node: Any, order: int) -> None:
-        self.node = node
-        self.order = order
-        self._attached = False
-
-    def attach(self, view: Any) -> None:
-        scene_parent = view.scene
-        if self.node.parent is not scene_parent:
-            view.add(self.node)
-        self.node.order = self.order
-        self.node.visible = True
-        self._attached = True
-
-    def detach(self) -> None:
-        self.node.visible = False
-        self.node.parent = None
-        self._attached = False
-
-    def is_attached(self) -> bool:
-        return self._attached
-def _rect_to_tuple(rect: Rect) -> tuple[float, float, float, float]:
-    """Normalize a VisPy Rect into (left, bottom, width, height)."""
-
-    return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
-
-
-def _coarsest_level_index(source: ZarrSceneSource) -> Optional[int]:
-    descriptors = source.level_descriptors
-    if not descriptors:
-        return None
-    return len(descriptors) - 1
 
 
 # Back-compat for tests patching the selector directly
@@ -276,58 +227,6 @@ class EGLRendererWorker:
     @_volume_scale.setter
     def _volume_scale(self, value: tuple[float, float, float]) -> None:
         self._viewport_state.volume.scale = tuple(float(component) for component in value)
-
-    def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
-        """Choose stable initial center and distance for TurntableCamera.
-
-        ``w``, ``h``, ``d`` are world-space extents (after scale). We center the
-        camera on the volume midpoint and set distance so the full height fits.
-        """
-        cam = self.view.camera
-        if not isinstance(cam, scene.cameras.TurntableCamera):
-            return
-        center = (float(w) * 0.5, float(h) * 0.5, float(d) * 0.5)
-        cam.center = center  # type: ignore[attr-defined]
-        fov_deg = float(getattr(cam, 'fov', 60.0) or 60.0)
-        fov_rad = math.radians(max(1e-3, min(179.0, fov_deg)))
-        dist = (0.5 * float(h)) / max(1e-6, math.tan(0.5 * fov_rad))
-        cam.distance = float(dist * 1.1)  # type: ignore[attr-defined]
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "frame_volume_camera extent=(%.3f, %.3f, %.3f) center=%s dist=%.3f",
-                w,
-                h,
-                d,
-                center,
-                float(cam.distance),
-            )
-
-    def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
-        builder = ViewerBuilder(self)
-        step_hint = self._ledger_step()
-        level_hint = self._ledger_level()
-        axis_labels = self._ledger_axis_labels()
-        order = self._ledger_order()
-        ndisplay = self._ledger_ndisplay()
-        canvas, view, viewer = builder.build(
-            source,
-            level=level_hint,
-            step=step_hint,
-            axis_labels=axis_labels,
-            order=order,
-            ndisplay=ndisplay,
-        )
-        # Mirror attributes for call sites expecting them
-        self.canvas = canvas
-        self.view = view
-        self._viewer = viewer
-        # Ensure both plane and volume camera poses are bootstrapped so restores are deterministic.
-        assert self.view is not None, "adapter must supply a VisPy view"
-        active_mode = self._viewport_state.mode
-        self._bootstrap_camera_pose(RenderMode.PLANE, source, reason="bootstrap-plane")
-        self._bootstrap_camera_pose(RenderMode.VOLUME, source, reason="bootstrap-volume")
-        self._viewport_state.mode = active_mode
-        self._configure_camera_for_mode()
 
     def _set_dims_range_for_level(self, source: ZarrSceneSource, level: int) -> None:
         """Set napari dims.range to match the chosen level shape.
@@ -466,295 +365,6 @@ class EGLRendererWorker:
         callback(intent)
         self._mark_render_tick_needed()
 
-    def _bootstrap_camera_pose(
-        self,
-        mode: RenderMode,
-        source: Optional[ZarrSceneSource],
-        *,
-        reason: str,
-    ) -> None:
-        """Frame and emit an initial pose for the requested render mode."""
-
-        if self.view is None:
-            return
-
-        original_mode = self._viewport_state.mode
-        original_camera = self.view.camera
-
-        if mode is RenderMode.PLANE:
-            self._viewport_state.mode = RenderMode.PLANE
-            self._configure_camera_for_mode()
-            plane_state = self.viewport_state.plane
-            rect = plane_state.pose.rect
-            center = plane_state.pose.center
-            zoom = plane_state.pose.zoom
-            cam = self.view.camera
-            assert isinstance(cam, PanZoomCamera)
-            if rect is not None and len(rect) >= 4:
-                cam.rect = Rect(
-                    float(rect[0]),
-                    float(rect[1]),
-                    float(rect[2]),
-                    float(rect[3]),
-                )
-            else:
-                self._apply_camera_reset(cam)
-            if center is not None and len(center) >= 2:
-                cam.center = (
-                    float(center[0]),
-                    float(center[1]),
-                )
-            if zoom is not None:
-                cam.zoom = float(zoom)
-            self._emit_current_camera_pose(reason)
-
-        else:
-            source = self._ensure_scene_source()
-            coarse_level = _coarsest_level_index(source)
-            assert coarse_level is not None and coarse_level >= 0, "volume bootstrap requires multiscale levels"
-            prev_mode = self._viewport_state.mode
-            prev_level = self._current_level_index()
-            prev_step = self._ledger_step()
-            self._viewport_state.mode = RenderMode.VOLUME
-            self._set_current_level_index(int(coarse_level))
-            applied_context = lod.build_level_context(
-                lod.LevelDecision(
-                    desired_level=int(coarse_level),
-                    selected_level=int(coarse_level),
-                    reason="bootstrap-volume",
-                    timestamp=time.perf_counter(),
-                    oversampling={},
-                    downgraded=False,
-                ),
-                source=source,
-                prev_level=int(prev_level),
-                last_step=prev_step,
-            )
-            apply_volume_metadata(self, source, applied_context)
-            apply_volume_level(
-                self,
-                source,
-                applied_context,
-                downgraded=False,
-            )
-            extent = self._volume_world_extents()
-            if extent is None:
-                raise RuntimeError("volume bootstrap failed to determine world extents")
-            self._configure_camera_for_mode()
-            self._emit_current_camera_pose(reason)
-            self._set_current_level_index(int(prev_level))
-            self._viewport_state.mode = prev_mode
-
-        self._viewport_state.mode = original_mode
-        if original_camera is not None:
-            self.view.camera = original_camera
-        self._configure_camera_for_mode()
-
-    def _configure_camera_for_mode(self) -> None:
-        view = self.view
-        if view is None:
-            return
-
-        if self._viewport_state.mode is RenderMode.VOLUME:
-            view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
-            extent = self._volume_world_extents()
-            if extent is None:
-                width_px, height_px = self._data_wh
-                depth_px = self._data_d or 1
-                extent = (float(width_px), float(height_px), float(depth_px))
-            view.camera.set_range(
-                x=(0.0, max(1.0, extent[0])),
-                y=(0.0, max(1.0, extent[1])),
-                z=(0.0, max(1.0, extent[2])),
-            )
-            self._frame_volume_camera(extent[0], extent[1], extent[2])
-        else:
-            cam = scene.cameras.PanZoomCamera(aspect=1.0)
-            view.camera = cam
-            plane_state = self.viewport_state.plane
-            rect = plane_state.pose.rect
-            center = plane_state.pose.center
-            zoom = plane_state.pose.zoom
-
-            if rect is not None and len(rect) >= 4:
-                cam.rect = Rect(
-                    float(rect[0]),
-                    float(rect[1]),
-                    float(rect[2]),
-                    float(rect[3]),
-                )
-            else:
-                self._apply_camera_reset(cam)
-
-            if center is not None and len(center) >= 2:
-                cam.center = (
-                    float(center[0]),
-                    float(center[1]),
-                )
-            if zoom is not None:
-                cam.zoom = float(zoom)
-
-    def _enter_volume_mode(self) -> None:
-        if self._viewport_state.mode is RenderMode.VOLUME:
-            return
-
-        if self._level_intent_callback is None:
-            raise RuntimeError("level intent callback required for volume mode")
-
-        source = self._ensure_scene_source()
-        requested_level = _coarsest_level_index(source)
-        assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
-        selected_level, downgraded = self._resolve_volume_intent_level(source, int(requested_level))
-        self._viewport_state.volume.downgraded = bool(downgraded)
-
-        decision = lod.LevelDecision(
-            desired_level=int(requested_level),
-            selected_level=int(selected_level),
-            reason="ndisplay-3d",
-            timestamp=time.perf_counter(),
-            oversampling={},
-            downgraded=bool(downgraded),
-        )
-        last_step = self._ledger_step()
-        context = lod.build_level_context(
-            decision,
-            source=source,
-            prev_level=int(self._current_level_index()),
-            last_step=last_step,
-        )
-        apply_volume_metadata(self, source, context)
-
-        # Defer level application to the controller transaction.
-        self._viewport_state.mode = RenderMode.VOLUME
-
-        intent = LevelSwitchIntent(
-            desired_level=int(requested_level),
-            selected_level=int(context.level),
-            reason="ndisplay-3d",
-            previous_level=int(self._current_level_index()),
-            context=context,
-            oversampling={},
-            timestamp=decision.timestamp,
-            downgraded=bool(downgraded),
-            zoom_ratio=None,
-            lock_level=self._lock_level,
-            mode=self.viewport_state.mode,
-            plane_state=deepcopy(self.viewport_state.plane),
-            volume_state=deepcopy(self.viewport_state.volume),
-        )
-        logger.info(
-            "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
-            int(self._current_level_index()),
-            int(context.level),
-            intent.reason,
-            intent.downgraded,
-        )
-        requested = self._viewport_runner.request_level(int(context.level))
-        if requested and self._level_intent_callback is not None:
-            self._level_intent_callback(intent)
-
-        volume_pose_cached = False
-        if self._ledger.get("camera_volume", "main", "center") is not None:
-            center_entry = self._ledger.get("camera_volume", "main", "center")
-            angles_entry = self._ledger.get("camera_volume", "main", "angles")
-            distance_entry = self._ledger.get("camera_volume", "main", "distance")
-            fov_entry = self._ledger.get("camera_volume", "main", "fov")
-            volume_pose_cached = all(
-                entry is not None and entry.value is not None
-                for entry in (center_entry, angles_entry, distance_entry, fov_entry)
-            )
-
-        self._configure_camera_for_mode()
-        if not volume_pose_cached:
-            self._emit_current_camera_pose("enter-3d")
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "toggle.enter_3d: requested_level=%d selected_level=%d downgraded=%s",
-                int(requested_level),
-                int(selected_level),
-                bool(downgraded),
-            )
-        self._request_encoder_idr()
-        self._mark_render_tick_needed()
-
-    def _exit_volume_mode(self) -> None:
-        if self._viewport_state.mode is not RenderMode.VOLUME:
-            return
-        self._viewport_state.mode = RenderMode.PLANE
-        # Restore plane target level/step and plane camera rect from caches
-        lvl_entry = self._ledger.get("view_cache", "plane", "level")
-        step_entry = self._ledger.get("view_cache", "plane", "step")
-        assert lvl_entry is not None, "plane restore requires view_cache.plane.level"
-        assert step_entry is not None, "plane restore requires view_cache.plane.step"
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "toggle.exit_3d: restore level=%s step=%s", str(lvl_entry.value), str(step_entry.value)
-            )
-        source = self._ensure_scene_source()
-        lvl_idx = int(lvl_entry.value)
-        plane_entry = self._ledger.get("viewport", "plane", "state")
-        assert plane_entry is not None and isinstance(plane_entry.value, Mapping), "plane camera cache missing viewport state"
-        plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
-        self._viewport_state.plane = PlaneState(**dict(plane_entry.value))
-        rect_pose = plane_state.pose.rect
-        assert rect_pose is not None, "plane camera cache missing rect"
-        rect = tuple(float(v) for v in rect_pose)
-        step_tuple = tuple(int(v) for v in step_entry.value)
-
-        view = self.view
-        if view is not None:
-            view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-            cam = view.camera
-            sy, sx = plane_scale_for_level(source, lvl_idx)
-            h_full, w_full = plane_wh_for_level(source, lvl_idx)
-            world_w = float(w_full) * float(max(1e-12, sx))
-            world_h = float(h_full) * float(max(1e-12, sy))
-            cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-            cam.rect = Rect(*rect)
-            if plane_state.pose.center is not None:
-                cx, cy = plane_state.pose.center
-                cam.center = (float(cx), float(cy), 0.0)  # type: ignore[attr-defined]
-            if plane_state.pose.zoom is not None:
-                cam.zoom = float(plane_state.pose.zoom)
-
-        decision = lod.LevelDecision(
-            desired_level=int(lvl_idx),
-            selected_level=int(lvl_idx),
-            reason="ndisplay-2d",
-            timestamp=time.perf_counter(),
-            oversampling={},
-        )
-        context = lod.build_level_context(
-            decision,
-            source=source,
-            prev_level=int(self._current_level_index()),
-            last_step=step_tuple,
-        )
-        apply_plane_metadata(self, source, context)
-        intent = LevelSwitchIntent(
-            desired_level=int(lvl_idx),
-            selected_level=int(context.level),
-            reason="ndisplay-2d",
-            previous_level=int(self._current_level_index()),
-            context=context,
-            oversampling={},
-            timestamp=decision.timestamp,
-            downgraded=False,
-            mode=self.viewport_state.mode,
-            plane_state=deepcopy(self.viewport_state.plane),
-            volume_state=deepcopy(self.viewport_state.volume),
-        )
-
-        callback = self._level_intent_callback
-        if callback is None:
-            logger.debug("plane restore intent dropped (no callback)")
-            return
-
-        requested = self._viewport_runner.request_level(int(context.level))
-        if requested:
-            callback(intent)
-        self._mark_render_tick_needed()
-
     def _mark_render_tick_needed(self) -> None:
         self._render_tick_required = True
 
@@ -780,8 +390,8 @@ class EGLRendererWorker:
         self.cuda_ctx = None
         self.canvas: Optional[scene.SceneCanvas] = None
         self.view = None
-        self._plane_visual_handle: Optional[_VisualHandle] = None
-        self._volume_visual_handle: Optional[_VisualHandle] = None
+        self._plane_visual_handle = None
+        self._volume_visual_handle = None
 
     @property
     def resources(self) -> WorkerResources:
@@ -869,6 +479,74 @@ class EGLRendererWorker:
         self._slice_max_bytes = int(max(0, getattr(cfg, 'max_slice_bytes', 0)))
         self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
         self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
+
+    def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
+        _viewer._init_viewer_scene(self, source)
+
+    def _configure_camera_for_mode(self) -> None:
+        _viewer._configure_camera_for_mode(self)
+
+    def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
+        _viewer._frame_volume_camera(self, w, h, d)
+
+    def _bootstrap_camera_pose(
+        self,
+        mode: RenderMode,
+        source: Optional[ZarrSceneSource],
+        *,
+        reason: str,
+    ) -> None:
+        _viewer._bootstrap_camera_pose(self, mode, source, reason=reason)
+
+    def _enter_volume_mode(self) -> None:
+        _viewer._enter_volume_mode(self)
+
+    def _exit_volume_mode(self) -> None:
+        _viewer._exit_volume_mode(self)
+
+    def _register_plane_visual(self, node: Any) -> None:
+        _viewer._register_plane_visual(self, node)
+
+    def _register_volume_visual(self, node: Any) -> None:
+        _viewer._register_volume_visual(self, node)
+
+    def _ensure_plane_visual(self) -> Any:
+        return _viewer._ensure_plane_visual(self)
+
+    def _ensure_volume_visual(self) -> Any:
+        return _viewer._ensure_volume_visual(self)
+
+    def _apply_camera_reset(self, cam) -> None:
+        _viewer._apply_camera_reset(self, cam)
+
+    def _emit_current_camera_pose(self, reason: str) -> None:
+        _viewer._emit_current_camera_pose(self, reason)
+
+    def _emit_pose_from_camera(self, camera, reason: str) -> None:
+        _viewer._emit_pose_from_camera(self, camera, reason)
+
+    def _pose_from_camera(self, camera, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
+        return _viewer._pose_from_camera(self, camera, target, command_seq)
+
+    def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
+        return _viewer._snapshot_camera_pose(self, target, command_seq)
+
+    def _current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
+        return _viewer._current_panzoom_rect(self)
+
+    def _apply_viewport_state_snapshot(
+        self,
+        *,
+        mode: Optional[RenderMode],
+        plane_state: Optional[PlaneState],
+        volume_state: Optional[VolumeState],
+    ) -> None:
+        _viewer._apply_viewport_state_snapshot(
+            self,
+            mode=mode,
+            plane_state=plane_state,
+            volume_state=volume_state,
+        )
 
     def snapshot_dims_metadata(self) -> dict[str, Any]:
         meta: dict[str, Any] = {}
@@ -1180,32 +858,6 @@ class EGLRendererWorker:
         if roi.is_empty():
             return "full"
         return f"y={roi.y_start}:{roi.y_stop} x={roi.x_start}:{roi.x_stop}"
-
-    def _register_plane_visual(self, node: Any) -> None:
-        self._plane_visual_handle = _VisualHandle(node, order=10_000)
-
-    def _register_volume_visual(self, node: Any) -> None:
-        self._volume_visual_handle = _VisualHandle(node, order=10_010)
-
-    def _ensure_plane_visual(self) -> Any:
-        view = self.view
-        assert view is not None, "VisPy view must exist before activating the plane visual"
-        handle = self._plane_visual_handle
-        assert handle is not None, "plane visual not registered"
-        if self._volume_visual_handle is not None:
-            self._volume_visual_handle.detach()
-        handle.attach(view)
-        return handle.node
-
-    def _ensure_volume_visual(self) -> Any:
-        view = self.view
-        assert view is not None, "VisPy view must exist before activating the volume visual"
-        handle = self._volume_visual_handle
-        assert handle is not None, "volume visual not registered"
-        if self._plane_visual_handle is not None:
-            self._plane_visual_handle.detach()
-        handle.attach(view)
-        return handle.node
 
     def _aligned_roi_signature(
         self,
@@ -1612,202 +1264,6 @@ class EGLRendererWorker:
             if factor > 0.0:
                 self._render_mailbox.record_zoom_hint(factor)
                 break
-
-    def _apply_camera_reset(self, cam) -> None:
-        reset_worker_camera(self, cam)
-
-    def _emit_current_camera_pose(self, reason: str) -> None:
-        """Emit the active camera pose for ledger sync."""
-
-        cam = self.view.camera if self.view is not None else None
-        if cam is None:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("pose.emit skipped (no active camera) reason=%s", reason)
-            return
-
-        self._emit_pose_from_camera(cam, reason)
-
-    def _emit_pose_from_camera(self, camera, reason: str) -> None:
-        """Emit the pose derived from ``camera`` without mutating the render camera."""
-
-        callback = self._camera_pose_callback
-        if callback is None:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("pose.emit skipped (no callback) reason=%s", reason)
-            return
-
-        target = "main"
-        base_seq = max(int(self._pose_seq), int(self._max_camera_command_seq))
-        next_seq = base_seq + 1
-        pose = self._pose_from_camera(camera, target, int(next_seq))
-        if pose is None:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("pose.emit skipped (no pose) reason=%s seq=%d", reason, int(self._pose_seq))
-            return
-
-        if pose.angles is not None or pose.distance is not None:
-            volume_key = (
-                tuple(float(v) for v in pose.center) if pose.center is not None else None,
-                tuple(float(v) for v in pose.angles) if pose.angles is not None else None,
-                float(pose.distance) if pose.distance is not None else None,
-                float(pose.fov) if pose.fov is not None else None,
-            )
-            if self._last_volume_pose == volume_key:
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("pose.emit skipped (unchanged volume pose) reason=%s", reason)
-                return
-            self._last_volume_pose = volume_key
-        else:
-            plane_key = (
-                tuple(float(v) for v in pose.center) if pose.center is not None else None,
-                float(pose.zoom) if pose.zoom is not None else None,
-                tuple(float(v) for v in pose.rect) if pose.rect is not None else None,
-            )
-            if self._last_plane_pose == plane_key:
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("pose.emit skipped (unchanged plane pose) reason=%s", reason)
-                return
-            self._last_plane_pose = plane_key
-
-        self._pose_seq = int(next_seq)
-
-        if logger.isEnabledFor(logging.INFO):
-            mode = "volume" if pose.angles is not None or pose.distance is not None else "plane"
-            rect = pose.rect if pose.rect is not None else None
-            logger.info(
-                "pose.emit: seq=%d reason=%s mode=%s rect=%s center=%s zoom=%s",
-                int(next_seq),
-                reason,
-                mode,
-                rect,
-                pose.center,
-                pose.zoom,
-            )
-
-        callback(pose)
-        self._max_camera_command_seq = max(int(self._max_camera_command_seq), int(next_seq))
-
-    def _pose_from_camera(self, camera, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
-        def _center_tuple(camera) -> Optional[tuple[float, ...]]:
-            center_value = camera.center
-            if center_value is None:
-                return None
-            return tuple(float(component) for component in center_value)
-
-        if isinstance(camera, TurntableCamera):
-            center_tuple = _center_tuple(camera)
-            distance_val = float(camera.distance)
-            fov_val = float(camera.fov)
-            azimuth = float(camera.azimuth)
-            elevation = float(camera.elevation)
-            roll = float(camera.roll)
-            volume_state = self._viewport_state.volume
-            volume_state.update_pose(
-                center=center_tuple,
-                angles=(azimuth, elevation, roll),
-                distance=distance_val,
-                fov=fov_val,
-            )
-            return CameraPoseApplied(
-                target=str(target or "main"),
-                command_seq=int(command_seq),
-                center=center_tuple,
-                zoom=None,
-                angles=(azimuth, elevation, roll),
-                distance=distance_val,
-                fov=fov_val,
-                rect=None,
-            )
-
-        if isinstance(camera, PanZoomCamera):
-            center_tuple = _center_tuple(camera)
-            rect_obj = camera.rect
-            rect_tuple: Optional[tuple[float, float, float, float]]
-            if rect_obj is None:
-                rect_tuple = None
-            else:
-                rect_tuple = (
-                    float(rect_obj.left),
-                    float(rect_obj.bottom),
-                    float(rect_obj.width),
-                    float(rect_obj.height),
-                )
-            zoom_val = float(camera.zoom_factor)
-            plane_state = self._viewport_state.plane
-            update_kwargs = {"zoom": zoom_val}
-            if rect_tuple is not None:
-                update_kwargs["rect"] = rect_tuple
-            if center_tuple is not None:
-                # PanZoomCamera.center may include a z component; normalise to XY.
-                update_kwargs["center"] = (float(center_tuple[0]), float(center_tuple[1]))
-            plane_state.update_pose(**update_kwargs)
-            return CameraPoseApplied(
-                target=str(target or "main"),
-                command_seq=int(command_seq),
-                center=center_tuple,
-                zoom=zoom_val,
-                angles=None,
-                distance=None,
-                fov=None,
-                rect=rect_tuple,
-            )
-
-        return None
-
-    def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
-        view = self.view
-        if view is None:
-            return None
-        return self._pose_from_camera(view.camera, target, command_seq)
-
-    def _current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
-        view = self.view
-        if view is None:
-            return None
-        cam = view.camera
-        if not isinstance(cam, PanZoomCamera):
-            return None
-        rect = cam.rect
-        if rect is None:
-            return None
-        return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
-
-    def _apply_viewport_state_snapshot(
-        self,
-        *,
-        mode: Optional[RenderMode],
-        plane_state: Optional[PlaneState],
-        volume_state: Optional[VolumeState],
-    ) -> None:
-        """Apply a mailbox-only viewport update (no scene snapshot)."""
-
-        runner = self._viewport_runner
-        updated = False
-
-        if plane_state is not None:
-            self._viewport_state.plane = deepcopy(plane_state)
-            if runner is not None:
-                runner._plane = self._viewport_state.plane  # type: ignore[attr-defined]
-            updated = True
-
-        if volume_state is not None:
-            self._viewport_state.volume = deepcopy(volume_state)
-            updated = True
-
-        if mode is not None and mode is not self._viewport_state.mode:
-            self._viewport_state.mode = mode
-            self._configure_camera_for_mode()
-            updated = True
-
-        if not updated:
-            return
-
-        if runner is not None:
-            # Ensure runner sees latest camera rect when switching modes before the next snapshot.
-            if self._viewport_state.mode is RenderMode.PLANE:
-                rect = self._current_panzoom_rect()
-                if rect is not None:
-                    runner.update_camera_rect(rect)
 
     def drain_scene_updates(self) -> None:
         updates: RenderUpdate = self._render_mailbox.drain()
