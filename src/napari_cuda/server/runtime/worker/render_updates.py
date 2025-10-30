@@ -14,9 +14,8 @@ from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply_render_snapshot
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
-from napari_cuda.server.runtime.worker.napari_viewer.viewport_state import (
-    _apply_viewport_state_snapshot as apply_viewport_state_snapshot,
-)
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.snapshots.viewport import apply_viewport_state_snapshot
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -213,7 +212,7 @@ def drain_scene_updates(worker: "EGLRendererWorker") -> None:
     state = updates.scene_state
     if state is None:
         apply_viewport_state_snapshot(
-            worker,
+            SnapshotInterface(worker),
             mode=updates.mode,
             plane_state=updates.plane_state,
             volume_state=updates.volume_state,

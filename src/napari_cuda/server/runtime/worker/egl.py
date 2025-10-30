@@ -81,7 +81,6 @@ from . import level_policy
 from .napari_viewer import bootstrap as viewer_bootstrap
 from .napari_viewer import camera_ops as viewer_camera_ops
 from .napari_viewer import visuals as viewer_visuals
-from .napari_viewer import viewport_state as viewer_viewport
 from .ticks import camera as camera_tick
 from .ticks import capture as capture_tick
 

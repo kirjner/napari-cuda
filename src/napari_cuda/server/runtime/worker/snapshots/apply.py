@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 apply_slice_roi = _apply_slice_roi
 apply_plane_slice_roi = apply_slice_roi
 
-
 @contextmanager
 def _suspend_fit_callbacks(viewer: Any):
     """Disconnect fit callbacks while applying dims, then restore them."""
