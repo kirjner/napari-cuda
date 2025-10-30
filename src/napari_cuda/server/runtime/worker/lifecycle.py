@@ -11,6 +11,7 @@ from typing import Optional
 
 from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
+from napari_cuda.server.runtime.core import init_egl as core_init_egl, init_vispy_scene as core_init_vispy_scene
 from napari_cuda.server.runtime.core.snapshot_build import (
     RenderLedgerSnapshot,
     pull_render_snapshot,
@@ -182,8 +183,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             state.worker = worker
             worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
 
-            worker._init_vispy_scene()
-            worker._init_egl()
+            core_init_vispy_scene(worker)
+            core_init_egl(worker)
 
             worker._debug = DebugDumper(worker._debug_config)
             if worker._debug.cfg.enabled:

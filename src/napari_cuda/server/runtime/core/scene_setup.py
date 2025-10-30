@@ -14,6 +14,34 @@ from napari_cuda.server.runtime.viewport import RenderMode
 
 logger = logging.getLogger(__name__)
 
+try:
+    import dask.array as da  # type: ignore
+except Exception as _da_err:  # pragma: no cover - optional dependency
+    da = None  # type: ignore[assignment]
+    logger.warning(
+        "dask.array not available; OME-Zarr features disabled: %s",
+        _da_err,
+    )
+
+
+def create_scene_source(worker: Any) -> Optional[ZarrSceneSource]:
+    """Create a ``ZarrSceneSource`` based on worker configuration."""
+
+    path = getattr(worker, "_zarr_path", None)
+    if not path:
+        return None
+    if da is None:
+        raise RuntimeError("ZarrSceneSource requires dask.array to be available")
+    axes_override = getattr(worker, "_zarr_axes", None)
+    if isinstance(axes_override, str):
+        axes_override = tuple(axes_override)
+    source = ZarrSceneSource(
+        path,
+        preferred_level=getattr(worker, "_zarr_level", None),
+        axis_override=axes_override,
+    )
+    return source
+
 
 def ensure_scene_source(worker: Any) -> ZarrSceneSource:
     """Return a configured ``ZarrSceneSource`` and synchronise worker metadata."""
@@ -22,7 +50,7 @@ def ensure_scene_source(worker: Any) -> ZarrSceneSource:
 
     source = worker._scene_source
     if source is None:
-        source = worker._create_scene_source()
+        source = create_scene_source(worker)
         assert source is not None, "Failed to create ZarrSceneSource"
         worker._scene_source = source
 
@@ -106,4 +134,4 @@ def reset_worker_camera(worker: Any, cam: Any) -> None:
     cam.rect = Rect(0.0, 0.0, max(1.0, world_w), max(1.0, world_h))
 
 
-__all__ = ["ensure_scene_source", "reset_worker_camera"]
+__all__ = ["create_scene_source", "ensure_scene_source", "reset_worker_camera"]

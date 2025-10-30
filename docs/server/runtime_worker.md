@@ -57,7 +57,7 @@ that behaviour.
   GL/CUDA/capture/encoder lifetimes.
 
 ### 2. Scene Source & Viewer Wiring
-- **Entry points:** `_create_scene_source`, `_ensure_scene_source`,
+- **Entry points:** `core.scene_setup.create_scene_source`, `_ensure_scene_source`,
   `_init_vispy_scene`, `_init_viewer_scene`, `_set_dims_range_for_level`,
   `_register_*_visual`, `_ensure_*_visual`, `_volume_shape_for_view`,
   `_volume_world_extents`.

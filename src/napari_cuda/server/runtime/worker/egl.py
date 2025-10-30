@@ -25,12 +25,6 @@ from typing import Any, Optional
 
 import numpy as np
 
-try:
-    import dask.array as da  # type: ignore
-except Exception as _da_err:
-    da = None  # type: ignore[assignment]
-    logging.getLogger(__name__).warning("dask.array not available; OME-Zarr features disabled: %s", _da_err)
-
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
@@ -222,19 +216,6 @@ class EGLRendererWorker:
     def _init_cuda(self) -> None:
         # CUDA context is established during bootstrap; nothing additional required.
         return
-
-    def _create_scene_source(self) -> Optional[ZarrSceneSource]:
-        if self._zarr_path is None:
-            return None
-        if da is None:
-            raise RuntimeError("ZarrSceneSource requires dask.array to be available")
-        axes_override = tuple(self._zarr_axes) if isinstance(self._zarr_axes, str) else None
-        source = ZarrSceneSource(
-            self._zarr_path,
-            preferred_level=self._zarr_level,
-            axis_override=axes_override,
-        )
-        return source
 
     def _ensure_scene_source(self) -> ZarrSceneSource:
         return ensure_scene_source(self)

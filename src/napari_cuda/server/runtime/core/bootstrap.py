@@ -12,6 +12,7 @@ from napari_cuda.server.data.zarr_source import ZarrSceneSource, LevelDescriptor
 from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.data import lod
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
+from napari_cuda.server.runtime.core.scene_setup import create_scene_source
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 
 
@@ -300,7 +301,7 @@ def init_vispy_scene(worker: object) -> None:
 
     source = None
     if getattr(worker, "_zarr_path", None):
-        source = worker._create_scene_source()  # type: ignore[attr-defined]
+        source = create_scene_source(worker)
         if source is not None:
             worker._scene_source = source  # type: ignore[attr-defined]
             try:
