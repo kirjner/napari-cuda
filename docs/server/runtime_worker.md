@@ -64,7 +64,7 @@ that behaviour.
 - **Shared state:** `_scene_source`, `_viewer`, `_plane_visual_handle`,
   `_volume_visual_handle`, `_zarr_*` metadata, `_data_wh`, `_data_d`,
   `_viewport_state.volume.world_extents`.
-- **Dependencies:** `ViewerBuilder` (`rendering/viewer_builder.py`),
+- **Dependencies:** `ViewerBuilder` (`runtime/worker/napari_viewer/bootstrap.py`),
   `ZarrSceneSource` (`data/zarr_source.py`), `ViewerModel`, VisPy cameras, the
   `_VisualHandle` wrapper (`egl.py:111-149`) that tracks node attachment, and
   plane ROI helpers (`runtime/data/roi_math.py`, `runtime/data/scene_types.py`).

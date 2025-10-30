@@ -32,7 +32,7 @@ Recent reorganisations landed the top-level split called out in the future-struc
 - **Create an encoder subpackage.** Group `encoder.py`, `h264_encoder.py`, `bitstream.py`, `_avcc_packer.pyx`, `capture.py`, and `frame_pipeline.py` under `server/rendering/encoder/` (or similar) to isolate encode/capture concerns from GL/VisPy scaffolding.
 - **Audit pixel channel responsibilities.** With `server/control/pixel_channel.py` now in place, decide which pieces should move into runtime vs remain transport (e.g., heartbeat vs broadcaster glue) and split accordingly.
 - **Split control channel orchestration.** `control_channel_server.py` currently mixes handshake, resume journal, command routing, and heartbeat/watchdog logic. Break it into `server/control/handshake.py`, `server/control/resume.py`, `server/control/dispatch.py`, etc., so future hoists (e.g., state sync, metrics taps) have explicit homes.
-- **Clarify GL/canvas helpers.** Split `viewer_builder.py`, `egl_context.py`, `gl_capture.py`, `vispy_intercept.py`, and `cuda_interop.py` into a `rendering/gl/` namespace so rendering vs orchestration vs transport responsibilities are obvious.
+- **Clarify GL/canvas helpers.** Split `napari_viewer/bootstrap.py`, `egl_context.py`, `gl_capture.py`, `vispy_intercept.py`, and `cuda_interop.py` into a `rendering/gl/` namespace so rendering vs orchestration vs transport responsibilities are obvious.
 - **Audit `app/experiments`.** Decide whether experiments remain in-tree or move to `tools/` to avoid diluting the production app surface.
 
 ### Client package

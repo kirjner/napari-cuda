@@ -78,7 +78,10 @@ from napari_cuda.server.runtime.viewport import (
 )
 from . import render_updates as _render_updates
 from . import level_policy
-from . import viewer as _viewer
+from .napari_viewer import bootstrap as viewer_bootstrap
+from .napari_viewer import camera_ops as viewer_camera_ops
+from .napari_viewer import visuals as viewer_visuals
+from .napari_viewer import viewport_state as viewer_viewport
 from .ticks import camera as camera_tick
 from .ticks import capture as capture_tick
 
@@ -313,13 +316,13 @@ class EGLRendererWorker:
 
 
     def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
-        _viewer._init_viewer_scene(self, source)
+        viewer_bootstrap._init_viewer_scene(self, source)
 
     def _configure_camera_for_mode(self) -> None:
-        _viewer._configure_camera_for_mode(self)
+        viewer_camera_ops._configure_camera_for_mode(self)
 
     def _frame_volume_camera(self, w: float, h: float, d: float) -> None:
-        _viewer._frame_volume_camera(self, w, h, d)
+        viewer_camera_ops._frame_volume_camera(self, w, h, d)
 
     def _bootstrap_camera_pose(
         self,
@@ -328,43 +331,43 @@ class EGLRendererWorker:
         *,
         reason: str,
     ) -> None:
-        _viewer._bootstrap_camera_pose(self, mode, source, reason=reason)
+        viewer_camera_ops._bootstrap_camera_pose(self, mode, source, reason=reason)
 
     def _enter_volume_mode(self) -> None:
-        _viewer._enter_volume_mode(self)
+        viewer_camera_ops._enter_volume_mode(self)
 
     def _exit_volume_mode(self) -> None:
-        _viewer._exit_volume_mode(self)
+        viewer_camera_ops._exit_volume_mode(self)
 
     def _register_plane_visual(self, node: Any) -> None:
-        _viewer._register_plane_visual(self, node)
+        viewer_visuals._register_plane_visual(self, node)
 
     def _register_volume_visual(self, node: Any) -> None:
-        _viewer._register_volume_visual(self, node)
+        viewer_visuals._register_volume_visual(self, node)
 
     def _ensure_plane_visual(self) -> Any:
-        return _viewer._ensure_plane_visual(self)
+        return viewer_visuals._ensure_plane_visual(self)
 
     def _ensure_volume_visual(self) -> Any:
-        return _viewer._ensure_volume_visual(self)
+        return viewer_visuals._ensure_volume_visual(self)
 
     def _apply_camera_reset(self, cam) -> None:
-        _viewer._apply_camera_reset(self, cam)
+        viewer_camera_ops._apply_camera_reset(self, cam)
 
     def _emit_current_camera_pose(self, reason: str) -> None:
-        _viewer._emit_current_camera_pose(self, reason)
+        viewer_camera_ops._emit_current_camera_pose(self, reason)
 
     def _emit_pose_from_camera(self, camera, reason: str) -> None:
-        _viewer._emit_pose_from_camera(self, camera, reason)
+        viewer_camera_ops._emit_pose_from_camera(self, camera, reason)
 
     def _pose_from_camera(self, camera, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
-        return _viewer._pose_from_camera(self, camera, target, command_seq)
+        return viewer_camera_ops._pose_from_camera(self, camera, target, command_seq)
 
     def _snapshot_camera_pose(self, target: str, command_seq: int) -> Optional[CameraPoseApplied]:
-        return _viewer._snapshot_camera_pose(self, target, command_seq)
+        return viewer_camera_ops._snapshot_camera_pose(self, target, command_seq)
 
     def _current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
-        return _viewer._current_panzoom_rect(self)
+        return viewer_camera_ops._current_panzoom_rect(self)
 
     def snapshot_dims_metadata(self) -> dict[str, Any]:
         meta: dict[str, Any] = {}

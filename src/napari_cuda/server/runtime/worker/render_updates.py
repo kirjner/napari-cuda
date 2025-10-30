@@ -14,6 +14,9 @@ from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply_render_snapshot
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
+from napari_cuda.server.runtime.worker.napari_viewer.viewport_state import (
+    _apply_viewport_state_snapshot as apply_viewport_state_snapshot,
+)
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -203,42 +206,6 @@ def consume_render_snapshot(worker: "EGLRendererWorker", state: RenderLedgerSnap
     worker._render_mailbox.set_scene_state(normalized)  # noqa: SLF001
     worker._mark_render_tick_needed()  # noqa: SLF001
     worker._last_interaction_ts = time.perf_counter()  # noqa: SLF001
-
-
-def apply_viewport_state_snapshot(
-    worker: "EGLRendererWorker",
-    *,
-    mode: Optional[RenderMode],
-    plane_state: Optional[PlaneState],
-    volume_state: Optional[VolumeState],
-) -> None:
-    """Apply a mailbox-only viewport update (no scene snapshot)."""
-
-    runner = worker._viewport_runner  # noqa: SLF001
-    updated = False
-
-    if plane_state is not None:
-        worker._viewport_state.plane = deepcopy(plane_state)  # noqa: SLF001
-        if runner is not None:
-            runner._plane = worker._viewport_state.plane  # type: ignore[attr-defined]  # noqa: SLF001
-        updated = True
-
-    if volume_state is not None:
-        worker._viewport_state.volume = deepcopy(volume_state)  # noqa: SLF001
-        updated = True
-
-    if mode is not None and mode is not worker._viewport_state.mode:  # noqa: SLF001
-        worker._viewport_state.mode = mode  # noqa: SLF001
-        worker._configure_camera_for_mode()  # noqa: SLF001
-        updated = True
-
-    if not updated:
-        return
-
-    if runner is not None and worker._viewport_state.mode is RenderMode.PLANE:  # noqa: SLF001
-        rect = worker._current_panzoom_rect()  # noqa: SLF001
-        if rect is not None:
-            runner.update_camera_rect(rect)
 
 
 def drain_scene_updates(worker: "EGLRendererWorker") -> None:

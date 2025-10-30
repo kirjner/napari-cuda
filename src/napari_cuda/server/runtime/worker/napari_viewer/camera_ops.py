@@ -1,4 +1,4 @@
-"""Viewer and camera helpers for the EGL render worker."""
+"""Camera lifecycle helpers for the EGL render worker."""
 
 from __future__ import annotations
 
@@ -14,24 +14,16 @@ from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
-from napari_cuda.server.rendering.viewer_builder import ViewerBuilder
 from napari_cuda.server.runtime.camera import CameraPoseApplied
-from napari_cuda.server.runtime.core import reset_worker_camera
+from napari_cuda.server.runtime.core import ledger_step, reset_worker_camera
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
+from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
+from napari_cuda.server.runtime.worker import level_policy
 from napari_cuda.server.runtime.worker.snapshots import (
     apply_plane_metadata,
     apply_volume_level,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
-from napari_cuda.server.runtime.core import (
-    ledger_axis_labels,
-    ledger_level,
-    ledger_ndisplay,
-    ledger_order,
-    ledger_step,
-)
-from napari_cuda.server.runtime.worker import level_policy, render_updates as _render_updates
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import ZarrSceneSource
@@ -39,31 +31,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-class _VisualHandle:
-    """Explicit handle for a VisPy visual node managed by the worker."""
-
-    def __init__(self, node: Any, order: int) -> None:
-        self.node = node
-        self.order = order
-        self._attached = False
-
-    def attach(self, view: Any) -> None:
-        scene_parent = view.scene
-        if self.node.parent is not scene_parent:
-            view.add(self.node)
-        self.node.order = self.order
-        self.node.visible = True
-        self._attached = True
-
-    def detach(self) -> None:
-        self.node.visible = False
-        self.node.parent = None
-        self._attached = False
-
-    def is_attached(self) -> bool:
-        return self._attached
 
 
 def _coarsest_level_index(source: "ZarrSceneSource") -> Optional[int]:
@@ -95,63 +62,6 @@ def _frame_volume_camera(worker: "EGLRendererWorker", w: float, h: float, d: flo
             center,
             float(cam.distance),
         )
-
-
-def _register_plane_visual(worker: "EGLRendererWorker", node: Any) -> None:
-    worker._plane_visual_handle = _VisualHandle(node, order=10_000)
-
-
-def _register_volume_visual(worker: "EGLRendererWorker", node: Any) -> None:
-    worker._volume_visual_handle = _VisualHandle(node, order=10_010)
-
-
-def _ensure_plane_visual(worker: "EGLRendererWorker") -> Any:
-    view = worker.view
-    assert view is not None, "VisPy view must exist before activating the plane visual"
-    handle = worker._plane_visual_handle
-    assert handle is not None, "plane visual not registered"
-    if worker._volume_visual_handle is not None:
-        worker._volume_visual_handle.detach()
-    handle.attach(view)
-    return handle.node
-
-
-def _ensure_volume_visual(worker: "EGLRendererWorker") -> Any:
-    view = worker.view
-    assert view is not None, "VisPy view must exist before activating the volume visual"
-    handle = worker._volume_visual_handle
-    assert handle is not None, "volume visual not registered"
-    if worker._plane_visual_handle is not None:
-        worker._plane_visual_handle.detach()
-    handle.attach(view)
-    return handle.node
-
-
-def _init_viewer_scene(worker: "EGLRendererWorker", source: Optional["ZarrSceneSource"]) -> None:
-    builder = ViewerBuilder(worker)
-    ledger = worker._ledger
-    step_hint = ledger_step(ledger)
-    level_hint = ledger_level(ledger)
-    axis_labels = ledger_axis_labels(ledger)
-    order = ledger_order(ledger)
-    ndisplay = ledger_ndisplay(ledger)
-    canvas, view, viewer = builder.build(
-        source,
-        level=level_hint,
-        step=step_hint,
-        axis_labels=axis_labels,
-        order=order,
-        ndisplay=ndisplay,
-    )
-    worker.canvas = canvas
-    worker.view = view
-    worker._viewer = viewer
-    assert worker.view is not None, "adapter must supply a VisPy view"
-    active_mode = worker._viewport_state.mode
-    _bootstrap_camera_pose(worker, RenderMode.PLANE, source, reason="bootstrap-plane")
-    _bootstrap_camera_pose(worker, RenderMode.VOLUME, source, reason="bootstrap-volume")
-    worker._viewport_state.mode = active_mode
-    _configure_camera_for_mode(worker)
 
 
 def _configure_camera_for_mode(worker: "EGLRendererWorker") -> None:
@@ -529,8 +439,10 @@ def _pose_from_camera(
     worker: "EGLRendererWorker",
     camera,
     target: str,
-    command_seq: int,
+    seq: int,
 ) -> Optional[CameraPoseApplied]:
+    """Convert camera state into ``CameraPoseApplied`` dataclass."""
+
     def _center_tuple(cam) -> Optional[tuple[float, ...]]:
         center_value = getattr(cam, "center", None)
         if center_value is None:
@@ -556,7 +468,7 @@ def _pose_from_camera(
         )
         return CameraPoseApplied(
             target=str(target or "main"),
-            command_seq=int(command_seq),
+            command_seq=int(seq),
             center=center_tuple,
             zoom=None,
             angles=(azimuth, elevation, roll),
@@ -587,7 +499,7 @@ def _pose_from_camera(
         plane_state.update_pose(**update_kwargs)
         return CameraPoseApplied(
             target=str(target or "main"),
-            command_seq=int(command_seq),
+            command_seq=int(seq),
             center=center_tuple,
             zoom=zoom_val,
             angles=None,
@@ -595,9 +507,6 @@ def _pose_from_camera(
             fov=None,
             rect=rect_tuple,
         )
-
-    if camera is None:
-        return None
 
     return None
 
@@ -626,59 +535,17 @@ def _current_panzoom_rect(worker: "EGLRendererWorker") -> Optional[tuple[float, 
     return (float(rect.left), float(rect.bottom), float(rect.width), float(rect.height))
 
 
-def _apply_viewport_state_snapshot(
-    worker: "EGLRendererWorker",
-    *,
-    mode: Optional[RenderMode],
-    plane_state: Optional[PlaneState],
-    volume_state: Optional[VolumeState],
-) -> None:
-    """Apply a mailbox-only viewport update (no scene snapshot)."""
-
-    runner = worker._viewport_runner
-    updated = False
-
-    if plane_state is not None:
-        worker._viewport_state.plane = deepcopy(plane_state)
-        if runner is not None:
-            runner._plane = worker._viewport_state.plane  # type: ignore[attr-defined]
-        updated = True
-
-    if volume_state is not None:
-        worker._viewport_state.volume = deepcopy(volume_state)
-        updated = True
-
-    if mode is not None and mode is not worker._viewport_state.mode:
-        worker._viewport_state.mode = mode
-        _configure_camera_for_mode(worker)
-        updated = True
-
-    if not updated:
-        return
-
-    if runner is not None and worker._viewport_state.mode is RenderMode.PLANE:
-        rect = _current_panzoom_rect(worker)
-        if rect is not None:
-            runner.update_camera_rect(rect)
-
-
 __all__ = [
-    "_VisualHandle",
     "_apply_camera_reset",
-    "_apply_viewport_state_snapshot",
     "_bootstrap_camera_pose",
     "_configure_camera_for_mode",
+    "_coarsest_level_index",
     "_current_panzoom_rect",
     "_emit_current_camera_pose",
     "_emit_pose_from_camera",
-    "_ensure_plane_visual",
-    "_ensure_volume_visual",
     "_enter_volume_mode",
     "_exit_volume_mode",
     "_frame_volume_camera",
-    "_init_viewer_scene",
     "_pose_from_camera",
-    "_register_plane_visual",
-    "_register_volume_visual",
     "_snapshot_camera_pose",
 ]

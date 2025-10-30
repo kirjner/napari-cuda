@@ -297,7 +297,9 @@ def init_egl(worker: object) -> None:
 def init_vispy_scene(worker: object) -> None:
     """Create the napari viewer + VisPy scene on the worker thread."""
 
-    from napari_cuda.server.runtime.worker import viewer as _viewer  # Local import to avoid circular dependency
+    from napari_cuda.server.runtime.worker.napari_viewer.bootstrap import (
+        _init_viewer_scene,
+    )  # Local import to avoid circular dependency
 
     source = None
     if getattr(worker, "_zarr_path", None):
@@ -316,7 +318,7 @@ def init_vispy_scene(worker: object) -> None:
                 )
 
     try:
-        _viewer._init_viewer_scene(worker, source)
+        _init_viewer_scene(worker, source)
     except Exception:
         logging.getLogger(worker.__class__.__module__).exception(
             "Adapter scene initialization failed (legacy path removed)"
