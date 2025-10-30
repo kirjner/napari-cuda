@@ -18,7 +18,9 @@ from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.core import ledger_step, reset_worker_camera
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
+    SnapshotInterface,
+)
 from napari_cuda.server.runtime.worker import level_policy
 from napari_cuda.server.runtime.worker.snapshots import (
     apply_plane_metadata,

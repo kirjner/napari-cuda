@@ -10,7 +10,9 @@ from napari_cuda.server.data.roi import (
     viewport_debug_snapshot,
 )
 from napari_cuda.server.runtime.data import SliceROI
-from napari_cuda.server.runtime.worker.interfaces import RenderViewportInterface
+from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
+    RenderViewportInterface,
+)
 
 logger = logging.getLogger(__name__)
 

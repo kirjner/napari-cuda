@@ -21,7 +21,7 @@ from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_leve
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.worker.snapshots import plane as plane_snapshots
 from napari_cuda.server.runtime.viewport import RenderMode
-from ..interfaces import RenderViewportInterface
+from ..interfaces.render_viewport_interface import RenderViewportInterface
 from ..interfaces.viewer_bootstrap_interface import ViewerBootstrapInterface
 from .camera_ops import _bootstrap_camera_pose, _configure_camera_for_mode, _frame_volume_camera
 from .visuals import (

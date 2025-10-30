@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
+    SnapshotInterface,
+)
 from napari_cuda.server.runtime.worker.snapshots.plane import apply_slice_level
 from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import ViewportState

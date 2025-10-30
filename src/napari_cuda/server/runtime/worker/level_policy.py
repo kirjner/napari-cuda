@@ -16,7 +16,9 @@ from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
-from napari_cuda.server.runtime.worker.interfaces import RenderViewportInterface
+from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
+    RenderViewportInterface,
+)
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker

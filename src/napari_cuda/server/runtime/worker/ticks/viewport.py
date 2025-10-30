@@ -15,7 +15,15 @@ from napari_cuda.server.runtime.worker.snapshots import (
     apply_volume_level,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.worker.interfaces import RenderTickInterface, RenderViewportInterface, SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces.render_tick_interface import (
+    RenderTickInterface,
+)
+from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
+    RenderViewportInterface,
+)
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
+    SnapshotInterface,
+)
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker

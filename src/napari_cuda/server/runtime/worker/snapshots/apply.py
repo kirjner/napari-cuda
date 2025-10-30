@@ -17,7 +17,12 @@ from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker import level_policy
-from napari_cuda.server.runtime.worker.interfaces import RenderViewportInterface, SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
+    RenderViewportInterface,
+)
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
+    SnapshotInterface,
+)
 from .plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,

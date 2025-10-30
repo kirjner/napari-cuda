@@ -14,8 +14,10 @@ from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply_render_snapshot
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
-from napari_cuda.server.runtime.worker.interfaces import (
+from napari_cuda.server.runtime.worker.interfaces.render_tick_interface import (
     RenderTickInterface,
+)
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
     SnapshotInterface,
 )
 from napari_cuda.server.runtime.worker.snapshots.viewport import apply_viewport_state_snapshot

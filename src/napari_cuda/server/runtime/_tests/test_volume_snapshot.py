@@ -6,7 +6,9 @@ import pytest
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
+    SnapshotInterface,
+)
 from napari_cuda.server.runtime.worker.snapshots.volume import (
     apply_volume_camera_pose,
     apply_volume_level,

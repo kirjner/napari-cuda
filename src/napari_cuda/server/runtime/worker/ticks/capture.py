@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Optional
 from napari_cuda.server.rendering.capture import FrameTimings, encode_frame
 from napari_cuda.server.runtime.camera.animator import animate_if_enabled
 from napari_cuda.server.runtime.worker.loop import run_render_tick
-from napari_cuda.server.runtime.worker.interfaces import RenderTickInterface
+from napari_cuda.server.runtime.worker.interfaces.render_tick_interface import (
+    RenderTickInterface,
+)
 
 from . import camera
 

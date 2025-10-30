@@ -15,7 +15,7 @@ from napari_cuda.server.scene import CameraDeltaCommand
 
 from .. import render_updates
 from . import viewport
-from ..interfaces import RenderTickInterface
+from ..interfaces.render_tick_interface import RenderTickInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker

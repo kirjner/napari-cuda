@@ -7,7 +7,9 @@ import pytest
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply as snapshot_mod
 from napari_cuda.server.runtime.worker.snapshots import plane as plane_mod
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
+    SnapshotInterface,
+)
 from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
