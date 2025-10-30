@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from napari_cuda.server.rendering.capture import FrameTimings, encode_frame
 from napari_cuda.server.runtime.camera.animator import animate_if_enabled
 from napari_cuda.server.runtime.worker.loop import run_render_tick
+from napari_cuda.server.runtime.worker.interfaces import RenderTickInterface
 
 from . import camera
 
@@ -15,39 +16,46 @@ if TYPE_CHECKING:
 
 
 def capture_blit_gpu_ns(worker: "EGLRendererWorker") -> Optional[int]:
-    return worker._resources.capture.pipeline.capture_blit_gpu_ns()  # noqa: SLF001
+    tick_iface = RenderTickInterface(worker)
+    resources = tick_iface.resources
+    assert resources is not None and resources.capture is not None, "render resources must be initialised"
+    return resources.capture.pipeline.capture_blit_gpu_ns()
 
 
 def render_tick(worker: "EGLRendererWorker") -> float:
-    canvas = worker.canvas
+    tick_iface = RenderTickInterface(worker)
+    canvas = tick_iface.canvas
     assert canvas is not None, "render_tick requires an initialized canvas"
 
     return run_render_tick(
         animate_camera=lambda: animate_if_enabled(
-            enabled=bool(worker._animate),  # noqa: SLF001
-            view=getattr(worker, "view", None),
+            enabled=tick_iface.animate,
+            view=tick_iface.view,
             width=worker.width,
             height=worker.height,
-            animate_dps=float(worker._animate_dps),  # noqa: SLF001
-            anim_start=float(worker._anim_start),  # noqa: SLF001
+            animate_dps=tick_iface.animate_dps,
+            anim_start=tick_iface.anim_start,
         ),
         drain_scene_updates=lambda: camera.drain(worker),
         render_canvas=canvas.render,
         evaluate_policy_if_needed=lambda: None,
-        mark_tick_complete=worker._mark_render_tick_complete,  # noqa: SLF001
-        mark_loop_started=worker._mark_render_loop_started,  # noqa: SLF001
+        mark_tick_complete=tick_iface.mark_render_tick_complete,
+        mark_loop_started=tick_iface.mark_render_loop_started,
     )
 
 
 def capture_and_encode_packet(
     worker: "EGLRendererWorker",
 ) -> tuple[FrameTimings, Optional[bytes], int, int]:
+    tick_iface = RenderTickInterface(worker)
+    resources = tick_iface.resources
+    assert resources is not None, "render resources must be initialised"
     encoded = encode_frame(
-        capture=worker._resources.capture,  # noqa: SLF001
+        capture=resources.capture,
         render_frame=lambda: render_tick(worker),
-        obtain_encoder=lambda: worker._resources.encoder,  # noqa: SLF001
-        encoder_lock=worker._resources.enc_lock,  # noqa: SLF001
-        debug_dumper=worker._debug,  # noqa: SLF001
+        obtain_encoder=lambda: resources.encoder,
+        encoder_lock=resources.enc_lock,
+        debug_dumper=getattr(worker, "_debug", None),
     )
 
     return encoded.timings, encoded.packet, encoded.flags, encoded.sequence

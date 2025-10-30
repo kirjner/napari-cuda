@@ -142,27 +142,27 @@ def apply_camera_deltas(
 def process_camera_deltas(worker, commands: Sequence[CameraDeltaCommand]) -> CameraDeltaOutcome:
     """Process camera commands on the worker, updating its state as needed."""
 
-    worker._user_interaction_seen = True
     logger.debug("worker processing %d camera command(s)", len(commands))
 
     view = worker.view
     assert view is not None, "process_camera_deltas requires an active VisPy view"
     camera = view.camera
 
-    if worker.canvas is not None:
-        canvas_wh = (int(worker.canvas.size[0]), int(worker.canvas.size[1]))
+    canvas = worker.canvas
+    if canvas is not None:
+        canvas_wh = (int(canvas.size[0]), int(canvas.size[1]))
     else:
         canvas_wh = (worker.width, worker.height)
 
     debug_flags = CameraDebugFlags(
-        zoom=worker._debug_zoom_drift,
-        pan=worker._debug_pan,
-        orbit=worker._debug_orbit,
-        reset=worker._debug_reset,
+        zoom=getattr(worker, "_debug_zoom_drift", False),
+        pan=getattr(worker, "_debug_pan", False),
+        orbit=getattr(worker, "_debug_orbit", False),
+        reset=getattr(worker, "_debug_reset", False),
     )
 
     def _mark_render() -> None:
-        worker._mark_render_tick_needed()
+        worker._mark_render_tick_needed()  # noqa: SLF001
 
     return apply_camera_deltas(
         commands,

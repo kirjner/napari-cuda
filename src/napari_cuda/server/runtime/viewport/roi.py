@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
     viewport_debug_snapshot,
 )
 from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.runtime.worker.interfaces import RenderViewportInterface
 
 logger = logging.getLogger(__name__)
 
 
 def viewport_roi_for_level(
-    worker: Any,
+    viewport_iface: RenderViewportInterface,
     source: Any,
     level: int,
     *,
@@ -24,28 +25,29 @@ def viewport_roi_for_level(
 ) -> SliceROI:
     """Compute the viewport ROI for the requested multiscale level."""
 
-    view = worker.view
-    align_chunks = (not for_policy) and bool(worker._roi_align_chunks)
-    ensure_contains = (not for_policy) and bool(worker._roi_ensure_contains_viewport)
-    edge_threshold = int(worker._roi_edge_threshold)
-    chunk_pad = int(worker._roi_pad_chunks)
+    view = viewport_iface.view
+    align_chunks = (not for_policy) and viewport_iface.roi_align_chunks
+    ensure_contains = (not for_policy) and viewport_iface.roi_ensure_contains_viewport
+    edge_threshold = int(viewport_iface.roi_edge_threshold)
+    chunk_pad = int(viewport_iface.roi_pad_chunks)
 
-    prev_roi: Optional[SliceROI] = worker.viewport_state.plane.applied_roi  # type: ignore[attr-defined]
+    prev_roi: Optional[SliceROI] = viewport_iface.viewport_state.plane.applied_roi  # type: ignore[attr-defined]
 
-    data_wh = worker._data_wh
+    data_wh = viewport_iface.data_wh
+    data_depth = viewport_iface.data_d
 
     def _snapshot() -> Dict[str, Any]:
         return viewport_debug_snapshot(
             view=view,
-            canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
+            canvas_size=(viewport_iface.width, viewport_iface.height),
             data_wh=data_wh,
-            data_depth=worker._data_d,
+            data_depth=data_depth,
         )
 
     reason = "policy-roi" if for_policy else "roi-request"
     roi = resolve_worker_viewport_roi(
         view=view,
-        canvas_size=(int(worker.width), int(worker.height)),  # type: ignore[attr-defined]
+        canvas_size=(viewport_iface.width, viewport_iface.height),
         source=source,
         level=int(level),
         align_chunks=align_chunks,
@@ -55,7 +57,7 @@ def viewport_roi_for_level(
         for_policy=for_policy,
         prev_roi=prev_roi,
         snapshot_cb=_snapshot,
-        log_layer_debug=worker._log_layer_debug,
+        log_layer_debug=viewport_iface.log_layer_debug,
         quiet=quiet,
         data_wh=data_wh,
         reason=reason,

@@ -28,7 +28,7 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
 )
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces import RenderViewportInterface, SnapshotInterface
 from .viewer_metadata import apply_plane_metadata
 
 logger = logging.getLogger(__name__)
@@ -45,14 +45,14 @@ class SliceApplyResult:
     width_px: int
     height_px: int
 def load_slice(
-    worker: Any,
+    viewport_iface: RenderViewportInterface,
     source: Any,
     level: int,
     z_index: int,
 ) -> np.ndarray:
     """Load a slice for ``level`` using the worker viewport ROI."""
 
-    roi = viewport_roi_for_level(worker, source, int(level))
+    roi = viewport_roi_for_level(viewport_iface, source, int(level))
     slab = source.slice(int(level), int(z_index), compute=True, roi=roi)
     if not isinstance(slab, np.ndarray):
         slab = np.asarray(slab, dtype=np.float32)
@@ -67,8 +67,8 @@ def aligned_roi_signature(
 ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
     """Align ``roi`` to the chunk grid (if enabled) and return its signature."""
 
-    worker = snapshot_iface.worker
-    roi_val = roi or viewport_roi_for_level(worker, source, int(level))
+    viewport_iface = RenderViewportInterface(snapshot_iface.worker)
+    roi_val = roi or viewport_roi_for_level(viewport_iface, source, int(level))
     chunk_shape = chunk_shape_for_level(source, int(level))
     aligned_roi = roi_val
     if snapshot_iface.roi_align_chunks and chunk_shape is not None:
@@ -306,7 +306,8 @@ def apply_slice_level(
     view = snapshot_iface.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
-    roi = viewport_roi_for_level(snapshot_iface.worker, source, int(applied.level))
+    viewport_iface = RenderViewportInterface(snapshot_iface.worker)
+    roi = viewport_roi_for_level(viewport_iface, source, int(applied.level))
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
         snapshot_iface,
         source,

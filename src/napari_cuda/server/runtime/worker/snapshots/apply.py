@@ -17,7 +17,7 @@ from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker import level_policy
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces import RenderViewportInterface, SnapshotInterface
 from .plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,
@@ -216,7 +216,8 @@ def _resolve_snapshot_ops(
     )
     step_tuple = tuple(int(v) for v in applied_context.step)
     level_int = int(applied_context.level)
-    roi_current = viewport_roi_for_level(worker, source, level_int)
+    viewport_iface = RenderViewportInterface(worker)
+    roi_current = viewport_roi_for_level(viewport_iface, source, level_int)
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
         snapshot_iface,
         source,

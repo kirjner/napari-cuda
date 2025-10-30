@@ -15,7 +15,7 @@ from napari_cuda.server.runtime.worker.snapshots import (
     apply_volume_level,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces import RenderTickInterface, RenderViewportInterface, SnapshotInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -26,23 +26,25 @@ logger = logging.getLogger(__name__)
 def run(worker: "EGLRendererWorker") -> None:
     """Drive a single viewport tick using the runner's current plan."""
 
-    runner = worker._viewport_runner
+    tick_iface = RenderTickInterface(worker)
+    runner = tick_iface.viewport_runner
     if runner is None:
         return
 
-    if worker._level_policy_suppressed:
+    if tick_iface.level_policy_suppressed:
         runner.state.zoom_hint = None
         return
 
-    if worker._viewport_state.mode is RenderMode.VOLUME:
+    if tick_iface.viewport_state.mode is RenderMode.VOLUME:
         runner.state.zoom_hint = None
         return
 
-    source = worker._scene_source or worker._ensure_scene_source()
+    source = tick_iface.get_scene_source() or tick_iface.ensure_scene_source()
     snapshot_iface = SnapshotInterface(worker)
+    viewport_iface = RenderViewportInterface(worker)
 
     def _resolve(level: int, _rect):
-        return viewport_roi_for_level(worker, source, int(level), quiet=True)
+        return viewport_roi_for_level(viewport_iface, source, int(level), quiet=True)
 
     plan = runner.plan_tick(source=source, roi_resolver=_resolve)
     if logger.isEnabledFor(logging.DEBUG):
@@ -57,13 +59,13 @@ def run(worker: "EGLRendererWorker") -> None:
         )
 
     if plan.zoom_hint is not None:
-        worker._render_mailbox.record_zoom_hint(float(plan.zoom_hint))
+        tick_iface.render_mailbox_record_zoom_hint(float(plan.zoom_hint))
 
     level_applied = False
 
     if plan.level_change:
         target_level = int(runner.state.request.level)
-        prev_level = int(worker._current_level_index())
+        prev_level = tick_iface.current_level_index()
         applied_context = level_policy.build_level_context(
             worker,
             source,

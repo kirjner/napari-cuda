@@ -15,6 +15,7 @@ from napari_cuda.server.scene import CameraDeltaCommand
 
 from .. import render_updates
 from . import viewport
+from ..interfaces import RenderTickInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -35,6 +36,7 @@ def _apply_commands(
     *,
     reset_policy_suppression: bool,
 ) -> CameraCommandResult:
+    tick_iface = RenderTickInterface(worker)
     outcome = _process_camera_deltas(worker, commands)
 
     last_seq: Optional[int]
@@ -44,34 +46,26 @@ def _apply_commands(
         last_seq = None
 
     if last_seq is not None:
-        worker._max_camera_command_seq = max(  # noqa: SLF001
-            int(worker._max_camera_command_seq),
-            last_seq,
-        )
-        worker._pose_seq = max(  # noqa: SLF001
-            int(worker._pose_seq),
-            int(worker._max_camera_command_seq),
-        )
+        tick_iface.bump_camera_sequences(last_seq)
 
-    runner = worker._viewport_runner  # noqa: SLF001
+    runner = tick_iface.viewport_runner
     if runner is not None:
         runner.ingest_camera_deltas(commands)
-        if worker._viewport_state.mode is RenderMode.PLANE:  # noqa: SLF001
-            rect = worker._current_panzoom_rect()  # noqa: SLF001
+        if tick_iface.viewport_state.mode is RenderMode.PLANE:
+            rect = tick_iface.current_panzoom_rect()
             if rect is not None:
                 runner.update_camera_rect(rect)
 
-    worker._mark_render_tick_needed()  # noqa: SLF001
-    worker._user_interaction_seen = True  # noqa: SLF001
-    worker._last_interaction_ts = time.perf_counter()  # noqa: SLF001
+    tick_iface.mark_render_tick_needed()
+    tick_iface.record_user_interaction()
 
     if reset_policy_suppression:
-        worker._level_policy_suppressed = False  # noqa: SLF001
+        tick_iface.level_policy_suppressed = False
 
-    if outcome.camera_changed and worker._viewport_state.mode is RenderMode.VOLUME:  # noqa: SLF001
-        worker._emit_current_camera_pose("camera-delta")  # noqa: SLF001
+    if outcome.camera_changed and tick_iface.viewport_state.mode is RenderMode.VOLUME:
+        tick_iface.emit_camera_pose("camera-delta")
 
-    record_zoom_hint(worker, commands)
+    record_zoom_hint(tick_iface, commands)
 
     return CameraCommandResult(
         policy_triggered=bool(outcome.policy_triggered),
@@ -89,15 +83,17 @@ def process_commands(
     if not commands:
         return CameraCommandResult(False, False, None)
 
+    tick_iface = RenderTickInterface(worker)
+    tick_iface.record_user_interaction()
     result = _apply_commands(worker, commands, reset_policy_suppression=False)
     viewport.run(worker)
 
     if (
         result.policy_triggered
-        and worker._viewport_state.mode is not RenderMode.VOLUME  # noqa: SLF001
-        and not worker._level_policy_suppressed  # noqa: SLF001
+        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
+        and not tick_iface.level_policy_suppressed
     ):
-        worker._evaluate_level_policy()  # noqa: SLF001
+        tick_iface.evaluate_level_policy()
 
     return result
 
@@ -105,7 +101,8 @@ def process_commands(
 def drain(worker: "EGLRendererWorker") -> None:
     """Drain queued camera deltas, then scene updates, for a render tick."""
 
-    commands = worker._camera_queue.pop_all()  # noqa: SLF001
+    tick_iface = RenderTickInterface(worker)
+    commands = tick_iface.camera_queue_pop_all()
     result: Optional[CameraCommandResult] = None
 
     if commands:
@@ -117,14 +114,14 @@ def drain(worker: "EGLRendererWorker") -> None:
     if (
         result is not None
         and result.policy_triggered
-        and worker._viewport_state.mode is not RenderMode.VOLUME  # noqa: SLF001
-        and not worker._level_policy_suppressed  # noqa: SLF001
+        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
+        and not tick_iface.level_policy_suppressed
     ):
-        worker._evaluate_level_policy()  # noqa: SLF001
+        tick_iface.evaluate_level_policy()
 
 
 def record_zoom_hint(
-    worker: "EGLRendererWorker",
+    tick_iface: RenderTickInterface,
     commands: Sequence[CameraDeltaCommand],
 ) -> None:
     """Capture the most recent zoom factor for policy evaluation."""
@@ -132,7 +129,7 @@ def record_zoom_hint(
     if not commands:
         return
 
-    mailbox = worker._render_mailbox  # noqa: SLF001
+    mailbox = tick_iface.render_mailbox
 
     for command in reversed(commands):
         if getattr(command, "kind", None) != "zoom":

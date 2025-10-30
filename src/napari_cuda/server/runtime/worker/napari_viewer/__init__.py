@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from .bootstrap import CanonicalAxes, ViewerBuilder, apply_canonical_axes, canonical_axes_from_source
-from ..interfaces.viewer_interface import ViewerInterface
+from ..interfaces.viewer_bootstrap_interface import ViewerBootstrapInterface
 
 __all__ = [
     "CanonicalAxes",
     "ViewerBuilder",
-    "ViewerInterface",
+    "ViewerBootstrapInterface",
     "apply_canonical_axes",
     "canonical_axes_from_source",
 ]

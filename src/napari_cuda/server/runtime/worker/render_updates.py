@@ -14,7 +14,10 @@ from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply_render_snapshot
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
-from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
+from napari_cuda.server.runtime.worker.interfaces import (
+    RenderTickInterface,
+    SnapshotInterface,
+)
 from napari_cuda.server.runtime.worker.snapshots.viewport import apply_viewport_state_snapshot
 
 if TYPE_CHECKING:
@@ -202,13 +205,15 @@ def consume_render_snapshot(worker: "EGLRendererWorker", state: RenderLedgerSnap
     """Queue a complete scene state snapshot for the next frame."""
 
     normalized = normalize_scene_state(state)
-    worker._render_mailbox.set_scene_state(normalized)  # noqa: SLF001
-    worker._mark_render_tick_needed()  # noqa: SLF001
-    worker._last_interaction_ts = time.perf_counter()  # noqa: SLF001
+    tick_iface = RenderTickInterface(worker)
+    tick_iface.render_mailbox_set_scene_state(normalized)
+    tick_iface.mark_render_tick_needed()
+    tick_iface.update_last_interaction_timestamp()
 
 
 def drain_scene_updates(worker: "EGLRendererWorker") -> None:
-    updates: RenderUpdate = worker._render_mailbox.drain()  # noqa: SLF001
+    tick_iface = RenderTickInterface(worker)
+    updates: RenderUpdate = tick_iface.render_mailbox_drain()
     snapshot_iface = SnapshotInterface(worker)
     state = updates.scene_state
     if state is None:
@@ -223,16 +228,16 @@ def drain_scene_updates(worker: "EGLRendererWorker") -> None:
     snapshot_op_seq = updates.op_seq
     if snapshot_op_seq is None:
         snapshot_op_seq = int(state.op_seq) if state.op_seq is not None else 0
-    if int(snapshot_op_seq) < int(worker.viewport_state.op_seq):
+    if int(snapshot_op_seq) < int(tick_iface.viewport_state.op_seq):
         logger.debug(
             "render snapshot skipped: stale op_seq snapshot=%d latest=%d",
             int(snapshot_op_seq),
-            int(worker.viewport_state.op_seq),
+            int(tick_iface.viewport_state.op_seq),
         )
         return
-    worker.viewport_state.op_seq = int(snapshot_op_seq)
+    tick_iface.viewport_state.op_seq = int(snapshot_op_seq)
 
-    applied_versions = worker._applied_versions  # noqa: SLF001
+    applied_versions = tick_iface.applied_versions
     record_snapshot_versions(applied_versions, state)
     layer_changes = extract_layer_changes(applied_versions, state)
 
@@ -256,59 +261,60 @@ def drain_scene_updates(worker: "EGLRendererWorker") -> None:
         state_for_apply = replace(state, layer_values=None, layer_versions=None)
 
     if updates.plane_state is not None:
-        worker._viewport_state.plane = deepcopy(updates.plane_state)  # noqa: SLF001
-        if worker._viewport_runner is not None:  # noqa: SLF001
-            worker._viewport_runner._plane = worker._viewport_state.plane  # type: ignore[attr-defined]  # noqa: SLF001
+        tick_iface.viewport_state.plane = deepcopy(updates.plane_state)
+        if tick_iface.viewport_runner is not None:
+            tick_iface.viewport_runner._plane = tick_iface.viewport_state.plane  # type: ignore[attr-defined]
     if updates.volume_state is not None:
-        worker._viewport_state.volume = deepcopy(updates.volume_state)  # noqa: SLF001
+        tick_iface.viewport_state.volume = deepcopy(updates.volume_state)
 
-    previous_mode = worker._viewport_state.mode  # noqa: SLF001
-    signature_changed = worker._render_mailbox.update_state_signature(state)  # noqa: SLF001
+    previous_mode = tick_iface.viewport_state.mode
+    signature_changed = tick_iface.render_mailbox_update_signature(state)
     if signature_changed:
         apply_render_snapshot(snapshot_iface, state_for_apply)
 
     if updates.mode is not None:
-        worker._viewport_state.mode = updates.mode  # noqa: SLF001
+        tick_iface.viewport_state.mode = updates.mode
     else:
-        worker._viewport_state.mode = previous_mode  # noqa: SLF001
+        tick_iface.viewport_state.mode = previous_mode
 
-    if worker._viewport_state.mode is RenderMode.VOLUME:  # noqa: SLF001
-        worker._level_policy_suppressed = False  # noqa: SLF001
+    if tick_iface.viewport_state.mode is RenderMode.VOLUME:
+        tick_iface.level_policy_suppressed = False
     elif updates.mode is RenderMode.PLANE or previous_mode is RenderMode.VOLUME:
-        worker._level_policy_suppressed = True  # noqa: SLF001
+        tick_iface.level_policy_suppressed = True
 
-    if signature_changed and worker._viewport_runner is not None:  # noqa: SLF001
-        worker._viewport_runner.ingest_snapshot(state)  # noqa: SLF001
+    if signature_changed and tick_iface.viewport_runner is not None:
+        tick_iface.viewport_runner.ingest_snapshot(state)
 
     drain_res = viewport_updates.drain_render_state(worker, state_for_apply)
 
     if drain_res.z_index is not None:
-        worker._z_index = int(drain_res.z_index)  # noqa: SLF001
+        snapshot_iface.set_z_index(int(drain_res.z_index))
     if drain_res.data_wh is not None:
-        worker._data_wh = (int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))  # noqa: SLF001
+        snapshot_iface.set_data_shape(int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
 
-    if worker._viewport_runner is not None and worker._viewport_state.mode is RenderMode.PLANE:  # noqa: SLF001
-        rect = worker._current_panzoom_rect()  # noqa: SLF001
+    runner = tick_iface.viewport_runner
+    if runner is not None and tick_iface.viewport_state.mode is RenderMode.PLANE:
+        rect = tick_iface.current_panzoom_rect()
         if rect is not None:
-            worker._viewport_runner.update_camera_rect(rect)  # noqa: SLF001
-        if int(worker._current_level_index()) == int(worker._viewport_runner.state.target_level):  # noqa: SLF001
-            worker._viewport_runner.mark_level_applied(worker._current_level_index())  # noqa: SLF001
-    elif worker._viewport_runner is not None and int(worker._current_level_index()) == int(worker._viewport_runner.state.target_level):  # noqa: SLF001
-        worker._viewport_runner.mark_level_applied(worker._current_level_index())  # noqa: SLF001
+            runner.update_camera_rect(rect)
+        if tick_iface.current_level_index() == int(runner.state.target_level):
+            runner.mark_level_applied(tick_iface.current_level_index())
+    elif runner is not None and tick_iface.current_level_index() == int(runner.state.target_level):
+        runner.mark_level_applied(tick_iface.current_level_index())
 
     if (
         drain_res.render_marked
-        and worker._viewport_state.mode is not RenderMode.VOLUME  # noqa: SLF001
-        and not worker._level_policy_suppressed  # noqa: SLF001
+        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
+        and not tick_iface.level_policy_suppressed
     ):
-        worker._evaluate_level_policy()  # noqa: SLF001
+        tick_iface.evaluate_level_policy()
 
-    if worker._level_policy_suppressed:  # noqa: SLF001
-        ledger = worker._ledger  # noqa: SLF001
+    if tick_iface.level_policy_suppressed:
+        ledger = tick_iface.ledger
         assert ledger is not None, "ledger must be attached before rendering"
         op_kind_entry = ledger.get("scene", "main", "op_kind")
         if op_kind_entry is not None and str(op_kind_entry.value) == "dims-update":
-            worker._level_policy_suppressed = False  # noqa: SLF001
+            tick_iface.level_policy_suppressed = False
 
 
 __all__ = [

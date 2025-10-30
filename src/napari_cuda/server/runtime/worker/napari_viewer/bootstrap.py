@@ -21,7 +21,8 @@ from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_leve
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.worker.snapshots import plane as plane_snapshots
 from napari_cuda.server.runtime.viewport import RenderMode
-from ..interfaces.viewer_interface import ViewerInterface
+from ..interfaces import RenderViewportInterface
+from ..interfaces.viewer_bootstrap_interface import ViewerBootstrapInterface
 from .camera_ops import _bootstrap_camera_pose, _configure_camera_for_mode, _frame_volume_camera
 from .visuals import (
     _VisualHandle,
@@ -94,7 +95,7 @@ def apply_canonical_axes(viewer: ViewerModel, meta: CanonicalAxes) -> None:
 class ViewerBuilder:
     """Bootstrap the viewer and VisPy canvas for the render worker."""
 
-    def __init__(self, facade: ViewerInterface) -> None:
+    def __init__(self, facade: ViewerBootstrapInterface) -> None:
         self._facade = facade
 
     def build(
@@ -228,7 +229,8 @@ class ViewerBuilder:
             else:
                 # Bootstrap: request a full-slab ROI for the first slice load
                 self._facade.set_bootstrap_full_roi(True)
-                slice_array = plane_snapshots.load_slice(self._facade.worker, source, selected_level, int(z_index))
+                viewport_iface = RenderViewportInterface(self._facade.worker)
+                slice_array = plane_snapshots.load_slice(viewport_iface, source, selected_level, int(z_index))
                 if self._facade.log_layer_debug:
                     smin = float(np.nanmin(slice_array))
                     smax = float(np.nanmax(slice_array))
@@ -391,7 +393,7 @@ class ViewerBuilder:
 
 
 def _init_viewer_scene(worker: "EGLRendererWorker", source: Optional[ZarrSceneSource]) -> None:
-    facade = ViewerInterface(worker)
+    facade = ViewerBootstrapInterface(worker)
     builder = ViewerBuilder(facade)
     ledger = worker._ledger
     step_hint = ledger_step(ledger)

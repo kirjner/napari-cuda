@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from napari_cuda.server.runtime.worker.interfaces.viewer_interface import ViewerInterface
+from napari_cuda.server.runtime.worker.interfaces.viewer_bootstrap_interface import ViewerBootstrapInterface
 
 
 class DummyWorker:
@@ -43,9 +43,9 @@ class DummyWorker:
         return "volume-visual"
 
 
-def test_viewer_interface_field_updates() -> None:
+def test_viewer_bootstrap_interface_field_updates() -> None:
     worker = DummyWorker()
-    facade = ViewerInterface(worker)
+    facade = ViewerBootstrapInterface(worker)
 
     assert facade.width == 640
     assert facade.height == 480
