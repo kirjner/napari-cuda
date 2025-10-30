@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from napari_cuda.server.runtime.worker.snapshots.plane import apply_slice_level
 from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import ViewportState
@@ -93,7 +94,7 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         return roi
 
     def _fake_apply(
-        _worker: object,
+        snapshot_iface: SnapshotInterface,
         _source: object,
         level: int,
         roi_in: SliceROI,
@@ -104,8 +105,8 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         result_cache["level"] = level
         result_cache["roi"] = roi_in
         result_cache["update_contrast"] = update_contrast
-        worker._data_wh = (roi_in.width, roi_in.height)
-        worker._data_d = None
+        snapshot_iface.set_data_shape(roi_in.width, roi_in.height)
+        snapshot_iface.set_data_depth(None)
         return (roi_in.height, roi_in.width)
 
     monkeypatch.setattr(
@@ -132,7 +133,8 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         dtype="float32",
     )
 
-    apply_slice_level(worker, source=object(), applied=context)
+    snapshot_iface = SnapshotInterface(worker)
+    apply_slice_level(snapshot_iface, source=object(), applied=context)
 
     assert emitted == ["slice-apply"]
     assert result_cache["level"] == 3

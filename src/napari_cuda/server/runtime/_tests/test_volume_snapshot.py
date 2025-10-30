@@ -6,6 +6,7 @@ import pytest
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from napari_cuda.server.runtime.worker.snapshots.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
@@ -59,9 +60,13 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
             self._volume_max_bytes = None
             self._volume_max_voxels = None
             self._hw_limits = SimpleNamespace(volume_max_bytes=None, volume_max_voxels=None)
+            self._napari_layer = None
 
         def _load_volume(self, _source: object, level: int) -> object:
             return ("volume", level)
+
+        def _ensure_volume_visual(self):
+            return SimpleNamespace()
 
     worker = _Worker()
 
@@ -106,8 +111,9 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         dtype="float32",
     )
 
+    snapshot_iface = SnapshotInterface(worker)
     result = apply_volume_level(
-        worker,
+        snapshot_iface,
         source=_Source(),
         applied=context,
         downgraded=True,
@@ -169,7 +175,8 @@ def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch)
         volume_fov=45.0,
     )
 
-    apply_volume_camera_pose(worker, snapshot)
+    snapshot_iface = SnapshotInterface(worker)
+    apply_volume_camera_pose(snapshot_iface, snapshot)
 
     vol_state = viewport_state.volume
     assert vol_state.pose.center == (10.0, 20.0, 30.0)

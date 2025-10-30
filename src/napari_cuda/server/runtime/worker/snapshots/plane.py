@@ -28,6 +28,7 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
 )
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from .viewer_metadata import apply_plane_metadata
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,6 @@ class SliceApplyResult:
     chunk_shape: Optional[Tuple[int, int]]
     width_px: int
     height_px: int
-
-
 def load_slice(
     worker: Any,
     source: Any,
@@ -61,22 +60,23 @@ def load_slice(
 
 
 def aligned_roi_signature(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     level: int,
     roi: Optional[SliceROI] = None,
 ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
     """Align ``roi`` to the chunk grid (if enabled) and return its signature."""
 
+    worker = snapshot_iface.worker
     roi_val = roi or viewport_roi_for_level(worker, source, int(level))
     chunk_shape = chunk_shape_for_level(source, int(level))
     aligned_roi = roi_val
-    if worker._roi_align_chunks and chunk_shape is not None:  # type: ignore[attr-defined]
+    if snapshot_iface.roi_align_chunks and chunk_shape is not None:
         full_h, full_w = plane_wh_for_level(source, int(level))
         aligned_roi = align_roi_to_chunk_grid(
             roi_val,
             chunk_shape,
-            int(worker._roi_pad_chunks),  # type: ignore[attr-defined]
+            int(snapshot_iface.roi_pad_chunks),
             height=full_h,
             width=full_w,
         )
@@ -98,18 +98,18 @@ def dims_signature(snapshot: RenderLedgerSnapshot) -> tuple:
 
 
 def apply_dims_from_snapshot(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     snapshot: RenderLedgerSnapshot,
     *,
     signature: tuple,
 ) -> None:
     """Apply dims metadata from ``snapshot`` back onto the worker viewer."""
 
-    viewer = worker._viewer  # type: ignore[attr-defined]
+    viewer = snapshot_iface.viewer
     if viewer is None:
         return
 
-    worker._last_dims_signature = signature  # type: ignore[attr-defined]
+    snapshot_iface.set_last_dims_signature(signature)
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
@@ -157,7 +157,7 @@ def apply_dims_from_snapshot(
             step_tuple = step_tuple[:ndim]
         dims.current_step = step_tuple
     if snapshot.current_level is not None:
-        worker._set_current_level_index(int(snapshot.current_level))  # type: ignore[attr-defined]
+        snapshot_iface.set_current_level_index(int(snapshot.current_level))
 
     if snapshot.order is not None:
         order_values = tuple(int(v) for v in snapshot.order)
@@ -191,7 +191,9 @@ def apply_dims_from_snapshot(
         )
 
 
-def update_z_index_from_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
+def update_z_index_from_snapshot(
+    snapshot_iface: SnapshotInterface, snapshot: RenderLedgerSnapshot
+) -> None:
     """Update the cached z-index if the snapshot provides axis labels."""
 
     if snapshot.axis_labels is None or snapshot.current_step is None:
@@ -201,18 +203,19 @@ def update_z_index_from_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) ->
         return
     idx = labels.index("z")
     if idx < len(snapshot.current_step):
-        worker._z_index = int(snapshot.current_step[idx])  # type: ignore[attr-defined]
+        snapshot_iface.set_z_index(int(snapshot.current_step[idx]))
 
 
 def apply_slice_snapshot(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     snapshot: RenderLedgerSnapshot,
 ) -> SliceApplyResult:
     """Apply plane metadata, camera pose, and ROI from the snapshot."""
 
-    prev_level = int(worker._current_level_index())  # type: ignore[attr-defined]
-    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
+    worker = snapshot_iface.worker
+    prev_level = int(snapshot_iface.current_level_index())
+    plane_state: PlaneState = snapshot_iface.viewport_state.plane
     snapshot_level = int(snapshot.current_level) if snapshot.current_level is not None else None
     target_level = snapshot_level if snapshot_level is not None else prev_level
     if plane_state.target_ndisplay < 3:
@@ -228,7 +231,7 @@ def apply_slice_snapshot(
         if recorded_step is not None:
             step_hint = tuple(int(v) for v in recorded_step)
 
-    was_volume = worker.viewport_state.mode is RenderMode.VOLUME  # type: ignore[attr-defined]
+    was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     stage_prev_level = target_level if was_volume else prev_level
 
     decision = lod.LevelDecision(
@@ -247,32 +250,31 @@ def apply_slice_snapshot(
     )
 
     if was_volume:
-        worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
-        worker._configure_camera_for_mode()
-        worker._last_dims_signature = None
-        if hasattr(worker, "_last_plane_pose"):
-            worker._last_plane_pose = None  # type: ignore[attr-defined]
+        snapshot_iface.viewport_state.mode = RenderMode.PLANE
+        snapshot_iface.configure_camera_for_mode()
+        snapshot_iface.set_last_dims_signature(None)
+        snapshot_iface.reset_last_plane_pose()
 
     apply_plane_metadata(worker, source, applied_context)
-    worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
-    apply_slice_camera_pose(worker, snapshot)
-    return apply_slice_level(worker, source, applied_context)
+    snapshot_iface.viewport_state.volume.downgraded = False
+    apply_slice_camera_pose(snapshot_iface, snapshot)
+    return apply_slice_level(snapshot_iface, source, applied_context)
 
 
 def apply_slice_camera_pose(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     snapshot: RenderLedgerSnapshot,
 ) -> None:
     """Apply slice camera pose from the snapshot to the active view."""
 
-    view = worker.view
+    view = snapshot_iface.view
     if view is None:
         return
     cam = view.camera
     if not isinstance(cam, PanZoomCamera):
         return
 
-    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
+    plane_state: PlaneState = snapshot_iface.viewport_state.plane
     rect_tuple, center_tuple, zoom_value = assign_pose_from_snapshot(plane_state, snapshot)
     apply_pose_to_camera(
         cam,
@@ -283,14 +285,14 @@ def apply_slice_camera_pose(
 
 
 def apply_slice_level(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     applied: lod.LevelContext,
 ) -> SliceApplyResult:
     """Load the slice for ``applied`` and update worker metadata."""
 
-    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
-    layer = worker._napari_layer  # type: ignore[attr-defined]
+    plane_state: PlaneState = snapshot_iface.viewport_state.plane
+    layer = snapshot_iface.napari_layer
     sy, sx = applied.scale_yx
 
     if layer is not None:
@@ -299,26 +301,26 @@ def apply_slice_level(
         layer.scale = (float(sy), float(sx))
         if hasattr(layer, "_set_view_slice"):
             layer._set_view_slice()  # type: ignore[misc]
-        worker._ensure_plane_visual()  # type: ignore[attr-defined]
+        snapshot_iface.ensure_plane_visual()
 
-    view = worker.view
+    view = snapshot_iface.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
-    roi = viewport_roi_for_level(worker, source, int(applied.level))
+    roi = viewport_roi_for_level(snapshot_iface.worker, source, int(applied.level))
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
-        worker,
+        snapshot_iface,
         source,
         int(applied.level),
         roi,
     )
-    if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
-        worker._emit_current_camera_pose("slice-apply")
+    if snapshot_iface.viewport_state.mode is not RenderMode.VOLUME:
+        snapshot_iface.emit_current_camera_pose("slice-apply")
     height_px, width_px = apply_slice_roi(
-        worker,
+        snapshot_iface,
         source,
         int(applied.level),
         aligned_roi,
-        update_contrast=not worker._sticky_contrast,
+        update_contrast=not snapshot_iface.sticky_contrast,
         step=applied.step,
     )
 
@@ -331,15 +333,17 @@ def apply_slice_level(
         zoom=pose.zoom,
     )
 
-    worker._layer_logger.log(
-        enabled=worker._log_layer_debug,
-        mode="slice",
-        level=applied.level,
-        z_index=worker._z_index,
-        shape=(int(height_px), int(width_px)),
-        contrast=applied.contrast,
-        downgraded=worker.viewport_state.volume.downgraded,  # type: ignore[attr-defined]
-    )
+    layer_logger = snapshot_iface.layer_logger
+    if layer_logger is not None:
+        layer_logger.log(
+            enabled=snapshot_iface.log_layer_debug,
+            mode="slice",
+            level=applied.level,
+            z_index=snapshot_iface.z_index(),
+            shape=(int(height_px), int(width_px)),
+            contrast=applied.contrast,
+            downgraded=snapshot_iface.viewport_state.volume.downgraded,
+        )
 
     mark_slice_applied(
         plane_state,
@@ -349,7 +353,7 @@ def apply_slice_level(
         roi_signature=roi_signature,
     )
 
-    runner = worker._viewport_runner
+    runner = snapshot_iface.viewport_runner
     if runner is not None:
         applied_step = (
             tuple(int(v) for v in applied.step) if applied.step is not None else None
@@ -369,10 +373,12 @@ def apply_slice_level(
             )
         )
 
-    worker._last_slice_signature = (
-        int(applied.level),
-        tuple(int(v) for v in applied.step),
-        roi_signature,
+    snapshot_iface.set_last_slice_signature(
+        (
+            int(applied.level),
+            tuple(int(v) for v in applied.step),
+            roi_signature,
+        )
     )
 
     return SliceApplyResult(
@@ -386,7 +392,7 @@ def apply_slice_level(
 
 
 def apply_slice_roi(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     level: int,
     roi: SliceROI,
@@ -396,10 +402,12 @@ def apply_slice_roi(
 ) -> Tuple[int, int]:
     """Load and apply a slice for the given ROI."""
 
-    aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(worker, source, int(level), roi)
+    aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
+        snapshot_iface, source, int(level), roi
+    )
 
     step_source: Optional[Sequence[int]] = step
-    plane_state: PlaneState = worker.viewport_state.plane  # type: ignore[attr-defined]
+    plane_state: PlaneState = snapshot_iface.viewport_state.plane
     if step_source is None:
         if plane_state.target_step is not None:
             step_source = plane_state.target_step
@@ -407,12 +415,12 @@ def apply_slice_roi(
             step_source = plane_state.applied_step
     step_tuple = tuple(int(v) for v in step_source) if step_source is not None else None
 
-    z_idx = int(worker._z_index or 0)
+    z_idx = int(snapshot_iface.z_index() or 0)
     slab = source.slice(int(level), z_idx, compute=True, roi=aligned_roi)
 
-    layer = worker._napari_layer
+    layer = snapshot_iface.napari_layer
     if layer is not None:
-        view = worker.view
+        view = snapshot_iface.view
         assert view is not None, "VisPy view required for slice apply"
         apply_slice_layer_data(
             layer=layer,
@@ -425,12 +433,12 @@ def apply_slice_roi(
 
     height_px = int(slab.shape[0])
     width_px = int(slab.shape[1])
-    worker._data_wh = (int(width_px), int(height_px))
-    worker._data_d = None
+    snapshot_iface.set_data_shape(width_px, height_px)
+    snapshot_iface.set_data_depth(None)
 
-    runner = worker._viewport_runner
+    runner = snapshot_iface.viewport_runner
     if runner is not None:
-        if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
+        if snapshot_iface.viewport_state.mode is not RenderMode.VOLUME:
             chunk_tuple = (
                 (int(chunk_shape[0]), int(chunk_shape[1]))
                 if chunk_shape is not None
@@ -446,14 +454,16 @@ def apply_slice_roi(
                 )
             )
             runner.mark_level_applied(int(level))
-            rect = worker._current_panzoom_rect()
+            rect = snapshot_iface.current_panzoom_rect()
             if rect is not None:
                 runner.update_camera_rect(rect)
 
-    worker._last_slice_signature = (
-        int(level),
-        step_tuple,
-        roi_signature,
+    snapshot_iface.set_last_slice_signature(
+        (
+            int(level),
+            step_tuple,
+            roi_signature,
+        )
     )
     if logger.isEnabledFor(logging.INFO):
         logger.info(
@@ -462,7 +472,7 @@ def apply_slice_roi(
             step_tuple,
             roi_signature,
         )
-    worker._mark_render_tick_needed()
+    snapshot_iface.mark_render_tick_needed()
     return height_px, width_px
 
 

@@ -8,6 +8,7 @@ from typing import Any, Optional, Tuple
 from vispy.scene.cameras import TurntableCamera
 
 import napari_cuda.server.data.lod as lod
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from napari_cuda.server.runtime.viewport.layers import apply_volume_layer_data
 from napari_cuda.server.runtime.viewport.volume_ops import (
     assign_pose_from_snapshot,
@@ -31,19 +32,19 @@ class VolumeApplyResult:
 
 
 def apply_volume_camera_pose(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     snapshot: RenderLedgerSnapshot,
 ) -> None:
     """Apply volume camera pose from the snapshot to the active view."""
 
-    view = worker.view
+    view = snapshot_iface.view
     if view is None:
         return
     cam = view.camera
     if not isinstance(cam, TurntableCamera):
         return
 
-    volume_state = worker.viewport_state.volume  # type: ignore[attr-defined]
+    volume_state = snapshot_iface.viewport_state.volume
     center, angles, distance, fov = assign_pose_from_snapshot(volume_state, snapshot)
     apply_pose_to_camera(
         cam,
@@ -55,7 +56,7 @@ def apply_volume_camera_pose(
 
 
 def apply_volume_level(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     applied: lod.LevelContext,
     *,
@@ -63,24 +64,24 @@ def apply_volume_level(
 ) -> VolumeApplyResult:
     """Load the volume level for ``applied`` and update worker metadata."""
 
+    worker = snapshot_iface.worker
     scale_vals = list(source.level_scale(applied.level)) if hasattr(source, "level_scale") else []
     scales = [float(s) for s in scale_vals[-3:]] if scale_vals else []
     while len(scales) < 3:
         scales.insert(0, 1.0)
     scale_tuple = (float(scales[-3]), float(scales[-2]), float(scales[-1]))
-    worker._volume_scale = scale_tuple
+    snapshot_iface.set_volume_scale(scale_tuple)
 
     volume = level_policy.load_volume(worker, source, applied.level)
-    cam = worker.view.camera if getattr(worker, "view", None) is not None else None
     data_wh, data_d = apply_volume_layer_data(
-        layer=getattr(worker, "_napari_layer", None),
+        layer=snapshot_iface.napari_layer,
         volume=volume,
         contrast=applied.contrast,
         scale=scale_tuple,
-        ensure_volume_visual=getattr(worker, "_ensure_volume_visual", None),
+        ensure_volume_visual=snapshot_iface.ensure_volume_visual,
     )
-    worker._data_wh = data_wh
-    worker._data_d = data_d
+    snapshot_iface.set_data_shape(int(data_wh[0]), int(data_wh[1]))
+    snapshot_iface.set_data_depth(data_d)
 
     shape = (
         (int(data_d), int(data_wh[1]), int(data_wh[0]))
@@ -88,17 +89,19 @@ def apply_volume_level(
         else (int(data_wh[1]), int(data_wh[0]))
     )
 
-    worker._layer_logger.log(
-        enabled=worker._log_layer_debug,
-        mode="volume",
-        level=applied.level,
-        z_index=None,
-        shape=shape,
-        contrast=applied.contrast,
-        downgraded=downgraded,
-    )
+    layer_logger = snapshot_iface.layer_logger
+    if layer_logger is not None:
+        layer_logger.log(
+            enabled=snapshot_iface.log_layer_debug,
+            mode="volume",
+            level=applied.level,
+            z_index=None,
+            shape=shape,
+            contrast=applied.contrast,
+            downgraded=downgraded,
+        )
 
-    volume_state = worker.viewport_state.volume  # type: ignore[attr-defined]
+    volume_state = snapshot_iface.viewport_state.volume
     update_level(volume_state, int(applied.level), downgraded=downgraded)
     update_scale(volume_state, scale_tuple)
 

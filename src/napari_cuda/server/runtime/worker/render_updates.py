@@ -209,10 +209,11 @@ def consume_render_snapshot(worker: "EGLRendererWorker", state: RenderLedgerSnap
 
 def drain_scene_updates(worker: "EGLRendererWorker") -> None:
     updates: RenderUpdate = worker._render_mailbox.drain()  # noqa: SLF001
+    snapshot_iface = SnapshotInterface(worker)
     state = updates.scene_state
     if state is None:
         apply_viewport_state_snapshot(
-            SnapshotInterface(worker),
+            snapshot_iface,
             mode=updates.mode,
             plane_state=updates.plane_state,
             volume_state=updates.volume_state,
@@ -264,7 +265,7 @@ def drain_scene_updates(worker: "EGLRendererWorker") -> None:
     previous_mode = worker._viewport_state.mode  # noqa: SLF001
     signature_changed = worker._render_mailbox.update_state_signature(state)  # noqa: SLF001
     if signature_changed:
-        apply_render_snapshot(worker, state_for_apply)
+        apply_render_snapshot(snapshot_iface, state_for_apply)
 
     if updates.mode is not None:
         worker._viewport_state.mode = updates.mode  # noqa: SLF001

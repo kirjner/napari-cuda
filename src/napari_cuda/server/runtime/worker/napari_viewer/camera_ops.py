@@ -18,6 +18,7 @@ from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.core import ledger_step, reset_worker_camera
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from napari_cuda.server.runtime.worker import level_policy
 from napari_cuda.server.runtime.worker.snapshots import (
     apply_plane_metadata,
@@ -174,8 +175,9 @@ def _bootstrap_camera_pose(
             last_step=prev_step,
         )
         apply_volume_metadata(worker, source, applied_context)
+        snapshot_iface = SnapshotInterface(worker)
         apply_volume_level(
-            worker,
+            snapshot_iface,
             source,
             applied_context,
             downgraded=False,

@@ -17,6 +17,7 @@ from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker import level_policy
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from .plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,
@@ -51,7 +52,7 @@ def _suspend_fit_callbacks(viewer: Any):
         order_event.connect(viewer.fit_to_view)
 
 
-def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
+def apply_render_snapshot(snapshot_iface: SnapshotInterface, snapshot: RenderLedgerSnapshot) -> None:
     """Apply the snapshot atomically, suppressing napari auto-fit during dims.
 
     This ensures that napari's fit_to_view callback does not run against a
@@ -59,29 +60,30 @@ def apply_render_snapshot(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
     the toggle back to 2D or 3D. Camera and level application are handled by
     the worker helpers invoked from within the dims application.
     """
-    viewer = worker._viewer
+    worker = snapshot_iface.worker
+    viewer = snapshot_iface.viewer
     assert viewer is not None, "RenderTxn requires an active viewer"
 
-    snapshot_ops = _resolve_snapshot_ops(worker, snapshot)
+    snapshot_ops = _resolve_snapshot_ops(snapshot_iface, snapshot)
     ops_signature = snapshot_ops["signature"]
-    if ops_signature == getattr(worker, "_last_snapshot_signature", None):
+    if ops_signature == snapshot_iface.last_snapshot_signature():
         return
 
     signature = dims_signature(snapshot)
-    dims_changed = signature != getattr(worker, "_last_dims_signature", None)
+    dims_changed = signature != snapshot_iface.last_dims_signature()
 
     if dims_changed:
         with _suspend_fit_callbacks(viewer):
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.begin: suppress fit; applying dims")
-            apply_dims_from_snapshot(worker, snapshot, signature=signature)
-            _apply_snapshot_ops(worker, snapshot, snapshot_ops)
+            apply_dims_from_snapshot(snapshot_iface, snapshot, signature=signature)
+            _apply_snapshot_ops(snapshot_iface, snapshot, snapshot_ops)
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
     else:
-        _apply_snapshot_ops(worker, snapshot, snapshot_ops)
+        _apply_snapshot_ops(snapshot_iface, snapshot, snapshot_ops)
 
-    worker._last_snapshot_signature = ops_signature
+    snapshot_iface.set_last_snapshot_signature(ops_signature)
 
 
 __all__ = [
@@ -95,15 +97,16 @@ __all__ = [
 
 
 def _resolve_snapshot_ops(
-    worker: Any, snapshot: RenderLedgerSnapshot
+    snapshot_iface: SnapshotInterface, snapshot: RenderLedgerSnapshot
 ) -> Dict[str, Any]:
     """Compute the metadata and slice ops before mutating worker state."""
 
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
     target_volume = nd >= 3
 
-    source = worker._ensure_scene_source()
-    prev_level = int(worker._current_level_index())  # type: ignore[attr-defined]
+    worker = snapshot_iface.worker
+    source = snapshot_iface.ensure_scene_source()
+    prev_level = snapshot_iface.current_level_index()
     target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
     level_changed = target_level != prev_level
 
@@ -113,7 +116,7 @@ def _resolve_snapshot_ops(
         else None
     )
 
-    was_volume = worker.viewport_state.mode is RenderMode.VOLUME  # type: ignore[attr-defined]
+    was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     ledger_step = (
         tuple(int(v) for v in snapshot.current_step)
         if snapshot.current_step is not None
@@ -215,13 +218,13 @@ def _resolve_snapshot_ops(
     level_int = int(applied_context.level)
     roi_current = viewport_roi_for_level(worker, source, level_int)
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
-        worker,
+        snapshot_iface,
         source,
         level_int,
         roi_current,
     )
     signature_token = (level_int, step_tuple, roi_signature)
-    last_slice_signature = getattr(worker, "_last_slice_signature", None)
+    last_slice_signature = snapshot_iface.last_slice_signature()
     level_changed = target_level != prev_level
     skip_slice = not level_changed and last_slice_signature == signature_token
     snapshot_signature = (
@@ -256,12 +259,13 @@ def _resolve_snapshot_ops(
 
 
 def _apply_snapshot_ops(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     snapshot: RenderLedgerSnapshot,
     ops: Dict[str, Any],
 ) -> None:
     """Apply the precomputed snapshot plan."""
 
+    worker = snapshot_iface.worker
     source = ops["source"]
 
     if ops["target_volume"]:
@@ -269,61 +273,61 @@ def _apply_snapshot_ops(
         assert volume_ops is not None
         entering_volume = volume_ops["entering_volume"]
         if entering_volume:
-            worker.viewport_state.mode = RenderMode.VOLUME  # type: ignore[attr-defined]
-            worker._last_dims_signature = None
+            snapshot_iface.viewport_state.mode = RenderMode.VOLUME
+            snapshot_iface.set_last_dims_signature(None)
 
-        runner = worker._viewport_runner
+        runner = snapshot_iface.viewport_runner
         if runner is not None and entering_volume:
             runner.reset_for_volume()
 
-        worker.viewport_state.volume.downgraded = bool(volume_ops["downgraded"])  # type: ignore[attr-defined]
+        snapshot_iface.viewport_state.volume.downgraded = bool(volume_ops["downgraded"])
         if volume_ops["load_needed"]:
             applied_context = volume_ops["applied_context"]
             assert applied_context is not None
             apply_volume_metadata(worker, source, applied_context)
             apply_volume_level(
-                worker,
+                snapshot_iface,
                 source,
                 applied_context,
                 downgraded=bool(volume_ops["downgraded"]),
             )
             if runner is not None:
                 runner.mark_level_applied(int(applied_context.level))
-                if worker.viewport_state.mode is RenderMode.PLANE:  # type: ignore[attr-defined]
-                    rect = worker._current_panzoom_rect()
+                if snapshot_iface.viewport_state.mode is RenderMode.PLANE:
+                    rect = snapshot_iface.current_panzoom_rect()
                     if rect is not None:
                         runner.update_camera_rect(rect)
-            worker._configure_camera_for_mode()
+            snapshot_iface.configure_camera_for_mode()
         elif entering_volume:
-            worker._configure_camera_for_mode()
+            snapshot_iface.configure_camera_for_mode()
 
-        apply_volume_camera_pose(worker, snapshot)
+        apply_volume_camera_pose(snapshot_iface, snapshot)
         return
 
     plane_ops = ops["plane"]
     assert plane_ops is not None
 
     if plane_ops["was_volume"]:
-        worker.viewport_state.mode = RenderMode.PLANE  # type: ignore[attr-defined]
-        worker._configure_camera_for_mode()
-        worker._last_dims_signature = None
+        snapshot_iface.viewport_state.mode = RenderMode.PLANE
+        snapshot_iface.configure_camera_for_mode()
+        snapshot_iface.set_last_dims_signature(None)
 
     apply_plane_metadata(worker, source, plane_ops["applied_context"])
-    worker.viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
-    apply_slice_camera_pose(worker, snapshot)
+    snapshot_iface.viewport_state.volume.downgraded = False
+    apply_slice_camera_pose(snapshot_iface, snapshot)
 
     if plane_ops["skip_slice"]:
-        runner = worker._viewport_runner
+        runner = snapshot_iface.viewport_runner
         if runner is not None:
             from napari_cuda.server.runtime.viewport.runner import SliceTask
 
             slice_task = SliceTask(**plane_ops["slice_payload"])
             runner.mark_level_applied(slice_task.level)
             runner.mark_slice_applied(slice_task)
-        update_z_index_from_snapshot(worker, snapshot)
+        update_z_index_from_snapshot(snapshot_iface, snapshot)
         return
 
-    apply_slice_level(worker, source, plane_ops["applied_context"])
-    update_z_index_from_snapshot(worker, snapshot)
+    apply_slice_level(snapshot_iface, source, plane_ops["applied_context"])
+    update_z_index_from_snapshot(snapshot_iface, snapshot)
     if TYPE_CHECKING:
         from napari_cuda.server.runtime.viewport.runner import SliceTask

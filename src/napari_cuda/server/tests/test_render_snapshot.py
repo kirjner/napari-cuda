@@ -7,6 +7,7 @@ import pytest
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.worker.snapshots import apply as snapshot_mod
 from napari_cuda.server.runtime.worker.snapshots import plane as plane_mod
+from napari_cuda.server.runtime.worker.interfaces import SnapshotInterface
 from napari_cuda.server.runtime.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
@@ -173,7 +174,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
             step=last_step,
         )
 
-    def _fake_volume(_worker, _source, context, *, downgraded: bool):
+    def _fake_volume(_snapshot_iface, _source, context, *, downgraded: bool):
         calls["volume"] = context.level
         call_order.append("volume")
         calls["downgraded"] = downgraded
@@ -192,8 +193,9 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     worker._configure_camera_for_mode = _wrapped_configure  # type: ignore[assignment]
 
-    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
-    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
+    snapshot_iface = SnapshotInterface(worker)
+    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
+    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
@@ -227,8 +229,9 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
-    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
-    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
+    snapshot_iface = SnapshotInterface(worker)
+    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
+    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 0
@@ -251,7 +254,7 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
             step=last_step,
         )
 
-    def _fake_slice(_worker, _source, context):
+    def _fake_slice(_snapshot_iface, _source, context):
         calls["slice"] = (context.level, context.step)
 
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
@@ -259,8 +262,9 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
     monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
-    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
-    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
+    snapshot_iface = SnapshotInterface(worker)
+    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
+    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.PLANE
     assert worker.configure_calls == 1
@@ -284,7 +288,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
             step=last_step,
         )
 
-    def _fake_volume(_worker, _source, context, *, downgraded: bool):
+    def _fake_volume(_snapshot_iface, _source, context, *, downgraded: bool):
         calls.setdefault("volume", []).append((context.level, downgraded))
 
     monkeypatch.setattr(snapshot_mod.lod, "build_level_context", _fake_build)
@@ -292,8 +296,9 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
     monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
-    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
-    snapshot_mod._apply_snapshot_ops(worker, snapshot, ops)
+    snapshot_iface = SnapshotInterface(worker)
+    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
+    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
@@ -307,21 +312,22 @@ def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch:
 
     original_apply_dims = plane_mod.apply_dims_from_snapshot
 
-    def _track_apply_dims(worker_obj, snapshot_obj, *, signature):
-        worker_obj._apply_dims_calls += 1
-        original_apply_dims(worker_obj, snapshot_obj, signature=signature)
+    def _track_apply_dims(snapshot_iface_obj, snapshot_obj, *, signature):
+        snapshot_iface_obj.worker._apply_dims_calls += 1
+        original_apply_dims(snapshot_iface_obj, snapshot_obj, signature=signature)
 
     monkeypatch.setattr(plane_mod, "apply_dims_from_snapshot", _track_apply_dims)
     monkeypatch.setattr(snapshot_mod, "viewport_roi_for_level", lambda *_args, **_kwargs: SliceROI(0, 10, 0, 10))
 
-    ops = snapshot_mod._resolve_snapshot_ops(worker, snapshot)
-    worker._last_snapshot_signature = ops["signature"]
-    worker._last_dims_signature = plane_mod.dims_signature(snapshot)
+    snapshot_iface = SnapshotInterface(worker)
+    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
+    snapshot_iface.set_last_snapshot_signature(ops["signature"])
+    snapshot_iface.set_last_dims_signature(plane_mod.dims_signature(snapshot))
 
     def _fail_apply(*_args, **_kwargs) -> None:
         raise AssertionError("apply_snapshot_ops should not be invoked when signature matches")
 
     monkeypatch.setattr(snapshot_mod, "_apply_snapshot_ops", _fail_apply)
 
-    snapshot_mod.apply_render_snapshot(worker, snapshot)
+    snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
     assert worker._apply_dims_calls == 0
