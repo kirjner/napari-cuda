@@ -8,13 +8,18 @@ and zoom hints.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Tuple, TYPE_CHECKING
 import logging
 
 from vispy import scene  # type: ignore
 
 from napari_cuda.server.runtime.camera import ops as camops
 from napari_cuda.server.scene import CameraDeltaCommand
+
+if TYPE_CHECKING:
+    from napari_cuda.server.runtime.worker.interfaces.render_tick_interface import (
+        RenderTickInterface,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -139,39 +144,35 @@ def apply_camera_deltas(
     )
 
 
-def process_camera_deltas(worker, commands: Sequence[CameraDeltaCommand]) -> CameraDeltaOutcome:
-    """Process camera commands on the worker, updating its state as needed."""
+def process_camera_deltas(
+    tick_iface: "RenderTickInterface",
+    commands: Sequence[CameraDeltaCommand],
+) -> CameraDeltaOutcome:
+    """Process camera commands using the worker façade."""
 
-    logger.debug("worker processing %d camera command(s)", len(commands))
+    logger.debug("processing %d camera command(s)", len(commands))
 
-    view = worker.view
+    view = tick_iface.view
     assert view is not None, "process_camera_deltas requires an active VisPy view"
     camera = view.camera
 
-    canvas = worker.canvas
-    if canvas is not None:
-        canvas_wh = (int(canvas.size[0]), int(canvas.size[1]))
-    else:
-        canvas_wh = (worker.width, worker.height)
-
+    canvas_wh = tick_iface.camera_canvas_size()
+    zoom_dbg, pan_dbg, orbit_dbg, reset_dbg = tick_iface.camera_debug_flags()
     debug_flags = CameraDebugFlags(
-        zoom=getattr(worker, "_debug_zoom_drift", False),
-        pan=getattr(worker, "_debug_pan", False),
-        orbit=getattr(worker, "_debug_orbit", False),
-        reset=getattr(worker, "_debug_reset", False),
+        zoom=zoom_dbg,
+        pan=pan_dbg,
+        orbit=orbit_dbg,
+        reset=reset_dbg,
     )
-
-    def _mark_render() -> None:
-        worker._mark_render_tick_needed()  # noqa: SLF001
 
     return apply_camera_deltas(
         commands,
         camera=camera,
         view=view,
         canvas_size=canvas_wh,
-        reset_camera=worker._apply_camera_reset,
+        reset_camera=tick_iface.reset_camera_callback(),
         debug_flags=debug_flags,
-        mark_render_tick_needed=_mark_render,
+        mark_render_tick_needed=tick_iface.mark_render_tick_needed,
         trigger_policy_refresh=None,
     )
 

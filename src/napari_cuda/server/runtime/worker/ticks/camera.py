@@ -37,7 +37,7 @@ def _apply_commands(
     reset_policy_suppression: bool,
 ) -> CameraCommandResult:
     tick_iface = RenderTickInterface(worker)
-    outcome = _process_camera_deltas(worker, commands)
+    outcome = _process_camera_deltas(tick_iface, commands)
 
     last_seq: Optional[int]
     try:

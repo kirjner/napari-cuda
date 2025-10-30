@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING, Callable, Tuple
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -83,6 +83,29 @@ class RenderTickInterface:
     def camera_queue_pop_all(self):
         queue = getattr(self.worker, "_camera_queue", None)  # type: ignore[attr-defined]
         return queue.pop_all() if queue is not None else []
+
+    def camera_canvas_size(self) -> Tuple[int, int]:
+        canvas = getattr(self.worker, "canvas", None)
+        if canvas is not None and getattr(canvas, "size", None) is not None:
+            width, height = canvas.size
+            return int(width), int(height)
+        return (
+            int(getattr(self.worker, "width", 0)),
+            int(getattr(self.worker, "height", 0)),
+        )
+
+    def camera_debug_flags(self) -> Tuple[bool, bool, bool, bool]:
+        return (
+            bool(getattr(self.worker, "_debug_zoom_drift", False)),  # type: ignore[attr-defined]
+            bool(getattr(self.worker, "_debug_pan", False)),  # type: ignore[attr-defined]
+            bool(getattr(self.worker, "_debug_orbit", False)),  # type: ignore[attr-defined]
+            bool(getattr(self.worker, "_debug_reset", False)),  # type: ignore[attr-defined]
+        )
+
+    def reset_camera_callback(self) -> Callable[[Any], None]:
+        reset = getattr(self.worker, "_apply_camera_reset", None)  # type: ignore[attr-defined]
+        assert reset is not None, "_apply_camera_reset must be initialised"
+        return reset
 
     # Timing / bookkeeping -----------------------------------------------
     def mark_render_tick_needed(self) -> None:

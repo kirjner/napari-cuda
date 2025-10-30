@@ -50,6 +50,7 @@ class _StubWorker:
         self._viewport_state.plane.applied_level = 0
         self._viewport_state.plane.target_level = 0
         self._level_policy_suppressed = False
+        self.viewport_state = self._viewport_state
 
     def _current_panzoom_rect(self):
         return None
@@ -88,14 +89,15 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     worker._emit_pose_from_camera = EGLRendererWorker._emit_pose_from_camera.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
     worker._pose_from_camera = EGLRendererWorker._pose_from_camera.__get__(worker, _StubWorker)  # type: ignore[attr-defined]
 
-    def _fake_process(self, commands):
-        self._mark_render_tick_needed()
-        self._user_interaction_seen = True
+    def _fake_process(tick_iface, commands):
+        worker = tick_iface.worker
+        tick_iface.mark_render_tick_needed()
+        worker._user_interaction_seen = True
         for command in commands:
             if getattr(command, "kind", None) == "zoom" and command.factor not in (None, 0):
                 ratio = 1.0 / float(command.factor)
-                self._render_mailbox.record_zoom_hint(ratio)
-                self._zoom_hints.append(ratio)
+                tick_iface.render_mailbox.record_zoom_hint(ratio)
+                worker._zoom_hints.append(ratio)
         return CameraDeltaOutcome(
             camera_changed=True,
             policy_triggered=True,
