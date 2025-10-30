@@ -19,7 +19,6 @@ from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.runtime.worker import level_policy
 from napari_cuda.server.runtime.worker.snapshots import plane as plane_snapshots
 from napari_cuda.server.runtime.viewport import RenderMode
 
@@ -163,7 +162,15 @@ class ViewerBuilder:
             self._bridge._z_index = int(z_index)
 
             if self._bridge.viewport_state.mode is RenderMode.VOLUME:
-                data = level_policy.load_volume(self._bridge, source, selected_level)
+                from napari_cuda.server.runtime.worker import (
+                    level_policy as worker_level_policy,
+                )
+
+                data = worker_level_policy.load_volume(
+                    self._bridge,
+                    source,
+                    selected_level,
+                )
                 level_scale = source.level_scale(selected_level)
                 scale_vals = [float(s) for s in level_scale]
                 while len(scale_vals) < 3:

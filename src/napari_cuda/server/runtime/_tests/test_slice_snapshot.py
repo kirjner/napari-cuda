@@ -64,7 +64,6 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
     class _Worker:
         def __init__(self) -> None:
             self.viewport_state = viewport_state
-            self.use_volume = False
             self.view = view
             self._emit_current_camera_pose = lambda reason: emitted.append(reason)
             self._sticky_contrast = False
@@ -76,7 +75,6 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
             self._viewport_runner = None
             self._data_wh = (0, 0)
             self._data_d = None
-            self._level_downgraded = False
             self._napari_layer = None
 
     worker = _Worker()

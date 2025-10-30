@@ -89,7 +89,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 3. Propagate state snapshots through render mailboxes and resume tokens; update tests in `src/napari_cuda/server/tests/test_state_channel_ingest.py`, resume helpers, and history store. ✅ Completed.
 
 ### Stage D — Shim removal
-1. Remove temporary properties (`worker.use_volume`, `_active_ms_level`) once all call sites consume the new state.
+1. Remove temporary properties (`worker.use_volume`, `_active_ms_level`) once all call sites consume the new state. ✅ Harnesses now mutate `ViewportState` directly.
 2. Delete legacy ROI/logging flags that are redundant (`_level_downgraded`, `_roi_cache` duplicates) after verifying new plane loader handles them. ✅ Completed.
 3. Run full test suite (`uv run pytest src/napari_cuda/server -q`), `make pre`, and `tox -e mypy`.
 4. Drop the `preserve_view_on_switch` policy flag; cached `PlaneState.pose` now drives every restore.

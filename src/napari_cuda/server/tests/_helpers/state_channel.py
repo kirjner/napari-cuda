@@ -264,9 +264,10 @@ class CaptureWorker:
         self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
         self.viewport_state = ViewportState(mode=RenderMode.PLANE)
-        self.viewport_state.plane.applied_level = 0
-        self.viewport_state.plane.target_level = 0
-        self.viewport_state.volume.level = 0
+        initial_level = 0
+        self.viewport_state.plane.applied_level = initial_level
+        self.viewport_state.plane.target_level = initial_level
+        self.viewport_state.volume.level = initial_level
         self.viewport_state.volume.scale = (1.0, 1.0, 1.0)
         self.viewport_state.plane.update_pose(
             rect=(0.0, 0.0, float(640), float(480)),
@@ -290,7 +291,6 @@ class CaptureWorker:
         self._zarr_shape = (480, 640)
         self._zarr_dtype = "float32"
         self.volume_dtype = "float32"
-        self._active_ms_level = 0
         self._last_step = (0, 0)
         self._roi_edge_threshold = 0
         self._roi_align_chunks = False
@@ -300,7 +300,6 @@ class CaptureWorker:
         self._sticky_contrast = False
         self._layer_logger = LayerAssignmentLogger(logging.getLogger(__name__))
         self._log_layer_debug = False
-        self._level_downgraded = False
         self._render_tick_required = False
         self._emit_current_camera_pose = lambda *_args, **_kwargs: None
         self._hw_limits = SimpleNamespace(volume_max_bytes=None, volume_max_voxels=None)
@@ -311,14 +310,6 @@ class CaptureWorker:
         self._pose_seq = 0
         self._max_camera_command_seq = 0
         self._last_dims_signature = None
-        from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
-
-        self._canonical_axes = canonical_axes_from_source(
-            axes=("y", "x"),
-            shape=(self._zarr_shape[0], self._zarr_shape[1]),
-            step=(0, 0),
-            use_volume=False,
-        )
         self._axis_labels = ("z", "y", "x")
         self._axis_order = (0, 1, 2)
         self._displayed = (1, 2)
@@ -384,14 +375,6 @@ class CaptureWorker:
 
     # Viewport state bridge ---------------------------------------------------
     @property
-    def use_volume(self) -> bool:
-        return self.viewport_state.mode is RenderMode.VOLUME
-
-    @use_volume.setter
-    def use_volume(self, value: bool) -> None:
-        self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
-
-    @property
     def _volume_scale(self) -> tuple[float, float, float]:
         scale = self.viewport_state.volume.scale
         if scale is None:
@@ -401,25 +384,6 @@ class CaptureWorker:
     @_volume_scale.setter
     def _volume_scale(self, value: tuple[float, float, float]) -> None:
         self.viewport_state.volume.scale = tuple(float(component) for component in value)
-
-    @property
-    def _level_downgraded(self) -> bool:
-        return bool(self.viewport_state.volume.downgraded)
-
-    @_level_downgraded.setter
-    def _level_downgraded(self, value: bool) -> None:
-        self.viewport_state.volume.downgraded = bool(value)
-
-    @property
-    def _active_ms_level(self) -> int:
-        return int(self.viewport_state.plane.applied_level)
-
-    @_active_ms_level.setter
-    def _active_ms_level(self, value: int) -> None:
-        level = int(value)
-        self.viewport_state.plane.applied_level = level
-        self.viewport_state.plane.target_level = level
-        self.viewport_state.volume.level = level
 
     def _current_level_index(self) -> int:
         if self.viewport_state.mode is RenderMode.VOLUME:
@@ -484,7 +448,10 @@ class CaptureWorker:
             dims.current_step = step_tuple  # type: ignore[assignment]
 
         if snapshot.current_level is not None:
-            self._active_ms_level = int(snapshot.current_level)
+            level = int(snapshot.current_level)
+            self.viewport_state.plane.applied_level = level
+            self.viewport_state.plane.target_level = level
+            self.viewport_state.volume.level = level
 
         self._update_z_index_from_snapshot(snapshot)
 
@@ -505,9 +472,11 @@ class CaptureWorker:
         return self._scene_source
 
     def _configure_camera_for_mode(self) -> None:
-        self.view = SimpleNamespace(
-            camera=_HarnessTurntableCamera() if self.use_volume else _HarnessPanZoomCamera()
-        )
+        if self.viewport_state.mode is RenderMode.VOLUME:
+            camera = _HarnessTurntableCamera()
+        else:
+            camera = _HarnessPanZoomCamera()
+        self.view = SimpleNamespace(camera=camera)
 
     def _register_plane_visual(self, node: Any) -> None:
         self._plane_visual_node = node
@@ -560,7 +529,10 @@ class CaptureWorker:
             self._mark_render_tick_needed()
 
     def _update_level_metadata(self, descriptor: SimpleNamespace, applied: Any) -> None:
-        self._active_ms_level = int(applied.level)
+        level = int(applied.level)
+        self.viewport_state.plane.applied_level = level
+        self.viewport_state.plane.target_level = level
+        self.viewport_state.volume.level = level
         self._z_index = int(applied.z_index) if applied.z_index is not None else 0
         self._zarr_level = getattr(descriptor, "path", None)
         self._zarr_shape = tuple(int(v) for v in getattr(descriptor, "shape", ()))

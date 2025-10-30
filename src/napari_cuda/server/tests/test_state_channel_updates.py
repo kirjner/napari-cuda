@@ -28,7 +28,6 @@ from napari_cuda.server.control.resumable_history_store import (
 from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
-from napari_cuda.server.rendering.viewer_builder import canonical_axes_from_source
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.scene import (
@@ -69,23 +68,17 @@ class _CaptureWorker:
         self._zarr_shape = (480, 640)
         self._zarr_dtype = "float32"
         self.volume_dtype = "float32"
-        self._active_ms_level = 0
         self._last_step = (0, 0)
         self._scene_source = None
         self.viewport_state = ViewportState(mode=RenderMode.PLANE)
-        self._canonical_axes = canonical_axes_from_source(
-            axes=("y", "x"),
-            shape=(self._zarr_shape[0], self._zarr_shape[1]),
-            step=(0, 0),
-            use_volume=False,
-        )
+        initial_level = 0
         self._axis_labels = ("z", "y", "x")
         self._axis_order = (0, 1, 2)
         self._displayed = (1, 2)
         self._level_shapes = ((16, self._zarr_shape[0], self._zarr_shape[1]), (8, self._zarr_shape[0] // 2, self._zarr_shape[1] // 2))
-        self.viewport_state.plane.applied_level = self._active_ms_level
+        self.viewport_state.plane.applied_level = initial_level
         self.viewport_state.plane.applied_step = (0, 0)
-        self.viewport_state.volume.level = self._active_ms_level
+        self.viewport_state.volume.level = initial_level
         self.enqueued_updates: list[Any] = []
 
     def set_policy(self, policy: str) -> None:
@@ -103,14 +96,6 @@ class _CaptureWorker:
     @property
     def is_ready(self) -> bool:
         return self._is_ready
-
-    @property
-    def use_volume(self) -> bool:
-        return self.viewport_state.mode is RenderMode.VOLUME
-
-    @use_volume.setter
-    def use_volume(self, value: bool) -> None:
-        self.viewport_state.mode = RenderMode.VOLUME if value else RenderMode.PLANE
 
     def enqueue_update(self, update: Any) -> None:
         self.enqueued_updates.append(update)
@@ -135,7 +120,7 @@ class _CaptureWorker:
         return self._level_shapes
 
     def _ledger_level(self) -> int:
-        return int(self._active_ms_level)
+        return int(self.viewport_state.plane.applied_level)
 
 
 class _FakeWS(SimpleNamespace):
