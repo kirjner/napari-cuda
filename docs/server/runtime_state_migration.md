@@ -132,7 +132,6 @@ src/napari_cuda/server/runtime/
 │   ├── __init__.py
 │   ├── bootstrap.py         # worker bootstrap context (prev renderer_context)
 │   ├── roi_utils.py         # shared ROI math helpers (prev roi_math)
-│   └── snapshot_pipeline.py # snapshot orchestrator (prev render_snapshot)
 ├── data/
 │   ├── __init__.py
 │   ├── roi_math.py

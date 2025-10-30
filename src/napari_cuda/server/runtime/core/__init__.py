@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from .bootstrap import probe_scene_bootstrap
+from .bootstrap import (
+    cleanup_render_worker,
+    init_egl,
+    init_vispy_scene,
+    probe_scene_bootstrap,
+    setup_worker_runtime,
+)
 from .ledger_access import (
     axis_labels as ledger_axis_labels,
     displayed as ledger_displayed,
@@ -30,7 +36,11 @@ __all__ = [
     "ledger_ndisplay",
     "ledger_order",
     "ledger_step",
+    "cleanup_render_worker",
+    "init_egl",
+    "init_vispy_scene",
     "probe_scene_bootstrap",
+    "setup_worker_runtime",
     "ensure_scene_source",
     "reset_worker_camera",
 ]

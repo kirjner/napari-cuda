@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from copy import deepcopy
 from collections.abc import Callable, Mapping
@@ -40,13 +39,9 @@ from vispy import scene  # type: ignore
 
 import napari_cuda.server.data.lod as lod
 from napari.components.viewer_model import ViewerModel
-from napari_cuda.server.app.config import LevelPolicySettings, ServerCtx
+from napari_cuda.server.app.config import ServerCtx
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.data.level_logging import (
-    LayerAssignmentLogger,
-    LevelSwitchLogger,
-)
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.rendering.capture import FrameTimings
@@ -66,7 +61,10 @@ from napari_cuda.server.runtime.worker.snapshots import (
 )
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate, RenderUpdateMailbox
 from napari_cuda.server.runtime.core import (
+    cleanup_render_worker,
     ensure_scene_source,
+    init_egl as core_init_egl,
+    init_vispy_scene as core_init_vispy_scene,
     ledger_axis_labels,
     ledger_displayed,
     ledger_level,
@@ -74,6 +72,7 @@ from napari_cuda.server.runtime.core import (
     ledger_ndisplay,
     ledger_order,
     ledger_step,
+    setup_worker_runtime,
 )
 from napari_cuda.server.runtime.worker.resources import WorkerResources
 from napari_cuda.server.runtime.viewport import (
@@ -131,34 +130,16 @@ class EGLRendererWorker:
         self._debug_policy_logged = False
         self._env: Optional[Mapping[str, str]] = dict(env) if env is not None else None
 
-        # Viewport state shared between runner and worker.
-        self._viewport_state = ViewportState()
-        self._viewport_state.mode = RenderMode.VOLUME if use_volume else RenderMode.PLANE
-        self._viewport_runner = ViewportRunner(self._viewport_state.plane)
-
-        self._configure_animation(animate, animate_dps)
-        self._init_render_components()
-        self._init_scene_state()
-        self._camera_queue = camera_queue
-        self._init_locks(camera_pose_cb, level_intent_cb)
-        self._last_slice_signature: Optional[
-            tuple[int, Optional[tuple[int, ...]], Optional[tuple[int, int, int, int]]]
-        ] = None
-        self._last_snapshot_signature: Optional[tuple] = None
-        self._configure_debug_flags()
-        self._configure_policy(self._ctx.policy)
-        self._configure_roi_settings()
-        self._configure_budget_limits()
-        self._last_dims_signature: Optional[tuple] = None
-        self._applied_versions: dict[tuple[str, str, str], int] = {}
-        self._last_plane_pose: Optional[tuple] = None
-        self._last_volume_pose: Optional[tuple] = None
-
-        if policy_name:
-            try:
-                self.set_policy(policy_name)
-            except Exception:
-                logger.exception("policy init set failed; continuing with default")
+        setup_worker_runtime(
+            self,
+            use_volume=use_volume,
+            animate=animate,
+            animate_dps=animate_dps,
+            camera_queue=camera_queue,
+            camera_pose_cb=camera_pose_cb,
+            level_intent_cb=level_intent_cb,
+            policy_name=policy_name,
+        )
 
         # Zarr/NGFF dataset configuration (optional); prefer explicit args from server
         self._zarr_path = zarr_path
@@ -190,6 +171,12 @@ class EGLRendererWorker:
     @property
     def viewport_state(self) -> ViewportState:
         return self._viewport_state
+
+    @property
+    def resources(self) -> WorkerResources:
+        """Expose render resources owned by the worker."""
+
+        return self._resources
 
     def _current_level_index(self) -> int:
         if self._viewport_state.mode is RenderMode.VOLUME:
@@ -230,7 +217,7 @@ class EGLRendererWorker:
     # Legacy _apply_zoom_based_level_switch removed
 
     def _init_egl(self) -> None:
-        self.cuda_ctx = self._resources.bootstrap(server_ctx=self._ctx, fps_hint=int(self.fps))
+        core_init_egl(self)
 
     def _init_cuda(self) -> None:
         # CUDA context is established during bootstrap; nothing additional required.
@@ -253,25 +240,7 @@ class EGLRendererWorker:
         return ensure_scene_source(self)
 
     def _init_vispy_scene(self) -> None:
-        """Adapter-only scene initialization (legacy path removed)."""
-        source = self._create_scene_source()
-        if source is not None:
-            self._scene_source = source
-            try:
-                self._zarr_shape = source.level_shape(0)
-                self._zarr_dtype = str(source.dtype)
-                self._set_current_level_index(source.current_level)
-                descriptor = source.level_descriptors[source.current_level]
-                self._zarr_level = descriptor.path or None
-            except Exception:
-                logger.debug("scene source metadata bootstrap failed", exc_info=True)
-
-        try:
-            self._init_viewer_scene(source)
-        except Exception:
-            logger.exception("Adapter scene initialization failed (legacy path removed)")
-            # Fail fast: adapter is mandatory
-            raise
+        core_init_vispy_scene(self)
 
     # --- Multiscale: request switch (thread-safe) ---
     def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
@@ -361,109 +330,6 @@ class EGLRendererWorker:
 
     # ---- Init helpers -------------------------------------------------------
 
-    def _configure_animation(self, animate: bool, animate_dps: float) -> None:
-        self._animate = bool(animate)
-        try:
-            self._animate_dps = float(animate_dps)
-        except Exception as exc:
-            logger.debug("Invalid animate_dps=%r; using default 30.0: %s", animate_dps, exc)
-            self._animate_dps = 30.0
-        self._anim_start = time.perf_counter()
-
-    def _init_render_components(self) -> None:
-        self._resources = WorkerResources(width=self.width, height=self.height)
-        self.cuda_ctx = None
-        self.canvas: Optional[scene.SceneCanvas] = None
-        self.view = None
-        self._plane_visual_handle = None
-        self._volume_visual_handle = None
-
-    @property
-    def resources(self) -> WorkerResources:
-        """Expose render resources owned by the worker."""
-
-        return self._resources
-
-    def _init_scene_state(self) -> None:
-        self._viewer: Optional[ViewerModel] = None
-        self._napari_layer = None
-        self._scene_source: Optional[ZarrSceneSource] = None
-        self._set_current_level_index(0)
-        self._viewport_state.volume.downgraded = False
-        self._data_wh = (int(self.width), int(self.height))
-        self._data_d = None
-        self._volume_scale = (1.0, 1.0, 1.0)
-        self._layer_logger = LayerAssignmentLogger(logger)
-        self._switch_logger = LevelSwitchLogger(logger)
-        # Monotonic sequence for programmatic camera pose commits (op close)
-        self._pose_seq: int = 1
-        # Track highest command_seq observed from camera deltas
-        self._max_camera_command_seq: int = 0
-        self._ledger: Optional[ServerStateLedger] = None
-        self._level_policy_suppressed = False
-
-
-    def _init_locks(
-        self,
-        camera_pose_cb: Optional[Callable[[CameraPoseApplied], None]],
-        level_intent_cb: Optional[Callable[[LevelSwitchIntent], None]] = None,
-    ) -> None:
-        self._state_lock = threading.RLock()
-        self._render_mailbox = RenderUpdateMailbox()
-        self._last_ensure_log: Optional[tuple[int, Optional[str]]] = None
-        self._last_ensure_log_ts = 0.0
-        self._render_tick_required = False
-        self._render_loop_started = False
-        if camera_pose_cb is None:
-            raise ValueError("EGLRendererWorker requires camera_pose callback")
-        self._camera_pose_callback = camera_pose_cb
-        self._level_intent_callback = level_intent_cb
-
-    def _configure_debug_flags(self) -> None:
-        worker_dbg = self._debug_policy.worker
-        self._debug_zoom_drift = bool(worker_dbg.debug_zoom_drift)
-        self._debug_pan = bool(worker_dbg.debug_pan)
-        self._debug_reset = bool(worker_dbg.debug_reset)
-        self._debug_orbit = bool(worker_dbg.debug_orbit)
-        self._orbit_el_min = float(worker_dbg.orbit_el_min)
-        self._orbit_el_max = float(worker_dbg.orbit_el_max)
-
-    def _configure_policy(self, policy_cfg: LevelPolicySettings) -> None:
-        self._policy_func = lod.select_level
-        self._policy_name = 'oversampling'
-        self._last_interaction_ts = time.perf_counter()
-        policy_logging = self._debug_policy.logging
-        worker_dbg = self._debug_policy.worker
-        self._log_layer_debug = bool(policy_logging.log_layer_debug)
-        self._log_policy_eval = bool(policy_cfg.log_policy_eval)
-        self._lock_level = worker_dbg.lock_level
-        self._level_threshold_in = float(policy_cfg.threshold_in)
-        self._level_threshold_out = float(policy_cfg.threshold_out)
-        self._level_hysteresis = float(policy_cfg.hysteresis)
-        self._level_fine_threshold = float(policy_cfg.fine_threshold)
-        self._sticky_contrast = bool(policy_cfg.sticky_contrast)
-        self._level_switch_cooldown_ms = float(policy_cfg.cooldown_ms)
-        self._last_level_switch_ts = 0.0
-        self._oversampling_thresholds = (
-            {int(k): float(v) for k, v in policy_cfg.oversampling_thresholds.items()}
-            if getattr(policy_cfg, "oversampling_thresholds", None)
-            else None
-        )
-        self._oversampling_hysteresis = float(getattr(policy_cfg, "oversampling_hysteresis", 0.1))
-
-    def _configure_roi_settings(self) -> None:
-        worker_dbg = self._debug_policy.worker
-        self._roi_edge_threshold = int(worker_dbg.roi_edge_threshold)
-        self._roi_align_chunks = bool(worker_dbg.roi_align_chunks)
-        self._roi_ensure_contains_viewport = bool(worker_dbg.roi_ensure_contains_viewport)
-        self._roi_pad_chunks = 1
-        self._idr_on_z = False
-
-    def _configure_budget_limits(self) -> None:
-        cfg = self._ctx.cfg
-        self._slice_max_bytes = int(max(0, getattr(cfg, 'max_slice_bytes', 0)))
-        self._volume_max_bytes = int(max(0, getattr(cfg, 'max_volume_bytes', 0)))
-        self._volume_max_voxels = int(max(0, getattr(cfg, 'max_volume_voxels', 0)))
 
     def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
         _viewer._init_viewer_scene(self, source)
@@ -776,25 +642,7 @@ class EGLRendererWorker:
     # Removed legacy _torch_from_cupy helper (unused)
 
     def cleanup(self) -> None:
-        self._resources.cleanup()
-        self.cuda_ctx = None
-
-        try:
-            if self.canvas is not None:
-                self.canvas.close()
-        except Exception:
-            logger.debug("Cleanup: canvas close failed", exc_info=True)
-        self.canvas = None
-        self._viewer = None
-        self._napari_layer = None
-        if self._plane_visual_handle is not None:
-            self._plane_visual_handle.detach()
-        if self._volume_visual_handle is not None:
-            self._volume_visual_handle.detach()
-        self._plane_visual_handle = None
-        self._volume_visual_handle = None
-
-        self._is_ready = False
+        cleanup_render_worker(self)
 
     def viewer_model(self) -> Optional[ViewerModel]:
         """Expose the napari ``ViewerModel`` when adapter mode is active."""

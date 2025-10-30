@@ -10,8 +10,9 @@ that behaviour.
   `PYOPENGL_PLATFORM=egl`, `QT_QPA_PLATFORM=offscreen`, and `XDG_RUNTIME_DIR`
   defaults (`src/napari_cuda/server/runtime/worker/egl.py:32-34`).
 - `start_worker` (`runtime/worker/lifecycle.py:45`) constructs the worker, then
-  drives `_init_cuda`, `_init_vispy_scene`, `_init_egl`, `_init_capture`,
-  `_init_cuda_interop`, `_init_encoder`, and seeds the first snapshot.
+  delegates to `core.bootstrap.setup_worker_runtime` for state/locks before
+  calling `core.bootstrap.init_vispy_scene`, `core.bootstrap.init_egl`,
+  capture bootstrap, and seeding the first snapshot.
 - The render thread loops over `render_updates.consume_render_snapshot`, then
   `capture_and_encode_packet`; the latter calls `render_tick`, which runs
   `run_render_tick` (`runtime/worker/loop.py:9`) with worker callbacks.
@@ -23,8 +24,9 @@ that behaviour.
   `height`, `fps`, volume defaults) plus policy name overrides stored on the
   instance (`src/napari_cuda/server/runtime/worker/egl.py:169`).
 - **Render resources** – `_egl`, `_capture`, `_encoder`, `_enc_lock`,
-  `_enc_input_fmt`, and CUDA handles initialised in `_init_render_components`
-  and booted by `_init_cuda*` methods (`egl.py:787-1297`).
+  `_enc_input_fmt`, and CUDA handles initialised by
+  `core.bootstrap.setup_worker_runtime` / `core.bootstrap.init_egl`
+  (`egl.py:787-1297`).
 - **Viewport & ledger** – `_viewport_state`, `_viewport_runner`,
   `_render_mailbox`, `_ledger`, `_applied_versions`, `_last_*` snapshot
   signatures, and ndisplay metadata caches (`egl.py:205-2330`).
@@ -41,21 +43,18 @@ that behaviour.
 ## Responsibility Clusters
 
 ### 1. Bootstrap & Resource Setup
-- **Entry points:** `_configure_animation`, `_init_render_components`,
-  `_init_scene_state`, `_init_locks`, `_configure_debug_flags`,
-  `_configure_policy`, `_configure_roi_settings`, `_configure_budget_limits`,
-  `_init_cuda`, `_init_egl`, `_init_capture`, `_init_cuda_interop`,
-  `_init_encoder`, `_log_debug_policy_once`.
+- **Entry points:** `core.bootstrap.setup_worker_runtime`, `_init_cuda`,
+  `core.bootstrap.init_egl`, capture/encoder ensure helpers,
+  `_log_debug_policy_once`.
 - **Shared state:** All render resources, locks, debug flags, policy thresholds,
   ROI settings, and ledger attachment.
 - **Dependencies:** `CaptureFacade` (`rendering/capture.py`), `EglContext`,
   `Encoder`, `RenderUpdateMailbox`, `ServerCtx`, debug policy dataclasses, and
   `LayerAssignmentLogger` / `LevelSwitchLogger`.
-- **Notes for extraction:** These helpers can be grouped into a
-  `WorkerResources` façade that owns GL/CUDA/capture/encoder lifetimes and the
-  associated locks. The remaining policy and ROI configuration reads directly
-  from `ServerCtx`/`LevelPolicySettings` and can move with the level-selection
-  logic.
+- **Notes:** `core.bootstrap.setup_worker_runtime` now performs the animation
+  setup, resource allocation, policy/ROI configuration, and lock wiring so the
+  worker constructor remains thin. `WorkerResources` continues to own the
+  GL/CUDA/capture/encoder lifetimes.
 
 ### 2. Scene Source & Viewer Wiring
 - **Entry points:** `_create_scene_source`, `_ensure_scene_source`,
