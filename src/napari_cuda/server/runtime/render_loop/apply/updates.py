@@ -15,10 +15,8 @@ from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.viewport import (
-    RenderMode,
-    updates as viewport_updates,
-)
+from napari_cuda.server.runtime.viewport import updates as viewport_updates
+from napari_cuda.server.runtime.viewport.state import RenderMode
 
 from ..plan_interface import RenderPlanInterface
 

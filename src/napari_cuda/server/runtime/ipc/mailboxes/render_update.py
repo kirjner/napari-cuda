@@ -13,11 +13,7 @@ from typing import Any, Optional
 from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.viewport import (
-    PlaneState,
-    RenderMode,
-    VolumeState,
-)
+from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode, VolumeState
 
 logger = logging.getLogger(__name__)
 

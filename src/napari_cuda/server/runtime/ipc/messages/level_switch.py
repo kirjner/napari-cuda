@@ -6,11 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from napari_cuda.server.data.lod import LevelContext
-from napari_cuda.server.runtime.viewport import (
-    PlaneState,
-    RenderMode,
-    VolumeState,
-)
+from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode, VolumeState
 
 
 @dataclass(frozen=True)

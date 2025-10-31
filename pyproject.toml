@@ -206,6 +206,7 @@ cuda-dev = [
     "napari-cuda[alignment]",
     "pytest-asyncio>=0.21.0",
     "pytest-mock>=3.10.0",
+    "snakeviz>=2.1.1",
 ]
 testing = [
     "napari[gallery]",
