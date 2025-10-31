@@ -17,7 +17,7 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 # ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-from napari_cuda.server.control.state_ledger import LedgerEntry, PropertyKey, ServerStateLedger
+from napari_cuda.server.state_ledger import LedgerEntry, PropertyKey, ServerStateLedger
 from napari_cuda.server.control.transactions import (
     apply_bootstrap_transaction,
     apply_camera_update_transaction,
@@ -28,11 +28,7 @@ from napari_cuda.server.control.transactions import (
     apply_volume_restore_transaction,
     apply_view_toggle_transaction,
 )
-from napari_cuda.server.runtime.viewport.state import (
-    PlaneState,
-    RenderMode,
-    VolumeState,
-)
+from napari_cuda.server.viewstate import PlaneState, RenderMode, VolumeState
 logger = logging.getLogger(__name__)
 
 

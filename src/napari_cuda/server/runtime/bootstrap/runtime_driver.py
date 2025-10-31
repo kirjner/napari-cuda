@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Optional
 
-from napari_cuda.server.control.state_models import BootstrapSceneMetadata
+from napari_cuda.server.viewstate import BootstrapSceneMetadata
 from napari_cuda.server.data import lod
 from napari_cuda.server.data.level_logging import (
     LayerAssignmentLogger,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.state_ledger import ServerStateLedger
 
 
 def step(ledger: Optional[ServerStateLedger]) -> Optional[tuple[int, ...]]:

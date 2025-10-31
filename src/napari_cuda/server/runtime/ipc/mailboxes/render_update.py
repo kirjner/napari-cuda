@@ -11,22 +11,14 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.server.viewstate import (
+    PlaneState,
     RenderLedgerSnapshot,
+    RenderMode,
+    RenderUpdate,
+    VolumeState,
 )
-from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode, VolumeState
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class RenderUpdate:
-    """Latest-wins state drained by the render worker."""
-
-    scene_state: Optional[RenderLedgerSnapshot]
-    mode: Optional[RenderMode] = None
-    plane_state: Optional[PlaneState] = None
-    volume_state: Optional[VolumeState] = None
-    op_seq: Optional[int] = None
 
 
 @dataclass(frozen=True)

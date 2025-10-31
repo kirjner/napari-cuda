@@ -9,7 +9,7 @@ from napari_cuda.server.viewstate import (
     snapshot_scene,
     snapshot_dims_metadata,
 )
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.state_ledger import ServerStateLedger
 
 
 def _seed_plane_ledger(ndisplay: int = 2) -> ServerStateLedger:

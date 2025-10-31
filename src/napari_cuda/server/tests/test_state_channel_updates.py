@@ -46,6 +46,7 @@ from napari_cuda.server.runtime.viewport import (
     ViewportState,
     VolumeState,
 )
+from napari_cuda.server.runtime.control_api import RuntimeHandle
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
@@ -53,7 +54,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_level_update,
     reduce_plane_restore,
 )
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
@@ -135,6 +136,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     server = SimpleNamespace()
     server._state_lock = threading.RLock()
     server._worker = worker
+    server.runtime = RuntimeHandle(lambda: server._worker)
     server._log_state_traces = False
     server._log_dims_info = False
     server._log_cam_info = False

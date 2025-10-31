@@ -6,7 +6,7 @@ import threading
 from collections import defaultdict
 from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
-from napari_cuda.server.control.state_ledger import LedgerEvent, ServerStateLedger
+from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
 
 
 ScheduleFn = Callable[[Awaitable[None], str], None]

@@ -16,7 +16,7 @@ from napari_cuda.protocol.snapshots import (
     scene_snapshot,
     viewer_snapshot_from_blocks,
 )
-from napari_cuda.server.control.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
 from napari_cuda.server.viewstate.models import (
     CameraDeltaCommand,
     RenderLedgerSnapshot,

@@ -7,7 +7,7 @@ Offensive coding tenet: no defensive fallbacks, no silent failures.
 ```
 napari_cuda/
 ├── client/          # App launcher, state projections, rendering stack, runtime loop
-├── server/          # Headless service (control, runtime/engine, data)
+├── server/          # Headless service (control, runtime/engine, state ledger, data)
 ├── protocol/        # Message schema, snapshots, parser
 ├── codec/           # Format helpers (AnnexB/AVCC parsing, H.264 utilities)
 ├── cpu/, cuda/, _vt/ # Platform shims (CPU capture, CUDA bindings, VT integration)
@@ -24,6 +24,7 @@ Recent reorganisations landed the top-level split called out in the future-struc
 - Server engine owns encoder + worker code after moving the PyAV encoder from the shared codec layer (`src/napari_cuda/server/engine/encoding/h264_encoder.py`).
 - Protocol, docs, and tools directories match the published draft (no more greenfield shims).
 - Server runtime package introduced (`server/runtime/worker/egl.py`, `runtime/worker/loop.py`, `runtime/ipc/mailboxes/render_update.py`, `runtime/core/*`), isolating orchestration from engine helpers.
+- Shared ledger moved to `server/state_ledger/`, making the control/runtime boundary explicit alongside the new `runtime/control_api.py` façade.
 
 ## Outstanding Organisation Work
 

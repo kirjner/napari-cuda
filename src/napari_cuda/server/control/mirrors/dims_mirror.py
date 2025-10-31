@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
 
-from napari_cuda.server.control.state_ledger import LedgerEvent, ServerStateLedger
+from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
 
 
 ScheduleFn = Callable[[Awaitable[None], str], None]

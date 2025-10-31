@@ -33,21 +33,19 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,
 )
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
 from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.server.viewstate import (
+    RenderLedgerSnapshot,
+    RenderUpdate,
     snapshot_render_state,
     snapshot_layer_controls,
     snapshot_multiscale_state,
     snapshot_scene,
     snapshot_volume_state,
 )
-from napari_cuda.server.viewstate import (
-    RenderLedgerSnapshot,
-)
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,
@@ -57,6 +55,7 @@ from napari_cuda.server.data import (
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari.components import viewer_model
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
+from napari_cuda.server.runtime.control_api import RuntimeHandle
 
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
 from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_mod
@@ -656,6 +655,7 @@ class StateServerHarness:
         server = SimpleNamespace()
         server._state_lock = threading.RLock()
         server._worker = worker
+        server.runtime = RuntimeHandle(lambda: server._worker)
         server._log_state_traces = False
         server._log_dims_info = False
         server._log_cam_info = False

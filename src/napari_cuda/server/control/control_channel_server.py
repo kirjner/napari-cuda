@@ -81,14 +81,12 @@ from napari_cuda.server.control.transactions.plane_restore import (
 )
 from napari_cuda.server.viewstate import (
     CameraDeltaCommand,
-    snapshot_render_state,
-    snapshot_multiscale_state,
-)
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
-from napari_cuda.server.runtime.viewport.state import (
     PlaneState,
     RenderMode,
+    RenderUpdate,
     VolumeState,
+    snapshot_render_state,
+    snapshot_multiscale_state,
 )
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_delta_payload,
@@ -100,6 +98,10 @@ from napari_cuda.server.engine import (
     build_notify_stream_payload,
     mark_stream_config_dirty,
 )
+from napari_cuda.server.engine import pixel as pixel_channel
+
+if not hasattr(pixel_channel, "mark_stream_config_dirty"):
+    pixel_channel.mark_stream_config_dirty = mark_stream_config_dirty
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
     ResumableHistoryStore,
@@ -506,12 +508,14 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
             new_ndisplay,
         )
 
-    worker = server._worker  # type: ignore[attr-defined]
-    if worker is not None and worker.is_ready:  # type: ignore[attr-defined]
-        base_state = worker.viewport_state  # type: ignore[attr-defined]
-        plane_state = replace(base_state.plane)
+    runtime = getattr(server, "runtime", None)
+    if runtime is not None and runtime.is_ready:
+        snapshot = runtime.viewport_snapshot()
+        if snapshot is None:
+            return True
+        plane_state = snapshot.plane
         plane_state.target_ndisplay = int(new_ndisplay)
-        volume_state = replace(restored_volume_state) if restored_volume_state is not None else replace(base_state.volume)
+        volume_state = replace(restored_volume_state) if restored_volume_state is not None else snapshot.volume
         desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
 
         if logger.isEnabledFor(logging.INFO):
@@ -527,10 +531,10 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
                 volume_state,
             )
 
-        snapshot = snapshot_render_state(server._state_ledger)
-        worker.enqueue_update(  # type: ignore[attr-defined]
+        snapshot_state = snapshot_render_state(server._state_ledger)
+        runtime.enqueue_render_update(
             RenderUpdate(
-                scene_state=snapshot,
+                scene_state=snapshot_state,
                 mode=desired_mode,
                 plane_state=plane_state,
                 volume_state=volume_state,
@@ -768,7 +772,8 @@ async def _handle_camera_reset(ctx: StateUpdateContext) -> bool:
         CameraDeltaCommand(kind='reset', target=target, command_seq=int(seq)),
     )
 
-    if getattr(server, "_idr_on_reset", False) and server._worker is not None:
+    runtime = getattr(server, "runtime", None)
+    if getattr(server, "_idr_on_reset", False) and runtime is not None and runtime.is_ready:
         server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
 
     server._schedule_coro(
@@ -1102,7 +1107,8 @@ async def _handle_multiscale_level(ctx: StateUpdateContext) -> bool:
         )
         return True
 
-    if server._worker is not None:
+    runtime = getattr(server, "runtime", None)
+    if runtime is not None and runtime.is_ready:
         log_fn = logger.info if server._log_state_traces else logger.debug
         try:
             levels_meta = multiscale_state.get('levels') or []
@@ -1111,12 +1117,12 @@ async def _handle_multiscale_level(ctx: StateUpdateContext) -> bool:
                 entry = levels_meta[int(level)]
                 if isinstance(entry, Mapping):
                     path = entry.get('path')
-            log_fn("state: multiscale level -> worker.request start level=%s", level)
-            server._worker.request_multiscale_level(int(level), path)
-            log_fn("state: multiscale level -> worker.request done")
-            log_fn("state: multiscale level -> worker.force_idr start")
-            server._worker.force_idr()
-            log_fn("state: multiscale level -> worker.force_idr done")
+            log_fn("state: multiscale level -> runtime.request start level=%s", level)
+            runtime.request_level(int(level), path)
+            log_fn("state: multiscale level -> runtime.request done")
+            log_fn("state: multiscale level -> runtime.force_idr start")
+            runtime.force_idr()
+            log_fn("state: multiscale level -> runtime.force_idr done")
             server._pixel.bypass_until_key = True
         except Exception:
             logger.exception("multiscale level switch request failed")

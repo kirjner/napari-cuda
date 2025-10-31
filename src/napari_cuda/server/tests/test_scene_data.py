@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.viewstate import (
     build_ledger_snapshot,
 )

@@ -41,6 +41,7 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import probe_scene_boot
 from napari_cuda.server.viewstate import (
     CameraDeltaCommand,
     RenderLedgerSnapshot,
+    RenderMode,
     snapshot_dims_metadata,
     snapshot_layer_controls,
     snapshot_multiscale_state,
@@ -49,7 +50,6 @@ from napari_cuda.server.viewstate import (
     snapshot_viewport_state,
     snapshot_volume_state,
 )
-from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.viewstate import pull_render_snapshot
 from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.app.metrics_core import Metrics
@@ -77,8 +77,8 @@ from napari_cuda.server.control.control_channel_server import (
     broadcast_stream_config,
     ingest_state,
 )
-from napari_cuda.server.control.state_ledger import ServerStateLedger
-from napari_cuda.server.control.state_models import BootstrapSceneMetadata
+from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.viewstate import BootstrapSceneMetadata, RenderUpdate
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.state_reducers import (
@@ -90,8 +90,8 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_opacity,
 )
 from napari_cuda.server.data.hw_limits import get_hw_limits
+from napari_cuda.server.runtime.control_api import RuntimeHandle
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent, WorkerIntentMailbox
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.runtime.worker import (
     WorkerLifecycleState,
@@ -217,6 +217,7 @@ class EGLHeadlessServer:
         )
         self._seq = 0
         self._worker_lifecycle = WorkerLifecycleState()
+        self._runtime_handle = RuntimeHandle(lambda: self._worker_lifecycle.worker)
         self._worker_intents = WorkerIntentMailbox()
         self._camera_queue = CameraCommandQueue()
         self._scene_snapshot: Optional[SceneSnapshot] = None
@@ -312,6 +313,10 @@ class EGLHeadlessServer:
     @_worker.setter
     def _worker(self, worker: Optional["EGLRendererWorker"]) -> None:
         self._worker_lifecycle.worker = worker
+
+    @property
+    def runtime(self) -> RuntimeHandle:
+        return self._runtime_handle
 
     # --- Logging + Broadcast helpers --------------------------------------------
     def _next_camera_command_seq(self, target: str) -> int:

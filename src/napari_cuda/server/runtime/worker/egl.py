@@ -33,7 +33,7 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 import napari_cuda.server.data.lod as lod
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.app.config import ServerCtx
-from napari_cuda.server.control.state_ledger import ServerStateLedger
+from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.engine import DebugConfig, DebugDumper, FrameTimings
