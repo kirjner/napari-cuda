@@ -17,11 +17,11 @@ from napari_cuda.protocol.snapshots import (
     viewer_snapshot_from_blocks,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
-from napari_cuda.server.viewstate.models import (
+from napari_cuda.server.scene.models import (
     CameraDeltaCommand,
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.viewstate.defaults import default_volume_state
+from napari_cuda.server.scene.defaults import default_volume_state
 
 logger = logging.getLogger(__name__)
 

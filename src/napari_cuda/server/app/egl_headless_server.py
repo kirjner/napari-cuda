@@ -39,7 +39,7 @@ from napari_cuda.server.engine.api import (
 )
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.runtime.bootstrap.runtime_driver import probe_scene_bootstrap
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     CameraDeltaCommand,
     RenderLedgerSnapshot,
     RenderMode,
@@ -51,16 +51,13 @@ from napari_cuda.server.viewstate import (
     snapshot_viewport_state,
     snapshot_volume_state,
 )
-from napari_cuda.server.viewstate import pull_render_snapshot
+from napari_cuda.server.scene import pull_render_snapshot
 from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.utils.env import env_bool
 from napari_cuda.server.data.zarr_source import ZarrSceneSource, ZarrSceneSourceError
-from napari_cuda.server.app.config import (
-    ServerConfig,
-    ServerCtx,
-    load_server_ctx,
-)
+from napari_cuda.server.config import ServerConfig, ServerCtx
+from napari_cuda.server.app.config import load_server_ctx
 from napari_cuda.protocol import (
     NotifyStreamPayload,
     NotifyDimsPayload,
@@ -79,7 +76,7 @@ from napari_cuda.server.control.control_channel_server import (
     ingest_state,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.server.viewstate import BootstrapSceneMetadata, RenderUpdate
+from napari_cuda.server.scene import BootstrapSceneMetadata, RenderUpdate
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.state_reducers import (

@@ -7,7 +7,7 @@ from typing import Any, MutableMapping, Optional
 
 import PyNvVideoCodec as pnvc  # type: ignore
 
-from napari_cuda.server.app.config import EncoderRuntime, ServerCtx
+from napari_cuda.server.config import EncoderRuntime, ServerCtx
 
 
 logger = logging.getLogger(__name__)

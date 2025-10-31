@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from napari_cuda.server.viewstate.viewport import (
+from napari_cuda.server.scene.viewport import (
     PlanePose,
     PlaneRequest,
     PlaneResult,

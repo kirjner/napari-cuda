@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     build_ledger_snapshot,
 )
-from napari_cuda.server.viewstate import snapshot_render_state
+from napari_cuda.server.scene import snapshot_render_state
 
 
 def test_snapshot_render_state_preserves_dims_metadata() -> None:

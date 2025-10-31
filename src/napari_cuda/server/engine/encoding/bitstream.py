@@ -15,8 +15,8 @@ from dataclasses import dataclass
 import logging
 from typing import List, Optional, Tuple, Sequence, Union
 
-from napari_cuda.server.data.logging_policy import EncoderLogging
-from napari_cuda.server.app.config import BitstreamRuntime
+from napari_cuda.server.config.logging_policy import EncoderLogging
+from napari_cuda.server.config import BitstreamRuntime
 
 # Optional Cython fast packer; default is to require it on server
 _BITSTREAM_RUNTIME = BitstreamRuntime()

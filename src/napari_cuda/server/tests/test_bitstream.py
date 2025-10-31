@@ -2,6 +2,7 @@ import base64
 
 import pytest
 
+from napari_cuda.server.config import BitstreamRuntime
 from napari_cuda.server.engine.encoding.bitstream import (
     parse_nals,
     pack_to_avcc,
@@ -52,8 +53,6 @@ def test_pack_to_avcc_from_annexb_and_cache_and_keyflag():
     idr = bytes([0x65, 0x12, 0x34, 0x56])
     buf = _annexb(sps, pps, idr)
     cache = ParamCache()
-
-    from napari_cuda.server.app.config import BitstreamRuntime
 
     prev_runtime = bitstream._BITSTREAM_RUNTIME
     bitstream.configure_bitstream(BitstreamRuntime(

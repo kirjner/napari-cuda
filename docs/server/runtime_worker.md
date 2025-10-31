@@ -112,7 +112,7 @@ see `docs/server/architecture.md`.
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.render_loop.plan.ledger_access`).
 - **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
-  `napari_cuda.server.viewstate`), `runtime.render_loop.apply.render_state.*`,
+  `napari_cuda.server.scene`), `runtime.render_loop.apply.render_state.*`,
   `runtime.render_loop.apply.updates`, `viewport.updates`,
   ledger interfaces in `ServerStateLedger`.
 - **Notes:** This block is where external updates enter the worker. The

@@ -9,10 +9,11 @@ contracted, well-partitioned layout.
 | Domain | Location | Reality today |
 | --- | --- | --- |
 | Entry points | `server/app/` | Modules wire control, runtime, engine, and data directly in `egl_headless_server.py`. |
+| Config | `server/config/` | Shared config/telemetry dataclasses; originally mixed with app and data helpers. |
 | Control plane | `server/control/` | Imports runtime state types (`viewport.state`, IPC mailboxes) and engine helpers (`engine.pixel.channel`). |
 | Runtime | `server/runtime/` | Still depends on control models and `server/data` helpers; circular imports previously blocked profiling. |
 | Engine | `server/engine/` | GPU/NVENC code split across `capture/`, `encoding/`, and `pixel/`; consumers still import these submodules directly (façade TODO). |
-| View state | `server/viewstate/` | Centralised viewer DTOs/defaults consumed by control and runtime. |
+| Scene | `server/scene/` | Centralised viewer DTOs/defaults consumed by control and runtime. |
 | State ledger | `server/state_ledger/` | Thread-safe ledger shared across control/runtime/tests. |
 | Shared data | `server/data/` | ROI/chunk math, hardware limits, LOD configs. (Former `runtime/data` helpers moved here.) |
 | Tests | `server/tests/` | Flat bucket covering control, runtime, engine, and integration cases. |
@@ -33,17 +34,18 @@ Direct intra-server imports discovered with `grimp` (`PYTHONPATH=src uv run pyth
 | `scene` | 0 | 0 | 1 | 0 | 2 | 0 | 9 | 1 |
 | `state_ledger` | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-(`scene` refers to `server/viewstate`; `state_ledger` covers the shared ledger package.)
+(`scene` refers to `server/scene`; `state_ledger` covers the shared ledger package.)
 
 This snapshot shows the control↔runtime edges collapsed via the new façade, while `engine → app` and `control → engine` remain to be tightened.
 
 ## Target Architecture (designed state)
 
 - **server.app** – CLI and dashboard entry points only. Parses config/env, instantiates control, and exposes metrics. No direct runtime/engine logic.
-- **server.control** – Websocket server, ledger, reducers, transaction scheduling. Consumes DTOs from `server.viewstate` and primitives from `server.data`. Talks to runtime through a narrow façade (`server.runtime.interface`), never via direct module imports.
-- **server.runtime** – Worker bootstrap, viewport, render loop, LOD policy. Imports shared ROI math (`server.data`) and viewer DTOs from `server.viewstate`, exposes `runtime/api.py` for control interactions, and should call GPU code exclusively through an engine façade.
+- **server.config** – Shared configuration and debug-policy dataclasses used across app/runtime/engine.
+- **server.control** – Websocket server, ledger, reducers, transaction scheduling. Consumes DTOs from `server.scene` and primitives from `server.data`. Talks to runtime through a narrow façade (`server.runtime.interface`), never via direct module imports.
+- **server.runtime** – Worker bootstrap, viewport, render loop, LOD policy. Imports shared ROI math (`server.data`) and viewer DTOs from `server.scene`, exposes `runtime/api.py` for control interactions, and should call GPU code exclusively through an engine façade.
 - **server.engine** – Renamed from `rendering/`. Hosts GL/EGL/CUDA/NVENC integration and compiled artifacts in `engine/encoding/compiled/`. We still need to formalise a thin API surface so runtime/control stop importing internals.
-- **server.viewstate** – Authoritative DTOs, defaults, and builders for snapshots, layer schemas, and bootstrap metadata. Both control and runtime consume these types.
+- **server.scene** – Authoritative DTOs, defaults, and builders for snapshots, layer schemas, and bootstrap metadata. Both control and runtime consume these types.
 - **server.data** – Consolidated ROI/LOD math, hardware limits, logging helpers, env parsing. All pure helpers live here (merging the old `server/data/` and `server/runtime/data/`).
 - **server.state_ledger** – Shared ledger primitives (`ServerStateLedger`, events, helpers) for control/runtime/tests.
 - **server.tests** – Mirrors the package layout (`tests/control`, `tests/runtime`, `tests/engine`, `tests/integration`) with fixtures in `_helpers`.
@@ -54,12 +56,12 @@ This snapshot shows the control↔runtime edges collapsed via the new façade, w
 Allowed import edges (prefixes under `napari_cuda.server`):
 
 ```
-app → control, runtime.interface, viewstate, data
-control → viewstate, data, runtime.interface
+app → config, control, runtime.interface, scene, data
+control → config, scene, data, runtime.interface
 control → state_ledger
-runtime → viewstate, data, state_ledger, engine.api
-engine → data
-viewstate → data (helpers only when unavoidable)
+runtime → config, scene, data, state_ledger, engine.api
+engine → config
+scene → data (helpers only when unavoidable)
 data → (no intra-server dependencies)
 tests/* → any domain as needed
 ```
@@ -72,7 +74,7 @@ the contract in CI.
 
 - **Engine façade discipline** – Control/runtime still import from `engine.encoding` and `engine.pixel` (two direct edges). Introduce an explicit `server/engine/api.py` (or similar façade) so engine internals stay private and control-side shims can be removed.
 - **Runtime façade follow-through** – `runtime/api.py` removes direct control↔runtime imports; keep future control features on this surface and migrate lingering helpers (e.g., keyframe scheduling) where sensible.
-- **Viewer DTO alignment** – Plane/volume/view snapshots now live in `server/viewstate`; keep new code on the shared models and trim remaining runtime-only shims.
+- **Viewer DTO alignment** – Plane/volume/view snapshots now live in `server/scene`; keep new code on the shared models and trim remaining runtime-only shims.
 - **Docs & tooling** – Update the worker/state docs plus CI checks to reference the new ledger package and façade.
 
 ## Roadmap
@@ -87,8 +89,8 @@ the contract in CI.
    - Move `server/runtime/data/*` into `server/data/`.
    - Update all imports (`rg "runtime\\.data"` → `server.data`).
    - Delete the orphaned `server/state/` package.
-3. **Consolidate viewstate DTOs**
-   - Move shared dataclasses/defaults into `server/viewstate/`.
+3. **Consolidate scene DTOs**
+   - Move shared dataclasses/defaults into `server/scene/`.
    - Refactor `control/state_models.py`, `runtime/render_loop/apply/render_state`,
      and viewstate builders to use the shared models.
 4. **Isolate engine**
@@ -116,7 +118,7 @@ Use this as you execute the roadmap:
 
 - [ ] Commit architecture doc and import-matrix tooling to CI.
 - [x] Merge data helpers into `server/data` and delete `server/state`.
-- [x] Publish shared viewstate DTOs and update control/runtime call sites.
+- [x] Publish shared scene DTOs and update control/runtime call sites.
 - [x] Move the ledger into `server/state_ledger` and repoint imports.
 - [ ] Introduce `server/engine/api.py` and migrate runtime/control callers to the façade.
 - [x] Add `runtime/api.py` and remove direct control ↔ runtime imports.

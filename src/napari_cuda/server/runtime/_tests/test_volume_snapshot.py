@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface

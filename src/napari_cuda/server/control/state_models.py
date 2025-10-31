@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple
 
-from napari_cuda.server.viewstate import BootstrapSceneMetadata
+from napari_cuda.server.scene import BootstrapSceneMetadata
 
 
 @dataclass(frozen=True)
