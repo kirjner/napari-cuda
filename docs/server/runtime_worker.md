@@ -5,6 +5,9 @@ splitting the module. Every cluster below lists the public entry points, the
 shared state they read or mutate, and the collaborating modules that depend on
 that behaviour.
 
+For the high-level package boundaries and intended runtime ↔ engine contracts,
+see `docs/server/architecture.md`.
+
 ## Lifecycle Overview
 - Module import side effects prime EGL headless operation by setting
   `PYOPENGL_PLATFORM=egl`, `QT_QPA_PLATFORM=offscreen`, and `XDG_RUNTIME_DIR`

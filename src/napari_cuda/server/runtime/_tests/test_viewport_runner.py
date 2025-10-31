@@ -7,7 +7,7 @@ from typing import Optional
 from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.viewport import (
     PoseEvent,
     ViewportOps,

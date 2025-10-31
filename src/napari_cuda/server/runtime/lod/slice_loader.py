@@ -10,7 +10,7 @@ from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
     viewport_debug_snapshot,
 )
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 
 
 def viewport_roi_for_lod(

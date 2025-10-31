@@ -55,7 +55,7 @@
    - Move `handle_key_event` into a runtime-local helper that works with emitters directly, eliminating the last runtime dependency.
 6. **Test consolidation + module deletion**
    - Once all call sites swap over, delete `state_update_actions.py` along with `test_state_update_actions.py`.
-   - Run control/runtime/data suites to confirm behaviour matches the previous layer-emitter rewrite.
+  - Run control and server/data suites to confirm behaviour matches the previous layer-emitter rewrite.
 
 ## 4. Open Questions
 - Do we want a dedicated `VolumeIntentEmitter`, or should volume stay bundled with dims for now?

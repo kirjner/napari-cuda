@@ -48,7 +48,7 @@ from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
-from napari_cuda.server.runtime.data import (
+from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,

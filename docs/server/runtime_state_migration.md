@@ -2,6 +2,9 @@
 
 Single-source our render state so the worker, viewport runner, controller, and tests consume the same information. This doc captures (a) every plane/volume datum that exists today, (b) the desired end state, and (c) the checkpoints we expect to pass through. It replaces the stale architecture plans that referenced removed mailboxes and “render txn” scaffolding.
 
+Refer to `docs/server/architecture.md` for the authoritative package layout and
+the control/runtime/engine dependency contract this plan works toward.
+
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.viewport import ViewportState
     from napari_cuda.server.runtime.viewport.runner import ViewportRunner

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 from .slice_loader import viewport_roi_for_lod
 
 

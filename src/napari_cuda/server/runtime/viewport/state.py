@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 
 
 class RenderMode(Enum):

@@ -10,7 +10,7 @@ from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
 from napari_cuda.server.runtime.render_loop.apply.snapshots import apply as snapshot_mod
 from napari_cuda.server.runtime.render_loop.apply.snapshots import plane as plane_mod
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 

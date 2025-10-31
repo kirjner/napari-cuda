@@ -6,7 +6,7 @@ from vispy.geometry import Rect
 from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.viewport import PlaneState
 from napari_cuda.server.runtime.viewport.plane_ops import (
     apply_pose_to_camera,

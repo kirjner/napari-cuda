@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from napari_cuda.server.runtime.data import (
+from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,

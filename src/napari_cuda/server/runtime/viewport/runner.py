@@ -15,7 +15,7 @@ from typing import Any, Optional
 from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.data import (
+from napari_cuda.server.data import (
     SliceROI,
     chunk_shape_for_level,
     roi_chunk_signature,
