@@ -174,8 +174,8 @@ def _bootstrap_camera_pose(
             prev_level=int(prev_level),
             last_step=prev_step,
         )
-        apply_volume_metadata(worker, source, applied_context)
         snapshot_iface = SnapshotInterface(worker)
+        apply_volume_metadata(snapshot_iface, source, applied_context)
         apply_volume_level(
             snapshot_iface,
             source,
