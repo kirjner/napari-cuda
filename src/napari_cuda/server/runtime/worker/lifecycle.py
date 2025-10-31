@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from napari_cuda.server.engine import (
+from napari_cuda.server.engine.api import (
     DebugDumper,
     build_avcc_config,
     enqueue_frame,

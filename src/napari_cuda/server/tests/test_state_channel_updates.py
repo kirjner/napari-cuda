@@ -46,7 +46,7 @@ from napari_cuda.server.runtime.viewport import (
     ViewportState,
     VolumeState,
 )
-from napari_cuda.server.runtime.control_api import RuntimeHandle
+from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,

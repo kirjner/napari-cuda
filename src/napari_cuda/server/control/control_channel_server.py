@@ -94,14 +94,10 @@ from napari_cuda.server.control.control_payload_builder import (
     build_notify_scene_payload,
 )
 from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
-from napari_cuda.server.engine import (
-    build_notify_stream_payload,
-    mark_stream_config_dirty,
-)
-from napari_cuda.server.engine import pixel as pixel_channel
+import napari_cuda.server.engine.api as engine_api
 
-if not hasattr(pixel_channel, "mark_stream_config_dirty"):
-    pixel_channel.mark_stream_config_dirty = mark_stream_config_dirty
+# Preserve alias for test monkeypatches until control stops touching engine internals.
+pixel_channel = engine_api
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
     ResumableHistoryStore,
@@ -481,7 +477,7 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
     broadcast = server._pixel_channel.broadcast
     broadcast.bypass_until_key = True
     broadcast.waiting_for_keyframe = True
-    mark_stream_config_dirty(server._pixel_channel)
+    engine_api.mark_stream_config_dirty(server._pixel_channel)
     server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
 
     restored_volume_state: Optional[VolumeState] = None
@@ -1921,7 +1917,7 @@ async def _emit_stream_baseline(
 
     avcc = channel.last_avcc
     if avcc is not None:
-        stream_payload = build_notify_stream_payload(cfg, avcc)
+        stream_payload = engine_api.build_notify_stream_payload(cfg, avcc)
         await _send_stream_frame(
             server,
             ws,
@@ -1929,7 +1925,7 @@ async def _emit_stream_baseline(
             timestamp=time.time(),
         )
     else:
-        mark_stream_config_dirty(channel)
+        engine_api.mark_stream_config_dirty(channel)
 
 
 async def _emit_dims_baseline(server: Any, ws: Any) -> None:

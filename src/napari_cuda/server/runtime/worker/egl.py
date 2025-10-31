@@ -36,7 +36,7 @@ from napari_cuda.server.app.config import ServerCtx
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.engine import DebugConfig, DebugDumper, FrameTimings
+from napari_cuda.server.engine.api import DebugConfig, DebugDumper, FrameTimings
 from napari_cuda.server.runtime.bootstrap import (
     setup_camera as viewer_camera_ops,
     setup_viewer as viewer_setup,

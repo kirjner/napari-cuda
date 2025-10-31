@@ -73,7 +73,6 @@ def main() -> None:
 
     # Normalise naming for doc + viewstate under new contract.
     mapping = {
-        "viewstate": "scene",
         "tests": "tests",
         "docs": "docs",
     }
@@ -90,4 +89,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

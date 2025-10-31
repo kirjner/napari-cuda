@@ -21,7 +21,7 @@ import importlib.resources as ilr
 import socket
 from websockets.exceptions import ConnectionClosed
 
-from napari_cuda.server.engine import (
+from napari_cuda.server.engine.api import (
     ParamCache,
     PixelBroadcastConfig,
     PixelBroadcastState,
@@ -90,7 +90,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_opacity,
 )
 from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.runtime.control_api import RuntimeHandle
+from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent, WorkerIntentMailbox
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.runtime.worker import (
