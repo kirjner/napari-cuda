@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from napari_cuda.server.rendering.bitstream import (
+from napari_cuda.server.engine.encoding.bitstream import (
     parse_nals,
     pack_to_avcc,
     build_avcc_config,
@@ -45,7 +45,7 @@ def test_parse_nals_annexb_and_avcc_equivalence():
 
 
 def test_pack_to_avcc_from_annexb_and_cache_and_keyflag():
-    from napari_cuda.server.rendering import bitstream
+    from napari_cuda.server.engine.encoding import bitstream
 
     sps = bytes([0x67, 100, 0, 31, 0xAA, 0xBB])
     pps = bytes([0x68, 0xEF, 0x3C])
@@ -105,4 +105,3 @@ def test_build_avcc_config_structure():
     pps_len = int.from_bytes(avcc[sps_end+1:sps_end+3], 'big')
     assert pps_len == len(pps)
     assert avcc[sps_end+3:sps_end+3+pps_len] == pps
-

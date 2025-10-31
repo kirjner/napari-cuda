@@ -27,8 +27,9 @@ def _load_fast_packer(runtime: BitstreamRuntime):
     if runtime.disable_fast_pack:
         return None
     try:
-        from ._avcc_packer import pack_to_avcc_fast as fast  # type: ignore
-        return fast
+        from .compiled import _avcc_packer  # type: ignore
+
+        return _avcc_packer.pack_to_avcc_fast  # type: ignore[attr-defined]
     except Exception:
         if not runtime.build_cython:
             return None
@@ -36,8 +37,9 @@ def _load_fast_packer(runtime: BitstreamRuntime):
             import pyximport  # type: ignore
 
             pyximport.install(language_level=3, inplace=True)  # type: ignore
-            from ._avcc_packer import pack_to_avcc_fast as fast  # type: ignore
-            return fast
+            from .compiled import _avcc_packer  # type: ignore
+
+            return _avcc_packer.pack_to_avcc_fast  # type: ignore[attr-defined]
         except Exception:
             return None
 

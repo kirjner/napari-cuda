@@ -21,7 +21,21 @@ import importlib.resources as ilr
 import socket
 from websockets.exceptions import ConnectionClosed
 
-from napari_cuda.server.rendering.bitstream import build_avcc_config
+from napari_cuda.server.engine import (
+    ParamCache,
+    PixelBroadcastConfig,
+    PixelBroadcastState,
+    PixelChannelConfig,
+    PixelChannelState,
+    broadcast_loop,
+    build_avcc_config,
+    configure_bitstream,
+    ensure_keyframe,
+    ingest_client,
+    mark_stream_config_dirty,
+    prepare_client_attach,
+    run_channel_loop,
+)
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.runtime.bootstrap.runtime_driver import probe_scene_bootstrap
 from napari_cuda.server.viewstate import (
@@ -38,7 +52,6 @@ from napari_cuda.server.viewstate import (
 from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.viewstate import pull_render_snapshot
 from napari_cuda.server.control.state_reducers import reduce_level_update
-from napari_cuda.server.rendering.bitstream import ParamCache, configure_bitstream
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.utils.env import env_bool
 from napari_cuda.server.data.zarr_source import ZarrSceneSource, ZarrSceneSourceError
@@ -56,8 +69,6 @@ from napari_cuda.protocol import (
     NOTIFY_STREAM_TYPE,
 )
 from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
-from napari_cuda.server.rendering import pixel_broadcaster
-from napari_cuda.server.control import pixel_channel
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
     _broadcast_camera_update,
@@ -185,12 +196,12 @@ class EGLHeadlessServer:
         qsize = int(self._ctx.frame_queue)
         frame_queue: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
         log_sends_flag = bool(log_sends or policy_logging.log_sends_env)
-        broadcast_state = pixel_broadcaster.PixelBroadcastState(
+        broadcast_state = PixelBroadcastState(
             frame_queue=frame_queue,
             clients=set(),
             log_sends=log_sends_flag,
         )
-        self._pixel_config = pixel_channel.PixelChannelConfig(
+        self._pixel_config = PixelChannelConfig(
             width=self.width,
             height=self.height,
             fps=float(self.cfg.fps),
@@ -198,7 +209,7 @@ class EGLHeadlessServer:
             codec_name=self._codec_name,
             kf_watchdog_cooldown_s=float(self._ctx.kf_watchdog_cooldown_s),
         )
-        self._pixel_channel = pixel_channel.PixelChannelState(
+        self._pixel_channel = PixelChannelState(
             broadcast=broadcast_state,
             needs_stream_config=True,
             last_avcc=None,
@@ -476,7 +487,7 @@ class EGLHeadlessServer:
             return False
         logger.info("Encoder reset requested (reason=%s)", reason)
         worker.reset_encoder()
-        pixel_channel.mark_stream_config_dirty(self._pixel_channel)
+        mark_stream_config_dirty(self._pixel_channel)
         return True
 
     def _try_force_idr(self) -> bool:
@@ -517,7 +528,7 @@ class EGLHeadlessServer:
     async def _ensure_keyframe(self) -> None:
         """Request a clean keyframe and arrange for watchdog + config resend."""
 
-        await pixel_channel.ensure_keyframe(
+        await ensure_keyframe(
             self._pixel_channel,
             config=self._pixel_config,
             metrics=self.metrics,
@@ -779,8 +790,8 @@ class EGLHeadlessServer:
         lifecycle_stop_worker(self._worker_lifecycle)
 
     async def _ingest_pixel(self, ws: websockets.WebSocketServerProtocol):
-        pixel_channel.prepare_client_attach(self._pixel_channel)
-        await pixel_channel.ingest_client(
+        prepare_client_attach(self._pixel_channel)
+        await ingest_client(
             self._pixel_channel,
             ws,
             config=self._pixel_config,
@@ -794,7 +805,7 @@ class EGLHeadlessServer:
         )
 
     async def _broadcast_loop(self) -> None:
-        await pixel_channel.run_channel_loop(
+        await run_channel_loop(
             self._pixel_channel,
             config=self._pixel_config,
             metrics=self.metrics,

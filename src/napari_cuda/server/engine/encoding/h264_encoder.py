@@ -16,7 +16,7 @@ from fractions import Fraction
 from typing import Dict, List, Optional
 
 from napari_cuda.codec.avcc import AccessUnit, parse_avcc
-from napari_cuda.server.rendering.bitstream import (
+from napari_cuda.server.engine.encoding.bitstream import (
     ParamCache,
     build_avcc_config,
     pack_to_avcc,

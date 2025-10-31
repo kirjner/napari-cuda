@@ -36,7 +36,7 @@ Offensive coding tenet: assertions over guards unless interfacing external syste
 Offensive coding tenet: remove try/except scaffolding that hides bugs.
 
 1. **Archive empty stubs**
-  - Remove or consolidate thin wrappers such as `server/runtime/worker/loop.py`, `server/control/pixel_channel.py` after ensuring
+  - Remove or consolidate thin wrappers such as `server/runtime/worker/loop.py`, `server/engine/pixel/channel.py` after ensuring
      callers reference the shared helpers.
 2. **Split control channel**
    - Move WebSocket setup to a new `transport.py`.

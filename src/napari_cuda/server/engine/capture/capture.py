@@ -8,9 +8,9 @@ import logging
 import time
 from threading import Lock
 
-from napari_cuda.server.rendering.gl_capture import GLCapture
-from napari_cuda.server.rendering.cuda_interop import CudaInterop
-from napari_cuda.server.rendering.frame_pipeline import FramePipeline
+from napari_cuda.server.engine.capture.gl_capture import GLCapture
+from napari_cuda.server.engine.capture.cuda_interop import CudaInterop
+from napari_cuda.server.engine.capture.frame_pipeline import FramePipeline
 
 
 logger = logging.getLogger(__name__)

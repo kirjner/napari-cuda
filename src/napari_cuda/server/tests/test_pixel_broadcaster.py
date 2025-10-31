@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from napari_cuda.server.rendering import pixel_broadcaster
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 
 
 class DummyMetrics:

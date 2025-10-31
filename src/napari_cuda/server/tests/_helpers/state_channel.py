@@ -36,7 +36,7 @@ from napari_cuda.server.control.resumable_history_store import (
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
-from napari_cuda.server.rendering import pixel_broadcaster
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.server.viewstate import (
     snapshot_render_state,
     snapshot_layer_controls,
@@ -844,7 +844,7 @@ class StateServerHarness:
             clients=set(),
             log_sends=False,
         )
-        from napari_cuda.server.control.pixel_channel import PixelChannelConfig, PixelChannelState
+        from napari_cuda.server.engine import PixelChannelConfig, PixelChannelState
 
         server._pixel_channel = PixelChannelState(
             broadcast=broadcast_state,

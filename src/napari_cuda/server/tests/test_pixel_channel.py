@@ -5,7 +5,15 @@ from collections import Counter
 import pytest
 
 from napari_cuda.protocol import NotifyStreamPayload
-from napari_cuda.server.rendering import pixel_broadcaster, pixel_channel
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
+from napari_cuda.server.engine import (
+    PixelChannelConfig,
+    PixelChannelState,
+    enqueue_frame,
+    maybe_send_stream_config,
+    prepare_client_attach,
+    start_watchdog,
+)
 
 
 class DummyMetrics:
@@ -28,17 +36,17 @@ def test_enqueue_frame_drops_oldest() -> None:
             clients=set(),
             log_sends=False,
         )
-        state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
+        state = PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
         metrics = DummyMetrics()
 
         packet1: pixel_broadcaster.FramePacket = (b"a", 0, 0, 0.0)
         packet2: pixel_broadcaster.FramePacket = (b"b", 0, 1, 0.0)
 
-        pixel_channel.enqueue_frame(state, packet1, metrics=metrics)
+        enqueue_frame(state, packet1, metrics=metrics)
         assert queue.qsize() == 1
         assert metrics.values["napari_cuda_frame_queue_depth"] == pytest.approx(1.0)
 
-        pixel_channel.enqueue_frame(state, packet2, metrics=metrics)
+        enqueue_frame(state, packet2, metrics=metrics)
         assert queue.qsize() == 1
         queued = queue.get_nowait()
         assert queued == packet2
@@ -56,9 +64,9 @@ def test_maybe_send_stream_config_tracks_cache() -> None:
             clients=set(),
             log_sends=False,
         )
-        state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
+        state = PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
         metrics = DummyMetrics()
-        config = pixel_channel.PixelChannelConfig(
+        config = PixelChannelConfig(
             width=640,
             height=480,
             fps=60.0,
@@ -74,7 +82,7 @@ def test_maybe_send_stream_config_tracks_cache() -> None:
 
         avcc_blob = b"test-avcc"
 
-        await pixel_channel.maybe_send_stream_config(
+        await maybe_send_stream_config(
             state,
             config=config,
             metrics=metrics,
@@ -88,7 +96,7 @@ def test_maybe_send_stream_config_tracks_cache() -> None:
 
         # Second call with unchanged avcC should be a no-op
         sent.clear()
-        await pixel_channel.maybe_send_stream_config(
+        await maybe_send_stream_config(
             state,
             config=config,
             metrics=metrics,
@@ -108,7 +116,7 @@ def test_start_watchdog_respects_cooldown() -> None:
             clients=set(),
             log_sends=False,
         )
-        state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.05)
+        state = PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.05)
 
         calls: list[float] = []
 
@@ -116,14 +124,14 @@ def test_start_watchdog_respects_cooldown() -> None:
             calls.append(asyncio.get_running_loop().time())
             return True
 
-        pixel_channel.start_watchdog(state, reset_encoder=reset_encoder, watchdog_delay_s=0.01)
+        start_watchdog(state, reset_encoder=reset_encoder, watchdog_delay_s=0.01)
         await asyncio.sleep(0.02)
         assert calls, "watchdog should trigger reset"
         first_call = calls[-1]
 
         # Set recent reset time to trigger cooldown and ensure second watchdog does nothing
         state.broadcast.kf_last_reset_ts = time.time()
-        pixel_channel.start_watchdog(state, reset_encoder=reset_encoder, watchdog_delay_s=0.01)
+        start_watchdog(state, reset_encoder=reset_encoder, watchdog_delay_s=0.01)
         await asyncio.sleep(0.02)
         assert calls[-1] == pytest.approx(first_call)
 
@@ -139,10 +147,10 @@ def test_prepare_client_attach_flushes_queue() -> None:
         clients=set(),
         log_sends=False,
     )
-    state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
+    state = PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
     state.needs_stream_config = False
 
-    pixel_channel.prepare_client_attach(state)
+    prepare_client_attach(state)
 
     assert queue.empty()
     assert state.broadcast.bypass_until_key
@@ -159,10 +167,10 @@ def test_prepare_client_attach_skips_when_clients_present() -> None:
         clients={ws},  # Existing client should suppress flush
         log_sends=False,
     )
-    state = pixel_channel.PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
+    state = PixelChannelState(broadcast=broadcast, kf_watchdog_cooldown_s=0.3)
     state.needs_stream_config = False
 
-    pixel_channel.prepare_client_attach(state)
+    prepare_client_attach(state)
 
     assert queue.qsize() == 1
     assert not state.broadcast.bypass_until_key

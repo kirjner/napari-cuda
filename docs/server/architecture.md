@@ -9,13 +9,13 @@ contracted, well-partitioned layout.
 | Domain | Location | Reality today |
 | --- | --- | --- |
 | Entry points | `server/app/` | Modules wire control, runtime, engine, and data directly in `egl_headless_server.py`. |
-| Control plane | `server/control/` | Imports runtime state types (`viewport.state`, IPC mailboxes) and engine helpers (`pixel_channel`). |
+| Control plane | `server/control/` | Imports runtime state types (`viewport.state`, IPC mailboxes) and engine helpers (`engine.pixel.channel`). |
 | Runtime | `server/runtime/` | Still depends on control models and `server/data` helpers; circular imports previously blocked profiling. |
-| Engine | `server/rendering/` | GPU/NVENC code lives alongside control shims (`pixel_channel`) and depends on app config objects. Compiled `.so` files share the top-level directory. |
+| Engine | `server/engine/` | GPU/NVENC code, capture pipeline, and pixel broadcaster; exported via `engine/api.py`. |
 | View state | `server/viewstate/` | Centralised viewer DTOs/defaults consumed by control and runtime. |
 | Shared data | `server/data/` | ROI/chunk math, hardware limits, LOD configs. (Former `runtime/data` helpers moved here.) |
 | Tests | `server/tests/` | Flat bucket covering control, runtime, engine, and integration cases. |
-| Docs | `docs/server/runtime_worker.md`, `docs/server/runtime_state_migration.md` | Reference old module paths (`render_loop.render_updates.*`) and lack a top-level architecture contract. |
+| Docs | `docs/server/runtime_worker.md`, `docs/server/runtime_state_migration.md` | Reference prior module paths (`render_loop.apply.render_state.*`) and lack a top-level architecture contract. |
 
 ### Current Import Matrix (captured Oct 2025)
 
@@ -84,7 +84,7 @@ the contract in CI.
 - **Duplicate data layers** – (Resolved) `runtime/data` helpers are now part of
   `server/data`; future changes should rely on that package exclusively.
 - **Viewer DTO alignment** – Shared dataclasses/defaults live in `server/viewstate`; continue steering new code through that façade.
-- **Engine bleed-through** – `server/rendering/encoder.py` imports app config
+- **Engine façade discipline** – Keep runtime/control imports limited to `server/engine/api.py` to avoid leaking internal modules.
   and re-exports control pixel channels. The engine package must stand alone
   behind an API module.
 - **Control/runtime coupling** – Control reducers import runtime state classes,
@@ -110,9 +110,8 @@ the contract in CI.
    - Refactor `control/state_models.py`, `runtime/render_loop/apply/render_state`,
      and viewstate builders to use the shared models.
 4. **Isolate engine**
-   - Introduce `server/engine/api.py` and update runtime to call it.
-   - Move compiled artifacts under `engine/_compiled/`.
-   - Rename `server/rendering/` to `server/engine/` once imports are adjusted.
+   - Maintain `server/engine/api.py` as the only public surface.
+   - Keep compiled artifacts under `engine/encoding/compiled/` and document rebuild steps.
 5. **Establish control/runtime façades**
    - Define `server/runtime/interface.py` (runtime entry points) and
      `server/control/runtime_proxy.py` (control-side adapter).

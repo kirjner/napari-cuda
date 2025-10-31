@@ -9,12 +9,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from napari_cuda.server.control import pixel_channel
-from napari_cuda.server.rendering.bitstream import (
+from napari_cuda.server.engine import (
+    DebugDumper,
     build_avcc_config,
+    enqueue_frame,
     pack_to_avcc,
+    publish_avcc,
 )
-from napari_cuda.server.rendering.debug_tools import DebugDumper
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     init_egl as core_init_egl,
@@ -98,7 +99,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         if avcc_cfg is not None:
             def _publish_config(avcc_bytes: bytes) -> None:
                 server._schedule_coro(
-                    pixel_channel.publish_avcc(
+                    publish_avcc(
                         server._pixel_channel,
                         config=server._pixel_config,
                         metrics=server.metrics,
@@ -134,7 +135,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         packet = (avcc_pkt, flags, seq_val, stamp_ts)
 
         def _enqueue() -> None:
-            pixel_channel.enqueue_frame(
+            enqueue_frame(
                 server._pixel_channel,
                 packet,
                 metrics=server.metrics,
@@ -228,7 +229,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             if avcc_cfg is not None:
                 def _publish_start_config(avcc_bytes: bytes) -> None:
                     server._schedule_coro(
-                        pixel_channel.publish_avcc(
+                        publish_avcc(
                             server._pixel_channel,
                             config=server._pixel_config,
                             metrics=server.metrics,

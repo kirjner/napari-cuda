@@ -9,9 +9,7 @@ from typing import Optional
 import pycuda.driver as cuda  # type: ignore
 
 from napari_cuda.server.app.config import ServerCtx
-from napari_cuda.server.rendering.capture import CaptureFacade
-from napari_cuda.server.rendering.egl_context import EglContext
-from napari_cuda.server.rendering.encoder import Encoder
+from napari_cuda.server.engine import CaptureFacade, EglContext, Encoder
 
 
 @dataclass

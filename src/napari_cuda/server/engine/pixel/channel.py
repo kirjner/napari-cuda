@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 import websockets
 
-from napari_cuda.server.rendering import pixel_broadcaster
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.protocol import NotifyStreamPayload
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only

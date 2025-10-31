@@ -1,2 +1,0 @@
-"""Server pixel channel modules."""
-
