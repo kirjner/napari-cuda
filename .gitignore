@@ -197,3 +197,4 @@ uv.lock
 backups/
 profile/
 client_metrics.csv
+*.prof

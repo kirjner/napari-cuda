@@ -24,7 +24,11 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from napari_cuda.server.rendering.bitstream import ParamCache, pack_to_avcc, build_avcc_config
+from napari_cuda.server.engine.encoding.bitstream import (
+    ParamCache,
+    build_avcc_config,
+    pack_to_avcc,
+)
 from napari_cuda.codec.avcc import split_avcc_by_len, AccessUnit
 
 
@@ -195,7 +199,7 @@ def main() -> None:
 
     # Print packer fast-path availability
     try:
-        from napari_cuda.server.rendering.bitstream import _FAST_PACK  # type: ignore
+        from napari_cuda.server.engine.encoding.bitstream import _FAST_PACK  # type: ignore
         print(f'FAST_PACK available: {bool(_FAST_PACK)}')
     except Exception:
         pass

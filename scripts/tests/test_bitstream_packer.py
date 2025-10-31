@@ -1,6 +1,9 @@
 import pytest
 
-from napari_cuda.server.rendering.bitstream import pack_to_annexb, ParamCache
+from napari_cuda.server.engine.encoding.bitstream import (
+    ParamCache,
+    pack_to_annexb,
+)
 
 
 def start_code4():
@@ -81,4 +84,3 @@ def test_non_keyframe():
     payload, key = pack_to_annexb([pframe], cache)
     assert key is False
     assert payload is not None and payload.startswith(start_code4())
-
