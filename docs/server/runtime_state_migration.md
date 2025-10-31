@@ -20,7 +20,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
 - ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport/runner.py:214`).
 
 ### 1.4 Worker loop interactions
-- `worker.ticks.viewport.run` asks the `ViewportRunner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `snapshots.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/worker/ticks/viewport.py`).
+- `render_loop.ticks.viewport.run` asks the `ViewportRunner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `snapshots.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
 - Snapshot drain (`egl_worker.py:1488`) rebuilds `SceneStateApplyContext`, updates `_z_index`, `_data_wh`, and mirrors runner state by calling `mark_level_applied` when the staged level matches the target.
 - `ensure_scene_source` and `reset_worker_camera` (server/runtime/worker_runtime.py) mutate `worker._active_ms_level`, `_zarr_*`, `_data_wh`, and depend on `worker.use_volume` to branch camera resets (`worker_runtime.py:16`–`worker_runtime.py:105`).
 
@@ -71,7 +71,7 @@ Single-source our render state so the worker, viewport runner, controller, and t
    - `@property use_volume` → `self.viewport_state.mode is RenderMode.VOLUME`
    - `_active_ms_level` → proxy to `viewport_state.plane.applied_level`.
    ✅ Implemented along with shims for `_level_downgraded` and `_volume_scale`.
-4. Update worker helpers (`_ensure_scene_source`, `worker.ticks.viewport.run`, `_build_scene_state_context`) to read/write through the new struct, guarding mutations with `_state_lock` where required.
+4. Update worker helpers (`_ensure_scene_source`, `render_loop.ticks.viewport.run`, `_build_scene_state_context`) to read/write through the new struct, guarding mutations with `_state_lock` where required.
    ✅ Worker shims now funnel level/volume updates, ROI tracking, and napari camera snapshots into `ViewportState`.
 5. Extend existing tests to assert the struct mirrors legacy values (e.g., `test_render_snapshot` confirms `PlaneState.applied_level` changes on apply; harness checks mode flag).
    ✅ Render snapshot tests and viewport runner suite cover mode/level/pose updates; state-channel harness adoption remains as a follow-up.

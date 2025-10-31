@@ -20,7 +20,7 @@ from napari_cuda.server.runtime.data import (
 )
 from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
 from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
-from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
+from napari_cuda.server.runtime.lod.roi import viewport_roi_for_level
 from napari_cuda.server.runtime.viewport.plane_ops import (
     assign_pose_from_snapshot,
     apply_pose_to_camera,
@@ -28,12 +28,10 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
 )
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
-    RenderViewportInterface,
+from napari_cuda.server.runtime.lod.viewport_lod_interface import (
+    ViewportLodInterface,
 )
-from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
-    SnapshotInterface,
-)
+from .interface import SnapshotInterface
 from .viewer_metadata import apply_plane_metadata
 
 logger = logging.getLogger(__name__)
@@ -50,7 +48,7 @@ class SliceApplyResult:
     width_px: int
     height_px: int
 def load_slice(
-    viewport_iface: RenderViewportInterface,
+    viewport_iface: ViewportLodInterface,
     source: Any,
     level: int,
     z_index: int,
@@ -72,7 +70,7 @@ def aligned_roi_signature(
 ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
     """Align ``roi`` to the chunk grid (if enabled) and return its signature."""
 
-    viewport_iface = RenderViewportInterface(snapshot_iface.worker)
+    viewport_iface = ViewportLodInterface(snapshot_iface.worker)
     roi_val = roi or viewport_roi_for_level(viewport_iface, source, int(level))
     chunk_shape = chunk_shape_for_level(source, int(level))
     aligned_roi = roi_val
@@ -311,7 +309,7 @@ def apply_slice_level(
     view = snapshot_iface.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
-    viewport_iface = RenderViewportInterface(snapshot_iface.worker)
+    viewport_iface = ViewportLodInterface(snapshot_iface.worker)
     roi = viewport_roi_for_level(viewport_iface, source, int(applied.level))
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
         snapshot_iface,

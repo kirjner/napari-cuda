@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from napari_cuda.server.runtime.worker.interfaces.viewer_bootstrap_interface import ViewerBootstrapInterface
+from napari_cuda.server.runtime.bootstrap.interface import ViewerBootstrapInterface
 
 
 class DummyWorker:

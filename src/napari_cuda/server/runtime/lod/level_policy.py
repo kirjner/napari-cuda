@@ -15,10 +15,8 @@ from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.viewport import RenderMode
-from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
-from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
-    RenderViewportInterface,
-)
+from .roi import viewport_roi_for_level
+from .viewport_lod_interface import ViewportLodInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -48,7 +46,7 @@ def _oversampling_for_level(
 ) -> float:
     """Estimate oversampling ratio for ``level`` relative to the worker viewport."""
 
-    viewport_iface = RenderViewportInterface(worker)
+    viewport_iface = ViewportLodInterface(worker)
     try:
         roi = viewport_roi_for_level(viewport_iface, source, level, quiet=True, for_policy=True)
         if roi.is_empty():

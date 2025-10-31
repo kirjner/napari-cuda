@@ -13,7 +13,7 @@ that behaviour.
   delegates to `core.bootstrap.setup_worker_runtime` for state/locks before
   calling `core.bootstrap.init_vispy_scene`, `core.bootstrap.init_egl`,
   capture bootstrap, and seeding the first snapshot.
-- The render thread loops over `render_updates.consume_render_snapshot`, then
+- The render thread loops over `render_loop.render_updates.consume_render_snapshot`, then
   `capture_and_encode_packet`; the latter calls `render_tick`, which runs
   `run_render_tick` (`runtime/worker/loop.py:9`) with worker callbacks.
 - Shutdown runs `cleanup`, reclaiming CUDA/GL resources, encoder state, VisPy
@@ -64,10 +64,10 @@ that behaviour.
 - **Shared state:** `_scene_source`, `_viewer`, `_plane_visual_handle`,
   `_volume_visual_handle`, `_zarr_*` metadata, `_data_wh`, `_data_d`,
   `_viewport_state.volume.world_extents`.
-- **Dependencies:** `ViewerBuilder` (`runtime/worker/napari_viewer/bootstrap.py`),
+- **Dependencies:** `ViewerBuilder` (`runtime/bootstrap/setup_viewer.py`),
   `ZarrSceneSource` (`data/zarr_source.py`), `ViewerModel`, VisPy cameras, the
   `_VisualHandle` wrapper (`egl.py:111-149`) that tracks node attachment, and
-  plane ROI helpers (`runtime/data/roi_math.py`, `runtime/data/scene_types.py`).
+  LOD helpers (`runtime/lod/roi.py`, `runtime/lod/level_policy.py`).
 - **Notes:** Anything touching VisPy canvas or napari `ViewerModel` should live
   together so we can preserve the adapter contract. Scene-source helpers are
   also used by level policy evaluation (`_ensure_scene_source`,
@@ -78,10 +78,10 @@ that behaviour.
   `_frame_volume_camera`, `_enter_volume_mode`, `_exit_volume_mode`,
   `_apply_camera_reset`, `_emit_current_camera_pose`, `_emit_pose_from_camera`,
   `_pose_from_camera`, `_snapshot_camera_pose`, `_current_panzoom_rect`,
-  `render_updates.apply_viewport_state_snapshot`,
-  `ticks.camera.process_commands`, `ticks.camera.drain`,
-  `ticks.camera.record_zoom_hint`,
-  `render_updates.drain_scene_updates`.
+  `render_loop.render_loop.render_updates.apply_viewport_state_snapshot`,
+  `render_loop.ticks.camera.process_commands`, `render_loop.ticks.camera.drain`,
+  `render_loop.ticks.camera.record_zoom_hint`,
+  `render_loop.render_loop.render_updates.drain_scene_updates`.
 - **Shared state:** `_viewport_state`, `_viewport_runner`, `_camera_queue`,
   `_camera_pose_callback`, `_last_plane_pose`, `_last_volume_pose`,
   `_pose_seq`, `_max_camera_command_seq`, `_render_mailbox` zoom hints.
@@ -95,12 +95,12 @@ that behaviour.
 
 ### 4. Snapshot Ingestion & Ledger Coordination
 - **Entry points:** `enqueue_update`,
-  `render_updates.consume_render_snapshot`,
-  `render_updates.normalize_scene_state`,
-  `render_updates.record_snapshot_versions`,
-  `render_updates.extract_layer_changes`,
-  `render_updates.apply_viewport_state_snapshot`,
-  `render_updates.drain_scene_updates`,
+  `render_loop.render_updates.consume_render_snapshot`,
+  `render_loop.render_updates.normalize_scene_state`,
+  `render_loop.render_updates.record_snapshot_versions`,
+  `render_loop.render_updates.extract_layer_changes`,
+  `render_loop.render_updates.apply_viewport_state_snapshot`,
+  `render_loop.render_updates.drain_scene_updates`,
   `snapshots.plane.dims_signature`,
   `snapshots.plane.apply_dims_from_snapshot`,
   `snapshots.plane.update_z_index_from_snapshot`,
@@ -109,11 +109,11 @@ that behaviour.
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.core.ledger_access`).
 - **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
-  `runtime.core.snapshot_build`), `runtime.worker.snapshots.*`,
-  `runtime.worker.render_updates`, `viewport.updates`,
+  `runtime.core.snapshot_build`), `runtime.snapshots.*`,
+  `runtime.render_loop.render_updates`, `viewport.updates`,
   ledger interfaces in `ServerStateLedger`.
 - **Notes:** This block is where external updates enter the worker. The
-  render-thread snapshot helpers now live under `runtime/worker/snapshots/`,
+  render-thread snapshot helpers now live under `runtime/snapshots/`,
   while shared ledger readers reside in `runtime/core/ledger_access.py`.
 
 ### 5. Level Selection, ROI, and Policy Evaluation
@@ -125,39 +125,39 @@ that behaviour.
   `_volume_world_extents`, `_evaluate_level_policy`, `_mark_render_tick_needed`,
   `_mark_render_tick_complete`, `_mark_render_loop_started`,
   `request_multiscale_level`, `_enter_volume_mode`, `_exit_volume_mode`,
-  `_mark_render_tick_needed`, `worker.ticks.viewport.run`.
+  `_mark_render_tick_needed`, `render_loop.ticks.viewport.run`.
 - **Shared state:** Policy thresholds, `_viewport_runner`, `_viewport_state`,
   `_level_policy_suppressed`, `_last_level_switch_ts`,
   `_oversampling_thresholds`, `_oversampling_hysteresis`,
   `_roi_edge_threshold`, `_roi_align_chunks`, `_roi_pad_chunks`,
   `_roi_ensure_contains_viewport`, `_slice_max_bytes`, `_volume_*` limits,
   `_hw_limits`, `_log_layer_debug`, `_layer_logger`, `_switch_logger`.
-- **Dependencies:** `level_policy` module (`runtime/worker/level_policy.py`), ROI helpers,
-  `ViewportRunner`, `LevelSwitchIntent`, `lod.LevelDecision` contexts,
-  `ServerStateLedger` (for step/order/axes hints), `viewport_roi_for_level`,
-  `apply_plane_metadata`, `apply_volume_metadata`.
+- **Dependencies:** `level_policy` module (`runtime/lod/level_policy.py`), ROI helpers
+  (`runtime/lod/roi.py`), `ViewportRunner`, `LevelSwitchIntent`, LOD decision
+  contexts, `ServerStateLedger` (for step/order/axes hints),
+  `viewport_roi_for_level`, `apply_plane_metadata`, `apply_volume_metadata`.
 - **Notes:** These helpers blend policy selection with ROI alignment and level
   bookkeeping. They depend on both the scene source and the viewport runner,
   which makes them a good candidate for a `levels.py` module exposing pure
   functions that accept a worker façade.
 
 ### 6. Render Loop & Capture/Encode
-- **Entry points:** `render_tick`, `ticks.camera.drain`,
-  `worker.ticks.viewport.run`, `capture_and_encode_packet`, `_capture_blit_gpu_ns`,
+- **Entry points:** `render_tick`, `render_loop.ticks.camera.drain`,
+  `render_loop.ticks.viewport.run`, `capture_and_encode_packet`, `_capture_blit_gpu_ns`,
   `_mark_render_tick_needed`, `_mark_render_tick_complete`,
   `_mark_render_loop_started`.
 - **Shared state:** `_capture`, `_encoder`, `_enc_lock`, `_render_tick_required`,
   `_render_loop_started`, `_animate`, `_animate_dps`, `_anim_start`,
   `_user_interaction_seen`, `_last_interaction_ts`, `_viewport_runner`
   checkpoints.
-- **Dependencies:** `run_render_tick`, animation helper
+- **Dependencies:** `render_loop.loop.run_render_tick`, animation helper
   (`runtime/camera/animator.py`), `CaptureFacade` pipeline, `encode_frame`,
   `CameraCommandQueue`, `ViewportRunner.plan_tick` (indirect via
   `viewport.updates`), debug dumper.
 - **Notes:** `capture_and_encode_packet` glues together GPU capture, encoder
   access, and metrics collection. Splitting this code requires preserving the
   locking discipline (`_enc_lock`) and the ordering guarantees around
-  `ticks.camera.drain`.
+  `render_loop.ticks.camera.drain`.
 
 ### 7. Debugging, Metrics & Misc Utilities
 - **Entry points:** `_log_debug_policy_once`, `snapshot_dims_metadata`,
@@ -189,15 +189,15 @@ that behaviour.
 2. Worker thread calls `_init_cuda`, `_init_vispy_scene`, `_init_egl`,
    `_init_capture`, `_init_cuda_interop`, `_init_encoder`.
 3. Initial snapshot pulled via `pull_render_snapshot`, handed to
-   `render_updates.consume_render_snapshot`, then
-   `render_updates.drain_scene_updates` hydrates the mailbox and viewport runner.
+   `render_loop.render_updates.consume_render_snapshot`, then
+   `render_loop.render_updates.drain_scene_updates` hydrates the mailbox and viewport runner.
 
 ### Per-frame Loop
 1. Controller snapshot fetched (`pull_render_snapshot`) and passed to
-   `render_updates.consume_render_snapshot`.
+   `render_loop.render_updates.consume_render_snapshot`.
 2. `capture_and_encode_packet` performs:
    - `ticks.camera.drain` → `_process_camera_deltas` →
-     `_viewport_runner.ingest_camera_deltas` and `render_updates.drain_scene_updates`.
+     `_viewport_runner.ingest_camera_deltas` and `render_loop.render_updates.drain_scene_updates`.
    - `render_tick` → `run_render_tick` to render the VisPy canvas and mark tick
      completion.
    - `encode_frame` to map, copy, convert, and encode GPU output.

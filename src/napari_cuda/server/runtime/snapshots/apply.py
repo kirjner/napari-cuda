@@ -16,13 +16,11 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker import level_policy
-from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
-    RenderViewportInterface,
+from napari_cuda.server.runtime.lod import level_policy
+from napari_cuda.server.runtime.lod.viewport_lod_interface import (
+    ViewportLodInterface,
 )
-from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
-    SnapshotInterface,
-)
+from .interface import SnapshotInterface
 from .plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,
@@ -34,7 +32,7 @@ from .plane import (
 )
 from .volume import apply_volume_camera_pose, apply_volume_level
 from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
-from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
+from napari_cuda.server.runtime.lod.roi import viewport_roi_for_level
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +219,7 @@ def _resolve_snapshot_ops(
     )
     step_tuple = tuple(int(v) for v in applied_context.step)
     level_int = int(applied_context.level)
-    viewport_iface = RenderViewportInterface(worker)
+    viewport_iface = ViewportLodInterface(worker)
     roi_current = viewport_roi_for_level(viewport_iface, source, level_int)
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
         snapshot_iface,

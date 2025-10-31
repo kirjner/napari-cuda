@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
     viewport_debug_snapshot,
 )
 from napari_cuda.server.runtime.data import SliceROI
-from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
-    RenderViewportInterface,
-)
+from .viewport_lod_interface import ViewportLodInterface
 
 logger = logging.getLogger(__name__)
 
 
 def viewport_roi_for_level(
-    viewport_iface: RenderViewportInterface,
+    viewport_iface: ViewportLodInterface,
     source: Any,
     level: int,
     *,

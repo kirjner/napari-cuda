@@ -46,13 +46,12 @@ from napari_cuda.server.runtime.camera import (
 )
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.worker.snapshots import (
+from napari_cuda.server.runtime.snapshots.plane import apply_slice_level, apply_slice_roi
+from napari_cuda.server.runtime.snapshots.viewer_metadata import (
     apply_plane_metadata,
-    apply_slice_level,
-    apply_slice_roi,
-    apply_volume_level,
     apply_volume_metadata,
 )
+from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate, RenderUpdateMailbox
 from napari_cuda.server.runtime.core import (
     cleanup_render_worker,
@@ -76,13 +75,13 @@ from napari_cuda.server.runtime.viewport import (
     ViewportState,
     VolumeState,
 )
-from . import render_updates as _render_updates
-from . import level_policy
-from .napari_viewer import bootstrap as viewer_bootstrap
-from .napari_viewer import camera_ops as viewer_camera_ops
-from .napari_viewer import visuals as viewer_visuals
-from .ticks import camera as camera_tick
-from .ticks import capture as capture_tick
+from napari_cuda.server.runtime.render_loop import render_updates as _render_updates
+from napari_cuda.server.runtime.lod import level_policy
+from napari_cuda.server.runtime.bootstrap import setup_viewer as viewer_setup
+from napari_cuda.server.runtime.bootstrap import setup_camera as viewer_camera_ops
+from napari_cuda.server.runtime.bootstrap import setup_visuals as viewer_visuals
+from napari_cuda.server.runtime.render_loop.ticks import camera as camera_tick
+from napari_cuda.server.runtime.render_loop.ticks import capture as capture_tick
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +314,7 @@ class EGLRendererWorker:
 
 
     def _init_viewer_scene(self, source: Optional[ZarrSceneSource]) -> None:
-        viewer_bootstrap._init_viewer_scene(self, source)
+        viewer_setup._init_viewer_scene(self, source)
 
     def _configure_camera_for_mode(self) -> None:
         viewer_camera_ops._configure_camera_for_mode(self)

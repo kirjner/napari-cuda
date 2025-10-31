@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple, TYPE_CHECKING
 
+import numpy as np
+from napari_cuda.server.data.roi import resolve_worker_viewport_roi, viewport_debug_snapshot
+
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -133,3 +139,62 @@ class ViewerBootstrapInterface:
         self.set_zarr_shape(shape)
         self.set_zarr_dtype(dtype)
         self.set_zarr_clim(clim)
+
+    def load_initial_slice(
+        self,
+        source: Any,
+        level: int,
+        z_index: int,
+    ) -> Any:
+        """Fetch the initial 2D slab using the worker's viewport policy."""
+
+        worker = self.worker
+        view = getattr(worker, "view", None)
+        if view is None:
+            slab = source.slice(int(level), int(z_index), compute=True)
+            if not isinstance(slab, np.ndarray):
+                slab = np.asarray(slab, dtype=np.float32)
+            return slab
+
+        width = int(worker.width)
+        height = int(worker.height)
+        align_chunks = bool(getattr(worker, "_roi_align_chunks", False))
+        ensure_contains = bool(getattr(worker, "_roi_ensure_contains_viewport", False))
+        edge_threshold = int(getattr(worker, "_roi_edge_threshold", 0))
+        chunk_pad = int(getattr(worker, "_roi_pad_chunks", 0))
+        data_wh = getattr(worker, "_data_wh", (width, height))
+        data_wh = (int(data_wh[0]), int(data_wh[1]))
+        data_depth = getattr(worker, "_data_d", None)
+        prev_roi = worker.viewport_state.plane.applied_roi  # type: ignore[attr-defined]
+
+        def _snapshot() -> dict[str, Any]:
+            return viewport_debug_snapshot(
+                view=view,
+                canvas_size=(width, height),
+                data_wh=data_wh,
+                data_depth=data_depth,
+            )
+
+        roi = resolve_worker_viewport_roi(
+            view=view,
+            canvas_size=(width, height),
+            source=source,
+            level=int(level),
+            align_chunks=align_chunks,
+            chunk_pad=chunk_pad,
+            ensure_contains_viewport=ensure_contains,
+            edge_threshold=edge_threshold,
+            for_policy=False,
+            prev_roi=prev_roi,
+            snapshot_cb=_snapshot,
+            log_layer_debug=self.log_layer_debug,
+            quiet=False,
+            data_wh=data_wh,
+            reason="bootstrap",
+            logger_ref=logger,
+        )
+
+        slab = source.slice(int(level), int(z_index), compute=True, roi=roi)
+        if not isinstance(slab, np.ndarray):
+            slab = np.asarray(slab, dtype=np.float32)
+        return slab

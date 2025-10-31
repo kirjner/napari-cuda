@@ -297,7 +297,7 @@ def init_egl(worker: object) -> None:
 def init_vispy_scene(worker: object) -> None:
     """Create the napari viewer + VisPy scene on the worker thread."""
 
-    from napari_cuda.server.runtime.worker.napari_viewer.bootstrap import (
+    from napari_cuda.server.runtime.bootstrap.setup_viewer import (
         _init_viewer_scene,
     )  # Local import to avoid circular dependency
 

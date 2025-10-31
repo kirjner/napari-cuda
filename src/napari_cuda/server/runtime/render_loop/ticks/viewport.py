@@ -6,24 +6,22 @@ import logging
 from typing import TYPE_CHECKING
 
 from napari_cuda.server.runtime.viewport import RenderMode
-from napari_cuda.server.runtime.viewport.roi import viewport_roi_for_level
-from napari_cuda.server.runtime.worker import level_policy
-from napari_cuda.server.runtime.worker.snapshots import (
-    apply_plane_metadata,
+from napari_cuda.server.runtime.lod.roi import viewport_roi_for_level
+from napari_cuda.server.runtime.lod import level_policy
+from napari_cuda.server.runtime.snapshots.plane import (
     apply_slice_level,
     apply_slice_roi,
-    apply_volume_level,
+)
+from napari_cuda.server.runtime.snapshots.viewer_metadata import (
+    apply_plane_metadata,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.worker.interfaces.render_tick_interface import (
-    RenderTickInterface,
+from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
+from ..tick_interface import RenderTickInterface
+from napari_cuda.server.runtime.lod.viewport_lod_interface import (
+    ViewportLodInterface,
 )
-from napari_cuda.server.runtime.worker.interfaces.render_viewport_interface import (
-    RenderViewportInterface,
-)
-from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import (
-    SnapshotInterface,
-)
+from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -49,7 +47,7 @@ def run(worker: "EGLRendererWorker") -> None:
 
     source = tick_iface.get_scene_source() or tick_iface.ensure_scene_source()
     snapshot_iface = SnapshotInterface(worker)
-    viewport_iface = RenderViewportInterface(worker)
+    viewport_iface = ViewportLodInterface(worker)
 
     def _resolve(level: int, _rect):
         return viewport_roi_for_level(viewport_iface, source, int(level), quiet=True)

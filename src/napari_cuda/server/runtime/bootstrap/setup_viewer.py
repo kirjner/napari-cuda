@@ -19,12 +19,14 @@ from napari.components.viewer_model import ViewerModel
 
 from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.runtime.worker.snapshots import plane as plane_snapshots
 from napari_cuda.server.runtime.viewport import RenderMode
-from ..interfaces.render_viewport_interface import RenderViewportInterface
-from ..interfaces.viewer_bootstrap_interface import ViewerBootstrapInterface
-from .camera_ops import _bootstrap_camera_pose, _configure_camera_for_mode, _frame_volume_camera
-from .visuals import (
+from .interface import ViewerBootstrapInterface
+from .setup_camera import (
+    _bootstrap_camera_pose,
+    _configure_camera_for_mode,
+    _frame_volume_camera,
+)
+from .setup_visuals import (
     _VisualHandle,
     _ensure_plane_visual,
     _ensure_volume_visual,
@@ -229,8 +231,11 @@ class ViewerBuilder:
             else:
                 # Bootstrap: request a full-slab ROI for the first slice load
                 self._facade.set_bootstrap_full_roi(True)
-                viewport_iface = RenderViewportInterface(self._facade.worker)
-                slice_array = plane_snapshots.load_slice(viewport_iface, source, selected_level, int(z_index))
+                slice_array = self._facade.load_initial_slice(
+                    source,
+                    selected_level,
+                    int(z_index),
+                )
                 if self._facade.log_layer_debug:
                     smin = float(np.nanmin(slice_array))
                     smax = float(np.nanmax(slice_array))

@@ -6,8 +6,8 @@ from copy import deepcopy
 from typing import Optional
 
 from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
-from napari_cuda.server.runtime.worker.interfaces.snapshot_interface import SnapshotInterface
-from ..napari_viewer.camera_ops import _current_panzoom_rect
+from napari_cuda.server.runtime.bootstrap.setup_camera import _current_panzoom_rect
+from .interface import SnapshotInterface
 
 
 def apply_viewport_state_snapshot(

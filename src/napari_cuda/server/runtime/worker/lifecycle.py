@@ -16,7 +16,7 @@ from napari_cuda.server.runtime.core.snapshot_build import (
     RenderLedgerSnapshot,
     pull_render_snapshot,
 )
-from . import render_updates as _render_updates
+from napari_cuda.server.runtime.render_loop import render_updates as _render_updates
 from .egl import EGLRendererWorker
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import snapshot_multiscale_state

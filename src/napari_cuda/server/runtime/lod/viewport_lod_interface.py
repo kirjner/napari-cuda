@@ -1,4 +1,4 @@
-"""Read-only viewport/camera access for render helpers."""
+"""Read-only viewport + ROI access used by level-of-detail planning."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
-class RenderViewportInterface:
-    """Expose viewport state and read helpers without touching worker internals."""
+class ViewportLodInterface:
+    """Expose viewport state needed to resolve level-of-detail decisions."""
 
     worker: "EGLRendererWorker"
 
@@ -75,4 +75,4 @@ class RenderViewportInterface:
         self.worker._emit_current_camera_pose(reason)  # type: ignore[attr-defined]
 
 
-__all__ = ["RenderViewportInterface"]
+__all__ = ["ViewportLodInterface"]
