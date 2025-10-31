@@ -16,10 +16,6 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.lod.viewport_lod_interface import (
-    ViewportLodInterface,
-)
 from .interface import SnapshotInterface
 from .plane import (
     aligned_roi_signature,
@@ -32,7 +28,6 @@ from .plane import (
 )
 from .volume import apply_volume_camera_pose, apply_volume_level
 from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
-from napari_cuda.server.runtime.lod.roi import viewport_roi_for_level
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +58,6 @@ def apply_render_snapshot(snapshot_iface: SnapshotInterface, snapshot: RenderLed
     the toggle back to 2D or 3D. Camera and level application are handled by
     the worker helpers invoked from within the dims application.
     """
-    worker = snapshot_iface.worker
     viewer = snapshot_iface.viewer
     assert viewer is not None, "RenderTxn requires an active viewer"
 
@@ -95,7 +89,6 @@ __all__ = [
     "apply_render_snapshot",
     "apply_slice_level",
     "apply_volume_level",
-    "viewport_roi_for_level",
 ]
 
 
@@ -107,7 +100,6 @@ def _resolve_snapshot_ops(
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
     target_volume = nd >= 3
 
-    worker = snapshot_iface.worker
     source = snapshot_iface.ensure_scene_source()
     prev_level = snapshot_iface.current_level_index()
     target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
@@ -120,11 +112,7 @@ def _resolve_snapshot_ops(
     )
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
-    ledger_step = (
-        tuple(int(v) for v in snapshot.current_step)
-        if snapshot.current_step is not None
-        else None
-    )
+    ledger_snapshot_step = snapshot_iface.ledger_step()
 
     ops: Dict[str, Any] = {
         "source": source,
@@ -137,8 +125,7 @@ def _resolve_snapshot_ops(
 
     if target_volume:
         requested_level = int(target_level)
-        selected_level, downgraded = level_policy.resolve_volume_intent_level(
-            worker,
+        selected_level, downgraded = snapshot_iface.resolve_volume_intent_level(
             source,
             requested_level,
         )
@@ -147,10 +134,9 @@ def _resolve_snapshot_ops(
         if snapshot_step is not None:
             step_hint = snapshot_step
         else:
-            recorded_step = ledger_step(worker._ledger)
             step_hint = (
-                tuple(int(v) for v in recorded_step)
-                if recorded_step is not None
+                tuple(int(v) for v in ledger_snapshot_step)
+                if ledger_snapshot_step is not None
                 else None
             )
 
@@ -193,13 +179,12 @@ def _resolve_snapshot_ops(
     if was_volume and not target_volume:
         stage_prev_level = target_level
 
-    if ledger_step is not None:
-        step_hint = ledger_step
+    if snapshot_step is not None:
+        step_hint = snapshot_step
     else:
-        recorded_step = ledger_step(worker._ledger)
         step_hint = (
-            tuple(int(v) for v in recorded_step)
-            if recorded_step is not None
+            tuple(int(v) for v in ledger_snapshot_step)
+            if ledger_snapshot_step is not None
             else None
         )
 
@@ -219,8 +204,7 @@ def _resolve_snapshot_ops(
     )
     step_tuple = tuple(int(v) for v in applied_context.step)
     level_int = int(applied_context.level)
-    viewport_iface = ViewportLodInterface(worker)
-    roi_current = viewport_roi_for_level(viewport_iface, source, level_int)
+    roi_current = snapshot_iface.viewport_roi_for_level(source, level_int)
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
         snapshot_iface,
         source,
@@ -269,7 +253,6 @@ def _apply_snapshot_ops(
 ) -> None:
     """Apply the precomputed snapshot plan."""
 
-    worker = snapshot_iface.worker
     source = ops["source"]
 
     if ops["target_volume"]:
@@ -288,19 +271,21 @@ def _apply_snapshot_ops(
         if volume_ops["load_needed"]:
             applied_context = volume_ops["applied_context"]
             assert applied_context is not None
-            apply_volume_metadata(worker, source, applied_context)
+            apply_volume_metadata(snapshot_iface, source, applied_context)
             apply_volume_level(
                 snapshot_iface,
                 source,
                 applied_context,
                 downgraded=bool(volume_ops["downgraded"]),
             )
-            if runner is not None:
-                runner.mark_level_applied(int(applied_context.level))
-                if snapshot_iface.viewport_state.mode is RenderMode.PLANE:
-                    rect = snapshot_iface.current_panzoom_rect()
-                    if rect is not None:
-                        runner.update_camera_rect(rect)
+            snapshot_iface.mark_level_applied(int(applied_context.level))
+            if (
+                runner is not None
+                and snapshot_iface.viewport_state.mode is RenderMode.PLANE
+            ):
+                rect = snapshot_iface.current_panzoom_rect()
+                if rect is not None:
+                    runner.update_camera_rect(rect)
             snapshot_iface.configure_camera_for_mode()
         elif entering_volume:
             snapshot_iface.configure_camera_for_mode()
@@ -316,7 +301,7 @@ def _apply_snapshot_ops(
         snapshot_iface.configure_camera_for_mode()
         snapshot_iface.set_last_dims_signature(None)
 
-    apply_plane_metadata(worker, source, plane_ops["applied_context"])
+    apply_plane_metadata(snapshot_iface, source, plane_ops["applied_context"])
     snapshot_iface.viewport_state.volume.downgraded = False
     apply_slice_camera_pose(snapshot_iface, snapshot)
 

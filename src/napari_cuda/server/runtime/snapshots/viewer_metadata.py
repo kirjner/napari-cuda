@@ -10,36 +10,35 @@ from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
+from .interface import SnapshotInterface
 
 
 def _apply_dims_and_metadata(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     context: lod.LevelContext,
 ) -> None:
-    viewer = getattr(worker, "_viewer", None)
+    viewer = snapshot_iface.viewer
     if viewer is not None:
-        set_range = getattr(worker, "_set_dims_range_for_level", None)
-        if callable(set_range):
-            set_range(source, int(context.level))
+        snapshot_iface.set_dims_range_for_level(source, int(context.level))
         viewer.dims.current_step = tuple(int(v) for v in context.step)
 
     descriptor = source.level_descriptors[int(context.level)]
-    worker._update_level_metadata(descriptor, context)
+    snapshot_iface.update_level_metadata(descriptor, context)
 
 
 def apply_plane_metadata(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     context: lod.LevelContext,
 ) -> None:
     """Update viewer metadata for plane rendering."""
 
-    _apply_dims_and_metadata(worker, source, context)
+    _apply_dims_and_metadata(snapshot_iface, source, context)
 
-    viewport_state = worker.viewport_state
+    viewport_state = snapshot_iface.viewport_state
     plane_state = viewport_state.plane
-    view = worker.view
+    view = snapshot_iface.view
     cam = view.camera
     if not isinstance(cam, PanZoomCamera):
         return
@@ -67,13 +66,13 @@ def apply_plane_metadata(
 
 
 def apply_volume_metadata(
-    worker: Any,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     context: lod.LevelContext,
 ) -> None:
     """Update viewer metadata for volume rendering."""
 
-    _apply_dims_and_metadata(worker, source, context)
+    _apply_dims_and_metadata(snapshot_iface, source, context)
 
 
 __all__ = ["apply_plane_metadata", "apply_volume_metadata"]

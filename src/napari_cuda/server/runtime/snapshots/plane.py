@@ -20,17 +20,12 @@ from napari_cuda.server.runtime.data import (
 )
 from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
 from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
-from napari_cuda.server.runtime.lod.roi import viewport_roi_for_level
 from napari_cuda.server.runtime.viewport.plane_ops import (
     assign_pose_from_snapshot,
     apply_pose_to_camera,
     mark_slice_applied,
 )
-from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.lod.viewport_lod_interface import (
-    ViewportLodInterface,
-)
 from .interface import SnapshotInterface
 from .viewer_metadata import apply_plane_metadata
 
@@ -48,14 +43,14 @@ class SliceApplyResult:
     width_px: int
     height_px: int
 def load_slice(
-    viewport_iface: ViewportLodInterface,
+    snapshot_iface: SnapshotInterface,
     source: Any,
     level: int,
     z_index: int,
 ) -> np.ndarray:
     """Load a slice for ``level`` using the worker viewport ROI."""
 
-    roi = viewport_roi_for_level(viewport_iface, source, int(level))
+    roi = snapshot_iface.viewport_roi_for_level(source, int(level))
     slab = source.slice(int(level), int(z_index), compute=True, roi=roi)
     if not isinstance(slab, np.ndarray):
         slab = np.asarray(slab, dtype=np.float32)
@@ -70,8 +65,7 @@ def aligned_roi_signature(
 ) -> tuple[SliceROI, Optional[tuple[int, int]], Optional[tuple[int, int, int, int]]]:
     """Align ``roi`` to the chunk grid (if enabled) and return its signature."""
 
-    viewport_iface = ViewportLodInterface(snapshot_iface.worker)
-    roi_val = roi or viewport_roi_for_level(viewport_iface, source, int(level))
+    roi_val = roi or snapshot_iface.viewport_roi_for_level(source, int(level))
     chunk_shape = chunk_shape_for_level(source, int(level))
     aligned_roi = roi_val
     if snapshot_iface.roi_align_chunks and chunk_shape is not None:
@@ -216,7 +210,6 @@ def apply_slice_snapshot(
 ) -> SliceApplyResult:
     """Apply plane metadata, camera pose, and ROI from the snapshot."""
 
-    worker = snapshot_iface.worker
     prev_level = int(snapshot_iface.current_level_index())
     plane_state: PlaneState = snapshot_iface.viewport_state.plane
     snapshot_level = int(snapshot.current_level) if snapshot.current_level is not None else None
@@ -230,9 +223,9 @@ def apply_slice_snapshot(
     elif snapshot.current_step is not None:
         step_hint = tuple(int(v) for v in snapshot.current_step)
     if step_hint is None:
-        recorded_step = ledger_step(worker._ledger)
-        if recorded_step is not None:
-            step_hint = tuple(int(v) for v in recorded_step)
+        ledger_snapshot_step = snapshot_iface.ledger_step()
+        if ledger_snapshot_step is not None:
+            step_hint = tuple(int(v) for v in ledger_snapshot_step)
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     stage_prev_level = target_level if was_volume else prev_level
@@ -309,8 +302,7 @@ def apply_slice_level(
     view = snapshot_iface.view
     assert view is not None, "VisPy view must be initialised for 2D apply"
 
-    viewport_iface = ViewportLodInterface(snapshot_iface.worker)
-    roi = viewport_roi_for_level(viewport_iface, source, int(applied.level))
+    roi = snapshot_iface.viewport_roi_for_level(source, int(applied.level))
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
         snapshot_iface,
         source,

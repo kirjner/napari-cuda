@@ -17,7 +17,6 @@ from napari_cuda.server.runtime.viewport.volume_ops import (
     update_scale,
 )
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.lod import level_policy
 
 
 @dataclass(frozen=True)
@@ -64,7 +63,6 @@ def apply_volume_level(
 ) -> VolumeApplyResult:
     """Load the volume level for ``applied`` and update worker metadata."""
 
-    worker = snapshot_iface.worker
     scale_vals = list(source.level_scale(applied.level)) if hasattr(source, "level_scale") else []
     scales = [float(s) for s in scale_vals[-3:]] if scale_vals else []
     while len(scales) < 3:
@@ -72,7 +70,7 @@ def apply_volume_level(
     scale_tuple = (float(scales[-3]), float(scales[-2]), float(scales[-1]))
     snapshot_iface.set_volume_scale(scale_tuple)
 
-    volume = level_policy.load_volume(worker, source, applied.level)
+    volume = snapshot_iface.load_volume(source, applied.level)
     data_wh, data_d = apply_volume_layer_data(
         layer=snapshot_iface.napari_layer,
         volume=volume,

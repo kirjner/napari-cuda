@@ -6,7 +6,6 @@ import logging
 from typing import TYPE_CHECKING
 
 from napari_cuda.server.runtime.viewport import RenderMode
-from napari_cuda.server.runtime.lod.roi import viewport_roi_for_level
 from napari_cuda.server.runtime.lod import level_policy
 from napari_cuda.server.runtime.snapshots.plane import (
     apply_slice_level,
@@ -18,9 +17,6 @@ from napari_cuda.server.runtime.snapshots.viewer_metadata import (
 )
 from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
 from ..tick_interface import RenderTickInterface
-from napari_cuda.server.runtime.lod.viewport_lod_interface import (
-    ViewportLodInterface,
-)
 from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
 
 if TYPE_CHECKING:
@@ -47,10 +43,8 @@ def run(worker: "EGLRendererWorker") -> None:
 
     source = tick_iface.get_scene_source() or tick_iface.ensure_scene_source()
     snapshot_iface = SnapshotInterface(worker)
-    viewport_iface = ViewportLodInterface(worker)
-
     def _resolve(level: int, _rect):
-        return viewport_roi_for_level(viewport_iface, source, int(level), quiet=True)
+        return snapshot_iface.viewport_roi_for_level(source, int(level), quiet=True)
 
     plan = runner.plan_tick(source=source, roi_resolver=_resolve)
     if logger.isEnabledFor(logging.DEBUG):

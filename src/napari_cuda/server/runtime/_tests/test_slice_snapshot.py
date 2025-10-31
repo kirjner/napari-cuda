@@ -114,8 +114,9 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         _fake_plane_wh,
     )
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.snapshots.plane.viewport_roi_for_level",
-        _fake_roi,
+        SnapshotInterface,
+        "viewport_roi_for_level",
+        lambda self, _source, _level, **_: _fake_roi(self, _source, _level),
     )
     monkeypatch.setattr(
         "napari_cuda.server.runtime.snapshots.plane.apply_slice_roi",

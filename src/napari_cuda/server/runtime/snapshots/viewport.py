@@ -6,7 +6,6 @@ from copy import deepcopy
 from typing import Optional
 
 from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
-from napari_cuda.server.runtime.bootstrap.setup_camera import _current_panzoom_rect
 from .interface import SnapshotInterface
 
 
@@ -19,7 +18,6 @@ def apply_viewport_state_snapshot(
 ) -> None:
     """Apply a mailbox-only viewport update (no scene snapshot)."""
 
-    worker = snapshot_iface.worker
     runner = snapshot_iface.viewport_runner
     updated = False
 
@@ -42,7 +40,7 @@ def apply_viewport_state_snapshot(
         return
 
     if runner is not None and snapshot_iface.viewport_state.mode is RenderMode.PLANE:
-        rect = _current_panzoom_rect(worker)
+        rect = snapshot_iface.current_panzoom_rect()
         if rect is not None:
             runner.update_camera_rect(rect)
 
