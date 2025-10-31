@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.viewport.state import RenderMode
-from napari_cuda.server.runtime.core import ledger_step
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.lod.context import build_level_context
+from napari_cuda.server.runtime.viewport.state import RenderMode
+
 from .interface import SnapshotInterface
 from .plane import (
     aligned_roi_signature,
@@ -26,8 +27,8 @@ from .plane import (
     dims_signature,
     update_z_index_from_snapshot,
 )
-from .volume import apply_volume_camera_pose, apply_volume_level
 from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
+from .volume import apply_volume_camera_pose, apply_volume_level
 
 logger = logging.getLogger(__name__)
 
@@ -85,16 +86,16 @@ def apply_render_snapshot(snapshot_iface: SnapshotInterface, snapshot: RenderLed
 
 __all__ = [
     "apply_plane_slice_roi",
-    "apply_slice_roi",
     "apply_render_snapshot",
     "apply_slice_level",
+    "apply_slice_roi",
     "apply_volume_level",
 ]
 
 
 def _resolve_snapshot_ops(
     snapshot_iface: SnapshotInterface, snapshot: RenderLedgerSnapshot
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Compute the metadata and slice ops before mutating worker state."""
 
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
@@ -114,7 +115,7 @@ def _resolve_snapshot_ops(
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     ledger_snapshot_step = snapshot_iface.ledger_step()
 
-    ops: Dict[str, Any] = {
+    ops: dict[str, Any] = {
         "source": source,
         "target_volume": target_volume,
         "was_volume": was_volume,
@@ -150,14 +151,14 @@ def _resolve_snapshot_ops(
                 oversampling={},
                 downgraded=False,
             )
-            applied_context = lod.build_level_context(
+            applied_context = build_level_context(
                 decision,
                 source=source,
                 prev_level=prev_level,
                 last_step=step_hint,
             )
 
-        signature_token: Tuple[Any, ...] = ("volume", int(effective_level), step_hint)
+        signature_token: tuple[Any, ...] = ("volume", int(effective_level), step_hint)
         ops["signature"] = (
             snapshot.dims_version,
             snapshot.view_version,
@@ -196,7 +197,7 @@ def _resolve_snapshot_ops(
         oversampling={},
         downgraded=False,
     )
-    applied_context = lod.build_level_context(
+    applied_context = build_level_context(
         decision,
         source=source,
         prev_level=stage_prev_level,
@@ -249,7 +250,7 @@ def _resolve_snapshot_ops(
 def _apply_snapshot_ops(
     snapshot_iface: SnapshotInterface,
     snapshot: RenderLedgerSnapshot,
-    ops: Dict[str, Any],
+    ops: dict[str, Any],
 ) -> None:
     """Apply the precomputed snapshot plan."""
 

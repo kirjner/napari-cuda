@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
-
-from vispy import scene  # type: ignore
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -35,32 +33,32 @@ class _VisualHandle:
         return self._attached
 
 
-def _register_plane_visual(worker: "EGLRendererWorker", node: Any) -> None:
-    worker._plane_visual_handle = _VisualHandle(node, order=10_000)  # noqa: SLF001
+def _register_plane_visual(worker: EGLRendererWorker, node: Any) -> None:
+    worker._plane_visual_handle = _VisualHandle(node, order=10_000)
 
 
-def _register_volume_visual(worker: "EGLRendererWorker", node: Any) -> None:
-    worker._volume_visual_handle = _VisualHandle(node, order=10_010)  # noqa: SLF001
+def _register_volume_visual(worker: EGLRendererWorker, node: Any) -> None:
+    worker._volume_visual_handle = _VisualHandle(node, order=10_010)
 
 
-def _ensure_plane_visual(worker: "EGLRendererWorker") -> Any:
-    view = worker.view  # noqa: SLF001
+def _ensure_plane_visual(worker: EGLRendererWorker) -> Any:
+    view = worker.view
     assert view is not None, "VisPy view must exist before activating the plane visual"
-    handle = worker._plane_visual_handle  # noqa: SLF001
+    handle = worker._plane_visual_handle
     assert handle is not None, "plane visual not registered"
-    if worker._volume_visual_handle is not None:  # noqa: SLF001
-        worker._volume_visual_handle.detach()  # type: ignore[attr-defined]  # noqa: SLF001
+    if worker._volume_visual_handle is not None:
+        worker._volume_visual_handle.detach()  # type: ignore[attr-defined]
     handle.attach(view)
     return handle.node
 
 
-def _ensure_volume_visual(worker: "EGLRendererWorker") -> Any:
-    view = worker.view  # noqa: SLF001
+def _ensure_volume_visual(worker: EGLRendererWorker) -> Any:
+    view = worker.view
     assert view is not None, "VisPy view must exist before activating the volume visual"
-    handle = worker._volume_visual_handle  # noqa: SLF001
+    handle = worker._volume_visual_handle
     assert handle is not None, "volume visual not registered"
-    if worker._plane_visual_handle is not None:  # noqa: SLF001
-        worker._plane_visual_handle.detach()  # type: ignore[attr-defined]  # noqa: SLF001
+    if worker._plane_visual_handle is not None:
+        worker._plane_visual_handle.detach()  # type: ignore[attr-defined]
     handle.attach(view)
     return handle.node
 

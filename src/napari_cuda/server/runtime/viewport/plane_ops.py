@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
+from typing import Optional
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
@@ -77,7 +78,7 @@ def apply_pose_to_camera(
 
 
 __all__ = [
+    "apply_pose_to_camera",
     "assign_pose_from_snapshot",
     "mark_slice_applied",
-    "apply_pose_to_camera",
 ]

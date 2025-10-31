@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Tuple
-
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 
 from .state import VolumeState
@@ -89,7 +87,7 @@ def update_level(
 
 def update_scale(
     state: VolumeState,
-    scale: Tuple[float, float, float],
+    scale: tuple[float, float, float],
 ) -> None:
     """Persist the volume scale tuple on the state."""
 
@@ -118,4 +116,4 @@ def apply_pose_to_camera(
     camera.fov = float(fov)  # type: ignore[attr-defined]
 
 
-__all__ = ["assign_pose_from_snapshot", "update_level", "update_scale", "apply_pose_to_camera"]
+__all__ = ["apply_pose_to_camera", "assign_pose_from_snapshot", "update_level", "update_scale"]

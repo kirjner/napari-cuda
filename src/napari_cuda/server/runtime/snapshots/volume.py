@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 from vispy.scene.cameras import TurntableCamera
 
 import napari_cuda.server.data.lod as lod
-from .interface import SnapshotInterface
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.viewport.layers import apply_volume_layer_data
 from napari_cuda.server.runtime.viewport.volume_ops import (
-    assign_pose_from_snapshot,
     apply_pose_to_camera,
+    assign_pose_from_snapshot,
     update_level,
     update_scale,
 )
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+
+from .interface import SnapshotInterface
 
 
 @dataclass(frozen=True)
@@ -25,9 +26,9 @@ class VolumeApplyResult:
 
     level: int
     downgraded: bool
-    data_wh: Tuple[int, int]
+    data_wh: tuple[int, int]
     data_d: Optional[int]
-    scale: Tuple[float, float, float]
+    scale: tuple[float, float, float]
 
 
 def apply_volume_camera_pose(

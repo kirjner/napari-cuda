@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import logging
-import time
+from collections.abc import MutableMapping
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, Optional, TYPE_CHECKING
-from collections.abc import MutableMapping
+from typing import TYPE_CHECKING, Any
 
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.snapshots.apply import apply_render_snapshot
-from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
-from napari_cuda.server.runtime.viewport import updates as viewport_updates
-from .tick_interface import RenderTickInterface
 from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.viewport import apply_viewport_state_snapshot
+from napari_cuda.server.runtime.snapshots.viewport import (
+    apply_viewport_state_snapshot,
+)
+from napari_cuda.server.runtime.viewport import (
+    RenderMode,
+    updates as viewport_updates,
+)
+
+from .tick_interface import RenderTickInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -199,7 +203,7 @@ def extract_layer_changes(
     return layer_changes
 
 
-def consume_render_snapshot(worker: "EGLRendererWorker", state: RenderLedgerSnapshot) -> None:
+def consume_render_snapshot(worker: EGLRendererWorker, state: RenderLedgerSnapshot) -> None:
     """Queue a complete scene state snapshot for the next frame."""
 
     normalized = normalize_scene_state(state)
@@ -209,7 +213,7 @@ def consume_render_snapshot(worker: "EGLRendererWorker", state: RenderLedgerSnap
     tick_iface.update_last_interaction_timestamp()
 
 
-def drain_scene_updates(worker: "EGLRendererWorker") -> None:
+def drain_scene_updates(worker: EGLRendererWorker) -> None:
     tick_iface = RenderTickInterface(worker)
     updates: RenderUpdate = tick_iface.render_mailbox_drain()
     snapshot_iface = SnapshotInterface(worker)

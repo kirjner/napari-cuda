@@ -10,28 +10,32 @@ initial scene wiring.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 from vispy import scene
-from napari.components.viewer_model import ViewerModel
 
-from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
+from napari.components.viewer_model import ViewerModel
+from napari_cuda.server.data.roi import (
+    plane_scale_for_level,
+    plane_wh_for_level,
+)
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.viewport import RenderMode
-from .interface import ViewerBootstrapInterface
-from .setup_camera import (
+
+from napari_cuda.server.runtime.bootstrap.interface import ViewerBootstrapInterface
+from napari_cuda.server.runtime.bootstrap.setup_camera import (
     _bootstrap_camera_pose,
     _configure_camera_for_mode,
-    _frame_volume_camera,
 )
-from .setup_visuals import (
-    _VisualHandle,
+from napari_cuda.server.runtime.bootstrap.setup_visuals import (
     _ensure_plane_visual,
     _ensure_volume_visual,
     _register_plane_visual,
     _register_volume_visual,
+    _VisualHandle,
 )
 
 if TYPE_CHECKING:
@@ -109,7 +113,7 @@ class ViewerBuilder:
         axis_labels: Optional[Sequence[str]] = None,
         order: Optional[Sequence[int]] = None,
         ndisplay: Optional[int] = None,
-    ) -> Tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
+    ) -> tuple[scene.SceneCanvas, scene.widgets.ViewBox, ViewerModel]:
         worker_policy = self._facade.debug_policy
         worker_debug = worker_policy.worker
         debug_bg = bool(worker_debug.debug_bg_overlay)
@@ -179,12 +183,7 @@ class ViewerBuilder:
             self._facade.set_z_index(int(z_index))
 
             if self._facade.viewport_state.mode is RenderMode.VOLUME:
-                from napari_cuda.server.runtime.worker import (
-                    level_policy as worker_level_policy,
-                )
-
-                data = worker_level_policy.load_volume(
-                    self._facade.worker,
+                data = self._facade.load_volume(
                     source,
                     selected_level,
                 )
@@ -201,7 +200,9 @@ class ViewerBuilder:
                     viewer.dims.axis_labels = tuple(source.axes)
                 viewer.dims.ndisplay = 3
                 viewer.dims.current_step = tuple(int(v) for v in applied_step) if applied_step is not None else tuple()
-                from napari._vispy.layers.image import VispyImageLayer  # type: ignore
+                from napari._vispy.layers.image import (
+                    VispyImageLayer,  # type: ignore
+                )
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
                 d, h, w = int(data.shape[0]), int(data.shape[1]), int(data.shape[2])
@@ -265,7 +266,9 @@ class ViewerBuilder:
                 layer.gamma = 1.0
                 layer.colormap = 'gray'
                 layer.interpolation = layer_interpolation
-                from napari._vispy.layers.image import VispyImageLayer  # type: ignore
+                from napari._vispy.layers.image import (
+                    VispyImageLayer,  # type: ignore
+                )
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
                 h, w = plane_wh_for_level(source, selected_level)
@@ -284,7 +287,9 @@ class ViewerBuilder:
                 volume = rng.random((self._facade.volume_depth, self._facade.height, self._facade.width), dtype=np.float32)
                 layer = viewer.add_image(volume, name="adapter-volume")
                 viewer.dims.ndisplay = 3
-                from napari._vispy.layers.image import VispyImageLayer  # type: ignore
+                from napari._vispy.layers.image import (
+                    VispyImageLayer,  # type: ignore
+                )
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.TurntableCamera(elevation=30, azimuth=30, fov=60)
                 d = int(volume.shape[0]); h = int(volume.shape[1]); w = int(volume.shape[2])
@@ -304,7 +309,9 @@ class ViewerBuilder:
             else:
                 image = rng.random((self._facade.height, self._facade.width), dtype=np.float32)
                 layer = viewer.add_image(image, name="adapter-image")
-                from napari._vispy.layers.image import VispyImageLayer  # type: ignore
+                from napari._vispy.layers.image import (
+                    VispyImageLayer,  # type: ignore
+                )
                 adapter = VispyImageLayer(layer)
                 view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
                 h = int(image.shape[0]); w = int(image.shape[1])
@@ -378,7 +385,7 @@ class ViewerBuilder:
                 )
                 # Ensure overlay draws on top of the layer visual
                 try:
-                    setattr(overlay, 'order', 20_000)
+                    overlay.order = 20000
                 except Exception:
                     pass
                 # Disable depth test and enable blending for overlays
@@ -397,7 +404,7 @@ class ViewerBuilder:
         return canvas, view, viewer
 
 
-def _init_viewer_scene(worker: "EGLRendererWorker", source: Optional[ZarrSceneSource]) -> None:
+def _init_viewer_scene(worker: EGLRendererWorker, source: Optional[ZarrSceneSource]) -> None:
     facade = ViewerBootstrapInterface(worker)
     builder = ViewerBuilder(facade)
     ledger = worker._ledger
@@ -432,7 +439,6 @@ from napari_cuda.server.runtime.core import (  # noqa: E402  (avoid circular imp
     ledger_order,
     ledger_step,
 )
-
 
 __all__ = [
     "CanonicalAxes",

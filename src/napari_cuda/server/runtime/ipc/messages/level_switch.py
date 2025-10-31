@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.runtime.viewport import (

@@ -6,13 +6,14 @@ future controller-side plumbing can reuse the exact same alignment logic.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Optional
 
 from .scene_types import SliceROI
 
 __all__ = [
-    "chunk_shape_for_level",
     "align_roi_to_chunk_grid",
+    "chunk_shape_for_level",
     "roi_chunk_signature",
 ]
 
@@ -25,7 +26,7 @@ def _axis_index(axes_lower: Sequence[str], axis: str, fallback: int) -> int:
     return fallback
 
 
-def chunk_shape_for_level(source: object, level: int) -> Optional[Tuple[int, int]]:
+def chunk_shape_for_level(source: object, level: int) -> Optional[tuple[int, int]]:
     """Return (cy, cx) chunk dimensions for ``source`` at ``level``.
 
     When chunk metadata is unavailable we return ``None`` so callers can
@@ -67,7 +68,7 @@ def chunk_shape_for_level(source: object, level: int) -> Optional[Tuple[int, int
 
 def align_roi_to_chunk_grid(
     roi: SliceROI,
-    chunk_shape: Optional[Tuple[int, int]],
+    chunk_shape: Optional[tuple[int, int]],
     pad_chunks: int,
     *,
     height: int,
@@ -99,8 +100,8 @@ def align_roi_to_chunk_grid(
 
 def roi_chunk_signature(
     roi: SliceROI,
-    chunk_shape: Optional[Tuple[int, int]],
-) -> Optional[Tuple[int, int, int, int]]:
+    chunk_shape: Optional[tuple[int, int]],
+) -> Optional[tuple[int, int, int, int]]:
     """Return a stable signature describing which chunks *roi* spans.
 
     The signature is ``(y_start_idx, y_stop_idx, x_start_idx, x_stop_idx)`` and

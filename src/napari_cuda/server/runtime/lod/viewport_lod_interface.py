@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class ViewportLodInterface:
     """Expose viewport state needed to resolve level-of-detail decisions."""
 
-    worker: "EGLRendererWorker"
+    worker: EGLRendererWorker
 
     # Basic geometry -----------------------------------------------------
     @property
@@ -34,7 +34,7 @@ class ViewportLodInterface:
 
     # Data/cache state ---------------------------------------------------
     @property
-    def data_wh(self) -> Tuple[int, int]:
+    def data_wh(self) -> tuple[int, int]:
         wh = getattr(self.worker, "_data_wh", (0, 0))  # type: ignore[attr-defined]
         return (int(wh[0]), int(wh[1]))
 
@@ -65,7 +65,7 @@ class ViewportLodInterface:
         return bool(getattr(self.worker, "_log_layer_debug", False))  # type: ignore[attr-defined]
 
     # Camera helpers -----------------------------------------------------
-    def current_panzoom_rect(self) -> Optional[Tuple[float, float, float, float]]:
+    def current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
         rect = self.worker._current_panzoom_rect()  # type: ignore[attr-defined]
         if rect is None:
             return None

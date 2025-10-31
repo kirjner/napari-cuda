@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections import deque
-from typing import Deque, Iterable, List
 import threading
+from collections import deque
+from collections.abc import Iterable
 
 from napari_cuda.server.scene import CameraDeltaCommand
 
@@ -14,7 +14,7 @@ class CameraCommandQueue:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._commands: Deque[CameraDeltaCommand] = deque()
+        self._commands: deque[CameraDeltaCommand] = deque()
 
     def extend(self, commands: Iterable[CameraDeltaCommand]) -> None:
         with self._lock:
@@ -25,7 +25,7 @@ class CameraCommandQueue:
         with self._lock:
             self._commands.append(command)
 
-    def pop_all(self) -> List[CameraDeltaCommand]:
+    def pop_all(self) -> list[CameraDeltaCommand]:
         with self._lock:
             if not self._commands:
                 return []

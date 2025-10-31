@@ -2,28 +2,35 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import time
-import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
 from napari_cuda.server.control import pixel_channel
-from napari_cuda.server.rendering.bitstream import build_avcc_config, pack_to_avcc
-from napari_cuda.server.runtime.core import init_egl as core_init_egl, init_vispy_scene as core_init_vispy_scene
+from napari_cuda.server.rendering.bitstream import (
+    build_avcc_config,
+    pack_to_avcc,
+)
+from napari_cuda.server.rendering.debug_tools import DebugDumper
+from napari_cuda.server.runtime.camera import CameraPoseApplied
+from napari_cuda.server.runtime.core import (
+    init_egl as core_init_egl,
+    init_vispy_scene as core_init_vispy_scene,
+)
 from napari_cuda.server.runtime.core.snapshot_build import (
-    RenderLedgerSnapshot,
     pull_render_snapshot,
 )
-from napari_cuda.server.runtime.render_loop import render_updates as _render_updates
-from .egl import EGLRendererWorker
+from napari_cuda.server.runtime.ipc import LevelSwitchIntent
+from napari_cuda.server.runtime.render_loop import (
+    render_updates as _render_updates,
+)
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import snapshot_multiscale_state
-from napari_cuda.server.runtime.camera import CameraPoseApplied
-from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.rendering.debug_tools import DebugDumper
 
+from .egl import EGLRendererWorker
 
 logger = logging.getLogger(__name__)
 @dataclass

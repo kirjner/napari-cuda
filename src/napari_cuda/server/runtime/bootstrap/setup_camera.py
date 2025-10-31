@@ -6,25 +6,25 @@ import logging
 import math
 import time
 from copy import deepcopy
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 from vispy import scene  # type: ignore
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.roi import plane_scale_for_level, plane_wh_for_level
+from napari_cuda.server.data.roi import (
+    plane_scale_for_level,
+    plane_wh_for_level,
+)
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.core import ledger_step, reset_worker_camera
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.viewport import RenderMode, PlaneState, VolumeState
-from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
-from napari_cuda.server.runtime.snapshots.viewer_metadata import (
-    apply_plane_metadata,
-    apply_volume_metadata,
+from napari_cuda.server.runtime.viewport import (
+    PlaneState,
+    RenderMode,
 )
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
+from napari_cuda.server.runtime.bootstrap.interface import ViewerBootstrapInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import ZarrSceneSource
@@ -34,14 +34,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _coarsest_level_index(source: "ZarrSceneSource") -> Optional[int]:
+def _coarsest_level_index(source: ZarrSceneSource) -> Optional[int]:
     descriptors = source.level_descriptors
     if not descriptors:
         return None
     return len(descriptors) - 1
 
 
-def _frame_volume_camera(worker: "EGLRendererWorker", w: float, h: float, d: float) -> None:
+def _frame_volume_camera(worker: EGLRendererWorker, w: float, h: float, d: float) -> None:
     """Choose stable initial center and distance for TurntableCamera."""
 
     view = worker.view
@@ -65,7 +65,7 @@ def _frame_volume_camera(worker: "EGLRendererWorker", w: float, h: float, d: flo
         )
 
 
-def _configure_camera_for_mode(worker: "EGLRendererWorker") -> None:
+def _configure_camera_for_mode(worker: EGLRendererWorker) -> None:
     view = worker.view
     if view is None:
         return
@@ -111,9 +111,9 @@ def _configure_camera_for_mode(worker: "EGLRendererWorker") -> None:
 
 
 def _bootstrap_camera_pose(
-    worker: "EGLRendererWorker",
+    worker: EGLRendererWorker,
     mode: RenderMode,
-    source: Optional["ZarrSceneSource"],
+    source: Optional[ZarrSceneSource],
     *,
     reason: str,
 ) -> None:
@@ -121,6 +121,8 @@ def _bootstrap_camera_pose(
 
     if worker.view is None:
         return
+
+    facade = ViewerBootstrapInterface(worker)
 
     original_mode = worker._viewport_state.mode
     original_camera = worker.view.camera
@@ -161,7 +163,7 @@ def _bootstrap_camera_pose(
         prev_step = ledger_step(worker._ledger)
         worker._viewport_state.mode = RenderMode.VOLUME
         worker._set_current_level_index(int(coarse_level))
-        applied_context = lod.build_level_context(
+        applied_context = facade.build_level_context(
             lod.LevelDecision(
                 desired_level=int(coarse_level),
                 selected_level=int(coarse_level),
@@ -174,10 +176,8 @@ def _bootstrap_camera_pose(
             prev_level=int(prev_level),
             last_step=prev_step,
         )
-        snapshot_iface = SnapshotInterface(worker)
-        apply_volume_metadata(snapshot_iface, source, applied_context)
-        apply_volume_level(
-            snapshot_iface,
+        facade.apply_volume_metadata(source, applied_context)
+        facade.apply_volume_level(
             source,
             applied_context,
             downgraded=False,
@@ -196,21 +196,18 @@ def _bootstrap_camera_pose(
     _configure_camera_for_mode(worker)
 
 
-def _enter_volume_mode(worker: "EGLRendererWorker") -> None:
+def _enter_volume_mode(worker: EGLRendererWorker) -> None:
     if worker._viewport_state.mode is RenderMode.VOLUME:
         return
 
     if worker._level_intent_callback is None:
         raise RuntimeError("level intent callback required for volume mode")
 
+    facade = ViewerBootstrapInterface(worker)
     source = worker._ensure_scene_source()
     requested_level = _coarsest_level_index(source)
     assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
-    selected_level, downgraded = level_policy.resolve_volume_intent_level(
-        worker,
-        source,
-        int(requested_level),
-    )
+    selected_level, downgraded = facade.resolve_volume_intent_level(source, int(requested_level))
     worker._viewport_state.volume.downgraded = bool(downgraded)
 
     decision = lod.LevelDecision(
@@ -222,13 +219,13 @@ def _enter_volume_mode(worker: "EGLRendererWorker") -> None:
         downgraded=bool(downgraded),
     )
     last_step = ledger_step(worker._ledger)
-    context = lod.build_level_context(
+    context = facade.build_level_context(
         decision,
         source=source,
         prev_level=int(worker._current_level_index()),
         last_step=last_step,
     )
-    apply_volume_metadata(worker, source, context)
+    facade.apply_volume_metadata(source, context)
 
     worker._viewport_state.mode = RenderMode.VOLUME
 
@@ -283,10 +280,11 @@ def _enter_volume_mode(worker: "EGLRendererWorker") -> None:
     worker._mark_render_tick_needed()
 
 
-def _exit_volume_mode(worker: "EGLRendererWorker") -> None:
+def _exit_volume_mode(worker: EGLRendererWorker) -> None:
     if worker._viewport_state.mode is not RenderMode.VOLUME:
         return
     worker._viewport_state.mode = RenderMode.PLANE
+    facade = ViewerBootstrapInterface(worker)
     lvl_entry = worker._ledger.get("view_cache", "plane", "level")
     step_entry = worker._ledger.get("view_cache", "plane", "step")
     assert lvl_entry is not None, "plane restore requires view_cache.plane.level"
@@ -329,13 +327,13 @@ def _exit_volume_mode(worker: "EGLRendererWorker") -> None:
         timestamp=time.perf_counter(),
         oversampling={},
     )
-    context = lod.build_level_context(
+    context = facade.build_level_context(
         decision,
         source=source,
         prev_level=int(worker._current_level_index()),
         last_step=step_tuple,
     )
-    apply_plane_metadata(worker, source, context)
+    facade.apply_plane_metadata(source, context)
     intent = LevelSwitchIntent(
         desired_level=int(lvl_idx),
         selected_level=int(context.level),
@@ -361,11 +359,11 @@ def _exit_volume_mode(worker: "EGLRendererWorker") -> None:
     worker._mark_render_tick_needed()
 
 
-def _apply_camera_reset(worker: "EGLRendererWorker", cam) -> None:
+def _apply_camera_reset(worker: EGLRendererWorker, cam) -> None:
     reset_worker_camera(worker, cam)
 
 
-def _emit_current_camera_pose(worker: "EGLRendererWorker", reason: str) -> None:
+def _emit_current_camera_pose(worker: EGLRendererWorker, reason: str) -> None:
     """Emit the active camera pose for ledger sync."""
 
     cam = worker.view.camera if worker.view is not None else None
@@ -377,7 +375,7 @@ def _emit_current_camera_pose(worker: "EGLRendererWorker", reason: str) -> None:
     _emit_pose_from_camera(worker, cam, reason)
 
 
-def _emit_pose_from_camera(worker: "EGLRendererWorker", camera, reason: str) -> None:
+def _emit_pose_from_camera(worker: EGLRendererWorker, camera, reason: str) -> None:
     """Emit the pose derived from ``camera`` without mutating the render camera."""
 
     callback = worker._camera_pose_callback
@@ -438,7 +436,7 @@ def _emit_pose_from_camera(worker: "EGLRendererWorker", camera, reason: str) -> 
 
 
 def _pose_from_camera(
-    worker: "EGLRendererWorker",
+    worker: EGLRendererWorker,
     camera,
     target: str,
     seq: int,
@@ -514,7 +512,7 @@ def _pose_from_camera(
 
 
 def _snapshot_camera_pose(
-    worker: "EGLRendererWorker",
+    worker: EGLRendererWorker,
     target: str,
     command_seq: int,
 ) -> Optional[CameraPoseApplied]:
@@ -524,7 +522,7 @@ def _snapshot_camera_pose(
     return _pose_from_camera(worker, view.camera, target, command_seq)
 
 
-def _current_panzoom_rect(worker: "EGLRendererWorker") -> Optional[tuple[float, float, float, float]]:
+def _current_panzoom_rect(worker: EGLRendererWorker) -> Optional[tuple[float, float, float, float]]:
     view = worker.view
     if view is None:
         return None
@@ -540,8 +538,8 @@ def _current_panzoom_rect(worker: "EGLRendererWorker") -> Optional[tuple[float, 
 __all__ = [
     "_apply_camera_reset",
     "_bootstrap_camera_pose",
-    "_configure_camera_for_mode",
     "_coarsest_level_index",
+    "_configure_camera_for_mode",
     "_current_panzoom_rect",
     "_emit_current_camera_pose",
     "_emit_pose_from_camera",

@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.runtime.lod import level_policy
+from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
 from napari_cuda.server.runtime.snapshots.plane import (
     apply_slice_level,
     apply_slice_roi,
@@ -16,8 +16,9 @@ from napari_cuda.server.runtime.snapshots.viewer_metadata import (
     apply_volume_metadata,
 )
 from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
+from napari_cuda.server.runtime.viewport import RenderMode
+
 from ..tick_interface import RenderTickInterface
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def run(worker: "EGLRendererWorker") -> None:
+def run(worker: EGLRendererWorker) -> None:
     """Drive a single viewport tick using the runner's current plan."""
 
     tick_iface = RenderTickInterface(worker)
@@ -66,7 +67,7 @@ def run(worker: "EGLRendererWorker") -> None:
     if plan.level_change:
         target_level = int(runner.state.request.level)
         prev_level = tick_iface.current_level_index()
-        applied_context = level_policy.build_level_context(
+        applied_context = level_policy.build_worker_level_context(
             worker,
             source,
             level=target_level,
@@ -75,7 +76,7 @@ def run(worker: "EGLRendererWorker") -> None:
 
         snapshot_iface.set_current_level_index(int(applied_context.level))
         if snapshot_iface.viewport_state.mode is RenderMode.VOLUME:
-            apply_volume_metadata(worker, source, applied_context)
+            apply_volume_metadata(snapshot_iface, source, applied_context)
             apply_volume_level(
                 worker,
                 source,
@@ -83,7 +84,7 @@ def run(worker: "EGLRendererWorker") -> None:
                 downgraded=bool(snapshot_iface.viewport_state.volume.downgraded),
             )
         else:
-            apply_plane_metadata(worker, source, applied_context)
+            apply_plane_metadata(snapshot_iface, source, applied_context)
             apply_slice_level(snapshot_iface, source, applied_context)
         level_applied = True
         runner.mark_level_applied(int(applied_context.level))

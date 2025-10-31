@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from napari_cuda.server.runtime.bootstrap.interface import ViewerBootstrapInterface
+import pytest
+
+from napari_cuda.server.runtime.bootstrap.interface import (
+    ViewerBootstrapInterface,
+)
 
 
 class DummyWorker:
@@ -109,3 +113,55 @@ def test_viewer_bootstrap_interface_field_updates() -> None:
     assert worker._volume_handle == "volume-node"
     assert worker._ensure_plane_called is True
     assert worker._ensure_volume_called is True
+
+
+def test_viewer_bootstrap_interface_lod_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = DummyWorker()
+    facade = ViewerBootstrapInterface(worker)
+
+    decision = object()
+
+    def fake_build(decision_arg, *, source, prev_level, last_step):
+        assert decision_arg is decision
+        assert source == "scene"
+        assert prev_level == 3
+        assert last_step == (1, 2, 3)
+        return "built-context"
+
+    def fake_resolve(worker_arg, source, level):
+        assert worker_arg is worker
+        assert source == "scene"
+        assert level == 5
+        return 7, True
+
+    def fake_load(worker_arg, source, level):
+        assert worker_arg is worker
+        assert source == "scene"
+        assert level == 9
+        return "volume-bytes"
+
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.bootstrap.interface.lod_build_level_context",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.bootstrap.interface.lod_resolve_volume_intent_level",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.bootstrap.interface.lod_load_volume",
+        fake_load,
+    )
+
+    context = facade.build_level_context(
+        decision,
+        source="scene",
+        prev_level=3,
+        last_step=(1, 2, 3),
+    )
+    resolved = facade.resolve_volume_intent_level("scene", 5)
+    loaded = facade.load_volume("scene", 9)
+
+    assert context == "built-context"
+    assert resolved == (7, True)
+    assert loaded == "volume-bytes"

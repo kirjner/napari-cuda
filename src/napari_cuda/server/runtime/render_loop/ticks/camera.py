@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Optional
 
 from napari_cuda.server.runtime.camera.controller import (
     process_camera_deltas as _process_camera_deltas,
@@ -14,8 +14,8 @@ from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import CameraDeltaCommand
 
 from .. import render_updates
-from . import viewport
 from ..tick_interface import RenderTickInterface
+from . import viewport
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -31,7 +31,7 @@ class CameraCommandResult:
 
 
 def _apply_commands(
-    worker: "EGLRendererWorker",
+    worker: EGLRendererWorker,
     commands: Sequence[CameraDeltaCommand],
     *,
     reset_policy_suppression: bool,
@@ -75,7 +75,7 @@ def _apply_commands(
 
 
 def process_commands(
-    worker: "EGLRendererWorker",
+    worker: EGLRendererWorker,
     commands: Sequence[CameraDeltaCommand],
 ) -> CameraCommandResult:
     """Apply camera commands immediately, mirroring the old worker method."""
@@ -98,7 +98,7 @@ def process_commands(
     return result
 
 
-def drain(worker: "EGLRendererWorker") -> None:
+def drain(worker: EGLRendererWorker) -> None:
     """Drain queued camera deltas, then scene updates, for a render tick."""
 
     tick_iface = RenderTickInterface(worker)
@@ -145,7 +145,7 @@ def record_zoom_hint(
 
 __all__ = [
     "CameraCommandResult",
-    "process_commands",
     "drain",
+    "process_commands",
     "record_zoom_hint",
 ]

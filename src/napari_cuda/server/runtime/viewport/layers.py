@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Callable, Optional, Tuple
+from collections.abc import Callable
+from typing import Any, Optional
 
 import numpy as np
-from napari.layers.base._base_constants import Blending as NapariBlending
-from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
 
+from napari.layers.base._base_constants import Blending as NapariBlending
+from napari.layers.image._image_constants import (
+    ImageRendering as NapariImageRendering,
+)
 from napari_cuda.server.data.roi import plane_scale_for_level
 from napari_cuda.server.data.roi_applier import SliceDataApplier
 from napari_cuda.server.runtime.data import SliceROI
@@ -40,9 +43,7 @@ def apply_slice_layer_data(
     if update_contrast:
         smin = float(np.nanmin(slab)) if hasattr(np, "nanmin") else float(np.min(slab))
         smax = float(np.nanmax(slab)) if hasattr(np, "nanmax") else float(np.max(slab))
-        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin:
-            layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
-        elif 0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1:
+        if not math.isfinite(smin) or not math.isfinite(smax) or smax <= smin or (0.0 <= smin <= 1.0 and 0.0 <= smax <= 1.1):
             layer.contrast_limits = [0.0, 1.0]  # type: ignore[assignment]
         else:
             layer.contrast_limits = [smin, smax]  # type: ignore[assignment]
@@ -54,10 +55,10 @@ def apply_volume_layer_data(
     *,
     layer: Any,
     volume: Any,
-    contrast: Tuple[float, float],
-    scale: Tuple[float, float, float],
+    contrast: tuple[float, float],
+    scale: tuple[float, float, float],
     ensure_volume_visual: Optional[Callable[[], Any]] = None,
-) -> Tuple[Tuple[int, int], Optional[int]]:
+) -> tuple[tuple[int, int], Optional[int]]:
     """Apply the provided volume data to the active napari layer."""
 
     if ensure_volume_visual is not None:
@@ -91,7 +92,7 @@ def apply_volume_layer_data(
         else:
             layer.contrast_limits = [lo, hi]  # type: ignore[assignment]
 
-        scale_vals: Tuple[float, ...] = tuple(float(s) for s in scale)
+        scale_vals: tuple[float, ...] = tuple(float(s) for s in scale)
         if len(scale_vals) < int(volume.ndim):
             pad = int(volume.ndim) - len(scale_vals)
             scale_vals = tuple(1.0 for _ in range(pad)) + scale_vals

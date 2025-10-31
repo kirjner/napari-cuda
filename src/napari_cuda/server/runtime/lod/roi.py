@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from napari_cuda.server.data.roi import (
     resolve_worker_viewport_roi,
     viewport_debug_snapshot,
 )
 from napari_cuda.server.runtime.data import SliceROI
+
 from .viewport_lod_interface import ViewportLodInterface
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def viewport_roi_for_level(
     data_wh = viewport_iface.data_wh
     data_depth = viewport_iface.data_d
 
-    def _snapshot() -> Dict[str, Any]:
+    def _snapshot() -> dict[str, Any]:
         return viewport_debug_snapshot(
             view=view,
             canvas_size=(viewport_iface.width, viewport_iface.height),

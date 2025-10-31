@@ -5,7 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Optional
 
-from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.runtime.viewport import (
+    PlaneState,
+    RenderMode,
+    VolumeState,
+)
+
 from .interface import SnapshotInterface
 
 

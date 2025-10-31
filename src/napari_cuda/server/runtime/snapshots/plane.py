@@ -4,28 +4,30 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Optional
 
-import numpy as np
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.roi import plane_wh_for_level
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.data import (
     SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
+from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
 from napari_cuda.server.runtime.viewport.plane_ops import (
-    assign_pose_from_snapshot,
     apply_pose_to_camera,
+    assign_pose_from_snapshot,
     mark_slice_applied,
 )
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
+
 from .interface import SnapshotInterface
 from .viewer_metadata import apply_plane_metadata
 
@@ -39,22 +41,10 @@ class SliceApplyResult:
     level: int
     roi: SliceROI
     aligned_roi: SliceROI
-    chunk_shape: Optional[Tuple[int, int]]
+    chunk_shape: Optional[tuple[int, int]]
     width_px: int
     height_px: int
-def load_slice(
-    snapshot_iface: SnapshotInterface,
-    source: Any,
-    level: int,
-    z_index: int,
-) -> np.ndarray:
-    """Load a slice for ``level`` using the worker viewport ROI."""
 
-    roi = snapshot_iface.viewport_roi_for_level(source, int(level))
-    slab = source.slice(int(level), int(z_index), compute=True, roi=roi)
-    if not isinstance(slab, np.ndarray):
-        slab = np.asarray(slab, dtype=np.float32)
-    return slab
 
 
 def aligned_roi_signature(
@@ -238,7 +228,7 @@ def apply_slice_snapshot(
         oversampling={},
         downgraded=False,
     )
-    applied_context = lod.build_level_context(
+    applied_context = build_level_context(
         decision,
         source=source,
         prev_level=stage_prev_level,
@@ -395,7 +385,7 @@ def apply_slice_roi(
     *,
     update_contrast: bool,
     step: Optional[Sequence[int]] = None,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Load and apply a slice for the given ROI."""
 
     aligned_roi, chunk_shape, roi_signature = aligned_roi_signature(
@@ -473,15 +463,14 @@ def apply_slice_roi(
 
 
 __all__ = [
+    "SliceApplyResult",
     "aligned_roi_signature",
     "apply_dims_from_snapshot",
-    "SliceApplyResult",
-    "apply_slice_snapshot",
     "apply_slice_camera_pose",
     "apply_slice_level",
     "apply_slice_roi",
+    "apply_slice_snapshot",
     "dims_signature",
-    "load_slice",
     "update_z_index_from_snapshot",
 ]
 def _create_slice_task(

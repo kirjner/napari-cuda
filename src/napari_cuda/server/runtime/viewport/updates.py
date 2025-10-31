@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional
 
-from napari.layers.image._image_constants import ImageRendering as NapariImageRendering
+from vispy.scene.cameras import TurntableCamera
+
 from napari._vispy.layers.image import _napari_cmap_to_vispy
+from napari.layers.image._image_constants import (
+    ImageRendering as NapariImageRendering,
+)
 from napari.utils.colormaps.colormap_utils import ensure_colormap
-from vispy.scene.cameras import PanZoomCamera, TurntableCamera
-
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.viewport.state import RenderMode
 
@@ -237,9 +240,9 @@ def drain_render_state(worker: Any, snapshot: RenderLedgerSnapshot) -> DrainOutc
 
 __all__ = [
     "DrainOutcome",
-    "apply_dims_step",
-    "apply_volume_visual_params",
-    "apply_layer_updates",
     "apply_camera_overrides",
+    "apply_dims_step",
+    "apply_layer_updates",
+    "apply_volume_visual_params",
     "drain_render_state",
 ]

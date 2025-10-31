@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
-import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
-import numpy as np
-from napari_cuda.server.data.roi import resolve_worker_viewport_roi, viewport_debug_snapshot
+from napari_cuda.server.runtime.lod.context import build_level_context as lod_build_level_context
+from napari_cuda.server.runtime.lod.level_policy import (
+    load_volume as lod_load_volume,
+    resolve_volume_intent_level as lod_resolve_volume_intent_level,
+)
+from napari_cuda.server.runtime.lod.slice_loader import load_lod_slice
+from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
+from napari_cuda.server.runtime.snapshots.viewer_metadata import (
+    apply_plane_metadata as snapshot_apply_plane_metadata,
+    apply_volume_metadata as snapshot_apply_volume_metadata,
+)
+from napari_cuda.server.runtime.snapshots.volume import (
+    VolumeApplyResult,
+    apply_volume_level as snapshot_apply_volume_level,
+)
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -91,10 +102,10 @@ class ViewerBootstrapInterface:
     def set_z_index(self, index: int) -> None:
         self.worker._z_index = int(index)  # type: ignore[attr-defined]
 
-    def set_volume_scale(self, scale: Tuple[float, float, float]) -> None:
+    def set_volume_scale(self, scale: tuple[float, float, float]) -> None:
         self.worker._volume_scale = tuple(float(v) for v in scale)  # type: ignore[attr-defined]
 
-    def set_data_wh(self, wh: Tuple[int, int]) -> None:
+    def set_data_wh(self, wh: tuple[int, int]) -> None:
         self.worker._data_wh = (int(wh[0]), int(wh[1]))  # type: ignore[attr-defined]
 
     def set_data_depth(self, depth: int) -> None:
@@ -148,53 +159,97 @@ class ViewerBootstrapInterface:
     ) -> Any:
         """Fetch the initial 2D slab using the worker's viewport policy."""
 
-        worker = self.worker
-        view = getattr(worker, "view", None)
-        if view is None:
-            slab = source.slice(int(level), int(z_index), compute=True)
-            if not isinstance(slab, np.ndarray):
-                slab = np.asarray(slab, dtype=np.float32)
-            return slab
-
-        width = int(worker.width)
-        height = int(worker.height)
-        align_chunks = bool(getattr(worker, "_roi_align_chunks", False))
-        ensure_contains = bool(getattr(worker, "_roi_ensure_contains_viewport", False))
-        edge_threshold = int(getattr(worker, "_roi_edge_threshold", 0))
-        chunk_pad = int(getattr(worker, "_roi_pad_chunks", 0))
-        data_wh = getattr(worker, "_data_wh", (width, height))
-        data_wh = (int(data_wh[0]), int(data_wh[1]))
-        data_depth = getattr(worker, "_data_d", None)
-        prev_roi = worker.viewport_state.plane.applied_roi  # type: ignore[attr-defined]
-
-        def _snapshot() -> dict[str, Any]:
-            return viewport_debug_snapshot(
-                view=view,
-                canvas_size=(width, height),
-                data_wh=data_wh,
-                data_depth=data_depth,
-            )
-
-        roi = resolve_worker_viewport_roi(
-            view=view,
-            canvas_size=(width, height),
-            source=source,
-            level=int(level),
-            align_chunks=align_chunks,
-            chunk_pad=chunk_pad,
-            ensure_contains_viewport=ensure_contains,
-            edge_threshold=edge_threshold,
-            for_policy=False,
-            prev_roi=prev_roi,
-            snapshot_cb=_snapshot,
-            log_layer_debug=self.log_layer_debug,
+        return load_lod_slice(
+            self.worker,
+            source,
+            int(level),
+            int(z_index),
             quiet=False,
-            data_wh=data_wh,
+            for_policy=False,
             reason="bootstrap",
-            logger_ref=logger,
         )
 
-        slab = source.slice(int(level), int(z_index), compute=True, roi=roi)
-        if not isinstance(slab, np.ndarray):
-            slab = np.asarray(slab, dtype=np.float32)
-        return slab
+    def build_level_context(
+        self,
+        decision: Any,
+        *,
+        source: Any,
+        prev_level: Optional[int],
+        last_step: Optional[Sequence[int]],
+    ) -> Any:
+        """Delegate level context construction to the runtime LOD helpers."""
+
+        return lod_build_level_context(
+            decision,
+            source=source,
+            prev_level=prev_level,
+            last_step=last_step,
+        )
+
+    def resolve_volume_intent_level(
+        self,
+        source: Any,
+        requested_level: int,
+    ) -> tuple[int, bool]:
+        """Resolve the requested volume level against worker policies."""
+
+        return lod_resolve_volume_intent_level(
+            self.worker,
+            source,
+            int(requested_level),
+        )
+
+    def load_volume(
+        self,
+        source: Any,
+        level: int,
+    ) -> Any:
+        """Load a volume payload after enforcing worker budgets."""
+
+        return lod_load_volume(
+            self.worker,
+            source,
+            int(level),
+        )
+
+    def apply_volume_metadata(
+        self,
+        source: Any,
+        context: Any,
+    ) -> None:
+        """Apply viewer metadata for a volume context."""
+
+        snapshot_apply_volume_metadata(
+            SnapshotInterface(self.worker),
+            source,
+            context,
+        )
+
+    def apply_plane_metadata(
+        self,
+        source: Any,
+        context: Any,
+    ) -> None:
+        """Apply viewer metadata for a plane context."""
+
+        snapshot_apply_plane_metadata(
+            SnapshotInterface(self.worker),
+            source,
+            context,
+        )
+
+    def apply_volume_level(
+        self,
+        source: Any,
+        context: Any,
+        *,
+        downgraded: bool,
+    ) -> VolumeApplyResult:
+        """Apply the volume level for bootstrap using shared helpers."""
+
+        return snapshot_apply_volume_level(
+            SnapshotInterface(self.worker),
+            source,
+            context,
+            downgraded=downgraded,
+        )

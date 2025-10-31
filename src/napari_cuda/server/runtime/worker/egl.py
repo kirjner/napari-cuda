@@ -19,8 +19,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from copy import deepcopy
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from typing import Any, Optional
 
 import numpy as np
@@ -29,30 +29,24 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
-from vispy import scene  # type: ignore
 
 import napari_cuda.server.data.lod as lod
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.app.config import ServerCtx
 from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
-
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.rendering.capture import FrameTimings
 from napari_cuda.server.rendering.debug_tools import DebugConfig, DebugDumper
+from napari_cuda.server.runtime.bootstrap import (
+    setup_camera as viewer_camera_ops,
+    setup_viewer as viewer_setup,
+    setup_visuals as viewer_visuals,
+)
 from napari_cuda.server.runtime.camera import (
     CameraCommandQueue,
     CameraPoseApplied,
 )
-from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.snapshots.plane import apply_slice_level, apply_slice_roi
-from napari_cuda.server.runtime.snapshots.viewer_metadata import (
-    apply_plane_metadata,
-    apply_volume_metadata,
-)
-from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate, RenderUpdateMailbox
 from napari_cuda.server.runtime.core import (
     cleanup_render_worker,
     ensure_scene_source,
@@ -67,21 +61,29 @@ from napari_cuda.server.runtime.core import (
     ledger_step,
     setup_worker_runtime,
 )
-from napari_cuda.server.runtime.worker.resources import WorkerResources
-from napari_cuda.server.runtime.viewport import (
-    PlaneState,
-    RenderMode,
-    ViewportRunner,
-    ViewportState,
-    VolumeState,
+from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.ipc import LevelSwitchIntent
+from napari_cuda.server.runtime.ipc.mailboxes import (
+    RenderUpdate,
 )
-from napari_cuda.server.runtime.render_loop import render_updates as _render_updates
 from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.bootstrap import setup_viewer as viewer_setup
-from napari_cuda.server.runtime.bootstrap import setup_camera as viewer_camera_ops
-from napari_cuda.server.runtime.bootstrap import setup_visuals as viewer_visuals
-from napari_cuda.server.runtime.render_loop.ticks import camera as camera_tick
-from napari_cuda.server.runtime.render_loop.ticks import capture as capture_tick
+from napari_cuda.server.runtime.lod.context import build_level_context
+from napari_cuda.server.runtime.render_loop import (
+    render_updates as _render_updates,
+)
+from napari_cuda.server.runtime.render_loop.ticks import (
+    capture as capture_tick,
+)
+from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
+from napari_cuda.server.runtime.snapshots.viewer_metadata import (
+    apply_plane_metadata,
+    apply_volume_metadata,
+)
+from napari_cuda.server.runtime.viewport import (
+    RenderMode,
+    ViewportState,
+)
+from napari_cuda.server.runtime.worker.resources import WorkerResources
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +265,7 @@ class EGLRendererWorker:
         )
         ledger = self._ledger
         step_hint = ledger_step(ledger)
-        context = lod.build_level_context(
+        context = build_level_context(
             decision,
             source=source,
             prev_level=int(self._current_level_index()),
@@ -582,10 +584,11 @@ class EGLRendererWorker:
             logger.debug("level intent suppressed (no change or already pending)")
             return
 
+        snapshot_iface = SnapshotInterface(self)
         if self._viewport_state.mode is RenderMode.VOLUME:
-            apply_volume_metadata(self, source, context)
+            apply_volume_metadata(snapshot_iface, source, context)
         else:
-            apply_plane_metadata(self, source, context)
+            apply_plane_metadata(snapshot_iface, source, context)
 
         intent = LevelSwitchIntent(
             desired_level=int(decision.desired_level),

@@ -18,7 +18,8 @@ from napari_cuda.server.runtime.data import (
     chunk_shape_for_level,
     roi_chunk_signature,
 )
-from .state import PlaneRequest, PlaneResult, PlaneState, PoseEvent
+
+from .state import PlaneResult, PlaneState, PoseEvent
 
 
 @dataclass(frozen=True)

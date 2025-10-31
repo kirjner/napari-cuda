@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Protocol, Sequence, Tuple, runtime_checkable, TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
-import numpy as np
 import dask.array as da
+import numpy as np
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import LevelDescriptor
@@ -21,7 +27,7 @@ class SliceROI:
     x_start: int
     x_stop: int
 
-    def clamp(self, max_y: int, max_x: int) -> "SliceROI":
+    def clamp(self, max_y: int, max_x: int) -> SliceROI:
         """Clamp the ROI to the provided bounds (half-open)."""
 
         y0 = max(0, min(self.y_start, max_y))
@@ -56,11 +62,11 @@ class SceneSource(Protocol):
     """Protocol for multiscale sources that can service ROI-aware slices."""
 
     @property
-    def axes(self) -> Tuple[str, ...]:
+    def axes(self) -> tuple[str, ...]:
         ...
 
     @property
-    def level_descriptors(self) -> Sequence["LevelDescriptor"]:
+    def level_descriptors(self) -> Sequence[LevelDescriptor]:
         ...
 
     @property
@@ -80,8 +86,8 @@ class SceneSource(Protocol):
     def estimate_slice_io(self, level: int, z_index: int, roi: Optional[SliceROI] = None) -> SliceIOMetrics:
         ...
 
-    def level_shape(self, index: Optional[int] = None) -> Tuple[int, ...]:
+    def level_shape(self, index: Optional[int] = None) -> tuple[int, ...]:
         ...
 
 
-__all__ = ["SliceROI", "SliceIOMetrics", "SceneSource"]
+__all__ = ["SceneSource", "SliceIOMetrics", "SliceROI"]

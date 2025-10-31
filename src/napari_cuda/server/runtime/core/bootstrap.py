@@ -5,22 +5,29 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Optional
 
 from napari_cuda.server.control.state_models import BootstrapSceneMetadata
-from napari_cuda.server.data.zarr_source import ZarrSceneSource, LevelDescriptor
-from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.data import lod
-from napari_cuda.server.data.level_logging import LayerAssignmentLogger, LevelSwitchLogger
+from napari_cuda.server.data.level_logging import (
+    LayerAssignmentLogger,
+    LevelSwitchLogger,
+)
+from napari_cuda.server.data.roi import plane_wh_for_level
+from napari_cuda.server.data.zarr_source import (
+    LevelDescriptor,
+    ZarrSceneSource,
+)
 from napari_cuda.server.runtime.core.scene_setup import create_scene_source
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 
 
-def _resolve_level_shapes(descriptors: Sequence[LevelDescriptor]) -> Tuple[Tuple[int, ...], ...]:
+def _resolve_level_shapes(descriptors: Sequence[LevelDescriptor]) -> tuple[tuple[int, ...], ...]:
     return tuple(tuple(int(size) for size in descriptor.shape) for descriptor in descriptors)
 
 
-def _resolve_levels(descriptors: Sequence[LevelDescriptor]) -> Tuple[dict[str, object], ...]:
+def _resolve_levels(descriptors: Sequence[LevelDescriptor]) -> tuple[dict[str, object], ...]:
     payload: list[dict[str, object]] = []
     for descriptor in descriptors:
         entry: dict[str, object] = {
@@ -36,10 +43,10 @@ def _resolve_levels(descriptors: Sequence[LevelDescriptor]) -> Tuple[dict[str, o
 
 def _normalize_step(
     *,
-    initial: Tuple[int, ...],
+    initial: tuple[int, ...],
     axes: Sequence[str],
     use_volume: bool,
-) -> Tuple[int, ...]:
+) -> tuple[int, ...]:
     values = list(int(value) for value in initial)
     if use_volume and axes:
         axes_lower = [axis.lower() for axis in axes]
@@ -58,7 +65,7 @@ def probe_scene_bootstrap(
     preferred_level: Optional[str] = None,
     axes_override: Optional[Sequence[str]] = None,
     z_override: Optional[int] = None,
-    canvas_size: Tuple[int, int] = (1, 1),
+    canvas_size: tuple[int, int] = (1, 1),
     oversampling_thresholds: Optional[Mapping[int, float]] = None,
     oversampling_hysteresis: float = 0.1,
     threshold_in: float = 1.05,
@@ -175,8 +182,11 @@ def setup_worker_runtime(
 ) -> None:
     """Initialize render resources, viewport state, and policy config on the worker."""
 
-    from napari_cuda.server.runtime.viewport import RenderMode, ViewportRunner, ViewportState
-
+    from napari_cuda.server.runtime.viewport import (
+        RenderMode,
+        ViewportRunner,
+        ViewportState,
+    )
     from napari_cuda.server.runtime.worker.resources import WorkerResources
 
     logger = logging.getLogger(worker.__class__.__module__)

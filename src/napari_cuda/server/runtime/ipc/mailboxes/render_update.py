@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass
 import logging
 import threading
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.runtime.viewport import (
+    PlaneState,
+    RenderMode,
+    VolumeState,
+)
 
 logger = logging.getLogger(__name__)
 

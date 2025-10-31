@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Optional
 
-from napari_cuda.server.runtime.viewport import PoseEvent, ViewportOps, ViewportRunner
 from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.data import SliceROI
+from napari_cuda.server.runtime.viewport import (
+    PoseEvent,
+    ViewportOps,
+    ViewportRunner,
+)
 
 
 @dataclass
 class _StubSource:
-    chunks: Tuple[int, ...] = (1, 8, 8)
-    axes: Tuple[str, ...] = ("z", "y", "x")
+    chunks: tuple[int, ...] = (1, 8, 8)
+    axes: tuple[str, ...] = ("z", "y", "x")
 
     def get_level(self, level: int):
         return type("_Level", (), {"chunks": self.chunks})()
@@ -21,7 +26,7 @@ def _make_snapshot(
     *,
     level: int = 0,
     ndisplay: int = 2,
-    rect: Optional[Tuple[float, float, float, float]] = (0.0, 0.0, 100.0, 60.0),
+    rect: Optional[tuple[float, float, float, float]] = (0.0, 0.0, 100.0, 60.0),
 ) -> RenderLedgerSnapshot:
     return RenderLedgerSnapshot(
         ndisplay=ndisplay,
@@ -35,7 +40,7 @@ def _make_snapshot(
     )
 
 
-def _roi_resolver(level: int, rect: Tuple[float, float, float, float]) -> SliceROI:
+def _roi_resolver(level: int, rect: tuple[float, float, float, float]) -> SliceROI:
     x0, y0, w, h = rect
     x1 = x0 + w
     y1 = y0 + h

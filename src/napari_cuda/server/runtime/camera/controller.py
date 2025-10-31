@@ -7,9 +7,10 @@ and zoom hints.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Optional, Sequence, Tuple, TYPE_CHECKING
 import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
 
 from vispy import scene  # type: ignore
 
@@ -46,7 +47,7 @@ def apply_camera_deltas(
     *,
     camera,
     view,
-    canvas_size: Tuple[int, int],
+    canvas_size: tuple[int, int],
     reset_camera: Callable[[object], None],
     debug_flags: CameraDebugFlags,
     mark_render_tick_needed: Optional[Callable[[], None]] = None,
@@ -145,7 +146,7 @@ def apply_camera_deltas(
 
 
 def process_camera_deltas(
-    tick_iface: "RenderTickInterface",
+    tick_iface: RenderTickInterface,
     commands: Sequence[CameraDeltaCommand],
 ) -> CameraDeltaOutcome:
     """Process camera commands using the worker façade."""
@@ -178,8 +179,8 @@ def process_camera_deltas(
 
 
 __all__ = [
-    "CameraDeltaOutcome",
     "CameraDebugFlags",
+    "CameraDeltaOutcome",
     "apply_camera_deltas",
     "process_camera_deltas",
 ]

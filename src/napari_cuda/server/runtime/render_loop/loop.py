@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable
 import time
+from collections.abc import Callable
 
 
 def run_render_tick(

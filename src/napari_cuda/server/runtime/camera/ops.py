@@ -7,14 +7,15 @@ unchanged while making the math testable and reusable.
 
 from __future__ import annotations
 
-from typing import Tuple, Callable, Any
 import math
 import time
+from collections.abc import Callable
+from typing import Any
 
 from vispy.scene.cameras import PanZoomCamera, TurntableCamera
 
 
-def anchor_to_world(ax_px: float, ay_px: float, canvas_wh: Tuple[int, int], view) -> Tuple[float, float]:
+def anchor_to_world(ax_px: float, ay_px: float, canvas_wh: tuple[int, int], view) -> tuple[float, float]:
     """Map an anchor pixel to world coordinates using the view transform."""
     width, height = canvas_wh
     mapped = view.transform * view.scene.transform
@@ -23,7 +24,7 @@ def anchor_to_world(ax_px: float, ay_px: float, canvas_wh: Tuple[int, int], view
     return float(point[0]), float(point[1])
 
 
-def per_pixel_world_scale_3d(cam: TurntableCamera, canvas_wh: Tuple[int, int]) -> Tuple[float, float]:
+def per_pixel_world_scale_3d(cam: TurntableCamera, canvas_wh: tuple[int, int]) -> tuple[float, float]:
     """Estimate world-units per pixel for a 3D camera from FOV and distance."""
     width, height = canvas_wh
     fov_rad = math.radians(float(cam.fov))
@@ -49,7 +50,7 @@ def apply_zoom_3d(cam: TurntableCamera, factor: float) -> None:
     cam.distance = max(1e-6, float(cam.distance) * float(factor))
 
 
-def apply_zoom_2d(cam: PanZoomCamera, factor: float, anchor_px: Tuple[float, float], canvas_wh: Tuple[int, int], view) -> None:
+def apply_zoom_2d(cam: PanZoomCamera, factor: float, anchor_px: tuple[float, float], canvas_wh: tuple[int, int], view) -> None:
     """Zoom around an anchor in 2D using view transforms for correct centering."""
     if factor <= 0.0:
         return
@@ -61,7 +62,7 @@ def apply_zoom_2d(cam: PanZoomCamera, factor: float, anchor_px: Tuple[float, flo
     type(cam).zoom(cam, float(factor), center=anchor_world)
 
 
-def apply_pan_3d(cam: TurntableCamera, dx_px: float, dy_px: float, canvas_wh: Tuple[int, int]) -> None:
+def apply_pan_3d(cam: TurntableCamera, dx_px: float, dy_px: float, canvas_wh: tuple[int, int]) -> None:
     """Pan/dolly in 3D using pixel deltas mapped to world units."""
     if dx_px == 0.0 and dy_px == 0.0:
         return
@@ -72,7 +73,7 @@ def apply_pan_3d(cam: TurntableCamera, dx_px: float, dy_px: float, canvas_wh: Tu
         cam.distance = max(1e-6, float(cam.distance) - float(dy_px) * scale_y)
 
 
-def apply_pan_2d(cam: PanZoomCamera, dx_px: float, dy_px: float, canvas_wh: Tuple[int, int], view) -> None:
+def apply_pan_2d(cam: PanZoomCamera, dx_px: float, dy_px: float, canvas_wh: tuple[int, int], view) -> None:
     """Pan in 2D using pixel deltas mapped through view transforms."""
     if dx_px == 0.0 and dy_px == 0.0:
         return

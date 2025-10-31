@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any, Optional
 
-from napari_cuda.server.control.state_ledger import ServerStateLedger, LedgerEntry
+from napari_cuda.server.control.state_ledger import (
+    LedgerEntry,
+    ServerStateLedger,
+)
 from napari_cuda.server.scene_defaults import default_volume_state
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +44,15 @@ class RenderLedgerSnapshot:
     volume_clim: Optional[tuple[float, float]] = None
     volume_opacity: Optional[float] = None
     volume_sample_step: Optional[float] = None
-    layer_values: Optional[Dict[str, Dict[str, Any]]] = None
-    layer_versions: Optional[Dict[str, Dict[str, int]]] = None
-    camera_versions: Optional[Dict[str, int]] = None
+    layer_values: Optional[dict[str, dict[str, Any]]] = None
+    layer_versions: Optional[dict[str, dict[str, int]]] = None
+    camera_versions: Optional[dict[str, int]] = None
     op_seq: int = 0
 
 
 def build_ledger_snapshot(
     ledger: ServerStateLedger,
-    snapshot: Dict[tuple[str, str, str], LedgerEntry] | None = None,
+    snapshot: dict[tuple[str, str, str], LedgerEntry] | None = None,
 ) -> RenderLedgerSnapshot:
     """Construct the render snapshot from confirmed ledger state."""
 
@@ -121,8 +124,8 @@ def build_ledger_snapshot(
         fallback=defaults.get("sample_step"),
     )
 
-    layer_values: Dict[str, Dict[str, Any]] = {}
-    layer_versions: Dict[str, Dict[str, int]] = {}
+    layer_values: dict[str, dict[str, Any]] = {}
+    layer_versions: dict[str, dict[str, int]] = {}
     for (scope, target, key), entry in snapshot.items():
         if scope != "layer":
             continue
@@ -135,7 +138,7 @@ def build_ledger_snapshot(
             versions = layer_versions.setdefault(layer_id, {})
             versions[prop] = version_value
 
-    camera_versions: Dict[str, int] = {}
+    camera_versions: dict[str, int] = {}
     for scope_name, prefix in (("camera_plane", "plane"), ("camera_volume", "volume")):
         for camera_key in ("center", "zoom", "angles", "distance", "fov", "rect"):
             entry = snapshot.get((scope_name, "main", camera_key))
@@ -182,7 +185,7 @@ def build_ledger_snapshot(
 
 
 def _ledger_value(
-    snapshot: Dict[tuple[str, str, str], LedgerEntry],
+    snapshot: dict[tuple[str, str, str], LedgerEntry],
     scope: str,
     target: str,
     key: str,

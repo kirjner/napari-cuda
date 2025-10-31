@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
-import numpy as np
-
-from napari_cuda.server.runtime.viewport import ViewportState
 from napari_cuda.server.runtime.data import SliceROI
-from napari_cuda.server.data.roi import resolve_worker_viewport_roi, viewport_debug_snapshot
+from napari_cuda.server.runtime.viewport import ViewportState
 
 if TYPE_CHECKING:
-    from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
     from napari_cuda.server.runtime.viewport.runner import ViewportRunner
+    from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +22,7 @@ logger = logging.getLogger(__name__)
 class SnapshotInterface:
     """Explicit surface the snapshot helpers may touch on the worker."""
 
-    _worker: "EGLRendererWorker"
+    _worker: EGLRendererWorker
 
     # Viewport access --------------------------------------------------
     @property
@@ -32,7 +30,7 @@ class SnapshotInterface:
         return self._worker.viewport_state
 
     @property
-    def viewport_runner(self) -> Optional["ViewportRunner"]:
+    def viewport_runner(self) -> Optional[ViewportRunner]:
         return getattr(self._worker, "_viewport_runner", None)
 
     def ensure_scene_source(self):
@@ -157,58 +155,17 @@ class SnapshotInterface:
     ) -> SliceROI:
         """Resolve the viewport ROI using the worker's current policy."""
 
-        worker = self._worker
-        view = getattr(worker, "view", None)
-        width = int(getattr(worker, "width", 0))
-        height = int(getattr(worker, "height", 0))
+        from napari_cuda.server.runtime.lod.slice_loader import (
+            viewport_roi_for_lod,
+        )
 
-        if view is None:
-            shape = getattr(source, "level_shape", None)
-            if callable(shape):
-                try:
-                    dims = shape(int(level))
-                    if dims:
-                        height = int(dims[-2]) if len(dims) >= 2 else height
-                        width = int(dims[-1]) if len(dims) >= 1 else width
-                except Exception:
-                    logger.debug("level_shape lookup failed during ROI fallback", exc_info=True)
-            return SliceROI(0, int(height), 0, int(width))
-
-        align_chunks = (not for_policy) and bool(getattr(worker, "_roi_align_chunks", False))
-        ensure_contains = (not for_policy) and bool(getattr(worker, "_roi_ensure_contains_viewport", False))
-        edge_threshold = int(getattr(worker, "_roi_edge_threshold", 0))
-        chunk_pad = int(getattr(worker, "_roi_pad_chunks", 0))
-        data_wh = getattr(worker, "_data_wh", (width, height))
-        data_wh = (int(data_wh[0]), int(data_wh[1]))
-        data_depth = getattr(worker, "_data_d", None)
-        prev_roi = worker.viewport_state.plane.applied_roi  # type: ignore[attr-defined]
-
-        def _snapshot() -> dict[str, Any]:
-            return viewport_debug_snapshot(
-                view=view,
-                canvas_size=(width, height),
-                data_wh=data_wh,
-                data_depth=data_depth,
-            )
-
-        reason = "policy-roi" if for_policy else "roi-request"
-        return resolve_worker_viewport_roi(
-            view=view,
-            canvas_size=(width, height),
-            source=source,
-            level=int(level),
-            align_chunks=align_chunks,
-            chunk_pad=chunk_pad,
-            ensure_contains_viewport=ensure_contains,
-            edge_threshold=edge_threshold,
-            for_policy=for_policy,
-            prev_roi=prev_roi,
-            snapshot_cb=_snapshot,
-            log_layer_debug=self.log_layer_debug,
+        return viewport_roi_for_lod(
+            self._worker,
+            source,
+            int(level),
             quiet=quiet,
-            data_wh=data_wh,
-            reason=reason,
-            logger_ref=logger,
+            for_policy=for_policy,
+            reason="policy-roi" if for_policy else "roi-request",
         )
 
     def resolve_volume_intent_level(self, source: Any, requested_level: int):

@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional, TYPE_CHECKING, Callable, Tuple
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
     from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
+    from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
 
 
 @dataclass(slots=True)
 class RenderTickInterface:
     """Bridge tick helpers to the worker without exposing private state."""
 
-    worker: "EGLRendererWorker"
+    worker: EGLRendererWorker
 
     # Viewport / runner ---------------------------------------------------
     @property
@@ -52,7 +53,7 @@ class RenderTickInterface:
 
     # Render mailbox ------------------------------------------------------
     @property
-    def render_mailbox(self) -> "RenderUpdateMailbox":
+    def render_mailbox(self) -> RenderUpdateMailbox:
         return self.worker._render_mailbox  # type: ignore[attr-defined]
 
     def render_mailbox_record_zoom_hint(self, value: float) -> None:
@@ -84,7 +85,7 @@ class RenderTickInterface:
         queue = getattr(self.worker, "_camera_queue", None)  # type: ignore[attr-defined]
         return queue.pop_all() if queue is not None else []
 
-    def camera_canvas_size(self) -> Tuple[int, int]:
+    def camera_canvas_size(self) -> tuple[int, int]:
         canvas = getattr(self.worker, "canvas", None)
         if canvas is not None and getattr(canvas, "size", None) is not None:
             width, height = canvas.size
@@ -94,7 +95,7 @@ class RenderTickInterface:
             int(getattr(self.worker, "height", 0)),
         )
 
-    def camera_debug_flags(self) -> Tuple[bool, bool, bool, bool]:
+    def camera_debug_flags(self) -> tuple[bool, bool, bool, bool]:
         return (
             bool(getattr(self.worker, "_debug_zoom_drift", False)),  # type: ignore[attr-defined]
             bool(getattr(self.worker, "_debug_pan", False)),  # type: ignore[attr-defined]
