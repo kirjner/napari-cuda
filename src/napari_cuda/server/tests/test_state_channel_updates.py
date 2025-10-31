@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 from types import SimpleNamespace
@@ -357,13 +358,38 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         broadcast=SimpleNamespace(bypass_until_key=False, waiting_for_keyframe=False)
     )
     server._pixel_config = SimpleNamespace()
+    def _mark_stream_config_dirty() -> None:
+        setattr(server._pixel_channel, "needs_stream_config", True)
+    
+    def _build_stream_payload(avcc: bytes) -> NotifyStreamPayload:
+        data = avcc
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        elif isinstance(data, bytearray):
+            data = bytes(data)
+        if not isinstance(data, bytes):
+            data = bytes(data)
+        encoded = base64.b64encode(data).decode("ascii")
+        return NotifyStreamPayload(
+            codec="stub",
+            format="avcc",
+            fps=float(server.cfg.fps),
+            frame_size=(server.width, server.height),
+            nal_length_size=4,
+            avcc=encoded,
+            latency_policy={},
+            vt_hint=None,
+        )
+    
+    server.mark_stream_config_dirty = _mark_stream_config_dirty
+    server.build_stream_payload = _build_stream_payload
     server._camera_seq: dict[str, int] = {}
-
+    
     def _next_camera_command_seq(target: str) -> int:
         current = server._camera_seq.get(target, 0) + 1
         server._camera_seq[target] = current
         return current
-
+    
     server._next_camera_command_seq = _next_camera_command_seq
 
     server._camera_queue = CameraCommandQueue()
@@ -994,7 +1020,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         server._pixel_channel = SimpleNamespace(last_avcc=None)
         server._pixel_config = SimpleNamespace()
 
-        monkeypatch.setattr(state_channel_handler.pixel_channel, 'mark_stream_config_dirty', lambda *a, **k: None)
+        server.mark_stream_config_dirty = lambda: None
 
         class _CaptureWS:
             def __init__(self) -> None:
@@ -1062,7 +1088,7 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
         server._pixel_channel = SimpleNamespace(last_avcc=None)
         server._pixel_config = SimpleNamespace()
 
-        monkeypatch.setattr(state_channel_handler.pixel_channel, 'mark_stream_config_dirty', lambda *a, **k: None)
+        server.mark_stream_config_dirty = lambda: None
 
         class _CaptureWS:
             def __init__(self) -> None:

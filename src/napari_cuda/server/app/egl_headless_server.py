@@ -28,6 +28,7 @@ from napari_cuda.server.engine.api import (
     PixelChannelConfig,
     PixelChannelState,
     broadcast_loop,
+    build_notify_stream_payload,
     build_avcc_config,
     configure_bitstream,
     ensure_keyframe,
@@ -556,6 +557,16 @@ class EGLHeadlessServer:
 
     def _start_kf_watchdog(self) -> None:
         return
+
+    def mark_stream_config_dirty(self) -> None:
+        """Mark the pixel channel so the next notify.stream carries fresh config."""
+
+        mark_stream_config_dirty(self._pixel_channel)
+
+    def build_stream_payload(self, avcc: bytes) -> NotifyStreamPayload:
+        """Build a notify.stream payload for the current pixel configuration."""
+
+        return build_notify_stream_payload(self._pixel_config, avcc)
 
     def _maybe_enable_debug_logger(self) -> None:
         """Enable DEBUG logs for this module only, leaving root/others unchanged.

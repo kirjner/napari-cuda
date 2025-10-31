@@ -37,6 +37,10 @@ from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
 from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
+from napari_cuda.server.engine.api import (
+    build_notify_stream_payload,
+    mark_stream_config_dirty,
+)
 from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
     RenderUpdate,
@@ -851,6 +855,14 @@ class StateServerHarness:
             needs_stream_config=True,
         )
         server._pixel = SimpleNamespace(bypass_until_key=False)
+        def _mark_stream_config_dirty() -> None:
+            mark_stream_config_dirty(server._pixel_channel)
+        
+        def _build_stream_payload(avcc: bytes) -> NotifyStreamPayload:
+            return build_notify_stream_payload(server._pixel_config, avcc)
+        
+        server.mark_stream_config_dirty = _mark_stream_config_dirty
+        server.build_stream_payload = _build_stream_payload
         server._pixel_config = PixelChannelConfig(
             width=self.width,
             height=self.height,
