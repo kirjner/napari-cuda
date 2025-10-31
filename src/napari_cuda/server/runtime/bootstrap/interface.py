@@ -12,14 +12,12 @@ from napari_cuda.server.runtime.lod.level_policy import (
     resolve_volume_intent_level as lod_resolve_volume_intent_level,
 )
 from napari_cuda.server.runtime.lod.slice_loader import load_lod_slice
-from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.apply.snapshots.viewer_metadata import (
-    apply_plane_metadata as snapshot_apply_plane_metadata,
-    apply_volume_metadata as snapshot_apply_volume_metadata,
-)
-from napari_cuda.server.runtime.render_loop.apply.snapshots.volume import (
+
+from .snapshot_helpers import (
     VolumeApplyResult,
-    apply_volume_level as snapshot_apply_volume_level,
+    apply_plane_metadata as bootstrap_apply_plane_metadata,
+    apply_volume_level as bootstrap_apply_volume_level,
+    apply_volume_metadata as bootstrap_apply_volume_metadata,
 )
 
 if TYPE_CHECKING:
@@ -219,11 +217,7 @@ class ViewerBootstrapInterface:
     ) -> None:
         """Apply viewer metadata for a volume context."""
 
-        snapshot_apply_volume_metadata(
-            RenderApplyInterface(self.worker),
-            source,
-            context,
-        )
+        bootstrap_apply_volume_metadata(self.worker, source, context)
 
     def apply_plane_metadata(
         self,
@@ -232,11 +226,7 @@ class ViewerBootstrapInterface:
     ) -> None:
         """Apply viewer metadata for a plane context."""
 
-        snapshot_apply_plane_metadata(
-            RenderApplyInterface(self.worker),
-            source,
-            context,
-        )
+        bootstrap_apply_plane_metadata(self.worker, source, context)
 
     def apply_volume_level(
         self,
@@ -247,8 +237,8 @@ class ViewerBootstrapInterface:
     ) -> VolumeApplyResult:
         """Apply the volume level for bootstrap using shared helpers."""
 
-        return snapshot_apply_volume_level(
-            RenderApplyInterface(self.worker),
+        return bootstrap_apply_volume_level(
+            self.worker,
             source,
             context,
             downgraded=downgraded,

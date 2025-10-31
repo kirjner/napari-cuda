@@ -77,4 +77,26 @@ def apply_volume_metadata(
     _apply_dims_and_metadata(snapshot_iface, source, context)
 
 
+def apply_plane_metadata_for_worker(
+    worker: Any,
+    source: Any,
+    context: lod.LevelContext,
+) -> None:
+    """Bootstrap helper that routes through the apply façade internally."""
+
+    snapshot_iface = RenderApplyInterface(worker)
+    apply_plane_metadata(snapshot_iface, source, context)
+
+
+def apply_volume_metadata_for_worker(
+    worker: Any,
+    source: Any,
+    context: lod.LevelContext,
+) -> None:
+    """Bootstrap helper that routes through the apply façade internally."""
+
+    snapshot_iface = RenderApplyInterface(worker)
+    apply_volume_metadata(snapshot_iface, source, context)
+
+
 __all__ = ["apply_plane_metadata", "apply_volume_metadata"]

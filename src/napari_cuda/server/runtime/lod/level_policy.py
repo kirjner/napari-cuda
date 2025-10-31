@@ -18,7 +18,6 @@ from napari_cuda.server.runtime.viewport import RenderMode
 
 from .context import build_level_context
 from .roi import viewport_roi_for_level
-from .viewport_lod_interface import ViewportLodInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -48,17 +47,17 @@ def _oversampling_for_level(
 ) -> float:
     """Estimate oversampling ratio for ``level`` relative to the worker viewport."""
 
-    viewport_iface = ViewportLodInterface(worker)
     try:
-        roi = viewport_roi_for_level(viewport_iface, source, level, quiet=True, for_policy=True)
+        roi = viewport_roi_for_level(worker, source, level, quiet=True, for_policy=True)
         if roi.is_empty():
             height, width = plane_wh_for_level(source, level)
         else:
             height, width = roi.height, roi.width
     except Exception:  # pragma: no cover - guarded by policy logging
-        height, width = viewport_iface.height, viewport_iface.width
-    viewport_h = max(1, viewport_iface.height)
-    viewport_w = max(1, viewport_iface.width)
+        height = int(getattr(worker, "height", 0))
+        width = int(getattr(worker, "width", 0))
+    viewport_h = max(1, int(getattr(worker, "height", 0)))
+    viewport_w = max(1, int(getattr(worker, "width", 0)))
     return float(max(height / viewport_h, width / viewport_w))
 
 

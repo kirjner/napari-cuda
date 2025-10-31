@@ -20,7 +20,7 @@ from napari_cuda.server.runtime.viewport import (
     updates as viewport_updates,
 )
 
-from .plan_interface import RenderPlanInterface
+from ..plan_interface import RenderPlanInterface
 
 apply_render_snapshot = snapshot_apply.apply_render_snapshot
 apply_viewport_state_snapshot = snapshot_viewport.apply_viewport_state_snapshot

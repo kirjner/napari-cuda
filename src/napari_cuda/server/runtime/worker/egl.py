@@ -72,9 +72,7 @@ from napari_cuda.server.runtime.ipc.mailboxes import (
 )
 from napari_cuda.server.runtime.lod import level_policy
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop import (
-    render_updates as _render_updates,
-)
+from napari_cuda.server.runtime.render_loop.apply import updates as _render_updates
 from napari_cuda.server.runtime.render_loop.ticks import (
     capture as capture_tick,
 )

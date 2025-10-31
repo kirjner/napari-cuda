@@ -13,7 +13,7 @@ from napari_cuda.server.runtime.camera.controller import (
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import CameraDeltaCommand
 
-from .. import render_updates
+from ..apply import updates as render_updates
 from ..plan_interface import RenderPlanInterface
 from . import viewport
 

@@ -1,4 +1,5 @@
 """Render-loop apply-phase helpers."""
 
-__all__ = []
+from . import updates
 
+__all__ = ["updates"]
