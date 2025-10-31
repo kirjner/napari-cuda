@@ -11,7 +11,7 @@ contracted, well-partitioned layout.
 | Entry points | `server/app/` | Modules wire control, runtime, engine, and data directly in `egl_headless_server.py`. |
 | Control plane | `server/control/` | Imports runtime state types (`viewport.state`, IPC mailboxes) and engine helpers (`engine.pixel.channel`). |
 | Runtime | `server/runtime/` | Still depends on control models and `server/data` helpers; circular imports previously blocked profiling. |
-| Engine | `server/engine/` | GPU/NVENC code, capture pipeline, and pixel broadcaster; exported via `engine/api.py`. |
+| Engine | `server/engine/` | GPU/NVENC code split across `capture/`, `encoding/`, and `pixel/`; consumers still import these submodules directly (façade TODO). |
 | View state | `server/viewstate/` | Centralised viewer DTOs/defaults consumed by control and runtime. |
 | Shared data | `server/data/` | ROI/chunk math, hardware limits, LOD configs. (Former `runtime/data` helpers moved here.) |
 | Tests | `server/tests/` | Flat bucket covering control, runtime, engine, and integration cases. |
@@ -24,38 +24,42 @@ Direct intra-server imports discovered with `grimp` (`PYTHONPATH=src uv run pyth
 | From | To | Direct imports |
 | --- | --- | --- |
 | `app` | `app` | 6 |
-| `app` | `control` | 9 |
+| `app` | `control` | 8 |
 | `app` | `data` | 3 |
-| `app` | `rendering` | 2 |
+| `app` | `engine` | 1 |
+| `app` | `external` | 2 |
 | `app` | `runtime` | 6 |
-| `app` | `viewstate` | 1 |
-| `control` | `app` | 1 |
-| `control` | `control` | 33 |
-| `control` | `rendering` | 1 |
+| `app` | `scene` | 1 |
+| `control` | `control` | 32 |
+| `control` | `engine` | 1 |
+| `control` | `external` | 9 |
 | `control` | `runtime` | 3 |
-| `control` | `viewstate` | 3 |
+| `control` | `scene` | 3 |
 | `data` | `data` | 13 |
-| `rendering` | `app` | 2 |
-| `rendering` | `control` | 1 |
-| `rendering` | `data` | 2 |
-| `rendering` | `rendering` | 6 |
+| `engine` | `app` | 3 |
+| `engine` | `data` | 2 |
+| `engine` | `engine` | 15 |
+| `engine` | `external` | 2 |
 | `runtime` | `app` | 2 |
-| `runtime` | `control` | 4 |
+| `runtime` | `control` | 3 |
 | `runtime` | `data` | 39 |
-| `runtime` | `rendering` | 8 |
+| `runtime` | `engine` | 4 |
 | `runtime` | `runtime` | 154 |
-| `runtime` | `viewstate` | 16 |
-| `viewstate` | `control` | 1 |
-| `viewstate` | `viewstate` | 5 |
+| `runtime` | `scene` | 16 |
+| `scene` | `control` | 1 |
+| `scene` | `external` | 2 |
+| `scene` | `scene` | 5 |
 
-This snapshot serves as the baseline to verify that later refactors remove the unwanted edges (e.g., `rendering → control`).
+(`scene` in the table represents modules under `server/viewstate`.)
+
+This snapshot serves as the baseline to verify that later refactors remove the unwanted edges (e.g., `engine → app`, `control → engine`).
 
 ## Target Architecture (designed state)
 
 - **server.app** – CLI and dashboard entry points only. Parses config/env, instantiates control, and exposes metrics. No direct runtime/engine logic.
 - **server.control** – Websocket server, ledger, reducers, transaction scheduling. Consumes DTOs from `server.viewstate` and primitives from `server.data`. Talks to runtime through a narrow façade (`server.runtime.interface`), never via direct module imports.
 - **server.runtime** – Worker bootstrap, viewport, render loop, LOD policy. Imports shared ROI math (`server.data`) and viewer DTOs from `server.viewstate`, and calls GPU code exclusively through `server.engine.api`.
-- **server.engine** – Renamed `rendering/`. Hosts GL/EGL/CUDA/NVENC integration and compiled artifacts in `engine/_compiled/`. Exposes a thin API (capture, encode, reset) with no knowledge of control/runtime internals.
+- **server.engine** – Renamed from `rendering/`. Hosts GL/EGL/CUDA/NVENC integration and compiled artifacts in `engine/encoding/compiled/`. We still need to formalise a thin API surface so runtime/control stop importing internals.
 - **server.viewstate** – Authoritative DTOs, defaults, and builders for snapshots, layer schemas, and bootstrap metadata. Both control and runtime consume these types.
 - **server.data** – Consolidated ROI/LOD math, hardware limits, logging helpers, env parsing. All pure helpers live here (merging the old `server/data/` and `server/runtime/data/`).
 - **server.tests** – Mirrors the package layout (`tests/control`, `tests/runtime`, `tests/engine`, `tests/integration`) with fixtures in `_helpers`.
@@ -84,9 +88,7 @@ the contract in CI.
 - **Duplicate data layers** – (Resolved) `runtime/data` helpers are now part of
   `server/data`; future changes should rely on that package exclusively.
 - **Viewer DTO alignment** – Shared dataclasses/defaults live in `server/viewstate`; continue steering new code through that façade.
-- **Engine façade discipline** – Keep runtime/control imports limited to `server/engine/api.py` to avoid leaking internal modules.
-  and re-exports control pixel channels. The engine package must stand alone
-  behind an API module.
+- **Engine façade discipline** – Runtime/control still reach directly into `engine.capture`, `engine.encoding`, and `engine.pixel`. Introduce an explicit `server/engine/api.py` (or similar façade) so engine internals stay private and control-side shims can be removed.
 - **Control/runtime coupling** – Control reducers import runtime state classes,
   and runtime bootstrap imports control models. We need façades for cross-plane
   communication.
@@ -110,7 +112,7 @@ the contract in CI.
    - Refactor `control/state_models.py`, `runtime/render_loop/apply/render_state`,
      and viewstate builders to use the shared models.
 4. **Isolate engine**
-   - Maintain `server/engine/api.py` as the only public surface.
+   - Add `server/engine/api.py` (or equivalent) as the only public surface and migrate callers to it.
    - Keep compiled artifacts under `engine/encoding/compiled/` and document rebuild steps.
 5. **Establish control/runtime façades**
    - Define `server/runtime/interface.py` (runtime entry points) and
@@ -136,7 +138,7 @@ Use this as you execute the roadmap:
 - [ ] Commit architecture doc and import-matrix tooling to CI.
 - [x] Merge data helpers into `server/data` and delete `server/state`.
 - [x] Publish shared viewstate DTOs and update control/runtime call sites.
-- [ ] Introduce `server/engine/api.py`, migrate runtime, and rename the package.
+- [ ] Introduce `server/engine/api.py` and migrate runtime/control callers to the façade.
 - [ ] Add runtime/control façade modules and remove cross-plane imports.
 - [ ] Re-home tests under `server/tests/<domain>/` and refresh docs.
 - [ ] Verify import contract compliance and rerun key pytest selections.

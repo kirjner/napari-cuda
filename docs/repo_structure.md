@@ -7,7 +7,7 @@ Offensive coding tenet: no defensive fallbacks, no silent failures.
 ```
 napari_cuda/
 ├── client/          # App launcher, state projections, rendering stack, runtime loop
-├── server/          # Headless service (control, state, rendering, data)
+├── server/          # Headless service (control, runtime/engine, data)
 ├── protocol/        # Message schema, snapshots, parser
 ├── codec/           # Format helpers (AnnexB/AVCC parsing, H.264 utilities)
 ├── cpu/, cuda/, _vt/ # Platform shims (CPU capture, CUDA bindings, VT integration)
@@ -16,14 +16,14 @@ napari_cuda/
 └── docs/, tools/, scripts/
 ```
 
-Recent reorganisations landed the top-level split called out in the future-structure draft, and both client/server trees now expose the expected `app`, `control`, `data`, `rendering`, `runtime` (client-only today), and `state` packages.
+Recent reorganisations landed the top-level split called out in the future-structure draft, and both client/server trees now expose the expected `app`, `control`, `data`, `engine`, `runtime` (client-only today), and `state` packages.
 
 ## Alignment Highlights
 
 - Client runtime/app/rendering separation matches the target layout; `proxy_viewer` is now thin and bridges live in `client/state`.
 - Server engine owns encoder + worker code after moving the PyAV encoder from the shared codec layer (`src/napari_cuda/server/engine/encoding/h264_encoder.py`).
 - Protocol, docs, and tools directories match the published draft (no more greenfield shims).
-- Server runtime package introduced (`server/runtime/worker/egl.py`, `runtime/worker/loop.py`, `runtime/ipc/mailboxes/render_update.py`, `runtime/core/*`), isolating orchestration from rendering helpers.
+- Server runtime package introduced (`server/runtime/worker/egl.py`, `runtime/worker/loop.py`, `runtime/ipc/mailboxes/render_update.py`, `runtime/core/*`), isolating orchestration from engine helpers.
 
 ## Outstanding Organisation Work
 
@@ -32,7 +32,7 @@ Recent reorganisations landed the top-level split called out in the future-struc
 - **Document engine façade expectations.** Add guidance in the architecture doc covering `server/engine/api.py` so downstream contributors rely on the façade rather than internal capture/encoding modules.
 - **Audit pixel channel responsibilities.** With the channel logic now in `server/engine/pixel/channel.py`, decide whether any remaining control-plane glue should migrate or stay transport-side (e.g., heartbeat vs broadcaster orchestration).
 - **Split control channel orchestration.** `control_channel_server.py` currently mixes handshake, resume journal, command routing, and heartbeat/watchdog logic. Break it into `server/control/handshake.py`, `server/control/resume.py`, `server/control/dispatch.py`, etc., so future hoists (e.g., state sync, metrics taps) have explicit homes.
-- **Clarify GL/canvas helpers.** Split `napari_viewer/bootstrap.py`, `egl_context.py`, `gl_capture.py`, `vispy_intercept.py`, and `cuda_interop.py` into a `rendering/gl/` namespace so rendering vs orchestration vs transport responsibilities are obvious.
+- **Clarify GL/canvas helpers.** Split `napari_viewer/bootstrap.py`, `egl_context.py`, `gl_capture.py`, `vispy_intercept.py`, and `cuda_interop.py` into an `engine/gl/` namespace so GPU-facing code is grouped separately from orchestration.
 - **Audit `app/experiments`.** Decide whether experiments remain in-tree or move to `tools/` to avoid diluting the production app surface.
 
 ### Client package
@@ -45,7 +45,7 @@ Recent reorganisations landed the top-level split called out in the future-struc
 
 ### Shared / top level
 
-- **Collapse dormant packages.** `src/napari_cuda/cuda` currently contains only `__pycache__`; remove or repurpose once CUDA helpers move under rendering/runtime modules.
+- **Collapse dormant packages.** `src/napari_cuda/cuda` currently contains only `__pycache__`; remove or repurpose once CUDA helpers move under engine/runtime modules.
 - **Document ownership of platform shims.** Clarify in this doc where `_vt/`, `cpu/`, and `web/` fit into the architecture, and whether they should gain subpackages (e.g., `_vt/shim/`, `cpu/capture/`).
 - **Ensure tests mirror the final layout.** As packages move, migrate test modules (e.g., `server/tests/test_worker_confirmations.py`) to new `_tests` packages inside the destination modules to keep co-location consistent with the guiding principles.
 
