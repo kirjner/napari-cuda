@@ -14,15 +14,12 @@ import base64
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import websockets
 
 from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.protocol import NotifyStreamPayload
-
-if TYPE_CHECKING:  # pragma: no cover - import for typing only
-    from napari_cuda.server.app.metrics_core import Metrics  # circular guard at runtime
 
 FramePacket = pixel_broadcaster.FramePacket
 logger = logging.getLogger(__name__)
@@ -102,7 +99,7 @@ async def ingest_client(
     ws: websockets.WebSocketServerProtocol,
     *,
     config: PixelChannelConfig,
-    metrics: "Metrics",
+    metrics: Any,
     reset_encoder: Callable[[], bool],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
     on_clients_change: Callable[[], None],
@@ -137,7 +134,7 @@ async def ensure_keyframe(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
-    metrics: "Metrics",
+    metrics: Any,
     reset_encoder: Callable[[], bool],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
     capture_avcc: Optional[Callable[[], Optional[bytes]]] = None,
@@ -252,7 +249,7 @@ async def maybe_send_stream_config(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
-    metrics: "Metrics",
+    metrics: Any,
     avcc: Optional[bytes],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
 ) -> None:
@@ -284,7 +281,7 @@ async def publish_avcc(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
-    metrics: "Metrics",
+    metrics: Any,
     avcc: Optional[bytes],
     send_stream: Callable[[NotifyStreamPayload], Awaitable[None]],
 ) -> None:
@@ -322,7 +319,7 @@ def enqueue_frame(
     state: PixelChannelState,
     packet: FramePacket,
     *,
-    metrics: "Metrics",
+    metrics: Any,
 ) -> None:
     """Attempt to queue a frame for broadcast, dropping oldest on overflow."""
 
@@ -372,7 +369,7 @@ async def run_channel_loop(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
-    metrics: "Metrics",
+    metrics: Any,
 ) -> None:
     """Run the broadcaster loop using the stored configuration."""
 

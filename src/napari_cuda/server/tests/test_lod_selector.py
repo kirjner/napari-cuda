@@ -6,11 +6,11 @@ from napari_cuda.server.data.lod import (
     LevelDecision,
     LevelPolicyConfig,
     LevelPolicyInputs,
-    build_level_context,
     enforce_budgets,
     evaluate_policy,
     select_level,
 )
+from napari_cuda.server.runtime.lod.context import build_level_context
 
 
 _BASE_CONFIG = LevelPolicyConfig(

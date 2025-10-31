@@ -14,13 +14,20 @@ Usage plan (PR1/PR2):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Mapping, Optional
 import json
 import logging
 import os
 
-from napari_cuda.server.data.logging_policy import DebugPolicy, load_debug_policy
+from napari_cuda.server.config import (
+    BitstreamRuntime,
+    EncodeCfg,
+    EncoderRuntime,
+    LevelPolicySettings,
+    ServerConfig,
+    ServerCtx,
+)
+from napari_cuda.server.config.logging_policy import load_debug_policy
 
 
 logger = logging.getLogger(__name__)
@@ -171,101 +178,7 @@ def _load_json_config(env: Mapping[str, str], name: str) -> dict[str, object]:
     return {}
 
 
-# ---- Types -------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class EncodeCfg:
-    """Encoder parameters for the streaming pipeline."""
-
-    fps: int = 60
-    codec: str = "h264"  # "h264" | "hevc" | "av1"
-    bitrate: int = 12_000_000
-    keyint: int = 120
-
-
-def _codec_to_int(codec: str) -> int:
-    c = (codec or "").strip().lower()
-    if c == "h264":
-        return 1
-    if c == "hevc":
-        return 2
-    if c == "av1":
-        return 3
-    return 1
-
-
-@dataclass(frozen=True)
-class ServerConfig:
-    """Top‑level server configuration.
-
-    This consolidates runtime flags and provides defaults aligned with the
-    refactor plan to reduce branching and env sprawl.
-    """
-
-    # Network
-    host: str = "0.0.0.0"
-    state_port: int = 8081
-    pixel_port: int = 8082
-
-    # Data (Zarr)
-    zarr_path: Optional[str] = None
-    zarr_level: Optional[str] = None
-    zarr_axes: Optional[str] = None
-    zarr_z: Optional[int] = None
-
-    # Render
-    width: int = 1920
-    height: int = 1080
-    use_volume: bool = False
-    ndisplay: int = 2  # 2|3 intent; worker may clamp
-    max_slice_bytes: int = 0
-    max_volume_bytes: int = 0
-    max_volume_voxels: int = 0
-
-    # Animation (dev only)
-    animate: bool = False
-    animate_dps: float = 30.0
-
-    # Queueing
-    frame_queue: int = 1
-
-    # Encoder
-    encode: EncodeCfg = EncodeCfg()
-
-    # Behavior toggles (kept minimal)
-    idr_on_reset: bool = True
-    packer: str = "cython"  # "cython" | "python"
-
-
-@dataclass(frozen=True)
-class EncoderRuntime:
-    """Advanced NVENC runtime tuning overrides.
-
-    These values capture the various environment-based knobs that historically
-    lived inside `rendering.encoder`. They are now parsed once during context
-    construction so the encoder no longer touches `os.environ`.
-    """
-
-    input_format: str = "NV12"
-    rc_mode: str = "cbr"
-    preset: str = "P3"
-    max_bitrate: Optional[int] = 20_000_000
-    lookahead: int = 0
-    aq: int = 1
-    temporalaq: int = 1
-    enable_non_ref_p: bool = False
-    bframes: int = 0
-    idr_period: int = 600
-
-
-@dataclass(frozen=True)
-class BitstreamRuntime:
-    """Bitstream packer toggles resolved from environment."""
-
-    build_cython: bool = True
-    disable_fast_pack: bool = False
-    allow_py_fallback: bool = False
-
+# ---- Loaders -----------------------------------------------------------------
 
 def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
     """Load server configuration from environment (no side effects).
@@ -349,55 +262,6 @@ def load_server_config(env: Optional[Mapping[str, str]] = None) -> ServerConfig:
         idr_on_reset=idr_on_reset,
         packer=packer,
     )
-
-
-@dataclass(frozen=True)
-class LevelPolicySettings:
-    """Level selection policy configuration resolved from environment."""
-
-    threshold_in: float = 1.05
-    threshold_out: float = 1.35
-    hysteresis: float = 0.0
-    fine_threshold: float = 1.05
-    cooldown_ms: float = 150.0
-    log_policy_eval: bool = False
-    sticky_contrast: bool = True
-    oversampling_thresholds: Optional[Mapping[int, float]] = None
-    oversampling_hysteresis: float = 0.1
-
-
-@dataclass(frozen=True)
-class ServerCtx:
-    """Resolved server runtime context.
-
-    Wraps the structured `ServerConfig` and collects additional operational
-    toggles that were previously read ad-hoc from the environment. Built once
-    at startup and passed around (observe-only at first, then authoritative).
-    """
-
-    cfg: ServerConfig
-
-    # Queuing / dumps / watchdogs
-    frame_queue: int = 1
-    dump_bitstream: int = 0
-    dump_dir: str = "benchmarks/bitstreams"
-    kf_watchdog_cooldown_s: float = 2.0
-
-    # Debug/logging policy
-    debug_policy: DebugPolicy = field(default_factory=lambda: load_debug_policy({}))
-
-    # Encoder runtime overrides (NVENC tuning)
-    encoder_runtime: EncoderRuntime = field(default_factory=EncoderRuntime)
-
-    # Bitstream/packer toggles
-    bitstream: BitstreamRuntime = field(default_factory=BitstreamRuntime)
-
-    # Metrics UI
-    metrics_port: int = 8083
-    metrics_refresh_ms: int = 1000
-
-    # Level policy settings
-    policy: LevelPolicySettings = LevelPolicySettings()
 
 
 def load_server_ctx(env: Optional[Mapping[str, str]] = None) -> ServerCtx:

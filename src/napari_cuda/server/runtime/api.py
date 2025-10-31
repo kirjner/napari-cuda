@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Callable, Optional, TYPE_CHECKING
 
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     PlaneState,
     RenderMode,
     RenderUpdate,

@@ -41,7 +41,7 @@ from napari_cuda.server.engine.api import (
     build_notify_stream_payload,
     mark_stream_config_dirty,
 )
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
     RenderUpdate,
     snapshot_render_state,

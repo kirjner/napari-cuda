@@ -2,7 +2,7 @@ import json
 
 from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 
-from napari_cuda.server.data.logging_policy import load_debug_policy
+from napari_cuda.server.config.logging_policy import load_debug_policy
 
 
 def test_debug_policy_defaults():

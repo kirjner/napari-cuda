@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from vispy.geometry import Rect
 
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.data import SliceROI

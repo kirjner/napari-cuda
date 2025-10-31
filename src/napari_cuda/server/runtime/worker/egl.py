@@ -32,7 +32,7 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 
 import napari_cuda.server.data.lod as lod
 from napari.components.viewer_model import ViewerModel
-from napari_cuda.server.app.config import ServerCtx
+from napari_cuda.server.config import ServerCtx
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
@@ -53,7 +53,7 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     setup_worker_runtime,
 )
 from napari_cuda.server.runtime.bootstrap.scene_setup import ensure_scene_source
-from napari_cuda.server.viewstate import (
+from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (

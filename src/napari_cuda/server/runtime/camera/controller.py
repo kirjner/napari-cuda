@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional
 from vispy import scene  # type: ignore
 
 from napari_cuda.server.runtime.camera import ops as camops
-from napari_cuda.server.viewstate import CameraDeltaCommand
+from napari_cuda.server.scene import CameraDeltaCommand
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.render_loop.plan_interface import (

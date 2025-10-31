@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 
-from napari_cuda.server.data.logging_policy import DumpControls
+from napari_cuda.server.config.logging_policy import DumpControls
 
 try:
     from OpenGL import GL  # type: ignore
