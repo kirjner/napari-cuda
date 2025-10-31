@@ -37,14 +37,14 @@ from napari_cuda.server.control.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
 from napari_cuda.server.rendering import pixel_broadcaster
-from napari_cuda.server.scene import (
+from napari_cuda.server.viewstate import (
     snapshot_render_state,
     snapshot_layer_controls,
     snapshot_multiscale_state,
     snapshot_scene,
     snapshot_volume_state,
 )
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
@@ -59,7 +59,7 @@ from napari.components import viewer_model
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.apply.snapshots import apply as snapshot_mod
+from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_mod
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.data.roi import plane_wh_for_level
 

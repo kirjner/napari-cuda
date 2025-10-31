@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional
 
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.data import SliceROI

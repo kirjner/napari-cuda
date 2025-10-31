@@ -104,27 +104,27 @@ see `docs/server/architecture.md`.
   `render_loop.apply.updates.extract_layer_changes`,
   `render_loop.apply.updates.apply_viewport_state_snapshot`,
   `render_loop.apply.updates.drain_scene_updates`,
-  `render_loop.apply.snapshots.plane.dims_signature`,
-  `render_loop.apply.snapshots.plane.apply_dims_from_snapshot`,
-  `render_loop.apply.snapshots.plane.update_z_index_from_snapshot`,
+  `render_loop.apply.render_state.plane.dims_signature`,
+  `render_loop.apply.render_state.plane.apply_dims_from_snapshot`,
+  `render_loop.apply.render_state.plane.update_z_index_from_snapshot`,
   `snapshot_dims_metadata`, `_set_dims_range_for_level`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.render_loop.plan.ledger_access`).
 - **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
-  `runtime.render_loop.apply.snapshots.build`), `runtime.render_loop.apply.snapshots.*`,
+  `napari_cuda.server.viewstate`), `runtime.render_loop.apply.render_state.*`,
   `runtime.render_loop.apply.updates`, `viewport.updates`,
   ledger interfaces in `ServerStateLedger`.
 - **Notes:** This block is where external updates enter the worker. The
-  render-thread snapshot helpers now live under `runtime/render_loop/apply/snapshots/`,
+  render-thread snapshot helpers now live under `runtime/render_loop/apply/render_state/`,
   while shared ledger readers reside in `runtime/render_loop/plan/ledger_access.py`.
 
 ### 5. Level Selection, ROI, and Policy Evaluation
 - **Entry points:** `_configure_policy`, `set_policy`,
   `level_policy.build_level_context`, `level_policy.volume_budget_allows`,
   `level_policy.slice_budget_allows`, `level_policy.resolve_volume_intent_level`,
-  `level_policy.load_volume`, `render_loop.apply.snapshots.plane.apply_slice_level`,
-  `render_loop.apply.snapshots.plane.aligned_roi_signature`,
+  `level_policy.load_volume`, `render_loop.apply.render_state.plane.apply_slice_level`,
+  `render_loop.apply.render_state.plane.aligned_roi_signature`,
   `_volume_world_extents`, `_evaluate_level_policy`, `_mark_render_tick_needed`,
   `_mark_render_tick_complete`, `_mark_render_loop_started`,
   `request_multiscale_level`, `_enter_volume_mode`, `_exit_volume_mode`,

@@ -20,13 +20,13 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     init_egl as core_init_egl,
     init_vispy_scene as core_init_vispy_scene,
 )
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     pull_render_snapshot,
 )
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.render_loop.apply import updates as _render_updates
 from napari_cuda.server.runtime.viewport import RenderMode
-from napari_cuda.server.scene import snapshot_multiscale_state
+from napari_cuda.server.viewstate import snapshot_multiscale_state
 
 from .egl import EGLRendererWorker
 

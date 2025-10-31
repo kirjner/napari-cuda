@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode, VolumeState

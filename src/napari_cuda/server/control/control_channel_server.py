@@ -79,7 +79,7 @@ from napari_cuda.server.control.state_reducers import (
 from napari_cuda.server.control.transactions.plane_restore import (
     apply_plane_restore_transaction,
 )
-from napari_cuda.server.scene import (
+from napari_cuda.server.viewstate import (
     CameraDeltaCommand,
     snapshot_render_state,
     snapshot_multiscale_state,

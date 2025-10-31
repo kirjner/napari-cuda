@@ -15,7 +15,7 @@
 ## Architectural Touchpoints
 - **Scene state**: the authoritative scene lives in the server state ledger + `RenderLedgerSnapshot` plus the worker viewer model. MCP commands should route state changes through the same reducers and mailboxes (`RenderUpdateMailbox`, ledger-driven dims/camera updates) that the WebSocket state channel uses.
 - **Scene metadata**: the `snapshot_scene` helpers can generate layer listings, dims metadata, and camera snapshots without Qt. The MCP `list_layers`, `session_information`, and related tools should call into them instead of reading napari Viewer objects.
-- **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation helpers in `napari_cuda.server.scene.snapshot` (or a dedicated adapter) should create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
+- **Layer storage**: data layers originate from the worker's scene source (e.g., NGFF datasets). For MCP-driven layer CRUD, surface translation helpers in `napari_cuda.server.viewstate.builders` (or a dedicated adapter) should create/remove server-side layer specs and notify clients via the existing state broadcast pipeline.
 - **Camera/dims controls**: reuse `_enqueue_camera_delta` and `_rebroadcast_meta` from `EGLHeadlessServer` so MCP camera operations coalesce with WebSocket-sourced commands.
 - **Code execution**: limit the `execute_code` tool to a constrained namespace that mirrors what the worker already exposes (e.g., viewer metadata snapshot, metrics hooks). Avoid letting the tool mutate global module state directly.
 

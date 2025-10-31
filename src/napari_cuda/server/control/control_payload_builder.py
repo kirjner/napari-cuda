@@ -6,7 +6,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
 from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.scene import snapshot_volume_state, snapshot_viewport_state
+from napari_cuda.server.viewstate import snapshot_volume_state, snapshot_viewport_state
 from napari_cuda.server.control.state_ledger import LedgerEntry
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 

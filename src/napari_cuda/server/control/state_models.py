@@ -5,21 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple
 
-
-@dataclass(frozen=True)
-class BootstrapSceneMetadata:
-    """Snapshot of worker bootstrap state for seeding reducer intents."""
-
-    step: tuple[int, ...]
-    axis_labels: tuple[str, ...]
-    order: tuple[int, ...]
-    level_shapes: tuple[tuple[int, ...], ...]
-    levels: tuple[dict[str, Any], ...]
-    current_level: int
-    ndisplay: int
-    plane_rect: Optional[tuple[float, float, float, float]] = None
-    plane_center: Optional[tuple[float, float]] = None
-    plane_zoom: Optional[float] = None
+from napari_cuda.server.viewstate import BootstrapSceneMetadata
 
 
 @dataclass(frozen=True)

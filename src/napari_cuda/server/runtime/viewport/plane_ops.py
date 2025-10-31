@@ -8,7 +8,7 @@ from typing import Optional
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.data import SliceROI

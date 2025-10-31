@@ -7,15 +7,15 @@ from typing import TYPE_CHECKING
 
 from napari_cuda.server.runtime.lod import level_policy
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.apply.snapshots.plane import (
+from napari_cuda.server.runtime.render_loop.apply.render_state.plane import (
     apply_slice_level,
     apply_slice_roi,
 )
-from napari_cuda.server.runtime.render_loop.apply.snapshots.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.apply.render_state.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.render_loop.apply.snapshots.volume import (
+from napari_cuda.server.runtime.render_loop.apply.render_state.volume import (
     apply_volume_level,
 )
 from napari_cuda.server.runtime.viewport import RenderMode

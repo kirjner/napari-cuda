@@ -4,11 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
-    RenderLedgerSnapshot,
-)
-from napari_cuda.server.runtime.render_loop.apply.snapshots import apply as snapshot_mod
-from napari_cuda.server.runtime.render_loop.apply.snapshots import plane as plane_mod
+from napari_cuda.server.viewstate import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_mod
+from napari_cuda.server.runtime.render_loop.apply.render_state import plane as plane_mod
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
 from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState

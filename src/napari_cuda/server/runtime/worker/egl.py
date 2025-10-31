@@ -54,7 +54,7 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     setup_worker_runtime,
 )
 from napari_cuda.server.runtime.bootstrap.scene_setup import ensure_scene_source
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
@@ -77,7 +77,7 @@ from napari_cuda.server.runtime.render_loop.ticks import (
     capture as capture_tick,
 )
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.apply.snapshots.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.apply.render_state.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )

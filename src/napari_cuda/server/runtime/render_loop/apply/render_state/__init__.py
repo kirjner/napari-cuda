@@ -1,7 +1,12 @@
-"""Render snapshot helpers consumed by the apply phase."""
+"""Render-state helpers consumed by the apply phase."""
+
+from napari_cuda.server.viewstate import (
+    RenderLedgerSnapshot,
+    build_ledger_snapshot,
+    pull_render_snapshot,
+)
 
 from . import apply, plane, viewer_metadata, viewport, volume
-from .build import RenderLedgerSnapshot, build_ledger_snapshot, pull_render_snapshot
 
 __all__ = [
     "RenderLedgerSnapshot",

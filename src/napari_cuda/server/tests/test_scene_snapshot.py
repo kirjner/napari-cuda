@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from napari_cuda.server.scene import (
+from napari_cuda.server.viewstate import (
     snapshot_render_state,
     snapshot_scene,
     snapshot_dims_metadata,

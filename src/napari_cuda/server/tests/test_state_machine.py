@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox

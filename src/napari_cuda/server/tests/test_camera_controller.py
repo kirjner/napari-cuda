@@ -9,7 +9,7 @@ from napari_cuda.server.runtime.camera.controller import (
     CameraDebugFlags,
     apply_camera_deltas,
 )
-from napari_cuda.server.scene import CameraDeltaCommand
+from napari_cuda.server.viewstate import CameraDeltaCommand
 
 
 @dataclass

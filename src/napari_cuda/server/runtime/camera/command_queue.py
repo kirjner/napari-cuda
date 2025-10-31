@@ -6,7 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Iterable
 
-from napari_cuda.server.scene import CameraDeltaCommand
+from napari_cuda.server.viewstate import CameraDeltaCommand
 
 
 class CameraCommandQueue:

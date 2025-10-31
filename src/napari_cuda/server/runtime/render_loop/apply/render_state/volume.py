@@ -8,9 +8,7 @@ from typing import Any, Optional
 from vispy.scene.cameras import TurntableCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
-    RenderLedgerSnapshot,
-)
+from napari_cuda.server.viewstate import RenderLedgerSnapshot
 from napari_cuda.server.runtime.viewport.layers import apply_volume_layer_data
 from napari_cuda.server.runtime.viewport.volume_ops import (
     apply_pose_to_camera,

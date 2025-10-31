@@ -9,9 +9,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
-from napari_cuda.server.runtime.render_loop.apply.snapshots import apply as snapshot_apply
-from napari_cuda.server.runtime.render_loop.apply.snapshots import viewport as snapshot_viewport
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_apply
+from napari_cuda.server.runtime.render_loop.apply.render_state import viewport as snapshot_viewport
+from napari_cuda.server.viewstate import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface

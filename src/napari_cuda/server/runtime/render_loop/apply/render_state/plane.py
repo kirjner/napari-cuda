@@ -12,9 +12,7 @@ from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.roi import plane_wh_for_level
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
-    RenderLedgerSnapshot,
-)
+from napari_cuda.server.viewstate import RenderLedgerSnapshot
 from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,

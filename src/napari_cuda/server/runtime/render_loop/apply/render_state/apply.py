@@ -13,9 +13,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
-    RenderLedgerSnapshot,
-)
+from napari_cuda.server.viewstate import RenderLedgerSnapshot
 from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.viewport.state import RenderMode
 
