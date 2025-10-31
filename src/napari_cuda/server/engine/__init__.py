@@ -1,9 +1,9 @@
 """Rendering/encoding engine components for napari-cuda.
 
-This package exposes a curated surface so callers can continue importing the
-engine façade without reaching into the subpackages directly. The actual
-modules stay organized by concern (capture / encoding / pixel), while this
-module provides lazy re-exports for the public entry points.
+This module provides a lazy façade that re-exports the engine packages'
+public surface. Importing anything from here will only load the backing
+module when the attribute is first accessed, avoiding heavy GL/EGL work
+before the worker thread has established its context.
 """
 
 from __future__ import annotations
