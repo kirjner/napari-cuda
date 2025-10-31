@@ -12,12 +12,12 @@ from napari_cuda.server.runtime.lod.level_policy import (
     resolve_volume_intent_level as lod_resolve_volume_intent_level,
 )
 from napari_cuda.server.runtime.lod.slice_loader import load_lod_slice
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.apply.snapshots.viewer_metadata import (
     apply_plane_metadata as snapshot_apply_plane_metadata,
     apply_volume_metadata as snapshot_apply_volume_metadata,
 )
-from napari_cuda.server.runtime.snapshots.volume import (
+from napari_cuda.server.runtime.render_loop.apply.snapshots.volume import (
     VolumeApplyResult,
     apply_volume_level as snapshot_apply_volume_level,
 )
@@ -220,7 +220,7 @@ class ViewerBootstrapInterface:
         """Apply viewer metadata for a volume context."""
 
         snapshot_apply_volume_metadata(
-            SnapshotInterface(self.worker),
+            RenderApplyInterface(self.worker),
             source,
             context,
         )
@@ -233,7 +233,7 @@ class ViewerBootstrapInterface:
         """Apply viewer metadata for a plane context."""
 
         snapshot_apply_plane_metadata(
-            SnapshotInterface(self.worker),
+            RenderApplyInterface(self.worker),
             source,
             context,
         )
@@ -248,7 +248,7 @@ class ViewerBootstrapInterface:
         """Apply the volume level for bootstrap using shared helpers."""
 
         return snapshot_apply_volume_level(
-            SnapshotInterface(self.worker),
+            RenderApplyInterface(self.worker),
             source,
             context,
             downgraded=downgraded,

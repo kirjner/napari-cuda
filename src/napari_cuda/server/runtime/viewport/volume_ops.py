@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
 
 from .state import VolumeState
 

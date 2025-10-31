@@ -8,19 +8,22 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
-from napari_cuda.server.runtime.snapshots.apply import apply_render_snapshot
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.viewport import (
-    apply_viewport_state_snapshot,
+from napari_cuda.server.runtime.render_loop.apply.snapshots import apply as snapshot_apply
+from napari_cuda.server.runtime.render_loop.apply.snapshots import viewport as snapshot_viewport
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
 )
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
 from napari_cuda.server.runtime.viewport import (
     RenderMode,
     updates as viewport_updates,
 )
 
-from .tick_interface import RenderTickInterface
+from .plan_interface import RenderPlanInterface
+
+apply_render_snapshot = snapshot_apply.apply_render_snapshot
+apply_viewport_state_snapshot = snapshot_viewport.apply_viewport_state_snapshot
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -207,20 +210,20 @@ def consume_render_snapshot(worker: EGLRendererWorker, state: RenderLedgerSnapsh
     """Queue a complete scene state snapshot for the next frame."""
 
     normalized = normalize_scene_state(state)
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     tick_iface.render_mailbox_set_scene_state(normalized)
     tick_iface.mark_render_tick_needed()
     tick_iface.update_last_interaction_timestamp()
 
 
 def drain_scene_updates(worker: EGLRendererWorker) -> None:
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     updates: RenderUpdate = tick_iface.render_mailbox_drain()
-    snapshot_iface = SnapshotInterface(worker)
+    apply_iface = RenderApplyInterface(worker)
     state = updates.scene_state
     if state is None:
         apply_viewport_state_snapshot(
-            snapshot_iface,
+            apply_iface,
             mode=updates.mode,
             plane_state=updates.plane_state,
             volume_state=updates.volume_state,
@@ -272,7 +275,7 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
     previous_mode = tick_iface.viewport_state.mode
     signature_changed = tick_iface.render_mailbox_update_signature(state)
     if signature_changed:
-        apply_render_snapshot(snapshot_iface, state_for_apply)
+        apply_render_snapshot(apply_iface, state_for_apply)
 
     if updates.mode is not None:
         tick_iface.viewport_state.mode = updates.mode
@@ -290,9 +293,9 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
     drain_res = viewport_updates.drain_render_state(worker, state_for_apply)
 
     if drain_res.z_index is not None:
-        snapshot_iface.set_z_index(int(drain_res.z_index))
+        apply_iface.set_z_index(int(drain_res.z_index))
     if drain_res.data_wh is not None:
-        snapshot_iface.set_data_shape(int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
+        apply_iface.set_data_shape(int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
 
     runner = tick_iface.viewport_runner
     if runner is not None and tick_iface.viewport_state.mode is RenderMode.PLANE:

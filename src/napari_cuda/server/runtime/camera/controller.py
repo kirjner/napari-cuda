@@ -18,8 +18,8 @@ from napari_cuda.server.runtime.camera import ops as camops
 from napari_cuda.server.scene import CameraDeltaCommand
 
 if TYPE_CHECKING:
-    from napari_cuda.server.runtime.render_loop.tick_interface import (
-        RenderTickInterface,
+    from napari_cuda.server.runtime.render_loop.plan_interface import (
+        RenderPlanInterface,
     )
 
 
@@ -146,7 +146,7 @@ def apply_camera_deltas(
 
 
 def process_camera_deltas(
-    tick_iface: RenderTickInterface,
+    tick_iface: RenderPlanInterface,
     commands: Sequence[CameraDeltaCommand],
 ) -> CameraDeltaOutcome:
     """Process camera commands using the worker façade."""

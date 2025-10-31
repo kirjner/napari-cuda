@@ -18,7 +18,7 @@ from napari_cuda.protocol.snapshots import (
     viewer_snapshot_from_blocks,
 )
 from napari_cuda.server.control.state_ledger import LedgerEntry, ServerStateLedger
-from napari_cuda.server.runtime.core.snapshot_build import (
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     RenderLedgerSnapshot,
     build_ledger_snapshot,
 )

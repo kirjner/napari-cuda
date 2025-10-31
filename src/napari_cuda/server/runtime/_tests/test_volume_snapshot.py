@@ -5,9 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.volume import (
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.apply.snapshots.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
 )
@@ -88,7 +90,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         return (128, 256), 64
 
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.snapshots.volume.apply_volume_layer_data",
+        "napari_cuda.server.runtime.render_loop.apply.snapshots.volume.apply_volume_layer_data",
         _fake_apply_volume_layer,
     )
 
@@ -111,7 +113,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         dtype="float32",
     )
 
-    snapshot_iface = SnapshotInterface(worker)
+    snapshot_iface = RenderApplyInterface(worker)
     result = apply_volume_level(
         snapshot_iface,
         source=_Source(),
@@ -156,7 +158,7 @@ class _FakeTurntableCamera:
 
 def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.snapshots.volume.TurntableCamera",
+        "napari_cuda.server.runtime.render_loop.apply.snapshots.volume.TurntableCamera",
         _FakeTurntableCamera,
     )
     viewport_state = ViewportState()
@@ -175,7 +177,7 @@ def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch)
         volume_fov=45.0,
     )
 
-    snapshot_iface = SnapshotInterface(worker)
+    snapshot_iface = RenderApplyInterface(worker)
     apply_volume_camera_pose(snapshot_iface, snapshot)
 
     vol_state = viewport_state.volume

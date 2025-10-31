@@ -44,7 +44,9 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.data import (
     SliceROI,
@@ -56,8 +58,8 @@ from napari_cuda.server.data.level_logging import LayerAssignmentLogger
 from napari.components import viewer_model
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots import apply as snapshot_mod
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.apply.snapshots import apply as snapshot_mod
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.data.roi import plane_wh_for_level
 
@@ -885,7 +887,7 @@ class StateServerHarness:
             snapshot = server._latest_render_snapshot
             assert snapshot is not None, "harness scene snapshot unavailable"
             assert server._worker._viewer is not None, "harness worker viewer not initialised"
-            snapshot_iface = SnapshotInterface(server._worker)
+            snapshot_iface = RenderApplyInterface(server._worker)
             snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
 
         server._commit_level = _commit_level

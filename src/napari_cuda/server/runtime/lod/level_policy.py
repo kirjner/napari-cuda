@@ -13,7 +13,7 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.runtime.core import ledger_step
+from napari_cuda.server.runtime.render_loop.plan.ledger_access import step as ledger_step
 from napari_cuda.server.runtime.viewport import RenderMode
 
 from .context import build_level_context

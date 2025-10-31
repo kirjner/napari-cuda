@@ -14,7 +14,7 @@ from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import CameraDeltaCommand
 
 from .. import render_updates
-from ..tick_interface import RenderTickInterface
+from ..plan_interface import RenderPlanInterface
 from . import viewport
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ def _apply_commands(
     *,
     reset_policy_suppression: bool,
 ) -> CameraCommandResult:
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     outcome = _process_camera_deltas(tick_iface, commands)
 
     last_seq: Optional[int]
@@ -83,7 +83,7 @@ def process_commands(
     if not commands:
         return CameraCommandResult(False, False, None)
 
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     tick_iface.record_user_interaction()
     result = _apply_commands(worker, commands, reset_policy_suppression=False)
     viewport.run(worker)
@@ -101,7 +101,7 @@ def process_commands(
 def drain(worker: EGLRendererWorker) -> None:
     """Drain queued camera deltas, then scene updates, for a render tick."""
 
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     commands = tick_iface.camera_queue_pop_all()
     result: Optional[CameraCommandResult] = None
 
@@ -121,7 +121,7 @@ def drain(worker: EGLRendererWorker) -> None:
 
 
 def record_zoom_hint(
-    tick_iface: RenderTickInterface,
+    tick_iface: RenderPlanInterface,
     commands: Sequence[CameraDeltaCommand],
 ) -> None:
     """Capture the most recent zoom factor for policy evaluation."""

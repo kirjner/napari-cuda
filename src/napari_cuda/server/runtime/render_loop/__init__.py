@@ -1,11 +1,7 @@
-"""Render-loop helpers for the worker thread."""
+"""Render loop package interfaces."""
 
-from . import loop, render_updates, ticks
-from .tick_interface import RenderTickInterface
+from .plan_interface import RenderPlanInterface
 
 __all__ = [
-    "RenderTickInterface",
-    "loop",
-    "render_updates",
-    "ticks",
+    "RenderPlanInterface",
 ]

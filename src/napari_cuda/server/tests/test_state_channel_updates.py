@@ -28,7 +28,9 @@ from napari_cuda.server.control.resumable_history_store import (
 from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.scene import (
     snapshot_render_state,

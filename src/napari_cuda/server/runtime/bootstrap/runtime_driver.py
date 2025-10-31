@@ -19,7 +19,7 @@ from napari_cuda.server.data.zarr_source import (
     LevelDescriptor,
     ZarrSceneSource,
 )
-from napari_cuda.server.runtime.core.scene_setup import create_scene_source
+from napari_cuda.server.runtime.bootstrap.scene_setup import create_scene_source
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 
 

@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
-class RenderTickInterface:
-    """Bridge tick helpers to the worker without exposing private state."""
+class RenderPlanInterface:
+    """Bridge tick planners to the worker without exposing private state."""
 
     worker: EGLRendererWorker
 
@@ -162,4 +162,4 @@ class RenderTickInterface:
         return float(getattr(self.worker, "_anim_start", 0.0))  # type: ignore[attr-defined]
 
 
-__all__ = ["RenderTickInterface"]
+__all__ = ["RenderPlanInterface"]

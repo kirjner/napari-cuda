@@ -5,17 +5,19 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Optional
 
-from napari_cuda.server.runtime.viewport import (
+from napari_cuda.server.runtime.viewport.state import (
     PlaneState,
     RenderMode,
     VolumeState,
 )
 
-from .interface import SnapshotInterface
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 
 
 def apply_viewport_state_snapshot(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     *,
     mode: Optional[RenderMode],
     plane_state: Optional[PlaneState],

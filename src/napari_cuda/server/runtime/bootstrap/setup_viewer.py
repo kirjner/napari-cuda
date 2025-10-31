@@ -432,12 +432,12 @@ def _init_viewer_scene(worker: EGLRendererWorker, source: Optional[ZarrSceneSour
     _configure_camera_for_mode(worker)
 
 
-from napari_cuda.server.runtime.core import (  # noqa: E402  (avoid circular import during module load)
-    ledger_axis_labels,
-    ledger_level,
-    ledger_ndisplay,
-    ledger_order,
-    ledger_step,
+from napari_cuda.server.runtime.render_loop.plan.ledger_access import (  # noqa: E402  (avoid circular import during module load)
+    axis_labels as ledger_axis_labels,
+    level as ledger_level,
+    ndisplay as ledger_ndisplay,
+    order as ledger_order,
+    step as ledger_step,
 )
 
 __all__ = [

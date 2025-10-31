@@ -6,19 +6,21 @@ import logging
 from typing import TYPE_CHECKING
 
 from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.plane import (
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.apply.snapshots.plane import (
     apply_slice_level,
     apply_slice_roi,
 )
-from napari_cuda.server.runtime.snapshots.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.apply.snapshots.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.snapshots.volume import apply_volume_level
+from napari_cuda.server.runtime.render_loop.apply.snapshots.volume import (
+    apply_volume_level,
+)
 from napari_cuda.server.runtime.viewport import RenderMode
 
-from ..tick_interface import RenderTickInterface
+from ..plan_interface import RenderPlanInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 def run(worker: EGLRendererWorker) -> None:
     """Drive a single viewport tick using the runner's current plan."""
 
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     runner = tick_iface.viewport_runner
     if runner is None:
         return
@@ -43,9 +45,9 @@ def run(worker: EGLRendererWorker) -> None:
         return
 
     source = tick_iface.get_scene_source() or tick_iface.ensure_scene_source()
-    snapshot_iface = SnapshotInterface(worker)
+    apply_iface = RenderApplyInterface(worker)
     def _resolve(level: int, _rect):
-        return snapshot_iface.viewport_roi_for_level(source, int(level), quiet=True)
+        return apply_iface.viewport_roi_for_level(source, int(level), quiet=True)
 
     plan = runner.plan_tick(source=source, roi_resolver=_resolve)
     if logger.isEnabledFor(logging.DEBUG):
@@ -74,35 +76,35 @@ def run(worker: EGLRendererWorker) -> None:
             prev_level=prev_level,
         )
 
-        snapshot_iface.set_current_level_index(int(applied_context.level))
-        if snapshot_iface.viewport_state.mode is RenderMode.VOLUME:
-            apply_volume_metadata(snapshot_iface, source, applied_context)
+        apply_iface.set_current_level_index(int(applied_context.level))
+        if apply_iface.viewport_state.mode is RenderMode.VOLUME:
+            apply_volume_metadata(apply_iface, source, applied_context)
             apply_volume_level(
                 worker,
                 source,
                 applied_context,
-                downgraded=bool(snapshot_iface.viewport_state.volume.downgraded),
+                downgraded=bool(apply_iface.viewport_state.volume.downgraded),
             )
         else:
-            apply_plane_metadata(snapshot_iface, source, applied_context)
-            apply_slice_level(snapshot_iface, source, applied_context)
+            apply_plane_metadata(apply_iface, source, applied_context)
+            apply_slice_level(apply_iface, source, applied_context)
         level_applied = True
         runner.mark_level_applied(int(applied_context.level))
 
     if (
         plan.slice_task is not None
-        and snapshot_iface.viewport_state.mode is not RenderMode.VOLUME
+        and apply_iface.viewport_state.mode is not RenderMode.VOLUME
         and not level_applied
     ):
         slice_task = plan.slice_task
         level_int = int(slice_task.level)
         step_tuple = tuple(int(v) for v in slice_task.step) if slice_task.step is not None else None
         signature_token = (level_int, step_tuple, slice_task.signature)
-        if snapshot_iface.last_slice_signature() == signature_token:
+        if apply_iface.last_slice_signature() == signature_token:
             runner.mark_slice_applied(slice_task)
         else:
             apply_slice_roi(
-                snapshot_iface,
+                apply_iface,
                 source,
                 level_int,
                 slice_task.roi,
@@ -111,8 +113,8 @@ def run(worker: EGLRendererWorker) -> None:
             )
             runner.mark_slice_applied(slice_task)
 
-    rect = snapshot_iface.current_panzoom_rect()
+    rect = apply_iface.current_panzoom_rect()
     if rect is not None:
         runner.update_camera_rect(rect)
     if plan.pose_event is not None:
-        snapshot_iface.emit_current_camera_pose(plan.pose_event.value)
+        apply_iface.emit_current_camera_pose(plan.pose_event.value)

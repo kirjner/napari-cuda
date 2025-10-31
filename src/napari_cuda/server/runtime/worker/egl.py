@@ -47,21 +47,25 @@ from napari_cuda.server.runtime.camera import (
     CameraCommandQueue,
     CameraPoseApplied,
 )
-from napari_cuda.server.runtime.core import (
+from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     cleanup_render_worker,
-    ensure_scene_source,
     init_egl as core_init_egl,
     init_vispy_scene as core_init_vispy_scene,
-    ledger_axis_labels,
-    ledger_displayed,
-    ledger_level,
-    ledger_level_shapes,
-    ledger_ndisplay,
-    ledger_order,
-    ledger_step,
     setup_worker_runtime,
 )
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.bootstrap.scene_setup import ensure_scene_source
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
+from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
+    axis_labels as ledger_axis_labels,
+    displayed as ledger_displayed,
+    level as ledger_level,
+    level_shapes as ledger_level_shapes,
+    ndisplay as ledger_ndisplay,
+    order as ledger_order,
+    step as ledger_step,
+)
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.ipc.mailboxes import (
     RenderUpdate,
@@ -74,8 +78,8 @@ from napari_cuda.server.runtime.render_loop import (
 from napari_cuda.server.runtime.render_loop.ticks import (
     capture as capture_tick,
 )
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.apply.snapshots.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )
@@ -584,11 +588,11 @@ class EGLRendererWorker:
             logger.debug("level intent suppressed (no change or already pending)")
             return
 
-        snapshot_iface = SnapshotInterface(self)
+        apply_iface = RenderApplyInterface(self)
         if self._viewport_state.mode is RenderMode.VOLUME:
-            apply_volume_metadata(snapshot_iface, source, context)
+            apply_volume_metadata(apply_iface, source, context)
         else:
-            apply_plane_metadata(snapshot_iface, source, context)
+            apply_plane_metadata(apply_iface, source, context)
 
         intent = LevelSwitchIntent(
             desired_level=int(decision.desired_level),

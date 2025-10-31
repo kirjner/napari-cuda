@@ -8,7 +8,7 @@ from napari_cuda.server.rendering.capture import FrameTimings, encode_frame
 from napari_cuda.server.runtime.camera.animator import animate_if_enabled
 
 from ..loop import run_render_tick
-from ..tick_interface import RenderTickInterface
+from ..plan_interface import RenderPlanInterface
 from . import camera
 
 if TYPE_CHECKING:
@@ -16,14 +16,14 @@ if TYPE_CHECKING:
 
 
 def capture_blit_gpu_ns(worker: EGLRendererWorker) -> Optional[int]:
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     resources = tick_iface.resources
     assert resources is not None and resources.capture is not None, "render resources must be initialised"
     return resources.capture.pipeline.capture_blit_gpu_ns()
 
 
 def render_tick(worker: EGLRendererWorker) -> float:
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     canvas = tick_iface.canvas
     assert canvas is not None, "render_tick requires an initialized canvas"
 
@@ -47,7 +47,7 @@ def render_tick(worker: EGLRendererWorker) -> float:
 def capture_and_encode_packet(
     worker: EGLRendererWorker,
 ) -> tuple[FrameTimings, Optional[bytes], int, int]:
-    tick_iface = RenderTickInterface(worker)
+    tick_iface = RenderPlanInterface(worker)
     resources = tick_iface.resources
     assert resources is not None, "render resources must be initialised"
     encoded = encode_frame(

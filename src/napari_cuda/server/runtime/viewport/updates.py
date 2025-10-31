@@ -14,7 +14,9 @@ from napari.layers.image._image_constants import (
     ImageRendering as NapariImageRendering,
 )
 from napari.utils.colormaps.colormap_utils import ensure_colormap
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.viewport.state import RenderMode
 
 logger = logging.getLogger(__name__)

@@ -6,8 +6,10 @@ import pytest
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.data import SliceROI
-from napari_cuda.server.runtime.snapshots.interface import SnapshotInterface
-from napari_cuda.server.runtime.snapshots.plane import apply_slice_level
+from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.apply.snapshots.plane import (
+    apply_slice_level,
+)
 from napari_cuda.server.runtime.viewport import ViewportState
 
 
@@ -94,7 +96,7 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         return roi
 
     def _fake_apply(
-        snapshot_iface: SnapshotInterface,
+        snapshot_iface: RenderApplyInterface,
         _source: object,
         level: int,
         roi_in: SliceROI,
@@ -110,16 +112,16 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         return (roi_in.height, roi_in.width)
 
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.snapshots.plane.plane_wh_for_level",
+        "napari_cuda.server.runtime.render_loop.apply.snapshots.plane.plane_wh_for_level",
         _fake_plane_wh,
     )
     monkeypatch.setattr(
-        SnapshotInterface,
+        RenderApplyInterface,
         "viewport_roi_for_level",
         lambda self, _source, _level, **_: _fake_roi(self, _source, _level),
     )
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.snapshots.plane.apply_slice_roi",
+        "napari_cuda.server.runtime.render_loop.apply.snapshots.plane.apply_slice_roi",
         _fake_apply,
     )
 
@@ -134,7 +136,7 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
         dtype="float32",
     )
 
-    snapshot_iface = SnapshotInterface(worker)
+    snapshot_iface = RenderApplyInterface(worker)
     apply_slice_level(snapshot_iface, source=object(), applied=context)
 
     assert emitted == ["slice-apply"]

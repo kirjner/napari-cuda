@@ -23,8 +23,12 @@ from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.server.rendering.bitstream import build_avcc_config
 from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.runtime.bootstrap.runtime_driver import probe_scene_bootstrap
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+    pull_render_snapshot,
+)
+from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
     snapshot_dims_metadata,
@@ -76,8 +80,6 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_opacity,
 )
 from napari_cuda.server.data.hw_limits import get_hw_limits
-from napari_cuda.server.runtime.core import probe_scene_bootstrap
-from napari_cuda.server.runtime.core.snapshot_build import pull_render_snapshot
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent, WorkerIntentMailbox
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.camera import CameraCommandQueue

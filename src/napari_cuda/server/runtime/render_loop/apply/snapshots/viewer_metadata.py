@@ -10,11 +10,13 @@ from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
 
-from .interface import SnapshotInterface
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 
 
 def _apply_dims_and_metadata(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     source: Any,
     context: lod.LevelContext,
 ) -> None:
@@ -28,7 +30,7 @@ def _apply_dims_and_metadata(
 
 
 def apply_plane_metadata(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     source: Any,
     context: lod.LevelContext,
 ) -> None:
@@ -66,7 +68,7 @@ def apply_plane_metadata(
 
 
 def apply_volume_metadata(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     source: Any,
     context: lod.LevelContext,
 ) -> None:

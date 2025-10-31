@@ -16,11 +16,11 @@ from napari_cuda.server.rendering.bitstream import (
 )
 from napari_cuda.server.rendering.debug_tools import DebugDumper
 from napari_cuda.server.runtime.camera import CameraPoseApplied
-from napari_cuda.server.runtime.core import (
+from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     init_egl as core_init_egl,
     init_vispy_scene as core_init_vispy_scene,
 )
-from napari_cuda.server.runtime.core.snapshot_build import (
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
     pull_render_snapshot,
 )
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent

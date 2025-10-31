@@ -13,11 +13,15 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.viewport.state import RenderMode
 
-from .interface import SnapshotInterface
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 from .plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,
@@ -51,7 +55,7 @@ def _suspend_fit_callbacks(viewer: Any):
         order_event.connect(viewer.fit_to_view)
 
 
-def apply_render_snapshot(snapshot_iface: SnapshotInterface, snapshot: RenderLedgerSnapshot) -> None:
+def apply_render_snapshot(snapshot_iface: RenderApplyInterface, snapshot: RenderLedgerSnapshot) -> None:
     """Apply the snapshot atomically, suppressing napari auto-fit during dims.
 
     This ensures that napari's fit_to_view callback does not run against a
@@ -94,7 +98,7 @@ __all__ = [
 
 
 def _resolve_snapshot_ops(
-    snapshot_iface: SnapshotInterface, snapshot: RenderLedgerSnapshot
+    snapshot_iface: RenderApplyInterface, snapshot: RenderLedgerSnapshot
 ) -> dict[str, Any]:
     """Compute the metadata and slice ops before mutating worker state."""
 
@@ -248,7 +252,7 @@ def _resolve_snapshot_ops(
 
 
 def _apply_snapshot_ops(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     snapshot: RenderLedgerSnapshot,
     ops: dict[str, Any],
 ) -> None:

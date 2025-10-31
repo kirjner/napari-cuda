@@ -28,7 +28,11 @@ from napari_cuda.server.control.transactions import (
     apply_volume_restore_transaction,
     apply_view_toggle_transaction,
 )
-from napari_cuda.server.runtime.viewport import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.runtime.viewport.state import (
+    PlaneState,
+    RenderMode,
+    VolumeState,
+)
 logger = logging.getLogger(__name__)
 
 

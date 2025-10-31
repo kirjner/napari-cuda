@@ -8,7 +8,9 @@ from typing import Any, Optional
 from vispy.scene.cameras import TurntableCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.core.snapshot_build import RenderLedgerSnapshot
+from napari_cuda.server.runtime.render_loop.apply.snapshots.build import (
+    RenderLedgerSnapshot,
+)
 from napari_cuda.server.runtime.viewport.layers import apply_volume_layer_data
 from napari_cuda.server.runtime.viewport.volume_ops import (
     apply_pose_to_camera,
@@ -17,7 +19,9 @@ from napari_cuda.server.runtime.viewport.volume_ops import (
     update_scale,
 )
 
-from .interface import SnapshotInterface
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 
 
 @dataclass(frozen=True)
@@ -32,7 +36,7 @@ class VolumeApplyResult:
 
 
 def apply_volume_camera_pose(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     snapshot: RenderLedgerSnapshot,
 ) -> None:
     """Apply volume camera pose from the snapshot to the active view."""
@@ -56,7 +60,7 @@ def apply_volume_camera_pose(
 
 
 def apply_volume_level(
-    snapshot_iface: SnapshotInterface,
+    snapshot_iface: RenderApplyInterface,
     source: Any,
     applied: lod.LevelContext,
     *,
