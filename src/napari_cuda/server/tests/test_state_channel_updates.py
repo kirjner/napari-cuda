@@ -26,6 +26,7 @@ from napari_cuda.server.control import (
 )
 from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 from napari_cuda.server.control.control_payload_builder import (
+    build_notify_layers_payload,
     build_notify_scene_payload,
 )
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
@@ -44,6 +45,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_level_update,
     reduce_plane_restore,
 )
+from napari_cuda.server.control.topics.baseline import orchestrate_connect
 from napari_cuda.server.control.topics.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.layers import broadcast_layers_delta
 from napari_cuda.server.runtime.api import RuntimeHandle
@@ -1018,7 +1020,10 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         server._update_scene_manager()
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
-        server._state_send = lambda _ws, text: captured.append(json.loads(text))
+        async def _state_send(_ws: Any, text: str) -> None:
+            captured.append(json.loads(text))
+
+        server._state_send = _state_send
         server._update_scene_manager = lambda: None
         server._schedule_coro = lambda coro, _label: scheduled.append(coro)
         server._pixel_channel = SimpleNamespace(last_avcc=None)
@@ -1032,6 +1037,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 
             async def send(self, payload: str) -> None:
                 self.sent.append(payload)
+                captured.append(json.loads(payload))
 
         ws = _CaptureWS()
         ws._napari_cuda_session = "baseline-session"
@@ -1044,7 +1050,8 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
         ws._napari_cuda_sequencers = {}
         ws._napari_cuda_resume_plan = {}
 
-        loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
+        resume_map = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
+        loop.run_until_complete(orchestrate_connect(server, ws, resume_map))
         _drain_scheduled(scheduled)
 
         scene_frames = _frames_of_type(captured, "notify.scene")
@@ -1052,9 +1059,9 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames, "expected notify.layers baseline"
-        changes = layer_frames[-1]["payload"]["changes"]
-        assert changes["opacity"] == 0.25
-        assert changes["colormap"] == "viridis"
+        controls = layer_frames[-1]["payload"].get("controls", {})
+        assert controls["opacity"] == 0.25
+        assert controls["colormap"] == "viridis"
 
         dims_frames = _frames_of_type(captured, "notify.dims")
         assert dims_frames, "expected notify.dims baseline"
@@ -1086,7 +1093,10 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
         server._update_scene_manager()
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
-        server._state_send = lambda _ws, text: captured.append(json.loads(text))
+        async def _state_send(_ws: Any, text: str) -> None:
+            captured.append(json.loads(text))
+
+        server._state_send = _state_send
         server._update_scene_manager = lambda: None
         server._schedule_coro = lambda coro, _label: scheduled.append(coro)
         server._pixel_channel = SimpleNamespace(last_avcc=None)
@@ -1100,6 +1110,7 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
 
             async def send(self, payload: str) -> None:
                 self.sent.append(payload)
+                captured.append(json.loads(payload))
 
         ws = _CaptureWS()
         ws._napari_cuda_session = "baseline-session"
@@ -1128,13 +1139,14 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
             ),
         }
 
-        loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
+        resume_map = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
+        loop.run_until_complete(orchestrate_connect(server, ws, resume_map))
         _drain_scheduled(scheduled)
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames, "expected notify.layers snapshot even with replay resume plan"
-        changes = layer_frames[-1]["payload"]["changes"]
-        assert changes["colormap"] == "gray"
+        controls = layer_frames[-1]["payload"].get("controls", {})
+        assert controls["colormap"] == "gray"
         entry = server._state_ledger.get("layer", "layer-0", "colormap")
         assert entry is not None and entry.value == "gray"
         volume_entry = server._state_ledger.get("volume", "main", "colormap")
@@ -1149,7 +1161,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
     server._refresh_scene_snapshot()
     scene_snapshot = server._scene_snapshot
     assert scene_snapshot is not None
-    scene_payload = state_channel_handler.build_notify_scene_payload(
+    scene_payload = build_notify_scene_payload(
         scene_snapshot=scene_snapshot,
         ledger_snapshot=server._state_ledger.snapshot(),
         viewer_settings={"fps_target": 60.0},
@@ -1160,9 +1172,9 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
         timestamp=time.time(),
     )
 
-    layer_payload = state_channel_handler.build_notify_layers_payload(
+    layer_payload = build_notify_layers_payload(
         layer_id="layer-0",
-        changes={"opacity": 0.42},
+        controls={"opacity": 0.42},
     )
     layer_snapshot = store.delta_envelope(
         state_channel_handler.NOTIFY_LAYERS_TYPE,
@@ -1256,7 +1268,10 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
         scene_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
 
         server._await_worker_bootstrap = lambda _timeout: asyncio.sleep(0)
-        server._state_send = lambda _ws, text: captured.append(json.loads(text))
+        async def _state_send(_ws: Any, text: str) -> None:
+            captured.append(json.loads(text))
+
+        server._state_send = _state_send
         server._pixel_channel = SimpleNamespace(last_avcc=b"avcc")
         server._pixel_config = SimpleNamespace()
 
@@ -1270,6 +1285,11 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
             },
             _napari_cuda_sequencers={},
         )
+
+        async def _ws_send(payload: str) -> None:
+            captured.append(json.loads(payload))
+
+        ws.send = _ws_send  # type: ignore[attr-defined]
         ws._napari_cuda_resume_plan = {
             state_channel_handler.NOTIFY_SCENE_TYPE: ResumePlan(
                 topic=state_channel_handler.NOTIFY_SCENE_TYPE,
@@ -1288,7 +1308,8 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
             ),
         }
 
-        loop.run_until_complete(state_channel_handler._send_state_baseline(server, ws))
+        resume_map = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
+        loop.run_until_complete(orchestrate_connect(server, ws, resume_map))
         _drain_scheduled(scheduled)
 
         scene_frames = _frames_of_type(captured, "notify.scene")

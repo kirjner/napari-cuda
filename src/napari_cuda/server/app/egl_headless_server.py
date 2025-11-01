@@ -36,10 +36,7 @@ from napari_cuda.server.app import metrics_server
 from napari_cuda.server.app.config import load_server_ctx
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.server.config import ServerConfig, ServerCtx
-from napari_cuda.server.control.control_channel_server import (
-    _send_state_baseline,
-    ingest_state,
-)
+from napari_cuda.server.control.control_channel_server import ingest_state
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_scene_payload,
 )
@@ -50,6 +47,7 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,
 )
+from napari_cuda.server.control.topics.baseline import orchestrate_connect
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_camera_update,
@@ -877,8 +875,9 @@ class EGLHeadlessServer:
 
     def _broadcast_state_baseline(self, *, reason: str) -> None:
         for ws in list(self._state_clients):
+            resume_map = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
             self._schedule_coro(
-                _send_state_baseline(self, ws),
+                orchestrate_connect(self, ws, resume_map),
                 f"baseline-{reason}",
             )
 
