@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Mapping
 
 from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
 
