@@ -72,11 +72,11 @@ from napari_cuda.server.control.control_payload_builder import build_notify_scen
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
     _broadcast_camera_update,
-    broadcast_stream_config,
     ingest_state,
     _send_state_baseline,
     CommandRejected,
 )
+from napari_cuda.server.control.topics.stream import broadcast_stream_config
 from napari_cuda.server.control.protocol_runtime import state_sequencer
 from napari_cuda.server.control.topics.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.layers import broadcast_layers_delta

@@ -117,6 +117,12 @@ from napari_cuda.server.control.topics.layers import (
     send_layer_baseline,
 )
 from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.scene import send_scene_snapshot
+from napari_cuda.server.control.topics.stream import (
+    send_stream_frame as topics_send_stream_frame,
+    send_stream_snapshot as topics_send_stream_snapshot,
+    broadcast_stream_config as topics_broadcast_stream_config,
+)
 from napari_cuda.server.control.command_registry import (
     COMMAND_REGISTRY,
     CommandHandler,
@@ -1717,58 +1723,7 @@ async def _broadcast_camera_update(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _send_stream_frame(
-    server: Any,
-    ws: Any,
-    *,
-    payload: NotifyStreamPayload | Mapping[str, Any],
-    timestamp: Optional[float],
-    snapshot: EnvelopeSnapshot | None = None,
-    force_snapshot: bool = False,
-) -> EnvelopeSnapshot | None:
-    session_id = state_session(ws)
-    if not session_id:
-        return snapshot
-    if not isinstance(payload, NotifyStreamPayload):
-        payload = NotifyStreamPayload.from_dict(payload)
-    now = time.time() if timestamp is None else float(timestamp)
-    store = history_store(server)
-    if snapshot is None and store is not None:
-        payload_dict = payload.to_dict()
-        if force_snapshot:
-            snapshot = store.snapshot_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-        else:
-            snapshot = store.delta_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-
-    kwargs: Dict[str, Any] = {
-        "session_id": session_id,
-        "payload": payload,
-        "timestamp": snapshot.timestamp if snapshot is not None else now,
-    }
-    sequencer = state_sequencer(ws, NOTIFY_STREAM_TYPE)
-    if snapshot is not None:
-        kwargs["seq"] = snapshot.seq
-        kwargs["delta_token"] = snapshot.delta_token
-        kwargs["frame_id"] = snapshot.frame_id
-        sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
-    else:
-        if force_snapshot or sequencer.seq is None:
-            cursor = sequencer.snapshot()
-            kwargs["seq"] = cursor.seq
-            kwargs["delta_token"] = cursor.delta_token
-        else:
-            kwargs["sequencer"] = sequencer
-    frame = build_notify_stream(**kwargs)
-    await send_frame(server, ws, frame)
-    return snapshot
+## moved to topics.stream: send_stream_frame
 
 
 async def _emit_scene_baseline(
@@ -1803,7 +1758,7 @@ async def _emit_scene_baseline(
             store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=timestamp)
             state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
             state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
-        await _send_scene_snapshot_from_cache(server, ws, snapshot)
+        await send_scene_snapshot(server, ws, snapshot)
     else:
         if payload is None:
             scene_snapshot = _ensure_scene_snapshot(server)
@@ -1860,7 +1815,7 @@ async def _emit_stream_baseline(
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
         if plan.deltas:
             for snapshot in plan.deltas:
-                await _send_stream_snapshot(server, ws, snapshot)
+                await topics_send_stream_snapshot(server, ws, snapshot)
         return
 
     channel = getattr(server, "_pixel_channel", None)
@@ -1871,7 +1826,7 @@ async def _emit_stream_baseline(
     avcc = channel.last_avcc
     if avcc is not None:
         stream_payload = server.build_stream_payload(avcc)
-        await _send_stream_frame(
+        await topics_send_stream_frame(
             server,
             ws,
             payload=stream_payload,
@@ -1896,71 +1851,7 @@ async def _emit_dims_baseline(server: Any, ws: Any) -> None:
         logger.debug("connect: notify.dims baseline sent")
 
 
-async def broadcast_stream_config(
-    server: Any,
-    *,
-    payload: NotifyStreamPayload,
-    timestamp: Optional[float] = None,
-) -> None:
-    clients = list(server._state_clients)
-    if not clients:
-        store = history_store(server)
-        if store is not None:
-            now = time.time() if timestamp is None else float(timestamp)
-            if store.current_snapshot(NOTIFY_STREAM_TYPE) is None:
-                store.snapshot_envelope(
-                    NOTIFY_STREAM_TYPE,
-                    payload=payload.to_dict(),
-                    timestamp=now,
-                )
-            else:
-                store.delta_envelope(
-                    NOTIFY_STREAM_TYPE,
-                    payload=payload.to_dict(),
-                    timestamp=now,
-                )
-        return
-
-    now = time.time() if timestamp is None else float(timestamp)
-    store = history_store(server)
-    snapshot: EnvelopeSnapshot | None = None
-    snapshot_mode = False
-    if store is not None:
-        payload_dict = payload.to_dict()
-        snapshot_mode = store.current_snapshot(NOTIFY_STREAM_TYPE) is None
-        if snapshot_mode:
-            snapshot = store.snapshot_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-        else:
-            snapshot = store.delta_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-
-    tasks: list[Awaitable[None]] = []
-    for ws in clients:
-        if not feature_enabled(ws, "notify.stream"):
-            continue
-        session_id = state_session(ws)
-        if not session_id:
-            continue
-        tasks.append(
-            _send_stream_frame(
-                server,
-                ws,
-                payload=payload,
-                timestamp=now,
-                snapshot=snapshot,
-                force_snapshot=snapshot_mode,
-            )
-        )
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+## moved to topics.stream: broadcast_stream_config
 
 
 async def ingest_state(server: Any, ws: Any) -> None:
@@ -2516,44 +2407,10 @@ async def _send_state_ack(
 ## moved to protocol_io / topics.layers: send_frame, send_layer_snapshot
 
 
-async def _send_stream_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
-    session_id = state_session(ws)
-    if not session_id:
-        return
-    payload = NotifyStreamPayload.from_dict(snapshot.payload)
-    frame = build_notify_stream(
-        session_id=session_id,
-        payload=payload,
-        timestamp=snapshot.timestamp,
-        frame_id=snapshot.frame_id,
-        seq=snapshot.seq,
-        delta_token=snapshot.delta_token,
-    )
-    await send_frame(server, ws, frame)
-    sequencer = state_sequencer(ws, NOTIFY_STREAM_TYPE)
-    sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
+## moved to topics.stream: send_stream_snapshot
 
 
-async def _send_scene_snapshot_from_cache(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
-    session_id = state_session(ws)
-    if not session_id:
-        return
-    payload = NotifyScenePayload.from_dict(snapshot.payload)
-    sequencer = state_sequencer(ws, NOTIFY_SCENE_TYPE)
-    sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
-    frame = build_notify_scene_snapshot(
-        session_id=session_id,
-        viewer=payload.viewer,
-        layers=payload.layers,
-        policies=payload.policies,
-        metadata=payload.metadata,
-        timestamp=snapshot.timestamp,
-        frame_id=snapshot.frame_id,
-        delta_token=snapshot.delta_token,
-        intent_id=snapshot.intent_id,
-        sequencer=sequencer,
-    )
-    await send_frame(server, ws, frame)
+## moved to topics.scene: send_scene_snapshot
 
 
 async def _send_state_baseline(server: Any, ws: Any) -> None:
