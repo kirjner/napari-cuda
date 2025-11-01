@@ -1696,8 +1696,8 @@ async def _emit_stream_baseline(
                 await topics_send_stream_snapshot(server, ws, snapshot)
         return
 
-    channel = getattr(server, "_pixel_channel", None)
-    cfg = getattr(server, "_pixel_config", None)
+    channel = server._pixel_channel
+    cfg = server._pixel_config
     if channel is None or cfg is None:
         logger.debug("connect: notify.stream baseline deferred (pixel channel not initialized)")
         return
@@ -1716,9 +1716,10 @@ async def _emit_stream_baseline(
 
 
 async def _emit_dims_baseline(server: Any, ws: Any) -> None:
-    mirror = getattr(server, "_dims_mirror", None)
+    mirror = server._dims_mirror
     if mirror is None:
-        raise AssertionError("dims mirror not initialized")
+        logger.debug("connect: notify.dims baseline deferred (dims mirror not initialized)")
+        return
     payload = mirror.latest_payload()
     if payload is None:
         logger.debug("connect: notify.dims baseline skipped (metadata unavailable)")
@@ -2302,18 +2303,20 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
     )
 
     layer_controls_map: dict[str, dict[str, Any]] = {}
-    mirror = getattr(server, "_layer_mirror", None)
+    mirror = server._layer_mirror
     if mirror is not None:
         layer_controls_map = mirror.latest_controls()
     else:
         logger.debug("layer mirror not initialised; falling back to scene snapshot controls")
     for layer_snapshot in scene_snapshot.layers:
         layer_id = layer_snapshot.layer_id
+        if not layer_id:
+            continue
         controls: dict[str, Any] = dict(layer_controls_map.get(layer_id, {}))
-        if not controls and "controls" in layer_snapshot.block:
-            block_controls = layer_snapshot.block["controls"]
-            assert isinstance(block_controls, Mapping), "layer snapshot controls missing mapping"
-            controls.update({str(key): value for key, value in block_controls.items()})
+        if not controls:
+            block_controls = layer_snapshot.block.get("controls")
+            if isinstance(block_controls, Mapping):
+                controls.update({str(key): value for key, value in block_controls.items()})
         metadata_block = layer_snapshot.block.get("metadata")
         if isinstance(metadata_block, Mapping) and metadata_block:
             controls.setdefault("metadata", dict(metadata_block))
@@ -2326,6 +2329,8 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
         and layers_plan.deltas
     ):
         for layer_id, controls in default_controls:
+            if not layer_id:
+                continue
             for key, raw_value in controls.items():
                 entry = server._state_ledger.get("layer", layer_id, key)
                 if entry is not None:

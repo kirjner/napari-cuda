@@ -9,6 +9,7 @@ from napari_cuda.protocol import (
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
 )
+import logging
 from napari_cuda.protocol.envelopes import build_notify_scene_snapshot
 from napari_cuda.protocol.messages import NotifyScenePayload
 from napari_cuda.server.control.protocol_io import send_frame
@@ -24,6 +25,7 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumePlan,
 )
 
+logger = logging.getLogger(__name__)
 
 async def send_scene_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
     session_id = state_session(ws)
@@ -46,6 +48,10 @@ async def send_scene_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) 
         sequencer=sequencer,
     )
     await send_frame(server, ws, frame)
+    if server._log_dims_info:
+        logger.info("notify.scene snapshot sent (resume)")
+    else:
+        logger.debug("notify.scene snapshot sent (resume)")
 
 
 async def send_scene_baseline(
@@ -105,6 +111,10 @@ async def send_scene_baseline(
     if snapshot is not None:
         # Resume the client's scene sequencer to the snapshot cursor
         state_sequencer(ws, NOTIFY_SCENE_TYPE).resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
+    if server._log_dims_info:
+        logger.info("notify.scene baseline sent")
+    else:
+        logger.debug("notify.scene baseline sent")
 
 
 async def send_scene_snapshot_direct(
@@ -141,6 +151,10 @@ async def send_scene_snapshot_direct(
     await send_frame(server, ws, frame)
     if snapshot is not None:
         state_sequencer(ws, NOTIFY_SCENE_TYPE).resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
+    if server._log_dims_info:
+        logger.info("notify.scene direct sent")
+    else:
+        logger.debug("notify.scene direct sent")
 
 
 async def broadcast_scene_snapshot(
@@ -207,6 +221,11 @@ async def broadcast_scene_snapshot(
         if snapshot is not None:
             for ws in clients:
                 state_sequencer(ws, NOTIFY_SCENE_TYPE).resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
+    count = len(tasks)
+    if server._log_dims_info:
+        logger.info("notify.scene broadcast to %d clients", count)
+    else:
+        logger.debug("notify.scene broadcast to %d clients", count)
 
 
 __all__ = [
