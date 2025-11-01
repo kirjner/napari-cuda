@@ -2323,7 +2323,7 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         )
         return False
 
-    history_store = history_store(server)
+    store = history_store(server)
     client_tokens = hello.payload.resume_tokens
     resume_plan: Dict[str, ResumePlan] = {}
 
@@ -2332,10 +2332,10 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
         if toggle is None or not toggle.enabled or not toggle.resume:
             continue
         token = client_tokens.get(topic)
-        if history_store is None:
+        if store is None:
             resume_plan[topic] = ResumePlan(topic=topic, decision=ResumeDecision.RESET, deltas=[])
             continue
-        plan = history_store.plan_resume(topic, token)
+        plan = store.plan_resume(topic, token)
         resume_plan[topic] = plan
         if plan.decision == ResumeDecision.REJECT:
             await _send_handshake_reject(
@@ -2347,11 +2347,11 @@ async def _perform_state_handshake(server: Any, ws: Any) -> bool:
             )
             return False
         if plan.decision == ResumeDecision.REPLAY:
-            cursor = history_store.latest_resume_state(topic)
+            cursor = store.latest_resume_state(topic)
             if cursor is not None:
                 negotiated_features[topic] = replace(toggle, resume_state=cursor)
             continue
-        cursor = history_store.latest_resume_state(topic)
+        cursor = store.latest_resume_state(topic)
         if cursor is not None:
             negotiated_features[topic] = replace(toggle, resume_state=cursor)
 
