@@ -11,8 +11,8 @@ from napari_cuda.protocol.messages import NotifyLayersPayload
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_payload,
 )
-from napari_cuda.server.control.protocol_io import send_frame
-from napari_cuda.server.control.protocol_runtime import (
+from napari_cuda.server.control.protocol.io import send_frame
+from napari_cuda.server.control.protocol.runtime import (
     feature_enabled,
     history_store,
     state_sequencer,

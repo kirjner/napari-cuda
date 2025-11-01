@@ -14,6 +14,9 @@ import pytest
 from napari_cuda.protocol import (
     PROTO_VERSION,
     FeatureToggle,
+    NOTIFY_LAYERS_TYPE,
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_STREAM_TYPE,
     NotifyStreamPayload,
     build_call_command,
     build_state_update,
@@ -29,6 +32,7 @@ from napari_cuda.server.control.control_payload_builder import (
     build_notify_layers_payload,
     build_notify_scene_payload,
 )
+from napari_cuda.server.control.protocol.handshake import perform_state_handshake
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.resumable_history_store import (
@@ -284,6 +288,7 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
         schedule=_mirror_schedule,
         default_layer=_default_layer_id,
     )
+    server._default_layer_id = _default_layer_id
     server._layer_mirror.start()
 
     axis_labels = tuple(str(lbl) for lbl in (baseline_dims.axis_labels or ("z", "y", "x")))
@@ -359,6 +364,12 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
         server._ensure_keyframe_calls += 1
 
     server._ensure_keyframe = _ensure_keyframe
+    server._thumbnail_requests: list[str] = []
+
+    async def _emit_layer_thumbnail(layer_id: str) -> None:
+        server._thumbnail_requests.append(layer_id)
+
+    server._emit_layer_thumbnail = _emit_layer_thumbnail
     server._idr_on_reset = True
     server._pixel_channel = SimpleNamespace(
         broadcast=SimpleNamespace(bypass_until_key=False, waiting_for_keyframe=False)
@@ -1122,18 +1133,18 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
         }
         ws._napari_cuda_sequencers = {}
         ws._napari_cuda_resume_plan = {
-            state_channel_handler.NOTIFY_SCENE_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_SCENE_TYPE,
+            NOTIFY_SCENE_TYPE: ResumePlan(
+                topic=NOTIFY_SCENE_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[],
             ),
-            state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
+            NOTIFY_LAYERS_TYPE: ResumePlan(
+                topic=NOTIFY_LAYERS_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[],
             ),
-            state_channel_handler.NOTIFY_STREAM_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_STREAM_TYPE,
+            NOTIFY_STREAM_TYPE: ResumePlan(
+                topic=NOTIFY_STREAM_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[],
             ),
@@ -1167,7 +1178,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
         viewer_settings={"fps_target": 60.0},
     )
     scene_snapshot = store.snapshot_envelope(
-        state_channel_handler.NOTIFY_SCENE_TYPE,
+        NOTIFY_SCENE_TYPE,
         payload=scene_payload.to_dict(),
         timestamp=time.time(),
     )
@@ -1177,7 +1188,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
         controls={"opacity": 0.42},
     )
     layer_snapshot = store.delta_envelope(
-        state_channel_handler.NOTIFY_LAYERS_TYPE,
+        NOTIFY_LAYERS_TYPE,
         payload=layer_payload.to_dict(),
         timestamp=time.time(),
     )
@@ -1192,7 +1203,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
         latency_policy={"mode": "low"},
     )
     stream_snapshot = store.snapshot_envelope(
-        state_channel_handler.NOTIFY_STREAM_TYPE,
+        NOTIFY_STREAM_TYPE,
         payload=stream_payload.to_dict(),
         timestamp=time.time(),
     )
@@ -1207,17 +1218,17 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
         server, scheduled, captured = _make_server()
         scene_snap, layer_snap, stream_snap = _prepare_resumable_payloads(server)
         resume_tokens = {
-            state_channel_handler.NOTIFY_SCENE_TYPE: scene_snap.delta_token,
-            state_channel_handler.NOTIFY_LAYERS_TYPE: layer_snap.delta_token,
-            state_channel_handler.NOTIFY_STREAM_TYPE: stream_snap.delta_token,
+            NOTIFY_SCENE_TYPE: scene_snap.delta_token,
+            NOTIFY_LAYERS_TYPE: layer_snap.delta_token,
+            NOTIFY_STREAM_TYPE: stream_snap.delta_token,
         }
 
         hello = build_session_hello(
             client=HelloClientInfo(name="tests", version="1.0", platform="test"),
             features={
-                state_channel_handler.NOTIFY_SCENE_TYPE: True,
-                state_channel_handler.NOTIFY_LAYERS_TYPE: True,
-                state_channel_handler.NOTIFY_STREAM_TYPE: True,
+                NOTIFY_SCENE_TYPE: True,
+                NOTIFY_LAYERS_TYPE: True,
+                NOTIFY_STREAM_TYPE: True,
             },
             resume_tokens=resume_tokens,
         )
@@ -1232,6 +1243,10 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
             async def recv(self) -> str:
                 return hello_json
 
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+                captured.append(json.loads(payload))
+
             async def close(self) -> None:  # pragma: no cover - defensive
                 pass
 
@@ -1242,13 +1257,13 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
 
         server._state_send = _state_send
 
-        loop.run_until_complete(state_channel_handler._perform_state_handshake(server, ws))
+        loop.run_until_complete(perform_state_handshake(server, ws))
         _drain_scheduled(scheduled)
 
         plan = ws._napari_cuda_resume_plan
-        assert plan[state_channel_handler.NOTIFY_SCENE_TYPE].decision == ResumeDecision.REPLAY
-        assert plan[state_channel_handler.NOTIFY_LAYERS_TYPE].decision == ResumeDecision.REPLAY
-        assert plan[state_channel_handler.NOTIFY_STREAM_TYPE].decision == ResumeDecision.REPLAY
+        assert plan[NOTIFY_SCENE_TYPE].decision == ResumeDecision.REPLAY
+        assert plan[NOTIFY_LAYERS_TYPE].decision == ResumeDecision.REPLAY
+        assert plan[NOTIFY_STREAM_TYPE].decision == ResumeDecision.REPLAY
 
         welcome = _frames_of_type(captured, "session.welcome")
         assert welcome, "expected handshake welcome frame"
@@ -1291,18 +1306,18 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
 
         ws.send = _ws_send  # type: ignore[attr-defined]
         ws._napari_cuda_resume_plan = {
-            state_channel_handler.NOTIFY_SCENE_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_SCENE_TYPE,
+            NOTIFY_SCENE_TYPE: ResumePlan(
+                topic=NOTIFY_SCENE_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[scene_snap],
             ),
-            state_channel_handler.NOTIFY_LAYERS_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_LAYERS_TYPE,
+            NOTIFY_LAYERS_TYPE: ResumePlan(
+                topic=NOTIFY_LAYERS_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[layer_snap],
             ),
-            state_channel_handler.NOTIFY_STREAM_TYPE: ResumePlan(
-                topic=state_channel_handler.NOTIFY_STREAM_TYPE,
+            NOTIFY_STREAM_TYPE: ResumePlan(
+                topic=NOTIFY_STREAM_TYPE,
                 decision=ResumeDecision.REPLAY,
                 deltas=[stream_snap],
             ),

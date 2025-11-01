@@ -7,11 +7,8 @@ import json
 import logging
 import socket
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
-from dataclasses import dataclass, replace
-from numbers import Integral
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from websockets.exceptions import ConnectionClosed
@@ -19,27 +16,13 @@ from websockets.protocol import State
 
 # Protocol builders & dataclasses
 from napari_cuda.protocol import (
-    NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_TYPE,
-    NOTIFY_STREAM_TYPE,
-    PROTO_VERSION,
     SESSION_ACK_TYPE,
     SESSION_GOODBYE_TYPE,
-    SESSION_HELLO_TYPE,
     CallCommand,
     EnvelopeParser,
-    FeatureToggle,
-    ResumableTopicSequencer,
-    SessionHello,
-    SessionReject,
-    SessionWelcome,
-    build_ack_state,
     build_error_command,
     build_reply_command,
-    build_session_goodbye,
     build_session_heartbeat,
-    build_session_reject,
-    build_session_welcome,
 )
 from napari_cuda.protocol.messages import (
     STATE_UPDATE_TYPE,
@@ -48,26 +31,21 @@ from napari_cuda.server.control.command_registry import (
     COMMAND_REGISTRY,
     register_command,
 )
-from napari_cuda.server.control.protocol_io import (
-    await_state_send,
-    send_frame,
+from napari_cuda.server.control.protocol.acks import (
+    send_session_goodbye,
+    send_state_ack,
 )
-from napari_cuda.server.control.protocol_runtime import (
+from napari_cuda.server.control.protocol.handshake import perform_state_handshake
+from napari_cuda.server.control.protocol.io import send_frame
+from napari_cuda.server.control.protocol.runtime import (
     feature_enabled,
-    history_store,
     state_session,
-)
-from napari_cuda.server.control.resumable_history_store import (
-    ResumeDecision,
-    ResumePlan,
 )
 from napari_cuda.server.control.topics.baseline import orchestrate_connect
 from napari_cuda.server.control.state_update_handlers.registry import STATE_UPDATE_HANDLERS
 
 logger = logging.getLogger(__name__)
 
-_HANDSHAKE_TIMEOUT_S = 5.0
-_REQUIRED_NOTIFY_FEATURES = ("notify.scene", "notify.layers", "notify.stream")
 _COMMAND_KEYFRAME = "napari.pixel.request_keyframe"
 _COMMAND_LISTDIR = "fs.listdir"
 _COMMAND_ZARR_LOAD = "napari.zarr.load"
@@ -95,7 +73,6 @@ class CommandRejected(RuntimeError):
         self.idempotency_key = idempotency_key
 
 
-_RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
 _ENVELOPE_PARSER = EnvelopeParser()
 
 async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
@@ -187,21 +164,6 @@ register_command(_COMMAND_LISTDIR, _command_fs_listdir)
 register_command(_COMMAND_ZARR_LOAD, _command_zarr_load)
 
 
-_SERVER_FEATURES: dict[str, FeatureToggle] = {
-    "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
-    "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
-    "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
-    "notify.telemetry": FeatureToggle(enabled=False),
-    "call.command": FeatureToggle(
-        enabled=True,
-        version=1,
-        resume=False,
-    ),
-}
-
-
 @dataclass(slots=True)
 class StateUpdateContext:
     """Envelope metadata shared across state.update handlers."""
@@ -227,7 +189,7 @@ class StateUpdateContext:
         error_payload: dict[str, Any] = {"code": code, "message": message}
         if details:
             error_payload["details"] = dict(details)
-        await _send_state_ack(
+        await send_state_ack(
             self.server,
             self.ws,
             session_id=self.session_id,
@@ -243,7 +205,7 @@ class StateUpdateContext:
         applied_value: Any,
         version: int,
     ) -> None:
-        await _send_state_ack(
+        await send_state_ack(
             self.server,
             self.ws,
             session_id=self.session_id,
@@ -386,46 +348,20 @@ def _mark_client_activity(ws: Any) -> None:
 
 
 def _heartbeat_shutting_down(ws: Any) -> bool:
-    return bool(getattr(ws, "_napari_cuda_shutdown", False))
+    return ws._napari_cuda_shutdown
 
 
 def _flag_heartbeat_shutdown(ws: Any) -> None:
     ws._napari_cuda_shutdown = True
 
-
-async def _send_session_goodbye(
-    server: Any,
-    ws: Any,
-    *,
-    session_id: str,
-    code: str,
-    message: str,
-    reason: Optional[str] = None,
-) -> None:
-    if getattr(ws, "_napari_cuda_goodbye_sent", False):
-        return
-    frame = build_session_goodbye(
-        session_id=session_id,
-        code=code,
-        message=message,
-        reason=reason,
-        timestamp=time.time(),
-    )
-    await send_frame(server, ws, frame)
-    ws._napari_cuda_goodbye_sent = True
-
-
 async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
-    try:
-        interval = float(getattr(ws, "_napari_cuda_heartbeat_interval", 0.0))
-    except Exception:
-        interval = 0.0
+    interval = float(ws._napari_cuda_heartbeat_interval)
     if interval <= 0.0:
         return
 
     log_debug = logger.debug
     session_id = state_session(ws)
-    missed = int(getattr(ws, "_napari_cuda_missed_heartbeats", 0))
+    missed = int(ws._napari_cuda_missed_heartbeats)
 
     try:
         while True:
@@ -436,7 +372,7 @@ async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
             if not session_id:
                 break
 
-            waiting_ack = bool(getattr(ws, "_napari_cuda_waiting_ack", False))
+            waiting_ack = ws._napari_cuda_waiting_ack
             if waiting_ack:
                 missed += 1
             else:
@@ -448,18 +384,16 @@ async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
                     "heartbeat timeout for session %s; closing connection",
                     session_id,
                 )
-                with suppress(Exception):
-                    await _send_session_goodbye(
-                        server,
-                        ws,
-                        session_id=session_id,
-                        code="timeout",
-                        message="heartbeat timeout",
-                        reason="heartbeat_timeout",
-                    )
+                await send_session_goodbye(
+                    server,
+                    ws,
+                    session_id=session_id,
+                    code="timeout",
+                    message="heartbeat timeout",
+                    reason="heartbeat_timeout",
+                )
                 _flag_heartbeat_shutdown(ws)
-                with suppress(Exception):
-                    await ws.close(code=1011, reason="heartbeat timeout")
+                await ws.close(code=1011, reason="heartbeat timeout")
                 break
 
             try:
@@ -476,13 +410,6 @@ async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
     except asyncio.CancelledError:
         pass
 
-
-
-def _state_features(ws: Any) -> Mapping[str, FeatureToggle]:
-    features = getattr(ws, "_napari_cuda_features", None)
-    if isinstance(features, Mapping):
-        return features
-    return {}
 
 
 ## moved to protocol_runtime: feature_enabled, state_sequencer
@@ -584,7 +511,7 @@ async def ingest_state(server: Any, ws: Any) -> None:
     heartbeat_task: asyncio.Task[Any] | None = None
     try:
         _disable_nagle(ws)
-        handshake_ok = await _perform_state_handshake(server, ws)
+        handshake_ok = await perform_state_handshake(server, ws)
         if not handshake_ok:
             return
         try:
@@ -608,9 +535,9 @@ async def ingest_state(server: Any, ws: Any) -> None:
         server._state_clients.add(ws)
         server.metrics.inc('napari_cuda_state_connects')
         server._update_client_gauges()
-        resume_map = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
+        resume_map = ws._napari_cuda_resume_plan
         await orchestrate_connect(server, ws, resume_map)
-        remote = getattr(ws, 'remote_address', None)
+        remote = ws.remote_address
         log = logger.info if server._log_state_traces else logger.debug
         log("state client loop start remote=%s id=%s", remote, id(ws))
         try:
@@ -634,13 +561,14 @@ async def ingest_state(server: Any, ws: Any) -> None:
     finally:
         _flag_heartbeat_shutdown(ws)
         if heartbeat_task is None:
-            heartbeat_task = getattr(ws, "_napari_cuda_heartbeat_task", None)
+            heartbeat_task = ws._napari_cuda_heartbeat_task
         if isinstance(heartbeat_task, asyncio.Task):
             heartbeat_task.cancel()
-            with suppress(Exception):
+            try:
                 await heartbeat_task
-        if hasattr(ws, "_napari_cuda_heartbeat_task"):
-            delattr(ws, "_napari_cuda_heartbeat_task")
+            except asyncio.CancelledError:
+                pass
+        ws._napari_cuda_heartbeat_task = None
         try:
             await ws.close()
         except Exception as exc:
@@ -672,18 +600,16 @@ async def _ingest_session_goodbye(server: Any, data: Mapping[str, Any], ws: Any)
 
     session_id = state_session(ws)
     if session_id:
-        with suppress(Exception):
-            await _send_session_goodbye(
-                server,
-                ws,
-                session_id=session_id,
-                code=code or "goodbye",
-                message=message,
-                reason=reason or "client_goodbye",
-            )
+        await send_session_goodbye(
+            server,
+            ws,
+            session_id=session_id,
+            code=code or "goodbye",
+            message=message,
+            reason=reason or "client_goodbye",
+        )
     _flag_heartbeat_shutdown(ws)
-    with suppress(Exception):
-        await ws.close()
+    await ws.close()
     return True
 
 
@@ -696,7 +622,7 @@ async def _ingest_state_update(server: Any, data: Mapping[str, Any], ws: Any) ->
         intent_id = data.get("intent_id")
         session_id = data.get("session") or state_session(ws)
         if frame_id and intent_id and session_id:
-            await _send_state_ack(
+            await send_state_ack(
                 server,
                 ws,
                 session_id=str(session_id),
@@ -846,277 +772,6 @@ def _disable_nagle(ws: Any) -> None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
-
-
-async def _perform_state_handshake(server: Any, ws: Any) -> bool:
-    """Negotiate the notify-only protocol handshake with the client."""
-
-    try:
-        raw = await asyncio.wait_for(ws.recv(), timeout=_HANDSHAKE_TIMEOUT_S)
-    except TimeoutError:
-        await _send_handshake_reject(
-            server,
-            ws,
-            code="timeout",
-            message="session.hello not received",
-        )
-        return False
-    except ConnectionClosed:
-        logger.debug("state client closed during handshake")
-        return False
-    except Exception:
-        logger.debug("state client handshake recv failed", exc_info=True)
-        return False
-
-    if isinstance(raw, bytes):
-        try:
-            raw = raw.decode("utf-8")
-        except Exception:
-            await _send_handshake_reject(
-                server,
-                ws,
-                code="invalid_payload",
-                message="session.hello must be UTF-8 text",
-            )
-            return False
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        await _send_handshake_reject(
-            server,
-            ws,
-            code="invalid_json",
-            message="session.hello must be valid JSON",
-        )
-        return False
-
-    msg_type = str(data.get("type") or "").lower()
-    if msg_type != SESSION_HELLO_TYPE:
-        await _send_handshake_reject(
-            server,
-            ws,
-            code="unexpected_message",
-            message="expected session.hello",
-            details={"received": msg_type},
-        )
-        return False
-
-    try:
-        hello = _ENVELOPE_PARSER.parse_hello(data)
-    except Exception as exc:
-        await _send_handshake_reject(
-            server,
-            ws,
-            code="invalid_payload",
-            message="session.hello payload rejected",
-            details={"error": str(exc)},
-        )
-        return False
-
-    client_protocols = hello.payload.protocols
-    if PROTO_VERSION not in client_protocols:
-        await _send_handshake_reject(
-            server,
-            ws,
-            code="protocol_mismatch",
-            message=f"server requires protocol {PROTO_VERSION}",
-            details={"client_protocols": list(client_protocols)},
-        )
-        return False
-
-    negotiated_features = _resolve_handshake_features(hello)
-    missing = [name for name in _REQUIRED_NOTIFY_FEATURES if not negotiated_features[name].enabled]
-    if missing:
-        await _send_handshake_reject(
-            server,
-            ws,
-            code="unsupported_client",
-            message="client missing notify features",
-            details={"missing": missing},
-        )
-        return False
-
-    store = history_store(server)
-    client_tokens = hello.payload.resume_tokens
-    resume_plan: dict[str, ResumePlan] = {}
-
-    for topic in _RESUMABLE_TOPICS:
-        toggle = negotiated_features.get(topic)
-        if toggle is None or not toggle.enabled or not toggle.resume:
-            continue
-        token = client_tokens.get(topic)
-        if store is None:
-            resume_plan[topic] = ResumePlan(topic=topic, decision=ResumeDecision.RESET, deltas=[])
-            continue
-        plan = store.plan_resume(topic, token)
-        resume_plan[topic] = plan
-        if plan.decision == ResumeDecision.REJECT:
-            await _send_handshake_reject(
-                server,
-                ws,
-                code="invalid_resume_token",
-                message=f"resume token for {topic} rejected",
-                details={"topic": topic},
-            )
-            return False
-        if plan.decision == ResumeDecision.REPLAY:
-            cursor = store.latest_resume_state(topic)
-            if cursor is not None:
-                negotiated_features[topic] = replace(toggle, resume_state=cursor)
-            continue
-        cursor = store.latest_resume_state(topic)
-        if cursor is not None:
-            negotiated_features[topic] = replace(toggle, resume_state=cursor)
-
-    ws._napari_cuda_resume_plan = resume_plan
-
-    session_id = str(uuid.uuid4())
-    heartbeat_s = getattr(server, "state_heartbeat_s", 15.0)
-    ack_timeout_ms = getattr(server, "state_ack_timeout_ms", 250)
-    welcome = build_session_welcome(
-        session_id=session_id,
-        heartbeat_s=heartbeat_s,
-        ack_timeout_ms=ack_timeout_ms,
-        features=negotiated_features,
-        timestamp=time.time(),
-    )
-
-    try:
-        await _send_handshake_envelope(server, ws, welcome)
-    except Exception:
-        logger.debug("session.welcome send failed", exc_info=True)
-        return False
-
-    ws._napari_cuda_session = session_id
-    ws._napari_cuda_features = negotiated_features
-    ws._napari_cuda_heartbeat_interval = float(heartbeat_s)
-    ws._napari_cuda_shutdown = False
-    ws._napari_cuda_goodbye_sent = False
-    ws._napari_cuda_sequencers = {NOTIFY_SCENE_TYPE: ResumableTopicSequencer(topic=NOTIFY_SCENE_TYPE), NOTIFY_LAYERS_TYPE: ResumableTopicSequencer(topic=NOTIFY_LAYERS_TYPE), NOTIFY_STREAM_TYPE: ResumableTopicSequencer(topic=NOTIFY_STREAM_TYPE)}
-
-    _mark_client_activity(ws)
-
-    client_info = hello.payload.client
-    client_name = client_info.name
-    client_version = client_info.version
-    logger.info(
-        "state handshake accepted name=%s version=%s features=%s",
-        client_name,
-        client_version,
-        sorted(name for name, toggle in negotiated_features.items() if toggle.enabled),
-    )
-
-    return True
-
-
-def _resolve_handshake_features(hello: SessionHello) -> dict[str, FeatureToggle]:
-    client_features = hello.payload.features
-    negotiated: dict[str, FeatureToggle] = {}
-    for name, server_toggle in _SERVER_FEATURES.items():
-        client_enabled = client_features.get(name, False)
-        # Required features must be explicitly true; optional ones inherit server toggle.
-        enabled = server_toggle.enabled and (client_enabled or name not in _REQUIRED_NOTIFY_FEATURES)
-        negotiated[name] = replace(server_toggle, enabled=enabled)
-
-    command_toggle = negotiated.get("call.command")
-    if command_toggle is not None:
-        commands = COMMAND_REGISTRY.command_names()
-        negotiated["call.command"] = replace(
-            command_toggle,
-            commands=commands if (command_toggle.enabled and commands) else (),
-        )
-    return negotiated
-
-
-async def _send_handshake_envelope(server: Any, ws: Any, envelope: SessionWelcome | SessionReject) -> None:
-    text = json.dumps(envelope.to_dict(), separators=(",", ":"))
-    await await_state_send(server, ws, text)
-
-
-async def _send_handshake_reject(
-    server: Any,
-    ws: Any,
-    *,
-    code: str,
-    message: str,
-    details: Optional[Mapping[str, Any]] = None,
-) -> None:
-    reject = build_session_reject(
-        code=str(code),
-        message=str(message),
-        details=dict(details) if details else None,
-        timestamp=time.time(),
-    )
-    try:
-        await _send_handshake_envelope(server, ws, reject)
-    except Exception:
-        logger.debug("session.reject send failed", exc_info=True)
-    try:
-        await ws.close()
-    except Exception:
-        logger.debug("state ws close after reject failed", exc_info=True)
-
-
-## moved to protocol_io: await_state_send
-
-
-async def _send_state_ack(
-    server: Any,
-    ws: Any,
-    *,
-    session_id: str,
-    intent_id: str,
-    in_reply_to: str,
-    status: str,
-    applied_value: Any | None = None,
-    error: Mapping[str, Any] | Any | None = None,
-    version: int | None = None,
-) -> None:
-    """Build and emit an ``ack.state`` frame that mirrors the incoming update."""
-
-    if not intent_id or not in_reply_to:
-        raise ValueError("ack.state requires intent_id and in_reply_to identifiers")
-
-    normalized_status = str(status).lower()
-    if normalized_status not in {"accepted", "rejected"}:
-        raise ValueError("ack.state status must be 'accepted' or 'rejected'")
-
-    payload: dict[str, Any] = {
-        "intent_id": str(intent_id),
-        "in_reply_to": str(in_reply_to),
-        "status": normalized_status,
-    }
-
-    if normalized_status == "accepted":
-        if error is not None:
-            raise ValueError("accepted ack.state payload cannot include error details")
-        if version is None:
-            raise ValueError("accepted ack.state payload requires version")
-        if not isinstance(version, Integral):
-            raise ValueError("ack.state version must be integer")
-        if applied_value is not None:
-            payload["applied_value"] = applied_value
-        payload["version"] = int(version)
-    else:
-        if not isinstance(error, Mapping):
-            raise ValueError("rejected ack.state payload requires {code, message}")
-        if "code" not in error or "message" not in error:
-            raise ValueError("ack.state error payload must include 'code' and 'message'")
-        payload["error"] = dict(error)
-        if version is not None:
-            if not isinstance(version, Integral):
-                raise ValueError("ack.state version must be integer")
-            payload["version"] = int(version)
-
-    frame = build_ack_state(
-        session_id=str(session_id),
-        frame_id=None,
-        payload=payload,
-        timestamp=time.time(),
-    )
-
-    await send_frame(server, ws, frame)
 
 
 ## moved to protocol_io / topics.layers: send_frame, send_layer_snapshot

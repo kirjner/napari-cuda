@@ -7,8 +7,8 @@ from typing import Any, Optional
 from napari_cuda.protocol import NOTIFY_STREAM_TYPE
 from napari_cuda.protocol.envelopes import build_notify_stream
 from napari_cuda.protocol.messages import NotifyStreamPayload
-from napari_cuda.server.control.protocol_io import send_frame
-from napari_cuda.server.control.protocol_runtime import (
+from napari_cuda.server.control.protocol.io import send_frame
+from napari_cuda.server.control.protocol.runtime import (
     feature_enabled,
     history_store,
     state_sequencer,
@@ -159,4 +159,3 @@ __all__ = [
     "send_stream_frame",
     "send_stream_snapshot",
 ]
-

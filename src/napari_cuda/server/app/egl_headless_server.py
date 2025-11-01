@@ -42,7 +42,7 @@ from napari_cuda.server.control.control_payload_builder import (
 )
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
-from napari_cuda.server.control.protocol_runtime import state_sequencer
+from napari_cuda.server.control.protocol.runtime import state_sequencer
 from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,

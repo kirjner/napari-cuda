@@ -16,7 +16,7 @@ from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_scene_payload,
 )
-from napari_cuda.server.control.protocol_runtime import history_store
+from napari_cuda.server.control.protocol.runtime import history_store
 from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
@@ -79,8 +79,7 @@ async def orchestrate_connect(
 
     _schedule_keyframe_and_thumbnail(server)
 
-    if hasattr(ws, "_napari_cuda_resume_plan"):
-        delattr(ws, "_napari_cuda_resume_plan")
+    ws._napari_cuda_resume_plan = {}
 
 
 def _ensure_scene_snapshot(server: Any) -> SceneSnapshot:

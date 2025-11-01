@@ -12,8 +12,8 @@ from napari_cuda.protocol import (
 import logging
 from napari_cuda.protocol.envelopes import build_notify_scene_snapshot
 from napari_cuda.protocol.messages import NotifyScenePayload
-from napari_cuda.server.control.protocol_io import send_frame
-from napari_cuda.server.control.protocol_runtime import (
+from napari_cuda.server.control.protocol.io import send_frame
+from napari_cuda.server.control.protocol.runtime import (
     feature_enabled,
     history_store,
     state_sequencer,
