@@ -190,7 +190,13 @@ class RemoteImageLayer(Image):
             logger.debug("RemoteImageLayer: failed to install empty slice", exc_info=True)
 
     def _set_view_slice(self) -> None:
-        self._install_empty_slice()
+        # On dim/ndisplay changes, re-apply the current preview into the
+        # layer slice so thumbnails reflect the new view mode immediately
+        # (e.g., 3D↔2D). Avoid clearing to an empty slice which would blank
+        # the thumbnail until the next preview metadata arrives.
+        self._apply_preview_to_slice()
+        # Schedule a thumbnail refresh on the GUI thread when available.
+        self._schedule_thumbnail_refresh()
 
     # ------------------------------------------------------------------
     def _apply_render(self, hints: Optional[Mapping[str, Any]]) -> None:

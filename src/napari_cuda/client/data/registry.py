@@ -7,6 +7,7 @@ import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Mapping
+import numpy as np
 
 from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
 
@@ -163,32 +164,53 @@ class RemoteLayerRegistry:
                     if _LAYER_DEBUG:
                         logger.debug("layer delta ignored (no baseline): id=%s", layer_id)
                     return
+                # TODO(protocol): consider emitting deltas in structured sections
+                # (e.g. {controls:{...}, metadata:{...}, data:{...}}) to avoid
+                # any key-based inference here. Optionally, a dedicated
+                # {thumbnail:{array:..., dtype:..., shape:..., version:...}}
+                # sub-section can make preview updates explicit and separable
+                # (rate limiting, compression, caching) from other metadata.
+                # The client already routes by subset to keep assertions strict
+                # and side-effects minimal.
                 controls = block.get("controls")
                 if not isinstance(controls, dict):
                     controls = {}
                     block["controls"] = controls
                 updated = False
-                control_only = True
+                # Build precise change subsets to avoid misrouting
+                control_changes: Dict[str, Any] = {}
+                has_metadata = False
+                has_other = False
                 for key, value in changes.items():
                     if key == "removed":
                         continue
                     if key in _CONTROL_ONLY_KEYS:
                         controls[key] = value
+                        control_changes[key] = value
                         if key == "contrast_limits":
                             if isinstance(value, Sequence):
                                 block["contrast_limits"] = [float(v) for v in value]
                             else:
                                 block["contrast_limits"] = value
                     elif key == "metadata":
+                        has_metadata = True
                         if isinstance(value, Mapping):
                             block["metadata"] = dict(value)
                         else:
                             block["metadata"] = value
-                        control_only = False
                     else:
                         block[key] = value
-                        control_only = False
+                        has_other = True
                     updated = True
+                # If metadata provided a thumbnail, update preview immediately
+                if has_metadata:
+                    layer = self._layers.get(layer_id)
+                    meta = block.get("metadata")
+                    if layer is not None and isinstance(meta, Mapping):
+                        thumb = meta.get("thumbnail")
+                        if thumb is not None:
+                            arr = np.asarray(thumb)
+                            layer.update_preview(arr)
                 if not updated:
                     return
 
@@ -201,10 +223,14 @@ class RemoteLayerRegistry:
                     if layer_id not in self._order:
                         self._order.append(layer_id)
                 else:
-                    if control_only:
-                        layer.apply_control_changes(block, changes)
-                    else:
+                    # Route changes based on subsets
+                    if has_other:
                         self._update_layer(layer, block)
+                    elif control_changes:
+                        layer.apply_control_changes(block, control_changes)
+                    else:
+                        # metadata-only: preview already applied above
+                        pass
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:
                     logger.debug("layer delta applied: id=%s keys=%s", layer_id, tuple(changes.keys()))
