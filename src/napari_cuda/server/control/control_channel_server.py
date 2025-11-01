@@ -579,6 +579,12 @@ async def _handle_view_ndisplay(ctx: StateUpdateContext) -> bool:
             new_ndisplay,
         )
 
+    # Proactively refresh the layer thumbnail after view mode changes so thin
+    # clients update immediately (without waiting for unrelated input).
+    assert hasattr(server, "_emit_layer_thumbnail"), "server must expose _emit_layer_thumbnail"
+    assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
+    server._schedule_coro(server._emit_layer_thumbnail(server._default_layer_id()), "ndisplay-layer-thumbnail")
+
     runtime = getattr(server, "runtime", None)
     if runtime is not None and runtime.is_ready:
         snapshot = runtime.viewport_snapshot()
@@ -2835,6 +2841,12 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
     assert hasattr(server, "_ensure_keyframe"), "server must expose _ensure_keyframe"
     assert hasattr(server, "_schedule_coro"), "server must expose _schedule_coro"
     server._schedule_coro(server._ensure_keyframe(), "state-baseline-keyframe")
+
+    # Proactively push a layer thumbnail so clients update without waiting for
+    # additional input. Non-blocking.
+    assert hasattr(server, "_emit_layer_thumbnail"), "server must expose _emit_layer_thumbnail"
+    assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
+    server._schedule_coro(server._emit_layer_thumbnail(server._default_layer_id()), "baseline-layer-thumbnail")
 
     if hasattr(ws, "_napari_cuda_resume_plan"):
         delattr(ws, "_napari_cuda_resume_plan")
