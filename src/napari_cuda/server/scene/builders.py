@@ -707,6 +707,10 @@ def _scene_metadata(
 ) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
     if zarr_path:
+        metadata["status"] = "ready"
+    else:
+        metadata["status"] = "idle"
+    if zarr_path:
         metadata["source_path"] = str(zarr_path)
     if scene_source is not None:
         metadata.setdefault("source_kind", "ome-zarr")

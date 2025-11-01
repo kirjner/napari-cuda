@@ -106,6 +106,11 @@ class ServerDimsMirror:
             self._last_signature = signature
             return payload
 
+    def reset(self) -> None:
+        with self._lock:
+            self._last_signature = None
+            self._latest_payload = None
+
     # ------------------------------------------------------------------
     def _build_payload(self) -> NotifyDimsPayload:
         snapshot = self._ledger.snapshot()

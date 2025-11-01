@@ -112,6 +112,8 @@ logger = logging.getLogger(__name__)
 _HANDSHAKE_TIMEOUT_S = 5.0
 _REQUIRED_NOTIFY_FEATURES = ("notify.scene", "notify.layers", "notify.stream")
 _COMMAND_KEYFRAME = "napari.pixel.request_keyframe"
+_COMMAND_LISTDIR = "fs.listdir"
+_COMMAND_ZARR_LOAD = "napari.zarr.load"
 
 
 @dataclass(slots=True)
@@ -150,6 +152,82 @@ async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) ->
 
 
 register_command(_COMMAND_KEYFRAME, _command_request_keyframe)
+
+
+async def _command_fs_listdir(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
+    kwargs = dict(frame.payload.kwargs or {})
+    path = kwargs.get("path")
+    show_hidden = bool(kwargs.get("show_hidden", False))
+    only = kwargs.get("only")
+    filters: Optional[Sequence[str]] = None
+    if only is not None:
+        if isinstance(only, (list, tuple)):
+            filters = tuple(str(item) for item in only if item is not None)
+        else:
+            raise CommandRejected(
+                code="command.invalid",
+                message="'only' filter must be a list of suffixes",
+            )
+    if only is None:
+        filters = (".zarr",)
+    try:
+        listing = server._list_directory(
+            path,
+            only=filters,
+            show_hidden=show_hidden,
+        )
+    except RuntimeError as exc:
+        raise CommandRejected(code="fs.forbidden", message=str(exc)) from exc
+    except FileNotFoundError:
+        raise CommandRejected(
+            code="fs.not_found",
+            message="Directory not found",
+            details={"path": path},
+        )
+    except NotADirectoryError:
+        raise CommandRejected(
+            code="fs.not_found",
+            message="Path is not a directory",
+            details={"path": path},
+        )
+    return CommandResult(result=listing)
+
+
+async def _command_zarr_load(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
+    kwargs = dict(frame.payload.kwargs or {})
+    path = kwargs.get("path")
+    if not isinstance(path, str) or not path:
+        raise CommandRejected(
+            code="command.invalid",
+            message="'path' must be a non-empty string",
+        )
+    try:
+        await server._handle_zarr_load(path)
+    except RuntimeError as exc:
+        raise CommandRejected(code="fs.forbidden", message=str(exc)) from exc
+    except FileNotFoundError:
+        raise CommandRejected(
+            code="fs.not_found",
+            message="Dataset not found",
+            details={"path": path},
+        )
+    except NotADirectoryError:
+        raise CommandRejected(
+            code="fs.not_found",
+            message="Dataset path is not a directory",
+            details={"path": path},
+        )
+    except ValueError as exc:
+        raise CommandRejected(
+            code="zarr.invalid",
+            message=str(exc),
+            details={"path": path},
+        ) from exc
+    return CommandResult(result={"ok": True})
+
+
+register_command(_COMMAND_LISTDIR, _command_fs_listdir)
+register_command(_COMMAND_ZARR_LOAD, _command_zarr_load)
 
 
 _SERVER_FEATURES: dict[str, FeatureToggle] = {
