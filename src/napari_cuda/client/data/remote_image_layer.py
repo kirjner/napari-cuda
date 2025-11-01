@@ -107,10 +107,16 @@ class RemoteImageLayer(Image):
             self._remote_arrays = arrays
             self._allow_data_update = True
             try:
+                # Ensure napari treats data as multiscale before setting it and
+                # pre-size corner_pixels to the incoming ndim to avoid early vispy indexing.
+                self.multiscale = multiscale_flag
+                target_ndim = int(new_block.get("ndim") or 0) or (
+                    len(arrays[-1].shape) if arrays else len(new_block.get("shape") or ())
+                ) or getattr(self, "ndim", 2)
+                self.corner_pixels = np.zeros((2, int(target_ndim)), dtype=int)
                 Image.data.fset(self, new_data)
             finally:
                 self._allow_data_update = False
-            self.multiscale = multiscale_flag
 
             self.name = str(self._remote_block.get("name", self._remote_id))
             axis_labels = self._remote_block.get("axis_labels")

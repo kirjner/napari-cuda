@@ -74,6 +74,16 @@ class ServerLayerMirror:
         with self._lock:
             return {layer: dict(props) for layer, props in self._latest_controls.items() if props}
 
+    def reset(self) -> None:
+        with self._lock:
+            self._pending.clear()
+            self._pending_versions.clear()
+            self._pending_intents.clear()
+            self._last_versions.clear()
+            self._latest_controls.clear()
+            self._op_open = False
+            self._ndisplay = None
+
     # ------------------------------------------------------------------
     def _on_op_state(self, event: LedgerEvent) -> None:
         value = str(event.value)

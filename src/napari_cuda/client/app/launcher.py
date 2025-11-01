@@ -17,6 +17,8 @@ from napari.utils.translations import trans
 
 from .proxy_viewer import ProxyViewer
 from .streaming_canvas import StreamingCanvas
+from napari.utils.notifications import show_info
+from napari_cuda.client._qt.remote_file_dialog import RemoteFileDialog
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +215,61 @@ def launch_streaming_client(server_host='localhost',
             )
 
     logger.info("Client launched successfully")
-    
+
+    # Intercept File/Open actions via app-model action override (no monkeypatch)
+    from app_model.types import Action
+    from napari._app_model import get_app_model
+    from napari._qt.qt_viewer import QtViewer
+
+    app = get_app_model()
+
+    def _supports_remote_open_for(qt_viewer: 'QtViewer') -> bool:
+        mgr = getattr(qt_viewer.canvas, "_manager")
+        cmds = set(mgr._command_catalog or ())
+        return {"fs.listdir", "napari.zarr.load"}.issubset(cmds)
+
+    def _remote_open_files(qt_viewer: 'QtViewer') -> None:
+        if _supports_remote_open_for(qt_viewer):
+            mgr = getattr(qt_viewer.canvas, "_manager")
+            dlg = RemoteFileDialog(mgr, parent=qt_viewer, select_folders=False)
+            if dlg.exec_():
+                path = dlg.selected_path()
+                if path:
+                    fut = mgr.open_remote_dataset(path, origin="ui")
+
+                    def _log_result(f):  # noqa: ANN001
+                        _ = f.result()
+                        show_info("Server dataset loaded")
+
+                    fut.add_done_callback(_log_result)
+            return
+        # Fallback to original class method (local file dialog)
+        QtViewer._open_files_dialog(qt_viewer, choose_plugin=False, stack=False)
+
+    def _remote_open_folder(qt_viewer: 'QtViewer') -> None:
+        if _supports_remote_open_for(qt_viewer):
+            mgr = getattr(qt_viewer.canvas, "_manager")
+            dlg = RemoteFileDialog(mgr, parent=qt_viewer, select_folders=True)
+            if dlg.exec_():
+                path = dlg.selected_path()
+                if path:
+                    fut = mgr.open_remote_dataset(path, origin="ui")
+
+                    def _log_result(f):  # noqa: ANN001
+                        _ = f.result()
+                        show_info("Server dataset loaded")
+
+                    fut.add_done_callback(_log_result)
+            return
+        QtViewer._open_folder_dialog(qt_viewer, choose_plugin=False)
+
+    # Replace existing commands with our remote-backed handlers
+    reg = app.commands
+    reg._commands.pop('napari.window.file.open_files_dialog', None)  # type: ignore[attr-defined]
+    reg._commands.pop('napari.window.file.open_folder_dialog', None)  # type: ignore[attr-defined]
+    reg.register_command('napari.window.file.open_files_dialog', _remote_open_files, 'Open File(s)...')
+    reg.register_command('napari.window.file.open_folder_dialog', _remote_open_folder, 'Open Folder...')
+
     # Run Qt event loop
     napari.run()
 

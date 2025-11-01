@@ -657,6 +657,38 @@ class ClientStreamLoop:
 
         return self._issue_command(_KEYFRAME_COMMAND, origin=origin)
 
+    # ------------------------ Remote FS helpers ------------------------
+    def open_remote_dataset(self, path: str, origin: str = "ui") -> Future | None:
+        """Request the server to open a dataset at ``path`` (server-side).
+
+        Returns a Future that resolves with ``ReplyCommandPayload`` or raises
+        ``CommandError`` on failure.
+        """
+        if not path:
+            return None
+        return self._issue_command(
+            "napari.zarr.load",
+            kwargs={"path": str(path)},
+            origin=origin,
+        )
+
+    def list_remote_dir(
+        self,
+        path: Optional[str] = None,
+        *,
+        only: Optional[Sequence[str]] = (".zarr",),
+        show_hidden: bool = False,
+    ) -> Future | None:
+        """List a directory on the server via ``fs.listdir``.
+
+        Returns a Future resolving to ``ReplyCommandPayload`` (``.result``
+        contains the listing mapping) or raising ``CommandError``.
+        """
+        payload: Dict[str, object] = {"path": path, "show_hidden": bool(show_hidden)}
+        if only is not None:
+            payload["only"] = list(only)
+        return self._issue_command("fs.listdir", kwargs=payload, origin="ui")
+
     def _on_state_session_ready(self, metadata: "SessionMetadata") -> None:
         self._state_session_metadata = metadata
         self._control_state.session_id = metadata.session_id

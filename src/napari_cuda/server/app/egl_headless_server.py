@@ -13,7 +13,8 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any, Sequence, List
 
 import numpy as np
 import websockets
@@ -61,6 +62,7 @@ from napari_cuda.server.app.config import load_server_ctx
 from napari_cuda.protocol import (
     NotifyStreamPayload,
     NotifyDimsPayload,
+    NotifyScenePayload,
     NOTIFY_LAYERS_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
@@ -74,6 +76,9 @@ from napari_cuda.server.control.control_channel_server import (
     _broadcast_layers_delta,
     broadcast_stream_config,
     ingest_state,
+    _state_sequencer,
+    _send_state_baseline,
+    CommandRejected,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import BootstrapSceneMetadata, RenderUpdate
@@ -132,6 +137,7 @@ class EGLHeadlessServer:
         except Exception:
             # Fallback to minimal defaults if ctx load fails for any reason
             self._ctx = load_server_ctx({})  # type: ignore[arg-type]
+        self._data_root = self._resolve_env_path(self._ctx_env.get("NAPARI_CUDA_DATA_ROOT"))
         try:
             configure_bitstream(self._ctx.bitstream)
         except Exception:
@@ -190,6 +196,8 @@ class EGLHeadlessServer:
                 ),
             }
         )
+        self._dataset_lock: Optional[asyncio.Lock] = None
+        self._mirrors_started = False
         # Keep queue size at 1 for latest-wins, never-block behavior
         qsize = int(self._ctx.frame_queue)
         frame_queue: asyncio.Queue[tuple[bytes, int, int, float]] = asyncio.Queue(maxsize=max(1, qsize))
@@ -304,6 +312,12 @@ class EGLHeadlessServer:
         self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug_policy.enabled)
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
         # Populate multiscale description from NGFF metadata if available
+
+    @staticmethod
+    def _resolve_env_path(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        return str(Path(value).expanduser().resolve())
     @property
     def _worker(self) -> Optional["EGLRendererWorker"]:
         return self._worker_lifecycle.worker
@@ -692,6 +706,282 @@ class EGLHeadlessServer:
         assert isinstance(value, int), "ledger ndisplay must be int"
         return 3 if value >= 3 else 2
 
+    def _start_mirrors_if_needed(self) -> None:
+        if not self._mirrors_started:
+            self._dims_mirror.start()
+            self._layer_mirror.start()
+            self._mirrors_started = True
+
+    def _viewer_settings(self) -> Dict[str, Any]:
+        entry = self._state_ledger.get("view", "main", "ndisplay")
+        assert entry is not None and isinstance(entry.value, int), "ndisplay not initialised"
+        use_volume = int(entry.value) >= 3
+        return {
+            "fps_target": float(self.cfg.fps),
+            "canvas_size": [int(self.width), int(self.height)],
+            "volume_enabled": use_volume,
+        }
+
+    def _build_scene_payload(self) -> NotifyScenePayload:
+        snapshot = self._scene_snapshot
+        assert snapshot is not None, "scene snapshot unavailable"
+        return build_notify_scene_payload(
+            scene_snapshot=snapshot,
+            ledger_snapshot=self._state_ledger.snapshot(),
+            viewer_settings=self._viewer_settings(),
+        )
+
+    def _cache_scene_history(self, payload: NotifyScenePayload) -> None:
+        store = self._resumable_store
+        if store is None:
+            return
+        now = time.time()
+        store.snapshot_envelope(
+            NOTIFY_SCENE_TYPE,
+            payload=payload.to_dict(),
+            timestamp=now,
+        )
+        store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=now)
+        store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=now)
+        for ws in list(self._state_clients):
+            _state_sequencer(ws, NOTIFY_SCENE_TYPE).clear()
+            _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
+            _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
+
+    def _clear_frame_queue(self) -> None:
+        queue = self._pixel_channel.broadcast.frame_queue
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    def _enter_idle_state(self) -> None:
+        logger.info("Entering idle state (no dataset)")
+        self._stop_worker()
+        self._clear_frame_queue()
+        self._layer_mirror.reset()
+        self._dims_mirror.reset()
+        step = (0, 0)
+        axis_labels = ("y", "x")
+        order = (0, 1)
+        level_shapes = ((1, 1),)
+        levels = (
+            {"index": 0, "shape": [1, 1], "downsample": [1.0, 1.0], "path": ""},
+        )
+        reduce_bootstrap_state(
+            self._state_ledger,
+            step=step,
+            axis_labels=axis_labels,
+            order=order,
+            level_shapes=level_shapes,
+            levels=levels,
+            current_level=0,
+            ndisplay=2,
+            origin="server.idle-bootstrap",
+        )
+        self._zarr_path = None
+        self._zarr_level = None
+        self._zarr_axes = None
+        self._zarr_z = None
+        self._bootstrap_snapshot = pull_render_snapshot(self)
+        self._refresh_scene_snapshot(self._bootstrap_snapshot)
+        mark_stream_config_dirty(self._pixel_channel)
+        self._pixel_channel.last_avcc = None
+        broadcast = self._pixel_channel.broadcast
+        broadcast.last_key_seq = None
+        broadcast.last_key_ts = None
+        broadcast.waiting_for_keyframe = True
+
+    async def _switch_dataset(
+        self,
+        path: Path,
+        *,
+        preferred_level: Optional[str],
+        axes_override: Optional[str],
+        z_override: Optional[int],
+        notify_clients: bool,
+        initial: bool,
+    ) -> None:
+        if self._dataset_lock is None:
+            self._dataset_lock = asyncio.Lock()
+        async with self._dataset_lock:
+            logger.info("Activating dataset: %s", path)
+            if self._data_root and not initial:
+                resolved = self._resolve_dataset_path(str(path))
+            else:
+                resolved = path.expanduser().resolve(strict=True)
+                if not resolved.is_dir():
+                    raise NotADirectoryError(str(resolved))
+                if not (resolved / ".zattrs").exists():
+                    raise ValueError(f"Path is not an OME-Zarr root: {resolved}")
+            bootstrap_meta = probe_scene_bootstrap(
+                path=str(resolved),
+                use_volume=self._initial_mode is RenderMode.VOLUME,
+                preferred_level=preferred_level,
+                axes_override=tuple(axes_override) if axes_override is not None else None,
+                z_override=z_override,
+                canvas_size=(self.width, self.height),
+                oversampling_thresholds=self._ctx.policy.oversampling_thresholds,
+                oversampling_hysteresis=self._ctx.policy.oversampling_hysteresis,
+                threshold_in=self._ctx.policy.threshold_in,
+                threshold_out=self._ctx.policy.threshold_out,
+                fine_threshold=self._ctx.policy.fine_threshold,
+                policy_hysteresis=self._ctx.policy.hysteresis,
+                cooldown_ms=self._ctx.policy.cooldown_ms,
+            )
+
+            self._stop_worker()
+            self._clear_frame_queue()
+            self._layer_mirror.reset()
+            self._dims_mirror.reset()
+
+            reduce_bootstrap_state(
+                self._state_ledger,
+                step=bootstrap_meta.step,
+                axis_labels=bootstrap_meta.axis_labels,
+                order=bootstrap_meta.order,
+                level_shapes=bootstrap_meta.level_shapes,
+                levels=bootstrap_meta.levels,
+                current_level=bootstrap_meta.current_level,
+                ndisplay=bootstrap_meta.ndisplay,
+                origin="server.bootstrap",
+            )
+
+            self._zarr_path = str(resolved)
+            self._zarr_level = preferred_level
+            self._zarr_axes = "".join(bootstrap_meta.axis_labels)
+            self._zarr_z = z_override
+
+            self._bootstrap_snapshot = pull_render_snapshot(self)
+            self._start_mirrors_if_needed()
+            self._refresh_scene_snapshot(self._bootstrap_snapshot)
+
+            loop = asyncio.get_running_loop()
+            self._start_worker(loop)
+            self._refresh_scene_snapshot()
+
+            scene_payload = self._build_scene_payload()
+            self._cache_scene_history(scene_payload)
+
+            mark_stream_config_dirty(self._pixel_channel)
+            self._pixel_channel.last_avcc = None
+            broadcast = self._pixel_channel.broadcast
+            broadcast.last_key_seq = None
+            broadcast.last_key_ts = None
+            broadcast.waiting_for_keyframe = True
+
+            if notify_clients:
+                self._broadcast_state_baseline(reason="dataset-load")
+            else:
+                self._schedule_coro(self._ensure_keyframe(), "dataset-startup-keyframe")
+
+    def _broadcast_state_baseline(self, *, reason: str) -> None:
+        for ws in list(self._state_clients):
+            self._schedule_coro(
+                _send_state_baseline(self, ws),
+                f"baseline-{reason}",
+            )
+
+    def _require_data_root(self) -> Path:
+        if not self._data_root:
+            raise RuntimeError("NAPARI_CUDA_DATA_ROOT not configured")
+        root = Path(self._data_root).expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise RuntimeError(f"Data root is not a directory: {root}")
+        return root
+
+    def _resolve_data_path(self, path: Optional[str]) -> Path:
+        root = self._require_data_root()
+        if not path:
+            return root
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(root)
+        return resolved
+
+    def _resolve_dataset_path(self, path: str) -> Path:
+        resolved = self._resolve_data_path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(str(resolved))
+        if not resolved.is_dir():
+            raise NotADirectoryError(str(resolved))
+        if not (resolved / ".zattrs").exists():
+            raise ValueError(f"Path is not an OME-Zarr root: {resolved}")
+        return resolved
+
+    def _list_directory(
+        self,
+        path: Optional[str],
+        *,
+        only: Optional[Sequence[str]],
+        show_hidden: bool,
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_data_path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(str(resolved))
+        if not resolved.is_dir():
+            raise NotADirectoryError(str(resolved))
+
+        suffix_filters: Optional[List[str]] = None
+        if only:
+            suffix_filters = [s.lower() for s in only if isinstance(s, str) and s]
+            if not suffix_filters:
+                suffix_filters = None
+
+        filtered: List[Dict[str, Any]] = []
+        children = sorted(resolved.iterdir(), key=lambda p: p.name.lower())
+        for child in children:
+            name = child.name
+            if not show_hidden and name.startswith("."):
+                continue
+            stat_result = child.stat()
+            is_dir = child.is_dir()
+            if not is_dir and suffix_filters is not None:
+                lowered = name.lower()
+                if not any(lowered.endswith(suffix) for suffix in suffix_filters):
+                    continue
+            filtered.append(
+                {
+                    "name": name,
+                    "path": str(child),
+                    "is_dir": is_dir,
+                    "size": int(stat_result.st_size),
+                    "mtime": float(stat_result.st_mtime),
+                }
+            )
+
+        has_more = len(filtered) > limit
+        entries = filtered[:limit]
+        return {
+            "path": str(resolved),
+            "entries": entries,
+            "has_more": bool(has_more),
+        }
+
+    async def _handle_zarr_load(self, path: str) -> None:
+        if self._data_root:
+            resolved = self._resolve_dataset_path(path)
+        else:
+            resolved = Path(path).expanduser().resolve(strict=True)
+            if not resolved.exists():
+                raise FileNotFoundError(str(resolved))
+            if not resolved.is_dir():
+                raise NotADirectoryError(str(resolved))
+            if not (resolved / ".zattrs").exists():
+                raise ValueError(f"Path is not an OME-Zarr root: {resolved}")
+        await self._switch_dataset(
+            resolved,
+            preferred_level=None,
+            axes_override=None,
+            z_override=None,
+            notify_clients=True,
+            initial=False,
+        )
+
     # --- Validation helpers -------------------------------------------------------
     async def start(self) -> None:
         # Keep global logging at INFO; optionally enable module-only DEBUG logging
@@ -716,39 +1006,24 @@ class EGLHeadlessServer:
         logger.info("Starting EGLHeadlessServer %dx%d @ %dfps", self.width, self.height, self.cfg.fps)
         loop = asyncio.get_running_loop()
         self._control_loop = loop
-        if self._zarr_path is None:
-            raise RuntimeError("bootstrap requires zarr_path")
-        bootstrap_meta = probe_scene_bootstrap(
-            path=self._zarr_path,
-            use_volume=self._initial_mode is RenderMode.VOLUME,
-            preferred_level=self._zarr_level,
-            axes_override=tuple(self._zarr_axes) if self._zarr_axes is not None else None,
-            z_override=self._zarr_z,
-            canvas_size=(self.width, self.height),
-            oversampling_thresholds=self._ctx.policy.oversampling_thresholds,
-            oversampling_hysteresis=self._ctx.policy.oversampling_hysteresis,
-            threshold_in=self._ctx.policy.threshold_in,
-            threshold_out=self._ctx.policy.threshold_out,
-            fine_threshold=self._ctx.policy.fine_threshold,
-            policy_hysteresis=self._ctx.policy.hysteresis,
-            cooldown_ms=self._ctx.policy.cooldown_ms,
-        )
-        reduce_bootstrap_state(
-            self._state_ledger,
-            step=bootstrap_meta.step,
-            axis_labels=bootstrap_meta.axis_labels,
-            order=bootstrap_meta.order,
-            level_shapes=bootstrap_meta.level_shapes,
-            levels=bootstrap_meta.levels,
-            current_level=bootstrap_meta.current_level,
-            ndisplay=bootstrap_meta.ndisplay,
-            origin="server.bootstrap",
-        )
-        self._bootstrap_snapshot = pull_render_snapshot(self)
-        self._dims_mirror.start()
-        self._layer_mirror.start()
-        self._start_worker(loop)
-        self._refresh_scene_snapshot()
+        self._dataset_lock = asyncio.Lock()
+
+        if self._zarr_path:
+            await self._switch_dataset(
+                Path(self._zarr_path),
+                preferred_level=self._zarr_level,
+                axes_override=self._zarr_axes,
+                z_override=self._zarr_z,
+                notify_clients=False,
+                initial=True,
+            )
+        else:
+            self._enter_idle_state()
+            self._start_mirrors_if_needed()
+            self._refresh_scene_snapshot()
+            idle_payload = self._build_scene_payload()
+            self._cache_scene_history(idle_payload)
+
         # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
         async def state_handler(ws: websockets.WebSocketServerProtocol) -> None:
             await ingest_state(self, ws)
