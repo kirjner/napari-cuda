@@ -33,6 +33,7 @@ from napari_cuda.server.control.topics.stream import (
     send_stream_frame,
     send_stream_snapshot,
 )
+
 logger = logging.getLogger("napari_cuda.server.control.control_channel_server")
 
 
@@ -83,21 +84,27 @@ async def orchestrate_connect(
 
 
 def _ensure_scene_snapshot(server: Any) -> SceneSnapshot:
-    refresher = getattr(server, "_refresh_scene_snapshot", None)
-    if callable(refresher):
-        refresher()
-    snapshot = getattr(server, "_scene_snapshot", None)
+    # Server must expose a snapshot refresher and snapshot storage
+    server._refresh_scene_snapshot()
+    snapshot = server._scene_snapshot
     assert isinstance(snapshot, SceneSnapshot), "scene snapshot unavailable"
     return snapshot
 
 
 def _viewer_settings(server: Any) -> dict[str, Any]:
-    settings_provider = getattr(server, "_viewer_settings_for_scene", None)
-    if callable(settings_provider):
-        settings = settings_provider()
-        if isinstance(settings, Mapping):
-            return dict(settings)
-    return {}
+    width = int(server.width)
+    height = int(server.height)
+    fps = float(server.cfg.fps)
+    ndisplay_entry = server._state_ledger.get("view", "main", "ndisplay")
+    assert (
+        ndisplay_entry is not None and isinstance(ndisplay_entry.value, int)
+    ), "viewer settings require ledger ndisplay entry"
+    use_volume = int(ndisplay_entry.value) >= 3
+    return {
+        "fps_target": fps,
+        "canvas_size": [width, height],
+        "volume_enabled": use_volume,
+    }
 
 
 def _collect_default_controls(
@@ -105,7 +112,7 @@ def _collect_default_controls(
     scene_snapshot: SceneSnapshot,
 ) -> list[tuple[str, Mapping[str, Any]]]:
     layer_controls_map: dict[str, Mapping[str, Any]] = {}
-    mirror = getattr(server, "_layer_mirror", None)
+    mirror = server._layer_mirror
     if mirror is not None:
         layer_controls_map = mirror.latest_controls()
     else:
@@ -226,8 +233,8 @@ async def _emit_stream_baseline(
                 await send_stream_snapshot(server, ws, snapshot)
         return
 
-    channel = getattr(server, "_pixel_channel", None)
-    cfg = getattr(server, "_pixel_config", None)
+    channel = server._pixel_channel
+    cfg = server._pixel_config
     if channel is None or cfg is None:
         logger.debug("connect: notify.stream baseline deferred (pixel channel not initialized)")
         return
@@ -246,7 +253,7 @@ async def _emit_stream_baseline(
 
 
 async def _emit_dims_baseline(server: Any, ws: Any) -> None:
-    mirror = getattr(server, "_dims_mirror", None)
+    mirror = server._dims_mirror
     if mirror is None:
         logger.debug("connect: notify.dims baseline deferred (dims mirror not initialized)")
         return
@@ -262,20 +269,14 @@ async def _emit_dims_baseline(server: Any, ws: Any) -> None:
 
 
 def _schedule_keyframe_and_thumbnail(server: Any) -> None:
-    scheduler = getattr(server, "_schedule_coro", None)
-    ensure_keyframe = getattr(server, "_ensure_keyframe", None)
-    if callable(scheduler) and callable(ensure_keyframe):
-        scheduler(ensure_keyframe(), "state-baseline-keyframe")
-    else:
-        logger.debug("connect: baseline keyframe scheduling skipped (hooks unavailable)")
-        return
+    # Server must expose scheduling and keyframe/thumbnail hooks
+    assert hasattr(server, "_schedule_coro"), "server must expose _schedule_coro"
+    assert hasattr(server, "_ensure_keyframe"), "server must expose _ensure_keyframe"
+    server._schedule_coro(server._ensure_keyframe(), "state-baseline-keyframe")
 
-    emit_thumbnail = getattr(server, "_emit_layer_thumbnail", None)
-    default_layer_id = getattr(server, "_default_layer_id", None)
-    if callable(emit_thumbnail) and callable(default_layer_id):
-        scheduler(emit_thumbnail(default_layer_id()), "baseline-layer-thumbnail")
-    else:
-        logger.debug("connect: baseline thumbnail emission skipped (hooks unavailable)")
+    assert hasattr(server, "_emit_layer_thumbnail"), "server must expose _emit_layer_thumbnail"
+    assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
+    server._schedule_coro(server._emit_layer_thumbnail(server._default_layer_id()), "baseline-layer-thumbnail")
 
 
 __all__ = ["orchestrate_connect"]
