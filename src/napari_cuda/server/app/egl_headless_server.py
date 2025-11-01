@@ -1197,7 +1197,7 @@ class EGLHeadlessServer:
                 )
 
         self._schedule_coro(
-            _broadcast_camera_update(
+            broadcast_camera_update(
                 self,
                 mode="pose",
                 state=ack_state,

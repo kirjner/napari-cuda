@@ -699,7 +699,7 @@ async def _handle_camera_zoom(ctx: StateUpdateContext) -> bool:
     )
 
     server._schedule_coro(
-        _broadcast_camera_update(
+        broadcast_camera_update(
             server,
             mode='zoom',
             delta=ack_value,
@@ -955,7 +955,7 @@ async def _handle_camera_set(ctx: StateUpdateContext) -> bool:
         metrics.inc('napari_cuda_state_camera_updates')
 
     server._schedule_coro(
-        _broadcast_camera_update(
+        broadcast_camera_update(
             server,
             mode='set',
             delta=ack_components,
