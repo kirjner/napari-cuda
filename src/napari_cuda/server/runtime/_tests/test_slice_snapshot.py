@@ -13,6 +13,7 @@ from napari_cuda.server.runtime.render_loop.apply_interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.runtime.viewport import ViewportState
+from napari_cuda.server.state_ledger import ServerStateLedger
 
 
 class _FakeCamera:
@@ -81,6 +82,7 @@ def test_apply_slice_level_updates_plane_state(monkeypatch: pytest.MonkeyPatch) 
             self._data_wh = (0, 0)
             self._data_d = None
             self._napari_layer = None
+            self._ledger = ServerStateLedger()
 
     worker = _Worker()
     viewport_state.plane.update_pose(

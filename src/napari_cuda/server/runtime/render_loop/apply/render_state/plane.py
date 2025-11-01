@@ -289,7 +289,9 @@ def apply_slice_level(
         layer.scale = (float(sy), float(sx))
         if hasattr(layer, "_set_view_slice"):
             layer._set_view_slice()  # type: ignore[misc]
-        snapshot_iface.ensure_plane_visual()
+        visible_flag = bool(getattr(layer, "visible", True))
+        visual = snapshot_iface.ensure_plane_visual()
+        visual.visible = visible_flag  # type: ignore[attr-defined]
 
     view = snapshot_iface.view
     assert view is not None, "VisPy view must be initialised for 2D apply"

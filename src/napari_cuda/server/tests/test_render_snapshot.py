@@ -12,6 +12,7 @@ from napari_cuda.server.runtime.render_loop.apply.render_state import (
 from napari_cuda.server.runtime.render_loop.apply_interface import (
     RenderApplyInterface,
 )
+from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
@@ -103,6 +104,7 @@ class _StubWorker:
         self.width = 640
         self.height = 480
         self._log_layer_debug = False
+        self._ledger = ServerStateLedger()
 
     def _ensure_scene_source(self) -> object:
         return self._scene_source

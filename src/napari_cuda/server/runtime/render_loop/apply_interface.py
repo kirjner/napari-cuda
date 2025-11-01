@@ -181,8 +181,8 @@ class RenderApplyInterface:
             step as ledger_step,
         )
 
-        ledger = getattr(self.worker, "_ledger", None)  # type: ignore[attr-defined]
-        return ledger_step(ledger) if ledger is not None else None
+        ledger = self.worker._ledger
+        return ledger_step(ledger)
 
     def set_dims_range_for_level(self, source: Any, level: int) -> None:
         setter = getattr(self.worker, "_set_dims_range_for_level", None)  # type: ignore[attr-defined]

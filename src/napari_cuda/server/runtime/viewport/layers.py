@@ -35,9 +35,7 @@ def apply_slice_layer_data(
     roi_to_apply = roi or SliceROI(0, int(slab.shape[0]), 0, int(slab.shape[1]))
     SliceDataApplier(layer=layer).apply(slab=slab, roi=roi_to_apply, scale=(sy, sx))
 
-    layer.visible = True  # type: ignore[assignment]
-    layer.opacity = 1.0  # type: ignore[assignment]
-    if not getattr(layer, "blending", None):
+    if not layer.blending:
         layer.blending = NapariBlending.OPAQUE.value  # type: ignore[assignment]
 
     if update_contrast:
@@ -61,8 +59,7 @@ def apply_volume_layer_data(
 ) -> tuple[tuple[int, int], Optional[int]]:
     """Apply the provided volume data to the active napari layer."""
 
-    if ensure_volume_visual is not None:
-        ensure_volume_visual()
+    visual = ensure_volume_visual() if ensure_volume_visual is not None else None
 
     if layer is not None:
         layer.depiction = "volume"  # type: ignore[assignment]
@@ -98,6 +95,8 @@ def apply_volume_layer_data(
             scale_vals = tuple(1.0 for _ in range(pad)) + scale_vals
         scale_vals = tuple(scale_vals[-int(volume.ndim):])
         layer.scale = scale_vals  # type: ignore[assignment]
+        if visual is not None:
+            visual.visible = bool(getattr(layer, "visible", True))  # type: ignore[attr-defined]
 
     depth = int(volume.shape[0])
     height = int(volume.shape[1]) if int(volume.ndim) >= 2 else int(volume.shape[-1])

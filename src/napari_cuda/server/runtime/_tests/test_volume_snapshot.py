@@ -16,6 +16,7 @@ from napari_cuda.server.runtime.viewport import ViewportState
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
+from napari_cuda.server.state_ledger import ServerStateLedger
 
 
 class _FakeLayerLogger:
@@ -65,6 +66,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
             self._volume_max_voxels = None
             self._hw_limits = SimpleNamespace(volume_max_bytes=None, volume_max_voxels=None)
             self._napari_layer = None
+            self._ledger = ServerStateLedger()
 
         def _load_volume(self, _source: object, level: int) -> object:
             return ("volume", level)

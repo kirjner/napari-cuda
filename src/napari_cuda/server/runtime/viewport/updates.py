@@ -136,6 +136,8 @@ def apply_layer_updates(worker: Any, updates: Mapping[str, Mapping[str, Any]]) -
         for key, value in props.items():
             if key == "visible":
                 layer.visible = bool(value)  # type: ignore[assignment]
+                visual = _active_visual()
+                visual.visible = bool(value)  # type: ignore[attr-defined]
             elif key == "opacity":
                 layer.opacity = float(max(0.0, min(1.0, float(value))))  # type: ignore[assignment]
             elif key == "blending":

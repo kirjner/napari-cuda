@@ -62,8 +62,8 @@ def test_apply_slice_layer_data_updates_layer(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert (sy, sx) == (2.0, 3.0)
-    assert layer.visible is True
-    assert layer.opacity == 1.0
+    assert layer.visible is False
+    assert layer.opacity == 0.5
     assert layer.blending == NapariBlending.OPAQUE.value
     assert layer.contrast_limits == [0.0, 1.0]
 
