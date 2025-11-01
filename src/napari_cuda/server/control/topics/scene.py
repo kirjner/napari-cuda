@@ -89,28 +89,18 @@ async def send_scene_baseline(
         else:
             snapshot = current
 
-    kwargs: dict[str, Any] = {
-        "session_id": session_id,
-        "viewer": payload.viewer,
-        "layers": payload.layers,
-        "policies": payload.policies,
-        "metadata": payload.metadata,
-        "timestamp": snapshot.timestamp if snapshot is not None else now,
-    }
-
-    if snapshot is not None:
-        kwargs["frame_id"] = snapshot.frame_id
-        kwargs["delta_token"] = snapshot.delta_token
-        kwargs["seq"] = snapshot.seq
+        await send_scene_snapshot(server, ws, snapshot)
     else:
-        kwargs["sequencer"] = state_sequencer(ws, NOTIFY_SCENE_TYPE)
-
-    frame = build_notify_scene_snapshot(**kwargs)
-    await send_frame(server, ws, frame)
-
-    if snapshot is not None:
-        # Resume the client's scene sequencer to the snapshot cursor
-        state_sequencer(ws, NOTIFY_SCENE_TYPE).resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
+        frame = build_notify_scene_snapshot(
+            session_id=session_id,
+            viewer=payload.viewer,
+            layers=payload.layers,
+            policies=payload.policies,
+            metadata=payload.metadata,
+            timestamp=now,
+            sequencer=state_sequencer(ws, NOTIFY_SCENE_TYPE),
+        )
+        await send_frame(server, ws, frame)
     if server._log_dims_info:
         logger.info("notify.scene baseline sent")
     else:
