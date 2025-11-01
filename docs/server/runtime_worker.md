@@ -223,6 +223,47 @@ see `docs/server/architecture.md`.
 3. `_viewport_runner.update_camera_rect` stores the rect for ROI planning;
    `_emit_current_camera_pose` notifies the ledger when volumes change.
 
+### Layer Updates & Visual Synchronisation (current behaviour)
+- `viewport_updates.apply_layer_updates`
+  (`src/napari_cuda/server/runtime/viewport/updates.py:123`) is the first hop
+  for `state.update` payloads. It mutates the napari layer instance and calls
+  `_ensure_plane_visual` or `_ensure_volume_visual` so the VisPy node is
+  attached before writing properties such as `visible`, `gamma`,
+  `contrast_limits`, and `colormap`.
+- `_ensure_plane_visual` / `_ensure_volume_visual`
+  (`src/napari_cuda/server/runtime/bootstrap/setup_visuals.py:44`) detach the
+  opposite visual and re-attach the requested node to the current view. The
+  helper sets `visible=True` via `_VisualHandle.attach`, which means every eager
+  layer update briefly toggles the scene graph even when the correct visual is
+  already active.
+- The render tick repeats the attach step. `apply_slice_level` and
+  `apply_slice_roi`
+  (`src/napari_cuda/server/runtime/render_loop/apply/render_state/plane.py:300`,
+  `:408`) call `snapshot_iface.ensure_plane_visual()` on every slice upload to
+  guard against mode switches and bootstrap windows. After reattaching they copy
+  the current `layer.visible` flag back onto the node.
+- Visibility therefore travels through two paths: the eager control-channel
+  update, and the render-loop reattach that sets `visible=True` before restoring
+  the cached layer flag. Other layer properties (gamma, contrast, colormap)
+  rely solely on the eager path; the render snapshot signature does not include
+  them, so a layer-only change will short-circuit the slice reload.
+- When ndisplay flips between 2‑D and 3‑D the helpers for plane/volume visuals
+  run back to back. Because pose and camera updates happen afterwards, the user
+  can briefly see the wrong visual (plane in 3‑D or volume in 2‑D) during the
+  transition. At present we only emit a new pose once another interaction
+  (camera delta, slice reload, etc.) hits the worker, so the incorrect pose can
+  linger indefinitely until that next input arrives.
+
+> **Implications**
+> - Layer updates currently require both the eager path and render tick to keep
+>   visuals in sync. Moving visual synchronisation solely into the render loop
+>   would require widening the snapshot signature (so layer props force a slice
+>   apply) and adjusting `_ensure_*_visual` to respect cached visibility instead
+>   of forcing `True`.
+> - Tests such as `src/napari_cuda/server/tests/test_render_snapshot.py` stub
+>   `apply_slice_level`; any refactor must keep the skip path capable of syncing
+>   layer → visual state to avoid regressions.
+
 ## Extraction Guardrails
 - Preserve `_state_lock` usage: `viewport.updates.drain_render_state` and
   `runtime/core/scene_setup.py` expect a re-entrant lock guarding worker state.
