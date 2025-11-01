@@ -160,7 +160,17 @@ async def send_layer_baseline(
     if store is not None:
         now = __import__("time").time()
         for layer_id, changes in default_controls:
-            payload = build_notify_layers_payload(layer_id=layer_id or "layer-0", controls=changes)
+            # Classify the mapping so 'metadata' or 'thumbnail' nested
+            # in the provided mapping do not leak into controls.
+            controls, metadata, data, thumbnail, removed = classify_layer_changes(changes)
+            payload = build_notify_layers_payload(
+                layer_id=layer_id or "layer-0",
+                controls=controls,
+                metadata=metadata,
+                data=data,
+                thumbnail=thumbnail,
+                removed=removed or None,
+            )
             snapshot = store.delta_envelope(
                 NOTIFY_LAYERS_TYPE,
                 payload=payload.to_dict(),
@@ -187,4 +197,3 @@ __all__ = [
     "send_layer_snapshot",
     "send_layer_baseline",
 ]
-
