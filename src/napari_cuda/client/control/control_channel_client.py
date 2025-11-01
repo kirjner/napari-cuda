@@ -714,13 +714,11 @@ class StateChannel:
             return
 
         payload = frame.payload
-        error = payload.error
         logger.info(
-            "error.command received intent=%s in_reply_to=%s code=%s message=%s",
-            payload.intent_id,
+            "error.command received in_reply_to=%s code=%s message=%s",
             payload.in_reply_to,
-            error.code,
-            error.message,
+            payload.code,
+            payload.message,
         )
         if self.ingest_error_command:
             try:
