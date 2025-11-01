@@ -123,6 +123,7 @@ from napari_cuda.server.control.topics.stream import (
     send_stream_snapshot as topics_send_stream_snapshot,
     broadcast_stream_config as topics_broadcast_stream_config,
 )
+from napari_cuda.server.control.topics.camera import broadcast_camera_update
 from napari_cuda.server.control.command_registry import (
     COMMAND_REGISTRY,
     CommandHandler,
@@ -763,7 +764,7 @@ async def _handle_camera_pan(ctx: StateUpdateContext) -> bool:
         )
 
         server._schedule_coro(
-            _broadcast_camera_update(
+            broadcast_camera_update(
                 server,
                 mode='pan',
                 delta=ack_value,
@@ -828,7 +829,7 @@ async def _handle_camera_orbit(ctx: StateUpdateContext) -> bool:
         )
 
         server._schedule_coro(
-            _broadcast_camera_update(
+            broadcast_camera_update(
                 server,
                 mode='orbit',
                 delta=ack_value,
@@ -876,7 +877,7 @@ async def _handle_camera_reset(ctx: StateUpdateContext) -> bool:
         server._schedule_coro(server._ensure_keyframe(), 'state-camera-reset-keyframe')
 
     server._schedule_coro(
-        _broadcast_camera_update(
+        broadcast_camera_update(
             server,
             mode='reset',
             delta={'reason': reason},
@@ -1676,51 +1677,7 @@ def _string_value(value: Any) -> Optional[str]:
     return None
 
 
-async def _broadcast_camera_update(
-    server: Any,
-    *,
-    mode: str,
-    delta: Mapping[str, Any] | None = None,
-    state: Mapping[str, Any] | None = None,
-    intent_id: Optional[str],
-    origin: str,
-    timestamp: Optional[float] = None,
-    targets: Optional[Sequence[Any]] = None,
-) -> None:
-    clients = list(targets) if targets is not None else list(server._state_clients)
-    if not clients:
-        return
-
-    payload: Dict[str, Any] = {
-        "mode": str(mode),
-        "origin": str(origin),
-    }
-    if delta is not None:
-        payload["delta"] = _normalize_camera_value(delta)
-    if state is not None:
-        payload["state"] = _normalize_camera_value(state)
-    if "delta" not in payload and "state" not in payload:
-        return
-
-    tasks: list[Awaitable[None]] = []
-    now = time.time() if timestamp is None else float(timestamp)
-
-    for ws in clients:
-        if not feature_enabled(ws, "notify.camera"):
-            continue
-        session_id = state_session(ws)
-        if not session_id:
-            continue
-        frame = build_notify_camera(
-            session_id=session_id,
-            payload=payload,
-            timestamp=now,
-            intent_id=intent_id,
-        )
-        tasks.append(send_frame(server, ws, frame))
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+## moved to topics.camera: broadcast_camera_update
 
 
 ## moved to topics.stream: send_stream_frame

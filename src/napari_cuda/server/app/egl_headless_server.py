@@ -71,11 +71,11 @@ from napari_cuda.protocol import (
 from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
-    _broadcast_camera_update,
     ingest_state,
     _send_state_baseline,
     CommandRejected,
 )
+from napari_cuda.server.control.topics.camera import broadcast_camera_update
 from napari_cuda.server.control.topics.stream import broadcast_stream_config
 from napari_cuda.server.control.protocol_runtime import state_sequencer
 from napari_cuda.server.control.topics.dims import broadcast_dims_state
@@ -488,7 +488,7 @@ class EGLHeadlessServer:
                 )
 
         self._schedule_coro(
-            _broadcast_camera_update(
+            broadcast_camera_update(
                 self,
                 mode="pose",
                 state=ack_state,
