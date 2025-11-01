@@ -412,98 +412,10 @@ async def _state_heartbeat_loop(server: Any, ws: Any) -> None:
 
 
 
-## moved to protocol_runtime: feature_enabled, state_sequencer
 
 
 def _resolve_dims_mode_from_ndisplay(ndisplay: int) -> str:
     return "volume" if int(ndisplay) >= 3 else "plane"
-
-
-## broadcast_layers_delta moved to topics.layers
-## broadcast_dims_state moved to topics.dims
-
-
-def _normalize_camera_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _normalize_camera_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_camera_value(v) for v in value]
-    if isinstance(value, (int, float)):
-        return float(value)
-    return value
-
-
-def _float_value(value: Any) -> Optional[float]:
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
-
-
-def _positive_float(value: Any) -> Optional[float]:
-    result = _float_value(value)
-    if result is None or result <= 0.0:
-        return None
-    return result
-
-
-def _float_pair(value: Any) -> Optional[tuple[float, float]]:
-    if not isinstance(value, Sequence) or len(value) < 2:
-        return None
-    first = _float_value(value[0])
-    second = _float_value(value[1])
-    if first is None or second is None:
-        return None
-    return float(first), float(second)
-
-
-def _float_triplet(value: Any) -> Optional[tuple[float, float, float]]:
-    if not isinstance(value, Sequence) or len(value) < 3:
-        return None
-    x = _float_value(value[0])
-    y = _float_value(value[1])
-    z = _float_value(value[2])
-    if x is None or y is None or z is None:
-        return None
-    return float(x), float(y), float(z)
-
-
-def _float_rect(value: Any) -> Optional[tuple[float, float, float, float]]:
-    if not isinstance(value, Sequence) or len(value) < 4:
-        return None
-    left = _float_value(value[0])
-    bottom = _float_value(value[1])
-    width = _float_value(value[2])
-    height = _float_value(value[3])
-    if None in (left, bottom, width, height):
-        return None
-    return float(left), float(bottom), float(width), float(height)
-
-
-def _float_sequence(value: Any) -> Optional[tuple[float, ...]]:
-    if not isinstance(value, Sequence) or not value:
-        return None
-    components: list[float] = []
-    for item in value:
-        component = _float_value(item)
-        if component is None:
-            return None
-        components.append(component)
-    return tuple(components)
-
-
-def _string_value(value: Any) -> Optional[str]:
-    if isinstance(value, str) and value.strip():
-        return str(value)
-    return None
-
-
-## moved to topics.camera: broadcast_camera_update
-
-
-## moved to topics.stream: send_stream_frame
-
-
-## moved to topics.scene: send_scene_baseline
 
 async def ingest_state(server: Any, ws: Any) -> None:
     """Ingest a state-channel websocket connection."""
@@ -774,10 +686,5 @@ def _disable_nagle(ws: Any) -> None:
         logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
 
 
-## moved to protocol_io / topics.layers: send_frame, send_layer_snapshot
 
 
-## moved to topics.stream: send_stream_snapshot
-
-
-## moved to topics.scene: send_scene_snapshot
