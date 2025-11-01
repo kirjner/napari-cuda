@@ -1152,21 +1152,6 @@ class EGLHeadlessServer:
                 metadata={"pose_seq": seq},
             )
 
-            # Volume cache: camera_volume.*
-            if pose.angles is not None and pose.distance is not None and pose.fov is not None:
-                assert pose.center is not None, "volume pose requires center"
-
-                vol_entries = [
-                    ("camera_volume", "main", "center", tuple(float(c) for c in pose.center)),
-                    ("camera_volume", "main", "angles", tuple(float(a) for a in pose.angles)),
-                    ("camera_volume", "main", "distance", float(pose.distance)),
-                    ("camera_volume", "main", "fov", float(pose.fov)),
-                ]
-                self._state_ledger.batch_record_confirmed(
-                    vol_entries,
-                    origin="worker.state.camera_volume",
-                )
-
         # Close any open op after camera commit so dims+level+camera are atomic for mirrors
         op_state = self._state_ledger.get("scene", "main", "op_state")
         if op_state is not None:
