@@ -1699,7 +1699,8 @@ async def _emit_stream_baseline(
     channel = getattr(server, "_pixel_channel", None)
     cfg = getattr(server, "_pixel_config", None)
     if channel is None or cfg is None:
-        raise AssertionError("Pixel channel not initialized")
+        logger.debug("connect: notify.stream baseline deferred (pixel channel not initialized)")
+        return
 
     avcc = channel.last_avcc
     if avcc is not None:
