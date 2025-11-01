@@ -332,8 +332,11 @@ def snapshot_scene(
         normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
         if normalized_thumb is not None:
             layer_metadata["thumbnail"] = normalized_thumb.tolist()
-    if layer_metadata:
-        layer_block["metadata"] = layer_metadata
+            layer_metadata["thumbnail_status"] = "ready"
+    if "thumbnail_status" not in layer_metadata:
+        layer_metadata["thumbnail_status"] = "pending"
+
+    layer_block["metadata"] = layer_metadata
 
     multiscale_block = _build_multiscale_block(multiscale_state, base_shape=geometry.shape)
     if multiscale_block:

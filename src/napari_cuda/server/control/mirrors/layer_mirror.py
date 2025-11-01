@@ -24,6 +24,7 @@ _ALLOWED_LAYER_KEYS = {
     "contrast_limits",
     "attenuation",
     "iso_threshold",
+    "metadata",
 }
 
 

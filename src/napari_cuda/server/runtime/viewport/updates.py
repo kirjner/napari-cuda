@@ -177,6 +177,13 @@ def apply_layer_updates(worker: Any, updates: Mapping[str, Mapping[str, Any]]) -
                 layer.attenuation = float(value)  # type: ignore[assignment]
             elif key == "iso_threshold":
                 layer.iso_threshold = float(value)  # type: ignore[assignment]
+            elif key == "metadata":
+                if not isinstance(value, Mapping):
+                    raise ValueError("metadata updates require mapping payloads")
+                metadata_map = dict(layer.metadata)
+                for m_key, m_val in value.items():
+                    metadata_map[str(m_key)] = m_val
+                layer.metadata = metadata_map
             else:
                 raise KeyError(f"Unsupported layer property '{key}'")
 

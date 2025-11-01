@@ -2740,6 +2740,9 @@ async def _send_state_baseline(server: Any, ws: Any) -> None:
                 block_controls = layer_snapshot.block["controls"]
                 assert isinstance(block_controls, Mapping), "layer snapshot controls missing mapping"
                 controls.update({str(key): value for key, value in block_controls.items()})
+            metadata_block = layer_snapshot.block.get("metadata")
+            if isinstance(metadata_block, Mapping) and metadata_block:
+                controls.setdefault("metadata", dict(metadata_block))
             if controls:
                 default_controls.append((layer_id, controls))
 

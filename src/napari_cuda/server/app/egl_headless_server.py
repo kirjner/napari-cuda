@@ -636,7 +636,7 @@ class EGLHeadlessServer:
         volume_state = snapshot_volume_state(ledger_snapshot)
         layer_controls = snapshot_layer_controls(ledger_snapshot)
 
-        thumbnail_provider = self._layer_thumbnail if worker_ready else None
+        thumbnail_provider = self._layer_thumbnail
 
         self._scene_snapshot = snapshot_scene(
             render_state=render_snapshot,
@@ -882,6 +882,43 @@ class EGLHeadlessServer:
                 _send_state_baseline(self, ws),
                 f"baseline-{reason}",
             )
+
+    async def _emit_layer_thumbnail(
+        self,
+        layer_id: str,
+        *,
+        retries: int = 5,
+        delay_s: float = 0.25,
+    ) -> None:
+        for attempt in range(retries):
+            worker = self._worker
+            if worker is None or not worker.is_ready:
+                await asyncio.sleep(delay_s)
+                continue
+            array = self._layer_thumbnail(layer_id)
+            if array is None or array.size == 0:
+                await asyncio.sleep(delay_s)
+                continue
+            arr = np.asarray(array, dtype=np.float32)
+            np.clip(arr, 0.0, 1.0, out=arr)
+            metadata = {
+                "thumbnail": arr.tolist(),
+                "thumbnail_status": "ready",
+                "thumbnail_shape": list(arr.shape),
+                "thumbnail_dtype": str(arr.dtype),
+                "thumbnail_version": float(time.time()),
+            }
+            self._state_ledger.record_confirmed(
+                "layer",
+                layer_id,
+                "metadata",
+                metadata,
+                origin="server.thumbnail",
+            )
+            self._refresh_scene_snapshot()
+            return
+            
+        logger.debug("thumbnail emission skipped for layer %s (no data)", layer_id)
 
     def _require_data_root(self) -> Path:
         if not self._data_root:

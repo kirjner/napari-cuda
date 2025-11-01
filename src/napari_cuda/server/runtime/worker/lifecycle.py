@@ -243,6 +243,15 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             # Now flip worker ready
             worker._is_ready = True
 
+            def _emit_initial_thumbnail() -> None:
+                layer_id = server._default_layer_id()
+                server._schedule_coro(
+                    server._emit_layer_thumbnail(layer_id),
+                    "initial-layer-thumbnail",
+                )
+
+            control_loop.call_soon_threadsafe(_emit_initial_thumbnail)
+
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
 
