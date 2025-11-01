@@ -4,12 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from napari_cuda.server.scene import RenderLedgerSnapshot
-from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_mod
-from napari_cuda.server.runtime.render_loop.apply.render_state import plane as plane_mod
-from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
 from napari_cuda.server.data import SliceROI
+from napari_cuda.server.runtime.render_loop.apply.render_state import (
+    apply as snapshot_mod,
+    plane as plane_mod,
+)
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
+from napari_cuda.server.scene import RenderLedgerSnapshot
 
 
 class _NoopEvent:

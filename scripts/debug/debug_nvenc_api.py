@@ -22,7 +22,6 @@ for fmt_str in test_formats:
 
 print()
 print("3. Looking for examples in the module...")
-import inspect
 
 # Check for any example usage
 if hasattr(pnvc, '__file__'):

@@ -5,15 +5,14 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
-from typing import Dict, Iterable, Tuple
+from collections.abc import Iterable
 
 from grimp import build_graph
-
 
 SERVER_PREFIX = "napari_cuda.server."
 
 
-def classify(module: str, mapping: Dict[str, str]) -> str:
+def classify(module: str, mapping: dict[str, str]) -> str:
     """Return the domain bucket for a module (defaults to 'misc')."""
     if not module.startswith(SERVER_PREFIX):
         return "external"
@@ -26,8 +25,8 @@ def collect_edges(
     *,
     graph_root: str,
     include_external: bool,
-    mapping: Dict[str, str],
-) -> Iterable[Tuple[str, str]]:
+    mapping: dict[str, str],
+) -> Iterable[tuple[str, str]]:
     graph = build_graph(graph_root, include_external_packages=include_external)
     for module in graph.modules:
         if not module.startswith(SERVER_PREFIX):
@@ -38,14 +37,14 @@ def collect_edges(
             yield src_bucket, dst_bucket
 
 
-def build_matrix(edges: Iterable[Tuple[str, str]]) -> Dict[str, Counter]:
-    matrix: Dict[str, Counter] = defaultdict(Counter)
+def build_matrix(edges: Iterable[tuple[str, str]]) -> dict[str, Counter]:
+    matrix: dict[str, Counter] = defaultdict(Counter)
     for src, dst in edges:
         matrix[src][dst] += 1
     return matrix
 
 
-def render(matrix: Dict[str, Counter]) -> None:
+def render(matrix: dict[str, Counter]) -> None:
     headers = sorted({bucket for bucket in matrix} | {dst for counter in matrix.values() for dst in counter})
     header_line = " " * 15 + " ".join(f"{h:>10}" for h in headers)
     print(header_line)

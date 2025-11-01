@@ -17,15 +17,21 @@ from napari_cuda.server.data.roi import (
     plane_scale_for_level,
     plane_wh_for_level,
 )
+from napari_cuda.server.runtime.bootstrap.interface import (
+    ViewerBootstrapInterface,
+)
+from napari_cuda.server.runtime.bootstrap.scene_setup import (
+    reset_worker_camera,
+)
 from napari_cuda.server.runtime.camera import CameraPoseApplied
-from napari_cuda.server.runtime.bootstrap.scene_setup import reset_worker_camera
-from napari_cuda.server.runtime.render_loop.plan.ledger_access import step as ledger_step
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
+from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
+    step as ledger_step,
+)
 from napari_cuda.server.runtime.viewport import (
     PlaneState,
     RenderMode,
 )
-from napari_cuda.server.runtime.bootstrap.interface import ViewerBootstrapInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import ZarrSceneSource

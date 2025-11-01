@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Awaitable, Mapping, Optional, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
+from typing import Any, Optional
 
 from napari_cuda.protocol import build_notify_camera
+from napari_cuda.server.control.protocol_io import send_frame
 from napari_cuda.server.control.protocol_runtime import (
     feature_enabled,
     state_session,
 )
-from napari_cuda.server.control.protocol_io import send_frame
 
 
 async def broadcast_camera_update(

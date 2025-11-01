@@ -27,7 +27,7 @@ async def _drain_once(uri: str, frames: int, idle_timeout: float, max_runtime: f
                 break
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=idle_timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 _LOG.warning("Pixel drain timeout after %d frames", received)
                 break
             except Exception:

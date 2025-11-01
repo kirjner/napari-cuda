@@ -5,8 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Mapping
+from typing import (
+    Any,
+    Optional,
+)
+
 import numpy as np
 
 from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
@@ -25,7 +30,7 @@ def _maybe_enable_debug_logger() -> bool:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter('[%(asctime)s] %(name)s - %(levelname)s - %(message)s'))
         handler.setLevel(logging.DEBUG)
-        setattr(handler, "_napari_cuda_local", True)
+        handler._napari_cuda_local = True
         logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -53,18 +58,18 @@ LayerListener = Callable[["RegistrySnapshot"], None]
 @dataclass(frozen=True)
 class LayerRecord:
     layer_id: str
-    block: Dict[str, Any]
+    block: dict[str, Any]
     layer: RemoteImageLayer
 
 
 @dataclass(frozen=True)
 class RegistrySnapshot:
-    layers: Tuple[LayerRecord, ...]
+    layers: tuple[LayerRecord, ...]
 
     def iter(self) -> Iterable[LayerRecord]:
         return self.layers
 
-    def ids(self) -> Tuple[str, ...]:
+    def ids(self) -> tuple[str, ...]:
         return tuple(record.layer_id for record in self.layers)
 
 
@@ -73,10 +78,10 @@ class RemoteLayerRegistry:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._layers: Dict[str, RemoteImageLayer] = {}
-        self._blocks: Dict[str, Dict[str, Any]] = {}
-        self._order: List[str] = []
-        self._listeners: List[LayerListener] = []
+        self._layers: dict[str, RemoteImageLayer] = {}
+        self._blocks: dict[str, dict[str, Any]] = {}
+        self._order: list[str] = []
+        self._listeners: list[LayerListener] = []
 
     # ------------------------------------------------------------------
     def add_listener(self, callback: LayerListener) -> None:
@@ -93,7 +98,7 @@ class RemoteLayerRegistry:
     def apply_snapshot(self, snapshot: SceneSnapshot) -> None:
         emitted: Optional[RegistrySnapshot] = None
         with self._lock:
-            desired_order: List[str] = []
+            desired_order: list[str] = []
             changed = False
             for entry in snapshot.layers:
                 layer_id = entry.layer_id
@@ -168,10 +173,10 @@ class RemoteLayerRegistry:
                     controls = {}
                     block["controls"] = controls
                 # Structured sections
-                controls_delta: Dict[str, Any] = dict(delta.controls) if delta.controls else {}
-                metadata_delta: Dict[str, Any] | None = dict(delta.metadata) if delta.metadata else None
-                data_delta: Dict[str, Any] | None = dict(delta.data) if delta.data else None
-                thumbnail_delta: Dict[str, Any] | None = dict(delta.thumbnail) if delta.thumbnail else None
+                controls_delta: dict[str, Any] = dict(delta.controls) if delta.controls else {}
+                metadata_delta: dict[str, Any] | None = dict(delta.metadata) if delta.metadata else None
+                data_delta: dict[str, Any] | None = dict(delta.data) if delta.data else None
+                thumbnail_delta: dict[str, Any] | None = dict(delta.thumbnail) if delta.thumbnail else None
 
                 needs_full_update = False
                 # Apply data changes first (structural)
@@ -246,7 +251,7 @@ class RemoteLayerRegistry:
 
     # ------------------------------------------------------------------
     def _snapshot_locked(self) -> RegistrySnapshot:
-        entries: List[LayerRecord] = []
+        entries: list[LayerRecord] = []
         for layer_id in self._order:
             layer = self._layers.get(layer_id)
             block = self._blocks.get(layer_id)
@@ -262,10 +267,10 @@ class RemoteLayerRegistry:
             except Exception:
                 logger.debug("layer registry listener failed", exc_info=True)
 
-    def _create_layer(self, layer_id: str, block: Dict[str, Any]) -> RemoteImageLayer | None:
+    def _create_layer(self, layer_id: str, block: dict[str, Any]) -> RemoteImageLayer | None:
         layer_type = str(block.get("layer_type", "")).lower()
         assert layer_type in {"image", "volume"}, f"unsupported layer type: {layer_type!r}"
         return RemoteImageLayer(layer_id=layer_id, block=block)
 
-    def _update_layer(self, layer: RemoteImageLayer, block: Dict[str, Any]) -> None:
+    def _update_layer(self, layer: RemoteImageLayer, block: dict[str, Any]) -> None:
         layer.update_from_block(block)

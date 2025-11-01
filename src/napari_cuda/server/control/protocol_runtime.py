@@ -7,11 +7,14 @@ carrying behavior beyond simple lookups and object creation.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from napari_cuda.protocol import FeatureToggle
 from napari_cuda.protocol.envelopes import ResumableTopicSequencer
-from napari_cuda.server.control.resumable_history_store import ResumableHistoryStore
+from napari_cuda.server.control.resumable_history_store import (
+    ResumableHistoryStore,
+)
 
 
 def state_session(ws: Any) -> Optional[str]:
@@ -42,8 +45,8 @@ def state_sequencer(ws: Any, topic: str) -> ResumableTopicSequencer:
 
 
 __all__ = [
-    "state_session",
-    "history_store",
     "feature_enabled",
+    "history_store",
     "state_sequencer",
+    "state_session",
 ]

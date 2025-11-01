@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import torch  # type: ignore
 import torch.nn.functional as F  # type: ignore
 
-from .gl_capture import GLCapture
 from .cuda_interop import CudaInterop
+from .gl_capture import GLCapture
 
 logger = logging.getLogger(__name__)
 

@@ -7,27 +7,15 @@ state channel. No direct sockets or legacy dims.set paths remain here.
 
 import logging
 import os
-from typing import Optional, TYPE_CHECKING, Sequence
 
-import napari
-from qtpy.QtWidgets import QApplication
 from napari.components.viewer_model import ViewerModel
+
 try:
     # pydantic v1 compatibility (used by napari EventedModel)
     from pydantic.v1 import PrivateAttr
 except Exception:  # pragma: no cover
     from pydantic import PrivateAttr  # type: ignore
-from napari.components import LayerList, Dims, Camera
 
-if TYPE_CHECKING:
-    # This import reveals napari's intentional architectural coupling between
-    # Viewer and Window. While theoretically the model shouldn't know about
-    # the GUI, napari deliberately couples them for a cohesive application.
-    # This coupling is actually beneficial for our proxy pattern - it means
-    # ViewerModel already has the exact "shape" the GUI expects, making our
-    # ProxyViewer a perfect drop-in replacement that can intercept all 
-    # viewer operations while maintaining API compatibility.
-    from napari._qt.qt_main_window import Window
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +39,7 @@ def _maybe_enable_debug_logger() -> None:
         fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
         h.setFormatter(logging.Formatter(fmt))
         h.setLevel(logging.DEBUG)
-        setattr(h, '_napari_cuda_local', True)
+        h._napari_cuda_local = True
         logger.addHandler(h)
         logger.setLevel(logging.DEBUG)
         logger.propagate = False
@@ -67,7 +55,7 @@ class ProxyViewer(ViewerModel):
     This inherits from ViewerModel (not Viewer) to avoid creating a Window.
     The Window and QtViewer will be created separately by the launcher.
     """
-    
+
     # Private attributes (not part of the pydantic/EventedModel schema)
     _server_host: str = PrivateAttr(default='localhost')
     _server_port: int = PrivateAttr(default=8081)
@@ -120,9 +108,9 @@ class ProxyViewer(ViewerModel):
     @window.setter
     def window(self, value):  # value: 'Window'
         self._window = value
-    
+
     # No direct socket handling in thin client mode
-    
+
     def _on_camera_change(self, event=None):
         """Forward camera change.
 
@@ -132,7 +120,7 @@ class ProxyViewer(ViewerModel):
         ops through the coordinator.
         """
         return
-    
+
     # --- Streaming client bridge -------------------------------------------------
     def attach_state_sender(self, sender) -> None:
         """Attach a coordinator-like sender for thin client state forwarding."""
@@ -231,39 +219,39 @@ class ProxyViewer(ViewerModel):
     def add_image(self, *args, **kwargs):
         """Block local image addition."""
         logger.warning("ProxyViewer: add_image blocked (server-side only)")
-        return None
-    
+        return
+
     def add_labels(self, *args, **kwargs):
         """Block local labels addition."""
         logger.warning("ProxyViewer: add_labels blocked (server-side only)")
-        return None
-    
+        return
+
     def add_points(self, *args, **kwargs):
         """Block local points addition."""
         logger.warning("ProxyViewer: add_points blocked (server-side only)")
-        return None
-    
+        return
+
     def add_shapes(self, *args, **kwargs):
         """Block local shapes addition."""
         logger.warning("ProxyViewer: add_shapes blocked (server-side only)")
-        return None
-    
+        return
+
     def screenshot(self, *args, **kwargs):
         """Screenshot happens server-side."""
         logger.info("Screenshot requested from server")
         # Could implement by requesting high-quality frame from server
-        return None
-    
+        return
+
     @property
     def window(self):
         """Return the window if set by launcher."""
         return self._window
-    
+
     @window.setter
     def window(self, value):
         """Allow launcher to set the window."""
         self._window = value
-    
+
     def close(self):
         """Close connection to server and window if exists."""
         if self._window:
@@ -271,7 +259,7 @@ class ProxyViewer(ViewerModel):
         logger.info("ProxyViewer closed")
 
     @property
-    def _suppress_forward(self) -> bool:  # noqa: D401 - legacy compatibility
+    def _suppress_forward(self) -> bool:
         """Expose suppression flag for legacy callers."""
         return bool(self._suppress_forward_flag)
 

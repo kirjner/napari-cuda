@@ -8,7 +8,8 @@ high-entropy random noise that tends to trigger macroblock artifacts.
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence, Tuple
+from typing import Optional
+
 import numpy as np
 
 
@@ -114,7 +115,7 @@ def make_rgba_image(width: int, height: int, pattern: str | None = None) -> np.n
     if pat in ('cat', 'cat_hd'):
         # Pixel-art cat (16x16) with custom palette; 'cat_hd' applies micro-shading to 32x32
         # Palette: 0=bg, 1=fur, 2=shadow, 3=lines/eyes, 4=inner ear, 5=nose, 6=eye highlight
-        pal: Tuple[Tuple[int, int, int, int], ...] = (
+        pal: tuple[tuple[int, int, int, int], ...] = (
             (0, 0, 0, 255),        # 0 bg
             (220, 220, 220, 255),  # 1 fur
             (180, 180, 180, 255),  # 2 shadow

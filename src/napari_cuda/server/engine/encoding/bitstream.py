@@ -11,12 +11,13 @@ Provided helpers:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
-from typing import List, Optional, Tuple, Sequence, Union
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Optional, Union
 
-from napari_cuda.server.config.logging_policy import EncoderLogging
 from napari_cuda.server.config import BitstreamRuntime
+from napari_cuda.server.config.logging_policy import EncoderLogging
 
 # Optional Cython fast packer; default is to require it on server
 _BITSTREAM_RUNTIME = BitstreamRuntime()
@@ -70,20 +71,20 @@ class ParamCache:
     pps: Optional[bytes] = None
 
 
-def parse_nals(buf: bytes) -> List[bytes]:
+def parse_nals(buf: bytes) -> list[bytes]:
     """Split a buffer into raw NAL units (no start codes / no length prefixes).
 
     - If buffer uses Annex B start codes (0x000001 or 0x00000001), split on them.
     - Otherwise, treat as AVCC: a sequence of 4-byte big-endian lengths.
     - On malformed input, return the buffer as a single NAL for robustness.
     """
-    nals: List[bytes] = []
+    nals: list[bytes] = []
     if not buf:
         return nals
     if _is_annexb(buf):
         i = 0
         l = len(buf)
-        idx: List[int] = []
+        idx: list[int] = []
         while i < l - 3:
             if buf[i:i+3] == b"\x00\x00\x01":
                 idx.append(i); i += 3
@@ -94,7 +95,7 @@ def parse_nals(buf: bytes) -> List[bytes]:
         if not idx:
             return [buf]
         idx.append(l)
-        for a, b in zip(idx, idx[1:]):
+        for a, b in zip(idx, idx[1:], strict=False):
             j = a
             while j < b and buf[j] == 0:
                 j += 1
@@ -104,16 +105,15 @@ def parse_nals(buf: bytes) -> List[bytes]:
             if nal:
                 nals.append(nal)
         return nals
-    else:
-        # AVCC: 4-byte big-endian length prefixes
-        i = 0
-        l = len(buf)
-        while i + 4 <= l:
-            ln = int.from_bytes(buf[i:i+4], 'big'); i += 4
-            if ln <= 0 or i + ln > l:
-                return [buf]
-            nals.append(buf[i:i+ln]); i += ln
-        return nals if nals else [buf]
+    # AVCC: 4-byte big-endian length prefixes
+    i = 0
+    l = len(buf)
+    while i + 4 <= l:
+        ln = int.from_bytes(buf[i:i+4], 'big'); i += 4
+        if ln <= 0 or i + ln > l:
+            return [buf]
+        nals.append(buf[i:i+ln]); i += ln
+    return nals if nals else [buf]
 
 
 def pack_to_annexb(
@@ -121,7 +121,7 @@ def pack_to_annexb(
     cache: ParamCache,
     *,
     encoder_logging: Optional[EncoderLogging] = None,
-) -> Tuple[Optional[bytes], bool]:
+) -> tuple[Optional[bytes], bool]:
     """Normalize encoder output (bytes or list of bytes) to Annex B and detect keyframe.
 
     - Accepts bytes or list/tuple of byte-like objects
@@ -160,7 +160,7 @@ def pack_to_annexb(
             return buf, is_key
         chunks = [buf]
     else:
-        chunks: List[bytes] = []
+        chunks: list[bytes] = []
         if isinstance(packets, (list, tuple)):
             for p in packets:
                 if p is None:
@@ -172,7 +172,7 @@ def pack_to_annexb(
             except Exception:
                 return None, False
 
-    nal_units: List[bytes] = []
+    nal_units: list[bytes] = []
     for c in chunks:
         nal_units.extend(parse_nals(c))
 
@@ -211,7 +211,7 @@ def pack_to_annexb(
         elif n265 in (19, 20, 21):  # IDR/CRA
             is_key = True
 
-    out: List[bytes] = []
+    out: list[bytes] = []
     if is_key:
         if cache.vps and not saw_vps:
             out.append(cache.vps)
@@ -235,7 +235,7 @@ def pack_to_avcc(
     cache: ParamCache,
     *,
     encoder_logging: Optional[EncoderLogging] = None,
-) -> Tuple[Optional[bytes], bool]:
+) -> tuple[Optional[bytes], bool]:
     """Normalize encoder output to AVCC (4-byte length-prefixed) and detect keyframe.
 
     - Accepts bytes or list/tuple of byte-like objects (Annex B or AVCC)
@@ -248,7 +248,7 @@ def pack_to_avcc(
     if _FAST_PACK is None and not allow_fallback:
         raise RuntimeError(
             "Cython packer not available. Install with 'napari-cuda[server]' (includes Cython) "
-            "or enable the Python fallback via server context." 
+            "or enable the Python fallback via server context."
         )
     if _FAST_PACK is not None:
         try:
@@ -265,7 +265,7 @@ def pack_to_avcc(
         return None, False
     # Gather chunks as bytes
     if isinstance(packets, (bytes, bytearray, memoryview)):
-        chunks: List[bytes] = [bytes(packets)]
+        chunks: list[bytes] = [bytes(packets)]
     elif isinstance(packets, (list, tuple)):
         chunks = [bytes(p) for p in packets if p is not None]
     else:
@@ -275,7 +275,7 @@ def pack_to_avcc(
             return None, False
 
     # Flatten into NAL units
-    nal_units: List[bytes] = []
+    nal_units: list[bytes] = []
     for c in chunks:
         nal_units.extend(parse_nals(c))
 

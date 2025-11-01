@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional, Any
+from collections.abc import Callable
+from typing import Any, Optional
 
 from napari_cuda.client.rendering.vt_frame import FrameLease
-
 
 logger = logging.getLogger(__name__)
 

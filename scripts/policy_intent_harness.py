@@ -15,7 +15,6 @@ import logging
 import time
 import urllib.request
 from pathlib import Path
-from typing import Dict, List
 
 from napari_cuda.client.runtime.channel_threads import StateController
 
@@ -54,7 +53,7 @@ def run_harness(
     final_zoom: float = 1.01,
     verbose: bool = False,
 ) -> None:
-    records: List[Dict[str, object]] = []
+    records: list[dict[str, object]] = []
 
     controller = StateController(host, state_port)
     channel, _thread = controller.start()
@@ -62,7 +61,7 @@ def run_harness(
 
     seq = 1
 
-    def send(payload: Dict[str, object], label: str) -> None:
+    def send(payload: dict[str, object], label: str) -> None:
         nonlocal seq
         message = {
             "client_id": "policy-harness",

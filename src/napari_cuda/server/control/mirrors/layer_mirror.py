@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Optional
 
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
-
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[str, Mapping[str, object], Optional[str], float], Awaitable[None]]
@@ -46,11 +46,11 @@ class ServerLayerMirror:
         self._lock = threading.Lock()
         self._started = False
         self._op_open = False
-        self._pending: Dict[str, Dict[str, object]] = {}
-        self._pending_versions: Dict[Tuple[str, str], int] = {}
-        self._pending_intents: Dict[str, Optional[str]] = {}
-        self._last_versions: Dict[Tuple[str, str], int] = {}
-        self._latest_controls: Dict[str, Dict[str, object]] = defaultdict(dict)
+        self._pending: dict[str, dict[str, object]] = {}
+        self._pending_versions: dict[tuple[str, str], int] = {}
+        self._pending_intents: dict[str, Optional[str]] = {}
+        self._last_versions: dict[tuple[str, str], int] = {}
+        self._latest_controls: dict[str, dict[str, object]] = defaultdict(dict)
         self._ndisplay: Optional[int] = None
 
     # ------------------------------------------------------------------
@@ -71,7 +71,7 @@ class ServerLayerMirror:
         self._ledger.subscribe_all(self._on_event)
 
     # ------------------------------------------------------------------
-    def latest_controls(self) -> Dict[str, Dict[str, object]]:
+    def latest_controls(self) -> dict[str, dict[str, object]]:
         with self._lock:
             return {layer: dict(props) for layer, props in self._latest_controls.items() if props}
 
@@ -88,8 +88,8 @@ class ServerLayerMirror:
     # ------------------------------------------------------------------
     def _on_op_state(self, event: LedgerEvent) -> None:
         value = str(event.value)
-        to_flush: Dict[str, Dict[str, object]] = {}
-        intents: Dict[str, Optional[str]] = {}
+        to_flush: dict[str, dict[str, object]] = {}
+        intents: dict[str, Optional[str]] = {}
         with self._lock:
             if value == "open":
                 self._op_open = True
@@ -125,8 +125,8 @@ class ServerLayerMirror:
             return
         if scope not in {"layer", "volume", "multiscale"}:
             return
-        to_flush: Optional[Dict[str, Dict[str, object]]] = None
-        intents: Dict[str, Optional[str]] = {}
+        to_flush: Optional[dict[str, dict[str, object]]] = None
+        intents: dict[str, Optional[str]] = {}
         with self._lock:
             layer_id, prop, value = self._map_event_locked(event)
             if layer_id is None or prop is None:
@@ -153,7 +153,7 @@ class ServerLayerMirror:
             self._flush(to_flush, intents, event.timestamp)
 
     # ------------------------------------------------------------------
-    def _drain_pending_locked(self) -> Dict[str, Dict[str, object]]:
+    def _drain_pending_locked(self) -> dict[str, dict[str, object]]:
         pending = self._pending
         self._pending = {}
         return {layer: dict(props) for layer, props in pending.items() if props}
@@ -161,8 +161,8 @@ class ServerLayerMirror:
     # ------------------------------------------------------------------
     def _flush(
         self,
-        pending: Dict[str, Dict[str, object]],
-        intents: Dict[str, Optional[str]],
+        pending: dict[str, dict[str, object]],
+        intents: dict[str, Optional[str]],
         timestamp: float,
     ) -> None:
         for layer_id, changes in pending.items():

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Mapping, Optional, Sequence
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from napari_cuda.protocol import NOTIFY_STREAM_TYPE
-from napari_cuda.protocol.messages import NotifyStreamPayload
 from napari_cuda.protocol.envelopes import build_notify_stream
+from napari_cuda.protocol.messages import NotifyStreamPayload
+from napari_cuda.server.control.protocol_io import send_frame
 from napari_cuda.server.control.protocol_runtime import (
     feature_enabled,
     history_store,
     state_sequencer,
     state_session,
 )
-from napari_cuda.server.control.protocol_io import send_frame
 from napari_cuda.server.control.resumable_history_store import EnvelopeSnapshot
 
 
@@ -154,8 +155,8 @@ async def broadcast_stream_config(
 
 
 __all__ = [
+    "broadcast_stream_config",
     "send_stream_frame",
     "send_stream_snapshot",
-    "broadcast_stream_config",
 ]
 

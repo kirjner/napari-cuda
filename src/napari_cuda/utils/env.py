@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from typing import Optional
 
 
 def env_str(name: str, default: Optional[str] = None) -> Optional[str]:

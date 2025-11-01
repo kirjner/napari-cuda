@@ -39,8 +39,8 @@ class WarmupPolicy:
 
 def on_gate_lift(
     policy: WarmupPolicy,
-    state: "ClientLoopState",
-    presenter: "FixedLatencyPresenter",
+    state: ClientLoopState,
+    presenter: FixedLatencyPresenter,
     base_latency_s: float,
     fps: float | None,
 ) -> None:
@@ -57,8 +57,8 @@ def on_gate_lift(
 
 def apply_ramp(
     policy: WarmupPolicy,
-    state: "ClientLoopState",
-    presenter: "FixedLatencyPresenter",
+    state: ClientLoopState,
+    presenter: FixedLatencyPresenter,
     base_latency_s: float,
     now_pc: float,
 ) -> None:
@@ -76,8 +76,8 @@ def apply_ramp(
 
 
 def cancel(
-    state: "ClientLoopState",
-    presenter: "FixedLatencyPresenter",
+    state: ClientLoopState,
+    presenter: FixedLatencyPresenter,
     base_latency_s: float,
 ) -> None:
     """Reset warmup state and restore the baseline latency."""

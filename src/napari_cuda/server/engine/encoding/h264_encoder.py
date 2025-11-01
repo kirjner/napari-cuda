@@ -13,7 +13,7 @@ This module avoids importing PyAV at import time; it loads PyAV lazily.
 
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Dict, List, Optional
+from typing import Optional
 
 from napari_cuda.codec.avcc import AccessUnit, parse_avcc
 from napari_cuda.server.engine.encoding.bitstream import (
@@ -31,7 +31,7 @@ class EncoderConfig:
     height: int = 720
     fps: float = 60.0
     pix_fmt: Optional[str] = None  # defaults: nv12 for VT, yuv420p otherwise
-    options: Optional[Dict[str, str]] = None
+    options: Optional[dict[str, str]] = None
 
 
 class H264Encoder:
@@ -64,7 +64,7 @@ class H264Encoder:
         enc.height = int(c.height)
         enc.pix_fmt = c.pix_fmt or ('nv12' if c.name == 'h264_videotoolbox' else 'yuv420p')
         enc.time_base = Fraction(1, int(round(c.fps)))
-        opts: Dict[str, str] = {}
+        opts: dict[str, str] = {}
         if c.options:
             opts.update({str(k): str(v) for k, v in c.options.items()})
         else:
@@ -139,7 +139,7 @@ class H264Encoder:
         except Exception:
             return
 
-    def encode_rgb_frame(self, rgb: 'object', pixfmt: str = 'rgb24', pts: Optional[float] = None) -> List[AccessUnit]:
+    def encode_rgb_frame(self, rgb: object, pixfmt: str = 'rgb24', pts: Optional[float] = None) -> list[AccessUnit]:
         """Encode a single RGB ndarray and return a list of AVCC AUs for the frame.
 
         The returned list usually contains 0-1 AUs; encoders can emit multiple packets
@@ -155,20 +155,20 @@ class H264Encoder:
         except Exception:
             pass
         out = self._enc.encode(vf)
-        payloads: List[bytes] = []
+        payloads: list[bytes] = []
         for p in out:
             # Ingest side-data extradata early to seed SPS/PPS if needed
             if self._cache.sps is None or self._cache.pps is None:
                 self._ingest_side_extradata(p)
             payloads.append(self._pkt_bytes(p))
         au_bytes, is_key = pack_to_avcc(payloads, self._cache)
-        result: List[AccessUnit] = []
+        result: list[AccessUnit] = []
         if au_bytes is not None:
             # Attach provided PTS if any; caller computes based on frame index/fps
             result.append(AccessUnit(payload=au_bytes, is_keyframe=bool(is_key), pts=pts))
         return result
 
-    def flush(self) -> List[AccessUnit]:
+    def flush(self) -> list[AccessUnit]:
         if not self._opened or self._enc is None:
             return []
         out = []
@@ -176,7 +176,7 @@ class H264Encoder:
             pkts = self._enc.encode(None)
         except Exception:
             pkts = []
-        payloads: List[bytes] = []
+        payloads: list[bytes] = []
         for p in pkts:
             if self._cache.sps is None or self._cache.pps is None:
                 self._ingest_side_extradata(p)

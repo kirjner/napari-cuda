@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 from napari_cuda.codec.avcc import is_annexb
 
@@ -20,7 +20,9 @@ class VTLiveDecoder:
     """
 
     def __init__(self, avcc: bytes, width: int, height: int) -> None:
-        from napari_cuda.client.rendering.vt_shim import VTShimDecoder  # type: ignore
+        from napari_cuda.client.rendering.vt_shim import (
+            VTShimDecoder,  # type: ignore
+        )
 
         self._shim = VTShimDecoder(avcc, width, height)
 
@@ -30,7 +32,7 @@ class VTLiveDecoder:
         assert not is_annexb(avcc_au), "VTLiveDecoder requires AVCC, got AnnexB input"
         return bool(self._shim.decode(avcc_au, ts))
 
-    def get_frame_nowait(self) -> Optional[Tuple[object, Optional[float]]]:
+    def get_frame_nowait(self) -> Optional[tuple[object, Optional[float]]]:
         item = self._shim.get_frame_nowait()
         if not item:
             return None

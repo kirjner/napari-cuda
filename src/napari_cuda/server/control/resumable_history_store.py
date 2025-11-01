@@ -5,9 +5,10 @@ from __future__ import annotations
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Optional
 
 from napari_cuda.protocol import FeatureResumeState
 
@@ -40,7 +41,7 @@ class ResumableTopicHistory:
     topic: str
     retention: ResumableRetention
     snapshot: Optional[EnvelopeSnapshot] = None
-    deltas: Deque[EnvelopeSnapshot] = field(default_factory=deque)
+    deltas: deque[EnvelopeSnapshot] = field(default_factory=deque)
 
     def latest_cursor(self) -> Optional[FeatureResumeState]:
         if self.deltas:
@@ -64,7 +65,7 @@ class ResumePlan:
 
     topic: str
     decision: ResumeDecision
-    deltas: List[EnvelopeSnapshot]
+    deltas: list[EnvelopeSnapshot]
 
 
 class ResumableHistoryStore:
@@ -74,12 +75,12 @@ class ResumableHistoryStore:
         self,
         retention: Mapping[str, ResumableRetention],
     ) -> None:
-        self._retention: Dict[str, ResumableRetention] = dict(retention)
-        self._topics: Dict[str, ResumableTopicHistory] = {
+        self._retention: dict[str, ResumableRetention] = dict(retention)
+        self._topics: dict[str, ResumableTopicHistory] = {
             name: ResumableTopicHistory(topic=name, retention=policy)
             for name, policy in self._retention.items()
         }
-        self._seq_state: Dict[str, int] = {name: -1 for name in retention}
+        self._seq_state: dict[str, int] = {name: -1 for name in retention}
 
     # ------------------------------------------------------------------
     # Snapshot / delta recording
@@ -187,7 +188,7 @@ class ResumableHistoryStore:
     def current_snapshot(self, topic: str) -> Optional[EnvelopeSnapshot]:
         return self._topic(topic).snapshot
 
-    def all_deltas(self, topic: str) -> List[EnvelopeSnapshot]:
+    def all_deltas(self, topic: str) -> list[EnvelopeSnapshot]:
         return list(self._topic(topic).deltas)
 
     def reset_epoch(

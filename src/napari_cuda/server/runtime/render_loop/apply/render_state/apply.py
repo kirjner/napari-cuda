@@ -13,13 +13,13 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.viewport.state import RenderMode
-
 from napari_cuda.server.runtime.render_loop.apply_interface import (
     RenderApplyInterface,
 )
+from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene import RenderLedgerSnapshot
+
 from .plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,

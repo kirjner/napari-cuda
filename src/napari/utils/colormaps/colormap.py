@@ -5,13 +5,13 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Self,
     cast,
     overload,
 )
 from warnings import warn
 
 import numpy as np
-from typing_extensions import Self
 
 from napari._pydantic_compat import Field, PrivateAttr, validator
 from napari.utils.color import ColorArray, ColorValue

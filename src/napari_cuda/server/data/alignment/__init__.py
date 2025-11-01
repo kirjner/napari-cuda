@@ -8,12 +8,11 @@ alignment profiles before the heavy lifting is wired into the server.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict
-
-import json
 
 __all__ = [
     "AlignmentDependencyError",
@@ -32,7 +31,7 @@ class AlignmentProfile:
     """Container for Allen CCF alignment configuration."""
 
     source: Path
-    data: Dict[str, Any]
+    data: dict[str, Any]
 
     def get(self, key: str, default: Any | None = None) -> Any | None:
         return self.data.get(key, default)

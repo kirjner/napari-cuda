@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import time
 import types
-from typing import Dict
 
 import pytest
 
@@ -18,8 +17,8 @@ from napari_cuda.protocol import (
     FeatureResumeState,
     FeatureToggle,
     build_ack_state,
-    build_notify_layers_delta,
     build_notify_dims,
+    build_notify_layers_delta,
     build_notify_scene_snapshot,
     build_notify_stream,
     build_session_heartbeat,
@@ -34,7 +33,7 @@ from napari_cuda.protocol.messages import (
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def state_channel() -> StateChannel:
     return StateChannel('localhost', 8081)
 
@@ -287,8 +286,8 @@ def test_state_channel_notify_stream_dispatch() -> None:
     assert payload.format == 'avcc'
 
 
-def _welcome_with_features(session_id: str, resume_tokens: Dict[str, str]) -> object:
-    features: Dict[str, FeatureToggle] = {}
+def _welcome_with_features(session_id: str, resume_tokens: dict[str, str]) -> object:
+    features: dict[str, FeatureToggle] = {}
     for name, token in (
         ("notify.scene", resume_tokens.get("notify.scene")),
         ("notify.layers", resume_tokens.get("notify.layers")),
@@ -386,7 +385,7 @@ def test_handle_session_heartbeat_sends_ack(monkeypatch) -> None:
     )
     channel._record_session_metadata(welcome)
 
-    captured: Dict[str, object] = {}
+    captured: dict[str, object] = {}
 
     def _fake_send(self, frame):
         captured['frame'] = frame
@@ -414,7 +413,7 @@ def test_handle_session_heartbeat_propagates_send_failure() -> None:
     )
     channel._record_session_metadata(welcome)
 
-    def _fail_send(self, frame):  # noqa: ARG001
+    def _fail_send(self, frame):
         return False
 
     channel.send_frame = types.MethodType(_fail_send, channel)  # type: ignore[assignment]
@@ -432,7 +431,7 @@ def test_monitor_heartbeat_timeout_triggers_close() -> None:
     closed = {'called': False}
 
     class DummyWS:
-        async def close(self, code=None, reason=None):  # noqa: ARG002
+        async def close(self, code=None, reason=None):
             closed['called'] = True
 
     async def _run() -> None:

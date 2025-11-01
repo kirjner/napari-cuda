@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional, Tuple
 import logging
+from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -12,7 +12,7 @@ class LayerAssignmentLogger:
     """Deduplicate verbose layer assignment logs."""
 
     logger_ref: logging.Logger
-    _last_key: Optional[Tuple[str, int, int]] = field(default=None, init=False)
+    _last_key: Optional[tuple[str, int, int]] = field(default=None, init=False)
 
     def log(
         self,
@@ -21,8 +21,8 @@ class LayerAssignmentLogger:
         mode: str,
         level: int,
         z_index: Optional[int],
-        shape: Tuple[int, ...],
-        contrast: Tuple[float, float],
+        shape: tuple[int, ...],
+        contrast: tuple[float, float],
         downgraded: bool,
     ) -> None:
         if not enabled or not self.logger_ref.isEnabledFor(logging.INFO):

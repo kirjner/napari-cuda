@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Any
 
 
-def default_volume_state() -> Dict[str, Any]:
+def default_volume_state() -> dict[str, Any]:
     """Return the canonical defaults for volume render hints."""
 
     return {

@@ -1,16 +1,24 @@
-from dataclasses import replace
 import os
+from dataclasses import replace
 
 import numpy as np
-
 import pytest
 
 try:
-    from napari_cuda.client.data import LayerRecord, RegistrySnapshot, RemotePreview
-    from napari_cuda.client.data.remote_data import RemoteArray
+    from napari_cuda.client.data import (
+        LayerRecord,
+        RegistrySnapshot,
+        RemotePreview,
+    )
     from napari_cuda.client.data.registry import RemoteLayerRegistry
+    from napari_cuda.client.data.remote_data import RemoteArray
     from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
-    from napari_cuda.protocol.snapshots import LayerDelta, LayerSnapshot, SceneSnapshot, ViewerSnapshot
+    from napari_cuda.protocol.snapshots import (
+        LayerDelta,
+        LayerSnapshot,
+        SceneSnapshot,
+        ViewerSnapshot,
+    )
     NAPARI_AVAILABLE = True
 except Exception as exc:  # pragma: no cover - environment dependent import guard
     NAPARI_AVAILABLE = False
@@ -20,12 +28,8 @@ except Exception as exc:  # pragma: no cover - environment dependent import guar
     LayerDelta = LayerSnapshot = SceneSnapshot = ViewerSnapshot = object  # type: ignore[assignment]
 
 if NAPARI_AVAILABLE:
-    from qtpy import QtCore
 
-    from napari_cuda.client.control.mirrors import NapariLayerMirror
-    from napari_cuda.client.control.state_update_actions import ControlStateContext
-    from napari_cuda.client.control.client_state_ledger import ClientStateLedger
-    from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+    pass
 
 def make_layer_block(**overrides) -> dict:
     base: dict[str, object] = {

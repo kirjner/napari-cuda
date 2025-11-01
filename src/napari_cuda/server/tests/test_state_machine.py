@@ -4,10 +4,10 @@ import math
 
 import pytest
 
+from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 
 
 class _FakeClock:

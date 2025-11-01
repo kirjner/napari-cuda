@@ -4,26 +4,26 @@ Launcher for napari-cuda streaming client.
 This creates the client application that connects to a remote napari-cuda server.
 """
 
-import sys
-import os
-import logging
 import argparse
+import logging
+import os
+import sys
 
 import napari
 from napari._qt.qt_main_window import Window
 from napari.components.viewer_model import ViewerModel
 from napari.utils.action_manager import action_manager
+from napari.utils.notifications import show_info
 from napari.utils.translations import trans
+from napari_cuda.client._qt.remote_file_dialog import RemoteFileDialog
 
 from .proxy_viewer import ProxyViewer
 from .streaming_canvas import StreamingCanvas
-from napari.utils.notifications import show_info
-from napari_cuda.client._qt.remote_file_dialog import RemoteFileDialog
 
 logger = logging.getLogger(__name__)
 
 
-def launch_streaming_client(server_host='localhost', 
+def launch_streaming_client(server_host='localhost',
                           state_port=8081,
                           pixel_port=8082,
                           debug=False):
@@ -61,9 +61,9 @@ def launch_streaming_client(server_host='localhost',
                 logging.getLogger('websockets.protocol').setLevel(logging.INFO)
             except Exception:
                 pass
-    
+
     logger.info(f"Launching streaming client for {server_host}")
-    
+
     # Create ProxyViewer (inherits from ViewerModel, no Window created)
     # In the streaming client, keep ProxyViewer offline and forward state
     # via the ClientStreamLoop to avoid dual sockets/drift.
@@ -72,17 +72,17 @@ def launch_streaming_client(server_host='localhost',
         server_port=state_port,
         offline=True,
     )
-    
+
     # Create Window manually with our ProxyViewer
     # The Window constructor expects a Viewer, but ViewerModel works too
     window = Window(proxy_viewer, show=False)
-    
+
     # Store window reference in the ProxyViewer
     proxy_viewer.window = window
-    
+
     # Replace the canvas with our streaming canvas
     qt_viewer = window._qt_viewer
-    
+
     # Create streaming canvas
     streaming_canvas = StreamingCanvas(
         proxy_viewer,
@@ -91,7 +91,7 @@ def launch_streaming_client(server_host='localhost',
         key_map_handler=getattr(qt_viewer, '_key_map_handler', None),
         parent=qt_viewer
     )
-    
+
     # Replace the default canvas with streaming canvas
     old_canvas = qt_viewer.canvas
     qt_viewer.canvas = streaming_canvas
@@ -100,9 +100,9 @@ def launch_streaming_client(server_host='localhost',
     if getattr(proxy_viewer, '_connection_pending', False):
         try:
             proxy_viewer._connect_to_server()
-        except Exception as e:
+        except Exception:
             logger.debug("Deferred server connect failed (will retry later)", exc_info=True)
-    
+
     # Replace canvas inside the QtViewer welcome overlay stack (current napari layout)
     try:
         ow = qt_viewer._welcome_widget  # QtWidgetOverlay(QStackedWidget)
@@ -133,7 +133,7 @@ def launch_streaming_client(server_host='localhost',
                 logger.debug("launcher: failed to hide welcome overlay (overlay widget)", exc_info=True)
     except Exception:
         logger.debug("launcher: overlay manipulation failed", exc_info=True)
-    
+
     # Clean up old canvas widget
     try:
         old_canvas.delete()
@@ -143,7 +143,7 @@ def launch_streaming_client(server_host='localhost',
             old_canvas.native.deleteLater()
         except Exception:
             logger.debug("launcher: cleanup old canvas native failed", exc_info=True)
-    
+
     # Delay showing the window until the first authoritative dims.update arrives.
     try:
         streaming_canvas.defer_window_show(window)
@@ -186,8 +186,8 @@ def launch_streaming_client(server_host='localhost',
 
                 suppress_token = None
                 if hasattr(viewer, '_suppress_forward'):
-                    suppress_token = getattr(viewer, '_suppress_forward')
-                    setattr(viewer, '_suppress_forward', True)
+                    suppress_token = viewer._suppress_forward
+                    viewer._suppress_forward = True
                 try:
                     viewer.dims.ndisplay = target
                 except Exception:
@@ -196,7 +196,7 @@ def launch_streaming_client(server_host='localhost',
                     )
                 finally:
                     if suppress_token is not None:
-                        setattr(viewer, '_suppress_forward', suppress_token)
+                        viewer._suppress_forward = suppress_token
 
                 try:
                     ndb.setChecked(target == 3)
@@ -217,27 +217,26 @@ def launch_streaming_client(server_host='localhost',
     logger.info("Client launched successfully")
 
     # Intercept File/Open actions via app-model action override (no monkeypatch)
-    from app_model.types import Action
     from napari._app_model import get_app_model
     from napari._qt.qt_viewer import QtViewer
 
     app = get_app_model()
 
     def _supports_remote_open_for(qt_viewer: 'QtViewer') -> bool:
-        mgr = getattr(qt_viewer.canvas, "_manager")
+        mgr = qt_viewer.canvas._manager
         cmds = set(mgr._command_catalog or ())
         return {"fs.listdir", "napari.zarr.load"}.issubset(cmds)
 
     def _remote_open_files(qt_viewer: 'QtViewer') -> None:
         if _supports_remote_open_for(qt_viewer):
-            mgr = getattr(qt_viewer.canvas, "_manager")
+            mgr = qt_viewer.canvas._manager
             dlg = RemoteFileDialog(mgr, parent=qt_viewer, select_folders=False)
             if dlg.exec_():
                 path = dlg.selected_path()
                 if path:
                     fut = mgr.open_remote_dataset(path, origin="ui")
 
-                    def _log_result(f):  # noqa: ANN001
+                    def _log_result(f):
                         _ = f.result()
                         show_info("Server dataset loaded")
 
@@ -248,14 +247,14 @@ def launch_streaming_client(server_host='localhost',
 
     def _remote_open_folder(qt_viewer: 'QtViewer') -> None:
         if _supports_remote_open_for(qt_viewer):
-            mgr = getattr(qt_viewer.canvas, "_manager")
+            mgr = qt_viewer.canvas._manager
             dlg = RemoteFileDialog(mgr, parent=qt_viewer, select_folders=True)
             if dlg.exec_():
                 path = dlg.selected_path()
                 if path:
                     fut = mgr.open_remote_dataset(path, origin="ui")
 
-                    def _log_result(f):  # noqa: ANN001
+                    def _log_result(f):
                         _ = f.result()
                         show_info("Server dataset loaded")
 
@@ -285,27 +284,27 @@ def main():
     parser = argparse.ArgumentParser(
         description='napari-cuda streaming client'
     )
-    
+
     parser.add_argument(
         '--host',
         default='localhost',
         help='Remote server hostname/IP (default: localhost)'
     )
-    
+
     parser.add_argument(
         '--state-port',
         type=int,
         default=8081,
         help='State synchronization port (default: 8081)'
     )
-    
+
     parser.add_argument(
         '--pixel-port',
         type=int,
         default=8082,
         help='Pixel stream port (default: 8082)'
     )
-    
+
     parser.add_argument(
         '--debug',
         action='store_true',
@@ -346,9 +345,9 @@ def main():
         action='store_true',
         help='Show SSH tunnel setup command'
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.tunnel_hint:
         print("SSH Tunnel Setup:")
         print(f"ssh -L {args.state_port}:localhost:{args.state_port} \\")
@@ -356,7 +355,7 @@ def main():
         print(f"    user@{args.host}")
         print("\nThen run client with: --host localhost")
         sys.exit(0)
-    
+
     # Client metrics envs
     if args.metrics:
         os.environ['NAPARI_CUDA_CLIENT_METRICS'] = '1'

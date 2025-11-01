@@ -4,10 +4,11 @@ import asyncio
 import base64
 import json
 import threading
-from types import SimpleNamespace
-from typing import Any, Coroutine, List, Tuple, Mapping, Optional
-
 import time
+from collections.abc import Coroutine, Mapping
+from types import SimpleNamespace
+from typing import Any, Optional
+
 import pytest
 
 from napari_cuda.protocol import (
@@ -19,6 +20,16 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo, NotifyDimsPayload
+from napari_cuda.protocol.snapshots import SceneSnapshot
+from napari_cuda.server.control import (
+    control_channel_server as state_channel_handler,
+)
+from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
+from napari_cuda.server.control.control_payload_builder import (
+    build_notify_scene_payload,
+)
+from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.resumable_history_store import (
     EnvelopeSnapshot,
     ResumableHistoryStore,
@@ -26,30 +37,6 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
 )
-from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
-
-from napari_cuda.server.control import control_channel_server as state_channel_handler
-from napari_cuda.server.control.topics.dims import broadcast_dims_state
-from napari_cuda.server.control.topics.layers import broadcast_layers_delta
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-)
-from napari_cuda.server.runtime.camera import CameraCommandQueue
-from napari_cuda.server.scene import (
-    snapshot_render_state,
-    snapshot_layer_controls,
-    snapshot_multiscale_state,
-    snapshot_scene,
-    snapshot_volume_state,
-)
-from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.runtime.viewport import (
-    PlaneState,
-    RenderMode,
-    ViewportState,
-    VolumeState,
-)
-from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
@@ -57,10 +44,25 @@ from napari_cuda.server.control.state_reducers import (
     reduce_level_update,
     reduce_plane_restore,
 )
+from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.layers import broadcast_layers_delta
+from napari_cuda.server.runtime.api import RuntimeHandle
+from napari_cuda.server.runtime.camera import CameraCommandQueue
+from napari_cuda.server.runtime.viewport import (
+    PlaneState,
+    RenderMode,
+    ViewportState,
+    VolumeState,
+)
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
+    snapshot_layer_controls,
+    snapshot_multiscale_state,
+    snapshot_render_state,
+    snapshot_scene,
+    snapshot_volume_state,
+)
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
-from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
-from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
 
 
 class _CaptureWorker:
@@ -133,7 +135,7 @@ class _FakeWS(SimpleNamespace):
     __hash__ = object.__hash__
 
 
-def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], List[dict[str, Any]]]:
+def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], list[dict[str, Any]]]:
     worker = _CaptureWorker()
 
     server = SimpleNamespace()
@@ -361,8 +363,8 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
     )
     server._pixel_config = SimpleNamespace()
     def _mark_stream_config_dirty() -> None:
-        setattr(server._pixel_channel, "needs_stream_config", True)
-    
+        server._pixel_channel.needs_stream_config = True
+
     def _build_stream_payload(avcc: bytes) -> NotifyStreamPayload:
         data = avcc
         if isinstance(data, memoryview):
@@ -382,16 +384,16 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
             latency_policy={},
             vt_hint=None,
         )
-    
+
     server.mark_stream_config_dirty = _mark_stream_config_dirty
     server.build_stream_payload = _build_stream_payload
     server._camera_seq: dict[str, int] = {}
-    
+
     def _next_camera_command_seq(target: str) -> int:
         current = server._camera_seq.get(target, 0) + 1
         server._camera_seq[target] = current
         return current
-    
+
     server._next_camera_command_seq = _next_camera_command_seq
 
     server._camera_queue = CameraCommandQueue()
@@ -1231,7 +1233,7 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
         loop.run_until_complete(state_channel_handler._perform_state_handshake(server, ws))
         _drain_scheduled(scheduled)
 
-        plan = getattr(ws, "_napari_cuda_resume_plan")
+        plan = ws._napari_cuda_resume_plan
         assert plan[state_channel_handler.NOTIFY_SCENE_TYPE].decision == ResumeDecision.REPLAY
         assert plan[state_channel_handler.NOTIFY_LAYERS_TYPE].decision == ResumeDecision.REPLAY
         assert plan[state_channel_handler.NOTIFY_STREAM_TYPE].decision == ResumeDecision.REPLAY

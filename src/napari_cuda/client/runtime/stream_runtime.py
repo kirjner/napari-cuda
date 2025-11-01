@@ -6,41 +6,20 @@ import os
 import queue
 import threading
 import time
-from threading import Thread
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
-from concurrent.futures import Future
 import weakref
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future
 from contextlib import ExitStack
+from typing import (
+    TYPE_CHECKING,
+    Optional,
+)
 
-import numpy as np
 from qtpy import QtCore
 
-from napari_cuda.client.rendering.presenter import FixedLatencyPresenter, SourceMux
-from napari_cuda.client.rendering.presenter_facade import PresenterFacade
-from napari_cuda.client.runtime.receiver import PixelReceiver, Packet
-from napari_cuda.client.rendering.types import Source, SubmittedFrame
-from napari_cuda.client.rendering.renderer import GLRenderer
-from napari_cuda.client.rendering.decoders.pyav import PyAVDecoder
-from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
-from napari_cuda.client.runtime.input import InputSender
-from napari_cuda.codec.avcc import (
-    annexb_to_avcc,
-    is_annexb,
-    split_annexb,
-    split_avcc_by_len,
-    build_avcc,
-    find_sps_pps,
-)
-from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
-from napari_cuda.client.runtime.client_loop.scheduler import CallProxy, WakeProxy
-from napari_cuda.client.runtime.client_loop.pipelines import (
-    build_pyav_pipeline,
-    build_vt_pipeline,
-)
-from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFallbacks
-from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.runtime.client_loop import warmup, camera, loop_lifecycle
 from napari_cuda.client.control import state_update_actions as control_actions
+from napari_cuda.client.control.client_state_ledger import ClientStateLedger
+from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 from napari_cuda.client.control.emitters import (
     NapariCameraIntentEmitter,
     NapariDimsIntentEmitter,
@@ -51,6 +30,35 @@ from napari_cuda.client.control.mirrors import (
     NapariLayerMirror,
     napari_dims_mirror,
 )
+from napari_cuda.client.data import RemoteLayerRegistry
+from napari_cuda.client.rendering.decoders.pyav import PyAVDecoder
+from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
+from napari_cuda.client.rendering.presenter import (
+    FixedLatencyPresenter,
+    SourceMux,
+)
+from napari_cuda.client.rendering.presenter_facade import PresenterFacade
+from napari_cuda.client.rendering.renderer import GLRenderer
+from napari_cuda.client.rendering.types import Source
+from napari_cuda.client.runtime.client_loop import (
+    camera,
+    loop_lifecycle,
+    warmup,
+)
+from napari_cuda.client.runtime.client_loop.client_loop_config import (
+    load_client_loop_config,
+)
+from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+from napari_cuda.client.runtime.client_loop.pipelines import (
+    build_pyav_pipeline,
+    build_vt_pipeline,
+)
+from napari_cuda.client.runtime.client_loop.renderer_fallbacks import (
+    RendererFallbacks,
+)
+from napari_cuda.client.runtime.client_loop.scheduler import (
+    CallProxy,
+)
 from napari_cuda.client.runtime.client_loop.scheduler_helpers import (
     init_wake_scheduler,
 )
@@ -58,23 +66,33 @@ from napari_cuda.client.runtime.client_loop.telemetry import (
     build_telemetry_config,
     create_metrics,
 )
-from napari_cuda.client.runtime.client_loop.client_loop_config import load_client_loop_config
-from napari_cuda.client.data import RemoteLayerRegistry
+from napari_cuda.client.runtime.receiver import Packet
+from napari_cuda.codec.avcc import (
+    is_annexb,
+)
+from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
+from napari_cuda.protocol import (
+    AckState,
+    NotifyCamera,
+    build_call_command,
+    build_state_update,
+)
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
     NotifySceneFrame,
     NotifyStreamFrame,
 )
-from napari_cuda.protocol import AckState, NotifyCamera, build_call_command, build_state_update
-from napari_cuda.client.control.client_state_ledger import ClientStateLedger
-from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
-    from napari_cuda.client.control.control_channel_client import StateChannel, SessionMetadata
-    from napari_cuda.client.control.client_state_ledger import IntentRecord, AckReconciliation
+    from napari_cuda.client.control.client_state_ledger import (
+        IntentRecord,
+    )
+    from napari_cuda.client.control.control_channel_client import (
+        SessionMetadata,
+    )
     from napari_cuda.client.runtime.config import ClientConfig
-    from napari_cuda.protocol import ReplyCommand, ErrorCommand
+    from napari_cuda.protocol import ErrorCommand, ReplyCommand
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +116,7 @@ def _maybe_enable_debug_logger() -> None:
     fmt = '[%(asctime)s] %(name)s - %(levelname)s - %(message)s'
     handler.setFormatter(logging.Formatter(fmt))
     handler.setLevel(logging.DEBUG)
-    setattr(handler, '_napari_cuda_local', True)
+    handler._napari_cuda_local = True
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -159,7 +177,7 @@ class ClientStreamLoop:
         stream_format: str = 'avcc',
         vt_backlog_trigger: int = 32,
         pyav_backlog_trigger: int = 16,
-        client_cfg: 'ClientConfig | None' = None,
+        client_cfg: ClientConfig | None = None,
         *,
         on_first_dims_ready: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -183,7 +201,7 @@ class ClientStreamLoop:
         self._stream_format = stream_format
         self._stream_format_set = False
         self._command_lock = threading.Lock()
-        self._pending_commands: Dict[str, Future] = {}
+        self._pending_commands: dict[str, Future] = {}
         self._command_catalog: tuple[str, ...] = ()
         self._log_dims_info: bool = False
         self._slider_tx_interval_ms = int(getattr(self._env_cfg, 'slider_tx_ms', 0))
@@ -237,7 +255,7 @@ class ClientStreamLoop:
         self._camera_emitter: NapariCameraIntentEmitter | None = None
         # Keep-last-frame fallback default enabled for smoother presentation
         self._keep_last_frame_fallback = True
-        self._state_session_metadata: "SessionMetadata | None" = None
+        self._state_session_metadata: SessionMetadata | None = None
         # Monotonic scheduling marker for next due
         # Startup warmup policy: temporarily boost VT latency and ramp down
         self._warmup_policy = warmup.WarmupPolicy(
@@ -690,12 +708,12 @@ class ClientStreamLoop:
         Returns a Future resolving to ``ReplyCommandPayload`` (``.result``
         contains the listing mapping) or raising ``CommandError``.
         """
-        payload: Dict[str, object] = {"path": path, "show_hidden": bool(show_hidden)}
+        payload: dict[str, object] = {"path": path, "show_hidden": bool(show_hidden)}
         if only is not None:
             payload["only"] = list(only)
         return self._issue_command("fs.listdir", kwargs=payload, origin="ui")
 
-    def _on_state_session_ready(self, metadata: "SessionMetadata") -> None:
+    def _on_state_session_ready(self, metadata: SessionMetadata) -> None:
         self._state_session_metadata = metadata
         self._control_state.session_id = metadata.session_id
         self._control_state.ack_timeout_ms = metadata.ack_timeout_ms
@@ -751,7 +769,7 @@ class ClientStreamLoop:
 
         self._run_on_ui(_apply)
 
-    def _ingest_reply_command(self, frame: "ReplyCommand") -> None:
+    def _ingest_reply_command(self, frame: ReplyCommand) -> None:
         payload = frame.payload
         logger.info(
             "reply.command received in_reply_to=%s result=%s",
@@ -767,7 +785,7 @@ class ClientStreamLoop:
                 payload.in_reply_to,
             )
 
-    def _ingest_error_command(self, frame: "ErrorCommand") -> None:
+    def _ingest_error_command(self, frame: ErrorCommand) -> None:
         payload = frame.payload
         logger.warning(
             "error.command received in_reply_to=%s code=%s message=%s",
@@ -829,7 +847,7 @@ class ClientStreamLoop:
         if not session_id:
             logger.debug("Command %s skipped: missing session id", command)
             return None
-        payload_dict: Dict[str, object] = {"command": command}
+        payload_dict: dict[str, object] = {"command": command}
         if args:
             payload_dict["args"] = list(args)
         if kwargs:
@@ -936,7 +954,7 @@ class ClientStreamLoop:
         else:
             logger.info("StateChannel disconnected: %s; dims state.update traffic gated", exc)
 
-    def _dispatch_state_update(self, pending_update: "IntentRecord", origin: str) -> bool:
+    def _dispatch_state_update(self, pending_update: IntentRecord, origin: str) -> bool:
         channel = self._loop_state.state_channel
         if channel is None:
             logger.debug("state.update emit skipped: channel unavailable")

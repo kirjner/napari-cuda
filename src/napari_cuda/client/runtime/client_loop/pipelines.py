@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from napari_cuda.client.rendering.pipelines.pyav_pipeline import PyAVPipeline
 from napari_cuda.client.rendering.pipelines.vt_pipeline import VTPipeline
@@ -13,7 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
 
 
 def build_vt_pipeline(
-    loop: "ClientStreamLoop",
+    loop: ClientStreamLoop,
     *,
     schedule_next_wake: Callable[[], None],
     logger: logging.Logger,
@@ -39,7 +40,7 @@ def build_vt_pipeline(
         backlog_trigger=loop._vt_backlog_trigger,
         is_gated=_is_vt_gated,
         on_backlog_gate=_on_vt_backlog_gate,
-        request_keyframe=loop._request_keyframe_command,  # noqa: SLF001
+        request_keyframe=loop._request_keyframe_command,
         on_cache_last=_on_cache_last,
         metrics=loop._loop_state.metrics,
         schedule_next_wake=schedule_next_wake,
@@ -47,7 +48,7 @@ def build_vt_pipeline(
 
 
 def build_pyav_pipeline(
-    loop: "ClientStreamLoop",
+    loop: ClientStreamLoop,
     *,
     schedule_next_wake: Callable[[], None],
 ) -> PyAVPipeline:

@@ -7,6 +7,7 @@ instead of locally rendered content.
 
 import logging
 import os
+
 from qtpy import QtCore
 
 from napari._vispy.canvas import VispyCanvas
@@ -20,8 +21,8 @@ logger = logging.getLogger(__name__)
 # No direct networking or shader setup here; ClientStreamLoop + GLRenderer own these
 
 
-from napari_cuda.utils.env import env_int, env_float
 from napari_cuda.client.runtime.config import ClientConfig
+from napari_cuda.utils.env import env_float, env_int
 
 
 class StreamingCanvas(VispyCanvas):
@@ -71,7 +72,9 @@ class StreamingCanvas(VispyCanvas):
         # Ensure we have a KeymapHandler; create a minimal one if not provided
         if key_map_handler is None:
             try:
-                from napari.utils.key_bindings import KeymapHandler  # type: ignore
+                from napari.utils.key_bindings import (
+                    KeymapHandler,  # type: ignore
+                )
             except ImportError:
                 logger.debug(
                     'KeymapHandler unavailable; using dummy handler',

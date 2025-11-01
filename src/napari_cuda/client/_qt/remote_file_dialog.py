@@ -17,10 +17,9 @@ Usage (from the streaming client launcher):
 
 """
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from qtpy import QtCore, QtGui, QtWidgets
-
 
 
 class RemoteFileDialog(QtWidgets.QDialog):

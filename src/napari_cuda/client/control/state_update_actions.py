@@ -4,24 +4,27 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TYPE_CHECKING
 from numbers import Integral, Real
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Optional,
+)
 
 from napari_cuda.protocol import NotifyCamera
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
-
-    from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+    from napari_cuda.client.runtime.client_loop.loop_state import (
+        ClientLoopState,
+    )
 from napari_cuda.client.control.client_state_ledger import (
+    AckReconciliation,
     ClientStateLedger,
     IntentRecord,
-    AckReconciliation,
-    MirrorEvent,
 )
-
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
 
@@ -50,8 +53,8 @@ def _normalize_camera_delta_value(value: Any) -> Any:
     return value
 
 
-def _normalize_camera_state_value(value: Mapping[str, Any]) -> Dict[str, Any]:
-    normalized: Dict[str, Any] = {}
+def _normalize_camera_state_value(value: Mapping[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
     for key, raw in value.items():
         name = str(key)
         if name in {"center", "angles"}:
@@ -82,15 +85,15 @@ class ControlStateContext:
     dims_z: float | None = None
     dims_z_min: float | None = None
     dims_z_max: float | None = None
-    control_runtimes: Dict[str, "ControlRuntime"] = field(default_factory=dict)
-    dims_state: Dict[tuple[str, str], Any] = field(default_factory=dict)
-    view_state: Dict[str, Any] = field(default_factory=dict)
-    volume_state: Dict[str, Any] = field(default_factory=dict)
-    multiscale_state: Dict[str, Any] = field(default_factory=dict)
-    camera_state: Dict[str, Any] = field(default_factory=dict)
+    control_runtimes: dict[str, ControlRuntime] = field(default_factory=dict)
+    dims_state: dict[tuple[str, str], Any] = field(default_factory=dict)
+    view_state: dict[str, Any] = field(default_factory=dict)
+    volume_state: dict[str, Any] = field(default_factory=dict)
+    multiscale_state: dict[str, Any] = field(default_factory=dict)
+    camera_state: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, env_cfg: Any) -> "ControlStateContext":
+    def from_env(cls, env_cfg: Any) -> ControlStateContext:
         state = cls()
         dims_rate = getattr(env_cfg, 'dims_rate_hz', 1.0) or 1.0
         state.dims_min_dt = 1.0 / max(1.0, float(dims_rate))
@@ -131,7 +134,7 @@ def on_state_connected(state: ControlStateContext) -> None:
     state.primary_axis_index = None
 
 
-def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateContext) -> None:
+def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
@@ -140,7 +143,7 @@ def on_state_disconnected(loop_state: "ClientLoopState", state: ControlStateCont
     state.camera_state.clear()
 def handle_notify_camera(
     state: ControlStateContext,
-    state_ledger: "ClientStateLedger",
+    state_ledger: ClientStateLedger,
     frame: NotifyCamera,
     *,
     log_debug: bool = False,
@@ -203,9 +206,9 @@ def _runtime_key(scope: str, target: str, key: str) -> str:
 
 def _emit_state_update(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     *,
     scope: str,
     target: str,
@@ -254,7 +257,7 @@ def _emit_state_update(
     runtime.active_frame_id = frame_id
     return True, pending.projection_value
 
-def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: "AckReconciliation") -> None:
+def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: AckReconciliation) -> None:
     if outcome.scope is None or outcome.target is None or outcome.key is None:
         return
     runtime_key = _runtime_key(outcome.scope, outcome.target, outcome.key)
@@ -277,7 +280,7 @@ def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: "AckRe
 
 def _sync_dims_payload_from_meta(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
+    loop_state: ClientLoopState,
 ) -> dict[str, Any]:
     meta = state.dims_meta
 
@@ -336,7 +339,7 @@ def _sync_dims_payload_from_meta(
 
 def _seed_dims_baseline(
     state: ControlStateContext,
-    state_ledger: "ClientStateLedger",
+    state_ledger: ClientStateLedger,
     payload: dict[str, Any],
 ) -> None:
     current_step = payload.get('current_step') or []
@@ -398,7 +401,7 @@ def _seed_dims_baseline(
 
 def _seed_dims_indices(
     state: ControlStateContext,
-    state_ledger: "ClientStateLedger",
+    state_ledger: ClientStateLedger,
     payload: Mapping[str, Any],
     *,
     update_kind: str,
@@ -507,10 +510,10 @@ def mirror_dims_to_viewer(
 
 def handle_dims_ack(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    outcome: "AckReconciliation",
+    loop_state: ClientLoopState,
+    outcome: AckReconciliation,
     *,
-    presenter: Optional["PresenterFacade"] = None,
+    presenter: Optional[PresenterFacade] = None,
     viewer_ref=None,
     ui_call=None,
     log_dims_info: bool = False,
@@ -586,10 +589,10 @@ def handle_dims_ack(
 
 def handle_generic_ack(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    outcome: "AckReconciliation",
+    loop_state: ClientLoopState,
+    outcome: AckReconciliation,
     *,
-    presenter: Optional["PresenterFacade"] = None,
+    presenter: Optional[PresenterFacade] = None,
 ) -> None:
     if outcome.scope is None:
         return
@@ -799,9 +802,9 @@ def handle_key_event(
 
 def camera_zoom(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     *,
     factor: float,
     anchor_px: tuple[float, float],
@@ -836,9 +839,9 @@ def camera_zoom(
 
 def camera_pan(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     *,
     dx_px: float,
     dy_px: float,
@@ -870,9 +873,9 @@ def camera_pan(
 
 def camera_orbit(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     *,
     d_az_deg: float,
     d_el_deg: float,
@@ -904,9 +907,9 @@ def camera_orbit(
 
 def camera_reset(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     *,
     reason: str,
     origin: str,
@@ -937,16 +940,16 @@ def camera_reset(
 
 def camera_set(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     *,
     center: Optional[Sequence[float]] = None,
     zoom: Optional[float] = None,
     angles: Optional[Sequence[float]] = None,
     origin: str,
 ) -> bool:
-    payload: Dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     if center is not None:
         payload['center'] = [float(c) for c in center]
     if zoom is not None:
@@ -979,9 +982,9 @@ def camera_set(
 
 def volume_set_render_mode(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     mode: str,
     *,
     origin: str,
@@ -1007,9 +1010,9 @@ def volume_set_render_mode(
 
 def volume_set_clim(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     lo: float,
     hi: float,
     *,
@@ -1036,9 +1039,9 @@ def volume_set_clim(
 
 def volume_set_colormap(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     name: str,
     *,
     origin: str,
@@ -1063,9 +1066,9 @@ def volume_set_colormap(
 
 def volume_set_opacity(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     alpha: float,
     *,
     origin: str,
@@ -1091,9 +1094,9 @@ def volume_set_opacity(
 
 def volume_set_sample_step(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     relative: float,
     *,
     origin: str,
@@ -1119,9 +1122,9 @@ def volume_set_sample_step(
 
 def multiscale_set_policy(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     policy: str,
     *,
     origin: str,
@@ -1150,9 +1153,9 @@ def multiscale_set_policy(
 
 def multiscale_set_level(
     state: ControlStateContext,
-    loop_state: "ClientLoopState",
-    state_ledger: "ClientStateLedger",
-    dispatch_state_update: Callable[["IntentRecord", str], bool],
+    loop_state: ClientLoopState,
+    state_ledger: ClientStateLedger,
+    dispatch_state_update: Callable[[IntentRecord, str], bool],
     level: int,
     *,
     origin: str,

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
-
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
     PropertyKey,
@@ -16,11 +14,11 @@ def apply_view_toggle_transaction(
     ledger: ServerStateLedger,
     op_seq: int,
     target_ndisplay: int,
-    order_value: Tuple[int, ...],
-    displayed_value: Tuple[int, ...],
+    order_value: tuple[int, ...],
+    displayed_value: tuple[int, ...],
     origin: str,
     timestamp: float,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Record the ledger updates for a view toggle intent."""
 
     return ledger.batch_record_confirmed(

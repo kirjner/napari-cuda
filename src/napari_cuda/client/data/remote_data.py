@@ -9,8 +9,13 @@ stream; the objects here simply satisfy `LayerDataProtocol`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Iterable, Iterator, Sequence, Tuple, Union, overload
+from typing import (
+    Any,
+    Union,
+    overload,
+)
 
 import numpy as np
 
@@ -32,7 +37,7 @@ def _safe_dtype(value: str | None) -> np.dtype:
     return dtype
 
 
-def _preview_shape(shape: Sequence[int]) -> Tuple[int, ...]:
+def _preview_shape(shape: Sequence[int]) -> tuple[int, ...]:
     if not shape:
         return (1,)
     dims: list[int] = []
@@ -74,9 +79,9 @@ def _result_length(length: int, key: slice | int | None) -> int:
     return max(1, min(count, length, _PREVIEW_MAX))
 
 
-def _normalize_key(key: Union[IndexKey, Tuple[IndexKey, ...]], ndim: int) -> Tuple[IndexKey, ...]:
+def _normalize_key(key: Union[IndexKey, tuple[IndexKey, ...]], ndim: int) -> tuple[IndexKey, ...]:
     if not isinstance(key, tuple):
-        key_tuple: Tuple[IndexKey, ...] = (key,)
+        key_tuple: tuple[IndexKey, ...] = (key,)
     else:
         key_tuple = key
 
@@ -127,7 +132,7 @@ class RemoteArray(LayerDataProtocol):
         return self._dtype
 
     @property
-    def shape(self) -> Tuple[int, ...]:
+    def shape(self) -> tuple[int, ...]:
         return self._shape
 
     @property
@@ -158,7 +163,7 @@ class RemoteArray(LayerDataProtocol):
     def __getitem__(self, key: IndexKey) -> np.ndarray: ...
 
     @overload
-    def __getitem__(self, key: Tuple[IndexKey, ...]) -> np.ndarray: ...
+    def __getitem__(self, key: tuple[IndexKey, ...]) -> np.ndarray: ...
 
     def __getitem__(self, key):
         normalized = _normalize_key(key, self.ndim)
@@ -231,7 +236,7 @@ class RemotePreview:
         np.clip(arr, 0.0, 1.0, out=arr)
         self.data = arr
 
-    def as_thumbnail(self, rgb: bool, target_shape: Tuple[int, int]) -> np.ndarray:
+    def as_thumbnail(self, rgb: bool, target_shape: tuple[int, int]) -> np.ndarray:
         h, w = int(target_shape[0]), int(target_shape[1])
         if h <= 0 or w <= 0:
             return np.zeros((1, 1, 3 if rgb else 1), dtype=np.float32)
@@ -289,7 +294,7 @@ class RemotePreview:
 class RemoteMultiscale:
     """Container for multiscale remote arrays."""
 
-    arrays: Tuple[RemoteArray, ...]
+    arrays: tuple[RemoteArray, ...]
 
     def as_multiscale(self) -> MultiScaleData:
         return MultiScaleData(self.arrays)

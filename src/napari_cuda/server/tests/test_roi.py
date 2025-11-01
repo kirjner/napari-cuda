@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from vispy import scene
 
-from napari_cuda.server.data.roi import compute_viewport_roi
 from napari_cuda.server.data import SliceROI
+from napari_cuda.server.data.roi import compute_viewport_roi
 
 
 class _DummyTransform:

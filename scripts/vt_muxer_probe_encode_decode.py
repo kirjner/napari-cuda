@@ -18,18 +18,18 @@ import argparse
 import os
 import sys
 import tempfile
-from fractions import Fraction
 import time
-from typing import Optional, Tuple
+from fractions import Fraction
+from typing import Optional
 
 import numpy as np
 
 from napari_cuda.codec.avcc import (
-    is_annexb,
     annexb_to_avcc,
-    split_avcc_by_len,
-    split_annexb,
+    is_annexb,
     parse_avcc,
+    split_annexb,
+    split_avcc_by_len,
 )
 
 
@@ -109,6 +109,7 @@ def encode_decode_demo(
     use_container_encoder: bool = True,
 ) -> None:
     import av
+
     from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
 
     if not _is_darwin():
@@ -193,7 +194,7 @@ def encode_decode_demo(
             except Exception:
                 return memoryview(pkt).tobytes()
 
-    def repack_to_len(au_bytes: bytes, preferred: int) -> Tuple[bytes, list[int]]:
+    def repack_to_len(au_bytes: bytes, preferred: int) -> tuple[bytes, list[int]]:
         # Return AVCC AU with desired length size and nal types
         if is_annexb(au_bytes):
             nals = split_annexb(au_bytes)
@@ -267,7 +268,9 @@ def encode_decode_demo(
                 cap, pts = item
                 arr = None
                 try:
-                    from napari_cuda.client.rendering.vt_shim import VTShimDecoder as _VT
+                    from napari_cuda.client.rendering.vt_shim import (
+                        VTShimDecoder as _VT,
+                    )
                     arr = _VT.map_to_rgb(vt._shim._vt, cap)  # type: ignore[attr-defined]
                 except Exception:
                     pass

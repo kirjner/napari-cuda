@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Optional,
+)
 
 import numpy as np
 
@@ -16,12 +20,12 @@ from napari_cuda.protocol.snapshots import (
     scene_snapshot,
     viewer_snapshot_from_blocks,
 )
-from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.server.scene.defaults import default_volume_state
 from napari_cuda.server.scene.models import (
     CameraDeltaCommand,
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.scene.defaults import default_volume_state
+from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +44,7 @@ CONTROL_KEYS: tuple[str, ...] = (
     "iso_threshold",
 )
 
-_DEFAULT_LAYER_CONTROLS: Dict[str, Any] = {
+_DEFAULT_LAYER_CONTROLS: dict[str, Any] = {
     "visible": True,
     "opacity": 1.0,
     "blending": "opaque",
@@ -53,16 +57,16 @@ _DEFAULT_LAYER_CONTROLS: Dict[str, Any] = {
 __all__ = [
     "CONTROL_KEYS",
     "CameraDeltaCommand",
-    "default_volume_state",
     "build_ledger_snapshot",
-    "snapshot_render_state",
-    "snapshot_layer_controls",
-    "snapshot_volume_state",
-    "snapshot_multiscale_state",
-    "snapshot_viewport_state",
-    "snapshot_scene",
-    "snapshot_dims_metadata",
+    "default_volume_state",
     "pull_render_snapshot",
+    "snapshot_dims_metadata",
+    "snapshot_layer_controls",
+    "snapshot_multiscale_state",
+    "snapshot_render_state",
+    "snapshot_scene",
+    "snapshot_viewport_state",
+    "snapshot_volume_state",
 ]
 
 
@@ -72,7 +76,7 @@ __all__ = [
 
 def snapshot_multiscale_state(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Derive multiscale policy metadata from a ledger snapshot."""
 
     def _normalize(value: Any) -> Any:
@@ -82,7 +86,7 @@ def snapshot_multiscale_state(
             return [_normalize(v) for v in value]
         return value
 
-    state: Dict[str, Any] = {}
+    state: dict[str, Any] = {}
 
     policy_entry = snapshot.get(("multiscale", "main", "policy"))
     if policy_entry is not None and policy_entry.value is not None:
@@ -202,7 +206,7 @@ def snapshot_render_state(
 
 def snapshot_layer_controls(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Collect per-layer control values from a ledger snapshot."""
 
     controls: dict[str, dict[str, Any]] = defaultdict(dict)
@@ -215,10 +219,10 @@ def snapshot_layer_controls(
 
 def snapshot_volume_state(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract volume render hints from the ledger snapshot."""
 
-    mapping: Dict[str, Any] = {}
+    mapping: dict[str, Any] = {}
     for ledger_key, field in (
         (("volume", "main", "render_mode"), "mode"),
         (("volume", "main", "colormap"), "colormap"),
@@ -234,7 +238,7 @@ def snapshot_volume_state(
 
 def snapshot_viewport_state(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract viewport mode and plane/volume payloads from the ledger snapshot."""
 
     def _clone(value: Any) -> Any:
@@ -244,7 +248,7 @@ def snapshot_viewport_state(
             return [_clone(v) for v in value]
         return value
 
-    payload: Dict[str, Any] = {}
+    payload: dict[str, Any] = {}
 
     mode_entry = snapshot.get(("viewport", "state", "mode"))
     if mode_entry is not None and mode_entry.value is not None:
@@ -277,8 +281,8 @@ def snapshot_scene(
     zarr_path: Optional[str] = None,
     scene_source: Optional[object] = None,
     layer_controls: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    multiscale_state: Optional[Dict[str, Any]] = None,
-    volume_state: Optional[Dict[str, Any]] = None,
+    multiscale_state: Optional[dict[str, Any]] = None,
+    volume_state: Optional[dict[str, Any]] = None,
     thumbnail_provider: Optional[Callable[[str], Optional[Any]]] = None,
 ) -> SceneSnapshot:
     """Build a ``SceneSnapshot`` suitable for ``notify.scene`` baselines."""
@@ -287,18 +291,14 @@ def snapshot_scene(
     ndisplay_value = max(1, ndisplay_value)
 
     ledger_multiscale = snapshot_multiscale_state(ledger_snapshot)
-    if multiscale_state is None:
-        multiscale_state = ledger_multiscale
-    elif not multiscale_state and ledger_multiscale:
+    if multiscale_state is None or (not multiscale_state and ledger_multiscale):
         multiscale_state = ledger_multiscale
 
     if not multiscale_state and scene_source is not None:
         multiscale_state = _fallback_multiscale_state(scene_source)
 
     ledger_controls = snapshot_layer_controls(ledger_snapshot)
-    if layer_controls is None:
-        layer_controls = ledger_controls
-    elif not layer_controls and ledger_controls:
+    if layer_controls is None or (not layer_controls and ledger_controls):
         layer_controls = ledger_controls
 
     if volume_state is None or not volume_state:
@@ -314,7 +314,7 @@ def snapshot_scene(
 
     geometry = _resolve_layer_geometry(render_state, multiscale_state, ndisplay_value)
 
-    layer_block: Dict[str, Any] = {
+    layer_block: dict[str, Any] = {
         "layer_id": default_layer_id,
         "layer_type": "image",
         "name": default_layer_name,
@@ -326,7 +326,7 @@ def snapshot_scene(
         "level_shapes": geometry.level_shapes,
     }
 
-    layer_metadata: Dict[str, Any] = {}
+    layer_metadata: dict[str, Any] = {}
     if thumbnail_provider is not None:
         raw_thumbnail = thumbnail_provider(default_layer_id)
         normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
@@ -389,11 +389,11 @@ def snapshot_scene(
     )
 
 
-def snapshot_dims_metadata(scene_snapshot: SceneSnapshot) -> Dict[str, Any]:
+def snapshot_dims_metadata(scene_snapshot: SceneSnapshot) -> dict[str, Any]:
     """Extract dims metadata used for HUD payloads."""
 
     dims_block = dict(scene_snapshot.viewer.dims)
-    meta: Dict[str, Any] = dict(dims_block)
+    meta: dict[str, Any] = dict(dims_block)
 
     if not scene_snapshot.layers:
         return meta
@@ -462,7 +462,7 @@ def _snapshot_coalesce_string(value: Any, base: Optional[str], *, fallback: Any 
     return text if text else base
 
 
-def _resolve_layer_controls(overrides: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def _resolve_layer_controls(overrides: Optional[Mapping[str, Any]]) -> dict[str, Any]:
     controls = dict(_DEFAULT_LAYER_CONTROLS)
     if not overrides:
         return controls
@@ -478,7 +478,7 @@ def _resolve_layer_controls(overrides: Optional[Mapping[str, Any]]) -> Dict[str,
 def _resolve_volume_state(
     render_state: RenderLedgerSnapshot,
     ledger_snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     defaults = default_volume_state()
     ledger_state = snapshot_volume_state(ledger_snapshot)
 
@@ -496,7 +496,7 @@ def _resolve_volume_state(
         else ledger_state.get("sample_step", defaults["sample_step"])
     )
 
-    clim_list: List[float]
+    clim_list: list[float]
     if isinstance(clim, Sequence):
         clim_list = [float(v) for v in clim[:2]]
         if len(clim_list) < 2:
@@ -515,12 +515,12 @@ def _resolve_volume_state(
 
 @dataclass
 class _LayerGeometry:
-    shape: List[int]
-    axis_labels: List[str]
-    order: List[int]
-    current_step: List[int]
-    displayed: List[int]
-    level_shapes: List[List[int]]
+    shape: list[int]
+    axis_labels: list[str]
+    order: list[int]
+    current_step: list[int]
+    displayed: list[int]
+    level_shapes: list[list[int]]
     current_level: int
     ndisplay: int
     is_volume: bool
@@ -531,7 +531,7 @@ def _resolve_layer_geometry(
     multiscale_state: Optional[Mapping[str, Any]],
     ndisplay_value: int,
 ) -> _LayerGeometry:
-    level_shapes: List[List[int]] = []
+    level_shapes: list[list[int]] = []
 
     if render_state.level_shapes:
         level_shapes = [list(map(int, level)) for level in render_state.level_shapes]
@@ -604,7 +604,7 @@ def _build_multiscale_block(
     multiscale_state: Optional[Mapping[str, Any]],
     *,
     base_shape: Sequence[int],
-) -> Optional[Dict[str, Any]]:
+) -> Optional[dict[str, Any]]:
     if not multiscale_state:
         return None
 
@@ -612,7 +612,7 @@ def _build_multiscale_block(
     if not isinstance(levels_data, Sequence) or not levels_data:
         return None
 
-    levels: List[Dict[str, Any]] = []
+    levels: list[dict[str, Any]] = []
     for entry in levels_data:
         if not isinstance(entry, Mapping):
             continue
@@ -631,12 +631,12 @@ def _build_multiscale_block(
     if not levels:
         return None
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "levels": levels,
         "current_level": int(multiscale_state.get("current_level", 0)),
     }
 
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
     if "policy" in multiscale_state:
         metadata["policy"] = multiscale_state["policy"]
     if "index_space" in multiscale_state:
@@ -647,14 +647,14 @@ def _build_multiscale_block(
     return payload
 
 
-def _build_render_hints(volume_state: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _build_render_hints(volume_state: Mapping[str, Any]) -> Optional[dict[str, Any]]:
     shading = volume_state.get("shade") if volume_state else None
     if shading is None:
         return None
     return {"shading": str(shading)}
 
 
-def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[List[float]]:
+def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[list[float]]:
     if not volume_state:
         return None
     clim = volume_state.get("clim")
@@ -663,7 +663,7 @@ def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[List[f
     return None
 
 
-def _build_dims_block(geometry: _LayerGeometry) -> Dict[str, Any]:
+def _build_dims_block(geometry: _LayerGeometry) -> dict[str, Any]:
     return {
         "ndim": len(geometry.shape),
         "axis_labels": list(geometry.axis_labels),
@@ -680,8 +680,8 @@ def _build_camera_block(
     render_state: RenderLedgerSnapshot,
     geometry: _LayerGeometry,
     ndisplay_value: int,
-) -> Dict[str, Any]:
-    block: Dict[str, Any] = {"ndisplay": int(ndisplay_value)}
+) -> dict[str, Any]:
+    block: dict[str, Any] = {"ndisplay": int(ndisplay_value)}
 
     if geometry.is_volume and render_state.volume_center is not None:
         block["center"] = [float(v) for v in render_state.volume_center]
@@ -707,8 +707,8 @@ def _scene_metadata(
     *,
     zarr_path: Optional[str],
     scene_source: Optional[object],
-) -> Dict[str, Any]:
-    metadata: Dict[str, Any] = {}
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
     if zarr_path:
         metadata["status"] = "ready"
     else:
@@ -720,7 +720,7 @@ def _scene_metadata(
     return metadata
 
 
-def _fallback_multiscale_state(scene_source: object) -> Dict[str, Any]:
+def _fallback_multiscale_state(scene_source: object) -> dict[str, Any]:
     descriptors = getattr(scene_source, "level_descriptors", [])
     if not descriptors:
         return {}
@@ -739,38 +739,38 @@ def _fallback_multiscale_state(scene_source: object) -> Dict[str, Any]:
     }
 
 
-def _resolve_scale(scene_source: Optional[object]) -> Optional[List[float]]:
+def _resolve_scale(scene_source: Optional[object]) -> Optional[list[float]]:
     if scene_source is None:
         return None
     if not hasattr(scene_source, "current_level") or not hasattr(scene_source, "level_scale"):
         return None
-    level_index = int(getattr(scene_source, "current_level"))
-    scale_fn = getattr(scene_source, "level_scale")
+    level_index = int(scene_source.current_level)
+    scale_fn = scene_source.level_scale
     scale_tuple = scale_fn(level_index)
     if not isinstance(scale_tuple, Sequence):
         return None
     return [float(value) for value in scale_tuple]
 
 
-def _resolve_translate(scene_source: Optional[object]) -> Optional[List[float]]:
+def _resolve_translate(scene_source: Optional[object]) -> Optional[list[float]]:
     if scene_source is None or not hasattr(scene_source, "translate"):
         return None
-    translate = getattr(scene_source, "translate")
+    translate = scene_source.translate
     if not isinstance(translate, Sequence):
         return None
     return [float(value) for value in translate]
 
 
-def _resolve_source_block(scene_source: Optional[object]) -> Optional[Dict[str, Any]]:
+def _resolve_source_block(scene_source: Optional[object]) -> Optional[dict[str, Any]]:
     if scene_source is None:
         return None
-    block: Dict[str, Any] = {"kind": "ome-zarr"}
+    block: dict[str, Any] = {"kind": "ome-zarr"}
     if hasattr(scene_source, "data_id"):
-        data_id = getattr(scene_source, "data_id")
+        data_id = scene_source.data_id
         if data_id is not None:
             block["data_id"] = str(data_id)
     if hasattr(scene_source, "cache_version"):
-        cache_version = getattr(scene_source, "cache_version")
+        cache_version = scene_source.cache_version
         if cache_version is not None:
             block["cache_version"] = int(cache_version)
     return block or None

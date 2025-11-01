@@ -8,7 +8,6 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Optional
 
-from napari_cuda.server.scene import BootstrapSceneMetadata
 from napari_cuda.server.data import lod
 from napari_cuda.server.data.level_logging import (
     LayerAssignmentLogger,
@@ -19,8 +18,11 @@ from napari_cuda.server.data.zarr_source import (
     LevelDescriptor,
     ZarrSceneSource,
 )
-from napari_cuda.server.runtime.bootstrap.scene_setup import create_scene_source
+from napari_cuda.server.runtime.bootstrap.scene_setup import (
+    create_scene_source,
+)
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
+from napari_cuda.server.scene import BootstrapSceneMetadata
 
 
 def _resolve_level_shapes(descriptors: Sequence[LevelDescriptor]) -> tuple[tuple[int, ...], ...]:

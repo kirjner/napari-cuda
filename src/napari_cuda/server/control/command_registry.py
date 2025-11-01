@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from napari_cuda.protocol import CallCommand
 
@@ -22,7 +23,7 @@ class CommandRegistration:
 
 class CommandRegistry:
     def __init__(self) -> None:
-        self._commands: Dict[str, CommandRegistration] = {}
+        self._commands: dict[str, CommandRegistration] = {}
 
     def register(self, registration: CommandRegistration) -> None:
         name = registration.name
@@ -36,7 +37,7 @@ class CommandRegistry:
             return None
         return entry.handler
 
-    def command_names(self) -> Tuple[str, ...]:
+    def command_names(self) -> tuple[str, ...]:
         return tuple(self._commands.keys())
 
     def clear(self) -> None:
@@ -50,5 +51,5 @@ def register_command(name: str, handler: CommandHandler, *, version: int = 1) ->
     COMMAND_REGISTRY.register(CommandRegistration(name=name, handler=handler, version=version))
 
 
-def advertised_commands() -> Tuple[str, ...]:
+def advertised_commands() -> tuple[str, ...]:
     return COMMAND_REGISTRY.command_names()

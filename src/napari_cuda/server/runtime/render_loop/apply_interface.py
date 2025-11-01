@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 from napari_cuda.server.data import SliceROI
+
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.viewport import ViewportState
     from napari_cuda.server.runtime.viewport.runner import ViewportRunner
@@ -17,15 +18,15 @@ if TYPE_CHECKING:
 class RenderApplyInterface:
     """Expose the worker state that slice/volume apply helpers mutate."""
 
-    worker: "EGLRendererWorker"
+    worker: EGLRendererWorker
 
     # Viewport access --------------------------------------------------
     @property
-    def viewport_state(self) -> "ViewportState":
+    def viewport_state(self) -> ViewportState:
         return self.worker.viewport_state
 
     @property
-    def viewport_runner(self) -> Optional["ViewportRunner"]:
+    def viewport_runner(self) -> Optional[ViewportRunner]:
         return getattr(self.worker, "_viewport_runner", None)
 
     def ensure_scene_source(self):
@@ -148,7 +149,9 @@ class RenderApplyInterface:
         quiet: bool = False,
         for_policy: bool = False,
     ) -> SliceROI:
-        from napari_cuda.server.runtime.lod.slice_loader import viewport_roi_for_lod
+        from napari_cuda.server.runtime.lod.slice_loader import (
+            viewport_roi_for_lod,
+        )
 
         return viewport_roi_for_lod(
             self.worker,

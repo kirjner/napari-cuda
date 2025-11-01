@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Optional
 
-from napari_cuda.protocol.messages import NotifyScenePayload, NotifyLayersPayload
+from napari_cuda.protocol.messages import (
+    NotifyLayersPayload,
+    NotifyScenePayload,
+)
 from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.scene import snapshot_volume_state, snapshot_viewport_state
-from napari_cuda.server.state_ledger import LedgerEntry
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-
+from napari_cuda.server.scene import (
+    snapshot_viewport_state,
+    snapshot_volume_state,
+)
+from napari_cuda.server.state_ledger import LedgerEntry
 
 # ---------------------------------------------------------------------------
 # Greenfield payload adapters
@@ -107,8 +113,8 @@ def _normalize_value(value: Any) -> Any:
 
 def _build_policies_block(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Optional[Dict[str, Any]]:
-    policy_payload: Dict[str, Any] = {}
+) -> Optional[dict[str, Any]]:
+    policy_payload: dict[str, Any] = {}
 
     policy_entry = snapshot.get(("multiscale", "main", "policy"))
     if policy_entry is not None and policy_entry.value is not None:
@@ -148,8 +154,8 @@ def _build_policies_block(
 def _merge_scene_metadata(
     snapshot_metadata: Mapping[str, Any],
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> Optional[Dict[str, Any]]:
-    metadata: Dict[str, Any] = dict(snapshot_metadata)
+) -> Optional[dict[str, Any]]:
+    metadata: dict[str, Any] = dict(snapshot_metadata)
 
     volume_state = snapshot_volume_state(snapshot)
     if volume_state:

@@ -4,13 +4,13 @@ import importlib
 import logging
 import os
 from collections import deque
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Optional, Tuple, Any, Callable
+from typing import Any, Optional
 
 import numpy as np
-from vispy.gloo import Texture2D, Program
-
 from OpenGL import GL as GL  # type: ignore
+from vispy.gloo import Program, Texture2D
 
 from napari_cuda.client.rendering.vt_frame import FrameLease
 
@@ -64,7 +64,7 @@ class VTReleaseQueue:
 
     def __init__(self) -> None:
         # Each entry stores (GLsync handle, tex_cap)
-        self._entries: deque[Tuple[object, object]] = deque()
+        self._entries: deque[tuple[object, object]] = deque()
 
     def enqueue(self, tex_cap: object) -> bool:
         sync = _safe_call(

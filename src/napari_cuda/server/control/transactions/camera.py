@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -10,8 +11,7 @@ from napari_cuda.server.state_ledger import (
     ServerStateLedger,
 )
 
-
-CameraLedgerUpdate = Tuple[str, str, str, object] | Tuple[str, str, str, object, Dict[str, object]]
+CameraLedgerUpdate = tuple[str, str, str, object] | tuple[str, str, str, object, dict[str, object]]
 
 
 def apply_camera_update_transaction(
@@ -23,7 +23,7 @@ def apply_camera_update_transaction(
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Record camera updates in the ledger and return stored entries."""
 
     entries = list(updates)

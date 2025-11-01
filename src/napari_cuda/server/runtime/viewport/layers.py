@@ -13,9 +13,9 @@ from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import (
     ImageRendering as NapariImageRendering,
 )
+from napari_cuda.server.data import SliceROI
 from napari_cuda.server.data.roi import plane_scale_for_level
 from napari_cuda.server.data.roi_applier import SliceDataApplier
-from napari_cuda.server.data import SliceROI
 
 logger = logging.getLogger(__name__)
 

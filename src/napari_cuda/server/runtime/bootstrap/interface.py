@@ -6,7 +6,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-from napari_cuda.server.runtime.lod.context import build_level_context as lod_build_level_context
+from napari_cuda.server.runtime.lod.context import (
+    build_level_context as lod_build_level_context,
+)
 from napari_cuda.server.runtime.lod.level_policy import (
     load_volume as lod_load_volume,
     resolve_volume_intent_level as lod_resolve_volume_intent_level,
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
 class ViewerBootstrapInterface:
     """Explicit surface the viewer helpers may touch on the worker."""
 
-    worker: "EGLRendererWorker"
+    worker: EGLRendererWorker
 
     # Read-only properties -------------------------------------------------
     @property

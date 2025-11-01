@@ -1,8 +1,7 @@
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Self
 
 from qtpy.QtCore import QModelIndex, Qt
-from typing_extensions import Self
 
 from napari._qt.containers.qt_list_model import QtListModel
 from napari.components import Dims

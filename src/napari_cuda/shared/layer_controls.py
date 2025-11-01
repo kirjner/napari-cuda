@@ -7,8 +7,9 @@ vocabulary is enforced for every layer control surfaced to the UI.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Tuple
+from typing import Any
 
 from napari.layers.base._base_constants import Blending as NapariBlending
 from napari.layers.image._image_constants import (
@@ -36,7 +37,7 @@ def _normalize_float(value: Any) -> float:
     return float(value)
 
 
-def _normalize_clim(value: Any) -> Tuple[float, float]:
+def _normalize_clim(value: Any) -> tuple[float, float]:
     lo, hi = value
     lo_f = float(lo)
     hi_f = float(hi)
@@ -74,10 +75,10 @@ def _tuple_float_equals(a: Iterable[Any], b: Iterable[Any], *, tol: float = 1e-5
     b_list = list(b)
     if len(a_list) != len(b_list):
         return False
-    return all(_float_equals(x, y, tol=tol) for x, y in zip(a_list, b_list))
+    return all(_float_equals(x, y, tol=tol) for x, y in zip(a_list, b_list, strict=False))
 
 
-LAYER_CONTROL_SPECS: Dict[str, ControlSpec] = {
+LAYER_CONTROL_SPECS: dict[str, ControlSpec] = {
     "visible": ControlSpec(
         key="visible",
         normalize=_normalize_bool,
@@ -158,15 +159,15 @@ def normalize_control(key: str, value: Any) -> Any:
     return spec.normalize(value)
 
 
-def controls_defaults() -> Dict[str, Any | None]:
+def controls_defaults() -> dict[str, Any | None]:
     """Return the canonical defaults for layer controls."""
 
     return {key: spec.default for key, spec in LAYER_CONTROL_SPECS.items()}
 
 
 __all__ = [
-    "ControlSpec",
     "LAYER_CONTROL_SPECS",
+    "ControlSpec",
     "controls_defaults",
     "normalize_control",
 ]

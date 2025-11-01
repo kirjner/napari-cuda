@@ -7,7 +7,10 @@ import time
 
 from qtpy import QtCore
 
-from napari_cuda.client.runtime.client_loop.scheduler import CallProxy, WakeProxy
+from napari_cuda.client.runtime.client_loop.scheduler import (
+    CallProxy,
+    WakeProxy,
+)
 
 
 def _ensure_app() -> QtCore.QCoreApplication:

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import os
 import random
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
-import logging
+from typing import Optional
 
 
 @dataclass
@@ -110,7 +110,7 @@ class JitterChannel:
         self._metrics = metrics
         self.cfg = config or JitterConfig()
         # Heap of (deliver_time, seq, payload, pts, is_key)
-        self._heap: list[Tuple[float, int, bytes, float, bool]] = []
+        self._heap: list[tuple[float, int, bytes, float, bool]] = []
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._stop = False

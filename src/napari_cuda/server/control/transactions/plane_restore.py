@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -11,15 +12,15 @@ from napari_cuda.server.state_ledger import (
 )
 
 
-def _as_level(value: int | float | str) -> int:
+def _as_level(value: float | str) -> int:
     return int(value)
 
 
-def _as_step(step: Sequence[int | float | str]) -> Tuple[int, ...]:
+def _as_step(step: Sequence[int | float | str]) -> tuple[int, ...]:
     return tuple(int(v) for v in step)
 
 
-def _as_center(center: Sequence[float | int | str]) -> Tuple[float, float, float]:
+def _as_center(center: Sequence[float | int | str]) -> tuple[float, float, float]:
     if len(center) < 2:
         raise ValueError("plane restore center requires at least two components")
     if len(center) >= 3:
@@ -31,7 +32,7 @@ def _as_center(center: Sequence[float | int | str]) -> Tuple[float, float, float
     return (float(center[0]), float(center[1]), 0.0)
 
 
-def _as_rect(rect: Sequence[float | int | str]) -> Tuple[float, float, float, float]:
+def _as_rect(rect: Sequence[float | int | str]) -> tuple[float, float, float, float]:
     if len(rect) < 4:
         raise ValueError("plane restore rect requires four components")
     return (
@@ -45,17 +46,17 @@ def _as_rect(rect: Sequence[float | int | str]) -> Tuple[float, float, float, fl
 def apply_plane_restore_transaction(
     *,
     ledger: ServerStateLedger,
-    level: int | float | str,
+    level: float | str,
     step: Sequence[int | float | str],
     center: Sequence[float | int | str],
-    zoom: float | int | str,
+    zoom: float | str,
     rect: Sequence[float | int | str],
     origin: str = "control.view.plane_restore",
     timestamp: Optional[float] = None,
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Batch ledger writes for a plane camera restore.
 
     Parameters

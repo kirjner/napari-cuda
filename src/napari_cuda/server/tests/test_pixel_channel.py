@@ -5,7 +5,6 @@ from collections import Counter
 import pytest
 
 from napari_cuda.protocol import NotifyStreamPayload
-from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.server.engine import (
     PixelChannelConfig,
     PixelChannelState,
@@ -14,6 +13,7 @@ from napari_cuda.server.engine import (
     prepare_client_attach,
     start_watchdog,
 )
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 
 
 class DummyMetrics:
@@ -21,7 +21,7 @@ class DummyMetrics:
         self.counts = Counter()
         self.values: dict[str, float] = {}
 
-    def inc(self, name: str, value: float | int = 1) -> None:
+    def inc(self, name: str, value: float = 1) -> None:
         self.counts[name] += value
 
     def set(self, name: str, value: float) -> None:

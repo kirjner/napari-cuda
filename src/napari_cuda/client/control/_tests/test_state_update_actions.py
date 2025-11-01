@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 from collections import deque
-from itertools import count
+from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Any, Callable, Sequence
+from typing import Any
 
 import pytest
 
 from napari_cuda.client.control import state_update_actions as control_actions
-from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
-from napari_cuda.client.control.mirrors.napari_dims_mirror import NapariDimsMirror
+from napari_cuda.client.control.client_state_ledger import (
+    ClientStateLedger,
+    IntentRecord,
+)
 from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
+from napari_cuda.client.control.mirrors.napari_dims_mirror import (
+    NapariDimsMirror,
+)
+from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
+
 @pytest.fixture(autouse=True)
-def _ensure_qapp(qtbot):  # noqa: D401
+def _ensure_qapp(qtbot):
     """Guarantee a Qt application instance for mirror tests."""
-    yield
+    return
 
 class FakeDispatch:
     def __init__(self) -> None:

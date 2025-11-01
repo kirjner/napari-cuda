@@ -8,9 +8,10 @@ an envelope and payload pair.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from numbers import Integral
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from typing import Any
 
 PROTO_VERSION = 2
 
@@ -45,7 +46,7 @@ _COMMAND_ERROR_STATUS = "error"
 _ERROR_SEVERITIES = {"info", "warning", "critical"}
 
 
-def _strip_none(mapping: Dict[str, Any]) -> Dict[str, Any]:
+def _strip_none(mapping: dict[str, Any]) -> dict[str, Any]:
     """Return *mapping* without keys whose value is ``None``."""
 
     return {key: value for key, value in mapping.items() if value is not None}
@@ -57,7 +58,7 @@ def _as_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
     return value
 
 
-def _as_mutable_mapping(value: Any, field_name: str) -> Dict[str, Any]:
+def _as_mutable_mapping(value: Any, field_name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field_name} must be a mapping")
     return dict(value)
@@ -75,7 +76,7 @@ def _optional_str(value: Any) -> str | None:
     return str(value)
 
 
-def _optional_mapping(value: Any, field_name: str) -> Dict[str, Any] | None:
+def _optional_mapping(value: Any, field_name: str) -> dict[str, Any] | None:
     if value is None:
         return None
     return _as_mutable_mapping(value, field_name)
@@ -118,7 +119,7 @@ class FrameEnvelope:
     delta_token: str | None = None
     intent_id: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         payload = {
             "type": self.type,
             "version": int(self.version),
@@ -132,7 +133,7 @@ class FrameEnvelope:
         return _strip_none(payload)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "FrameEnvelope":
+    def from_dict(cls, data: Mapping[str, Any]) -> FrameEnvelope:
         if "type" not in data:
             raise ValueError("frame envelope requires 'type'")
         if "version" not in data:
@@ -167,7 +168,7 @@ def _pull_payload(data: Mapping[str, Any]) -> tuple[FrameEnvelope, Mapping[str, 
     return FrameEnvelope.from_dict(data), payload
 
 
-def _frame_dict(envelope: FrameEnvelope, payload: Mapping[str, Any]) -> Dict[str, Any]:
+def _frame_dict(envelope: FrameEnvelope, payload: Mapping[str, Any]) -> dict[str, Any]:
     data = envelope.to_dict()
     data["payload"] = dict(payload)
     return data
@@ -179,7 +180,7 @@ class HelloClientInfo:
     version: str
     platform: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "version": self.version,
@@ -187,7 +188,7 @@ class HelloClientInfo:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "HelloClientInfo":
+    def from_dict(cls, data: Mapping[str, Any]) -> HelloClientInfo:
         mapping = _as_mapping(data, "session.hello payload.client")
         _ensure_keyset(mapping, required=("name", "version", "platform"), context="session.hello client")
         return cls(
@@ -202,11 +203,11 @@ class HelloAuthInfo:
     type: str
     token: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none({"type": self.type, "token": self.token})
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "HelloAuthInfo":
+    def from_dict(cls, data: Mapping[str, Any]) -> HelloAuthInfo:
         mapping = _as_mapping(data, "session.hello payload.auth")
         _ensure_keyset(mapping, required=("type",), optional=("token",), context="session.hello auth")
         return cls(type=str(mapping["type"]), token=_optional_str(mapping.get("token")))
@@ -214,13 +215,13 @@ class HelloAuthInfo:
 
 @dataclass(slots=True)
 class SessionHelloPayload:
-    protocols: Tuple[int, ...]
+    protocols: tuple[int, ...]
     client: HelloClientInfo
-    features: Dict[str, bool]
-    resume_tokens: Dict[str, str | None]
+    features: dict[str, bool]
+    resume_tokens: dict[str, str | None]
     auth: HelloAuthInfo | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "protocols": [int(value) for value in self.protocols],
@@ -232,7 +233,7 @@ class SessionHelloPayload:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionHelloPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionHelloPayload:
         mapping = _as_mapping(data, "session.hello payload")
         _ensure_keyset(
             mapping,
@@ -244,10 +245,10 @@ class SessionHelloPayload:
         protocols = tuple(int(value) for value in protocols_seq)
         if not protocols:
             raise ValueError("session.hello payload requires at least one protocol version")
-        features: Dict[str, bool] = {}
+        features: dict[str, bool] = {}
         for key, value in _as_mapping(mapping["features"], "session.hello payload.features").items():
             features[str(key)] = bool(value)
-        resume_tokens: Dict[str, str | None] = {}
+        resume_tokens: dict[str, str | None] = {}
         for key, value in _as_mapping(mapping["resume_tokens"], "session.hello payload.resume_tokens").items():
             resume_tokens[str(key)] = None if value is None else str(value)
         auth_payload = mapping.get("auth")
@@ -267,7 +268,7 @@ class WelcomeSessionInfo:
     heartbeat_s: float
     ack_timeout_ms: int | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "id": self.id,
@@ -277,7 +278,7 @@ class WelcomeSessionInfo:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "WelcomeSessionInfo":
+    def from_dict(cls, data: Mapping[str, Any]) -> WelcomeSessionInfo:
         mapping = _as_mapping(data, "session.welcome payload.session")
         _ensure_keyset(
             mapping,
@@ -299,11 +300,11 @@ class FeatureResumeState:
     seq: int
     delta_token: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"seq": int(self.seq), "delta_token": str(self.delta_token)}
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "FeatureResumeState":
+    def from_dict(cls, data: Mapping[str, Any]) -> FeatureResumeState:
         mapping = _as_mapping(data, "session.welcome payload.features.<topic>.resume_state")
         _ensure_keyset(
             mapping,
@@ -318,10 +319,10 @@ class FeatureToggle:
     enabled: bool
     version: int | None = None
     resume: bool | None = None
-    commands: Tuple[str, ...] | None = None
+    commands: tuple[str, ...] | None = None
     resume_state: FeatureResumeState | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "enabled": bool(self.enabled),
@@ -333,7 +334,7 @@ class FeatureToggle:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "FeatureToggle":
+    def from_dict(cls, data: Mapping[str, Any]) -> FeatureToggle:
         mapping = _as_mapping(data, "session.welcome payload.features.<topic>")
         _ensure_keyset(
             mapping,
@@ -342,7 +343,7 @@ class FeatureToggle:
             context="session.welcome feature",
         )
         commands_payload = mapping.get("commands")
-        commands: Tuple[str, ...] | None = None
+        commands: tuple[str, ...] | None = None
         if commands_payload is not None:
             commands = tuple(
                 str(item) for item in _as_sequence(commands_payload, "session.welcome feature.commands")
@@ -372,9 +373,9 @@ class FeatureToggle:
 class SessionWelcomePayload:
     protocol_version: int
     session: WelcomeSessionInfo
-    features: Dict[str, FeatureToggle]
+    features: dict[str, FeatureToggle]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "protocol_version": int(self.protocol_version),
             "session": self.session.to_dict(),
@@ -382,14 +383,14 @@ class SessionWelcomePayload:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionWelcomePayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionWelcomePayload:
         mapping = _as_mapping(data, "session.welcome payload")
         _ensure_keyset(
             mapping,
             required=("protocol_version", "session", "features"),
             context="session.welcome payload",
         )
-        features: Dict[str, FeatureToggle] = {}
+        features: dict[str, FeatureToggle] = {}
         for key, value in _as_mapping(mapping["features"], "session.welcome payload.features").items():
             features[str(key)] = FeatureToggle.from_dict(value)
         return cls(
@@ -403,13 +404,13 @@ class SessionWelcomePayload:
 class SessionRejectPayload:
     code: str
     message: str
-    details: Dict[str, Any] | None = None
+    details: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none({"code": self.code, "message": self.message, "details": self.details})
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionRejectPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionRejectPayload:
         mapping = _as_mapping(data, "session.reject payload")
         if "code" not in mapping or "message" not in mapping:
             raise ValueError("session.reject payload requires 'code' and 'message'")
@@ -426,11 +427,11 @@ class SessionGoodbyePayload:
     message: str | None = None
     reason: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none({"code": self.code, "message": self.message, "reason": self.reason})
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionGoodbyePayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionGoodbyePayload:
         mapping = _as_mapping(data, "session.goodbye payload")
         _ensure_keyset(
             mapping,
@@ -447,11 +448,11 @@ class SessionGoodbyePayload:
 
 @dataclass(slots=True)
 class SessionHeartbeatPayload:
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {}
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionHeartbeatPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionHeartbeatPayload:
         mapping = _as_mapping(data, "session.heartbeat payload")
         _require(not mapping, "session.heartbeat payload must be empty")
         return cls()
@@ -459,11 +460,11 @@ class SessionHeartbeatPayload:
 
 @dataclass(slots=True)
 class SessionAckPayload:
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {}
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionAckPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionAckPayload:
         mapping = _as_mapping(data, "session.ack payload")
         _require(not mapping, "session.ack payload must be empty")
         return cls()
@@ -471,12 +472,12 @@ class SessionAckPayload:
 
 @dataclass(slots=True)
 class NotifyScenePayload:
-    viewer: Dict[str, Any]
-    layers: Tuple[Dict[str, Any], ...]
-    metadata: Dict[str, Any] | None = None
-    policies: Dict[str, Any] | None = None
+    viewer: dict[str, Any]
+    layers: tuple[dict[str, Any], ...]
+    metadata: dict[str, Any] | None = None
+    policies: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "viewer": dict(self.viewer),
@@ -487,7 +488,7 @@ class NotifyScenePayload:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyScenePayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyScenePayload:
         mapping = _as_mapping(data, "notify.scene payload")
         _ensure_keyset(
             mapping,
@@ -511,9 +512,9 @@ class NotifyScenePayload:
 class NotifySceneLevelPayload:
     current_level: int
     downgraded: bool | None = None
-    levels: Tuple[Dict[str, Any], ...] | None = None
+    levels: tuple[dict[str, Any], ...] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "current_level": int(self.current_level),
@@ -525,7 +526,7 @@ class NotifySceneLevelPayload:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifySceneLevelPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifySceneLevelPayload:
         mapping = _as_mapping(data, "notify.scene.level payload")
         _ensure_keyset(
             mapping,
@@ -538,7 +539,7 @@ class NotifySceneLevelPayload:
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError("notify.scene.level current_level must be an int") from exc
         levels_payload = mapping.get("levels")
-        levels: Tuple[Dict[str, Any], ...] | None = None
+        levels: tuple[dict[str, Any], ...] | None = None
         if levels_payload is not None:
             levels = tuple(
                 _as_mutable_mapping(entry, "notify.scene.level payload.levels[]")
@@ -561,14 +562,14 @@ class NotifyLayersPayload:
     """
 
     layer_id: str
-    controls: Dict[str, Any] | None = None
-    metadata: Dict[str, Any] | None = None
-    data: Dict[str, Any] | None = None
-    thumbnail: Dict[str, Any] | None = None
+    controls: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
+    thumbnail: dict[str, Any] | None = None
     removed: bool | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"layer_id": self.layer_id}
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"layer_id": self.layer_id}
         if self.controls:
             payload["controls"] = dict(self.controls)
         if self.metadata:
@@ -582,7 +583,7 @@ class NotifyLayersPayload:
         return payload
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyLayersPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyLayersPayload:
         mapping = _as_mapping(data, "notify.layers payload")
         _ensure_keyset(
             mapping,
@@ -608,13 +609,13 @@ class NotifyStreamPayload:
     codec: str
     format: str
     fps: float
-    frame_size: Tuple[int, int]
+    frame_size: tuple[int, int]
     nal_length_size: int
     avcc: str
-    latency_policy: Dict[str, Any]
-    vt_hint: Dict[str, Any] | None = None
+    latency_policy: dict[str, Any]
+    vt_hint: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "codec": self.codec,
@@ -629,7 +630,7 @@ class NotifyStreamPayload:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyStreamPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyStreamPayload:
         mapping = _as_mapping(data, "notify.stream payload")
         _ensure_keyset(
             mapping,
@@ -662,20 +663,20 @@ class NotifyStreamPayload:
 
 @dataclass(slots=True)
 class NotifyDimsPayload:
-    current_step: Tuple[int, ...]
-    level_shapes: Tuple[Tuple[int, ...], ...]
-    levels: Tuple[Dict[str, Any], ...]
+    current_step: tuple[int, ...]
+    level_shapes: tuple[tuple[int, ...], ...]
+    levels: tuple[dict[str, Any], ...]
     current_level: int
     downgraded: bool | None
     mode: str
     ndisplay: int
-    axis_labels: Tuple[str, ...] | None
-    order: Tuple[int, ...] | None
-    displayed: Tuple[int, ...] | None
-    labels: Tuple[str, ...] | None = None
+    axis_labels: tuple[str, ...] | None
+    order: tuple[int, ...] | None
+    displayed: tuple[int, ...] | None
+    labels: tuple[str, ...] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "step": [int(v) for v in self.current_step],
             "current_step": [int(v) for v in self.current_step],
             "levels": [dict(level) for level in self.levels],
@@ -699,7 +700,7 @@ class NotifyDimsPayload:
         return payload
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyDimsPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyDimsPayload:
         mapping = _as_mapping(data, "notify.dims payload")
         _ensure_keyset(
             mapping,
@@ -751,7 +752,7 @@ class NotifyDimsPayload:
             parsed_shapes.append(tuple(int(dim) for dim in shape_seq))
         level_shapes = tuple(parsed_shapes)
 
-        levels: list[Dict[str, Any]] = []
+        levels: list[dict[str, Any]] = []
         for idx, entry in enumerate(levels_seq):
             levels.append(dict(_as_mapping(entry, f"notify.dims payload.levels[{idx}]")))
 
@@ -774,11 +775,11 @@ class NotifyDimsPayload:
 class NotifyCameraPayload:
     mode: str
     origin: str
-    delta: Dict[str, Any] | None = None
-    state: Dict[str, Any] | None = None
+    delta: dict[str, Any] | None = None
+    state: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"mode": self.mode, "origin": self.origin}
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"mode": self.mode, "origin": self.origin}
         if self.delta is not None:
             result["delta"] = dict(self.delta)
         if self.state is not None:
@@ -786,7 +787,7 @@ class NotifyCameraPayload:
         return result
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyCameraPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyCameraPayload:
         mapping = _as_mapping(data, "notify.camera payload")
         _ensure_keyset(
             mapping,
@@ -794,10 +795,10 @@ class NotifyCameraPayload:
             optional=("delta", "state"),
             context="notify.camera payload",
         )
-        delta_obj: Dict[str, Any] | None = None
+        delta_obj: dict[str, Any] | None = None
         if "delta" in mapping and mapping["delta"] is not None:
             delta_obj = _as_mutable_mapping(mapping["delta"], "notify.camera payload.delta")
-        state_obj: Dict[str, Any] | None = None
+        state_obj: dict[str, Any] | None = None
         if "state" in mapping and mapping["state"] is not None:
             state_obj = _as_mutable_mapping(mapping["state"], "notify.camera payload.state")
         if delta_obj is None and state_obj is None:
@@ -816,7 +817,7 @@ class NotifyTelemetryPayload:
     decode: float
     queue_depth: float
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "presenter": float(self.presenter),
             "decode": float(self.decode),
@@ -824,7 +825,7 @@ class NotifyTelemetryPayload:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyTelemetryPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyTelemetryPayload:
         mapping = _as_mapping(data, "notify.telemetry payload")
         _ensure_keyset(
             mapping,
@@ -844,9 +845,9 @@ class NotifyErrorPayload:
     code: str
     message: str
     severity: str
-    context: Dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "domain": self.domain,
@@ -858,7 +859,7 @@ class NotifyErrorPayload:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyErrorPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyErrorPayload:
         mapping = _as_mapping(data, "notify.error payload")
         _ensure_keyset(
             mapping,
@@ -885,7 +886,7 @@ class StateUpdatePayload:
     key: str
     value: Any
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "scope": self.scope,
             "target": self.target,
@@ -894,7 +895,7 @@ class StateUpdatePayload:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StateUpdatePayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> StateUpdatePayload:
         mapping = _as_mapping(data, "state.update payload")
         required = {"scope", "target", "key", "value"}
         missing = [key for key in required if key not in mapping]
@@ -912,13 +913,13 @@ class StateUpdatePayload:
 class StateErrorPayload:
     code: str
     message: str
-    details: Dict[str, Any] | None = None
+    details: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _strip_none({"code": self.code, "message": self.message, "details": self.details})
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StateErrorPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> StateErrorPayload:
         mapping = _as_mapping(data, "ack.state payload.error")
         if "code" not in mapping or "message" not in mapping:
             raise ValueError("ack.state error requires 'code' and 'message'")
@@ -938,8 +939,8 @@ class AckStatePayload:
     error: StateErrorPayload | None = None
     version: int | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "intent_id": self.intent_id,
             "in_reply_to": self.in_reply_to,
             "status": self.status,
@@ -950,7 +951,7 @@ class AckStatePayload:
         return _strip_none(data)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "AckStatePayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> AckStatePayload:
         mapping = _as_mapping(data, "ack.state payload")
         required = {"intent_id", "in_reply_to", "status"}
         missing = [key for key in required if key not in mapping]
@@ -991,12 +992,12 @@ class AckStatePayload:
 @dataclass(slots=True)
 class CallCommandPayload:
     command: str
-    args: Tuple[Any, ...] = field(default_factory=tuple)
-    kwargs: Dict[str, Any] = field(default_factory=dict)
+    args: tuple[Any, ...] = field(default_factory=tuple)
+    kwargs: dict[str, Any] = field(default_factory=dict)
     origin: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "command": self.command,
             "args": list(self.args),
             "kwargs": dict(self.kwargs),
@@ -1005,16 +1006,16 @@ class CallCommandPayload:
         return _strip_none(data)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "CallCommandPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> CallCommandPayload:
         mapping = _as_mapping(data, "call.command payload")
         if "command" not in mapping:
             raise ValueError("call.command payload requires 'command'")
         args_payload = mapping.get("args")
         kwargs_payload = mapping.get("kwargs")
-        args: Tuple[Any, ...] = ()
+        args: tuple[Any, ...] = ()
         if args_payload is not None:
             args = tuple(_as_sequence(args_payload, "call.command payload.args"))
-        kwargs: Dict[str, Any] = {}
+        kwargs: dict[str, Any] = {}
         if kwargs_payload is not None:
             kwargs = _as_mutable_mapping(kwargs_payload, "call.command payload.kwargs")
         return cls(
@@ -1032,8 +1033,8 @@ class ReplyCommandPayload:
     result: Any | None = None
     idempotency_key: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "in_reply_to": self.in_reply_to,
             "status": self.status,
             "result": self.result,
@@ -1042,7 +1043,7 @@ class ReplyCommandPayload:
         return _strip_none(data)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ReplyCommandPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> ReplyCommandPayload:
         mapping = _as_mapping(data, "reply.command payload")
         required = {"in_reply_to", "status"}
         missing = [key for key in required if key not in mapping]
@@ -1065,11 +1066,11 @@ class ErrorCommandPayload:
     status: str
     code: str
     message: str
-    details: Dict[str, Any] | None = None
+    details: dict[str, Any] | None = None
     idempotency_key: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "in_reply_to": self.in_reply_to,
             "status": self.status,
             "code": self.code,
@@ -1080,7 +1081,7 @@ class ErrorCommandPayload:
         return _strip_none(data)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ErrorCommandPayload":
+    def from_dict(cls, data: Mapping[str, Any]) -> ErrorCommandPayload:
         mapping = _as_mapping(data, "error.command payload")
         required = {"in_reply_to", "status", "code", "message"}
         missing = [key for key in required if key not in mapping]
@@ -1121,11 +1122,11 @@ class SessionHelloFrame:
         _require(env.delta_token is None, "session.hello forbids delta_token")
         _require(env.intent_id is None, "session.hello forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionHelloFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionHelloFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=SessionHelloPayload.from_dict(payload))
         frame._validate()
@@ -1158,11 +1159,11 @@ class SessionWelcomeFrame:
             f"session.welcome payload.protocol_version must equal {PROTO_VERSION}",
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionWelcomeFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionWelcomeFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=SessionWelcomePayload.from_dict(payload))
         frame._validate()
@@ -1190,11 +1191,11 @@ class SessionRejectFrame:
         _require(env.seq is None and env.delta_token is None, "session.reject forbids seq/delta_token")
         _require(env.intent_id is None, "session.reject forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionRejectFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionRejectFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=SessionRejectPayload.from_dict(payload))
         frame._validate()
@@ -1222,11 +1223,11 @@ class SessionHeartbeatFrame:
         _require(env.seq is None and env.delta_token is None, "session.heartbeat forbids seq/delta_token")
         _require(env.intent_id is None, "session.heartbeat forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionHeartbeatFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionHeartbeatFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=SessionHeartbeatPayload.from_dict(payload))
         frame._validate()
@@ -1254,11 +1255,11 @@ class SessionAckFrame:
         _require(env.seq is None and env.delta_token is None, "session.ack forbids seq/delta_token")
         _require(env.intent_id is None, "session.ack forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionAckFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionAckFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=SessionAckPayload.from_dict(payload))
         frame._validate()
@@ -1286,11 +1287,11 @@ class SessionGoodbyeFrame:
         _require(env.seq is None and env.delta_token is None, "session.goodbye forbids seq/delta_token")
         _require(env.intent_id is None, "session.goodbye forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SessionGoodbyeFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionGoodbyeFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=SessionGoodbyePayload.from_dict(payload))
         frame._validate()
@@ -1318,11 +1319,11 @@ class NotifySceneFrame:
         _require(env.seq == 0, "notify.scene snapshot must use seq=0")
         _require(env.delta_token is not None, "notify.scene requires delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifySceneFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifySceneFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyScenePayload.from_dict(payload))
         frame._validate()
@@ -1352,11 +1353,11 @@ class NotifySceneLevelFrame:
         _require(env.seq is not None, "notify.scene.level requires seq")
         _require(env.delta_token is not None, "notify.scene.level requires delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifySceneLevelFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifySceneLevelFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifySceneLevelPayload.from_dict(payload))
         frame._validate()
@@ -1383,11 +1384,11 @@ class NotifyLayersFrame:
         _require(env.seq is not None, "notify.layers requires seq")
         _require(env.delta_token is not None, "notify.layers requires delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyLayersFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyLayersFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyLayersPayload.from_dict(payload))
         frame._validate()
@@ -1414,11 +1415,11 @@ class NotifyStreamFrame:
         _require(env.seq is not None, "notify.stream requires seq")
         _require(env.delta_token is not None, "notify.stream requires delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyStreamFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyStreamFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyStreamPayload.from_dict(payload))
         frame._validate()
@@ -1445,11 +1446,11 @@ class NotifyDimsFrame:
         _require(env.seq is None and env.delta_token is None, "notify.dims forbids seq/delta_token")
         _require(env.intent_id is not None or env.frame_id is not None, "notify.dims requires intent_id or frame_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyDimsFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyDimsFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyDimsPayload.from_dict(payload))
         frame._validate()
@@ -1476,11 +1477,11 @@ class NotifyCameraFrame:
         _require(env.seq is None and env.delta_token is None, "notify.camera forbids seq/delta_token")
         _require(env.intent_id is not None or env.frame_id is not None, "notify.camera requires intent_id or frame_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyCameraFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyCameraFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyCameraPayload.from_dict(payload))
         frame._validate()
@@ -1506,11 +1507,11 @@ class NotifyTelemetryFrame:
         _require(env.timestamp is not None, "notify.telemetry requires timestamp")
         _require(env.seq is None and env.delta_token is None, "notify.telemetry forbids seq/delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyTelemetryFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyTelemetryFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyTelemetryPayload.from_dict(payload))
         frame._validate()
@@ -1536,11 +1537,11 @@ class NotifyErrorFrame:
         _require(env.timestamp is not None, "notify.error requires timestamp")
         _require(env.seq is None and env.delta_token is None, "notify.error forbids seq/delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "NotifyErrorFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyErrorFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=NotifyErrorPayload.from_dict(payload))
         frame._validate()
@@ -1568,11 +1569,11 @@ class StateUpdateFrame:
         _require(env.intent_id is not None, "state.update requires intent_id")
         _require(env.seq is None and env.delta_token is None, "state.update forbids seq/delta_token")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StateUpdateFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> StateUpdateFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=StateUpdatePayload.from_dict(payload))
         frame._validate()
@@ -1600,11 +1601,11 @@ class AckStateFrame:
         _require(env.seq is None and env.delta_token is None, "ack.state forbids seq/delta_token")
         _require(env.intent_id is None, "ack.state must carry intent only in payload")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "AckStateFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> AckStateFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=AckStatePayload.from_dict(payload))
         frame._validate()
@@ -1632,11 +1633,11 @@ class CallCommandFrame:
         _require(env.seq is None and env.delta_token is None, "call.command forbids seq/delta_token")
         _require(env.intent_id is None, "call.command forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "CallCommandFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> CallCommandFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=CallCommandPayload.from_dict(payload))
         frame._validate()
@@ -1664,11 +1665,11 @@ class ReplyCommandFrame:
         _require(env.seq is None and env.delta_token is None, "reply.command forbids seq/delta_token")
         _require(env.intent_id is None, "reply.command forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ReplyCommandFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> ReplyCommandFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=ReplyCommandPayload.from_dict(payload))
         frame._validate()
@@ -1696,11 +1697,11 @@ class ErrorCommandFrame:
         _require(env.seq is None and env.delta_token is None, "error.command forbids seq/delta_token")
         _require(env.intent_id is None, "error.command forbids intent_id")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ErrorCommandFrame":
+    def from_dict(cls, data: Mapping[str, Any]) -> ErrorCommandFrame:
         envelope, payload = _pull_payload(data)
         frame = cls(envelope=envelope, payload=ErrorCommandPayload.from_dict(payload))
         frame._validate()

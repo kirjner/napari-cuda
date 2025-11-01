@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import cupy as cp  # type: ignore
 import pycuda.driver as cuda  # type: ignore
 import pycuda.gl  # type: ignore
-from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 import torch  # type: ignore
 from OpenGL import GL  # type: ignore
-
+from pycuda.gl import RegisteredImage, graphics_map_flags  # type: ignore
 
 logger = logging.getLogger(__name__)
 

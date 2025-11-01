@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from OpenGL import GL
-
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ class GLFrameInterceptor:
         self._scene_canvas = canvas._scene_canvas
         self._texture: Optional[int] = None
         self._fbo: Optional[int] = None
-        self._size: Tuple[int, int] = (0, 0)
+        self._size: tuple[int, int] = (0, 0)
         self._last_stats: Optional[CaptureStats] = None
         self._attached = False
 
@@ -88,7 +87,7 @@ class GLFrameInterceptor:
             # Try to resize buffers, but don't fail if context not ready
             self._ensure_buffers(new_size)
 
-    def _ensure_buffers(self, size: Tuple[int, int]) -> bool:
+    def _ensure_buffers(self, size: tuple[int, int]) -> bool:
         """
         Create or resize GL buffers. Returns True on success, False on failure.
         Failures are expected before GL context is ready.
@@ -96,9 +95,9 @@ class GLFrameInterceptor:
         width, height = int(size[0]), int(size[1])
         if width <= 0 or height <= 0:
             return False  # Invalid size
-        
+
         self._size = (width, height)
-        
+
         try:
             # Try to make context current if possible
             if hasattr(self._scene_canvas, 'context') and self._scene_canvas.context:
@@ -106,7 +105,7 @@ class GLFrameInterceptor:
                     self._scene_canvas.context.make_current()
                 except Exception:
                     logger.debug("vispy_intercept: make_current failed", exc_info=True)
-            
+
             # Create or resize texture and FBO
             if self._texture is None:
                 self._texture = GL.glGenTextures(1)
@@ -138,14 +137,14 @@ class GLFrameInterceptor:
             )
             status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
-            
+
             if status != GL.GL_FRAMEBUFFER_COMPLETE:
                 # FBO creation failed - clean up and retry later
                 raise RuntimeError(f"Capture FBO incomplete: 0x{status:x}")
-            
+
             return True  # Success
-            
-        except (GL.error.GLError, RuntimeError) as e:
+
+        except (GL.error.GLError, RuntimeError):
             # GL context not ready or FBO creation failed
             # Clean up and retry on next draw
             if self._fbo is not None:
@@ -185,25 +184,25 @@ class GLFrameInterceptor:
             # Size changed, need to recreate buffers
             if not self._ensure_buffers((width, height)):
                 return  # Context not ready, try next frame
-        
+
         # If we don't have buffers yet, try to create them
         if self._fbo is None or self._texture is None:
             if not self._ensure_buffers((width, height)):
                 return  # Context not ready, try next frame
-        
+
         # Now we should have valid buffers
         if self._fbo is None or self._texture is None:
             return  # Still no buffers somehow
-        
+
         # Query currently bound framebuffer (Qt/VisPy FBO)
         try:
             bound_fbo = GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING)
         except GL.error.GLError:
             return  # GL context not ready
-        
+
         read_fbo = int(bound_fbo)
         draw_fbo = int(self._fbo)
-        
+
         gpu_time_ns: Optional[int] = None
         query_id = None
         try:
@@ -235,7 +234,7 @@ class GLFrameInterceptor:
             while not available.value and max_wait > 0:
                 GL.glGetQueryObjectiv(query_id, GL.GL_QUERY_RESULT_AVAILABLE, available)
                 max_wait -= 1
-            
+
             if available.value:
                 result = GL.GLuint64(0)
                 GL.glGetQueryObjectui64v(query_id, GL.GL_QUERY_RESULT, result)

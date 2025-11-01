@@ -7,8 +7,11 @@ import numpy as np
 import pytest
 import zarr
 
-from napari_cuda.server.data.zarr_source import ZarrSceneSource, ZarrSceneSourceError
 from napari_cuda.server.data import SliceROI
+from napari_cuda.server.data.zarr_source import (
+    ZarrSceneSource,
+    ZarrSceneSourceError,
+)
 
 
 def _write_multiscale(root: Path, datasets: list[dict]) -> None:

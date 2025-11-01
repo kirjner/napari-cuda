@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Any, Dict, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 __all__ = [
     # Capture / encoding interfaces
@@ -34,7 +34,7 @@ __all__ = [
     "run_channel_loop",
 ]
 
-_EXPORT_MAP: Dict[str, Tuple[str, str | None]] = {
+_EXPORT_MAP: dict[str, tuple[str, str | None]] = {
     # Capture / encoding
     "CaptureFacade": ("napari_cuda.server.engine.capture.capture", "CaptureFacade"),
     "FrameTimings": ("napari_cuda.server.engine.capture.capture", "FrameTimings"),
@@ -80,8 +80,15 @@ def __dir__() -> list[str]:  # pragma: no cover - trivial helper
 
 
 if TYPE_CHECKING:  # pragma: no cover - assist static type checkers
-    from napari_cuda.server.engine.capture.capture import CaptureFacade, FrameTimings, encode_frame
-    from napari_cuda.server.engine.capture.debug import DebugConfig, DebugDumper
+    from napari_cuda.server.engine.capture.capture import (
+        CaptureFacade,
+        FrameTimings,
+        encode_frame,
+    )
+    from napari_cuda.server.engine.capture.debug import (
+        DebugConfig,
+        DebugDumper,
+    )
     from napari_cuda.server.engine.capture.egl_context import EglContext
     from napari_cuda.server.engine.encoding.bitstream import (
         ParamCache,

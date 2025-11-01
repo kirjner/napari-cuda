@@ -16,10 +16,10 @@ CUDA_DEVICE_NAME = None
 def _check_cuda():
     """Lazy check for CUDA availability."""
     global HAS_CUDA, CUDA_DEVICE_NAME
-    
+
     if HAS_CUDA is not None:
         return HAS_CUDA
-        
+
     try:
         import cupy as cp
         import pycuda.driver as cuda
@@ -32,11 +32,10 @@ def _check_cuda():
         CUDA_DEVICE_NAME = None
         if os.environ.get('NAPARI_CUDA_REQUIRED'):
             raise ImportError("CUDA required but not available") from e
-        else:
-            # Only warn when actually trying to use CUDA; record reason at debug level
-            import logging
-            logging.getLogger(__name__).debug("CUDA check failed (will warn on use): %s", e)
-    
+        # Only warn when actually trying to use CUDA; record reason at debug level
+        import logging
+        logging.getLogger(__name__).debug("CUDA check failed (will warn on use): %s", e)
+
     return HAS_CUDA
 
 # Don't import anything at module level - let individual components check CUDA when needed
@@ -44,7 +43,7 @@ def _check_cuda():
 __version__ = "0.1.0"
 # Export only safe, lazily evaluated API at import time.
 # Client-side imports must not force CUDA checks.
-__all__ = ["HAS_CUDA", "accelerate", "benchmark", "_check_cuda", "__version__"]
+__all__ = ["HAS_CUDA", "__version__", "_check_cuda", "accelerate", "benchmark"]
 
 
 def accelerate(viewer=None):
@@ -65,16 +64,16 @@ def accelerate(viewer=None):
     if not _check_cuda():
         warnings.warn("Cannot enable CUDA acceleration: CUDA not available")
         return False
-    
+
     from napari_cuda.cuda import monkey_patch
-    
+
     if viewer is not None:
         # Accelerate specific viewer
         monkey_patch.patch_viewer(viewer)
     else:
         # Global patch
         monkey_patch.patch_global()
-    
+
     print(f"🚀 CUDA acceleration enabled on {CUDA_DEVICE_NAME}")
     return True
 

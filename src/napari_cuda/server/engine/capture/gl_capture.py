@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 from OpenGL import GL  # type: ignore
-
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +16,7 @@ class GLCapture:
         self._height = int(height)
         self._texture: Optional[int] = None
         self._fbo: Optional[int] = None
-        self._query_ids: Optional[Tuple[int, int]] = None
+        self._query_ids: Optional[tuple[int, int]] = None
         self._query_idx = 0
         self._query_started = False
 
@@ -62,7 +61,7 @@ class GLCapture:
         if status != GL.GL_FRAMEBUFFER_COMPLETE:
             raise RuntimeError(f"Capture FBO incomplete: 0x{status:x}")
 
-    def _query_pair(self) -> Tuple[int, int]:
+    def _query_pair(self) -> tuple[int, int]:
         if self._query_ids is None:
             ids = GL.glGenQueries(2)
             if isinstance(ids, (list, tuple)) and len(ids) == 2:

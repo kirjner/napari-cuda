@@ -4,14 +4,16 @@ Step 3: CUDA texture mapping - the zero-copy path.
 """
 import os
 import time
+
 import numpy as np
+
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
-from OpenGL import GL
 import OpenGL.EGL as EGL
-import pycuda.driver as cuda
 import pycuda.autoinit
+import pycuda.driver as cuda
 import pycuda.gl
+from OpenGL import GL
 from pycuda.gl import RegisteredImage, graphics_map_flags
 
 print("Step 3: CUDA Texture Mapping")
@@ -84,26 +86,26 @@ for i in range(30):
         GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, width, height,
                           GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, new_data)
         GL.glFinish()
-    
+
     cuda.Context.synchronize()
     t0 = time.perf_counter()
-    
+
     # THIS IS WHAT WE'RE MEASURING
     mapping = registered_texture.map()
-    
+
     # Get the CUDA array
     cuda_array = mapping.array(0, 0)
-    
+
     # This is where NVENC would read from cuda_array
     # The data is already on GPU - zero copy!
-    
+
     mapping.unmap()
     cuda.Context.synchronize()
-    
+
     t1 = time.perf_counter()
     elapsed_ms = (t1 - t0) * 1000
     times.append(elapsed_ms)
-    
+
     if (i + 1) % 10 == 0:
         print(f"  Frame {i+1}: {elapsed_ms:.3f}ms")
 
@@ -119,7 +121,7 @@ print(f"  Mean: {mean_time:.3f} ± {std_time:.3f} ms")
 print(f"  Min:  {min_time:.3f} ms")
 print(f"  Max:  {max_time:.3f} ms")
 print(f"  FPS:  {1000/mean_time:.0f}")
-print(f"  Data: Zero-copy (texture already on GPU)")
+print("  Data: Zero-copy (texture already on GPU)")
 
 # Cleanup
 registered_texture.unregister()

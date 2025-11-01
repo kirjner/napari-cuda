@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Optional
 
 
-def default_axis_labels(ndim: int) -> List[str]:
+def default_axis_labels(ndim: int) -> list[str]:
     """Return canonical axis labels for a given dimensionality."""
 
     if ndim <= 0:
@@ -20,10 +21,10 @@ def default_axis_labels(ndim: int) -> List[str]:
     return [f"d{i}" for i in range(ndim)]
 
 
-def normalize_axis_labels(labels: Optional[Iterable[Any]], ndim: int) -> List[str]:
+def normalize_axis_labels(labels: Optional[Iterable[Any]], ndim: int) -> list[str]:
     """Ensure axis labels are non-empty and cover ``ndim`` dimensions."""
 
-    cleaned: List[str] = []
+    cleaned: list[str] = []
     if labels is not None:
         for label in labels:
             text = str(label).strip()

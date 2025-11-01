@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Tuple
+from collections.abc import Iterable
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -15,10 +15,10 @@ def apply_bootstrap_transaction(
     *,
     ledger: ServerStateLedger,
     op_seq: int,
-    entries: Iterable[Tuple],
+    entries: Iterable[tuple],
     origin: str = "server.bootstrap",
     timestamp: float | None = None,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Batch the bootstrap ledger writes and return stored entries."""
 
     materialized = list(entries)

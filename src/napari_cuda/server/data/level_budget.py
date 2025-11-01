@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Sequence, Tuple
 import logging
 import time
+from collections.abc import Callable
+from typing import Optional
 
 import numpy as np
 
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def select_volume_level(
     max_voxels: Optional[int],
     max_bytes: Optional[int],
     error_cls: type[Exception] = LevelBudgetError,
-) -> Tuple[int, bool]:
+) -> tuple[int, bool]:
     """Clamp ``requested_level`` against voxel/byte budgets using source metadata."""
 
     level_shapes = [descriptor.shape for descriptor in source.level_descriptors]

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
-import logging
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional
+from typing import Optional
 
 from .types import ReadyFrame, Source, SubmittedFrame
 
@@ -56,12 +56,12 @@ class MinimalPresenter:
         except Exception:
             self._step_log = False
         # Per-source buffers
-        self._buf: Dict[Source, Deque[_Item]] = {Source.VT: deque(), Source.PYAV: deque()}
+        self._buf: dict[Source, deque[_Item]] = {Source.VT: deque(), Source.PYAV: deque()}
         # Sequence maps (for tick-locked selection)
-        self._seq_map: Dict[Source, Dict[int, _Item]] = {Source.VT: {}, Source.PYAV: {}}
+        self._seq_map: dict[Source, dict[int, _Item]] = {Source.VT: {}, Source.PYAV: {}}
         # Last presented markers
-        self._last_seq: Dict[Source, Optional[int]] = {Source.VT: None, Source.PYAV: None}
-        self._last_ts: Dict[Source, Optional[float]] = {Source.VT: None, Source.PYAV: None}
+        self._last_seq: dict[Source, Optional[int]] = {Source.VT: None, Source.PYAV: None}
+        self._last_ts: dict[Source, Optional[float]] = {Source.VT: None, Source.PYAV: None}
         # Time->seq mapping base and period
         self._base_seq: Optional[int] = None
         self._base_ts: Optional[float] = None  # server wall at base_seq
@@ -69,8 +69,8 @@ class MinimalPresenter:
         self._fps: float = 60.0
         self._period: float = 1.0 / 60.0
         # Stats
-        self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
-        self._out_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
+        self._submit_count: dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
+        self._out_count: dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         # Epsilon for timestamp monotonicity (seconds)
         self._ts_eps = 0.00025
 
@@ -278,7 +278,7 @@ class MinimalPresenter:
             return None
         return float(dq[0].due_ts)
 
-    def stats(self) -> Dict[str, object]:  # type: ignore[override]
+    def stats(self) -> dict[str, object]:  # type: ignore[override]
         now = time.perf_counter()
         next_due = {}
         fill = {}
@@ -304,7 +304,7 @@ class MinimalPresenter:
     # Compatibility: allow coordinator to relearn offset from buffered samples
     def compute_offset_median(self, source: Source) -> Optional[float]:
         dq = list(self._buf.get(source) or [])
-        diffs: List[float] = []
+        diffs: list[float] = []
         for it in dq[-20:]:  # recent items
             if it.server_ts is not None and math.isfinite(float(it.server_ts)):
                 diffs.append(float(it.arrival_ts) - float(it.server_ts))

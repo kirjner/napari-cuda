@@ -5,10 +5,12 @@ from __future__ import annotations
 This module re-exports minimal helpers for backward compatibility.
 """
 
-from typing import Union, Tuple
+from typing import Union
 
-from napari_cuda.codec.h264 import avcc_to_annexb as _core_avcc_to_annexb
-from napari_cuda.codec.h264 import is_annexb as _core_is_annexb
+from napari_cuda.codec.h264 import (
+    avcc_to_annexb as _core_avcc_to_annexb,
+    is_annexb as _core_is_annexb,
+)
 
 BytesLike = Union[bytes, bytearray, memoryview]
 
@@ -17,7 +19,7 @@ def avcc_to_annexb(avcc: BytesLike) -> bytes:  # pragma: no cover - shim
     return _core_avcc_to_annexb(bytes(avcc), 4)
 
 
-def normalize_to_annexb(buf: BytesLike) -> Tuple[bytes, bool]:  # pragma: no cover - shim
+def normalize_to_annexb(buf: BytesLike) -> tuple[bytes, bool]:  # pragma: no cover - shim
     b = bytes(buf)
     if _core_is_annexb(b):
         return b, False

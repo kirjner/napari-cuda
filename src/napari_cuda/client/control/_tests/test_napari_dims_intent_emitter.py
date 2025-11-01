@@ -5,10 +5,13 @@ from typing import Any
 
 import pytest
 
+from napari_cuda.client.control.client_state_ledger import (
+    ClientStateLedger,
+    IntentRecord,
+)
 from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
 
 
 class FakeDispatch:

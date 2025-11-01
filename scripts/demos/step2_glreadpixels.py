@@ -5,11 +5,13 @@ This is what napari does for screenshots.
 """
 import os
 import time
+
 import numpy as np
+
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
-from OpenGL import GL
 import OpenGL.EGL as EGL
+from OpenGL import GL
 
 print("Step 2: glReadPixels Timing")
 print("=" * 60)
@@ -72,17 +74,17 @@ for i in range(30):
     GL.glClearColor(np.random.rand(), np.random.rand(), np.random.rand(), 1.0)
     GL.glClear(GL.GL_COLOR_BUFFER_BIT)
     GL.glFinish()  # Ensure render is complete
-    
+
     t0 = time.perf_counter()
-    
+
     # THIS IS WHAT WE'RE MEASURING
     GL.glReadPixels(0, 0, width, height, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, buffer)
     GL.glFinish()  # Ensure transfer is complete
-    
+
     t1 = time.perf_counter()
     elapsed_ms = (t1 - t0) * 1000
     times.append(elapsed_ms)
-    
+
     if (i + 1) % 10 == 0:
         print(f"  Frame {i+1}: {elapsed_ms:.2f}ms")
 

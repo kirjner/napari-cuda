@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import List, Tuple
 
 import pytest
 from qtpy import QtCore
@@ -15,7 +14,7 @@ from napari_cuda.protocol.envelopes import build_notify_camera
 
 class _StubEmitter:
     def __init__(self) -> None:
-        self.calls: List[Tuple[str, dict]] = []
+        self.calls: list[tuple[str, dict]] = []
 
     def record_confirmed(self, key: str, value: dict) -> None:
         self.calls.append((key, dict(value)))
@@ -23,7 +22,7 @@ class _StubEmitter:
 
 class _StubPresenter:
     def __init__(self) -> None:
-        self.updates: List[Tuple[str, dict]] = []
+        self.updates: list[tuple[str, dict]] = []
 
     def apply_camera_update(self, *, mode: str, payload: dict) -> None:
         self.updates.append((mode, dict(payload)))

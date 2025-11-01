@@ -9,9 +9,9 @@ keeps behavior unchanged — we only read existing envs and expose a structured
 config for downstream components to consume gradually.
 """
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, Optional
 import os
+from dataclasses import asdict, dataclass
+from typing import Any, Optional
 
 
 def _env_str(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -60,11 +60,11 @@ class ClientConfig:
     preview_guard_ms: float = 5.0
 
     # Compatibility helper to ease logging/inspection
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @staticmethod
-    def from_env(default_latency_ms: float = 0.0, default_buffer_limit: int = 3, default_draw_fps: float = 60.0) -> "ClientConfig":
+    def from_env(default_latency_ms: float = 0.0, default_buffer_limit: int = 3, default_draw_fps: float = 60.0) -> ClientConfig:
         # Latency: prefer explicit VT latency env; else provided defaults
         base_latency_ms = _env_float("NAPARI_CUDA_CLIENT_VT_LATENCY_MS", default_latency_ms)
         # Buffer limit: mirror existing env; coordinator/Presenter still own the logic

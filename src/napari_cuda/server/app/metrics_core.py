@@ -16,7 +16,6 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Tuple
 
 
 def _env_int(name: str, default: int) -> int:
@@ -29,7 +28,7 @@ def _env_int(name: str, default: int) -> int:
 @dataclass
 class _Hist:
     window: int
-    values: Deque[float] = field(default_factory=deque)
+    values: deque[float] = field(default_factory=deque)
     last: float = 0.0
     total: float = 0.0
     count: int = 0
@@ -57,7 +56,7 @@ class _Hist:
             self.max_v = self.last
         self.count += 1
 
-    def stats(self) -> Dict[str, float]:
+    def stats(self) -> dict[str, float]:
         n = len(self.values)
         if n == 0:
             return {
@@ -71,7 +70,7 @@ class _Hist:
             }
         mean = (self.total / n) if n else 0.0
         # Full stats: compute percentiles from current window snapshot
-        arr: List[float] = sorted(self.values)
+        arr: list[float] = sorted(self.values)
         def q(p: float) -> float:
             if n == 0:
                 return 0.0
@@ -93,9 +92,9 @@ class Metrics:
 
     def __init__(self) -> None:
         self._window = max(16, _env_int("NAPARI_CUDA_METRICS_WINDOW", 512))
-        self._counters: Dict[str, float] = {}
-        self._gauges: Dict[str, float] = {}
-        self._hists: Dict[str, _Hist] = {}
+        self._counters: dict[str, float] = {}
+        self._gauges: dict[str, float] = {}
+        self._hists: dict[str, _Hist] = {}
         # for derived fps
         self._last_frames: float = 0.0
         self._last_ts: float = time.time()
@@ -108,7 +107,7 @@ class Metrics:
     def set(self, name: str, value: float) -> None:
         self._gauges[name] = float(value)
 
-    def observe_ms(self, name: str, value_ms: float, buckets: Tuple[float, ...] | None = None) -> None:  # buckets ignored
+    def observe_ms(self, name: str, value_ms: float, buckets: tuple[float, ...] | None = None) -> None:  # buckets ignored
         h = self._hists.get(name)
         if h is None:
             h = _Hist(window=self._window, values=deque(maxlen=self._window))
@@ -116,7 +115,7 @@ class Metrics:
         h.observe(float(value_ms))
 
     # Snapshot for HTTP JSON endpoint
-    def snapshot(self) -> Dict[str, object]:
+    def snapshot(self) -> dict[str, object]:
         now = time.time()
         frames = self._counters.get("napari_cuda_frames_total", 0.0)
         dt = max(1e-3, now - self._last_ts)

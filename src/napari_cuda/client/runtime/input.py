@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 from qtpy import QtCore, QtWidgets  # type: ignore
 
@@ -303,6 +304,6 @@ class InputSender:
         assert isinstance(ok, bool), "post must return bool"
 
     # --- Mouse/Pan ---------------------------------------------------------------
-    
+
     # No additional focus suppression helpers needed; coalesced wheel consumption
     # in _handle_wheel is sufficient to prevent highlight during fast scroll.

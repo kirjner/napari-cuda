@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
-
-from types import SimpleNamespace
 from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.camera.controller import CameraDeltaOutcome
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
-from napari_cuda.server.runtime.worker import EGLRendererWorker
 from napari_cuda.server.runtime.render_loop.ticks import camera as camera_tick
-from napari_cuda.server.scene import CameraDeltaCommand
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
+from napari_cuda.server.runtime.worker import EGLRendererWorker
+from napari_cuda.server.scene import CameraDeltaCommand
 
 
 @dataclass

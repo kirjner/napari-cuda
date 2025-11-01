@@ -9,9 +9,9 @@ Run:
   uv run python scripts/test_cuda_gl.py
 """
 
+import logging
 import os
 import sys
-import logging
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 log = logging.getLogger('test_cuda_gl')
@@ -23,13 +23,16 @@ def main() -> int:
     os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 
     try:
-        from qtpy.QtGui import QOpenGLContext, QSurfaceFormat
-        from qtpy.QtGui import QOffscreenSurface
-        from qtpy.QtWidgets import QApplication
         import OpenGL.GL as GL
         import pycuda.driver as cuda
         import pycuda.gl
         from pycuda.gl import RegisteredImage, graphics_map_flags
+        from qtpy.QtGui import (
+            QOffscreenSurface,
+            QOpenGLContext,
+            QSurfaceFormat,
+        )
+        from qtpy.QtWidgets import QApplication
     except Exception as e:
         log.error(f"Import failure (Qt/OpenGL/CUDA): {e}")
         return 1

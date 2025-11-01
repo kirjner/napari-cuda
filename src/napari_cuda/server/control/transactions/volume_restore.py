@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -11,11 +12,11 @@ from napari_cuda.server.state_ledger import (
 )
 
 
-def _as_level(value: int | float | str) -> int:
+def _as_level(value: float | str) -> int:
     return int(value)
 
 
-def _as_center(center: Sequence[float | int | str]) -> Tuple[float, float, float]:
+def _as_center(center: Sequence[float | int | str]) -> tuple[float, float, float]:
     if len(center) < 3:
         raise ValueError("volume restore center requires three components")
     return (
@@ -25,7 +26,7 @@ def _as_center(center: Sequence[float | int | str]) -> Tuple[float, float, float
     )
 
 
-def _as_angles(angles: Sequence[float | int | str]) -> Tuple[float, float, float]:
+def _as_angles(angles: Sequence[float | int | str]) -> tuple[float, float, float]:
     if len(angles) < 2:
         raise ValueError("volume restore angles require at least two components")
     roll = float(angles[2]) if len(angles) >= 3 else 0.0
@@ -39,17 +40,17 @@ def _as_angles(angles: Sequence[float | int | str]) -> Tuple[float, float, float
 def apply_volume_restore_transaction(
     *,
     ledger: ServerStateLedger,
-    level: int | float | str,
+    level: float | str,
     center: Sequence[float | int | str],
     angles: Sequence[float | int | str],
-    distance: float | int | str,
-    fov: float | int | str,
+    distance: float | str,
+    fov: float | str,
     origin: str = "control.view.volume_restore",
     timestamp: Optional[float] = None,
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Batch ledger writes for a volume camera restore."""
 
     level_idx = _as_level(level)

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
-
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[NotifyDimsPayload], Awaitable[None]]
@@ -26,7 +25,7 @@ class _Key:
 class ServerDimsMirror:
     """Project server ledger updates into notify.dims broadcasts."""
 
-    _WATCH_KEYS: Tuple[_Key, ...] = (
+    _WATCH_KEYS: tuple[_Key, ...] = (
         _Key("view", "main", "ndisplay"),
         _Key("view", "main", "displayed"),
         _Key("dims", "main", "current_step"),
@@ -54,7 +53,7 @@ class ServerDimsMirror:
         self._on_payload = on_payload
         self._lock = threading.Lock()
         self._started = False
-        self._last_signature: Optional[Tuple[Any, ...]] = None
+        self._last_signature: Optional[tuple[Any, ...]] = None
         self._latest_payload: Optional[NotifyDimsPayload] = None
 
     # ------------------------------------------------------------------
@@ -154,7 +153,7 @@ class ServerDimsMirror:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _as_int_tuple(value: Any) -> Tuple[int, ...]:
+    def _as_int_tuple(value: Any) -> tuple[int, ...]:
         if value is None:
             raise ValueError("expected integer sequence, received None")
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
@@ -162,10 +161,10 @@ class ServerDimsMirror:
         raise TypeError(f"expected integer sequence, received {type(value)!r}")
 
     @staticmethod
-    def _as_shape_sequence(value: Any) -> Tuple[Tuple[int, ...], ...]:
+    def _as_shape_sequence(value: Any) -> tuple[tuple[int, ...], ...]:
         if value is None:
             raise ValueError("expected shape sequence, received None")
-        shapes: list[Tuple[int, ...]] = []
+        shapes: list[tuple[int, ...]] = []
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
             for entry in value:
                 shapes.append(ServerDimsMirror._as_int_tuple(entry))
@@ -173,11 +172,11 @@ class ServerDimsMirror:
         raise TypeError(f"expected shape sequence, received {type(value)!r}")
 
     @staticmethod
-    def _as_level_sequence(value: Any) -> Tuple[Dict[str, Any], ...]:
+    def _as_level_sequence(value: Any) -> tuple[dict[str, Any], ...]:
         if value is None:
             raise ValueError("expected level sequence, received None")
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            levels: list[Dict[str, Any]] = []
+            levels: list[dict[str, Any]] = []
             for entry in value:
                 if isinstance(entry, dict):
                     levels.append(dict(entry))
@@ -187,7 +186,7 @@ class ServerDimsMirror:
         raise TypeError(f"expected level sequence, received {type(value)!r}")
 
     @staticmethod
-    def _optional_int_tuple(entry: Any) -> Optional[Tuple[int, ...]]:
+    def _optional_int_tuple(entry: Any) -> Optional[tuple[int, ...]]:
         if entry is None:
             return None
         value = getattr(entry, "value", entry)
@@ -196,7 +195,7 @@ class ServerDimsMirror:
         return ServerDimsMirror._as_int_tuple(value)
 
     @staticmethod
-    def _optional_str_tuple(entry: Any) -> Optional[Tuple[str, ...]]:
+    def _optional_str_tuple(entry: Any) -> Optional[tuple[str, ...]]:
         if entry is None:
             return None
         value = getattr(entry, "value", entry)
@@ -216,7 +215,7 @@ class ServerDimsMirror:
         return bool(value)
 
     @staticmethod
-    def _compute_signature(payload: NotifyDimsPayload) -> Tuple[Any, ...]:
+    def _compute_signature(payload: NotifyDimsPayload) -> tuple[Any, ...]:
         levels_sig = tuple(tuple(sorted(level.items())) for level in payload.levels)
         return (
             payload.current_step,

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Optional
 
 from qtpy import QtCore
-from napari.utils.events import EventEmitter
 
+from napari.utils.events import EventEmitter
 from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
     ClientStateLedger,
@@ -21,7 +21,6 @@ from napari_cuda.client.control.state_update_actions import (
 )
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +194,7 @@ def _equals_str(lhs: Any, rhs: Any) -> bool:
 def _equals_limits(lhs: Any, rhs: Any) -> bool:
     left = tuple(float(v) for v in lhs)
     right = tuple(float(v) for v in rhs)
-    return len(left) == len(right) and all(_equals_float(a, b) for a, b in zip(left, right))
+    return len(left) == len(right) and all(_equals_float(a, b) for a, b in zip(left, right, strict=False))
 
 
 @dataclass(frozen=True)
@@ -276,9 +275,9 @@ PROPERTY_BY_KEY: dict[str, PropertyConfig] = {cfg.key: cfg for cfg in PROPERTY_C
 class LayerBinding:
     layer_id: str
     layer: RemoteImageLayer
-    handlers: Dict[str, tuple[EventEmitter, Callable[[Any], None]]] = field(default_factory=dict)
+    handlers: dict[str, tuple[EventEmitter, Callable[[Any], None]]] = field(default_factory=dict)
     suspended: set[str] = field(default_factory=set)
-    pending: Dict[str, Any] = field(default_factory=dict)
+    pending: dict[str, Any] = field(default_factory=dict)
     timer: QtCore.QTimer | None = None
 
 
@@ -306,7 +305,7 @@ class NapariLayerIntentEmitter:
         self._dispatch_state_update = dispatch_state_update
         self._log_layers_info = bool(log_layers_info)
         self._tx_interval_ms = max(0, int(tx_interval_ms))
-        self._bindings: Dict[str, LayerBinding] = {}
+        self._bindings: dict[str, LayerBinding] = {}
         self._suppress_depth = 0
 
     # ------------------------------------------------------------------ configuration
@@ -359,7 +358,7 @@ class NapariLayerIntentEmitter:
         assert self._suppress_depth > 0, "resume_forward without matching suppress"
         self._suppress_depth -= 1
 
-    def suppressing(self):  # noqa: D401 - mirrors dims emitter signature
+    def suppressing(self):
         """Context manager that suppresses outgoing intents temporarily."""
 
         class _Suppressor:

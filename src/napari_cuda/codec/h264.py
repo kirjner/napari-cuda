@@ -10,7 +10,8 @@ Includes:
 - NAL type helpers and simple IDR detection
 """
 
-from typing import List, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Union
 
 BytesLike = Union[bytes, bytearray, memoryview]
 
@@ -34,12 +35,12 @@ def is_annexb(buf: BytesLike) -> bool:
     return False
 
 
-def split_annexb(data: BytesLike) -> List[bytes]:
-    out: List[bytes] = []
+def split_annexb(data: BytesLike) -> list[bytes]:
+    out: list[bytes] = []
     mv = memoryview(data).cast('B')
     i = 0
     n = len(mv)
-    idx: List[int] = []
+    idx: list[int] = []
     while i + 3 <= n:
         if mv[i : i + 3].tobytes() == b"\x00\x00\x01":
             idx.append(i)
@@ -50,7 +51,7 @@ def split_annexb(data: BytesLike) -> List[bytes]:
         else:
             i += 1
     idx.append(n)
-    for a, b in zip(idx, idx[1:]):
+    for a, b in zip(idx, idx[1:], strict=False):
         j = a
         while j < b and mv[j] == 0:
             j += 1
@@ -64,8 +65,8 @@ def split_annexb(data: BytesLike) -> List[bytes]:
     return out
 
 
-def split_avcc_by_len(data: BytesLike, nal_len_size: int = 4) -> List[bytes]:
-    out: List[bytes] = []
+def split_avcc_by_len(data: BytesLike, nal_len_size: int = 4) -> list[bytes]:
+    out: list[bytes] = []
     i = 0
     mv = memoryview(data).cast('B')
     n = len(mv)
@@ -103,7 +104,7 @@ def avcc_to_annexb(avcc: BytesLike, nal_len_size: int = 4) -> bytes:
     return bytes(out if out else avcc)
 
 
-def normalize_to_annexb(buf: BytesLike) -> Tuple[bytes, bool]:
+def normalize_to_annexb(buf: BytesLike) -> tuple[bytes, bool]:
     if is_annexb(buf):
         return bytes(buf), False
     return avcc_to_annexb(buf, 4), True
@@ -112,7 +113,7 @@ def normalize_to_annexb(buf: BytesLike) -> Tuple[bytes, bool]:
 # --- avcC helpers ---
 
 
-def parse_avcc(avcc: BytesLike) -> Tuple[List[bytes], List[bytes], int]:
+def parse_avcc(avcc: BytesLike) -> tuple[list[bytes], list[bytes], int]:
     mv = memoryview(avcc).cast('B')
     if not mv or len(mv) < 7:
         raise ValueError("Invalid avcC: too short")
@@ -130,7 +131,7 @@ def parse_avcc(avcc: BytesLike) -> Tuple[List[bytes], List[bytes], int]:
     nal_length_size = int(length_size_minus_one) + 1
     num_sps = mv[i] & 0x1F
     i += 1
-    sps_list: List[bytes] = []
+    sps_list: list[bytes] = []
     for _ in range(num_sps):
         if i + 2 > len(mv):
             raise ValueError("Invalid avcC: truncated SPS length")
@@ -144,7 +145,7 @@ def parse_avcc(avcc: BytesLike) -> Tuple[List[bytes], List[bytes], int]:
         raise ValueError("Invalid avcC: missing PPS count")
     num_pps = mv[i]
     i += 1
-    pps_list: List[bytes] = []
+    pps_list: list[bytes] = []
     for _ in range(num_pps):
         if i + 2 > len(mv):
             raise ValueError("Invalid avcC: truncated PPS length")

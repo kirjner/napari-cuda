@@ -9,13 +9,12 @@ strictGOPTarget=1, and no lookahead/intra-refresh.
 It forces IDR at frame 0 and frame 60 (and 120 if long enough) and writes
 an Annex B H.264 bitstream to nvenc_idr_test.h264.
 """
-import os
-import sys
-import math
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
+
 try:
     import cupy as cp  # type: ignore
 except Exception:

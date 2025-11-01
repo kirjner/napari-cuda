@@ -1,4 +1,3 @@
-import pytest
 
 from napari_cuda.server.engine.encoding.bitstream import (
     ParamCache,

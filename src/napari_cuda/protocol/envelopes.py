@@ -13,21 +13,20 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
-from .messages import *  # noqa: F401,F403 - compatibility surface
-from .messages import __all__ as _messages_all
+from .messages import *  # noqa: F403 - compatibility surface
 from .messages import (
-    PROTO_VERSION,
     ACK_STATE_TYPE,
     CALL_COMMAND_TYPE,
     ERROR_COMMAND_TYPE,
-    FrameEnvelope,
     NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
+    PROTO_VERSION,
     REPLY_COMMAND_TYPE,
     SESSION_HEARTBEAT_TYPE,
     SESSION_HELLO_TYPE,
@@ -40,14 +39,15 @@ from .messages import (
     ErrorCommand,
     ErrorCommandPayload,
     FeatureToggle,
+    FrameEnvelope,
     HelloAuthInfo,
     HelloClientInfo,
     NotifyLayers,
     NotifyLayersPayload,
     NotifyScene,
-    NotifyScenePayload,
     NotifySceneLevel,
     NotifySceneLevelPayload,
+    NotifyScenePayload,
     NotifyStream,
     NotifyStreamPayload,
     ReplyCommand,
@@ -63,6 +63,7 @@ from .messages import (
     StateUpdate,
     StateUpdatePayload,
     WelcomeSessionInfo,
+    __all__ as _messages_all,
 )
 
 
@@ -77,7 +78,7 @@ class ResumableCursor:
 class ResumableTopicSequencer:
     """Centralise seq/delta-token bookkeeping for resumable lanes."""
 
-    __slots__ = ("_topic", "_seq", "_delta_token", "_token_factory")
+    __slots__ = ("_delta_token", "_seq", "_token_factory", "_topic")
 
     def __init__(
         self,

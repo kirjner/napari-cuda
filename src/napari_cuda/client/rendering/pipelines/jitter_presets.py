@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List
 
 # Central preset definitions. Values are strings for direct env use.
-PRESETS: Dict[str, Dict[str, str]] = {
+PRESETS: dict[str, dict[str, str]] = {
     # Disabled
     'off': {
         'NAPARI_CUDA_JIT_ENABLE': '0',
@@ -47,11 +46,11 @@ PRESETS: Dict[str, Dict[str, str]] = {
 }
 
 
-def preset_names() -> List[str]:
+def preset_names() -> list[str]:
     return sorted(PRESETS.keys())
 
 
-def apply_preset(name: str, env: os._Environ[str] | None = None, override: bool = False) -> List[str]:
+def apply_preset(name: str, env: os._Environ[str] | None = None, override: bool = False) -> list[str]:
     """Apply a jitter preset to environment variables.
 
     - Uses setdefault semantics by default (explicit user envs win).
@@ -63,7 +62,7 @@ def apply_preset(name: str, env: os._Environ[str] | None = None, override: bool 
     key = (name or '').strip().lower()
     if key not in PRESETS:
         raise KeyError(f"Unknown jitter preset: {name}")
-    applied: List[str] = []
+    applied: list[str] = []
     for k, v in PRESETS[key].items():
         if override:
             env[k] = v

@@ -1,7 +1,8 @@
 import json
 
-from napari.layers.image._image_constants import Interpolation as NapariInterpolation
-
+from napari.layers.image._image_constants import (
+    Interpolation as NapariInterpolation,
+)
 from napari_cuda.server.config.logging_policy import load_debug_policy
 
 

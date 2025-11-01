@@ -7,20 +7,20 @@ worker sheds its bespoke implementations.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, Tuple
 import logging
 import math
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from vispy import scene
 
-from napari_cuda.server.data.scene_types import SliceROI
 from napari_cuda.server.data.roi_math import (
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
 )
+from napari_cuda.server.data.scene_types import SliceROI
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def _axis_index(axes_lower: Sequence[str], axis: str, fallback: int) -> int:
     return axes_lower.index(axis) if axis in axes_lower else fallback
 
 
-def plane_wh_for_level(source: ZarrSceneSource, level: int) -> Tuple[int, int]:
+def plane_wh_for_level(source: ZarrSceneSource, level: int) -> tuple[int, int]:
     """Return the plane height/width for the requested multiscale level."""
 
     descriptor = source.level_descriptors[level]
@@ -49,7 +49,7 @@ def plane_wh_for_level(source: ZarrSceneSource, level: int) -> Tuple[int, int]:
     return h, w
 
 
-def plane_scale_for_level(source: ZarrSceneSource, level: int) -> Tuple[float, float]:
+def plane_scale_for_level(source: ZarrSceneSource, level: int) -> tuple[float, float]:
     """Return the physical Y/X scale for the requested multiscale level."""
 
     axes = source.axes
@@ -79,7 +79,7 @@ def _transform_signature(view: Any) -> Optional[tuple[float, ...]]:
 def compute_viewport_roi(
     *,
     view: Any,
-    canvas_size: Tuple[int, int],
+    canvas_size: tuple[int, int],
     source: ZarrSceneSource,
     level: int,
     align_chunks: bool,
@@ -146,7 +146,7 @@ def compute_viewport_roi(
     viewport_bounds = (y_start, y_stop, x_start, x_stop)
     roi = SliceROI(y_start, y_stop, x_start, x_stop).clamp(h, w)
 
-    chunk_shape: Optional[Tuple[int, int]] = None
+    chunk_shape: Optional[tuple[int, int]] = None
     if align_chunks:
         chunk_shape = chunk_shape_for_level(source, level)
 
@@ -201,8 +201,8 @@ def compute_viewport_roi(
 def viewport_debug_snapshot(
     *,
     view: Any,
-    canvas_size: Tuple[int, int],
-    data_wh: Optional[Tuple[int, int]],
+    canvas_size: tuple[int, int],
+    data_wh: Optional[tuple[int, int]],
     data_depth: Optional[int],
 ) -> dict[str, Any]:
     width, height = canvas_size
@@ -257,7 +257,7 @@ def viewport_debug_snapshot(
         scene_graph = getattr(view, "scene", None)
         transform = getattr(scene_graph, "transform", None)
         if transform is not None and hasattr(transform, "matrix"):
-            mat = getattr(transform, "matrix")
+            mat = transform.matrix
             try:
                 info["transform_matrix"] = tuple(float(v) for v in mat.ravel())
             except Exception:
@@ -271,7 +271,7 @@ def viewport_debug_snapshot(
 def resolve_viewport_roi(
     *,
     view: Any,
-    canvas_size: Tuple[int, int],
+    canvas_size: tuple[int, int],
     source: ZarrSceneSource,
     level: int,
     align_chunks: bool,
@@ -368,7 +368,7 @@ def ensure_panzoom_camera(
 def resolve_worker_viewport_roi(
     *,
     view: Any,
-    canvas_size: Tuple[int, int],
+    canvas_size: tuple[int, int],
     source: ZarrSceneSource,
     level: int,
     align_chunks: bool,
@@ -423,11 +423,11 @@ def resolve_worker_viewport_roi(
 __all__ = [
     "ViewportROIResult",
     "compute_viewport_roi",
+    "ensure_panzoom_camera",
     "plane_scale_for_level",
     "plane_wh_for_level",
-    "viewport_debug_snapshot",
     "resolve_viewport_roi",
-    "ensure_panzoom_camera",
     "resolve_worker_viewport_roi",
+    "viewport_debug_snapshot",
 ]
 logger = logging.getLogger(__name__)

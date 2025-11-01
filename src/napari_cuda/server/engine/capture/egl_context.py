@@ -6,7 +6,6 @@ from typing import Optional
 
 from OpenGL import EGL, GL  # type: ignore
 
-
 logger = logging.getLogger(__name__)
 
 

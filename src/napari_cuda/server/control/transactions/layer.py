@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from collections.abc import Iterable, Mapping
+from typing import Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -10,8 +11,7 @@ from napari_cuda.server.state_ledger import (
     ServerStateLedger,
 )
 
-
-LayerLedgerUpdate = Tuple[str, str, str, object]
+LayerLedgerUpdate = tuple[str, str, str, object]
 
 
 def apply_layer_property_transaction(
@@ -24,7 +24,7 @@ def apply_layer_property_transaction(
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Record layer (and related) property updates in the ledger."""
 
     entries = []

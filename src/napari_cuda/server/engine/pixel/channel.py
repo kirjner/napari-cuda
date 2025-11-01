@@ -13,13 +13,14 @@ import asyncio
 import base64
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 import websockets
 
-from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.protocol import NotifyStreamPayload
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 
 FramePacket = pixel_broadcaster.FramePacket
 logger = logging.getLogger(__name__)

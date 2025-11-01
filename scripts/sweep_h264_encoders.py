@@ -12,22 +12,20 @@ Usage:
 """
 
 import argparse
-import itertools
 from fractions import Fraction
-from typing import Dict, List, Tuple
 
 import numpy as np
 
 from napari_cuda.codec.avcc import (
+    extract_sps_pps_from_blob,
     is_annexb,
+    parse_avcc,
     split_annexb,
     split_avcc_by_len,
-    parse_avcc,
-    extract_sps_pps_from_blob,
 )
 
 
-def nal_types(data: bytes) -> List[int]:
+def nal_types(data: bytes) -> list[int]:
     if is_annexb(data):
         nals = split_annexb(data)
     else:
@@ -39,12 +37,12 @@ def nal_types(data: bytes) -> List[int]:
     return [(n[0] & 0x1F) for n in nals if n]
 
 
-def names(ts: List[int]) -> List[str]:
+def names(ts: list[int]) -> list[str]:
     mp = {1: "nonIDR", 5: "IDR", 6: "SEI", 7: "SPS", 8: "PPS", 9: "AUD"}
     return [mp.get(t, str(t)) for t in ts]
 
 
-def test_config(enc_name: str, pixfmt: str, opts: Dict[str, str], w: int, h: int, fps: float, frames: int) -> Tuple[Dict[str, bool], List[List[str]], int, bool]:
+def test_config(enc_name: str, pixfmt: str, opts: dict[str, str], w: int, h: int, fps: float, frames: int) -> tuple[dict[str, bool], list[list[str]], int, bool]:
     import av
     enc = av.CodecContext.create(enc_name, 'w')
     enc.width = int(w); enc.height = int(h)
@@ -79,7 +77,7 @@ def test_config(enc_name: str, pixfmt: str, opts: Dict[str, str], w: int, h: int
     g = np.broadcast_to(y, (h, w))
     b = ((r.astype(np.uint16) + g.astype(np.uint16)) // 2).astype(np.uint8)
     any_sps = any_pps = any_idr = any_aud = False
-    au_summaries: List[List[str]] = []
+    au_summaries: list[list[str]] = []
     for i in range(frames):
         rgb = np.dstack([r, g, b])
         vf = av.VideoFrame.from_ndarray(rgb, format='rgb24')
@@ -89,7 +87,7 @@ def test_config(enc_name: str, pixfmt: str, opts: Dict[str, str], w: int, h: int
             pass
         out = enc.encode(vf)
         # Combine packets for this frame
-        buf_parts: List[bytes] = []
+        buf_parts: list[bytes] = []
         for p in out:
             # Collect payload
             try:

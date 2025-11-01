@@ -9,17 +9,18 @@ be extended later to support alternative formats with similar semantics.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
-from pathlib import Path
 import threading
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
 import dask.array as da
 import numpy as np
 
-from napari_cuda.server.data import SliceROI, SliceIOMetrics
+from napari_cuda.server.data import SliceIOMetrics, SliceROI
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,9 @@ class LevelDescriptor:
 
     index: int
     path: str
-    shape: Tuple[int, ...]
-    downsample: Tuple[float, ...]
-    scale: Tuple[float, ...]
+    shape: tuple[int, ...]
+    downsample: tuple[float, ...]
+    scale: tuple[float, ...]
 
 
 class ZarrSceneSource:
@@ -58,12 +59,12 @@ class ZarrSceneSource:
 
         self._preferred_level_name = preferred_level
         self._axes = tuple(axis_override) if axis_override else None
-        self._levels: List[da.Array] = []
-        self._level_descriptors: List[LevelDescriptor] = []
-        self._contrast_cache: Dict[int, Tuple[float, float]] = {}
+        self._levels: list[da.Array] = []
+        self._level_descriptors: list[LevelDescriptor] = []
+        self._contrast_cache: dict[int, tuple[float, float]] = {}
         self._lock = threading.Lock()
         self._current_level: int = 0
-        self._current_step: Optional[Tuple[int, ...]] = None
+        self._current_step: Optional[tuple[int, ...]] = None
 
         try:
             meta = self._read_zattrs(self._root / ".zattrs")
@@ -93,8 +94,8 @@ class ZarrSceneSource:
         axes = self._axes or self._parse_axes(multiscales)
         self._axes = axes
 
-        level_arrays: List[da.Array] = []
-        descriptors: List[LevelDescriptor] = []
+        level_arrays: list[da.Array] = []
+        descriptors: list[LevelDescriptor] = []
 
         base_scale = None
         for idx, entry in enumerate(datasets_meta):
@@ -142,7 +143,7 @@ class ZarrSceneSource:
                 self._current_step = self.initial_step(level=self._current_level)
 
     @property
-    def axes(self) -> Tuple[str, ...]:
+    def axes(self) -> tuple[str, ...]:
         return self._axes or DEFAULT_AXES[: self.ndim]
 
     @property
@@ -158,11 +159,11 @@ class ZarrSceneSource:
         return np.dtype(self._levels[0].dtype)
 
     @property
-    def levels(self) -> List[da.Array]:
+    def levels(self) -> list[da.Array]:
         return list(self._levels)
 
     @property
-    def level_descriptors(self) -> List[LevelDescriptor]:
+    def level_descriptors(self) -> list[LevelDescriptor]:
         return list(self._level_descriptors)
 
     @property
@@ -171,7 +172,7 @@ class ZarrSceneSource:
             return self._current_level
 
     @property
-    def current_step(self) -> Optional[Tuple[int, ...]]:
+    def current_step(self) -> Optional[tuple[int, ...]]:
         with self._lock:
             return tuple(self._current_step) if self._current_step is not None else None
 
@@ -179,7 +180,7 @@ class ZarrSceneSource:
         self,
         step: Sequence[int],
         level: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         lvl = self._validate_level(level)
         clamped = self.initial_step(level=lvl, step=step)
         with self._lock:
@@ -197,15 +198,15 @@ class ZarrSceneSource:
         lvl = self._validate_level(index)
         return self._levels[lvl]
 
-    def level_shape(self, index: int | None = None) -> Tuple[int, ...]:
+    def level_shape(self, index: int | None = None) -> tuple[int, ...]:
         descriptor = self._descriptor(index)
         return descriptor.shape
 
-    def level_downsample(self, index: int | None = None) -> Tuple[float, ...]:
+    def level_downsample(self, index: int | None = None) -> tuple[float, ...]:
         descriptor = self._descriptor(index)
         return descriptor.downsample
 
-    def level_scale(self, index: int | None = None) -> Tuple[float, ...]:
+    def level_scale(self, index: int | None = None) -> tuple[float, ...]:
         descriptor = self._descriptor(index)
         return descriptor.scale
 
@@ -215,7 +216,7 @@ class ZarrSceneSource:
         *,
         level: Optional[int] = None,
         step: Optional[Sequence[int]] = None,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         lvl = self._validate_level(level)
         descriptor = self._descriptor(lvl)
         shape = descriptor.shape
@@ -242,7 +243,7 @@ class ZarrSceneSource:
         elif step is None and len(shape) > 0:
             values[z_pos] = int(shape[z_pos] // 2)
 
-        clamped: List[int] = []
+        clamped: list[int] = []
         for idx, dim in enumerate(shape):
             hi = max(0, int(dim) - 1)
             if hi <= 0:
@@ -254,8 +255,8 @@ class ZarrSceneSource:
     def ensure_contrast(
         self,
         level: Optional[int] = None,
-        percentiles: Tuple[float, float] = (0.5, 99.5),
-    ) -> Tuple[float, float]:
+        percentiles: tuple[float, float] = (0.5, 99.5),
+    ) -> tuple[float, float]:
         lvl = self._validate_level(level)
         with self._lock:
             cached = self._contrast_cache.get(lvl)
@@ -271,7 +272,7 @@ class ZarrSceneSource:
             axes_lower = [str(ax).lower() for ax in axes]
             z_pos = axes_lower.index("z") if "z" in axes_lower else 0
             plane_index = int(array.shape[z_pos] // 2)
-            indexer: List[slice | int] = [slice(None)] * array.ndim
+            indexer: list[slice | int] = [slice(None)] * array.ndim
             indexer[z_pos] = plane_index
             sample = array[tuple(indexer)].astype("float32")
 
@@ -299,8 +300,8 @@ class ZarrSceneSource:
         self,
         *,
         level: Optional[int] = None,
-        percentiles: Tuple[float, float] = (0.5, 99.5),
-    ) -> Tuple[float, float]:
+        percentiles: tuple[float, float] = (0.5, 99.5),
+    ) -> tuple[float, float]:
         return self.ensure_contrast(level=level, percentiles=percentiles)
 
     def slice(
@@ -334,7 +335,7 @@ class ZarrSceneSource:
             roi_slice = roi.clamp(y_limit, x_limit)
 
         if array.ndim <= 2 or "z" not in axes_lower:
-            indexer: List[slice | int] = [slice(None)] * array.ndim
+            indexer: list[slice | int] = [slice(None)] * array.ndim
         else:
             z_pos = axes_lower.index("z") if "z" in axes_lower else 0
             dim = int(array.shape[z_pos])
@@ -481,13 +482,13 @@ class ZarrSceneSource:
         return lvl
 
     @staticmethod
-    def _read_zattrs(path: Path) -> Dict[str, object]:
+    def _read_zattrs(path: Path) -> dict[str, object]:
         if not path.exists():
             return {}
         return json.loads(path.read_text())
 
     @staticmethod
-    def _first_multiscale_entry(meta: Dict[str, object]) -> Dict[str, object]:
+    def _first_multiscale_entry(meta: dict[str, object]) -> dict[str, object]:
         entries = meta.get("multiscales") if isinstance(meta, dict) else None
         if isinstance(entries, list) and entries:
             entry = entries[0]
@@ -496,10 +497,10 @@ class ZarrSceneSource:
         return {}
 
     @staticmethod
-    def _parse_axes(multiscale: Dict[str, object]) -> Tuple[str, ...]:
+    def _parse_axes(multiscale: dict[str, object]) -> tuple[str, ...]:
         axes_meta = multiscale.get("axes") if isinstance(multiscale, dict) else None
         if isinstance(axes_meta, list) and axes_meta:
-            axes: List[str] = []
+            axes: list[str] = []
             for entry in axes_meta:
                 if isinstance(entry, dict):
                     name = entry.get("name")
@@ -510,7 +511,7 @@ class ZarrSceneSource:
         return DEFAULT_AXES
 
     @staticmethod
-    def _extract_scale(dataset_meta: Dict[str, object], axes: Sequence[str]) -> Tuple[float, ...]:
+    def _extract_scale(dataset_meta: dict[str, object], axes: Sequence[str]) -> tuple[float, ...]:
         transforms = dataset_meta.get("coordinateTransformations") if isinstance(dataset_meta, dict) else None
         if isinstance(transforms, list):
             for transform in transforms:
@@ -521,9 +522,9 @@ class ZarrSceneSource:
         return tuple(1.0 for _ in axes)
 
     @staticmethod
-    def _relative_downsample(level_scale: Tuple[float, ...], base_scale: Tuple[float, ...]) -> Tuple[float, ...]:
-        downsample: List[float] = []
-        for lvl, base in zip(level_scale, base_scale):
+    def _relative_downsample(level_scale: tuple[float, ...], base_scale: tuple[float, ...]) -> tuple[float, ...]:
+        downsample: list[float] = []
+        for lvl, base in zip(level_scale, base_scale, strict=False):
             if base == 0:
                 downsample.append(1.0)
             else:

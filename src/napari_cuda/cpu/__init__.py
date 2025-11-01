@@ -1,6 +1,6 @@
 """CPU fallback implementations for napari-cuda."""
 
-from .screenshot import CPUScreenshot
 from .memory import CPUMemoryManager
+from .screenshot import CPUScreenshot
 
-__all__ = ["CPUScreenshot", "CPUMemoryManager"]
+__all__ = ["CPUMemoryManager", "CPUScreenshot"]

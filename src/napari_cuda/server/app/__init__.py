@@ -4,8 +4,8 @@ from __future__ import annotations
 
 __all__ = [
     "config",
-    "egl_headless_server",
     "dash_dashboard",
+    "egl_headless_server",
     "metrics_core",
     "metrics_server",
 ]

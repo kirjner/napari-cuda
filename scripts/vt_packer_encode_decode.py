@@ -20,16 +20,16 @@ import argparse
 import os
 import time
 from fractions import Fraction
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
+from napari_cuda.codec.avcc import AccessUnit, split_avcc_by_len
 from napari_cuda.server.engine.encoding.bitstream import (
     ParamCache,
     build_avcc_config,
     pack_to_avcc,
 )
-from napari_cuda.codec.avcc import split_avcc_by_len, AccessUnit
 
 
 def _pkt_bytes(pkt) -> bytes:
@@ -49,7 +49,7 @@ def encode_all(
     fps: float,
     frames: int,
     pix_fmt: Optional[str],
-) -> Tuple[bytes, List[AccessUnit]]:
+) -> tuple[bytes, list[AccessUnit]]:
     import av
 
     # Ensure Python fallback if Cython packer isn't built
@@ -89,7 +89,7 @@ def encode_all(
 
     cache = ParamCache()
     avcc_cfg: Optional[bytes] = None
-    aus: List[AccessUnit] = []
+    aus: list[AccessUnit] = []
 
     # Encode all frames; pack each set of output packets into a single AVCC AU
     for i in range(max(1, int(frames))):
@@ -106,7 +106,7 @@ def encode_all(
         except Exception:
             pass
         pkts = enc.encode(vf)
-        payload_obj: List[bytes] = []
+        payload_obj: list[bytes] = []
         for p in pkts:
             payload_obj.append(_pkt_bytes(p))
         au, is_key = pack_to_avcc(payload_obj, cache)
@@ -135,7 +135,7 @@ def encode_all(
     return avcc_cfg, aus
 
 
-def decode_with_vt(avcc: bytes, aus: List[AccessUnit], min_decoded: int = 0) -> int:
+def decode_with_vt(avcc: bytes, aus: list[AccessUnit], min_decoded: int = 0) -> int:
     from napari_cuda.client.rendering.decoders.vt import VTLiveDecoder
 
     vt = VTLiveDecoder(avcc, 0, 0)  # width/height are not used by shim mapping in this demo
@@ -199,7 +199,9 @@ def main() -> None:
 
     # Print packer fast-path availability
     try:
-        from napari_cuda.server.engine.encoding.bitstream import _FAST_PACK  # type: ignore
+        from napari_cuda.server.engine.encoding.bitstream import (
+            _FAST_PACK,  # type: ignore
+        )
         print(f'FAST_PACK available: {bool(_FAST_PACK)}')
     except Exception:
         pass

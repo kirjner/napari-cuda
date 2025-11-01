@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from napari_cuda.server.scene import (
     PlaneState,
@@ -34,11 +35,11 @@ class RuntimeHandle:
 
     def __init__(
         self,
-        worker_getter: Callable[[], Optional["EGLRendererWorker"]],
+        worker_getter: Callable[[], Optional[EGLRendererWorker]],
     ) -> None:
         self._worker_getter = worker_getter
 
-    def _resolve_worker(self) -> Optional["EGLRendererWorker"]:
+    def _resolve_worker(self) -> Optional[EGLRendererWorker]:
         try:
             return self._worker_getter()
         except Exception:  # pragma: no cover - defensive logging path

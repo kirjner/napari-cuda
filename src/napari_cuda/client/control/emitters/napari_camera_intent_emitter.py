@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, Optional, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Optional
 
 from qtpy import QtCore
 
-from napari_cuda.client.control.client_state_ledger import AckReconciliation, ClientStateLedger, IntentRecord
+from napari_cuda.client.control.client_state_ledger import (
+    AckReconciliation,
+    ClientStateLedger,
+    IntentRecord,
+)
 from napari_cuda.client.control.state_update_actions import (
     ControlStateContext,
     _emit_state_update,

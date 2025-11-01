@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Callable, Mapping, Optional
+from typing import Optional
 
-import numpy as np
-
-from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.data.level_budget import LevelBudgetError
+from napari_cuda.server.data.zarr_source import ZarrSceneSource
 
 logger = logging.getLogger(__name__)
 
@@ -339,15 +338,15 @@ def format_oversampling(overs_map: Mapping[int, float]) -> str:
 AppliedLevel = LevelContext
 
 __all__ = [
-    "LevelContext",
     "AppliedLevel",
+    "LevelBudgetError",
+    "LevelContext",
     "LevelDecision",
     "LevelPolicyConfig",
-    "LevelPolicyInputs",
     "LevelPolicyDecision",
-    "LevelBudgetError",
-    "evaluate_policy",
+    "LevelPolicyInputs",
     "enforce_budgets",
+    "evaluate_policy",
     "format_oversampling",
     "select_level",
     "stabilize_level",

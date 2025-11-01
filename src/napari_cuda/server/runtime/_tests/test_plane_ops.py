@@ -3,15 +3,15 @@ from __future__ import annotations
 import pytest
 from vispy.geometry import Rect
 
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-)
 from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.viewport import PlaneState
 from napari_cuda.server.runtime.viewport.plane_ops import (
     apply_pose_to_camera,
     assign_pose_from_snapshot,
     mark_slice_applied,
+)
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
 )
 
 

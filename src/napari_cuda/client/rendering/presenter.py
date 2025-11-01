@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import logging
-import time
-from dataclasses import dataclass
-from typing import Callable, Deque, Dict, List, Optional, Tuple
-from collections import deque
-import threading
 import math
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Optional
 
-from napari_cuda.client.rendering.types import ReadyFrame, Source, SubmittedFrame
+from napari_cuda.client.rendering.types import (
+    ReadyFrame,
+    Source,
+    SubmittedFrame,
+)
 from napari_cuda.client.rendering.vt_frame import FrameLease
 
 logger = logging.getLogger(__name__)
@@ -102,12 +107,12 @@ class FixedLatencyPresenter:
         except Exception:
             self._early_consume_s = 0.003
         # Deque per source for O(1) append/pop from ends
-        self._buf: Dict[Source, Deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
-        self._submit_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
+        self._buf: dict[Source, deque[_BufItem]] = {Source.VT: deque(), Source.PYAV: deque()}
+        self._submit_count: dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         # Count frames actually consumed (removed from buffer)
-        self._out_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
+        self._out_count: dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         # Count preview returns (not consumed)
-        self._preview_count: Dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
+        self._preview_count: dict[Source, int] = {Source.VT: 0, Source.PYAV: 0}
         self._lock = threading.Lock()
         # Offset PLL (bounded) state for SERVER mode
         self._pll_offset: Optional[float] = None
@@ -154,7 +159,7 @@ class FixedLatencyPresenter:
                 logger.debug("PRES_NEED ms=%.3f", float(needed_ms))
         except Exception:
             pass
-        to_release: List[_BufItem] = []
+        to_release: list[_BufItem] = []
         with self._lock:
             items = self._buf[sf.source]
             # Insert by due_ts to avoid head-of-line blocking when arrivals are
@@ -217,7 +222,7 @@ class FixedLatencyPresenter:
             self._buf[source].clear()
         self._release_many(items)
 
-    def _release_many(self, items: List[_BufItem]) -> None:
+    def _release_many(self, items: list[_BufItem]) -> None:
         for it in items:
             self._release_payload(it.payload, it.release_cb)
 
@@ -239,7 +244,7 @@ class FixedLatencyPresenter:
         # Use monotonic clock for scheduling decisions
         n = float(now if now is not None else time.perf_counter())
         # Work on a single selected item and a list of items to release outside the lock
-        to_release: List[_BufItem] = []
+        to_release: list[_BufItem] = []
         sel: Optional[_BufItem] = None
         is_preview = False
         with self._lock:
@@ -305,13 +310,13 @@ class FixedLatencyPresenter:
 
         return _release
 
-    def stats(self) -> Dict[str, object]:
+    def stats(self) -> dict[str, object]:
         # Use monotonic clock to compare against due_ts values
         now = time.perf_counter()
         with self._lock:
             # Compute next_due (ms) per source and simple fill metrics
-            next_due: Dict[str, Optional[int]] = {}
-            fill: Dict[str, int] = {}
+            next_due: dict[str, Optional[int]] = {}
+            fill: dict[str, int] = {}
             for s in (Source.VT, Source.PYAV):
                 items = self._buf[s]
                 fill[s.value] = len(items)
@@ -348,7 +353,7 @@ class FixedLatencyPresenter:
     def relearn_offset(self, source: Source) -> Optional[float]:
         with self._lock:
             items = list(self._buf.get(source) or [])
-        diffs: List[float] = []
+        diffs: list[float] = []
         considered = items[-20:]  # last N samples
         total = len(considered)
         for it in considered:

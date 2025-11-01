@@ -9,6 +9,7 @@ use ffprobe; this script is a fallback when ffprobe isn't available.
 import sys
 from pathlib import Path
 
+
 def find_start_codes(data: bytes):
     i = 0
     n = len(data)

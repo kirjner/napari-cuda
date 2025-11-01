@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Callable, List, Tuple
+from typing import Any
 
-import pytest
 from qtpy import QtCore
 
-from napari_cuda.client.control.client_state_ledger import IntentRecord, ClientStateLedger
+from napari_cuda.client.control.client_state_ledger import (
+    ClientStateLedger,
+    IntentRecord,
+)
 from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop import camera
@@ -17,7 +19,7 @@ def _make_state(qtbot: Any) -> tuple[
     ControlStateContext,
     camera.CameraState,
     NapariCameraIntentEmitter,
-    List[Tuple[IntentRecord, str]],
+    list[tuple[IntentRecord, str]],
 ]:
     cam_env = SimpleNamespace(
         zoom_base=1.2,
@@ -32,7 +34,7 @@ def _make_state(qtbot: Any) -> tuple[
     loop_state.gui_thread = QtCore.QThread.currentThread()
     state_ledger = ClientStateLedger()
     cam_state.cam_min_dt = 0.0
-    dispatched: List[Tuple[IntentRecord, str]] = []
+    dispatched: list[tuple[IntentRecord, str]] = []
 
     def dispatch(pending_update: IntentRecord, origin: str) -> bool:
         dispatched.append((pending_update, origin))

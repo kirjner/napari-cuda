@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Optional
+from typing import Optional
 
-from napari.layers.image._image_constants import Interpolation as NapariInterpolation
-
+from napari.layers.image._image_constants import (
+    Interpolation as NapariInterpolation,
+)
 
 logger = logging.getLogger(__name__)
 

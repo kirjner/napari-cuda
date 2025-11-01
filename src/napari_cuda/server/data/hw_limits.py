@@ -25,7 +25,7 @@ def _detect_gpu() -> tuple[str, int]:
     if name and mem_env:
         try:
             return str(name), int(mem_env)
-        except Exception as e:
+        except Exception:
             logger.debug("env GPU parse failed", exc_info=True)
     try:
         out = subprocess.check_output([
@@ -36,7 +36,7 @@ def _detect_gpu() -> tuple[str, int]:
             nm = parts[0].strip()
             mb = int(parts[1].strip())
             return nm, mb
-    except Exception as e:
+    except Exception:
         logger.debug("nvidia-smi probe failed", exc_info=True)
     # Fallback
     return 'Unknown GPU', int(os.getenv('NAPARI_CUDA_VRAM_MB', '8192'))

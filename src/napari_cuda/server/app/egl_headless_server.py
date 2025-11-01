@@ -8,29 +8,65 @@ import asyncio
 import json
 import logging
 import os
-import uuid
-import struct
 import threading
 import time
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Dict, Optional, Set, Mapping, TYPE_CHECKING, Any, Sequence, List
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Optional,
+)
 
 import numpy as np
 import websockets
-import importlib.resources as ilr
-import socket
-from websockets.exceptions import ConnectionClosed
 
+from napari_cuda.protocol import (
+    NOTIFY_LAYERS_TYPE,
+    NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_STREAM_TYPE,
+    NotifyDimsPayload,
+    NotifyScenePayload,
+    NotifyStreamPayload,
+)
+from napari_cuda.protocol.snapshots import SceneSnapshot
+from napari_cuda.server.app import metrics_server
+from napari_cuda.server.app.config import load_server_ctx
+from napari_cuda.server.app.metrics_core import Metrics
+from napari_cuda.server.config import ServerConfig, ServerCtx
+from napari_cuda.server.control.control_channel_server import (
+    _send_state_baseline,
+    ingest_state,
+)
+from napari_cuda.server.control.control_payload_builder import (
+    build_notify_scene_payload,
+)
+from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
+from napari_cuda.server.control.protocol_runtime import state_sequencer
+from napari_cuda.server.control.resumable_history_store import (
+    ResumableHistoryStore,
+    ResumableRetention,
+)
+from napari_cuda.server.control.state_reducers import (
+    reduce_bootstrap_state,
+    reduce_camera_update,
+    reduce_level_update,
+)
+from napari_cuda.server.control.topics.camera import broadcast_camera_update
+from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.layers import broadcast_layers_delta
+from napari_cuda.server.control.topics.stream import broadcast_stream_config
+from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.engine.api import (
     ParamCache,
-    PixelBroadcastConfig,
     PixelBroadcastState,
     PixelChannelConfig,
     PixelChannelState,
-    broadcast_loop,
-    build_notify_stream_payload,
     build_avcc_config,
+    build_notify_stream_payload,
     configure_bitstream,
     ensure_keyframe,
     ingest_client,
@@ -38,74 +74,37 @@ from napari_cuda.server.engine.api import (
     prepare_client_attach,
     run_channel_loop,
 )
-from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.runtime.bootstrap.runtime_driver import probe_scene_bootstrap
-from napari_cuda.server.scene import (
-    CameraDeltaCommand,
-    RenderLedgerSnapshot,
-    RenderMode,
-    snapshot_dims_metadata,
-    snapshot_layer_controls,
-    snapshot_multiscale_state,
-    snapshot_render_state,
-    snapshot_scene,
-    snapshot_viewport_state,
-    snapshot_volume_state,
-)
-from napari_cuda.server.scene import pull_render_snapshot
-from napari_cuda.server.control.state_reducers import reduce_level_update
-from napari_cuda.server.app.metrics_core import Metrics
-from napari_cuda.utils.env import env_bool
-from napari_cuda.server.data.zarr_source import ZarrSceneSource, ZarrSceneSourceError
-from napari_cuda.server.config import ServerConfig, ServerCtx
-from napari_cuda.server.app.config import load_server_ctx
-from napari_cuda.protocol import (
-    NotifyStreamPayload,
-    NotifyDimsPayload,
-    NotifyScenePayload,
-    NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
-    NOTIFY_STREAM_TYPE,
-)
-from napari_cuda.server.control.control_payload_builder import build_notify_scene_payload
-from napari_cuda.server.app import metrics_server
-from napari_cuda.server.control.control_channel_server import (
-    ingest_state,
-    _send_state_baseline,
-    CommandRejected,
-)
-from napari_cuda.server.control.topics.camera import broadcast_camera_update
-from napari_cuda.server.control.topics.stream import broadcast_stream_config
-from napari_cuda.server.control.protocol_runtime import state_sequencer
-from napari_cuda.server.control.topics.dims import broadcast_dims_state
-from napari_cuda.server.control.topics.layers import broadcast_layers_delta
-from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.server.scene import BootstrapSceneMetadata, RenderUpdate
-from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
-from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
-from napari_cuda.server.control.state_reducers import (
-    reduce_bootstrap_state,
-    reduce_dims_update,
-    reduce_camera_update,
-    reduce_volume_colormap,
-    reduce_volume_contrast_limits,
-    reduce_volume_opacity,
-)
-from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.runtime.api import RuntimeHandle
-from napari_cuda.server.runtime.ipc import LevelSwitchIntent, WorkerIntentMailbox
-from napari_cuda.server.runtime.camera import CameraCommandQueue
+from napari_cuda.server.runtime.bootstrap.runtime_driver import (
+    probe_scene_bootstrap,
+)
+from napari_cuda.server.runtime.camera import (
+    CameraCommandQueue,
+    CameraPoseApplied,
+)
+from napari_cuda.server.runtime.ipc import (
+    WorkerIntentMailbox,
+)
 from napari_cuda.server.runtime.worker import (
     WorkerLifecycleState,
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
-from napari_cuda.server.runtime.camera import CameraPoseApplied
-from napari_cuda.server.control.resumable_history_store import (
-    ResumableHistoryStore,
-    ResumableRetention,
+from napari_cuda.server.scene import (
+    CameraDeltaCommand,
+    RenderLedgerSnapshot,
+    RenderMode,
+    RenderUpdate,
+    pull_render_snapshot,
+    snapshot_dims_metadata,
+    snapshot_layer_controls,
+    snapshot_multiscale_state,
+    snapshot_render_state,
+    snapshot_scene,
+    snapshot_volume_state,
 )
+from napari_cuda.server.state_ledger import ServerStateLedger
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LAYER_ID = "layer-0"
@@ -179,7 +178,7 @@ class EGLHeadlessServer:
         policy_logging = self._ctx.debug_policy.logging
         self.metrics = Metrics()
         self._metrics_runner = None
-        self._state_clients: Set[websockets.WebSocketServerProtocol] = set()
+        self._state_clients: set[websockets.WebSocketServerProtocol] = set()
         self._resumable_store = ResumableHistoryStore(
             {
                 NOTIFY_SCENE_TYPE: ResumableRetention(),
@@ -239,7 +238,7 @@ class EGLHeadlessServer:
         self._control_loop: Optional[asyncio.AbstractEventLoop] = None
         self._bootstrap_snapshot: Optional[RenderLedgerSnapshot] = None
         # Camera sequencing per target
-        self._camera_command_seq: Dict[str, int] = {}
+        self._camera_command_seq: dict[str, int] = {}
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -319,11 +318,11 @@ class EGLHeadlessServer:
             return None
         return str(Path(value).expanduser().resolve())
     @property
-    def _worker(self) -> Optional["EGLRendererWorker"]:
+    def _worker(self) -> Optional[EGLRendererWorker]:
         return self._worker_lifecycle.worker
 
     @_worker.setter
-    def _worker(self, worker: Optional["EGLRendererWorker"]) -> None:
+    def _worker(self, worker: Optional[EGLRendererWorker]) -> None:
         self._worker_lifecycle.worker = worker
 
     @property
@@ -599,7 +598,7 @@ class EGLHeadlessServer:
             h.setFormatter(logging.Formatter(fmt))
             h.setLevel(logging.DEBUG)
             # Tag so we don't add duplicates later
-            setattr(h, '_napari_cuda_local', True)
+            h._napari_cuda_local = True
             logger.addHandler(h)
             logger.setLevel(logging.DEBUG)
             # Ensure our records don't also bubble to root (which may be INFO)
@@ -712,7 +711,7 @@ class EGLHeadlessServer:
             self._layer_mirror.start()
             self._mirrors_started = True
 
-    def _viewer_settings(self) -> Dict[str, Any]:
+    def _viewer_settings(self) -> dict[str, Any]:
         entry = self._state_ledger.get("view", "main", "ndisplay")
         assert entry is not None and isinstance(entry.value, int), "ndisplay not initialised"
         use_volume = int(entry.value) >= 3
@@ -917,7 +916,7 @@ class EGLHeadlessServer:
             )
             self._refresh_scene_snapshot()
             return
-            
+
         logger.debug("thumbnail emission skipped for layer %s (no data)", layer_id)
 
     def _require_data_root(self) -> Path:
@@ -956,20 +955,20 @@ class EGLHeadlessServer:
         only: Optional[Sequence[str]],
         show_hidden: bool,
         limit: int = 1000,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resolved = self._resolve_data_path(path)
         if not resolved.exists():
             raise FileNotFoundError(str(resolved))
         if not resolved.is_dir():
             raise NotADirectoryError(str(resolved))
 
-        suffix_filters: Optional[List[str]] = None
+        suffix_filters: Optional[list[str]] = None
         if only:
             suffix_filters = [s.lower() for s in only if isinstance(s, str) and s]
             if not suffix_filters:
                 suffix_filters = None
 
-        filtered: List[Dict[str, Any]] = []
+        filtered: list[dict[str, Any]] = []
         children = sorted(resolved.iterdir(), key=lambda p: p.name.lower())
         for child in children:
             name = child.name

@@ -9,16 +9,17 @@ VTPipeline - encapsulates VT submit/drain and avcC/AnnexB normalization.
 
 import logging
 import queue
-import time
 import threading
+import time
+from collections.abc import Callable
 from threading import Thread
-from typing import Callable, Optional, Tuple
+from typing import Optional
 
 from qtpy import QtCore
 
 from napari_cuda.client.rendering.types import Source, SubmittedFrame
 from napari_cuda.client.rendering.vt_frame import FrameLease
-from napari_cuda.codec.avcc import is_annexb, annexb_to_avcc, split_avcc_by_len
+from napari_cuda.codec.avcc import annexb_to_avcc, is_annexb, split_avcc_by_len
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class VTPipeline:
             inq_cap = int(_os.getenv('NAPARI_CUDA_VT_INPUT_Q', '64') or '64')
         except Exception:
             inq_cap = 64
-        self._in_q: "queue.Queue[tuple[bytes | memoryview, float | None]]" = queue.Queue(maxsize=max(2, int(inq_cap)))
+        self._in_q: queue.Queue[tuple[bytes | memoryview, float | None]] = queue.Queue(maxsize=max(2, int(inq_cap)))
         self._backlog_trigger = int(backlog_trigger)
         self._decoder = None  # VTLiveDecoder-like
         self._started = False
@@ -307,7 +308,7 @@ class VTPipeline:
         except Exception:
             logger.debug("VTPipeline: clear failed", exc_info=True)
 
-    def counts(self) -> Tuple[int, int, int] | None:
+    def counts(self) -> tuple[int, int, int] | None:
         try:
             if self._decoder is None:
                 return None

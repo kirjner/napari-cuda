@@ -11,11 +11,11 @@ This module centralizes debug dumping and logging so the render loop stays lean.
 
 from __future__ import annotations
 
+import ctypes
+import logging
 import os
 import time
-import logging
 from dataclasses import dataclass
-import ctypes
 from typing import Optional
 
 import numpy as np
@@ -24,7 +24,7 @@ from napari_cuda.server.config.logging_policy import DumpControls
 
 try:
     from OpenGL import GL  # type: ignore
-except Exception as e:  # pragma: no cover - only used in GPU runtime
+except Exception:  # pragma: no cover - only used in GPU runtime
     GL = None  # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -39,10 +39,9 @@ class DebugConfig:
     have_imageio: bool = False
 
     @classmethod
-    def from_policy(cls, policy: DumpControls) -> "DebugConfig":
+    def from_policy(cls, policy: DumpControls) -> DebugConfig:
         have_iio = False
         try:
-            import imageio.v3 as _iio  # type: ignore
             have_iio = True
         except Exception:
             have_iio = False

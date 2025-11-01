@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from typing import Any, Awaitable, Mapping, Optional, Sequence
-
 import logging
+import time
+from collections.abc import Awaitable, Sequence
+from typing import Any, Optional
+
 from napari_cuda.protocol import build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.protocol_io import send_frame
@@ -12,7 +13,6 @@ from napari_cuda.server.control.protocol_runtime import (
     feature_enabled,
     state_session,
 )
-
 
 logger = logging.getLogger(__name__)
 

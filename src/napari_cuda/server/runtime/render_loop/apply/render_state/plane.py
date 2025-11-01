@@ -11,15 +11,17 @@ from typing import Any, Optional
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.data.roi import plane_wh_for_level
-from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,
     chunk_shape_for_level,
     roi_chunk_signature,
 )
+from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.runtime.lod.context import build_level_context
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
 from napari_cuda.server.runtime.viewport.plane_ops import (
     apply_pose_to_camera,
@@ -27,10 +29,8 @@ from napari_cuda.server.runtime.viewport.plane_ops import (
     mark_slice_applied,
 )
 from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
+from napari_cuda.server.scene import RenderLedgerSnapshot
 
-from napari_cuda.server.runtime.render_loop.apply_interface import (
-    RenderApplyInterface,
-)
 from .viewer_metadata import apply_plane_metadata
 
 logger = logging.getLogger(__name__)

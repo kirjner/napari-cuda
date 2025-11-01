@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, MutableMapping, TypeVar
+from typing import Any, TypeVar
 
 from .envelopes import (
     ACK_STATE_TYPE,
@@ -14,11 +15,10 @@ from .envelopes import (
     NOTIFY_DIMS_TYPE,
     NOTIFY_ERROR_TYPE,
     NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_TYPE,
     NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
-    STATE_UPDATE_TYPE,
     REPLY_COMMAND_TYPE,
     SESSION_ACK_TYPE,
     SESSION_GOODBYE_TYPE,
@@ -26,6 +26,7 @@ from .envelopes import (
     SESSION_HELLO_TYPE,
     SESSION_REJECT_TYPE,
     SESSION_WELCOME_TYPE,
+    STATE_UPDATE_TYPE,
     AckState,
     CallCommand,
     ErrorCommand,

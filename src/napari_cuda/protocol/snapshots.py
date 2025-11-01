@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from typing import Any
 
 from napari_cuda.protocol.messages import (
     NotifyLayersPayload,
@@ -15,11 +16,11 @@ from napari_cuda.protocol.messages import (
 class ViewerSnapshot:
     """Minimal viewer block used by ``notify.scene``."""
 
-    settings: Dict[str, Any]
-    dims: Dict[str, Any]
-    camera: Dict[str, Any]
+    settings: dict[str, Any]
+    dims: dict[str, Any]
+    camera: dict[str, Any]
 
-    def to_mapping(self) -> Dict[str, Any]:
+    def to_mapping(self) -> dict[str, Any]:
         return {
             "settings": dict(self.settings),
             "dims": dict(self.dims),
@@ -27,7 +28,7 @@ class ViewerSnapshot:
         }
 
     @classmethod
-    def from_mapping(cls, mapping: Mapping[str, Any]) -> "ViewerSnapshot":
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> ViewerSnapshot:
         settings = mapping.get("settings")
         dims = mapping.get("dims")
         camera = mapping.get("camera")
@@ -43,13 +44,13 @@ class LayerSnapshot:
     """Layer entry mirrored in ``notify.scene.layers``."""
 
     layer_id: str
-    block: Dict[str, Any]
+    block: dict[str, Any]
 
-    def to_mapping(self) -> Dict[str, Any]:
+    def to_mapping(self) -> dict[str, Any]:
         return dict(self.block)
 
     @classmethod
-    def from_mapping(cls, mapping: Mapping[str, Any]) -> "LayerSnapshot":
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> LayerSnapshot:
         layer_id = mapping.get("layer_id") or mapping.get("id")
         if not layer_id:
             layer_id = "layer-0"
@@ -61,9 +62,9 @@ class SceneSnapshot:
     """Authoritative scene snapshot emitted on baseline."""
 
     viewer: ViewerSnapshot
-    layers: Tuple[LayerSnapshot, ...]
-    policies: Dict[str, Any]
-    metadata: Dict[str, Any]
+    layers: tuple[LayerSnapshot, ...]
+    policies: dict[str, Any]
+    metadata: dict[str, Any]
 
     def to_notify_scene_payload(self) -> NotifyScenePayload:
         return NotifyScenePayload(
@@ -74,7 +75,7 @@ class SceneSnapshot:
         )
 
     @classmethod
-    def from_payload(cls, payload: NotifyScenePayload) -> "SceneSnapshot":
+    def from_payload(cls, payload: NotifyScenePayload) -> SceneSnapshot:
         viewer = ViewerSnapshot.from_mapping(payload.viewer)
         layers = tuple(LayerSnapshot.from_mapping(block) for block in payload.layers)
         policies = dict(payload.policies) if payload.policies else {}
@@ -87,10 +88,10 @@ class LayerDelta:
     """Incremental layer changes for ``notify.layers`` (structured)."""
 
     layer_id: str
-    controls: Dict[str, Any] | None = None
-    metadata: Dict[str, Any] | None = None
-    data: Dict[str, Any] | None = None
-    thumbnail: Dict[str, Any] | None = None
+    controls: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
+    thumbnail: dict[str, Any] | None = None
     removed: bool | None = None
 
     def to_payload(self) -> NotifyLayersPayload:
@@ -104,20 +105,20 @@ class LayerDelta:
         )
 
     @classmethod
-    def controls_only(cls, layer_id: str, controls: Mapping[str, Any]) -> "LayerDelta":
+    def controls_only(cls, layer_id: str, controls: Mapping[str, Any]) -> LayerDelta:
         return cls(layer_id=layer_id, controls=dict(controls))
 
     @classmethod
-    def removal(cls, layer_id: str) -> "LayerDelta":
+    def removal(cls, layer_id: str) -> LayerDelta:
         return cls(layer_id=layer_id, removed=True)
 
     @classmethod
-    def from_state_update(cls, layer_id: str, key: str, value: Any) -> "LayerDelta":
+    def from_state_update(cls, layer_id: str, key: str, value: Any) -> LayerDelta:
         # Fallback: treat unknown singletons as data section
         return cls(layer_id=layer_id, data={str(key): value})
 
     @classmethod
-    def from_payload(cls, payload: NotifyLayersPayload) -> "LayerDelta":
+    def from_payload(cls, payload: NotifyLayersPayload) -> LayerDelta:
         return cls(
             layer_id=str(payload.layer_id),
             controls=dict(payload.controls) if payload.controls else None,

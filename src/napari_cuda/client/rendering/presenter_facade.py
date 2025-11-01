@@ -13,17 +13,18 @@ import logging
 import os
 import time
 import weakref
-from typing import Any, Callable, Mapping, Optional, TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore, QtWidgets
 
 if TYPE_CHECKING:  # pragma: no cover - narrow compile-time imports only
     from qtpy.QtCore import QObject
 
-    from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
-    from napari_cuda.client.runtime.config import ClientConfig
     from napari_cuda.client.rendering.presenter import FixedLatencyPresenter
     from napari_cuda.client.rendering.renderer import GLRenderer
+    from napari_cuda.client.runtime.config import ClientConfig
+    from napari_cuda.client.runtime.stream_runtime import ClientStreamLoop
 
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,10 @@ class PresenterFacade:
         # Primary collaborators
         self._scene_canvas: Any = None
         self._scene_native: Any = None
-        self._loop: Optional["ClientStreamLoop"] = None
-        self._presenter: Optional["FixedLatencyPresenter"] = None
-        self._renderer: Optional["GLRenderer"] = None
-        self._client_cfg: Optional["ClientConfig"] = None
+        self._loop: Optional[ClientStreamLoop] = None
+        self._presenter: Optional[FixedLatencyPresenter] = None
+        self._renderer: Optional[GLRenderer] = None
+        self._client_cfg: Optional[ClientConfig] = None
 
         # GUI wiring
         self._draw_events: Any = None
@@ -49,7 +50,7 @@ class PresenterFacade:
 
         # Display loop & HUD
         self._use_display_loop: bool = False
-        self._display_loop: Optional["QObject"] = None
+        self._display_loop: Optional[QObject] = None
         self._hud_enabled: bool = False
         self._fps_label: Optional[QtWidgets.QLabel] = None
         self._fps_timer: Optional[QtCore.QTimer] = None
@@ -66,7 +67,7 @@ class PresenterFacade:
         }
 
         # Misc state
-        self._viewer_ref: Optional["weakref.ReferenceType[Any]"] = None
+        self._viewer_ref: Optional[weakref.ReferenceType[Any]] = None
         self._last_dims_payload: Optional[dict[str, Any]] = None
         self._intent_dispatcher: Optional[Callable[[str, dict[str, Any]], None]] = None
         self._camera_summaries: dict[str, Any] = {}
@@ -78,10 +79,10 @@ class PresenterFacade:
         self,
         *,
         scene_canvas: Any,
-        loop: "ClientStreamLoop",
-        presenter: "FixedLatencyPresenter",
-        renderer: "GLRenderer",
-        client_cfg: Optional["ClientConfig"],
+        loop: ClientStreamLoop,
+        presenter: FixedLatencyPresenter,
+        renderer: GLRenderer,
+        client_cfg: Optional[ClientConfig],
         use_display_loop: bool,
     ) -> None:
         """Record base collaborators and config."""

@@ -6,9 +6,10 @@ import logging
 import os
 import platform
 import time
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Optional
 
 import websockets
 
@@ -27,10 +28,10 @@ from napari_cuda.protocol import (
     NOTIFY_STREAM_TYPE,
     REPLY_COMMAND_TYPE,
     SESSION_HEARTBEAT_TYPE,
-    EnvelopeParser,
     SESSION_REJECT_TYPE,
     SESSION_WELCOME_TYPE,
     AckState,
+    EnvelopeParser,
     ErrorCommand,
     FeatureToggle,
     HelloClientInfo,
@@ -46,7 +47,6 @@ from napari_cuda.protocol.messages import (
     NotifySceneFrame,
     NotifyStreamFrame,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def _maybe_enable_debug_logger() -> bool:
         fmt = "[%(asctime)s] %(name)s - %(levelname)s - %(message)s"
         handler.setFormatter(logging.Formatter(fmt))
         handler.setLevel(logging.DEBUG)
-        setattr(handler, "_napari_cuda_local", True)
+        handler._napari_cuda_local = True
         logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
@@ -106,8 +106,8 @@ class SessionMetadata:
     session_id: str
     heartbeat_s: float
     ack_timeout_ms: int | None
-    resume_tokens: Dict[str, ResumeCursor | None]
-    features: Dict[str, FeatureToggle]
+    resume_tokens: dict[str, ResumeCursor | None]
+    features: dict[str, FeatureToggle]
 
 
 class StateChannel:
@@ -148,9 +148,9 @@ class StateChannel:
         self.on_disconnect = on_disconnect
         self._loop_state = StateChannelLoop()
         self._session_metadata: SessionMetadata | None = None
-        self._resume_tokens: Dict[str, ResumeCursor | None] = {topic: None for topic in _RESUMABLE_TOPICS}
+        self._resume_tokens: dict[str, ResumeCursor | None] = {topic: None for topic in _RESUMABLE_TOPICS}
         self._last_heartbeat_ts: float | None = None
-        self._feature_toggles: Dict[str, FeatureToggle] = {}
+        self._feature_toggles: dict[str, FeatureToggle] = {}
 
     @property
     def session_metadata(self) -> SessionMetadata | None:
@@ -425,7 +425,7 @@ class StateChannel:
 
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=_HANDSHAKE_TIMEOUT_S)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise RuntimeError("state handshake timed out waiting for session.welcome") from exc
         except Exception as exc:  # pragma: no cover - transport errors bubble up
             raise RuntimeError(f"state handshake failed: {exc}") from exc
@@ -572,7 +572,7 @@ class StateChannel:
     def _record_session_metadata(self, welcome: SessionWelcome) -> SessionMetadata:
         session_info = welcome.payload.session
         feature_toggles = welcome.payload.features
-        resume_tokens: Dict[str, ResumeCursor | None] = {}
+        resume_tokens: dict[str, ResumeCursor | None] = {}
         for name, toggle in feature_toggles.items():
             resume_state = getattr(toggle, "resume_state", None)
             if resume_state is not None:
@@ -655,8 +655,8 @@ class StateChannel:
         if metadata is not None:
             metadata.resume_tokens[topic] = cursor
 
-    def _resume_token_payload(self) -> Dict[str, str | None]:
-        payload: Dict[str, str | None] = {topic: None for topic in _RESUMABLE_TOPICS}
+    def _resume_token_payload(self) -> dict[str, str | None]:
+        payload: dict[str, str | None] = {topic: None for topic in _RESUMABLE_TOPICS}
         for topic, cursor in self._resume_tokens.items():
             if cursor is not None:
                 payload[topic] = cursor.delta_token

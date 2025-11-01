@@ -9,7 +9,9 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.protocol import build_state_update
 from napari_cuda.protocol.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
-from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_mod
+from napari_cuda.server.runtime.render_loop.apply.render_state import (
+    apply as snapshot_mod,
+)
 from napari_cuda.server.runtime.viewport.state import PlaneState
 from napari_cuda.server.tests._helpers.state_channel import StateServerHarness
 
@@ -140,7 +142,9 @@ def test_view_toggle_triggers_plane_restore_once() -> None:
 async def _test_view_toggle_triggers_plane_restore_once() -> None:
     loop = asyncio.get_running_loop()
     harness = StateServerHarness(loop)
-    from napari_cuda.server.control import control_channel_server as state_channel_handler
+    from napari_cuda.server.control import (
+        control_channel_server as state_channel_handler,
+    )
 
     orig_plane_restore = state_channel_handler.reduce_plane_restore
     calls: list[dict[str, object]] = []
@@ -232,7 +236,9 @@ def test_view_toggle_skips_plane_restore_without_cache() -> None:
 async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
     loop = asyncio.get_running_loop()
     harness = StateServerHarness(loop)
-    from napari_cuda.server.control import control_channel_server as state_channel_handler
+    from napari_cuda.server.control import (
+        control_channel_server as state_channel_handler,
+    )
 
     orig_plane_restore = state_channel_handler.reduce_plane_restore
     calls: list[dict[str, object]] = []
@@ -412,7 +418,7 @@ async def _test_roi_applied_once_on_level_switch() -> None:
 
     def _spy_apply_slice_level(*args, **kwargs):
         roi_calls.append((args, kwargs))
-        return None
+        return
 
     snapshot_mod.apply_slice_level = _spy_apply_slice_level  # type: ignore[assignment]
     try:

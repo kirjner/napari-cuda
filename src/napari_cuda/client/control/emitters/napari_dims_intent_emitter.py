@@ -5,16 +5,24 @@ from __future__ import annotations
 import logging
 import time
 import weakref
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Optional
 
 from qtpy import QtCore
 
 from napari_cuda.client.control import state_update_actions as control_actions
-from napari_cuda.client.control.client_state_ledger import ClientStateLedger, IntentRecord
-from napari_cuda.client.control.state_update_actions import ControlStateContext
-from napari_cuda.client.control.state_update_actions import _emit_state_update, _rate_gate_settings, current_ndisplay
+from napari_cuda.client.control.client_state_ledger import (
+    ClientStateLedger,
+    IntentRecord,
+)
+from napari_cuda.client.control.state_update_actions import (
+    ControlStateContext,
+    _emit_state_update,
+    _rate_gate_settings,
+    current_ndisplay,
+)
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 
 logger = logging.getLogger(__name__)
@@ -394,7 +402,7 @@ class NapariDimsIntentEmitter:
         prev = self._last_step_ui
         if prev is None or len(prev) != len(current):
             return None
-        for idx, (before, after) in enumerate(zip(prev, current)):
+        for idx, (before, after) in enumerate(zip(prev, current, strict=False)):
             if before != after:
                 return idx
         return None

@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import List, Tuple
 
 import pytest
 from qtpy import QtCore
 
-from napari_cuda.client.control.client_state_ledger import AckReconciliation, ClientStateLedger, IntentRecord
+from napari_cuda.client.control.client_state_ledger import (
+    AckReconciliation,
+    ClientStateLedger,
+    IntentRecord,
+)
 from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 
 
-def _make_emitter() -> tuple[NapariCameraIntentEmitter, ControlStateContext, ClientStateLedger, List[Tuple[IntentRecord, str]]]:
+def _make_emitter() -> tuple[NapariCameraIntentEmitter, ControlStateContext, ClientStateLedger, list[tuple[IntentRecord, str]]]:
     ctrl_env = SimpleNamespace(dims_rate_hz=60.0, wheel_step=1.0, settings_rate_hz=30.0)
     control_state = ControlStateContext.from_env(ctrl_env)
     loop_state = ClientLoopState()
     loop_state.gui_thread = QtCore.QThread.currentThread()
     ledger = ClientStateLedger()
-    dispatched: List[Tuple[IntentRecord, str]] = []
+    dispatched: list[tuple[IntentRecord, str]] = []
 
     def dispatch(pending_update: IntentRecord, origin: str) -> bool:
         dispatched.append((pending_update, origin))

@@ -12,13 +12,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-)
 from napari_cuda.server.data import (
     SliceROI,
     chunk_shape_for_level,
     roi_chunk_signature,
+)
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
 )
 
 from .state import PlaneResult, PlaneState, PoseEvent

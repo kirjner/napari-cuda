@@ -23,9 +23,9 @@ from napari_cuda.server.data.roi import (
     plane_wh_for_level,
 )
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.runtime.viewport import RenderMode
-
-from napari_cuda.server.runtime.bootstrap.interface import ViewerBootstrapInterface
+from napari_cuda.server.runtime.bootstrap.interface import (
+    ViewerBootstrapInterface,
+)
 from napari_cuda.server.runtime.bootstrap.setup_camera import (
     _bootstrap_camera_pose,
     _configure_camera_for_mode,
@@ -37,6 +37,7 @@ from napari_cuda.server.runtime.bootstrap.setup_visuals import (
     _register_volume_visual,
     _VisualHandle,
 )
+from napari_cuda.server.runtime.viewport import RenderMode
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker

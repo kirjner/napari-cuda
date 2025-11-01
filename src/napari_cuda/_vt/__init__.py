@@ -7,30 +7,30 @@ can `from napari_cuda import _vt as vt` and access functions like `vt.create`.
 
 try:
     from ._vt import (  # type: ignore
+        # Types
+        SessionType,
+        alloc_pixelbuffer_bgra,
+        counts,
         create,
         decode,
         flush,
         get_frame,
-        release_frame,
-        retain_frame,
-        counts,
-        stats,  # extended counters
-        map_to_rgb,
-        # Zero-copy / GL helpers
-        gl_cache_init_for_current_context,
+        gl_cache_counts,
         gl_cache_destroy,
         gl_cache_flush,
-        gl_cache_counts,
-        alloc_pixelbuffer_bgra,
-        pixel_format,
-        gl_tex_from_cvpixelbuffer,
+        # Zero-copy / GL helpers
+        gl_cache_init_for_current_context,
         gl_release_tex,
+        gl_tex_from_cvpixelbuffer,
+        map_to_rgb,
         pb_lock_base,
         pb_unlock_base,
-        # Types
-        SessionType,
+        pixel_format,
+        release_frame,
+        retain_frame,
+        stats,  # extended counters
     )
-except Exception as e:  # pragma: no cover
+except Exception:  # pragma: no cover
     # Allow import on non-macOS or when the extension is not built
     # Accessing attributes will raise AttributeError in that case
     pass
@@ -45,9 +45,25 @@ def compiled_path() -> str | None:  # pragma: no cover
         return None
 
 __all__ = [
-    'create','decode','flush','get_frame','release_frame','retain_frame',
-    'counts','stats','map_to_rgb',
-    'gl_cache_init_for_current_context','gl_cache_destroy','gl_cache_flush','gl_cache_counts',
-    'alloc_pixelbuffer_bgra','pixel_format','gl_tex_from_cvpixelbuffer','gl_release_tex',
-    'pb_lock_base','pb_unlock_base','SessionType','compiled_path',
+    'SessionType',
+    'alloc_pixelbuffer_bgra',
+    'compiled_path',
+    'counts',
+    'create',
+    'decode',
+    'flush',
+    'get_frame',
+    'gl_cache_counts',
+    'gl_cache_destroy',
+    'gl_cache_flush',
+    'gl_cache_init_for_current_context',
+    'gl_release_tex',
+    'gl_tex_from_cvpixelbuffer',
+    'map_to_rgb',
+    'pb_lock_base',
+    'pb_unlock_base',
+    'pixel_format',
+    'release_frame',
+    'retain_frame',
+    'stats',
 ]

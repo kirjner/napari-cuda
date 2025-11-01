@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Mapping, Optional, Sequence, TYPE_CHECKING
+from collections.abc import Callable, Mapping, Sequence
 from numbers import Integral, Real
+from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore
 
-from napari_cuda.client.control.client_state_ledger import ClientStateLedger, MirrorEvent
+from napari_cuda.client.control.client_state_ledger import (
+    ClientStateLedger,
+    MirrorEvent,
+)
 from napari_cuda.protocol.messages import NotifyDimsFrame
 
 if TYPE_CHECKING:  # pragma: no cover
-    from napari_cuda.client.control.state_update_actions import ControlStateContext
-    from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+    from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
+        NapariDimsIntentEmitter,
+    )
+    from napari_cuda.client.control.state_update_actions import (
+        ControlStateContext,
+    )
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
-    from napari_cuda.client.control.emitters.napari_dims_intent_emitter import NapariDimsIntentEmitter
+    from napari_cuda.client.runtime.client_loop.loop_state import (
+        ClientLoopState,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +38,11 @@ class NapariDimsMirror:
         self,
         *,
         ledger: ClientStateLedger,
-        state: "ControlStateContext",
-        loop_state: "ClientLoopState",
+        state: ControlStateContext,
+        loop_state: ClientLoopState,
         viewer_ref,
         ui_call,
-        presenter: Optional["PresenterFacade"],
+        presenter: Optional[PresenterFacade],
         log_dims_info: bool,
         notify_first_ready: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -46,7 +56,7 @@ class NapariDimsMirror:
         self._presenter = presenter
         self._log_dims_info = bool(log_dims_info)
         self._notify_first_ready = notify_first_ready
-        self._emitter: Optional["NapariDimsIntentEmitter"] = None
+        self._emitter: Optional[NapariDimsIntentEmitter] = None
         self._ui_thread = app.thread()
         self._last_multiscale_snapshot: Mapping[str, Any] | None = None
         ledger.subscribe_all(self._handle_ledger_update)
@@ -54,7 +64,7 @@ class NapariDimsMirror:
     def set_logging(self, enabled: bool) -> None:
         self._log_dims_info = bool(enabled)
 
-    def attach_emitter(self, emitter: "NapariDimsIntentEmitter") -> None:
+    def attach_emitter(self, emitter: NapariDimsIntentEmitter) -> None:
         self._emitter = emitter
 
     def ingest_dims_notify(self, frame: NotifyDimsFrame) -> None:
@@ -286,7 +296,7 @@ class NapariDimsMirror:
 
 
 def _record_dims_snapshot(
-    state: "ControlStateContext",
+    state: ControlStateContext,
     ledger: ClientStateLedger,
     payload: Mapping[str, Any],
 ) -> None:
@@ -317,7 +327,7 @@ def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
     if not levels_source:
         return None
     levels = [dict(entry) for entry in levels_source]
-    level_value = int(getattr(payload, 'current_level'))
+    level_value = int(payload.current_level)
     snapshot: dict[str, Any] = {
         'levels': levels,
         'current_level': level_value,
@@ -330,7 +340,7 @@ def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
 
 
 def _record_dims_delta(
-    state: "ControlStateContext",
+    state: ControlStateContext,
     ledger: ClientStateLedger,
     payload: Mapping[str, Any],
     *,
@@ -358,7 +368,7 @@ def _record_dims_delta(
         ledger.batch_record_confirmed(entries)
 
 
-def _build_consumer_dims_payload(state: "ControlStateContext", loop_state: "ClientLoopState") -> dict[str, Any]:
+def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientLoopState) -> dict[str, Any]:
     meta = state.dims_meta
     payload: dict[str, Any] = {}
 
@@ -410,7 +420,7 @@ def _build_consumer_dims_payload(state: "ControlStateContext", loop_state: "Clie
     return payload
 
 
-def _record_multiscale_metadata(state: "ControlStateContext", ledger: ClientStateLedger) -> None:
+def _record_multiscale_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:
     multiscale_meta = state.dims_meta.get('multiscale')
     if not isinstance(multiscale_meta, Mapping):
         return
@@ -434,7 +444,7 @@ def _record_multiscale_metadata(state: "ControlStateContext", ledger: ClientStat
     if entries:
         ledger.batch_record_confirmed(entries)
 
-def _record_volume_metadata(state: "ControlStateContext", ledger: ClientStateLedger) -> None:
+def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:
     render_meta = state.dims_meta.get('render')
     if not isinstance(render_meta, Mapping):
         return
@@ -467,7 +477,7 @@ def _record_volume_metadata(state: "ControlStateContext", ledger: ClientStateLed
         ledger.batch_record_confirmed(entries)
 
 
-def _axis_index_from_target(state: "ControlStateContext", target: str) -> Optional[int]:
+def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
@@ -500,7 +510,7 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
     return 0
 
 
-def _axis_target_label(state: "ControlStateContext", axis_idx: int) -> str:
+def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
         label = labels[axis_idx]

@@ -11,47 +11,48 @@ memory for assertions.
 from __future__ import annotations
 
 import asyncio
-import logging
 import json
+import logging
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from collections.abc import (
+    Callable,
+    Coroutine,
+    Iterable,
+    Mapping,
+    MutableSequence,
+)
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any, Callable, Coroutine, Iterable, Mapping, MutableSequence, Optional
+from typing import (
+    Any,
+    Optional,
+)
 
 import numpy as np
 from websockets.exceptions import ConnectionClosedOK
 from websockets.protocol import State
 
+from napari.components import viewer_model
 from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.protocol.messages import NotifyDimsPayload, SessionHello
 from napari_cuda.protocol.snapshots import SceneSnapshot
-from napari_cuda.server.control import control_channel_server as state_channel_handler
-from napari_cuda.server.control.topics.dims import broadcast_dims_state
-from napari_cuda.server.control.topics.layers import broadcast_layers_delta
+from napari_cuda.server.control import (
+    control_channel_server as state_channel_handler,
+)
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,
 )
-from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-from napari_cuda.server.control.state_reducers import reduce_bootstrap_state, reduce_level_update
-from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
-from napari_cuda.server.engine.api import (
-    build_notify_stream_payload,
-    mark_stream_config_dirty,
+from napari_cuda.server.control.state_reducers import (
+    reduce_bootstrap_state,
+    reduce_level_update,
 )
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-    RenderUpdate,
-    snapshot_render_state,
-    snapshot_layer_controls,
-    snapshot_multiscale_state,
-    snapshot_scene,
-    snapshot_volume_state,
-)
+from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.layers import broadcast_layers_delta
 from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,
@@ -59,15 +60,31 @@ from napari_cuda.server.data import (
     roi_chunk_signature,
 )
 from napari_cuda.server.data.level_logging import LayerAssignmentLogger
-from napari.components import viewer_model
-from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
-from napari_cuda.server.runtime.api import RuntimeHandle
-
-from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.apply.render_state import apply as snapshot_mod
-from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.data.roi import plane_wh_for_level
-
+from napari_cuda.server.engine.api import (
+    build_notify_stream_payload,
+    mark_stream_config_dirty,
+)
+from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
+from napari_cuda.server.runtime.api import RuntimeHandle
+from napari_cuda.server.runtime.camera import CameraCommandQueue
+from napari_cuda.server.runtime.render_loop.apply.render_state import (
+    apply as snapshot_mod,
+)
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
+from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
+    RenderUpdate,
+    snapshot_layer_controls,
+    snapshot_multiscale_state,
+    snapshot_render_state,
+    snapshot_scene,
+    snapshot_volume_state,
+)
+from napari_cuda.server.state_ledger import ServerStateLedger
 
 _SENTINEL = object()
 
@@ -648,7 +665,7 @@ class StateServerHarness:
             self._send_event.clear()
             try:
                 await asyncio.wait_for(self._send_event.wait(), remaining)
-            except asyncio.TimeoutError as exc:  # pragma: no cover - defensive
+            except TimeoutError as exc:  # pragma: no cover - defensive
                 raise TimeoutError("expected frame not observed before timeout") from exc
 
     # ------------------------------------------------------------------ helpers
@@ -850,7 +867,10 @@ class StateServerHarness:
             clients=set(),
             log_sends=False,
         )
-        from napari_cuda.server.engine import PixelChannelConfig, PixelChannelState
+        from napari_cuda.server.engine import (
+            PixelChannelConfig,
+            PixelChannelState,
+        )
 
         server._pixel_channel = PixelChannelState(
             broadcast=broadcast_state,
@@ -859,10 +879,10 @@ class StateServerHarness:
         server._pixel = SimpleNamespace(bypass_until_key=False)
         def _mark_stream_config_dirty() -> None:
             mark_stream_config_dirty(server._pixel_channel)
-        
+
         def _build_stream_payload(avcc: bytes) -> NotifyStreamPayload:
             return build_notify_stream_payload(server._pixel_config, avcc)
-        
+
         server.mark_stream_config_dirty = _mark_stream_config_dirty
         server.build_stream_payload = _build_stream_payload
         server._pixel_config = PixelChannelConfig(

@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import logging
-import math
-import uuid
 import time
-from dataclasses import asdict, replace
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from types import MappingProxyType
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Optional
 
-from napari.layers.image._image_constants import Interpolation as NapariInterpolation
+from napari.layers.image._image_constants import (
+    Interpolation as NapariInterpolation,
+)
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 # ruff: noqa: TID252 - absolute imports enforced project-wide
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-from napari_cuda.server.state_ledger import LedgerEntry, PropertyKey, ServerStateLedger
 from napari_cuda.server.control.transactions import (
     apply_bootstrap_transaction,
     apply_camera_update_transaction,
@@ -25,10 +26,16 @@ from napari_cuda.server.control.transactions import (
     apply_layer_property_transaction,
     apply_level_switch_transaction,
     apply_plane_restore_transaction,
-    apply_volume_restore_transaction,
     apply_view_toggle_transaction,
+    apply_volume_restore_transaction,
 )
 from napari_cuda.server.scene import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.state_ledger import (
+    LedgerEntry,
+    PropertyKey,
+    ServerStateLedger,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +91,7 @@ def clamp_sample_step(rel: object) -> float:
     return max(0.1, min(4.0, val))
 
 
-def _metadata_from_intent(intent_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def _metadata_from_intent(intent_id: Optional[str]) -> Optional[dict[str, Any]]:
     if not intent_id:
         return None
     return {"intent_id": intent_id}
@@ -152,7 +159,7 @@ def _store_plane_state(
     ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
 
 
-def _metadata_from_intent(intent_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def _metadata_from_intent(intent_id: Optional[str]) -> Optional[dict[str, Any]]:
     if not intent_id:
         return None
     return {"intent_id": intent_id}
@@ -242,7 +249,7 @@ def _store_volume_state(
         )
 
 
-def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
+def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
     if state is None:
         return None
     if isinstance(state, PlaneState):
@@ -252,7 +259,7 @@ def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional
     raise TypeError(f"unsupported plane state payload: {type(state)!r}")
 
 
-def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
+def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
     if state is None:
         return None
     if isinstance(state, VolumeState):
@@ -745,8 +752,8 @@ def _normalize_view_order(
     baseline_order: Optional[Sequence[int]],
     requested_order: Optional[Sequence[int]],
     ndim: int,
-) -> Tuple[int, ...]:
-    current: Tuple[int, ...] = ()
+) -> tuple[int, ...]:
+    current: tuple[int, ...] = ()
     if requested_order is not None:
         current = tuple(int(idx) for idx in requested_order)
     elif baseline_order is not None:
@@ -774,9 +781,9 @@ def _normalize_view_order(
 def _normalize_view_displayed(
     *,
     requested_displayed: Optional[Sequence[int]],
-    order_value: Tuple[int, ...],
+    order_value: tuple[int, ...],
     target_ndisplay: int,
-) -> Tuple[int, ...]:
+) -> tuple[int, ...]:
     if requested_displayed is not None:
         return tuple(int(idx) for idx in requested_displayed)
 
@@ -1301,7 +1308,7 @@ def reduce_plane_restore(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.view",
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     ts = _now(timestamp)
     metadata = {"intent_id": intent_id} if intent_id else None
     level_idx = int(level)
@@ -1367,7 +1374,7 @@ def reduce_volume_restore(
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.view",
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     ts = _now(timestamp)
     metadata = {"intent_id": intent_id} if intent_id else None
 
@@ -1558,7 +1565,7 @@ def reduce_camera_update(
     timestamp: Optional[float] = None,
     origin: str = "control.camera",
     metadata: Mapping[str, Any] = MappingProxyType({}),
-) -> Tuple[Dict[str, Any], int]:
+) -> tuple[dict[str, Any], int]:
     if (
         center is None
         and zoom is None
@@ -1576,7 +1583,7 @@ def reduce_camera_update(
     include_metadata = bool(metadata_dict)
 
     ledger_updates: list[tuple] = []
-    ack: Dict[str, Any] = {}
+    ack: dict[str, Any] = {}
 
     def _append_entry(scope: str, key: str, value: Any) -> None:
         if include_metadata:
@@ -1585,11 +1592,7 @@ def reduce_camera_update(
             ledger_updates.append((scope, "main", key, value))
 
     use_volume_path = False
-    if distance is not None or fov is not None:
-        use_volume_path = True
-    elif angles is not None and len(angles) >= 2:
-        use_volume_path = True
-    elif _current_ndisplay(ledger) >= 3:
+    if distance is not None or fov is not None or (angles is not None and len(angles) >= 2) or _current_ndisplay(ledger) >= 3:
         use_volume_path = True
 
     if not use_volume_path:
@@ -1713,13 +1716,13 @@ __all__ = [
     "reduce_dims_update",
     "reduce_layer_property",
     "reduce_level_update",
+    "reduce_plane_restore",
+    "reduce_view_update",
     "reduce_volume_colormap",
     "reduce_volume_contrast_limits",
     "reduce_volume_opacity",
     "reduce_volume_render_mode",
-    "reduce_volume_sample_step",
-    "reduce_plane_restore",
     "reduce_volume_restore",
-    "reduce_view_update",
+    "reduce_volume_sample_step",
     "resolve_axis_index",
 ]

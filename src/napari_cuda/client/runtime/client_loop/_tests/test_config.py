@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from napari_cuda.client.runtime.client_loop.client_loop_config import (
@@ -45,7 +43,7 @@ def clear_env(monkeypatch):
     ]
     for key in keys:
         monkeypatch.delenv(key, raising=False)
-    yield
+    return
 
 
 def test_load_client_loop_config_defaults():

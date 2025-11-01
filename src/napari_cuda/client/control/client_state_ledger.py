@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import dataclass, field
 import logging
 import time
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from dataclasses import dataclass, field
+from typing import (
+    Any,
+    Optional,
+)
 
 from napari_cuda.protocol import AckState
 
-
-PropertyKey = Tuple[str, str, str]
+PropertyKey = tuple[str, str, str]
 
 
 @dataclass
@@ -20,7 +23,7 @@ class LedgerConfirmedEntry:
     timestamp: float
     origin: str
     version: Any | None
-    metadata: Dict[str, Any] | None
+    metadata: dict[str, Any] | None
 
 
 @dataclass
@@ -30,7 +33,7 @@ class PendingIntentEntry:
     value: Any
     update_phase: str
     timestamp: float
-    metadata: Dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -44,9 +47,9 @@ class IntentRecord:
     frame_id: str
     timestamp: float
     projection_value: Any
-    metadata: Dict[str, Any] | None
+    metadata: dict[str, Any] | None
 
-    def payload_dict(self) -> Dict[str, Any]:
+    def payload_dict(self) -> dict[str, Any]:
         return {
             "scope": self.scope,
             "target": self.target,
@@ -68,9 +71,9 @@ class AckReconciliation:
     projection_value: Optional[Any]
     confirmed_value: Optional[Any]
     applied_value: Optional[Any]
-    error: Optional[Dict[str, Any]]
+    error: Optional[dict[str, Any]]
     update_phase: Optional[str]
-    metadata: Optional[Dict[str, Any]]
+    metadata: Optional[dict[str, Any]]
     version: Optional[Any]
     pending_len: int
     was_pending: bool
@@ -79,7 +82,7 @@ class AckReconciliation:
 @dataclass
 class LedgerPropertyState:
     confirmed: Optional[LedgerConfirmedEntry] = None
-    pending: "OrderedDict[str, PendingIntentEntry]" = field(default_factory=OrderedDict)
+    pending: OrderedDict[str, PendingIntentEntry] = field(default_factory=OrderedDict)
 
 
 @dataclass(frozen=True)
@@ -91,7 +94,7 @@ class MirrorEvent:
     origin: str
     version: Any | None
     timestamp: float
-    metadata: Dict[str, Any] | None
+    metadata: dict[str, Any] | None
 
 
 logger = logging.getLogger(__name__)
@@ -103,9 +106,9 @@ class ClientStateLedger:
     def __init__(self, *, clock=time.time) -> None:
         self._clock = clock
         self._state: MutableMapping[PropertyKey, LedgerPropertyState] = {}
-        self._pending_index: Dict[str, PropertyKey] = {}
-        self._subscribers: Dict[PropertyKey, List[Callable[[MirrorEvent], None]]] = {}
-        self._global_subscribers: List[Callable[[MirrorEvent], None]] = []
+        self._pending_index: dict[str, PropertyKey] = {}
+        self._subscribers: dict[PropertyKey, list[Callable[[MirrorEvent], None]]] = {}
+        self._global_subscribers: list[Callable[[MirrorEvent], None]] = []
 
     # ------------------------------------------------------------------
     def apply_local(
@@ -230,7 +233,7 @@ class ClientStateLedger:
         pending_value: Optional[Any] = None
         projection_value: Optional[Any] = None
         confirmed_value: Optional[Any] = None
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[dict[str, Any]] = None
         update_phase: Optional[str] = None
 
         if property_key is not None:
@@ -248,7 +251,7 @@ class ClientStateLedger:
                 projection_value = property_state.confirmed.value
 
         applied_value = payload.applied_value
-        error_dict: Optional[Dict[str, Any]] = None
+        error_dict: Optional[dict[str, Any]] = None
         status = str(payload.status)
         ack_version = payload.version
 
@@ -351,19 +354,19 @@ class ClientStateLedger:
     # ------------------------------------------------------------------
     def batch_record_confirmed(
         self,
-        entries: Iterable[Tuple[Any, ...]],
+        entries: Iterable[tuple[Any, ...]],
         *,
         timestamp: Optional[float] = None,
         origin: str = "remote",
-    ) -> Dict[PropertyKey, LedgerConfirmedEntry]:
+    ) -> dict[PropertyKey, LedgerConfirmedEntry]:
         """Promote multiple confirmed properties in a single batch."""
 
         materialized = list(entries)
         if not materialized:
             return {}
 
-        notifications: List[Tuple[PropertyKey, LedgerConfirmedEntry]] = []
-        stored: Dict[PropertyKey, LedgerConfirmedEntry] = {}
+        notifications: list[tuple[PropertyKey, LedgerConfirmedEntry]] = []
+        stored: dict[PropertyKey, LedgerConfirmedEntry] = {}
 
         for raw_entry in materialized:
             length = len(raw_entry)
@@ -455,8 +458,8 @@ class ClientStateLedger:
         return state.confirmed.value
 
     # ------------------------------------------------------------------
-    def dump_debug(self) -> Dict[str, Any]:  # pragma: no cover - diagnostic helper
-        summary: Dict[str, Any] = {}
+    def dump_debug(self) -> dict[str, Any]:  # pragma: no cover - diagnostic helper
+        summary: dict[str, Any] = {}
         for key, state in self._state.items():
             scope, target, prop = key
             k = f"{scope}:{target}:{prop}"
@@ -551,11 +554,11 @@ class ClientStateLedger:
 
 
 __all__ = [
-    "LedgerConfirmedEntry",
-    "PendingIntentEntry",
-    "IntentRecord",
     "AckReconciliation",
-    "LedgerPropertyState",
     "ClientStateLedger",
+    "IntentRecord",
+    "LedgerConfirmedEntry",
+    "LedgerPropertyState",
     "MirrorEvent",
+    "PendingIntentEntry",
 ]

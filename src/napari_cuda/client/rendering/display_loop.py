@@ -9,7 +9,8 @@ Provides start/stop and FPS changes without leaking timers.
 
 import logging
 import os
-from typing import Optional, Callable
+from collections.abc import Callable
+from typing import Optional
 
 from qtpy import QtCore
 from vispy import app as vispy_app  # type: ignore
@@ -39,7 +40,7 @@ class DisplayLoop:
             self._callback = callback
         else:
             native = getattr(scene_canvas, 'native', None)
-            self._callback = getattr(native, 'update', None) or getattr(scene_canvas, 'update')
+            self._callback = getattr(native, 'update', None) or scene_canvas.update
         # Resolve FPS
         try:
             # Prefer explicit arg, else client display env, else default 60
@@ -131,7 +132,7 @@ class DisplayLoop:
             else:
                 # Fallback: prefer native.update(), else canvas.update()
                 native = getattr(self._canvas, 'native', None)
-                upd = getattr(native, 'update', None) or getattr(self._canvas, 'update')
+                upd = getattr(native, 'update', None) or self._canvas.update
                 if upd is not None:
                     upd()
         except Exception:

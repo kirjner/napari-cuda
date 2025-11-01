@@ -6,9 +6,11 @@ import pytest
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
 from napari_cuda.server.runtime.render_loop.apply.render_state.plane import (
     apply_slice_level,
+)
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
 )
 from napari_cuda.server.runtime.viewport import ViewportState
 

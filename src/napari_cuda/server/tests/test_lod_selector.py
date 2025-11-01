@@ -2,16 +2,13 @@ from __future__ import annotations
 
 from napari_cuda.server.data.lod import (
     LevelBudgetError,
-    LevelContext,
     LevelDecision,
     LevelPolicyConfig,
     LevelPolicyInputs,
     enforce_budgets,
-    evaluate_policy,
     select_level,
 )
 from napari_cuda.server.runtime.lod.context import build_level_context
-
 
 _BASE_CONFIG = LevelPolicyConfig(
     threshold_in=1.05,

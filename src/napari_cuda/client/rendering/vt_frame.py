@@ -2,11 +2,9 @@ from __future__ import annotations
 
 """Utilities for managing VT frame ownership across threads."""
 
-from dataclasses import dataclass
 import logging
 import threading
-from typing import Dict
-
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +26,7 @@ class LeaseRole:
 class LeaseSnapshot:
     """Captures the outstanding refcounts for diagnostics."""
 
-    counts: Dict[str, int]
+    counts: dict[str, int]
 
 
 class FrameLease:
@@ -39,13 +37,13 @@ class FrameLease:
     All operations are thread-safe.
     """
 
-    __slots__ = ("_vt", "_capsule", "_lock", "_counts", "_closed")
+    __slots__ = ("_capsule", "_closed", "_counts", "_lock", "_vt")
 
     def __init__(self, vt_module: object, capsule: object) -> None:
         self._vt = vt_module
         self._capsule = capsule
         self._lock = threading.Lock()
-        self._counts: Dict[str, int] = {LeaseRole.DECODER: 1}
+        self._counts: dict[str, int] = {LeaseRole.DECODER: 1}
         self._closed = False
 
     # --- public API -----------------------------------------------------
@@ -84,7 +82,7 @@ class FrameLease:
     def close(self) -> None:
         """Force release of all remaining roles (used on shutdown)."""
 
-        to_release: Dict[str, int]
+        to_release: dict[str, int]
         with self._lock:
             to_release = dict(self._counts)
         for role, count in to_release.items():

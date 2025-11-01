@@ -21,4 +21,4 @@ def start_metrics_dashboard(
 def stop_metrics_dashboard(_runner) -> None:
     """Stop the metrics dashboard (no-op for current daemon thread)."""
 
-    return None
+    return

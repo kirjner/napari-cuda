@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 import websockets
-import struct
 
 logger = logging.getLogger(__name__)
 

@@ -4,14 +4,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional
 
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-)
 from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.viewport import (
     PoseEvent,
     ViewportOps,
     ViewportRunner,
+)
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
 )
 
 

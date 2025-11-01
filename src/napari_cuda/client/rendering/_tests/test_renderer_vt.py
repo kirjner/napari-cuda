@@ -1,4 +1,8 @@
-from napari_cuda.client.rendering.renderer import GLRenderer, VTReleaseQueue, GL
+from napari_cuda.client.rendering.renderer import (
+    GL,
+    GLRenderer,
+    VTReleaseQueue,
+)
 
 
 class DummyVT:

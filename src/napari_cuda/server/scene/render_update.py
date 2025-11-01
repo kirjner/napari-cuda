@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .models import RenderLedgerSnapshot
-from .viewport import RenderMode, PlaneState, VolumeState
+from .viewport import PlaneState, RenderMode, VolumeState
 
 
 @dataclass(frozen=True)

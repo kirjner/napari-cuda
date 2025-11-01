@@ -9,10 +9,10 @@ __all__ = [
     "LayerRecord",
     "RegistrySnapshot",
     "RemoteArray",
-    "RemotePreview",
     "RemoteImageLayer",
     "RemoteLayerRegistry",
     "RemoteMultiscale",
+    "RemotePreview",
     "build_remote_data",
 ]
 

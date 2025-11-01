@@ -7,7 +7,6 @@ import re
 import subprocess  # nosec
 import sys
 from pathlib import Path
-
 from tomllib import loads
 
 REPO_DIR = Path(__file__).parent.parent

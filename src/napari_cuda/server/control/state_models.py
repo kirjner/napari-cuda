@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Tuple
-
-from napari_cuda.server.scene import BootstrapSceneMetadata
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)

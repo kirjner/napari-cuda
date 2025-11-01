@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 
-
-PropertyKey = Tuple[str, str, str]
+PropertyKey = tuple[str, str, str]
 Subscriber = Callable[["LedgerEvent"], None]
 
 
@@ -18,7 +24,7 @@ class LedgerEntry:
     value: Any
     timestamp: float
     origin: str
-    metadata: Optional[Dict[str, Any]]
+    metadata: Optional[dict[str, Any]]
     version: Any | None
 
 
@@ -30,7 +36,7 @@ class LedgerEvent:
     value: Any
     timestamp: float
     origin: str
-    metadata: Optional[Dict[str, Any]]
+    metadata: Optional[dict[str, Any]]
     version: Any | None
 
 
@@ -43,10 +49,10 @@ class ServerStateLedger:
     def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._lock = threading.RLock()
-        self._state: Dict[PropertyKey, LedgerEntry] = {}
-        self._subscribers: Dict[PropertyKey, List[Subscriber]] = {}
-        self._global_subscribers: List[Subscriber] = []
-        self._versions: Dict[PropertyKey, int] = {}
+        self._state: dict[PropertyKey, LedgerEntry] = {}
+        self._subscribers: dict[PropertyKey, list[Subscriber]] = {}
+        self._global_subscribers: list[Subscriber] = []
+        self._versions: dict[PropertyKey, int] = {}
 
     # ------------------------------------------------------------------
     def record_confirmed(
@@ -146,20 +152,20 @@ class ServerStateLedger:
     # ------------------------------------------------------------------
     def batch_record_confirmed(
         self,
-        entries: Iterable[Tuple[Any, ...]],
+        entries: Iterable[tuple[Any, ...]],
         *,
         origin: str,
         timestamp: Optional[float] = None,
         dedupe: bool = True,
-    ) -> Dict[PropertyKey, LedgerEntry]:
+    ) -> dict[PropertyKey, LedgerEntry]:
         """Promote multiple confirmed properties in one batch and return stored entries."""
 
         materialized = list(entries)
         if not materialized:
             return {}
 
-        notifications: List[Tuple[LedgerEvent, List[Subscriber], List[Subscriber]]] = []
-        stored: Dict[PropertyKey, LedgerEntry] = {}
+        notifications: list[tuple[LedgerEvent, list[Subscriber], list[Subscriber]]] = []
+        stored: dict[PropertyKey, LedgerEntry] = {}
 
         with self._lock:
             for raw in materialized:
@@ -282,7 +288,7 @@ class ServerStateLedger:
                 self._global_subscribers.remove(callback)
 
     # ------------------------------------------------------------------
-    def snapshot(self) -> Dict[PropertyKey, LedgerEntry]:
+    def snapshot(self) -> dict[PropertyKey, LedgerEntry]:
         """Return a shallow copy of the ledger state."""
 
         with self._lock:
@@ -302,7 +308,7 @@ class ServerStateLedger:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _normalize_metadata(metadata: Optional[Any]) -> Optional[Dict[str, Any]]:
+    def _normalize_metadata(metadata: Optional[Any]) -> Optional[dict[str, Any]]:
         if metadata is None:
             return None
         if not isinstance(metadata, Mapping):

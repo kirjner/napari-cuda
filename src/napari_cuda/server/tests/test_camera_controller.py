@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import pytest
 
 from napari_cuda.server.runtime.camera.controller import (
-    CameraDeltaOutcome,
     CameraDebugFlags,
+    CameraDeltaOutcome,
     apply_camera_deltas,
 )
 from napari_cuda.server.scene import CameraDeltaCommand
@@ -40,7 +40,7 @@ def _patch_camops(monkeypatch):
 
     monkeypatch.setattr("napari_cuda.server.runtime.camera.controller.camops.apply_zoom_2d", _zoom_2d)
     monkeypatch.setattr("napari_cuda.server.runtime.camera.controller.camops.apply_pan_2d", _pan_2d)
-    yield
+    return
 
 
 def test_apply_camera_deltas_zoom_marks_render_and_policy() -> None:

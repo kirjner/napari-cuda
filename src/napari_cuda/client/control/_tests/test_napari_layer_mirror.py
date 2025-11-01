@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import List
 
 import pytest
 from qtpy import QtCore
@@ -12,12 +11,17 @@ from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.data.registry import RemoteLayerRegistry
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.protocol.snapshots import LayerDelta, LayerSnapshot, SceneSnapshot, ViewerSnapshot
+from napari_cuda.protocol.snapshots import (
+    LayerDelta,
+    LayerSnapshot,
+    SceneSnapshot,
+    ViewerSnapshot,
+)
 
 
 class _StubPresenter:
     def __init__(self) -> None:
-        self.deltas: List[LayerDelta] = []
+        self.deltas: list[LayerDelta] = []
 
     def apply_layer_delta(self, message: LayerDelta) -> None:
         self.deltas.append(message)

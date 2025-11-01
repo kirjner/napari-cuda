@@ -6,20 +6,23 @@ Provide small dataclasses that wrap starting threads for state and pixel
 receivers so the loop can delegate orchestration to pure helpers.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Callable, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid only
-    from napari_cuda.client.control.control_channel_client import StateChannel
+    from napari_cuda.client.control.control_channel_client import (
+        SessionMetadata,
+        StateChannel,
+    )
+    from napari_cuda.protocol import AckState, ErrorCommand, ReplyCommand
     from napari_cuda.protocol.messages import (
         NotifyDimsFrame,
         NotifyLayersFrame,
         NotifySceneFrame,
         NotifyStreamFrame,
     )
-    from napari_cuda.protocol import AckState, ErrorCommand, ReplyCommand
-    from napari_cuda.client.control.control_channel_client import SessionMetadata
 
 from napari_cuda.client.runtime.receiver import PixelReceiver
 
@@ -28,20 +31,22 @@ from napari_cuda.client.runtime.receiver import PixelReceiver
 class StateController:
     host: str
     port: int
-    ingest_notify_stream: Optional[Callable[["NotifyStreamFrame"], None]] = None
-    ingest_dims_notify: Optional[Callable[["NotifyDimsFrame"], None]] = None
-    ingest_notify_scene_snapshot: Optional[Callable[["NotifySceneFrame"], None]] = None
-    ingest_notify_layers: Optional[Callable[["NotifyLayersFrame"], None]] = None
+    ingest_notify_stream: Optional[Callable[[NotifyStreamFrame], None]] = None
+    ingest_dims_notify: Optional[Callable[[NotifyDimsFrame], None]] = None
+    ingest_notify_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None
+    ingest_notify_layers: Optional[Callable[[NotifyLayersFrame], None]] = None
     ingest_notify_camera: Optional[Callable[[Any], None]] = None
-    ingest_ack_state: Optional[Callable[["AckState"], None]] = None
-    ingest_reply_command: Optional[Callable[["ReplyCommand"], None]] = None
-    ingest_error_command: Optional[Callable[["ErrorCommand"], None]] = None
-    on_session_ready: Optional[Callable[["SessionMetadata"], None]] = None
+    ingest_ack_state: Optional[Callable[[AckState], None]] = None
+    ingest_reply_command: Optional[Callable[[ReplyCommand], None]] = None
+    ingest_error_command: Optional[Callable[[ErrorCommand], None]] = None
+    on_session_ready: Optional[Callable[[SessionMetadata], None]] = None
     on_connected: Optional[Callable[[], None]] = None
     on_disconnect: Optional[Callable[[Optional[Exception]], None]] = None
 
-    def start(self) -> Tuple["StateChannel", Thread]:
-        from napari_cuda.client.control.control_channel_client import StateChannel
+    def start(self) -> tuple[StateChannel, Thread]:
+        from napari_cuda.client.control.control_channel_client import (
+            StateChannel,
+        )
 
         ch = StateChannel(
             self.host,
@@ -62,7 +67,7 @@ class StateController:
         t.start()
         return ch, t
 
-    def stop(self, channel: "StateChannel", thread: Thread, timeout: float = 2.0) -> None:
+    def stop(self, channel: StateChannel, thread: Thread, timeout: float = 2.0) -> None:
         try:
             channel.stop()
         except Exception:
@@ -75,10 +80,10 @@ class ReceiveController:
     host: str
     port: int
     on_connected: Optional[Callable[[], None]] = None
-    on_frame: Optional[Callable[["object"], None]] = None
+    on_frame: Optional[Callable[[object], None]] = None
     on_disconnect: Optional[Callable[[Optional[Exception]], None]] = None
 
-    def start(self) -> Tuple[PixelReceiver, Thread]:
+    def start(self) -> tuple[PixelReceiver, Thread]:
         rx = PixelReceiver(
             self.host,
             int(self.port),

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
 from napari_cuda.server.scene import (
+    snapshot_dims_metadata,
     snapshot_render_state,
     snapshot_scene,
-    snapshot_dims_metadata,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
 
@@ -15,7 +15,7 @@ from napari_cuda.server.state_ledger import ServerStateLedger
 def _seed_plane_ledger(ndisplay: int = 2) -> ServerStateLedger:
     ledger = ServerStateLedger()
     ledger.record_confirmed("view", "main", "ndisplay", ndisplay, origin="test.plane")
-    displayed_axes: Tuple[int, ...] = (1, 2) if ndisplay == 2 else (0, 1, 2)
+    displayed_axes: tuple[int, ...] = (1, 2) if ndisplay == 2 else (0, 1, 2)
     ledger.record_confirmed("view", "main", "displayed", displayed_axes, origin="test.plane")
     ledger.record_confirmed("dims", "main", "current_step", (0, 0, 0), origin="test.plane")
     ledger.record_confirmed("dims", "main", "order", (0, 1, 2), origin="test.plane")

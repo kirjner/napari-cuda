@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
-from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.data import SliceROI
 
 
@@ -22,7 +20,7 @@ class SliceDataApplier:
         *,
         slab,
         roi: SliceROI,
-        scale: Tuple[float, float],
+        scale: tuple[float, float],
     ) -> None:
         sy, sx = scale
         translate = (

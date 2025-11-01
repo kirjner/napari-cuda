@@ -10,7 +10,8 @@ issues a one-off GUI update to help recover from prolonged stalls.
 
 import logging
 import time
-from typing import Optional, Callable
+from collections.abc import Callable
+from typing import Optional
 
 from qtpy import QtCore
 

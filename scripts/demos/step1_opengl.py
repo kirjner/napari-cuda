@@ -3,11 +3,12 @@
 Step 1: Verify OpenGL context and texture creation works.
 """
 import os
+
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
-from OpenGL import GL
-import OpenGL.EGL as EGL
 import numpy as np
+import OpenGL.EGL as EGL
+from OpenGL import GL
 
 print("Step 1: OpenGL Setup")
 print("=" * 60)

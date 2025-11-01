@@ -112,6 +112,7 @@ def main() -> int:
                 addr = None
             if addr:
                 import ctypes
+
                 import numpy as _np
                 width = int(width); height = int(height); bpr = int(bpr)
                 size = bpr * height

@@ -1,28 +1,29 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence, Dict
+from collections.abc import Mapping, Sequence
+from typing import Any, Optional
 
 from napari_cuda.protocol import NOTIFY_LAYERS_TYPE
 from napari_cuda.protocol.envelopes import (
     build_notify_layers_delta,
 )
 from napari_cuda.protocol.messages import NotifyLayersPayload
+from napari_cuda.server.control.control_payload_builder import (
+    build_notify_layers_payload,
+)
+from napari_cuda.server.control.protocol_io import send_frame
 from napari_cuda.server.control.protocol_runtime import (
     feature_enabled,
     history_store,
     state_sequencer,
     state_session,
 )
-from napari_cuda.server.control.protocol_io import send_frame
 from napari_cuda.server.control.resumable_history_store import EnvelopeSnapshot
-from napari_cuda.server.control.control_payload_builder import (
-    build_notify_layers_payload,
-)
 
 
 def classify_layer_changes(
     changes: Mapping[str, Any]
-) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None, Dict[str, Any] | None, Dict[str, Any] | None, bool]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
     ctrl_keys = {
         "opacity",
         "visible",
@@ -35,10 +36,10 @@ def classify_layer_changes(
         "iso_threshold",
         "attenuation",
     }
-    controls: Dict[str, Any] = {}
-    metadata: Dict[str, Any] | None = None
-    data: Dict[str, Any] | None = None
-    thumbnail: Dict[str, Any] | None = None
+    controls: dict[str, Any] = {}
+    metadata: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
+    thumbnail: dict[str, Any] | None = None
     removed = False
 
     for key, value in changes.items():
@@ -105,7 +106,7 @@ async def broadcast_layers_delta(
         session_id = state_session(ws)
         if not session_id:
             continue
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "session_id": session_id,
             "payload": payload,
             "timestamp": snapshot.timestamp if snapshot is not None else now,
@@ -192,8 +193,8 @@ async def send_layer_baseline(
 
 
 __all__ = [
-    "classify_layer_changes",
     "broadcast_layers_delta",
-    "send_layer_snapshot",
+    "classify_layer_changes",
     "send_layer_baseline",
+    "send_layer_snapshot",
 ]

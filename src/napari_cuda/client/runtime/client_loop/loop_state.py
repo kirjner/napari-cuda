@@ -59,49 +59,49 @@ class ClientLoopState:
     pixel_thread: Thread | None = None
 
     # Channels and receivers
-    state_channel: "StateChannel | None" = None
-    pixel_receiver: "PixelReceiver | None" = None
-    presenter: "FixedLatencyPresenter | None" = None
+    state_channel: StateChannel | None = None
+    pixel_receiver: PixelReceiver | None = None
+    presenter: FixedLatencyPresenter | None = None
 
     # Scheduling
     next_due_pending_until: float = 0.0
     in_present: bool = False
-    wake_proxy: "WakeProxy | None" = None
-    wake_timer: "QtCore.QTimer | None" = None
-    gui_thread: "QtCore.QThread | None" = None
+    wake_proxy: WakeProxy | None = None
+    wake_timer: QtCore.QTimer | None = None
+    gui_thread: QtCore.QThread | None = None
 
     # Renderer queue and fallbacks
-    frame_queue: "queue.Queue[object] | None" = None
-    fallbacks: "RendererFallbacks | None" = None
+    frame_queue: queue.Queue[object] | None = None
+    fallbacks: RendererFallbacks | None = None
 
     # Pipelines
-    vt_pipeline: "VTPipeline | None" = None
-    pyav_pipeline: "PyAVPipeline | None" = None
+    vt_pipeline: VTPipeline | None = None
+    pyav_pipeline: PyAVPipeline | None = None
     vt_wait_keyframe: bool = False
     pyav_wait_keyframe: bool = False
 
     # Telemetry and timers
-    metrics: "ClientMetrics | None" = None
-    stats_timer: "QtCore.QTimer | None" = None
-    metrics_timer: "QtCore.QTimer | None" = None
-    warmup_reset_timer: "QtCore.QTimer | None" = None
-    watchdog_timer: "QtCore.QTimer | None" = None
-    evloop_monitor: "EventLoopMonitor | None" = None
+    metrics: ClientMetrics | None = None
+    stats_timer: QtCore.QTimer | None = None
+    metrics_timer: QtCore.QTimer | None = None
+    warmup_reset_timer: QtCore.QTimer | None = None
+    watchdog_timer: QtCore.QTimer | None = None
+    evloop_monitor: EventLoopMonitor | None = None
 
     # Input handling
-    input_sender: "InputSender | None" = None
+    input_sender: InputSender | None = None
     shortcuts: list[object] = field(default_factory=list)
 
     # Control channel handling
-    control_state: "ControlStateContext | None" = None
+    control_state: ControlStateContext | None = None
 
     # Camera handling
-    camera: "CameraState | None" = None
+    camera: CameraState | None = None
 
     # Intent caches
     pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
     last_dims_payload: dict[str, object] | None = None
-    state_session_metadata: "SessionMetadata | None" = None
+    state_session_metadata: SessionMetadata | None = None
 
     # Stream continuity
     sync: LoopSyncState = field(default_factory=LoopSyncState)
@@ -113,7 +113,7 @@ class ClientLoopState:
     last_present_mono: float = 0.0
 
     # Warmup behaviour
-    warmup_policy: "WarmupPolicy | None" = None
+    warmup_policy: WarmupPolicy | None = None
     warmup_until: float = 0.0
     warmup_extra_active_s: float = 0.0
 
@@ -123,15 +123,24 @@ if TYPE_CHECKING:  # pragma: no cover - import for typing only
 
     from qtpy import QtCore
 
-    from napari_cuda.client.runtime.client_loop.renderer_fallbacks import RendererFallbacks
-    from napari_cuda.client.runtime.client_loop.scheduler import WakeProxy
-    from napari_cuda.client.runtime.client_loop.pipelines import VTPipeline, PyAVPipeline
-    from napari_cuda.client.runtime.eventloop_monitor import EventLoopMonitor
-    from napari_cuda.client.runtime.input import InputSender
+    from napari_cuda.client.control.control_channel_client import (
+        SessionMetadata,
+        StateChannel,
+    )
     from napari_cuda.client.rendering.metrics import ClientMetrics
     from napari_cuda.client.rendering.presenter import FixedLatencyPresenter
+    from napari_cuda.client.runtime.client_loop.pipelines import (
+        PyAVPipeline,
+        VTPipeline,
+    )
+    from napari_cuda.client.runtime.client_loop.renderer_fallbacks import (
+        RendererFallbacks,
+    )
+    from napari_cuda.client.runtime.client_loop.scheduler import WakeProxy
+    from napari_cuda.client.runtime.eventloop_monitor import EventLoopMonitor
+    from napari_cuda.client.runtime.input import InputSender
     from napari_cuda.client.runtime.receiver import PixelReceiver
-    from napari_cuda.client.control.control_channel_client import SessionMetadata, StateChannel
-    from .warmup import WarmupPolicy
-    from .control import ControlStateContext
+
     from .camera import CameraState
+    from .control import ControlStateContext
+    from .warmup import WarmupPolicy

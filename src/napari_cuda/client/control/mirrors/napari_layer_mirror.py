@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from contextlib import nullcontext
-from typing import Mapping, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
-from napari_cuda.client.data.registry import RegistrySnapshot, RemoteLayerRegistry
+from napari_cuda.client.control.state_update_actions import ControlStateContext
+from napari_cuda.client.data.registry import (
+    RegistrySnapshot,
+    RemoteLayerRegistry,
+)
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.rendering.presenter_facade import PresenterFacade
-from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.protocol.messages import NotifySceneFrame, NotifyLayersFrame
-from napari_cuda.protocol.snapshots import layer_delta_from_payload, scene_snapshot_from_payload
-
+from napari_cuda.protocol.messages import NotifyLayersFrame, NotifySceneFrame
+from napari_cuda.protocol.snapshots import (
+    layer_delta_from_payload,
+    scene_snapshot_from_payload,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from napari_cuda.client.control.emitters import NapariLayerIntentEmitter
@@ -51,7 +57,7 @@ class NapariLayerMirror:
         self._presenter = presenter
         self._viewer_ref = viewer_ref
         self._log_layers_info = bool(log_layers_info)
-        self._emitter: "NapariLayerIntentEmitter" | None = None
+        self._emitter: NapariLayerIntentEmitter | None = None
         self._last_snapshot: RegistrySnapshot | None = None
         self._attached_layers: set[str] = set()
 

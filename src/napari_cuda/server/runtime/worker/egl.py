@@ -33,18 +33,17 @@ os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp")
 import napari_cuda.server.data.lod as lod
 from napari.components.viewer_model import ViewerModel
 from napari_cuda.server.config import ServerCtx
-from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
-from napari_cuda.server.engine.api import DebugConfig, DebugDumper, FrameTimings
+from napari_cuda.server.engine.api import (
+    DebugConfig,
+    DebugDumper,
+    FrameTimings,
+)
 from napari_cuda.server.runtime.bootstrap import (
     setup_camera as viewer_camera_ops,
     setup_viewer as viewer_setup,
     setup_visuals as viewer_visuals,
-)
-from napari_cuda.server.runtime.camera import (
-    CameraCommandQueue,
-    CameraPoseApplied,
 )
 from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     cleanup_render_worker,
@@ -52,9 +51,28 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     init_vispy_scene as core_init_vispy_scene,
     setup_worker_runtime,
 )
-from napari_cuda.server.runtime.bootstrap.scene_setup import ensure_scene_source
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
+from napari_cuda.server.runtime.bootstrap.scene_setup import (
+    ensure_scene_source,
+)
+from napari_cuda.server.runtime.camera import (
+    CameraCommandQueue,
+    CameraPoseApplied,
+)
+from napari_cuda.server.runtime.ipc import LevelSwitchIntent
+from napari_cuda.server.runtime.ipc.mailboxes import (
+    RenderUpdate,
+)
+from napari_cuda.server.runtime.lod import level_policy
+from napari_cuda.server.runtime.lod.context import build_level_context
+from napari_cuda.server.runtime.render_loop.apply import (
+    updates as _render_updates,
+)
+from napari_cuda.server.runtime.render_loop.apply.render_state.viewer_metadata import (
+    apply_plane_metadata,
+    apply_volume_metadata,
+)
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
 )
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     axis_labels as ledger_axis_labels,
@@ -65,26 +83,18 @@ from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     order as ledger_order,
     step as ledger_step,
 )
-from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.ipc.mailboxes import (
-    RenderUpdate,
-)
-from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop.apply import updates as _render_updates
 from napari_cuda.server.runtime.render_loop.ticks import (
     capture as capture_tick,
-)
-from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.apply.render_state.viewer_metadata import (
-    apply_plane_metadata,
-    apply_volume_metadata,
 )
 from napari_cuda.server.runtime.viewport import (
     RenderMode,
     ViewportState,
 )
 from napari_cuda.server.runtime.worker.resources import WorkerResources
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
+)
+from napari_cuda.server.state_ledger import ServerStateLedger
 
 logger = logging.getLogger(__name__)
 

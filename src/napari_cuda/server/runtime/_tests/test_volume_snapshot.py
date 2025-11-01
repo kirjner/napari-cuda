@@ -5,15 +5,17 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-)
-from napari_cuda.server.runtime.render_loop.apply_interface import RenderApplyInterface
 from napari_cuda.server.runtime.render_loop.apply.render_state.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
 )
+from napari_cuda.server.runtime.render_loop.apply_interface import (
+    RenderApplyInterface,
+)
 from napari_cuda.server.runtime.viewport import ViewportState
+from napari_cuda.server.scene import (
+    RenderLedgerSnapshot,
+)
 
 
 class _FakeLayerLogger:

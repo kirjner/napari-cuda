@@ -14,7 +14,7 @@ import socket
 import struct
 import time
 from dataclasses import dataclass
-from typing import Optional, Set, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import websockets
 
@@ -43,7 +43,7 @@ class PixelBroadcastState:
     """Mutable broadcaster state carried by the server."""
 
     frame_queue: asyncio.Queue[FramePacket]
-    clients: Set[websockets.WebSocketServerProtocol]
+    clients: set[websockets.WebSocketServerProtocol]
     log_sends: bool
     bypass_until_key: bool = False
     last_key_seq: Optional[int] = None
@@ -84,7 +84,7 @@ async def safe_send(state: PixelBroadcastState, ws: websockets.WebSocketServerPr
 async def broadcast_loop(
     state: PixelBroadcastState,
     config: PixelBroadcastConfig,
-    metrics: "Metrics",
+    metrics: Metrics,
 ) -> None:
     """Continuously drain the frame queue and deliver packets to connected clients."""
 
@@ -105,7 +105,7 @@ async def broadcast_loop(
                 state.frame_queue.get(),
                 timeout=remaining if remaining > 0 else 1e-6,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
         latest = item
         while True:
@@ -123,7 +123,7 @@ async def broadcast_loop(
                 state.frame_queue.get(),
                 timeout=remaining if remaining > 0 else 1e-6,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
         latest = item
         payload, flags, _seq, _stamp_ts = item

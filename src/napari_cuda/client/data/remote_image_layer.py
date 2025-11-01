@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional
 
 import numpy as np
 
+from napari.layers._scalar_field._slice import (
+    _ScalarFieldSliceResponse,
+    _ScalarFieldView,
+)
 from napari.layers.image.image import Image
-from napari.layers._scalar_field._slice import _ScalarFieldSliceResponse, _ScalarFieldView
-from napari.layers.image._image_constants import Interpolation as NapariInterpolation
 from napari.utils.events import EventEmitter
+
 try:
     from qtpy import QtCore  # type: ignore
 except Exception:  # pragma: no cover - best effort import
     QtCore = None
 
-from .remote_data import RemoteArray, RemoteMultiscale, RemotePreview, build_remote_data
+from .remote_data import RemoteArray, RemotePreview, build_remote_data
 
 try:
     from napari_cuda.client.runtime.client_loop.scheduler import CallProxy
@@ -214,7 +218,7 @@ class RemoteImageLayer(Image):
                 logger.debug("RemoteImageLayer: colormap %s unsupported", hints["colormap"], exc_info=True)
         if hints.get("shading"):
             try:
-                setattr(self, "shading", str(hints["shading"]))
+                self.shading = str(hints["shading"])
             except Exception:
                 logger.debug("RemoteImageLayer: shading update failed", exc_info=True)
         if hints.get("opacity") is not None:

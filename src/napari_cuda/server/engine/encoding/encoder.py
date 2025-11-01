@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import MutableMapping
 from dataclasses import dataclass
-from typing import Any, MutableMapping, Optional
+from typing import Any, Optional
 
 import PyNvVideoCodec as pnvc  # type: ignore
 
 from napari_cuda.server.config import EncoderRuntime, ServerCtx
-
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +227,7 @@ class Encoder:
         if hasattr(encoder, "GetEncodeReconfigureParams") and hasattr(encoder, "Reconfigure"):
             params = encoder.GetEncodeReconfigureParams()
             if hasattr(params, "forceIDR"):
-                setattr(params, "forceIDR", 1)
+                params.forceIDR = 1
             encoder.Reconfigure(params)
 
     def reset(self, ctx: Optional[ServerCtx]) -> None:

@@ -19,15 +19,14 @@ Usage examples:
 import argparse
 import logging
 from fractions import Fraction
-from typing import List, Tuple
 
 import numpy as np
 
 from napari_cuda.codec.avcc import (
     is_annexb,
+    parse_avcc,
     split_annexb,
     split_avcc_by_len,
-    parse_avcc,
 )
 
 
@@ -44,10 +43,10 @@ def nal_name_h264(b0: int) -> str:
     return names.get(t, str(t))
 
 
-def analyze_packets(pkts: List[bytes], avcc_len_size_hint: int | None = None) -> List[List[str]]:
-    out: List[List[str]] = []
+def analyze_packets(pkts: list[bytes], avcc_len_size_hint: int | None = None) -> list[list[str]]:
+    out: list[list[str]] = []
     for data in pkts:
-        names: List[str] = []
+        names: list[str] = []
         if is_annexb(data):
             for nal in split_annexb(data):
                 if nal:
@@ -56,7 +55,7 @@ def analyze_packets(pkts: List[bytes], avcc_len_size_hint: int | None = None) ->
             # Try multiple length sizes
             tried = [avcc_len_size_hint] if avcc_len_size_hint in (1, 2, 3, 4) else []
             tried += [n for n in (4, 3, 2, 1) if n not in tried]
-            nals: List[bytes] = []
+            nals: list[bytes] = []
             for nsz in tried:
                 nals = split_avcc_by_len(data, nsz)
                 if nals:
@@ -148,7 +147,7 @@ def main() -> None:
     g = np.broadcast_to(y, (h, w))
     b = ((r.astype(np.uint16) + g.astype(np.uint16)) // 2).astype(np.uint8)
 
-    frames_pkts: List[List[bytes]] = []
+    frames_pkts: list[list[bytes]] = []
     # Some encoders (VT, certain wrappers) attach avcC as NEW_EXTRADATA on first packets.
     # Capture it if present so we can parse SPS/PPS and nal length size.
     pkt_side_extradata: bytes | None = None
@@ -160,7 +159,7 @@ def main() -> None:
         except Exception:
             pass
         out = enc.encode(vf)
-        group: List[bytes] = []
+        group: list[bytes] = []
         for p in out:
             try:
                 group.append(p.to_bytes())
@@ -209,7 +208,7 @@ def main() -> None:
     if args.flush:
         try:
             flush_pkts = enc.encode(None)
-            group: List[bytes] = []
+            group: list[bytes] = []
             for p in flush_pkts:
                 try:
                     group.append(p.to_bytes())

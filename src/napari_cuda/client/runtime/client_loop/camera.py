@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from typing import Optional
 
 from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 
@@ -40,7 +41,7 @@ class CameraState:
     last_pan_dy_sent: float = 0.0
 
     @classmethod
-    def from_env(cls, env_cfg: object) -> "CameraState":
+    def from_env(cls, env_cfg: object) -> CameraState:
         rate = getattr(env_cfg, 'camera_rate_hz', 60.0) or 60.0
         deg_x = getattr(env_cfg, 'orbit_deg_per_px_x', 0.3) or 0.3
         deg_y = getattr(env_cfg, 'orbit_deg_per_px_y', 0.3) or 0.3

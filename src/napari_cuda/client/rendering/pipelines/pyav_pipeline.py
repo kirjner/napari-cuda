@@ -12,9 +12,10 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Thread
-from typing import Callable, Optional
+from typing import Optional
 
 from qtpy import QtCore
 
@@ -36,7 +37,7 @@ class PyAVPipeline:
     schedule_next_wake: Optional[Callable[[], None]] = None
 
     def __post_init__(self) -> None:
-        self._in_q: "queue.Queue[tuple[bytes | memoryview, float|None]]" = queue.Queue(maxsize=64)
+        self._in_q: queue.Queue[tuple[bytes | memoryview, float|None]] = queue.Queue(maxsize=64)
         self._enqueued: int = 0
         self._decoder: Optional[DecodeFn] = None
         self._worker_started: bool = False

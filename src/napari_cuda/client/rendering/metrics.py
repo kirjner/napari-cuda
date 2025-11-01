@@ -14,7 +14,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Optional
 
 
 def _truthy(s: Optional[str]) -> bool:
@@ -39,7 +39,7 @@ def _env_str(name: str, default: Optional[str] = None) -> Optional[str]:
 @dataclass
 class _Hist:
     window: int
-    values: Deque[float] = field(default_factory=deque)
+    values: deque[float] = field(default_factory=deque)
     last: float = 0.0
     total: float = 0.0
     count: int = 0
@@ -63,7 +63,7 @@ class _Hist:
             self.max_v = self.last
         self.count += 1
 
-    def stats(self) -> Dict[str, float]:
+    def stats(self) -> dict[str, float]:
         n = len(self.values)
         if n == 0:
             return {
@@ -76,7 +76,7 @@ class _Hist:
                 "max_ms": 0.0,
             }
         mean = (self.total / n)
-        arr: List[float] = sorted(self.values)
+        arr: list[float] = sorted(self.values)
         def q(p: float) -> float:
             if n == 0:
                 return 0.0
@@ -111,9 +111,9 @@ class ClientMetrics:
         except Exception:
             pass
         self._window = max(16, int(window))
-        self._counters: Dict[str, float] = {}
-        self._gauges: Dict[str, float] = {}
-        self._hists: Dict[str, _Hist] = {}
+        self._counters: dict[str, float] = {}
+        self._gauges: dict[str, float] = {}
+        self._hists: dict[str, _Hist] = {}
         # CSV writer state
         self._csv_path: Optional[str] = _env_str("NAPARI_CUDA_CLIENT_METRICS_OUT", None)
         self._csv_lock = threading.Lock()
@@ -143,7 +143,7 @@ class ClientMetrics:
             self._hists[name] = h
         h.observe(float(value_ms))
 
-    def snapshot(self) -> Dict[str, object]:
+    def snapshot(self) -> dict[str, object]:
         if not self.enabled:
             return {"version": "v1", "ts": time.time(), "gauges": {}, "counters": {}, "histograms": {}, "derived": {}}
         now = time.time()
@@ -167,7 +167,7 @@ class ClientMetrics:
         if not path:
             return
         snap = self.snapshot()
-        row: Dict[str, object] = {"ts": snap.get("ts", time.time())}
+        row: dict[str, object] = {"ts": snap.get("ts", time.time())}
         # Flatten a few common fields for convenience
         for k, v in (snap.get("gauges", {}) or {}).items():
             row[f"g:{k}"] = v

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Optional, Any
 import logging
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from threading import Lock
+from typing import Any, Optional
 
-from napari_cuda.server.engine.capture.gl_capture import GLCapture
 from napari_cuda.server.engine.capture.cuda_interop import CudaInterop
 from napari_cuda.server.engine.capture.frame_pipeline import FramePipeline
-
+from napari_cuda.server.engine.capture.gl_capture import GLCapture
 
 logger = logging.getLogger(__name__)
 
@@ -211,9 +211,9 @@ def encode_frame(
 
 __all__ = [
     "CaptureFacade",
+    "EncodedFrame",
     "FrameCapture",
     "FrameTimings",
-    "EncodedFrame",
     "capture_frame_for_encoder",
     "encode_frame",
 ]

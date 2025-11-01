@@ -4,11 +4,10 @@ import weakref
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Self
 from weakref import ReferenceType
 
 from magicgui.widgets import FunctionGui
-from typing_extensions import Self
 
 from napari._pydantic_compat import BaseModel, validator
 from napari.layers.base.base import Layer

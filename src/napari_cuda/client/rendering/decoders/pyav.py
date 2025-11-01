@@ -29,7 +29,9 @@ class PyAVDecoder:
         import av
         # Be resilient to state/format races: always normalize to Annex B
         try:
-            from napari_cuda.codec.avcc import normalize_to_annexb  # type: ignore
+            from napari_cuda.codec.avcc import (
+                normalize_to_annexb,  # type: ignore
+            )
             b, _ = normalize_to_annexb(data)
             packet = av.Packet(b)
         except Exception:
@@ -56,6 +58,6 @@ class PyAVDecoder:
                     logger.info("Client(PyAV) decode to %s -> RGB array (%dx%d)", self.pixfmt, w, h)
                 except Exception:
                     logger.debug("PyAV first-frame logging failed", exc_info=True)
-                setattr(self, '_logged_once', True)
+                self._logged_once = True
             return arr
         return None

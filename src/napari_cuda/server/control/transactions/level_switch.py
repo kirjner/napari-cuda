@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -31,7 +32,7 @@ def apply_level_switch_transaction(
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
-) -> Dict[PropertyKey, LedgerEntry]:
+) -> dict[PropertyKey, LedgerEntry]:
     """Record the ledger updates for a level switch and return stored entries."""
 
     step_tuple = tuple(int(v) for v in step)

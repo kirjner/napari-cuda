@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping, Optional
+from typing import Optional
 
-from napari_cuda.server.config.logging_policy import DebugPolicy, load_debug_policy
+from napari_cuda.server.config.logging_policy import (
+    DebugPolicy,
+    load_debug_policy,
+)
 
 
 @dataclass(frozen=True)

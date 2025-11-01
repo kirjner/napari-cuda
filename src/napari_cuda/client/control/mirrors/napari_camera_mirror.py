@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from qtpy import QtCore
 
@@ -13,13 +14,14 @@ from napari_cuda.client.control.state_update_actions import (
     _normalize_camera_delta_value,
     _normalize_camera_state_value,
 )
-from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.rendering.presenter_facade import PresenterFacade
+from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol import NotifyCamera
 
-
 if TYPE_CHECKING:  # pragma: no cover
-    from napari_cuda.client.control.emitters.napari_camera_intent_emitter import NapariCameraIntentEmitter
+    from napari_cuda.client.control.emitters.napari_camera_intent_emitter import (
+        NapariCameraIntentEmitter,
+    )
 
 logger = logging.getLogger(__name__)
 

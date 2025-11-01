@@ -12,18 +12,15 @@ from __future__ import annotations
 
 import logging
 import threading
-import os
-from collections import deque
-from typing import Deque, Dict, Tuple
 
 from .metrics_core import Metrics
 
 
 def start_dash_dashboard(host: str, port: int, metrics: Metrics, refresh_ms: int = 1000) -> threading.Thread:
     import dash  # type: ignore
+    import plotly.graph_objs as go  # type: ignore
     from dash import dcc, html  # type: ignore
     from dash.dependencies import Input, Output, State  # type: ignore
-    import plotly.graph_objs as go  # type: ignore
 
     # Reduce werkzeug request logs
     logging.getLogger('werkzeug').setLevel(logging.ERROR)

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-import sys
 import os
-from typing import Optional, Tuple
+import sys
+from typing import Optional
 
 import numpy as np
 
@@ -49,7 +49,7 @@ class VTShimDecoder:
         except Exception:
             logger.debug("VTShimDecoder.flush: failed", exc_info=True)
 
-    def counts(self) -> Tuple[int, int, int]:
+    def counts(self) -> tuple[int, int, int]:
         try:
             a, b, c = self._vt.counts(self._sess)
             return int(a), int(b), int(c)
@@ -57,7 +57,7 @@ class VTShimDecoder:
             logger.debug("VTShimDecoder.counts: failed", exc_info=True)
             return (0, 0, 0)
 
-    def stats(self) -> Tuple[int, int, int, int, int, int]:
+    def stats(self) -> tuple[int, int, int, int, int, int]:
         """Return extended stats: (submits, outputs, qlen, drops, retains, releases)."""
         try:
             a, b, c, d, e, f = self._vt.stats(self._sess)
@@ -74,7 +74,7 @@ class VTShimDecoder:
             logger.debug("VT shim decode failed: %s", e)
             return False
 
-    def get_frame_nowait(self) -> Optional[Tuple[object, Optional[float]]]:
+    def get_frame_nowait(self) -> Optional[tuple[object, Optional[float]]]:
         try:
             res = self._vt.get_frame(self._sess, 0.0)
             if res is None:
@@ -85,7 +85,7 @@ class VTShimDecoder:
             logger.debug("VTShimDecoder.get_frame_nowait: failed", exc_info=True)
             return None
 
-    def get_frame(self, timeout: Optional[float] = None) -> Optional[Tuple[object, Optional[float]]]:
+    def get_frame(self, timeout: Optional[float] = None) -> Optional[tuple[object, Optional[float]]]:
         try:
             res = self._vt.get_frame(self._sess, float(timeout) if timeout is not None else 0.0)
             if res is None:

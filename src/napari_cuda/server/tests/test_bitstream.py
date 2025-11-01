@@ -1,13 +1,11 @@
-import base64
 
-import pytest
 
 from napari_cuda.server.config import BitstreamRuntime
 from napari_cuda.server.engine.encoding.bitstream import (
-    parse_nals,
-    pack_to_avcc,
-    build_avcc_config,
     ParamCache,
+    build_avcc_config,
+    pack_to_avcc,
+    parse_nals,
 )
 
 
