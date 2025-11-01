@@ -29,6 +29,8 @@ from napari_cuda.server.control.resumable_history_store import (
 from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
 
 from napari_cuda.server.control import control_channel_server as state_channel_handler
+from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.layers import broadcast_layers_delta
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
@@ -235,7 +237,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         scheduled.append(coro)
 
     async def _mirror_broadcast(payload: NotifyDimsPayload) -> None:
-        await state_channel_handler._broadcast_dims_state(server, payload=payload)
+        await broadcast_dims_state(server, payload=payload)
 
     def _mirror_apply(payload: NotifyDimsPayload) -> None:
         _ = payload
@@ -258,7 +260,7 @@ def _make_server() -> tuple[SimpleNamespace, List[Coroutine[Any, Any, None]], Li
         intent_id: Optional[str],
         timestamp: float,
     ) -> None:
-        await state_channel_handler._broadcast_layers_delta(
+        await broadcast_layers_delta(
             server,
             layer_id=layer_id,
             changes=changes,

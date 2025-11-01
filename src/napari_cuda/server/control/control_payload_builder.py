@@ -43,20 +43,55 @@ def build_notify_scene_payload(
 
 
 def build_notify_layers_delta_payload(result: ServerLedgerUpdate) -> NotifyLayersPayload:
-    """Convert a single layer result into a `notify.layers` payload."""
+    """Convert a single layer ledger update into a structured `notify.layers` payload."""
 
-    return build_notify_layers_payload(
-        layer_id=result.target,
-        changes={result.key: _normalize_value(result.value)},
-    )
+    key = str(result.key)
+    value = _normalize_value(result.value)
+    layer_id = str(result.target)
+
+    control_keys = {
+        "opacity",
+        "visible",
+        "blending",
+        "interpolation",
+        "colormap",
+        "rendering",
+        "gamma",
+        "contrast_limits",
+        "iso_threshold",
+        "attenuation",
+    }
+
+    if key in control_keys:
+        return NotifyLayersPayload(layer_id=layer_id, controls={key: value})
+    if key == "metadata":
+        md = dict(value) if isinstance(value, dict) else {"value": value}
+        return NotifyLayersPayload(layer_id=layer_id, metadata=md)
+    if key == "thumbnail":
+        th = dict(value) if isinstance(value, dict) else {"array": value}
+        return NotifyLayersPayload(layer_id=layer_id, thumbnail=th)
+    if key == "removed" and bool(value):
+        return NotifyLayersPayload(layer_id=layer_id, removed=True)
+    # Fallback: data section for structural/other keys
+    return NotifyLayersPayload(layer_id=layer_id, data={key: value})
 
 
 def build_notify_layers_payload(
-    *, layer_id: str, changes: Mapping[str, Any]
+    *,
+    layer_id: str,
+    controls: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    data: Mapping[str, Any] | None = None,
+    thumbnail: Mapping[str, Any] | None = None,
+    removed: bool | None = None,
 ) -> NotifyLayersPayload:
     return NotifyLayersPayload(
         layer_id=str(layer_id),
-        changes={key: _normalize_value(value) for key, value in changes.items()},
+        controls={k: _normalize_value(v) for k, v in controls.items()} if controls else None,
+        metadata={k: _normalize_value(v) for k, v in metadata.items()} if metadata else None,
+        data={k: _normalize_value(v) for k, v in data.items()} if data else None,
+        thumbnail={k: _normalize_value(v) for k, v in thumbnail.items()} if thumbnail else None,
+        removed=bool(removed) if removed else None,
     )
 
 

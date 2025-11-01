@@ -72,14 +72,14 @@ from napari_cuda.server.control.control_payload_builder import build_notify_scen
 from napari_cuda.server.app import metrics_server
 from napari_cuda.server.control.control_channel_server import (
     _broadcast_camera_update,
-    _broadcast_dims_state,
-    _broadcast_layers_delta,
     broadcast_stream_config,
     ingest_state,
-    _state_sequencer,
     _send_state_baseline,
     CommandRejected,
 )
+from napari_cuda.server.control.protocol_runtime import state_sequencer
+from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.layers import broadcast_layers_delta
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene import BootstrapSceneMetadata, RenderUpdate
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
@@ -248,7 +248,7 @@ class EGLHeadlessServer:
             loop.call_soon_threadsafe(self._schedule_coro, coro, label)
 
         async def _mirror_broadcast(payload: NotifyDimsPayload) -> None:
-            await _broadcast_dims_state(self, payload=payload)
+            await broadcast_dims_state(self, payload=payload)
 
         def _mirror_apply(payload: NotifyDimsPayload) -> None:
             _ = payload  # dims mirror ensures ledger is already updated
@@ -268,7 +268,7 @@ class EGLHeadlessServer:
             intent_id: Optional[str],
             timestamp: float,
         ) -> None:
-            await _broadcast_layers_delta(
+            await broadcast_layers_delta(
                 self,
                 layer_id=layer_id,
                 changes=changes,
@@ -744,9 +744,9 @@ class EGLHeadlessServer:
         store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=now)
         store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=now)
         for ws in list(self._state_clients):
-            _state_sequencer(ws, NOTIFY_SCENE_TYPE).clear()
-            _state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
-            _state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
+            state_sequencer(ws, NOTIFY_SCENE_TYPE).clear()
+            state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
+            state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
 
     def _clear_frame_queue(self) -> None:
         queue = self._pixel_channel.broadcast.frame_queue

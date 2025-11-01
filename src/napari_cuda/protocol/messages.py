@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 # Session frame types
 SESSION_HELLO_TYPE = "session.hello"
@@ -555,23 +555,51 @@ class NotifySceneLevelPayload:
 
 @dataclass(slots=True)
 class NotifyLayersPayload:
+    """Structured per-layer delta.
+
+    At least one of controls, metadata, data, thumbnail, or removed must be provided.
+    """
+
     layer_id: str
-    changes: Dict[str, Any]
+    controls: Dict[str, Any] | None = None
+    metadata: Dict[str, Any] | None = None
+    data: Dict[str, Any] | None = None
+    thumbnail: Dict[str, Any] | None = None
+    removed: bool | None = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"layer_id": self.layer_id, "changes": dict(self.changes)}
+        payload: Dict[str, Any] = {"layer_id": self.layer_id}
+        if self.controls:
+            payload["controls"] = dict(self.controls)
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        if self.data:
+            payload["data"] = dict(self.data)
+        if self.thumbnail:
+            payload["thumbnail"] = dict(self.thumbnail)
+        if self.removed:
+            payload["removed"] = True
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "NotifyLayersPayload":
         mapping = _as_mapping(data, "notify.layers payload")
         _ensure_keyset(
             mapping,
-            required=("layer_id", "changes"),
+            required=("layer_id",),
+            optional=("controls", "metadata", "data", "thumbnail", "removed"),
             context="notify.layers payload",
         )
+        provided = any(name in mapping for name in ("controls", "metadata", "data", "thumbnail", "removed"))
+        if not provided:
+            raise ValueError("notify.layers payload requires at least one section or 'removed'")
         return cls(
             layer_id=str(mapping["layer_id"]),
-            changes=_as_mutable_mapping(mapping["changes"], "notify.layers payload.changes"),
+            controls=_optional_mapping(mapping.get("controls"), "notify.layers payload.controls"),
+            metadata=_optional_mapping(mapping.get("metadata"), "notify.layers payload.metadata"),
+            data=_optional_mapping(mapping.get("data"), "notify.layers payload.data"),
+            thumbnail=_optional_mapping(mapping.get("thumbnail"), "notify.layers payload.thumbnail"),
+            removed=bool(mapping.get("removed")) if mapping.get("removed") is not None else None,
         )
 
 

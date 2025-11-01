@@ -84,29 +84,48 @@ class SceneSnapshot:
 
 @dataclass(slots=True)
 class LayerDelta:
-    """Incremental layer changes for ``notify.layers``."""
+    """Incremental layer changes for ``notify.layers`` (structured)."""
 
     layer_id: str
-    changes: Dict[str, Any]
+    controls: Dict[str, Any] | None = None
+    metadata: Dict[str, Any] | None = None
+    data: Dict[str, Any] | None = None
+    thumbnail: Dict[str, Any] | None = None
+    removed: bool | None = None
 
     def to_payload(self) -> NotifyLayersPayload:
-        return NotifyLayersPayload(layer_id=self.layer_id, changes=dict(self.changes))
+        return NotifyLayersPayload(
+            layer_id=self.layer_id,
+            controls=dict(self.controls) if self.controls else None,
+            metadata=dict(self.metadata) if self.metadata else None,
+            data=dict(self.data) if self.data else None,
+            thumbnail=dict(self.thumbnail) if self.thumbnail else None,
+            removed=bool(self.removed) if self.removed else None,
+        )
 
     @classmethod
-    def controls(cls, layer_id: str, controls: Mapping[str, Any]) -> "LayerDelta":
-        return cls(layer_id=layer_id, changes=dict(controls))
+    def controls_only(cls, layer_id: str, controls: Mapping[str, Any]) -> "LayerDelta":
+        return cls(layer_id=layer_id, controls=dict(controls))
 
     @classmethod
     def removal(cls, layer_id: str) -> "LayerDelta":
-        return cls(layer_id=layer_id, changes={"removed": True})
+        return cls(layer_id=layer_id, removed=True)
 
     @classmethod
     def from_state_update(cls, layer_id: str, key: str, value: Any) -> "LayerDelta":
-        return cls(layer_id=layer_id, changes={key: value})
+        # Fallback: treat unknown singletons as data section
+        return cls(layer_id=layer_id, data={str(key): value})
 
     @classmethod
     def from_payload(cls, payload: NotifyLayersPayload) -> "LayerDelta":
-        return cls(layer_id=str(payload.layer_id), changes=dict(payload.changes))
+        return cls(
+            layer_id=str(payload.layer_id),
+            controls=dict(payload.controls) if payload.controls else None,
+            metadata=dict(payload.metadata) if payload.metadata else None,
+            data=dict(payload.data) if payload.data else None,
+            thumbnail=dict(payload.thumbnail) if payload.thumbnail else None,
+            removed=bool(payload.removed) if payload.removed else None,
+        )
 
 
 def viewer_snapshot_from_blocks(*, settings: Mapping[str, Any], dims: Mapping[str, Any], camera: Mapping[str, Any]) -> ViewerSnapshot:

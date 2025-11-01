@@ -27,6 +27,8 @@ from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.protocol.messages import NotifyDimsPayload, SessionHello
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control import control_channel_server as state_channel_handler
+from napari_cuda.server.control.topics.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.layers import broadcast_layers_delta
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.resumable_history_store import (
@@ -741,7 +743,7 @@ class StateServerHarness:
         )
 
         async def _mirror_broadcast(payload: NotifyDimsPayload) -> None:
-            await state_channel_handler._broadcast_dims_state(server, payload=payload)
+            await broadcast_dims_state(server, payload=payload)
 
         server._dims_mirror = ServerDimsMirror(
             ledger=server._state_ledger,
@@ -755,7 +757,7 @@ class StateServerHarness:
             intent_id: Optional[str],
             timestamp: float,
         ) -> None:
-            await state_channel_handler._broadcast_layers_delta(
+            await broadcast_layers_delta(
                 server,
                 layer_id=layer_id,
                 changes=changes,

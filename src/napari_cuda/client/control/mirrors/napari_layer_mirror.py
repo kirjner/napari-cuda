@@ -87,10 +87,11 @@ class NapariLayerMirror:
         with self._suppress_emitter():
             self._registry.apply_delta(delta)
             emitter = self._emitter
-            if emitter is not None:
-                emitter.apply_remote_values(delta.layer_id, delta.changes)
+            if emitter is not None and delta.controls:
+                emitter.apply_remote_values(delta.layer_id, delta.controls)
         self._presenter.apply_layer_delta(delta)
-        logger.debug("notify.layers applied: id=%s keys=%s", delta.layer_id, tuple(delta.changes.keys()))
+        keys = tuple((delta.controls or {}).keys())
+        logger.debug("notify.layers applied: id=%s controls=%s", delta.layer_id, keys)
 
     def replay_last_payload(self) -> None:
         self._assert_gui_thread()

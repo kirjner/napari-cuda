@@ -496,10 +496,21 @@ class StateChannel:
 
         if _STATE_DEBUG:
             payload = frame.payload
+            sections = []
+            if getattr(payload, 'controls', None):
+                sections.append(f"controls:{sorted(payload.controls.keys())}")
+            if getattr(payload, 'metadata', None) is not None:
+                sections.append("metadata")
+            if getattr(payload, 'data', None) is not None:
+                sections.append("data")
+            if getattr(payload, 'thumbnail', None) is not None:
+                sections.append("thumbnail")
+            if getattr(payload, 'removed', None):
+                sections.append("removed")
             logger.debug(
-                "received notify.layers: id=%s keys=%s",
+                "received notify.layers: id=%s sections=%s",
                 payload.layer_id,
-                sorted(payload.changes.keys()),
+                sections,
             )
 
         try:

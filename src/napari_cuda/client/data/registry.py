@@ -142,11 +142,8 @@ class RemoteLayerRegistry:
         emitted: Optional[RegistrySnapshot] = None
         with self._lock:
             layer_id = delta.layer_id
-            changes = dict(delta.changes)
-            if not changes:
-                return
-
-            if changes.get("removed"):
+            # Handle removal
+            if getattr(delta, "removed", False):
                 removed_layer = self._layers.pop(layer_id, None)
                 self._blocks.pop(layer_id, None)
                 if layer_id in self._order:
@@ -165,54 +162,38 @@ class RemoteLayerRegistry:
                         logger.debug("layer delta ignored (no baseline): id=%s", layer_id)
                     return
                 # TODO(protocol): consider emitting deltas in structured sections
-                # (e.g. {controls:{...}, metadata:{...}, data:{...}}) to avoid
-                # any key-based inference here. Optionally, a dedicated
-                # {thumbnail:{array:..., dtype:..., shape:..., version:...}}
-                # sub-section can make preview updates explicit and separable
-                # (rate limiting, compression, caching) from other metadata.
-                # The client already routes by subset to keep assertions strict
-                # and side-effects minimal.
+                # (client consumes structured sections in v2).
                 controls = block.get("controls")
                 if not isinstance(controls, dict):
                     controls = {}
                     block["controls"] = controls
-                updated = False
-                # Build precise change subsets to avoid misrouting
-                control_changes: Dict[str, Any] = {}
-                has_metadata = False
-                has_other = False
-                for key, value in changes.items():
-                    if key == "removed":
-                        continue
-                    if key in _CONTROL_ONLY_KEYS:
-                        controls[key] = value
-                        control_changes[key] = value
-                        if key == "contrast_limits":
-                            if isinstance(value, Sequence):
-                                block["contrast_limits"] = [float(v) for v in value]
-                            else:
-                                block["contrast_limits"] = value
-                    elif key == "metadata":
-                        has_metadata = True
-                        if isinstance(value, Mapping):
-                            block["metadata"] = dict(value)
-                        else:
-                            block["metadata"] = value
-                    else:
+                # Structured sections
+                controls_delta: Dict[str, Any] = dict(delta.controls) if delta.controls else {}
+                metadata_delta: Dict[str, Any] | None = dict(delta.metadata) if delta.metadata else None
+                data_delta: Dict[str, Any] | None = dict(delta.data) if delta.data else None
+                thumbnail_delta: Dict[str, Any] | None = dict(delta.thumbnail) if delta.thumbnail else None
+
+                needs_full_update = False
+                # Apply data changes first (structural)
+                if data_delta:
+                    for key, value in data_delta.items():
                         block[key] = value
-                        has_other = True
-                    updated = True
-                # If metadata provided a thumbnail, update preview immediately
-                if has_metadata:
-                    layer = self._layers.get(layer_id)
-                    meta = block.get("metadata")
-                    if layer is not None and isinstance(meta, Mapping):
-                        thumb = meta.get("thumbnail")
-                        if thumb is not None:
-                            arr = np.asarray(thumb)
-                            layer.update_preview(arr)
-                if not updated:
-                    return
+                    needs_full_update = True
+
+                # Apply control deltas to block controls
+                if controls_delta:
+                    for key, value in controls_delta.items():
+                        if key in _CONTROL_ONLY_KEYS:
+                            controls[key] = value
+                            if key == "contrast_limits":
+                                if isinstance(value, Sequence):
+                                    block["contrast_limits"] = [float(v) for v in value]
+                                else:
+                                    block["contrast_limits"] = value
+
+                # Apply metadata (non-visual context)
+                if metadata_delta is not None:
+                    block["metadata"] = dict(metadata_delta)
 
                 layer = self._layers.get(layer_id)
                 if layer is None:
@@ -223,17 +204,38 @@ class RemoteLayerRegistry:
                     if layer_id not in self._order:
                         self._order.append(layer_id)
                 else:
-                    # Route changes based on subsets
-                    if has_other:
+                    # Route changes based on sections
+                    if needs_full_update:
                         self._update_layer(layer, block)
-                    elif control_changes:
-                        layer.apply_control_changes(block, control_changes)
+                    elif controls_delta:
+                        layer.apply_control_changes(block, controls_delta)
                     else:
-                        # metadata-only: preview already applied above
+                        # metadata-only: no action on layer object here
                         pass
+
+                # Apply/refresh thumbnail after layer existence ensured
+                if thumbnail_delta is not None:
+                    thumb = thumbnail_delta.get("array")
+                    if thumb is None:
+                        # Allow raw array under alternative key or pass-through mapping
+                        # e.g., server may send already-normalized array with any key
+                        # Prefer values under 'array', else attempt to coerce mapping itself
+                        if "data" in thumbnail_delta:
+                            thumb = thumbnail_delta.get("data")
+                    if thumb is not None:
+                        arr = np.asarray(thumb)
+                        layer.update_preview(arr)
+
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:
-                    logger.debug("layer delta applied: id=%s keys=%s", layer_id, tuple(changes.keys()))
+                    logger.debug(
+                        "layer delta applied: id=%s sections=(controls=%s, metadata=%s, data=%s, thumbnail=%s)",
+                        layer_id,
+                        bool(controls_delta),
+                        metadata_delta is not None,
+                        data_delta is not None,
+                        thumbnail_delta is not None,
+                    )
 
         if emitted is not None:
             self._emit(emitted)
