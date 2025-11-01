@@ -581,6 +581,12 @@ class ClientStreamLoop:
         if width > 0 and height > 0 and avcc_b64:
             # Cache video dimensions for input mapping and prime VT decode
             self._init_vt_from_avcc(avcc_b64, int(width), int(height))
+            # If VT is waiting on the first keyframe and the server advertises
+            # call.command, proactively request one. Some encoders attach new
+            # clients mid-GOP and won’t emit an IDR until explicitly asked.
+            # Backoff is enforced by _request_keyframe_command.
+            if self._loop_state.vt_wait_keyframe:
+                self._request_keyframe_command(origin="auto.notify.stream")
 
     def _ingest_notify_camera(self, frame: NotifyCamera) -> None:
         mirror = self._camera_mirror
@@ -902,6 +908,10 @@ class ClientStreamLoop:
         self._init_decoder()
         dec = self.decoder.decode if self.decoder else None
         self._loop_state.pyav_pipeline.set_decoder(dec)
+        # Best-effort: if keyframe command is supported, request one on
+        # fresh pixel-stream connect to ensure new clients get an IDR.
+        # Will be ignored if the state channel isn’t ready yet.
+        self._request_keyframe_command(origin="auto.pixel.connect")
 
     def _handle_disconnect(self, exc: Exception | None) -> None:
         logger.info("PixelReceiver disconnected: %s", exc)
