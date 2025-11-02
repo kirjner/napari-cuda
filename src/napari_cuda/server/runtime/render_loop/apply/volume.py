@@ -7,6 +7,12 @@ from typing import Any, Optional
 
 from vispy.scene.cameras import TurntableCamera
 
+from napari._vispy.layers.image import _napari_cmap_to_vispy
+from napari.layers.image._image_constants import (
+    ImageRendering as NapariImageRendering,
+)
+from napari.utils.colormaps.colormap_utils import ensure_colormap
+
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.render_loop.apply_interface import (
     RenderApplyInterface,
@@ -18,6 +24,7 @@ from napari_cuda.server.runtime.viewport.volume_ops import (
     update_level,
     update_scale,
 )
+from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
 
@@ -112,6 +119,48 @@ def apply_volume_level(
         data_d=int(data_d) if data_d is not None else None,
         scale=scale_tuple,
     )
+
+
+def apply_volume_visual_params(worker: Any, snapshot: RenderLedgerSnapshot) -> None:
+    """Update volume visual properties from the snapshot."""
+
+    if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
+        return
+
+    visual = worker._ensure_volume_visual()  # type: ignore[attr-defined]
+
+    if snapshot.volume_mode:
+        token = str(snapshot.volume_mode).strip().lower()
+        visual.method = NapariImageRendering(token).value  # type: ignore[attr-defined]
+
+    if snapshot.volume_colormap is not None:
+        cmap = ensure_colormap(snapshot.volume_colormap)
+        visual.cmap = _napari_cmap_to_vispy(cmap)  # type: ignore[attr-defined]
+
+    clim = snapshot.volume_clim
+    if isinstance(clim, tuple) and len(clim) >= 2:
+        lo = float(clim[0])
+        hi = float(clim[1])
+        if hi < lo:
+            lo, hi = hi, lo
+        visual.clim = (lo, hi)  # type: ignore[attr-defined]
+
+    if snapshot.volume_opacity is not None:
+        visual.opacity = float(max(0.0, min(1.0, float(snapshot.volume_opacity))))  # type: ignore[attr-defined]
+
+    if snapshot.volume_sample_step is not None:
+        if hasattr(visual, "relative_step_size"):
+            visual.relative_step_size = float(  # type: ignore[attr-defined]
+                max(0.1, min(4.0, float(snapshot.volume_sample_step)))
+            )
+
+
+__all__ = [
+    "VolumeApplyResult",
+    "apply_volume_camera_pose",
+    "apply_volume_level",
+    "apply_volume_visual_params",
+]
 
 
 __all__ = ["VolumeApplyResult", "apply_volume_camera_pose", "apply_volume_level"]

@@ -8,22 +8,22 @@ the control/runtime/engine dependency contract this plan works toward.
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply
-- `render_loop.apply.render_state.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/render_state/apply.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
+- `render_loop.apply.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
 - `_resolve_snapshot_ops` computes the per-mode metadata (level intent, ROI alignment, slice signature) and `_apply_snapshot_ops` performs the actual mutations, invoking `apply_volume_level` or `apply_slice_level` as needed.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
 ### 1.2 Worker fields mutated during apply
-- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`render_loop/apply/render_state/apply.py:209`, `render_loop/apply/render_state/apply.py:298`).
-- Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_loop/apply/render_state/apply.py:120`–`render_loop/apply/render_state/apply.py:150`, `render_loop/apply/render_state/apply.py:418`).
-- Volume metadata: `_volume_scale`, `_data_d` (`render_loop/apply/render_state/apply.py:404`), plus logging via `_layer_logger`.
-- Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_loop/apply/render_state/apply.py:430`, `worker/egl.py:1623`).
+- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`render_loop/apply/apply.py:209`, `render_loop/apply/apply.py:298`).
+- Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_loop/apply/apply.py:120`–`render_loop/apply/apply.py:150`, `render_loop/apply/apply.py:418`).
+- Volume metadata: `_volume_scale`, `_data_d` (`render_loop/apply/apply.py:404`), plus logging via `_layer_logger`.
+- Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_loop/apply/apply.py:430`, `worker/egl.py:1623`).
 
 ### 1.3 Viewport runner internals
 - The runner maintains plane targets (`target_level`, `target_step`, `pose`, `pending_roi`, reload flags, pose reason) and short-circuits volume handling by clearing reload flags when `target_ndisplay >= 3` (`src/napari_cuda/server/runtime/viewport/runner.py`).
 - ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport/runner.py:214`).
 
 ### 1.4 Worker loop interactions
-- `render_loop.ticks.viewport.run` asks the `ViewportRunner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `render_loop.apply.render_state.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
+- `render_loop.ticks.viewport.run` asks the `ViewportRunner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `render_loop.apply.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
 - Snapshot drain (`egl_worker.py:1488`) rebuilds `SceneStateApplyContext`, updates `_z_index`, `_data_wh`, and mirrors runner state by calling `mark_level_applied` when the staged level matches the target.
 - `ensure_scene_source` and `reset_worker_camera` (server/runtime/worker_runtime.py) mutate `worker._active_ms_level`, `_zarr_*`, `_data_wh`, and depend on `worker.use_volume` to branch camera resets (`worker_runtime.py:16`–`worker_runtime.py:105`).
 

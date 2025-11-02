@@ -13,7 +13,7 @@ from napari_cuda.server.runtime.camera.controller import (
 from napari_cuda.server.runtime.viewport import RenderMode
 from napari_cuda.server.scene import CameraDeltaCommand
 
-from ..apply import updates as render_updates
+from .. import snapshot_staging
 from ..plan_interface import RenderPlanInterface
 from . import viewport
 
@@ -108,7 +108,7 @@ def drain(worker: EGLRendererWorker) -> None:
     if commands:
         result = _apply_commands(worker, commands, reset_policy_suppression=True)
 
-    render_updates.drain_scene_updates(worker)
+    snapshot_staging.drain_scene_updates(worker)
     viewport.run(worker)
 
     if (

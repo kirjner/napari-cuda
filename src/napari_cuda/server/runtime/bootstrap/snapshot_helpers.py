@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.apply.render_state.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.apply.viewer_metadata import (
     apply_plane_metadata as _apply_plane_metadata,
     apply_volume_metadata as _apply_volume_metadata,
 )
-from napari_cuda.server.runtime.render_loop.apply.render_state.volume import (
+from napari_cuda.server.runtime.render_loop.apply.volume import (
     VolumeApplyResult,
     apply_volume_level as _apply_volume_level,
 )

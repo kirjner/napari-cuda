@@ -9,21 +9,21 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
-from napari_cuda.server.runtime.render_loop.apply.render_state import (
+from napari_cuda.server.runtime.render_loop.apply import (
     apply as snapshot_apply,
+    drain as snapshot_drain,
     viewport as snapshot_viewport,
 )
 from napari_cuda.server.runtime.render_loop.apply_interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport import updates as viewport_updates
 from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.scene import (
     LayerVisualState,
     RenderLedgerSnapshot,
 )
 
-from ..plan_interface import RenderPlanInterface
+from .plan_interface import RenderPlanInterface
 
 apply_render_snapshot = snapshot_apply.apply_render_snapshot
 apply_viewport_state_snapshot = snapshot_viewport.apply_viewport_state_snapshot
@@ -322,7 +322,7 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
     if signature_changed and tick_iface.viewport_runner is not None:
         tick_iface.viewport_runner.ingest_snapshot(state)
 
-    drain_res = viewport_updates.drain_render_state(worker, state_for_apply)
+    drain_res = snapshot_drain.drain_render_state(worker, state_for_apply)
 
     if drain_res.z_index is not None:
         apply_iface.set_z_index(int(drain_res.z_index))

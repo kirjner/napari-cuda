@@ -68,7 +68,7 @@ from napari_cuda.server.engine.api import (
 from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.camera import CameraCommandQueue
-from napari_cuda.server.runtime.render_loop.apply.render_state import (
+from napari_cuda.server.runtime.render_loop.apply import (
     apply as snapshot_mod,
 )
 from napari_cuda.server.runtime.render_loop.apply_interface import (

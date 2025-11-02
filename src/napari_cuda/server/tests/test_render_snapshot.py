@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.render_loop.apply.render_state import (
+from napari_cuda.server.runtime.render_loop.apply import (
     apply as snapshot_mod,
     plane as plane_mod,
 )

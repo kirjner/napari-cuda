@@ -17,7 +17,7 @@ contracted, well-partitioned layout.
 | State ledger | `server/state_ledger/` | Thread-safe ledger shared across control/runtime/tests. |
 | Shared data | `server/data/` | ROI/chunk math, hardware limits, LOD configs. (Former `runtime/data` helpers moved here.) |
 | Tests | `server/tests/` | Flat bucket covering control, runtime, engine, and integration cases. |
-| Docs | `docs/server/runtime_worker.md`, `docs/server/runtime_state_migration.md` | Reference prior module paths (`render_loop.apply.render_state.*`) and lack a top-level architecture contract. |
+| Docs | `docs/server/runtime_worker.md`, `docs/server/runtime_state_migration.md` | Reference prior module paths (`render_loop.apply.*`) and lack a top-level architecture contract. |
 
 ### Current Import Matrix (captured Oct 2025)
 

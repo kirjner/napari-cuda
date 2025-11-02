@@ -9,7 +9,7 @@ import napari_cuda.server.data.lod as lod
 from napari_cuda.protocol import build_state_update
 from napari_cuda.protocol.envelopes import build_session_hello
 from napari_cuda.protocol.messages import HelloClientInfo
-from napari_cuda.server.runtime.render_loop.apply.render_state import (
+from napari_cuda.server.runtime.render_loop.apply import (
     apply as snapshot_mod,
 )
 from napari_cuda.server.runtime.viewport.state import PlaneState

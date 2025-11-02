@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.apply.render_state.volume import (
+from napari_cuda.server.runtime.render_loop.apply.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
 )
@@ -94,7 +94,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         return (128, 256), 64
 
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.render_loop.apply.render_state.volume.apply_volume_layer_data",
+        "napari_cuda.server.runtime.render_loop.apply.volume.apply_volume_layer_data",
         _fake_apply_volume_layer,
     )
 
@@ -162,7 +162,7 @@ class _FakeTurntableCamera:
 
 def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.render_loop.apply.render_state.volume.TurntableCamera",
+        "napari_cuda.server.runtime.render_loop.apply.volume.TurntableCamera",
         _FakeTurntableCamera,
     )
     viewport_state = ViewportState()
