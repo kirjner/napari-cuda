@@ -159,13 +159,15 @@ class RenderUpdateMailbox:
                 _canonical(state.displayed),
             )
 
+        ndisplay_value = int(state.ndisplay) if state.ndisplay is not None else None
+
         view_token: tuple
         if state.view_version is not None:
-            view_token = ("vv", int(state.view_version))
+            view_token = ("vv", int(state.view_version), ndisplay_value)
         else:
             view_token = (
                 "vvals",
-                int(state.ndisplay) if state.ndisplay is not None else None,
+                ndisplay_value,
                 _canonical(state.displayed),
                 _canonical(state.order),
             )

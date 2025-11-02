@@ -305,18 +305,22 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
         tick_iface.viewport_state.volume = deepcopy(updates.volume_state)
 
     previous_mode = tick_iface.viewport_state.mode
+    mode_update = updates.mode
+    mode_changed = mode_update is not None and mode_update is not previous_mode
     signature_changed = tick_iface.render_mailbox_update_signature(state)
+    if mode_changed:
+        signature_changed = True
     if signature_changed:
         apply_render_snapshot(apply_iface, state_for_apply)
 
-    if updates.mode is not None:
-        tick_iface.viewport_state.mode = updates.mode
+    if mode_update is not None:
+        tick_iface.viewport_state.mode = mode_update
     else:
         tick_iface.viewport_state.mode = previous_mode
 
     if tick_iface.viewport_state.mode is RenderMode.VOLUME:
         tick_iface.level_policy_suppressed = False
-    elif updates.mode is RenderMode.PLANE or previous_mode is RenderMode.VOLUME:
+    elif mode_update is RenderMode.PLANE or previous_mode is RenderMode.VOLUME:
         tick_iface.level_policy_suppressed = True
 
     if signature_changed and tick_iface.viewport_runner is not None:

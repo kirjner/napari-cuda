@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 def _active_visual(worker: Any) -> Any:
     if worker.viewport_state.mode is RenderMode.VOLUME:  # type: ignore[attr-defined]
-        return worker._ensure_volume_visual()  # type: ignore[attr-defined]
-    return worker._ensure_plane_visual()  # type: ignore[attr-defined]
+        return worker._volume_visual_handle.node  # type: ignore[attr-defined]
+    return worker._plane_visual_handle.node  # type: ignore[attr-defined]
 
 
 def _set_visible(worker: Any, layer: Any, value: Any) -> bool:

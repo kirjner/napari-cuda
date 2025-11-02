@@ -127,7 +127,7 @@ def apply_volume_visual_params(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
         return
 
-    visual = worker._ensure_volume_visual()  # type: ignore[attr-defined]
+    visual = worker._volume_visual_handle.node  # type: ignore[attr-defined]
 
     if snapshot.volume_mode:
         token = str(snapshot.volume_mode).strip().lower()

@@ -264,6 +264,7 @@ def _apply_snapshot_ops(
         entering_volume = volume_ops["entering_volume"]
         if entering_volume:
             snapshot_iface.viewport_state.mode = RenderMode.VOLUME
+            snapshot_iface.ensure_volume_visual()
             snapshot_iface.set_last_dims_signature(None)
 
         runner = snapshot_iface.viewport_runner
@@ -301,6 +302,7 @@ def _apply_snapshot_ops(
 
     if plane_ops["was_volume"]:
         snapshot_iface.viewport_state.mode = RenderMode.PLANE
+        snapshot_iface.ensure_plane_visual()
         snapshot_iface.configure_camera_for_mode()
         snapshot_iface.set_last_dims_signature(None)
 
