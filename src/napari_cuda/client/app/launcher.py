@@ -223,9 +223,12 @@ def launch_streaming_client(server_host='localhost',
     app = get_app_model()
 
     def _supports_remote_open_for(qt_viewer: 'QtViewer') -> bool:
-        mgr = qt_viewer.canvas._manager
-        cmds = set(mgr._command_catalog or ())
-        return {"fs.listdir", "napari.load_zarr"}.issubset(cmds)
+        # Intercept whenever we're in streaming mode (manager present). We do not
+        # gate on the server advertising fs/zarr commands here to avoid falling
+        # back to the local OS file dialog. The remote dialog will no-op until
+        # call.command is available.
+        mgr = getattr(qt_viewer.canvas, "_manager", None)
+        return mgr is not None
 
     def _remote_open_files(qt_viewer: 'QtViewer') -> None:
         if _supports_remote_open_for(qt_viewer):
@@ -265,8 +268,10 @@ def launch_streaming_client(server_host='localhost',
     # Replace existing commands with our remote-backed handlers
     reg = app.commands
     reg._commands.pop('napari.window.file.open_files_dialog', None)  # type: ignore[attr-defined]
+    reg._commands.pop('napari.window.file.open_files_as_stack_dialog', None)  # type: ignore[attr-defined]
     reg._commands.pop('napari.window.file.open_folder_dialog', None)  # type: ignore[attr-defined]
     reg.register_command('napari.window.file.open_files_dialog', _remote_open_files, 'Open File(s)...')
+    reg.register_command('napari.window.file.open_files_as_stack_dialog', _remote_open_files, 'Open Files as Stack...')
     reg.register_command('napari.window.file.open_folder_dialog', _remote_open_folder, 'Open Folder...')
 
     # Run Qt event loop
