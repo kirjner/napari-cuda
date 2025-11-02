@@ -17,9 +17,8 @@ from napari.utils.naming import inc_name_count
 from napari.utils.translations import trans
 
 if TYPE_CHECKING:
-    from typing import Self
-
     from npe2.manifest.io import WriterContribution
+    from typing_extensions import Self
 
 
 def get_name(layer: Layer) -> str:
