@@ -91,14 +91,6 @@ class LayerVisualState:
     extra: Mapping[str, Any] = field(default_factory=dict)
     versions: Mapping[str, int] = field(default_factory=dict)
 
-    def to_mapping(self) -> dict[str, Any]:  # legacy helper used by existing call sites
-        mapping: dict[str, Any] = {}
-        for key in self.keys():
-            value = self.get(key)
-            if value is not None:
-                mapping[key] = value
-        return mapping
-
     def version_dict(self) -> dict[str, int]:
         return {str(key): int(value) for key, value in self.versions.items()}
 

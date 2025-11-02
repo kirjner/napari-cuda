@@ -103,7 +103,7 @@ def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
             if not isinstance(layer_state, LayerVisualState):
                 continue
             normalized = _normalize_layer_state(layer_state)
-            if normalized.to_mapping() or normalized.versions:
+            if normalized.keys() or normalized.versions:
                 values[str(layer_id)] = normalized
         if values:
             layer_states = values

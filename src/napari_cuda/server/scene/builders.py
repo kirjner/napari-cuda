@@ -306,13 +306,13 @@ def snapshot_scene(
     if volume_state is None or not volume_state:
         volume_state = _resolve_volume_state(render_state, ledger_snapshot)
 
-    layer_overrides: Optional[Mapping[str, Any]] = None
+    layer_overrides: LayerVisualState | Mapping[str, Any] | None = None
     if layer_controls:
         layer_overrides = layer_controls.get(default_layer_id)
     if layer_overrides is None and render_state.layer_values:
         layer_state = render_state.layer_values.get(default_layer_id)
         if isinstance(layer_state, LayerVisualState):
-            layer_overrides = layer_state.to_mapping()
+            layer_overrides = layer_state
 
     controls_block = _resolve_layer_controls(layer_overrides)
 
@@ -466,9 +466,16 @@ def _snapshot_coalesce_string(value: Any, base: Optional[str], *, fallback: Any 
     return text if text else base
 
 
-def _resolve_layer_controls(overrides: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+def _resolve_layer_controls(overrides: LayerVisualState | Mapping[str, Any] | None) -> dict[str, Any]:
     controls = dict(_DEFAULT_LAYER_CONTROLS)
     if not overrides:
+        return controls
+
+    if isinstance(overrides, LayerVisualState):
+        for key in CONTROL_KEYS:
+            value = getattr(overrides, key)
+            if value is not None:
+                controls[key] = value
         return controls
 
     for key, value in overrides.items():
