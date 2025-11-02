@@ -264,3 +264,11 @@ see `docs/server/architecture.md`.
 
 This map should serve as the baseline for carving `egl.py` into focused modules
 without losing sight of the shared state or cross-thread contracts.
+
+## Notify Topic helpers
+- `notify.layers`: use `send_layers_delta` for single clients and `broadcast_layers_delta` for fan-out.
+- `notify.dims`: use `send_dims_state` / `broadcast_dims_state`.
+- `notify.camera`: use `send_camera_update` / `broadcast_camera_update`.
+- `notify.scene`: use `send_scene_snapshot_payload` (single) or `broadcast_scene_snapshot`; baselines go through `send_scene_baseline`.
+- `notify.stream`: use `send_stream_payload` (single) or `broadcast_stream_config`.
+- All state-channel frames flow through `control.protocol.io.send_frame`, which relies on `server.util.websocket.safe_send` for socket safety.
