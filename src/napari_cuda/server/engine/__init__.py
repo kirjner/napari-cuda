@@ -46,8 +46,8 @@ __all__ = [
     "ensure_keyframe",
     "start_watchdog",
     "mark_stream_config_dirty",
-    "maybe_send_stream_config",
-    "publish_avcc",
+    "send_stream_snapshot_if_needed",
+    "send_cached_stream_snapshot",
     "enqueue_frame",
     "run_channel_loop",
 ]
@@ -123,11 +123,14 @@ _EXPORT_MAP: dict[str, tuple[str, str | None]] = {
         "napari_cuda.server.engine.pixel.channel",
         "mark_stream_config_dirty",
     ),
-    "maybe_send_stream_config": (
+    "send_stream_snapshot_if_needed": (
         "napari_cuda.server.engine.pixel.channel",
-        "maybe_send_stream_config",
+        "send_stream_snapshot_if_needed",
     ),
-    "publish_avcc": ("napari_cuda.server.engine.pixel.channel", "publish_avcc"),
+    "send_cached_stream_snapshot": (
+        "napari_cuda.server.engine.pixel.channel",
+        "send_cached_stream_snapshot",
+    ),
     "enqueue_frame": ("napari_cuda.server.engine.pixel.channel", "enqueue_frame"),
     "run_channel_loop": ("napari_cuda.server.engine.pixel.channel", "run_channel_loop"),
 }
@@ -190,9 +193,9 @@ if TYPE_CHECKING:  # pragma: no cover - assist static type checkers
         ensure_keyframe,
         ingest_client,
         mark_stream_config_dirty,
-        maybe_send_stream_config,
         prepare_client_attach,
-        publish_avcc,
         run_channel_loop,
+        send_cached_stream_snapshot,
+        send_stream_snapshot_if_needed,
         start_watchdog,
     )

@@ -14,7 +14,7 @@ from napari_cuda.server.engine.api import (
     build_avcc_config,
     enqueue_frame,
     pack_to_avcc,
-    publish_avcc,
+    send_cached_stream_snapshot,
 )
 from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     init_egl as core_init_egl,
@@ -102,7 +102,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
         if avcc_cfg is not None:
             def _publish_config(avcc_bytes: bytes) -> None:
                 server._schedule_coro(
-                    publish_avcc(
+                    send_cached_stream_snapshot(
                         server._pixel_channel,
                         config=server._pixel_config,
                         metrics=server.metrics,
@@ -232,7 +232,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             if avcc_cfg is not None:
                 def _publish_start_config(avcc_bytes: bytes) -> None:
                     server._schedule_coro(
-                        publish_avcc(
+                        send_cached_stream_snapshot(
                             server._pixel_channel,
                             config=server._pixel_config,
                             metrics=server.metrics,
@@ -246,14 +246,14 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             # Now flip worker ready
             worker._is_ready = True
 
-            def _emit_initial_thumbnail() -> None:
+            def _send_initial_thumbnail() -> None:
                 layer_id = server._default_layer_id()
                 server._schedule_coro(
-                    server._emit_layer_thumbnail(layer_id),
+                    server._send_layer_thumbnail(layer_id),
                     "initial-layer-thumbnail",
                 )
 
-            control_loop.call_soon_threadsafe(_emit_initial_thumbnail)
+            control_loop.call_soon_threadsafe(_send_initial_thumbnail)
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()

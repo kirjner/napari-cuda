@@ -17,7 +17,7 @@ from napari_cuda.server.control.protocol.runtime import (
 logger = logging.getLogger(__name__)
 
 
-async def broadcast_dims_state(
+async def _deliver_dims_state(
     server: Any,
     *,
     payload: NotifyDimsPayload,
@@ -59,3 +59,39 @@ async def broadcast_dims_state(
 
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def broadcast_dims_state(
+    server: Any,
+    *,
+    payload: NotifyDimsPayload,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_dims_state(
+        server,
+        payload=payload,
+        intent_id=intent_id,
+        timestamp=timestamp,
+        targets=None,
+    )
+
+
+async def send_dims_state(
+    server: Any,
+    ws: Any,
+    *,
+    payload: NotifyDimsPayload,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_dims_state(
+        server,
+        payload=payload,
+        intent_id=intent_id,
+        timestamp=timestamp,
+        targets=[ws],
+    )
+
+
+__all__ = ["broadcast_dims_state", "send_dims_state"]

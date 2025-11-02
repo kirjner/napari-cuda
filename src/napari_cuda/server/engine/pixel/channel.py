@@ -246,7 +246,7 @@ def mark_stream_config_dirty(state: PixelChannelState) -> None:
     state.needs_stream_config = True
 
 
-async def maybe_send_stream_config(
+async def send_stream_snapshot_if_needed(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
@@ -264,21 +264,13 @@ async def maybe_send_stream_config(
         return
 
     payload = build_notify_stream_payload(config, avcc)
-    try:
-        await send_stream(payload)
-    except Exception:
-        logger.debug("notify.stream broadcast failed", exc_info=True)
-        return
-
+    await send_stream(payload)
     state.last_avcc = avcc
     state.needs_stream_config = False
-    try:
-        metrics.inc("napari_cuda_stream_config_sends")
-    except Exception:  # pragma: no cover - defensive metrics guard
-        logger.debug("metrics inc napari_cuda_stream_config_sends failed", exc_info=True)
+    metrics.inc("napari_cuda_stream_config_sends")
 
 
-async def publish_avcc(
+async def send_cached_stream_snapshot(
     state: PixelChannelState,
     *,
     config: PixelChannelConfig,
@@ -296,7 +288,7 @@ async def publish_avcc(
     elif isinstance(avcc, bytearray):
         avcc = bytes(avcc)
     elif not isinstance(avcc, bytes):
-        raise AssertionError("publish_avcc requires bytes-like avcc payload")
+        raise AssertionError("send_cached_stream_snapshot requires bytes-like avcC payload")
 
     if state.last_avcc == avcc and not state.needs_stream_config:
         return
@@ -304,16 +296,9 @@ async def publish_avcc(
     state.last_avcc = avcc
     if state.needs_stream_config:
         payload = build_notify_stream_payload(config, avcc)
-        try:
-            await send_stream(payload)
-        except Exception:
-            logger.debug("publish_avcc notify.stream failed", exc_info=True)
-            return
+        await send_stream(payload)
         state.needs_stream_config = False
-        try:
-            metrics.inc("napari_cuda_stream_config_sends")
-        except Exception:  # pragma: no cover - defensive metrics guard
-            logger.debug("metrics inc napari_cuda_stream_config_sends failed", exc_info=True)
+        metrics.inc("napari_cuda_stream_config_sends")
 
 
 def enqueue_frame(

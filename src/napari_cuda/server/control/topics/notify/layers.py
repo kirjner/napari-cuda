@@ -71,7 +71,7 @@ def _split_layer_visual_state(
     )
 
 
-async def broadcast_layers_delta(
+async def _deliver_layers_delta(
     server: Any,
     *,
     layer_id: Optional[str],
@@ -142,6 +142,43 @@ async def broadcast_layers_delta(
             sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
 
 
+async def broadcast_layers_delta(
+    server: Any,
+    *,
+    layer_id: Optional[str],
+    state: LayerVisualState,
+    intent_id: Optional[str],
+    timestamp: Optional[float],
+) -> None:
+    await _deliver_layers_delta(
+        server,
+        layer_id=layer_id,
+        state=state,
+        intent_id=intent_id,
+        timestamp=timestamp,
+        targets=None,
+    )
+
+
+async def send_layers_delta(
+    server: Any,
+    ws: Any,
+    *,
+    layer_id: Optional[str],
+    state: LayerVisualState,
+    intent_id: Optional[str],
+    timestamp: Optional[float],
+) -> None:
+    await _deliver_layers_delta(
+        server,
+        layer_id=layer_id,
+        state=state,
+        intent_id=intent_id,
+        timestamp=timestamp,
+        targets=[ws],
+    )
+
+
 async def send_layer_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) -> None:
     session_id = state_session(ws)
     if not session_id:
@@ -195,17 +232,18 @@ async def send_layer_baseline(
         return
 
     for visual in default_visuals:
-        await broadcast_layers_delta(
+        await send_layers_delta(
             server,
+            ws,
             layer_id=visual.layer_id,
             state=visual,
             intent_id=None,
             timestamp=__import__("time").time(),
-            targets=[ws],
         )
 
 
 __all__ = [
+    "send_layers_delta",
     "broadcast_layers_delta",
     "send_layer_baseline",
     "send_layer_snapshot",

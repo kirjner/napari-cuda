@@ -139,7 +139,7 @@ async def broadcast_loop(
                 break
         return found
 
-    async def _send_packet(packet: FramePacket, *, bypass: bool) -> None:
+    async def send_frame_packet(packet: FramePacket, *, bypass: bool) -> None:
         payload, flags, seq_cap, stamp_ts = packet
         if not state.clients:
             return
@@ -225,7 +225,7 @@ async def broadcast_loop(
         if state.bypass_until_key:
             key_packet = await _fill_and_find_key(loop.time() + 0.050)
             if key_packet is not None:
-                await _send_packet(key_packet, bypass=True)
+                await send_frame_packet(key_packet, bypass=True)
                 latest = None
                 state.bypass_until_key = False
                 next_tick = loop.time() + tick
@@ -239,6 +239,6 @@ async def broadcast_loop(
             next_tick += missed * tick
 
         if latest is not None:
-            await _send_packet(latest, bypass=False)
+            await send_frame_packet(latest, bypass=False)
             latest = None
         next_tick += tick

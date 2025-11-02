@@ -13,7 +13,7 @@ from napari_cuda.server.control.protocol.runtime import (
 )
 
 
-async def broadcast_camera_update(
+async def _deliver_camera_update(
     server: Any,
     *,
     mode: str,
@@ -60,6 +60,51 @@ async def broadcast_camera_update(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def broadcast_camera_update(
+    server: Any,
+    *,
+    mode: str,
+    delta: Mapping[str, Any] | None = None,
+    state: Mapping[str, Any] | None = None,
+    intent_id: Optional[str],
+    origin: str,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_camera_update(
+        server,
+        mode=mode,
+        delta=delta,
+        state=state,
+        intent_id=intent_id,
+        origin=origin,
+        timestamp=timestamp,
+        targets=None,
+    )
+
+
+async def send_camera_update(
+    server: Any,
+    ws: Any,
+    *,
+    mode: str,
+    delta: Mapping[str, Any] | None = None,
+    state: Mapping[str, Any] | None = None,
+    intent_id: Optional[str],
+    origin: str,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_camera_update(
+        server,
+        mode=mode,
+        delta=delta,
+        state=state,
+        intent_id=intent_id,
+        origin=origin,
+        timestamp=timestamp,
+        targets=[ws],
+    )
+
+
 def _normalize_camera_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(k): _normalize_camera_value(v) for k, v in value.items()}
@@ -70,4 +115,4 @@ def _normalize_camera_value(value: Any) -> Any:
     return value
 
 
-__all__ = ["broadcast_camera_update"]
+__all__ = ["broadcast_camera_update", "send_camera_update"]

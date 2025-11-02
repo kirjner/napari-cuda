@@ -868,7 +868,7 @@ class EGLHeadlessServer:
                 f"baseline-{reason}",
             )
 
-    async def _emit_layer_thumbnail(
+    async def _send_layer_thumbnail(
         self,
         layer_id: str,
         *,

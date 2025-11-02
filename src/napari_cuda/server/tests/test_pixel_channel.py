@@ -9,7 +9,7 @@ from napari_cuda.server.engine import (
     PixelChannelConfig,
     PixelChannelState,
     enqueue_frame,
-    maybe_send_stream_config,
+    send_stream_snapshot_if_needed,
     prepare_client_attach,
     start_watchdog,
 )
@@ -56,7 +56,7 @@ def test_enqueue_frame_drops_oldest() -> None:
     asyncio.run(runner())
 
 
-def test_maybe_send_stream_config_tracks_cache() -> None:
+def test_send_stream_snapshot_if_needed_tracks_cache() -> None:
     async def runner() -> None:
         queue: asyncio.Queue[pixel_broadcaster.FramePacket] = asyncio.Queue()
         broadcast = pixel_broadcaster.PixelBroadcastState(
@@ -82,7 +82,7 @@ def test_maybe_send_stream_config_tracks_cache() -> None:
 
         avcc_blob = b"test-avcc"
 
-        await maybe_send_stream_config(
+        await send_stream_snapshot_if_needed(
             state,
             config=config,
             metrics=metrics,
@@ -96,7 +96,7 @@ def test_maybe_send_stream_config_tracks_cache() -> None:
 
         # Second call with unchanged avcC should be a no-op
         sent.clear()
-        await maybe_send_stream_config(
+        await send_stream_snapshot_if_needed(
             state,
             config=config,
             metrics=metrics,

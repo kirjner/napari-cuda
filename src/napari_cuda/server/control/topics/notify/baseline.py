@@ -22,7 +22,7 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumePlan,
 )
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
-from .dims import broadcast_dims_state
+from .dims import broadcast_dims_state, send_dims_state
 from .layers import (
     send_layer_baseline,
     send_layer_snapshot,
@@ -69,14 +69,14 @@ async def orchestrate_connect(
     )
     (logger.info if server._log_dims_info else logger.debug)("connect: notify.scene sent")
 
-    await _emit_dims_baseline(server, ws)
-    await _emit_layer_baseline(
+    await _send_dims_baseline(server, ws)
+    await _send_layer_baseline(
         server,
         ws,
         plan=layers_plan,
         default_visuals=default_visuals,
     )
-    await _emit_stream_baseline(server, ws, plan=stream_plan)
+    await _send_stream_baseline(server, ws, plan=stream_plan)
 
     _schedule_keyframe_and_thumbnail(server)
 
@@ -232,7 +232,7 @@ def _record_default_visuals(
                 )
 
 
-async def _emit_layer_baseline(
+async def _send_layer_baseline(
     server: Any,
     ws: Any,
     *,
@@ -249,7 +249,7 @@ async def _emit_layer_baseline(
     await send_layer_baseline(server, ws, default_visuals)
 
 
-async def _emit_stream_baseline(
+async def _send_stream_baseline(
     server: Any,
     ws: Any,
     *,
@@ -281,7 +281,7 @@ async def _emit_stream_baseline(
         server.mark_stream_config_dirty()
 
 
-async def _emit_dims_baseline(server: Any, ws: Any) -> None:
+async def _send_dims_baseline(server: Any, ws: Any) -> None:
     mirror = server._dims_mirror
     if mirror is None:
         logger.debug("connect: notify.dims baseline deferred (dims mirror not initialized)")
@@ -290,7 +290,7 @@ async def _emit_dims_baseline(server: Any, ws: Any) -> None:
     if payload is None:
         logger.debug("connect: notify.dims baseline skipped (metadata unavailable)")
         return
-    await broadcast_dims_state(server, payload=payload, intent_id=None, timestamp=time.time(), targets=[ws])
+    await send_dims_state(server, ws, payload=payload, intent_id=None, timestamp=time.time())
     if server._log_dims_info:
         logger.info("connect: notify.dims baseline sent")
     else:
@@ -303,9 +303,9 @@ def _schedule_keyframe_and_thumbnail(server: Any) -> None:
     assert hasattr(server, "_ensure_keyframe"), "server must expose _ensure_keyframe"
     server._schedule_coro(server._ensure_keyframe(), "state-baseline-keyframe")
 
-    assert hasattr(server, "_emit_layer_thumbnail"), "server must expose _emit_layer_thumbnail"
+    assert hasattr(server, "_send_layer_thumbnail"), "server must expose _send_layer_thumbnail"
     assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
-    server._schedule_coro(server._emit_layer_thumbnail(server._default_layer_id()), "baseline-layer-thumbnail")
+    server._schedule_coro(server._send_layer_thumbnail(server._default_layer_id()), "baseline-layer-thumbnail")
 
 
 __all__ = ["orchestrate_connect"]

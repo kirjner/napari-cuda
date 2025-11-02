@@ -372,10 +372,10 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     server._ensure_keyframe = _ensure_keyframe
     server._thumbnail_requests: list[str] = []
 
-    async def _emit_layer_thumbnail(layer_id: str) -> None:
+    async def _send_layer_thumbnail(layer_id: str) -> None:
         server._thumbnail_requests.append(layer_id)
 
-    server._emit_layer_thumbnail = _emit_layer_thumbnail
+    server._send_layer_thumbnail = _send_layer_thumbnail
     server._idr_on_reset = True
     server._pixel_channel = SimpleNamespace(
         broadcast=SimpleNamespace(bypass_until_key=False, waiting_for_keyframe=False)

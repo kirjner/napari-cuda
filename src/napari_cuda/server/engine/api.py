@@ -30,7 +30,8 @@ __all__ = [
     "ingest_client",
     "mark_stream_config_dirty",
     "prepare_client_attach",
-    "publish_avcc",
+    "send_cached_stream_snapshot",
+    "send_stream_snapshot_if_needed",
     "run_channel_loop",
 ]
 
@@ -59,7 +60,8 @@ _EXPORT_MAP: dict[str, tuple[str, str | None]] = {
     "ingest_client": ("napari_cuda.server.engine.pixel.channel", "ingest_client"),
     "mark_stream_config_dirty": ("napari_cuda.server.engine.pixel.channel", "mark_stream_config_dirty"),
     "prepare_client_attach": ("napari_cuda.server.engine.pixel.channel", "prepare_client_attach"),
-    "publish_avcc": ("napari_cuda.server.engine.pixel.channel", "publish_avcc"),
+    "send_cached_stream_snapshot": ("napari_cuda.server.engine.pixel.channel", "send_cached_stream_snapshot"),
+    "send_stream_snapshot_if_needed": ("napari_cuda.server.engine.pixel.channel", "send_stream_snapshot_if_needed"),
     "run_channel_loop": ("napari_cuda.server.engine.pixel.channel", "run_channel_loop"),
 }
 
@@ -111,7 +113,7 @@ if TYPE_CHECKING:  # pragma: no cover - assist static type checkers
         ingest_client,
         mark_stream_config_dirty,
         prepare_client_attach,
-        publish_avcc,
         run_channel_loop,
+        send_cached_stream_snapshot,
+        send_stream_snapshot_if_needed,
     )
-
