@@ -6,6 +6,7 @@ from typing import Any
 
 from napari_cuda.protocol import CallCommand
 from napari_cuda.server.control.command_registry import register_command
+from napari_cuda.server.data.zarr_discovery import ZarrDatasetDisambiguationError
 
 from . import CommandRejected, CommandResult
 
@@ -36,6 +37,15 @@ async def command_load_zarr(server: Any, frame: CallCommand, ws: Any) -> Command
             message="Dataset path is not a directory",
             details={"path": path},
         )
+    except ZarrDatasetDisambiguationError as exc:
+        raise CommandRejected(
+            code="zarr.disambiguate",
+            message=str(exc),
+            details={
+                "path": str(exc.root),
+                "options": list(exc.option_relatives()),
+            },
+        ) from exc
     except ValueError as exc:
         raise CommandRejected(
             code="zarr.invalid",

@@ -58,6 +58,11 @@ from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
 from napari_cuda.server.control.topics.notify.stream import broadcast_stream_config
 from napari_cuda.server.data.hw_limits import get_hw_limits
+from napari_cuda.server.data.zarr_discovery import (
+    ZarrDatasetDisambiguationError,
+    discover_dataset_root,
+    inspect_zarr_directory,
+)
 from napari_cuda.server.engine.api import (
     ParamCache,
     PixelBroadcastState,
@@ -933,9 +938,13 @@ class EGLHeadlessServer:
             raise FileNotFoundError(str(resolved))
         if not resolved.is_dir():
             raise NotADirectoryError(str(resolved))
-        if not (resolved / ".zattrs").exists():
-            raise ValueError(f"Path is not an OME-Zarr root: {resolved}")
-        return resolved
+
+        dataset = discover_dataset_root(resolved)
+
+        root = self._require_data_root()
+        if dataset != root and root not in dataset.parents:
+            raise RuntimeError(f"Resolved dataset escaped data root: {dataset}")
+        return dataset
 
     def _list_directory(
         self,
@@ -969,6 +978,7 @@ class EGLHeadlessServer:
                 lowered = name.lower()
                 if not any(lowered.endswith(suffix) for suffix in suffix_filters):
                     continue
+            zarr_meta = inspect_zarr_directory(child) if is_dir else None
             filtered.append(
                 {
                     "name": name,
@@ -976,6 +986,11 @@ class EGLHeadlessServer:
                     "is_dir": is_dir,
                     "size": int(stat_result.st_size),
                     "mtime": float(stat_result.st_mtime),
+                    "zarr_metadata": {
+                        "is_dataset": bool(zarr_meta.is_dataset),
+                        "has_multiscales": bool(zarr_meta.has_multiscales),
+                        "dataset_children": list(zarr_meta.dataset_children),
+                    } if zarr_meta is not None else None,
                 }
             )
 
@@ -996,8 +1011,7 @@ class EGLHeadlessServer:
                 raise FileNotFoundError(str(resolved))
             if not resolved.is_dir():
                 raise NotADirectoryError(str(resolved))
-            if not (resolved / ".zattrs").exists():
-                raise ValueError(f"Path is not an OME-Zarr root: {resolved}")
+            resolved = discover_dataset_root(resolved)
         await self._switch_dataset(
             resolved,
             preferred_level=None,

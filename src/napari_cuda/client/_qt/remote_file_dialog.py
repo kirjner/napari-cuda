@@ -22,6 +22,9 @@ from collections.abc import Mapping
 from qtpy import QtCore, QtGui, QtWidgets
 
 
+ZARR_METADATA_ROLE = QtCore.Qt.UserRole + 3
+
+
 class RemoteFileDialog(QtWidgets.QDialog):
     _listing_ready = QtCore.Signal(object)
     """Simple mac-like remote file picker backed by server RPC.
@@ -156,6 +159,7 @@ class RemoteFileDialog(QtWidgets.QDialog):
         is_dir: bool,
         size: int | None = None,
         mtime: float | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> None:
         icon = self.style().standardIcon(
             QtWidgets.QStyle.SP_DirIcon if is_dir else QtWidgets.QStyle.SP_FileIcon
@@ -164,8 +168,18 @@ class RemoteFileDialog(QtWidgets.QDialog):
         item_name = QtGui.QStandardItem(icon, name)
         item_name.setData(path, QtCore.Qt.UserRole + 1)
         item_name.setData(bool(is_dir), QtCore.Qt.UserRole + 2)
+        if metadata is not None:
+            item_name.setData(dict(metadata), ZARR_METADATA_ROLE)
+        inferred_type = "Folder" if is_dir else "File"
+        if metadata is not None:
+            is_dataset = bool(metadata.get("is_dataset"))
+            has_children = bool(metadata.get("dataset_children"))
+            if is_dataset:
+                inferred_type = "OME-Zarr dataset"
+            elif has_children:
+                inferred_type = "OME-Zarr group"
         # Secondary columns (simple strings for now)
-        item_type = QtGui.QStandardItem("Folder" if is_dir else "File")
+        item_type = QtGui.QStandardItem(inferred_type)
         item_size = QtGui.QStandardItem("" if is_dir or size is None else f"{int(size):,}")
         item_mtime = QtGui.QStandardItem("")
         self._model.appendRow([item_name, item_type, item_size, item_mtime])
@@ -175,21 +189,34 @@ class RemoteFileDialog(QtWidgets.QDialog):
             index = self._proxy.index(0, 0)
             self._view.setCurrentIndex(index)
 
-    def _current_selection(self) -> tuple[str | None, bool]:
+    def _current_selection(self) -> tuple[str | None, bool, Mapping[str, object] | None]:
         idx = self._view.currentIndex()
         if not idx.isValid():
-            return None, False
+            return None, False, None
         src_idx = self._proxy.mapToSource(idx)
         item = self._model.itemFromIndex(src_idx)
         path = str(item.data(QtCore.Qt.UserRole + 1))
         is_dir = bool(item.data(QtCore.Qt.UserRole + 2))
-        return path, is_dir
+        metadata_obj = item.data(ZARR_METADATA_ROLE)
+        metadata = metadata_obj if isinstance(metadata_obj, Mapping) else None
+        return path, is_dir, metadata
 
-    def _can_open(self, *, is_dir: bool, name: str) -> bool:
+    def _can_open(
+        self,
+        *,
+        is_dir: bool,
+        name: str,
+        metadata: Mapping[str, object] | None,
+    ) -> bool:
         # In files mode: allow opening directories that match suffix (e.g. ".zarr")
         if self._select_folders:
             return is_dir
         lowered = name.lower()
+        if metadata is not None:
+            if bool(metadata.get("is_dataset")):
+                return True
+            if is_dir and bool(metadata.get("dataset_children")):
+                return False
         if is_dir:
             if not self._only:
                 return False
@@ -278,7 +305,23 @@ class RemoteFileDialog(QtWidgets.QDialog):
                 size_int = None if size_val is None else int(size_val)  # type: ignore[arg-type]
                 mtime_val = entry.get("mtime")
                 mtime_float = None if mtime_val is None else float(mtime_val)  # type: ignore[arg-type]
-                self._add_row(name=name, path=full, is_dir=is_dir, size=size_int, mtime=mtime_float)
+                metadata_obj = entry.get("zarr_metadata")  # type: ignore[index]
+                if isinstance(metadata_obj, Mapping):
+                    metadata = {
+                        "is_dataset": bool(metadata_obj.get("is_dataset")),
+                        "has_multiscales": bool(metadata_obj.get("has_multiscales")),
+                        "dataset_children": tuple(metadata_obj.get("dataset_children") or ()),
+                    }
+                else:
+                    metadata = None
+                self._add_row(
+                    name=name,
+                    path=full,
+                    is_dir=is_dir,
+                    size=size_int,
+                    mtime=mtime_float,
+                    metadata=metadata,
+                )
             self._select_first_row()
             self._proxy.sort(0)
             # Auto-resize columns for visibility
@@ -322,28 +365,46 @@ class RemoteFileDialog(QtWidgets.QDialog):
             size_int = None if size_val is None else int(size_val)  # type: ignore[arg-type]
             mtime_val = entry.get("mtime")  # type: ignore[index]
             mtime_float = None if mtime_val is None else float(mtime_val)  # type: ignore[arg-type]
-            self._add_row(name=name, path=full, is_dir=is_dir, size=size_int, mtime=mtime_float)
+            metadata_obj = entry.get("zarr_metadata")  # type: ignore[index]
+            if isinstance(metadata_obj, Mapping):
+                metadata = {
+                    "is_dataset": bool(metadata_obj.get("is_dataset")),
+                    "has_multiscales": bool(metadata_obj.get("has_multiscales")),
+                    "dataset_children": tuple(metadata_obj.get("dataset_children") or ()),
+                }
+            else:
+                metadata = None
+            self._add_row(
+                name=name,
+                path=full,
+                is_dir=is_dir,
+                size=size_int,
+                mtime=mtime_float,
+                metadata=metadata,
+            )
         self._select_first_row()
         self._proxy.sort(0)
         self._view.resizeColumnToContents(0)
 
     # ---------------------------- Slots ----------------------------------
     def _on_selection_changed(self) -> None:
-        path, is_dir = self._current_selection()
+        path, is_dir, metadata = self._current_selection()
         if path is None:
             self._btn_open.setEnabled(False)
             return
         # Enable Open when selection satisfies mode
         name = self._model.item(self._view.currentIndex().row(), 0).text()
-        self._btn_open.setEnabled(self._can_open(is_dir=is_dir, name=name))
+        self._btn_open.setEnabled(self._can_open(is_dir=is_dir, name=name, metadata=metadata))
 
     def _on_double_clicked(self, index: QtCore.QModelIndex) -> None:
         src_idx = self._proxy.mapToSource(index)
         item = self._model.itemFromIndex(src_idx)
         path = str(item.data(QtCore.Qt.UserRole + 1))
         is_dir = bool(item.data(QtCore.Qt.UserRole + 2))
+        metadata_obj = item.data(ZARR_METADATA_ROLE)
+        metadata = metadata_obj if isinstance(metadata_obj, Mapping) else None
         name = item.text()
-        if is_dir and self._can_open(is_dir=True, name=name):
+        if self._can_open(is_dir=is_dir, name=name, metadata=metadata):
             # Treat suffix-matching directories (e.g. ".zarr") as openable datasets
             self._selected = path
             self.accept()
@@ -356,11 +417,11 @@ class RemoteFileDialog(QtWidgets.QDialog):
             self.accept()
 
     def _on_accept(self) -> None:
-        path, is_dir = self._current_selection()
+        path, is_dir, metadata = self._current_selection()
         if path is None:
             return
         name = self._model.item(self._view.currentIndex().row(), 0).text()
-        if not self._can_open(is_dir=is_dir, name=name):
+        if not self._can_open(is_dir=is_dir, name=name, metadata=metadata):
             return
         self._selected = path
         self.accept()

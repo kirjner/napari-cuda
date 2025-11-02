@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore
 
@@ -59,6 +59,8 @@ class NapariLayerMirror:
         self._log_layers_info = bool(log_layers_info)
         self._emitter: NapariLayerIntentEmitter | None = None
         self._last_snapshot: RegistrySnapshot | None = None
+        self._last_scene_metadata: dict[str, Any] | None = None
+        self._welcome_visible: Optional[bool] = None
         self._attached_layers: set[str] = set()
 
         registry.add_listener(self._on_registry_snapshot)
@@ -83,8 +85,10 @@ class NapariLayerMirror:
     def ingest_scene_snapshot(self, frame: NotifySceneFrame) -> None:
         self._assert_gui_thread()
         snapshot = scene_snapshot_from_payload(frame.payload)
+        self._last_scene_metadata = dict(snapshot.metadata) if snapshot.metadata else None
         with self._suppress_emitter():
             self._registry.apply_snapshot(snapshot)
+        self._update_welcome_overlay(snapshot.metadata, len(snapshot.layers))
         logger.debug("notify.scene applied: layers=%s", len(snapshot.layers))
 
     def ingest_layer_delta(self, frame: NotifyLayersFrame) -> None:
@@ -127,6 +131,7 @@ class NapariLayerMirror:
                     self._attached_layers.discard(layer_id)
         with self._suppress_emitter():
             self._sync_viewer_layers(snapshot)
+        self._update_welcome_overlay(self._last_scene_metadata, len(tuple(snapshot.iter())))
 
     # ------------------------------------------------------------------ helpers
     def _sync_viewer_layers(self, snapshot: RegistrySnapshot) -> None:
@@ -189,6 +194,49 @@ class NapariLayerMirror:
         if isinstance(layer, RemoteImageLayer):
             return layer.remote_id
         return None
+
+    def _update_welcome_overlay(
+        self,
+        metadata: Optional[Mapping[str, Any]],
+        layer_count: int,
+    ) -> None:
+        """Toggle napari's welcome overlay to mirror upstream idle UX."""
+
+        show = self._should_show_welcome(metadata, layer_count)
+        if self._welcome_visible is not None and self._welcome_visible == show:
+            return
+        self._set_welcome_visible(show)
+        self._welcome_visible = show
+
+    def _set_welcome_visible(self, visible: bool) -> None:
+        viewer = self._current_viewer()
+        if viewer is None:
+            return
+        window = getattr(viewer, "window", None)
+        qt_viewer = getattr(window, "_qt_viewer", None)
+        if qt_viewer is None:
+            return
+        setter = getattr(qt_viewer, "set_welcome_visible", None)
+        if callable(setter):
+            setter(bool(visible))
+            return
+        overlay = getattr(qt_viewer, "_welcome_widget", None)
+        toggler = getattr(overlay, "set_welcome_visible", None)
+        if callable(toggler):
+            toggler(bool(visible))
+
+    @staticmethod
+    def _should_show_welcome(
+        metadata: Optional[Mapping[str, Any]],
+        layer_count: int,
+    ) -> bool:
+        if metadata is not None:
+            status = str(metadata.get("status", "")).lower()
+            if status == "idle":
+                return True
+            if status == "ready":
+                return False
+        return layer_count <= 0
 
     def _assert_gui_thread(self) -> None:
         current = QtCore.QThread.currentThread()
