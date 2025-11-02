@@ -225,7 +225,7 @@ def launch_streaming_client(server_host='localhost',
     def _supports_remote_open_for(qt_viewer: 'QtViewer') -> bool:
         mgr = qt_viewer.canvas._manager
         cmds = set(mgr._command_catalog or ())
-        return {"fs.listdir", "napari.zarr.load"}.issubset(cmds)
+        return {"fs.listdir", "napari.load_zarr"}.issubset(cmds)
 
     def _remote_open_files(qt_viewer: 'QtViewer') -> None:
         if _supports_remote_open_for(qt_viewer):

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from napari_cuda.protocol import CallCommand
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .control_channel_server import CommandResult
+    from napari_cuda.server.control.topics.command import CommandResult
 
 CommandHandler = Callable[[Any, CallCommand, Any], Awaitable["CommandResult"]]
 

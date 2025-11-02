@@ -691,7 +691,7 @@ class ClientStreamLoop:
         if not path:
             return None
         return self._issue_command(
-            "napari.zarr.load",
+            "napari.load_zarr",
             kwargs={"path": str(path)},
             origin=origin,
         )

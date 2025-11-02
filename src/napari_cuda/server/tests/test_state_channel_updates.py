@@ -49,9 +49,9 @@ from napari_cuda.server.control.state_reducers import (
     reduce_level_update,
     reduce_plane_restore,
 )
-from napari_cuda.server.control.topics.baseline import orchestrate_connect
-from napari_cuda.server.control.topics.dims import broadcast_dims_state
-from napari_cuda.server.control.topics.layers import broadcast_layers_delta
+from napari_cuda.server.control.topics.notify.baseline import orchestrate_connect
+from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.server.runtime.viewport import (

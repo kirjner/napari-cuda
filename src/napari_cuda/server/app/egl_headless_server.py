@@ -47,16 +47,16 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumableHistoryStore,
     ResumableRetention,
 )
-from napari_cuda.server.control.topics.baseline import orchestrate_connect
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_camera_update,
     reduce_level_update,
 )
-from napari_cuda.server.control.topics.camera import broadcast_camera_update
-from napari_cuda.server.control.topics.dims import broadcast_dims_state
-from napari_cuda.server.control.topics.layers import broadcast_layers_delta
-from napari_cuda.server.control.topics.stream import broadcast_stream_config
+from napari_cuda.server.control.topics.notify.baseline import orchestrate_connect
+from napari_cuda.server.control.topics.notify.camera import broadcast_camera_update
+from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
+from napari_cuda.server.control.topics.notify.stream import broadcast_stream_config
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.engine.api import (
     ParamCache,

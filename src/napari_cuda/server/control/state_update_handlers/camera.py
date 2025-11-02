@@ -6,7 +6,7 @@ import logging
 from typing import Any, Callable, Mapping, Optional, TYPE_CHECKING
 
 from napari_cuda.server.control.state_reducers import reduce_camera_update
-from napari_cuda.server.control.topics.camera import broadcast_camera_update
+from napari_cuda.server.control.topics.notify.camera import broadcast_camera_update
 from napari_cuda.server.scene import CameraDeltaCommand
 
 if TYPE_CHECKING:

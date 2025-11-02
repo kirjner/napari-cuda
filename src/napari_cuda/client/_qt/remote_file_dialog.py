@@ -5,7 +5,7 @@ from __future__ import annotations
 This dialog mimics a standard file dialog but lists entries by issuing
 `call.command` requests to the napari-cuda server (fs.listdir). When the user
 accepts a selection, callers can request the server to open the dataset
-(`napari.zarr.load`).
+(`napari.load_zarr`).
 
 Usage (from the streaming client launcher):
 

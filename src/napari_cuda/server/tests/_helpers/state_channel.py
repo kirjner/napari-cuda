@@ -51,8 +51,8 @@ from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
     reduce_level_update,
 )
-from napari_cuda.server.control.topics.dims import broadcast_dims_state
-from napari_cuda.server.control.topics.layers import broadcast_layers_delta
+from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
+from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
 from napari_cuda.server.data import (
     SliceROI,
     align_roi_to_chunk_grid,

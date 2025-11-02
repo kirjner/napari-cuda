@@ -41,36 +41,15 @@ from napari_cuda.server.control.protocol.runtime import (
     feature_enabled,
     state_session,
 )
-from napari_cuda.server.control.topics.baseline import orchestrate_connect
 from napari_cuda.server.control.state_update_handlers.registry import STATE_UPDATE_HANDLERS
+from napari_cuda.server.control.topics.command import CommandRejected, CommandResult
+from napari_cuda.server.control.topics.command.fs import register_fs_commands
+from napari_cuda.server.control.topics.command.zarr import register_zarr_commands
+from napari_cuda.server.control.topics.notify.baseline import orchestrate_connect
 
 logger = logging.getLogger(__name__)
 
 _COMMAND_KEYFRAME = "napari.pixel.request_keyframe"
-_COMMAND_LISTDIR = "fs.listdir"
-_COMMAND_ZARR_LOAD = "napari.zarr.load"
-
-
-@dataclass(slots=True)
-class CommandResult:
-    result: Any | None = None
-    idempotency_key: str | None = None
-
-
-class CommandRejected(RuntimeError):
-    def __init__(
-        self,
-        *,
-        code: str,
-        message: str,
-        details: Mapping[str, Any] | None = None,
-        idempotency_key: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.code = str(code)
-        self.message = str(message)
-        self.details = dict(details) if details else None
-        self.idempotency_key = idempotency_key
 
 
 _ENVELOPE_PARSER = EnvelopeParser()
@@ -86,82 +65,8 @@ async def _command_request_keyframe(server: Any, frame: CallCommand, ws: Any) ->
 
 
 register_command(_COMMAND_KEYFRAME, _command_request_keyframe)
-
-
-async def _command_fs_listdir(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
-    kwargs = dict(frame.payload.kwargs or {})
-    path = kwargs.get("path")
-    show_hidden = bool(kwargs.get("show_hidden", False))
-    only = kwargs.get("only")
-    filters: Optional[Sequence[str]] = None
-    if only is not None:
-        if isinstance(only, (list, tuple)):
-            filters = tuple(str(item) for item in only if item is not None)
-        else:
-            raise CommandRejected(
-                code="command.invalid",
-                message="'only' filter must be a list of suffixes",
-            )
-    if only is None:
-        filters = (".zarr",)
-    try:
-        listing = server._list_directory(
-            path,
-            only=filters,
-            show_hidden=show_hidden,
-        )
-    except RuntimeError as exc:
-        raise CommandRejected(code="fs.forbidden", message=str(exc)) from exc
-    except FileNotFoundError:
-        raise CommandRejected(
-            code="fs.not_found",
-            message="Directory not found",
-            details={"path": path},
-        )
-    except NotADirectoryError:
-        raise CommandRejected(
-            code="fs.not_found",
-            message="Path is not a directory",
-            details={"path": path},
-        )
-    return CommandResult(result=listing)
-
-
-async def _command_zarr_load(server: Any, frame: CallCommand, ws: Any) -> CommandResult:
-    kwargs = dict(frame.payload.kwargs or {})
-    path = kwargs.get("path")
-    if not isinstance(path, str) or not path:
-        raise CommandRejected(
-            code="command.invalid",
-            message="'path' must be a non-empty string",
-        )
-    try:
-        await server._handle_zarr_load(path)
-    except RuntimeError as exc:
-        raise CommandRejected(code="fs.forbidden", message=str(exc)) from exc
-    except FileNotFoundError:
-        raise CommandRejected(
-            code="fs.not_found",
-            message="Dataset not found",
-            details={"path": path},
-        )
-    except NotADirectoryError:
-        raise CommandRejected(
-            code="fs.not_found",
-            message="Dataset path is not a directory",
-            details={"path": path},
-        )
-    except ValueError as exc:
-        raise CommandRejected(
-            code="zarr.invalid",
-            message=str(exc),
-            details={"path": path},
-        ) from exc
-    return CommandResult(result={"ok": True})
-
-
-register_command(_COMMAND_LISTDIR, _command_fs_listdir)
-register_command(_COMMAND_ZARR_LOAD, _command_zarr_load)
+register_fs_commands()
+register_zarr_commands()
 
 
 @dataclass(slots=True)
@@ -684,7 +589,4 @@ def _disable_nagle(ws: Any) -> None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         logger.debug('state ws: TCP_NODELAY toggle failed', exc_info=True)
-
-
-
 
