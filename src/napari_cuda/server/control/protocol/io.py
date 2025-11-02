@@ -10,18 +10,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
-async def await_state_send(server: Any, ws: Any, text: str) -> None:
-    """Send serialized text on the state channel."""
-    await ws.send(text)
+from napari_cuda.server.util.websocket import safe_send
 
 
-async def send_frame(server: Any, ws: Any, frame: Any) -> None:
+async def send_text(ws: Any, text: str) -> bool:
+    """Send raw text to the websocket, returning True on success."""
+
+    return await safe_send(ws, text)
+
+
+async def send_frame(server: Any, ws: Any, frame: Any) -> bool:
     """Serialize a frame via ``to_dict()`` and send it on the state channel."""
 
     payload = frame.to_dict()  # type: ignore[attr-defined]
     text = json.dumps(payload, separators=(",", ":"))
-    await await_state_send(server, ws, text)
+    return await send_text(ws, text)
 
 
-__all__ = ["await_state_send", "send_frame"]
+__all__ = ["send_text", "send_frame"]

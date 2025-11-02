@@ -29,7 +29,7 @@ from napari_cuda.protocol import (
     build_session_welcome,
 )
 from napari_cuda.server.control.command_registry import COMMAND_REGISTRY
-from napari_cuda.server.control.protocol.io import await_state_send
+from napari_cuda.server.control.protocol.io import send_text
 from napari_cuda.server.control.protocol.runtime import history_store
 from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
@@ -246,7 +246,7 @@ def _resolve_handshake_features(hello: SessionHello) -> dict[str, FeatureToggle]
 
 async def _send_handshake_envelope(server: Any, ws: Any, envelope: SessionWelcome | SessionReject) -> None:
     text = json.dumps(envelope.to_dict(), separators=(",", ":"))
-    await await_state_send(server, ws, text)
+    await send_text(ws, text)
 
 
 async def _send_handshake_reject(

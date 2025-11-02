@@ -71,7 +71,10 @@ from napari_cuda.server.engine.api import (
     mark_stream_config_dirty,
     prepare_client_attach,
     run_channel_loop,
+    send_cached_stream_snapshot,
+    send_stream_snapshot_if_needed,
 )
+from napari_cuda.server.util.websocket import safe_send
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     probe_scene_bootstrap,
@@ -1203,14 +1206,7 @@ class EGLHeadlessServer:
         await broadcast_stream_config(self, payload=payload)
 
     async def _state_send(self, ws: websockets.WebSocketServerProtocol, text: str) -> None:
-        try:
-            await ws.send(text)
-        except Exception as e:
-            logger.debug("State send error: %s", e)
-            try:
-                await ws.close()
-            except Exception as e2:
-                logger.debug("State WS close error: %s", e2)
+        if not await safe_send(ws, text):
             self._state_clients.discard(ws)
 
     def _update_client_gauges(self) -> None:

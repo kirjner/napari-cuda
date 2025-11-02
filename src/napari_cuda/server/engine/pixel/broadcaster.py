@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Optional
 
 import websockets
 
+from napari_cuda.server.util.websocket import safe_send as safe_send_ws
+
 if TYPE_CHECKING:  # pragma: no cover - metrics interface is runtime provided
     from napari_cuda.server.metrics import Metrics
 
@@ -70,14 +72,8 @@ def configure_socket(ws: websockets.WebSocketServerProtocol, *, label: str = "pi
 async def safe_send(state: PixelBroadcastState, ws: websockets.WebSocketServerProtocol, data: bytes) -> None:
     """Send `data` to a single websocket, pruning dead connections on failure."""
 
-    try:
-        await ws.send(data)
-    except Exception as exc:
-        logger.debug("Pixel send error: %s", exc)
-        try:
-            await ws.close()
-        except Exception as exc_close:
-            logger.debug("Pixel WS close error: %s", exc_close)
+    ok = await safe_send_ws(ws, data)
+    if not ok:
         state.clients.discard(ws)
 
 
