@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, Optional
 
 from napari_cuda.protocol import NOTIFY_LAYERS_TYPE
@@ -19,66 +19,78 @@ from napari_cuda.server.control.protocol.runtime import (
     state_session,
 )
 from napari_cuda.server.control.resumable_history_store import EnvelopeSnapshot
+from napari_cuda.server.scene import LayerVisualState
 
 
-def classify_layer_changes(
-    changes: Mapping[str, Any]
+_CONTROL_KEYS = {
+    "visible",
+    "opacity",
+    "blending",
+    "interpolation",
+    "colormap",
+    "rendering",
+    "gamma",
+    "contrast_limits",
+    "iso_threshold",
+    "attenuation",
+}
+
+
+def _split_layer_visual_state(
+    state: LayerVisualState,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
-    ctrl_keys = {
-        "opacity",
-        "visible",
-        "blending",
-        "interpolation",
-        "colormap",
-        "rendering",
-        "gamma",
-        "contrast_limits",
-        "iso_threshold",
-        "attenuation",
-    }
     controls: dict[str, Any] = {}
-    metadata: dict[str, Any] | None = None
-    data: dict[str, Any] | None = None
-    thumbnail: dict[str, Any] | None = None
+    for key in _CONTROL_KEYS:
+        value = state.get(key)
+        if value is not None:
+            controls[str(key)] = value
+
+    metadata = state.get("metadata")
+    metadata_payload = dict(metadata) if isinstance(metadata, dict) and metadata else None
+
+    thumbnail = state.get("thumbnail")
+    thumbnail_payload = dict(thumbnail) if isinstance(thumbnail, dict) else None
+
+    data_payload: dict[str, Any] | None = None
     removed = False
-
-    for key, value in changes.items():
+    for key, value in state.extra.items():
         skey = str(key)
-        if skey in ctrl_keys:
-            controls[skey] = value
-        elif skey == "metadata":
-            md = dict(value) if isinstance(value, Mapping) else {"value": value}
-            if "thumbnail" in md:
-                th_value = md.pop("thumbnail")
-                thumbnail = {"array": th_value}
-            metadata = md
-        elif skey == "thumbnail":
-            thumbnail = dict(value) if isinstance(value, Mapping) else {"array": value}
-        elif skey == "removed" and bool(value):
-            removed = True
-        else:
-            if data is None:
-                data = {}
-            data[skey] = value
+        if skey == "removed":
+            removed = bool(value)
+            continue
+        if data_payload is None:
+            data_payload = {}
+        data_payload[skey] = value
 
-    return (controls or None), metadata, data, thumbnail, removed
+    return (
+        controls or None,
+        metadata_payload,
+        data_payload,
+        thumbnail_payload,
+        removed,
+    )
 
 
 async def broadcast_layers_delta(
     server: Any,
     *,
     layer_id: Optional[str],
-    changes: Mapping[str, Any],
+    state: LayerVisualState,
     intent_id: Optional[str],
     timestamp: Optional[float],
     targets: Optional[Sequence[Any]] = None,
 ) -> None:
-    if not changes:
+    if not state.keys() and not state.extra and not state.metadata and state.thumbnail is None:
         return
 
-    controls, metadata, data, thumbnail, removed = classify_layer_changes(changes)
+    controls, metadata, data, thumbnail, removed = _split_layer_visual_state(state)
+    if not any((controls, metadata, data, thumbnail)) and not removed:
+        return
+
+    resolved_layer_id = layer_id or state.layer_id or "layer-0"
+
     payload = build_notify_layers_payload(
-        layer_id=layer_id or "layer-0",
+        layer_id=resolved_layer_id,
         controls=controls,
         metadata=metadata,
         data=data,
@@ -152,20 +164,21 @@ async def send_layer_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) 
 async def send_layer_baseline(
     server: Any,
     ws: Any,
-    default_controls: Sequence[tuple[str, Mapping[str, Any]]],
+    default_visuals: Sequence[LayerVisualState],
 ) -> None:
-    if not default_controls:
+    if not default_visuals:
         return
 
     store = history_store(server)
     if store is not None:
         now = __import__("time").time()
-        for layer_id, changes in default_controls:
-            # Classify the mapping so 'metadata' or 'thumbnail' nested
-            # in the provided mapping do not leak into controls.
-            controls, metadata, data, thumbnail, removed = classify_layer_changes(changes)
+        for visual in default_visuals:
+            controls, metadata, data, thumbnail, removed = _split_layer_visual_state(visual)
+            if not any((controls, metadata, data, thumbnail)) and not removed:
+                continue
+            resolved_layer_id = visual.layer_id or "layer-0"
             payload = build_notify_layers_payload(
-                layer_id=layer_id or "layer-0",
+                layer_id=resolved_layer_id,
                 controls=controls,
                 metadata=metadata,
                 data=data,
@@ -181,11 +194,11 @@ async def send_layer_baseline(
             await send_layer_snapshot(server, ws, snapshot)
         return
 
-    for layer_id, changes in default_controls:
+    for visual in default_visuals:
         await broadcast_layers_delta(
             server,
-            layer_id=layer_id,
-            changes=changes,
+            layer_id=visual.layer_id,
+            state=visual,
             intent_id=None,
             timestamp=__import__("time").time(),
             targets=[ws],
@@ -194,7 +207,6 @@ async def send_layer_baseline(
 
 __all__ = [
     "broadcast_layers_delta",
-    "classify_layer_changes",
     "send_layer_baseline",
     "send_layer_snapshot",
 ]

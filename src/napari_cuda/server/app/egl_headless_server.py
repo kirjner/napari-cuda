@@ -10,7 +10,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -90,6 +90,7 @@ from napari_cuda.server.runtime.worker import (
 )
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
+    LayerVisualState,
     RenderLedgerSnapshot,
     RenderMode,
     RenderUpdate,
@@ -261,14 +262,14 @@ class EGLHeadlessServer:
         )
         async def _mirror_layer_broadcast(
             layer_id: str,
-            changes: Mapping[str, object],
+            state: LayerVisualState,
             intent_id: Optional[str],
             timestamp: float,
         ) -> None:
             await broadcast_layers_delta(
                 self,
                 layer_id=layer_id,
-                changes=changes,
+                state=state,
                 intent_id=intent_id,
                 timestamp=timestamp,
             )

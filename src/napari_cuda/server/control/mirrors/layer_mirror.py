@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import threading
-from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Optional
 
+from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
-BroadcastFn = Callable[[str, Mapping[str, object], Optional[str], float], Awaitable[None]]
+BroadcastFn = Callable[[str, LayerVisualState, Optional[str], float], Awaitable[None]]
 DefaultLayerResolver = Callable[[], Optional[str]]
 
 
@@ -22,9 +22,12 @@ _ALLOWED_LAYER_KEYS = {
     "gamma",
     "colormap",
     "contrast_limits",
+    "depiction",
+    "rendering",
     "attenuation",
     "iso_threshold",
     "metadata",
+    "thumbnail",
 }
 
 
@@ -46,11 +49,11 @@ class ServerLayerMirror:
         self._lock = threading.Lock()
         self._started = False
         self._op_open = False
-        self._pending: dict[str, dict[str, object]] = {}
+        self._pending: dict[str, set[str]] = {}
         self._pending_versions: dict[tuple[str, str], int] = {}
         self._pending_intents: dict[str, Optional[str]] = {}
         self._last_versions: dict[tuple[str, str], int] = {}
-        self._latest_controls: dict[str, dict[str, object]] = defaultdict(dict)
+        self._latest_states: dict[str, LayerVisualState] = {}
         self._ndisplay: Optional[int] = None
 
     # ------------------------------------------------------------------
@@ -60,20 +63,42 @@ class ServerLayerMirror:
                 raise RuntimeError("ServerLayerMirror already started")
             self._started = True
         snapshot = self._ledger.snapshot()
+        ledger_snapshot = build_ledger_snapshot(self._ledger, snapshot)
         nd_entry = snapshot.get(("view", "main", "ndisplay"))
         with self._lock:
             if nd_entry is not None and nd_entry.value is not None:
                 self._ndisplay = int(nd_entry.value)
+            self._pending.clear()
+            self._pending_versions.clear()
+            self._pending_intents.clear()
+            self._last_versions.clear()
+            self._latest_states.clear()
+            layer_values = ledger_snapshot.layer_values or {}
+            for layer_id, layer_state in layer_values.items():
+                norm_id = str(layer_id)
+                self._latest_states[norm_id] = layer_state
+                if layer_state.versions:
+                    for prop, version in layer_state.versions.items():
+                        self._last_versions[(norm_id, str(prop))] = int(version)
         for (scope, target, key), entry in snapshot.items():
-            self._record_snapshot(scope, target, key, entry.value, entry.version)
+            if scope not in {"volume", "multiscale"}:
+                continue
+            self._record_snapshot(
+                scope,
+                target,
+                key,
+                entry.value,
+                entry.version,
+                finalize=True,
+            )
         self._ledger.subscribe("scene", "main", "op_state", self._on_op_state)
         self._ledger.subscribe("view", "main", "ndisplay", self._on_ndisplay)
         self._ledger.subscribe_all(self._on_event)
 
     # ------------------------------------------------------------------
-    def latest_controls(self) -> dict[str, dict[str, object]]:
+    def latest_visual_states(self) -> dict[str, LayerVisualState]:
         with self._lock:
-            return {layer: dict(props) for layer, props in self._latest_controls.items() if props}
+            return dict(self._latest_states)
 
     def reset(self) -> None:
         with self._lock:
@@ -81,14 +106,14 @@ class ServerLayerMirror:
             self._pending_versions.clear()
             self._pending_intents.clear()
             self._last_versions.clear()
-            self._latest_controls.clear()
+            self._latest_states.clear()
             self._op_open = False
             self._ndisplay = None
 
     # ------------------------------------------------------------------
     def _on_op_state(self, event: LedgerEvent) -> None:
         value = str(event.value)
-        to_flush: dict[str, dict[str, object]] = {}
+        to_flush: dict[str, set[str]] = {}
         intents: dict[str, Optional[str]] = {}
         with self._lock:
             if value == "open":
@@ -111,11 +136,22 @@ class ServerLayerMirror:
             previous_enabled = self._volume_enabled_locked()
             self._ndisplay = value
             if previous_enabled and not self._volume_enabled_locked():
-                for layer_id, props in list(self._latest_controls.items()):
-                    for key in [k for k in props if k.startswith("volume.")]:
-                        props.pop(key, None)
-                    if not props:
-                        self._latest_controls.pop(layer_id, None)
+                for layer_id, state in list(self._latest_states.items()):
+                    volume_keys = [
+                        key for key in state.extra.keys() if str(key).startswith("volume.")
+                    ]
+                    if not volume_keys:
+                        continue
+                    updates = {key: None for key in volume_keys}
+                    version_updates = {key: None for key in volume_keys}
+                    pruned = state.with_updates(
+                        updates=updates,
+                        versions=version_updates,
+                    )
+                    self._latest_states[layer_id] = pruned
+                    for key in volume_keys:
+                        self._last_versions.pop((layer_id, key), None)
+                        self._pending_versions.pop((layer_id, key), None)
 
     # ------------------------------------------------------------------
     def _on_event(self, event: LedgerEvent) -> None:
@@ -125,26 +161,36 @@ class ServerLayerMirror:
             return
         if scope not in {"layer", "volume", "multiscale"}:
             return
-        to_flush: Optional[dict[str, dict[str, object]]] = None
+        to_flush: Optional[dict[str, set[str]]] = None
         intents: dict[str, Optional[str]] = {}
         with self._lock:
             layer_id, prop, value = self._map_event_locked(event)
             if layer_id is None or prop is None:
                 return
-            version = event.version
-            if version is None:
+            version_obj = event.version
+            if version_obj is None:
                 raise AssertionError("ledger layer event missing version")
-            version_int = int(version)
+            version_int = int(version_obj)
             key = (layer_id, prop)
             last = self._last_versions.get(key)
             if last is not None and last == version_int:
                 return
-            self._latest_controls[layer_id][prop] = value
-            pending_props = self._pending.setdefault(layer_id, {})
-            pending_props[prop] = value
+            updates = {prop: value}
+            version_map = {prop: version_int}
+            self._update_state_locked(
+                layer_id,
+                updates=updates,
+                versions=version_map,
+                finalize=False,
+            )
+            pending_props = self._pending.setdefault(layer_id, set())
+            pending_props.add(prop)
             self._pending_versions[key] = version_int
             if event.metadata and "intent_id" in event.metadata:
-                self._pending_intents[layer_id] = event.metadata.get("intent_id")
+                intent_value = event.metadata.get("intent_id")
+                self._pending_intents[layer_id] = (
+                    None if intent_value is None else str(intent_value)
+                )
             if not self._op_open:
                 to_flush = self._drain_pending_locked()
                 intents = self._pending_intents
@@ -153,27 +199,32 @@ class ServerLayerMirror:
             self._flush(to_flush, intents, event.timestamp)
 
     # ------------------------------------------------------------------
-    def _drain_pending_locked(self) -> dict[str, dict[str, object]]:
+    def _drain_pending_locked(self) -> dict[str, set[str]]:
         pending = self._pending
         self._pending = {}
-        return {layer: dict(props) for layer, props in pending.items() if props}
+        return {layer: set(props) for layer, props in pending.items() if props}
 
     # ------------------------------------------------------------------
     def _flush(
         self,
-        pending: dict[str, dict[str, object]],
+        pending: dict[str, set[str]],
         intents: dict[str, Optional[str]],
         timestamp: float,
     ) -> None:
-        for layer_id, changes in pending.items():
-            key = tuple(changes.keys())
-            for prop in key:
+        for layer_id, props in pending.items():
+            state = self._latest_states.get(layer_id)
+            if state is None or not props:
+                continue
+            subset = state.subset(props)
+            if not subset.keys():
+                continue
+            for prop in props:
                 version = self._pending_versions.pop((layer_id, prop), None)
                 if version is not None:
                     self._last_versions[(layer_id, prop)] = version
             intent_id = intents.get(layer_id)
             self._schedule(
-                self._broadcaster(layer_id, changes, intent_id, timestamp),
+                self._broadcaster(layer_id, subset, intent_id, timestamp),
                 f"mirror-layer-{layer_id}",
             )
 
@@ -209,26 +260,65 @@ class ServerLayerMirror:
         key: str,
         value: object,
         version: object | None,
+        *,
+        finalize: bool = False,
     ) -> None:
         with self._lock:
+            layer_id: Optional[str] = None
+            prop_name: Optional[str] = None
             if scope == "layer":
                 if key not in _ALLOWED_LAYER_KEYS:
                     return
                 layer_id = str(target)
-                version_int = int(version) if version is not None else None
-                self._latest_controls[layer_id][key] = value
-                if version_int is not None:
-                    self._last_versions[(layer_id, key)] = version_int
-                return
-            if scope in {"volume", "multiscale"} and self._volume_enabled_locked():
+                prop_name = str(key)
+            elif scope in {"volume", "multiscale"}:
+                if not self._volume_enabled_locked():
+                    return
                 layer_id = str(target) if str(target).startswith("layer") else self._default_layer()
                 if layer_id is None:
                     return
-                namespaced = f"{scope}.{key}"
-                version_int = int(version) if version is not None else None
-                self._latest_controls[layer_id][namespaced] = value
-                if version_int is not None:
-                    self._last_versions[(layer_id, namespaced)] = version_int
+                prop_name = f"{scope}.{key}"
+            else:
+                return
+
+            assert layer_id is not None and prop_name is not None
+
+            version_map: dict[str, int | None] | None = None
+            if version is not None:
+                version_map = {prop_name: int(version)}
+
+            updates = {prop_name: value}
+            self._update_state_locked(
+                layer_id,
+                updates=updates,
+                versions=version_map,
+                finalize=finalize,
+            )
+
+    def _update_state_locked(
+        self,
+        layer_id: str,
+        *,
+        updates: Mapping[str, object] | None = None,
+        versions: Mapping[str, int | None] | None = None,
+        finalize: bool,
+    ) -> LayerVisualState:
+        state = self._latest_states.get(layer_id)
+        if state is None:
+            state = LayerVisualState(layer_id=layer_id)
+        updates_payload = {str(key): value for key, value in (updates or {}).items()}
+        versions_payload = (
+            {str(key): (None if value is None else int(value)) for key, value in versions.items()}
+            if versions
+            else None
+        )
+        state = state.with_updates(updates=updates_payload, versions=versions_payload)
+        self._latest_states[layer_id] = state
+        if finalize and versions_payload:
+            for key, value in versions_payload.items():
+                if value is not None:
+                    self._last_versions[(layer_id, key)] = int(value)
+        return state
 
     def _volume_enabled_locked(self) -> bool:
         value = self._ndisplay

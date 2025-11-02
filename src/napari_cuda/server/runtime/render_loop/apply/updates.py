@@ -91,48 +91,6 @@ def _normalize_layer_state(state: LayerVisualState) -> LayerVisualState:
         extra=extra,
         versions=versions,
     )
-def _layer_state_subset(layer_state: LayerVisualState, props: Iterable[str]) -> LayerVisualState:
-    prop_set = {str(p) for p in props}
-    versions_subset = {
-        str(key): int(value)
-        for key, value in layer_state.versions.items()
-        if str(key) in prop_set
-    }
-
-    kwargs: dict[str, Any] = {"layer_id": layer_state.layer_id}
-    for field_name in (
-        "visible",
-        "opacity",
-        "blending",
-        "interpolation",
-        "colormap",
-        "gamma",
-        "contrast_limits",
-        "depiction",
-        "rendering",
-        "attenuation",
-        "iso_threshold",
-    ):
-        if field_name in prop_set:
-            value = getattr(layer_state, field_name)
-            if value is not None:
-                kwargs[field_name] = value
-    if "metadata" in prop_set:
-        kwargs["metadata"] = dict(layer_state.metadata) if layer_state.metadata else {}
-    if "thumbnail" in prop_set:
-        kwargs["thumbnail"] = (
-            dict(layer_state.thumbnail)
-            if layer_state.thumbnail is not None
-            else None
-        )
-
-    extra_subset = {str(k): v for k, v in layer_state.extra.items() if str(k) in prop_set}
-    if extra_subset:
-        kwargs["extra"] = extra_subset
-    if versions_subset:
-        kwargs["versions"] = versions_subset
-
-    return LayerVisualState(**kwargs)
 
 
 def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
@@ -289,7 +247,7 @@ def extract_layer_changes(
             changed_props = list(layer_state.keys())
 
         if changed_props:
-            layer_changes[str(layer_id)] = _layer_state_subset(layer_state, changed_props)
+            layer_changes[str(layer_id)] = layer_state.subset(changed_props)
 
     return layer_changes
 

@@ -76,6 +76,7 @@ from napari_cuda.server.runtime.render_loop.apply_interface import (
 )
 from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import (
+    LayerVisualState,
     RenderLedgerSnapshot,
     RenderUpdate,
     snapshot_layer_controls,
@@ -770,14 +771,14 @@ class StateServerHarness:
         )
         async def _layer_mirror_broadcast(
             layer_id: str,
-            changes: Mapping[str, object],
+            state: LayerVisualState,
             intent_id: Optional[str],
             timestamp: float,
         ) -> None:
             await broadcast_layers_delta(
                 server,
                 layer_id=layer_id,
-                changes=changes,
+                state=state,
                 intent_id=intent_id,
                 timestamp=timestamp,
             )

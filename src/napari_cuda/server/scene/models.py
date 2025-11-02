@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Literal, Optional
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterable, Mapping, Literal, Optional
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ class LayerVisualState:
                 mapping[key] = value
         return mapping
 
-    def version_dict(self) -> dict[str, int]:  # legacy helper used by existing call sites
+    def version_dict(self) -> dict[str, int]:
         return {str(key): int(value) for key, value in self.versions.items()}
 
     def keys(self) -> tuple[str, ...]:
@@ -157,6 +157,126 @@ class LayerVisualState:
         if key == "thumbnail":
             return dict(self.thumbnail) if self.thumbnail is not None else None
         return self.extra.get(key)
+
+    def subset(self, props: Iterable[str]) -> "LayerVisualState":
+        prop_set = {str(prop) for prop in props}
+        versions_subset = {
+            str(key): int(value)
+            for key, value in self.versions.items()
+            if str(key) in prop_set
+        }
+
+        kwargs: dict[str, Any] = {"layer_id": self.layer_id}
+
+        for field_name in (
+            "visible",
+            "opacity",
+            "blending",
+            "interpolation",
+            "colormap",
+            "gamma",
+            "contrast_limits",
+            "depiction",
+            "rendering",
+            "attenuation",
+            "iso_threshold",
+        ):
+            if field_name in prop_set:
+                value = getattr(self, field_name)
+                if value is not None:
+                    kwargs[field_name] = value
+
+        if "metadata" in prop_set:
+            kwargs["metadata"] = dict(self.metadata) if self.metadata else {}
+        if "thumbnail" in prop_set:
+            kwargs["thumbnail"] = (
+                dict(self.thumbnail) if self.thumbnail is not None else None
+            )
+
+        extra_subset = {
+            str(key): value
+            for key, value in self.extra.items()
+            if str(key) in prop_set
+        }
+        if extra_subset:
+            kwargs["extra"] = extra_subset
+        if versions_subset:
+            kwargs["versions"] = versions_subset
+
+        return LayerVisualState(**kwargs)
+
+    def with_updates(
+        self,
+        *,
+        updates: Mapping[str, Any],
+        versions: Mapping[str, int | None] | None = None,
+    ) -> "LayerVisualState":
+        state = self
+        if updates:
+            base_kwargs: dict[str, Any] = {}
+            extra_updates: dict[str, Any] | None = None
+            for key, value in updates.items():
+                skey = str(key)
+                if skey == "visible":
+                    base_kwargs["visible"] = None if value is None else bool(value)
+                elif skey == "opacity":
+                    base_kwargs["opacity"] = None if value is None else float(value)
+                elif skey == "blending":
+                    base_kwargs["blending"] = None if value is None else str(value)
+                elif skey == "interpolation":
+                    base_kwargs["interpolation"] = None if value is None else str(value)
+                elif skey == "colormap":
+                    base_kwargs["colormap"] = None if value is None else str(value)
+                elif skey == "gamma":
+                    base_kwargs["gamma"] = None if value is None else float(value)
+                elif skey == "contrast_limits":
+                    base_kwargs["contrast_limits"] = (
+                        None
+                        if value is None
+                        else tuple(float(component) for component in value)  # type: ignore[arg-type]
+                    )
+                elif skey == "depiction":
+                    base_kwargs["depiction"] = None if value is None else str(value)
+                elif skey == "rendering":
+                    base_kwargs["rendering"] = None if value is None else str(value)
+                elif skey == "attenuation":
+                    base_kwargs["attenuation"] = (
+                        None if value is None else float(value)
+                    )
+                elif skey == "iso_threshold":
+                    base_kwargs["iso_threshold"] = (
+                        None if value is None else float(value)
+                    )
+                elif skey == "metadata":
+                    base_kwargs["metadata"] = (
+                        dict(value) if isinstance(value, Mapping) else {}
+                    )
+                elif skey == "thumbnail":
+                    base_kwargs["thumbnail"] = (
+                        dict(value) if isinstance(value, Mapping) else None
+                    )
+                else:
+                    if extra_updates is None:
+                        extra_updates = dict(self.extra)
+                    if value is None:
+                        extra_updates.pop(skey, None)
+                    else:
+                        extra_updates[skey] = value
+            if extra_updates is not None:
+                base_kwargs["extra"] = extra_updates
+            state = replace(state, **base_kwargs)
+
+        if versions:
+            current_versions = dict(state.versions)
+            for key, value in versions.items():
+                skey = str(key)
+                if value is None:
+                    current_versions.pop(skey, None)
+                else:
+                    current_versions[skey] = int(value)
+            state = replace(state, versions=current_versions)
+
+        return state
 
 
 __all__ = [

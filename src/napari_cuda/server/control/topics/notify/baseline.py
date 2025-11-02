@@ -21,6 +21,7 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
 )
+from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from .dims import broadcast_dims_state
 from .layers import (
     send_layer_baseline,
@@ -57,8 +58,8 @@ async def orchestrate_connect(
         viewer_settings=_viewer_settings(server),
     )
 
-    default_controls = _collect_default_controls(server, scene_snapshot)
-    _record_default_controls(server, layers_plan, default_controls)
+    default_visuals = _collect_default_visuals(server, scene_snapshot)
+    _record_default_visuals(server, layers_plan, default_visuals)
 
     await send_scene_baseline(
         server,
@@ -73,7 +74,7 @@ async def orchestrate_connect(
         server,
         ws,
         plan=layers_plan,
-        default_controls=default_controls,
+        default_visuals=default_visuals,
     )
     await _emit_stream_baseline(server, ws, plan=stream_plan)
 
@@ -106,67 +107,96 @@ def _viewer_settings(server: Any) -> dict[str, Any]:
     }
 
 
-def _collect_default_controls(
+def _collect_default_visuals(
     server: Any,
     scene_snapshot: SceneSnapshot,
-) -> list[tuple[str, Mapping[str, Any]]]:
-    layer_controls_map: dict[str, Mapping[str, Any]] = {}
-    mirror = server._layer_mirror
+) -> list[LayerVisualState]:
+    mirror = getattr(server, "_layer_mirror", None)
+    visual_map: dict[str, LayerVisualState] = {}
     if mirror is not None:
-        layer_controls_map = mirror.latest_controls()
+        visual_map = mirror.latest_visual_states()
     else:
-        logger.debug("layer mirror not initialised; falling back to scene snapshot controls")
+        logger.debug("layer mirror not initialised; falling back to ledger snapshot controls")
+        snapshot = build_ledger_snapshot(server._state_ledger)
+        layer_values = snapshot.layer_values or {}
+        visual_map = {str(layer_id): state for layer_id, state in layer_values.items()}
 
-    defaults: list[tuple[str, Mapping[str, Any]]] = []
+    defaults: list[LayerVisualState] = []
     for layer_snapshot in scene_snapshot.layers:
         layer_id = layer_snapshot.layer_id
         if not layer_id:
             continue
-
-        controls: dict[str, Any] = dict(layer_controls_map.get(layer_id, {}))
-        if not controls:
+        state = visual_map.get(layer_id)
+        if state is None:
+            updates: dict[str, Any] = {}
             block_controls = layer_snapshot.block.get("controls")
             if isinstance(block_controls, Mapping):
-                controls.update({str(key): value for key, value in block_controls.items()})
+                updates.update({str(key): value for key, value in block_controls.items()})
+            metadata_block = layer_snapshot.block.get("metadata")
+            if isinstance(metadata_block, Mapping) and metadata_block:
+                updates["metadata"] = dict(metadata_block)
+            if updates:
+                state = LayerVisualState(layer_id=layer_id).with_updates(updates=updates)
+        if state is not None:
+            defaults.append(state)
 
-        metadata_block = layer_snapshot.block.get("metadata")
-        if isinstance(metadata_block, Mapping) and metadata_block:
-            controls.setdefault("metadata", dict(metadata_block))
-
-        if controls:
-            defaults.append((layer_id, controls))
+    # Include any additional layers not represented in the scene snapshot ordering.
+    for layer_id, state in visual_map.items():
+        if not any(existing.layer_id == layer_id for existing in defaults):
+            defaults.append(state)
     return defaults
 
 
-def _record_default_controls(
+_DEFAULT_LAYER_KEYS = {
+    "visible",
+    "opacity",
+    "blending",
+    "interpolation",
+    "colormap",
+    "rendering",
+    "gamma",
+    "contrast_limits",
+    "iso_threshold",
+    "attenuation",
+    "metadata",
+}
+
+
+def _record_default_visuals(
     server: Any,
     plan: ResumePlan | None,
-    default_controls: Sequence[tuple[str, Mapping[str, Any]]],
+    default_visuals: Sequence[LayerVisualState],
 ) -> None:
-    if not default_controls:
+    if not default_visuals:
         return
     if plan is not None and plan.decision == ResumeDecision.REPLAY and plan.deltas:
         # Let replay handle the rehydration.
         return
 
-    for layer_id, controls in default_controls:
+    for visual in default_visuals:
+        layer_id = visual.layer_id
         if not layer_id:
             continue
-        for key, raw_value in controls.items():
+        for key in visual.keys():
+            if key not in _DEFAULT_LAYER_KEYS:
+                continue
+            raw_value = visual.get(key)
+            if raw_value is None:
+                continue
             entry = server._state_ledger.get("layer", layer_id, key)
             if entry is not None:
                 continue
             if key == "contrast_limits" and isinstance(raw_value, (list, tuple)):
                 lo, hi = float(raw_value[0]), float(raw_value[1])
                 normalized_value: Any = (lo, hi)
-            elif key in {"opacity", "gamma"}:
+            elif key in {"opacity", "gamma", "attenuation", "iso_threshold"}:
                 normalized_value = float(raw_value)
-            elif key in {"blending", "interpolation", "colormap"}:
+            elif key in {"blending", "interpolation", "colormap", "rendering"}:
                 normalized_value = str(raw_value)
             elif key == "visible":
                 normalized_value = bool(raw_value)
-            elif isinstance(raw_value, list):
-                normalized_value = tuple(raw_value)
+            elif key == "metadata":
+                normalized_value = dict(raw_value)
             else:
                 normalized_value = raw_value
             server._state_ledger.record_confirmed(
@@ -207,7 +237,7 @@ async def _emit_layer_baseline(
     ws: Any,
     *,
     plan: ResumePlan | None,
-    default_controls: Sequence[tuple[str, Mapping[str, Any]]],
+    default_visuals: Sequence[LayerVisualState],
 ) -> None:
     store = history_store(server)
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
@@ -216,7 +246,7 @@ async def _emit_layer_baseline(
                 await send_layer_snapshot(server, ws, snapshot)
             return
 
-    await send_layer_baseline(server, ws, default_controls)
+    await send_layer_baseline(server, ws, default_visuals)
 
 
 async def _emit_stream_baseline(

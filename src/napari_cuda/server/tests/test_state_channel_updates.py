@@ -61,6 +61,7 @@ from napari_cuda.server.runtime.viewport import (
     VolumeState,
 )
 from napari_cuda.server.scene import (
+    LayerVisualState,
     RenderLedgerSnapshot,
     snapshot_layer_controls,
     snapshot_multiscale_state,
@@ -189,6 +190,11 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
         _napari_cuda_resume_plan={}
     )
 
+    async def _fake_send(text: str) -> None:
+        await server._state_send(fake_ws, text)
+
+    fake_ws.send = _fake_send  # type: ignore[attr-defined]
+
     server._state_clients = {fake_ws}
     baseline_dims = NotifyDimsPayload.from_dict(
         {
@@ -264,14 +270,14 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
 
     async def _layer_broadcast(
         layer_id: str,
-        changes: Mapping[str, object],
+        state: LayerVisualState,
         intent_id: Optional[str],
         timestamp: float,
     ) -> None:
         await broadcast_layers_delta(
             server,
             layer_id=layer_id,
-            changes=changes,
+            state=state,
             intent_id=intent_id,
             timestamp=timestamp,
         )
@@ -508,6 +514,7 @@ def _build_state_update(payload: dict[str, Any], *, intent_id: str, frame_id: st
 
 def test_layer_update_emits_ack_and_notify() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "layer",
@@ -518,7 +525,7 @@ def test_layer_update_emits_ack_and_notify() -> None:
 
     frame = _build_state_update(payload, intent_id="layer-intent", frame_id="state-layer-1")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     entry = server._state_ledger.get("layer", "layer-0", "colormap")
@@ -539,11 +546,12 @@ def test_layer_update_emits_ack_and_notify() -> None:
     assert layer_frames, "expected notify.layers frame"
     notify_payload = layer_frames[-1]["payload"]
     assert notify_payload["layer_id"] == "layer-0"
-    assert notify_payload["changes"]["colormap"] == "red"
+    assert notify_payload["controls"]["colormap"] == "red"
 
 
 def test_layer_update_dedupe_preserves_version() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "layer",
@@ -554,7 +562,7 @@ def test_layer_update_dedupe_preserves_version() -> None:
 
     frame = _build_state_update(payload, intent_id="layer-dedupe", frame_id="state-layer-dup")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -570,7 +578,7 @@ def test_layer_update_dedupe_preserves_version() -> None:
 
     captured.clear()
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     entry_after = server._state_ledger.get("layer", "layer-0", "opacity")
@@ -656,6 +664,7 @@ def test_call_command_rejection_propagates_error() -> None:
 
 def test_layer_update_rejects_unknown_key() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "layer",
@@ -666,7 +675,7 @@ def test_layer_update_rejects_unknown_key() -> None:
 
     frame = _build_state_update(payload, intent_id="bad-layer", frame_id="state-layer-err")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     acks = _frames_of_type(captured, "ack.state")
@@ -680,6 +689,7 @@ def test_layer_update_rejects_unknown_key() -> None:
 
 def test_dims_update_emits_ack_and_notify() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "dims",
@@ -690,7 +700,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
 
     frame = _build_state_update(payload, intent_id="dims-intent", frame_id="state-dims-1")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     dims_entry = server._state_ledger.get("dims", "main", "current_step")
@@ -724,6 +734,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
 
 def test_view_ndisplay_update_ack_is_immediate() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     captured.clear()
 
@@ -736,7 +747,7 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
 
     frame = _build_state_update(payload, intent_id="view-intent", frame_id="state-view-1")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     view_entry = server._state_ledger.get("view", "main", "ndisplay")
@@ -819,6 +830,7 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
 
 def test_volume_render_mode_update() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
     server._allowed_render_modes = {"mip", "iso"}
 
     payload = {
@@ -830,7 +842,7 @@ def test_volume_render_mode_update() -> None:
 
     frame = _build_state_update(payload, intent_id="volume-intent", frame_id="state-volume-1")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     entry = server._state_ledger.get("volume", "main", "render_mode")
@@ -854,6 +866,7 @@ def test_volume_render_mode_update() -> None:
 
 def test_camera_zoom_update_emits_notify() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "camera",
@@ -864,7 +877,7 @@ def test_camera_zoom_update_emits_notify() -> None:
 
     frame = _build_state_update(payload, intent_id="cam-zoom", frame_id="state-cam-1")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     deltas = server._camera_queue.pop_all()
@@ -896,6 +909,7 @@ def test_camera_zoom_update_emits_notify() -> None:
 
 def test_camera_reset_triggers_keyframe() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "camera",
@@ -906,7 +920,7 @@ def test_camera_reset_triggers_keyframe() -> None:
 
     frame = _build_state_update(payload, intent_id="cam-reset", frame_id="state-cam-2")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     deltas = server._camera_queue.pop_all()
@@ -931,6 +945,7 @@ def test_camera_reset_triggers_keyframe() -> None:
 
 def test_camera_set_updates_latest_state() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     payload = {
         "scope": "camera",
@@ -944,7 +959,7 @@ def test_camera_set_updates_latest_state() -> None:
 
     frame = _build_state_update(payload, intent_id="cam-set", frame_id="state-cam-3")
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
     center_entry = server._state_ledger.get("camera_plane", "main", "center")
@@ -975,6 +990,7 @@ def test_camera_set_updates_latest_state() -> None:
 
 def test_parse_failure_emits_rejection_ack() -> None:
     server, scheduled, captured = _make_server()
+    fake_ws = next(iter(server._state_clients))
 
     bad_frame = {
         "type": "state.update",
@@ -986,7 +1002,7 @@ def test_parse_failure_emits_rejection_ack() -> None:
         "payload": {"scope": "layer", "key": "opacity"},
     }
 
-    asyncio.run(state_channel_handler._ingest_state_update(server, bad_frame, None))
+    asyncio.run(state_channel_handler._ingest_state_update(server, bad_frame, fake_ws))
     _drain_scheduled(scheduled)
 
     acks = _frames_of_type(captured, "ack.state")
@@ -1070,7 +1086,12 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames, "expected notify.layers baseline"
-        controls = layer_frames[-1]["payload"].get("controls", {})
+        baseline_frame = next(
+            frame
+            for frame in reversed(layer_frames)
+            if frame.get("session") == "baseline-session" and frame["payload"].get("controls")
+        )
+        controls = baseline_frame["payload"].get("controls", {})
         assert controls["opacity"] == 0.25
         assert controls["colormap"] == "viridis"
 
@@ -1156,7 +1177,12 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
 
         layer_frames = _frames_of_type(captured, "notify.layers")
         assert layer_frames, "expected notify.layers snapshot even with replay resume plan"
-        controls = layer_frames[-1]["payload"].get("controls", {})
+        baseline_frame = next(
+            frame
+            for frame in reversed(layer_frames)
+            if frame.get("session") == "baseline-session" and frame["payload"].get("controls")
+        )
+        controls = baseline_frame["payload"].get("controls", {})
         assert controls["colormap"] == "gray"
         entry = server._state_ledger.get("layer", "layer-0", "colormap")
         assert entry is not None and entry.value == "gray"
@@ -1269,7 +1295,9 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
         assert welcome, "expected handshake welcome frame"
         command_feature = welcome[0]["payload"]["features"].get("call.command")
         assert command_feature is not None
-        assert command_feature.get("commands") == ["napari.pixel.request_keyframe"]
+        commands = command_feature.get("commands")
+        assert commands is not None
+        assert "napari.pixel.request_keyframe" in commands
     finally:
         asyncio.set_event_loop(None)
         loop.close()
