@@ -1,7 +1,9 @@
-"""Render loop package interfaces."""
+"""Render loop package exports."""
 
-from .plan_interface import RenderPlanInterface
+from .applying.interface import RenderApplyInterface
+from .planning.interface import RenderPlanInterface
 
 __all__ = [
+    "RenderApplyInterface",
     "RenderPlanInterface",
 ]

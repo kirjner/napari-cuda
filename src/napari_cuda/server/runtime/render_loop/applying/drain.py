@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
 from .camera import apply_camera_overrides

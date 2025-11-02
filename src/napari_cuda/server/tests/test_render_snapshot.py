@@ -5,15 +5,15 @@ from types import SimpleNamespace
 import pytest
 
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.render_loop.apply import (
+from napari_cuda.server.runtime.render_loop.applying import (
     apply as snapshot_mod,
     plane as plane_mod,
 )
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.server.runtime.viewport import RenderMode, ViewportState
+from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
 

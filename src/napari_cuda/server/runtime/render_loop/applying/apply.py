@@ -14,10 +14,10 @@ from typing import TYPE_CHECKING, Any
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
 from .plane import (
@@ -311,7 +311,7 @@ def _apply_snapshot_ops(
     if plane_ops["skip_slice"]:
         runner = snapshot_iface.viewport_runner
         if runner is not None:
-            from napari_cuda.server.runtime.viewport.runner import SliceTask
+            from napari_cuda.server.runtime.render_loop.planning.viewport_planner import SliceTask
 
             slice_task = SliceTask(**plane_ops["slice_payload"])
             runner.mark_level_applied(slice_task.level)
@@ -322,4 +322,4 @@ def _apply_snapshot_ops(
     apply_slice_level(snapshot_iface, source, plane_ops["applied_context"])
     update_z_index_from_snapshot(snapshot_iface, snapshot)
     if TYPE_CHECKING:
-        from napari_cuda.server.runtime.viewport.runner import SliceTask
+        from napari_cuda.server.runtime.render_loop.planning.viewport_planner import SliceTask

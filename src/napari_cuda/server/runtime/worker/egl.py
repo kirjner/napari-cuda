@@ -64,12 +64,19 @@ from napari_cuda.server.runtime.ipc.mailboxes import (
 )
 from napari_cuda.server.runtime.lod import level_policy
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop import snapshot_staging
-from napari_cuda.server.runtime.render_loop.apply.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.planning.staging import (
+    consume_render_snapshot,
+    drain_scene_updates,
+    normalize_scene_state,
+)
+from napari_cuda.server.runtime.render_loop.planning.ticks import (
+    capture as capture_tick,
+)
+from napari_cuda.server.runtime.render_loop.applying.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
@@ -81,10 +88,7 @@ from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     order as ledger_order,
     step as ledger_step,
 )
-from napari_cuda.server.runtime.render_loop.ticks import (
-    capture as capture_tick,
-)
-from napari_cuda.server.runtime.viewport import (
+from napari_cuda.server.scene.viewport import (
     RenderMode,
     ViewportState,
 )
@@ -533,7 +537,7 @@ class EGLRendererWorker:
         if azimuth_deg is not None:
             assert self.view is not None and self.view.camera is not None
             self.view.camera.azimuth = float(azimuth_deg)
-        snapshot_staging.drain_scene_updates(self)
+        drain_scene_updates(self)
         t0 = time.perf_counter()
         self.canvas.render()
         self._render_tick_required = False
@@ -556,7 +560,7 @@ class EGLRendererWorker:
         scene_state = None
         if delta.scene_state is not None:
             self._last_interaction_ts = time.perf_counter()
-            scene_state = snapshot_staging.normalize_scene_state(delta.scene_state)
+            scene_state = normalize_scene_state(delta.scene_state)
         if scene_state is not None:
             self._render_mailbox.set_scene_state(scene_state)
             self._mark_render_tick_needed()

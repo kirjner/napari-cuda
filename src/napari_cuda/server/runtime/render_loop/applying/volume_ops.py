@@ -6,7 +6,7 @@ from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
-from .state import VolumeState
+from napari_cuda.server.scene.viewport import VolumeState
 
 
 def assign_pose_from_snapshot(

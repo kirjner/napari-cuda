@@ -9,21 +9,21 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
-from napari_cuda.server.runtime.render_loop.apply import (
+from napari_cuda.server.runtime.render_loop.applying import (
     apply as snapshot_apply,
     drain as snapshot_drain,
     viewport as snapshot_viewport,
 )
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import (
     LayerVisualState,
     RenderLedgerSnapshot,
 )
 
-from .plan_interface import RenderPlanInterface
+from .interface import RenderPlanInterface
 
 apply_render_snapshot = snapshot_apply.apply_render_snapshot
 apply_viewport_state_snapshot = snapshot_viewport.apply_viewport_state_snapshot

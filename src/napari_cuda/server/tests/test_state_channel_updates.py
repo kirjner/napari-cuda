@@ -54,7 +54,7 @@ from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.camera import CameraCommandQueue
-from napari_cuda.server.runtime.viewport import (
+from napari_cuda.server.scene.viewport import (
     PlaneState,
     RenderMode,
     ViewportState,

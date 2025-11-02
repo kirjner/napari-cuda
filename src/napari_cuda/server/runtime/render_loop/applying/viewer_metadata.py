@@ -9,7 +9,7 @@ from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 

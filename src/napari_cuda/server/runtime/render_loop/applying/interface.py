@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from napari_cuda.server.data import SliceROI
 
 if TYPE_CHECKING:
-    from napari_cuda.server.runtime.viewport import ViewportState
-    from napari_cuda.server.runtime.viewport.runner import ViewportRunner
+    from napari_cuda.server.scene.viewport import ViewportState
+    from napari_cuda.server.runtime.render_loop.planning.viewport_planner import ViewportPlanner
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
 
 
@@ -26,7 +26,7 @@ class RenderApplyInterface:
         return self.worker.viewport_state
 
     @property
-    def viewport_runner(self) -> Optional[ViewportRunner]:
+    def viewport_runner(self) -> Optional[ViewportPlanner]:
         return getattr(self.worker, "_viewport_runner", None)
 
     def ensure_scene_source(self):

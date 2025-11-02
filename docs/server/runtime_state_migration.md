@@ -8,7 +8,7 @@ the control/runtime/engine dependency contract this plan works toward.
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply
-- `render_loop.apply.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
+- `render_loop.applying.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
 - `_resolve_snapshot_ops` computes the per-mode metadata (level intent, ROI alignment, slice signature) and `_apply_snapshot_ops` performs the actual mutations, invoking `apply_volume_level` or `apply_slice_level` as needed.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
@@ -23,7 +23,7 @@ the control/runtime/engine dependency contract this plan works toward.
 - ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport/runner.py:214`).
 
 ### 1.4 Worker loop interactions
-- `render_loop.ticks.viewport.run` asks the `ViewportRunner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `render_loop.apply.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
+- `render_loop.ticks.viewport.run` asks the `ViewportPlanner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `render_loop.applying.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
 - Snapshot drain (`egl_worker.py:1488`) rebuilds `SceneStateApplyContext`, updates `_z_index`, `_data_wh`, and mirrors runner state by calling `mark_level_applied` when the staged level matches the target.
 - `ensure_scene_source` and `reset_worker_camera` (server/runtime/worker_runtime.py) mutate `worker._active_ms_level`, `_zarr_*`, `_data_wh`, and depend on `worker.use_volume` to branch camera resets (`worker_runtime.py:16`–`worker_runtime.py:105`).
 
@@ -41,7 +41,7 @@ the control/runtime/engine dependency contract this plan works toward.
 ## 2. Desired End State (steady-state architecture)
 
 ### 2.1 Unified runtime state
-- Replace ad-hoc `ViewportRunnerState` + worker fields with a shared `ViewportState` dataclass containing `PlaneState` and `VolumeState`. This struct should sit in `src/napari_cuda/server/runtime/viewport/state.py`.
+- Replace ad-hoc `ViewportPlannerState` + worker fields with a shared `ViewportState` dataclass containing `PlaneState` and `VolumeState`. This struct should sit in `src/napari_cuda/server/runtime/viewport/state.py`.
 - `PlaneState` owns: controller target (`target_level`, `target_step`, `pose`), applied (`applied_level`, `applied_roi`, signatures), pending reload flags, pose reason, and zoom hints.
 - `VolumeState` owns: current level, cached pose (`center`, `angles`, `distance`, `fov`), downgrade flag, and any cached extents/scale.
 - `ViewportState.mode` (enum) replaces `worker.use_volume`.
@@ -68,7 +68,7 @@ the control/runtime/engine dependency contract this plan works toward.
 ### Stage A — State migration (runner + worker)
 1. Introduce `ViewportState`, `PlaneState`, `VolumeState`, and a `RenderMode` enum.
    ✅ Completed (`fixtures live in src/napari_cuda/server/runtime/viewport/state.py`).
-2. Port `ViewportRunner` to use `ViewportState.plane`, deleting its private state dataclass.
+2. Port `ViewportPlanner` to use `ViewportState.plane`, deleting its private state dataclass.
    ✅ Completed (runner now mutates the shared plane state and tests remain green).
 3. Seed `ViewportState` in `EGLRendererWorker.__init__` (`src/napari_cuda/server/runtime/worker/egl.py:128`). Shim properties:
    - `@property use_volume` → `self.viewport_state.mode is RenderMode.VOLUME`

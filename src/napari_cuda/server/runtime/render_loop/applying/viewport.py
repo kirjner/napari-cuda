@@ -5,10 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Optional
 
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport.state import (
+from napari_cuda.server.scene.viewport import (
     PlaneState,
     RenderMode,
     VolumeState,

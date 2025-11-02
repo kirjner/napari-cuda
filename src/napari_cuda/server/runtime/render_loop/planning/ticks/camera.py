@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Optional
 from napari_cuda.server.runtime.camera.controller import (
     process_camera_deltas as _process_camera_deltas,
 )
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import CameraDeltaCommand
 
-from .. import snapshot_staging
-from ..plan_interface import RenderPlanInterface
+from ..interface import RenderPlanInterface
+from ..staging import drain_scene_updates
 from . import viewport
 
 if TYPE_CHECKING:
@@ -108,7 +108,7 @@ def drain(worker: EGLRendererWorker) -> None:
     if commands:
         result = _apply_commands(worker, commands, reset_policy_suppression=True)
 
-    snapshot_staging.drain_scene_updates(worker)
+    drain_scene_updates(worker)
     viewport.run(worker)
 
     if (

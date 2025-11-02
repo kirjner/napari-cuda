@@ -16,7 +16,7 @@ see `docs/server/architecture.md`.
   delegates to `core.bootstrap.setup_worker_runtime` for state/locks before
   calling `core.bootstrap.init_vispy_scene`, `core.bootstrap.init_egl`,
   capture bootstrap, and seeding the first snapshot.
-- The render thread loops over `render_loop.snapshot_staging.consume_render_snapshot`, then
+- The render thread loops over `render_loop.planning.staging.consume_render_snapshot`, then
   `capture_and_encode_packet`; the latter calls `render_tick`, which runs
   `run_render_tick` (`runtime/worker/loop.py:9`) with worker callbacks.
 - Shutdown runs `cleanup`, reclaiming CUDA/GL resources, encoder state, VisPy
@@ -81,15 +81,15 @@ see `docs/server/architecture.md`.
   `_frame_volume_camera`, `_enter_volume_mode`, `_exit_volume_mode`,
   `_apply_camera_reset`, `_emit_current_camera_pose`, `_emit_pose_from_camera`,
   `_pose_from_camera`, `_snapshot_camera_pose`, `_current_panzoom_rect`,
-  `render_loop.snapshot_staging.apply_viewport_state_snapshot`,
+  `render_loop.planning.staging.apply_viewport_state_snapshot`,
   `render_loop.ticks.camera.process_commands`, `render_loop.ticks.camera.drain`,
   `render_loop.ticks.camera.record_zoom_hint`,
-  `render_loop.snapshot_staging.drain_scene_updates`.
+  `render_loop.planning.staging.drain_scene_updates`.
 - **Shared state:** `_viewport_state`, `_viewport_runner`, `_camera_queue`,
   `_camera_pose_callback`, `_last_plane_pose`, `_last_volume_pose`,
   `_pose_seq`, `_max_camera_command_seq`, `_render_mailbox` zoom hints.
 - **Dependencies:** `CameraCommandQueue`, camera controller helpers
-  (`runtime/camera/controller.py`), `ViewportRunner`, ledger accessors,
+  (`runtime/camera/controller.py`), `ViewportPlanner`, ledger accessors,
   `napari.components.viewer_model.ViewerModel`, VisPy cameras.
 - **Notes:** Camera helpers straddle both the render thread (actual camera
   mutation) and controller notifications (callbacks back to asyncio). The
@@ -98,22 +98,22 @@ see `docs/server/architecture.md`.
 
 ### 4. Snapshot Ingestion & Ledger Coordination
 - **Entry points:** `enqueue_update`,
-  `render_loop.snapshot_staging.consume_render_snapshot`,
-  `render_loop.snapshot_staging.normalize_scene_state`,
-  `render_loop.snapshot_staging.record_snapshot_versions`,
-  `render_loop.snapshot_staging.extract_layer_changes`,
-  `render_loop.snapshot_staging.apply_viewport_state_snapshot`,
-  `render_loop.snapshot_staging.drain_scene_updates`,
-  `render_loop.apply.plane.dims_signature`,
-  `render_loop.apply.plane.apply_dims_from_snapshot`,
-  `render_loop.apply.plane.update_z_index_from_snapshot`,
+  `render_loop.planning.staging.consume_render_snapshot`,
+  `render_loop.planning.staging.normalize_scene_state`,
+  `render_loop.planning.staging.record_snapshot_versions`,
+  `render_loop.planning.staging.extract_layer_changes`,
+  `render_loop.planning.staging.apply_viewport_state_snapshot`,
+  `render_loop.planning.staging.drain_scene_updates`,
+  `render_loop.applying.plane.dims_signature`,
+  `render_loop.applying.plane.apply_dims_from_snapshot`,
+  `render_loop.applying.plane.update_z_index_from_snapshot`,
   `snapshot_dims_metadata`, `_set_dims_range_for_level`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
   `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.render_loop.plan.ledger_access`).
 - **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
-  `napari_cuda.server.scene`), `runtime.render_loop.apply.*`,
-  `runtime.render_loop.snapshot_staging`, `render_loop.apply`,
+  `napari_cuda.server.scene`), `runtime.render_loop.applying.*`,
+  `runtime.render_loop.planning.staging`, `render_loop.apply`,
   ledger interfaces in `ServerStateLedger`.
 - **Notes:** This block is where external updates enter the worker. The
   render-thread snapshot helpers now live under `runtime/render_loop/apply/`,
@@ -123,8 +123,8 @@ see `docs/server/architecture.md`.
 - **Entry points:** `_configure_policy`, `set_policy`,
   `level_policy.build_level_context`, `level_policy.volume_budget_allows`,
   `level_policy.slice_budget_allows`, `level_policy.resolve_volume_intent_level`,
-  `level_policy.load_volume`, `render_loop.apply.plane.apply_slice_level`,
-  `render_loop.apply.plane.aligned_roi_signature`,
+  `level_policy.load_volume`, `render_loop.applying.plane.apply_slice_level`,
+  `render_loop.applying.plane.aligned_roi_signature`,
   `_volume_world_extents`, `_evaluate_level_policy`, `_mark_render_tick_needed`,
   `_mark_render_tick_complete`, `_mark_render_loop_started`,
   `request_multiscale_level`, `_enter_volume_mode`, `_exit_volume_mode`,
@@ -136,7 +136,7 @@ see `docs/server/architecture.md`.
   `_roi_ensure_contains_viewport`, `_slice_max_bytes`, `_volume_*` limits,
   `_hw_limits`, `_log_layer_debug`, `_layer_logger`, `_switch_logger`.
 - **Dependencies:** `level_policy` module (`runtime/lod/level_policy.py`), ROI helpers
-  (`runtime/lod/roi.py`), `ViewportRunner`, `LevelSwitchIntent`, LOD decision
+  (`runtime/lod/roi.py`), `ViewportPlanner`, `LevelSwitchIntent`, LOD decision
   contexts, `ServerStateLedger` (for step/order/axes hints),
   `viewport_roi_for_level`, `apply_plane_metadata`, `apply_volume_metadata`.
 - **Notes:** These helpers blend policy selection with ROI alignment and level
@@ -155,7 +155,7 @@ see `docs/server/architecture.md`.
   checkpoints.
 - **Dependencies:** `render_loop.loop.run_render_tick`, animation helper
   (`runtime/camera/animator.py`), `CaptureFacade` pipeline, `encode_frame`,
-  `CameraCommandQueue`, `ViewportRunner.plan_tick` (indirect via
+  `CameraCommandQueue`, `ViewportPlanner.plan_tick` (indirect via
   `render_loop.apply`), debug dumper.
 - **Notes:** `capture_and_encode_packet` glues together GPU capture, encoder
   access, and metrics collection. Splitting this code requires preserving the
@@ -192,15 +192,15 @@ see `docs/server/architecture.md`.
 2. Worker thread calls `_init_cuda`, `_init_vispy_scene`, `_init_egl`,
    `_init_capture`, `_init_cuda_interop`, `_init_encoder`.
 3. Initial snapshot pulled via `pull_render_snapshot`, handed to
-   `render_loop.snapshot_staging.consume_render_snapshot`, then
-   `render_loop.snapshot_staging.drain_scene_updates` hydrates the mailbox and viewport runner.
+   `render_loop.planning.staging.consume_render_snapshot`, then
+   `render_loop.planning.staging.drain_scene_updates` hydrates the mailbox and viewport runner.
 
 ### Per-frame Loop
 1. Controller snapshot fetched (`pull_render_snapshot`) and passed to
-   `render_loop.snapshot_staging.consume_render_snapshot`.
+   `render_loop.planning.staging.consume_render_snapshot`.
 2. `capture_and_encode_packet` performs:
    - `ticks.camera.drain` → `_process_camera_deltas` →
-     `_viewport_runner.ingest_camera_deltas` and `render_loop.snapshot_staging.drain_scene_updates`.
+     `_viewport_runner.ingest_camera_deltas` and `render_loop.planning.staging.drain_scene_updates`.
    - `render_tick` → `run_render_tick` to render the VisPy canvas and mark tick
      completion.
    - `encode_frame` to map, copy, convert, and encode GPU output.
@@ -248,12 +248,12 @@ see `docs/server/architecture.md`.
 >   layer → visual state to avoid regressions.
 
 ## Extraction Guardrails
-- Preserve `_state_lock` usage: `render_loop.apply.drain_render_state` and
+- Preserve `_state_lock` usage: `render_loop.applying.drain_render_state` and
   `runtime/core/scene_setup.py` expect a re-entrant lock guarding worker state.
 - Maintain `RenderUpdateMailbox` semantics: the mailbox currently coalesces
   viewport state and scene snapshots; extracted helpers should never bypass its
   `set_scene_state` / `drain` contract.
-- Keep `ViewportRunner` mutations centralized: runner state must be updated in
+- Keep `ViewportPlanner` mutations centralized: runner state must be updated in
   tandem with `_viewport_state` to keep level confirmations consistent.
 - Ledger accessor helpers (`_ledger_*`) are consumed by snapshot bootstrap and
   level metadata; move them wholesale with the snapshot module to avoid partial

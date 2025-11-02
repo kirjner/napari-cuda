@@ -9,7 +9,7 @@ from typing import Any
 from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
-from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import LayerVisualState
 
 logger = logging.getLogger(__name__)

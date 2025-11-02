@@ -4,8 +4,8 @@ import pytest
 from vispy.geometry import Rect
 
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.viewport import PlaneState
-from napari_cuda.server.runtime.viewport.plane_ops import (
+from napari_cuda.server.scene.viewport import PlaneState
+from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
     apply_pose_to_camera,
     assign_pose_from_snapshot,
     mark_slice_applied,

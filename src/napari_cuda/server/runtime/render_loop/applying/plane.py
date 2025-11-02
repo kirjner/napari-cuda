@@ -19,16 +19,16 @@ from napari_cuda.server.data import (
 )
 from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport.layers import apply_slice_layer_data
-from napari_cuda.server.runtime.viewport.plane_ops import (
+from napari_cuda.server.runtime.render_loop.applying.layer_data import apply_slice_layer_data
+from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
     apply_pose_to_camera,
     assign_pose_from_snapshot,
     mark_slice_applied,
 )
-from napari_cuda.server.runtime.viewport.state import PlaneState, RenderMode
+from napari_cuda.server.scene.viewport import PlaneState, RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
 from .viewer_metadata import apply_plane_metadata
@@ -485,7 +485,7 @@ def _create_slice_task(
     chunk_shape: tuple[int, int],
     signature: Optional[tuple[int, int, int, int]],
 ):
-    from napari_cuda.server.runtime.viewport.runner import SliceTask
+    from napari_cuda.server.runtime.render_loop.planning.viewport_planner import SliceTask
 
     return SliceTask(
         level=level,

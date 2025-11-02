@@ -18,7 +18,7 @@ from napari_cuda.server.runtime.camera import ops as camops
 from napari_cuda.server.scene import CameraDeltaCommand
 
 if TYPE_CHECKING:
-    from napari_cuda.server.runtime.render_loop.plan_interface import (
+    from napari_cuda.server.runtime.render_loop.planning.interface import (
         RenderPlanInterface,
     )
 

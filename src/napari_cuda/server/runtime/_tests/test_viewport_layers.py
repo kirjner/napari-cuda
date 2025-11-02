@@ -8,7 +8,7 @@ from napari.layers.image._image_constants import (
     ImageRendering as NapariImageRendering,
 )
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.viewport.layers import (
+from napari_cuda.server.runtime.render_loop.applying.layer_data import (
     apply_slice_layer_data,
     apply_volume_layer_data,
 )
@@ -40,11 +40,11 @@ def test_apply_slice_layer_data_updates_layer(monkeypatch: pytest.MonkeyPatch) -
             calls["scale"] = scale
 
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.viewport.layers.SliceDataApplier",
+        "napari_cuda.server.runtime.render_loop.applying.layer_data.SliceDataApplier",
         _FakeApplier,
     )
     monkeypatch.setattr(
-        "napari_cuda.server.runtime.viewport.layers.plane_scale_for_level",
+        "napari_cuda.server.runtime.render_loop.applying.layer_data.plane_scale_for_level",
         lambda _source, _level: (2.0, 3.0),
     )
 

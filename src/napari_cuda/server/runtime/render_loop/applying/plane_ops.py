@@ -13,7 +13,7 @@ from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
-from .state import PlaneState
+from napari_cuda.server.scene.viewport import PlaneState
 
 
 def assign_pose_from_snapshot(

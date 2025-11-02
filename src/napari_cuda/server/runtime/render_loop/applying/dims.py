@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Optional
 
-from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 
 
 def apply_dims_step(worker: Any, current_step: Sequence[int]) -> tuple[Optional[int], bool]:

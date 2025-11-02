@@ -37,7 +37,7 @@ from napari_cuda.server.runtime.bootstrap.setup_visuals import (
     _register_volume_visual,
     _VisualHandle,
 )
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker

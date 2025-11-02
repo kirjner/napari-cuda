@@ -28,7 +28,7 @@ from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     step as ledger_step,
 )
-from napari_cuda.server.runtime.viewport import (
+from napari_cuda.server.scene.viewport import (
     PlaneState,
     RenderMode,
 )

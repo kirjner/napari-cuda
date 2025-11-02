@@ -184,18 +184,15 @@ def setup_worker_runtime(
 ) -> None:
     """Initialize render resources, viewport state, and policy config on the worker."""
 
-    from napari_cuda.server.runtime.viewport import (
-        RenderMode,
-        ViewportRunner,
-        ViewportState,
-    )
+    from napari_cuda.server.scene.viewport import RenderMode, ViewportState
+    from napari_cuda.server.runtime.render_loop.planning.viewport_planner import ViewportPlanner
     from napari_cuda.server.runtime.worker.resources import WorkerResources
 
     logger = logging.getLogger(worker.__class__.__module__)
     viewport_state = ViewportState()
     viewport_state.mode = RenderMode.VOLUME if use_volume else RenderMode.PLANE
     worker._viewport_state = viewport_state  # type: ignore[attr-defined]
-    worker._viewport_runner = ViewportRunner(viewport_state.plane)  # type: ignore[attr-defined]
+    worker._viewport_runner = ViewportPlanner(viewport_state.plane)  # type: ignore[attr-defined]
 
     try:
         worker._animate_dps = float(animate_dps)  # type: ignore[attr-defined]

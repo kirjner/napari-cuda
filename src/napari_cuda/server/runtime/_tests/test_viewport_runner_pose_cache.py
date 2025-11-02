@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from napari_cuda.server.runtime.viewport import PlaneState, ViewportRunner
+from napari_cuda.server.runtime.render_loop.planning.viewport_planner import ViewportPlanner
+from napari_cuda.server.scene.viewport import PlaneState
 
 
 def test_update_camera_rect_ignores_none() -> None:
     plane = PlaneState()
     plane.update_pose(rect=(100.0, 200.0, 300.0, 400.0))
-    runner = ViewportRunner(plane_state=plane)
+    runner = ViewportPlanner(plane_state=plane)
 
     # Sanity: explicit rect updates still apply.
     runner.update_camera_rect((10.0, 20.0, 30.0, 40.0))

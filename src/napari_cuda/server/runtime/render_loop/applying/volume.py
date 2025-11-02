@@ -14,17 +14,17 @@ from napari.layers.image._image_constants import (
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport.layers import apply_volume_layer_data
-from napari_cuda.server.runtime.viewport.volume_ops import (
+from napari_cuda.server.runtime.render_loop.applying.layer_data import apply_volume_layer_data
+from napari_cuda.server.runtime.render_loop.applying.volume_ops import (
     apply_pose_to_camera,
     assign_pose_from_snapshot,
     update_level,
     update_scale,
 )
-from napari_cuda.server.runtime.viewport.state import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
 

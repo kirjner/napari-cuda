@@ -1,4 +1,4 @@
-"""Helpers to apply ViewportRunner plans on behalf of the worker."""
+"""Helpers to apply ViewportPlanner plans on behalf of the worker."""
 
 from __future__ import annotations
 
@@ -6,23 +6,23 @@ import logging
 from typing import TYPE_CHECKING
 
 from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.render_loop.apply.plane import (
+from napari_cuda.server.runtime.render_loop.applying.plane import (
     apply_slice_level,
     apply_slice_roi,
 )
-from napari_cuda.server.runtime.render_loop.apply.viewer_metadata import (
+from napari_cuda.server.runtime.render_loop.applying.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.render_loop.apply.volume import (
+from napari_cuda.server.runtime.render_loop.applying.volume import (
     apply_volume_level,
 )
-from napari_cuda.server.runtime.render_loop.apply_interface import (
+from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 
-from ..plan_interface import RenderPlanInterface
+from ..interface import RenderPlanInterface
 
 if TYPE_CHECKING:
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker

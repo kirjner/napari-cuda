@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.viewport import (
-    PoseEvent,
+from napari_cuda.server.runtime.render_loop.planning.viewport_planner import (
     ViewportOps,
-    ViewportRunner,
+    ViewportPlanner,
 )
+from napari_cuda.server.scene.viewport import PoseEvent
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
@@ -48,7 +48,7 @@ def _roi_resolver(level: int, rect: tuple[float, float, float, float]) -> SliceR
     return SliceROI(int(y0 // 4) * 4, int(y1 // 4) * 4, int(x0 // 4) * 4, int(x1 // 4) * 4)
 
 
-def _apply_ops(runner: ViewportRunner, ops: ViewportOps) -> None:
+def _apply_ops(runner: ViewportPlanner, ops: ViewportOps) -> None:
     if ops.level_change:
         target_level = (
             ops.slice_task.level if ops.slice_task is not None else runner.state.request.level
@@ -59,7 +59,7 @@ def _apply_ops(runner: ViewportRunner, ops: ViewportOps) -> None:
 
 
 def test_level_switch_sets_level_change_flag() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=2))
 
@@ -73,7 +73,7 @@ def test_level_switch_sets_level_change_flag() -> None:
 
 
 def test_repeated_roi_within_chunk_skips_reload() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(rect=(0.0, 0.0, 64.0, 64.0)))
     first = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
@@ -86,7 +86,7 @@ def test_repeated_roi_within_chunk_skips_reload() -> None:
 
 
 def test_roi_reload_triggers_on_chunk_change() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(rect=(0.0, 0.0, 32.0, 32.0)))
     first = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
@@ -99,7 +99,7 @@ def test_roi_reload_triggers_on_chunk_change() -> None:
 
 
 def test_volume_mode_disables_roi_reload() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
 
     ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
@@ -108,7 +108,7 @@ def test_volume_mode_disables_roi_reload() -> None:
 
 
 def test_volume_level_request_does_not_wait_for_confirm() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
 
@@ -122,7 +122,7 @@ def test_volume_level_request_does_not_wait_for_confirm() -> None:
 
 
 def test_volume_pose_emits_only_on_dirty_events() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
     runner.request_level(2)
@@ -140,7 +140,7 @@ def test_volume_pose_emits_only_on_dirty_events() -> None:
 
 
 def test_zoom_hint_consumed_once() -> None:
-    runner = ViewportRunner()
+    runner = ViewportPlanner()
     commands: Sequence[object] = [
         type("Cmd", (), {"kind": "zoom", "factor": 1.2})(),
         type("Cmd", (), {"kind": "zoom", "factor": 0.85})(),

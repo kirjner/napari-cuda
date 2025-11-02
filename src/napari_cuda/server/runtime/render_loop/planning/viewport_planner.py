@@ -1,4 +1,4 @@
-"""ViewportRunner orchestrates per-frame level/ROI decisions on the worker.
+"""ViewportPlanner orchestrates per-frame level/ROI decisions on the worker.
 
 The runner keeps the authoritative view of:
 * what the controller asked us to render (`target_*` fields),
@@ -21,7 +21,7 @@ from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
-from .state import PlaneResult, PlaneState, PoseEvent
+from napari_cuda.server.scene.viewport import PlaneResult, PlaneState, PoseEvent
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class ViewportOps:
     zoom_hint: Optional[float] = None
 
 
-class ViewportRunner:
+class ViewportPlanner:
     """Local decision surface for level and ROI application."""
 
     def __init__(self, plane_state: Optional[PlaneState] = None) -> None:

@@ -16,7 +16,7 @@ from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     step as ledger_step,
 )
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.scene.viewport import RenderMode
 
 from .context import build_level_context
 from .roi import viewport_roi_for_level

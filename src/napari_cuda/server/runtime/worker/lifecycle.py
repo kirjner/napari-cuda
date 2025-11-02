@@ -22,8 +22,11 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
 )
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.render_loop import snapshot_staging
-from napari_cuda.server.runtime.viewport import RenderMode
+from napari_cuda.server.runtime.render_loop.planning.staging import (
+    consume_render_snapshot,
+    drain_scene_updates,
+)
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import (
     pull_render_snapshot,
     snapshot_multiscale_state,
@@ -215,8 +218,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 initial_snapshot = pull_render_snapshot(server)
             else:
                 server._bootstrap_snapshot = None  # type: ignore[attr-defined]
-            snapshot_staging.consume_render_snapshot(worker, initial_snapshot)
-            snapshot_staging.drain_scene_updates(worker)
+            consume_render_snapshot(worker, initial_snapshot)
+            drain_scene_updates(worker)
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -303,7 +306,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     bool(has_camera_deltas),
                     server._animate,
                 )
-                snapshot_staging.consume_render_snapshot(worker, frame_state)
+                consume_render_snapshot(worker, frame_state)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 

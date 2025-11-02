@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Optional
 from napari_cuda.server.engine.api import FrameTimings, encode_frame
 from napari_cuda.server.runtime.camera.animator import animate_if_enabled
 
-from ..loop import run_render_tick
-from ..plan_interface import RenderPlanInterface
+from ...loop import run_render_tick
+from ..interface import RenderPlanInterface
 from . import camera
 
 if TYPE_CHECKING:
