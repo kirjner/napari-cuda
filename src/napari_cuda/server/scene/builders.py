@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import (
     Any,
+    Mapping,
     Optional,
 )
 
@@ -23,6 +24,7 @@ from napari_cuda.protocol.snapshots import (
 from napari_cuda.server.scene.defaults import default_volume_state
 from napari_cuda.server.scene.models import (
     CameraDeltaCommand,
+    LayerVisualState,
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
@@ -308,7 +310,9 @@ def snapshot_scene(
     if layer_controls:
         layer_overrides = layer_controls.get(default_layer_id)
     if layer_overrides is None and render_state.layer_values:
-        layer_overrides = render_state.layer_values.get(default_layer_id)
+        layer_state = render_state.layer_values.get(default_layer_id)
+        if isinstance(layer_state, LayerVisualState):
+            layer_overrides = layer_state.to_mapping()
 
     controls_block = _resolve_layer_controls(layer_overrides)
 
@@ -803,6 +807,43 @@ def _normalize_thumbnail_array(data: Any) -> Optional[np.ndarray]:
     return arr
 
 
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _coerce_contrast_limits(value: Any) -> Optional[tuple[float, float]]:
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        lo_val = _coerce_float(value[0])
+        hi_val = _coerce_float(value[1])
+        if lo_val is None or hi_val is None:
+            return None
+        lo = float(lo_val)
+        hi = float(hi_val)
+        if hi < lo:
+            lo, hi = hi, lo
+        return (lo, hi)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Render ledger snapshots
 
@@ -881,19 +922,73 @@ def build_ledger_snapshot(
         fallback=defaults.get("sample_step"),
     )
 
-    layer_values: dict[str, dict[str, Any]] = {}
-    layer_versions: dict[str, dict[str, int]] = {}
+    layer_raw_values: dict[str, dict[str, Any]] = {}
+    layer_versions_raw: dict[str, dict[str, int]] = {}
     for (scope, target, key), entry in snapshot.items():
         if scope != "layer":
             continue
         layer_id = str(target)
         prop = str(key)
-        values = layer_values.setdefault(layer_id, {})
+        values = layer_raw_values.setdefault(layer_id, {})
         values[prop] = entry.value
         version_value = _version_or_none(entry.version)
         if version_value is not None:
-            versions = layer_versions.setdefault(layer_id, {})
+            versions = layer_versions_raw.setdefault(layer_id, {})
             versions[prop] = version_value
+
+    layer_states: dict[str, LayerVisualState] = {}
+    for layer_id, props in layer_raw_values.items():
+        raw_props = {str(k): v for k, v in props.items()}
+        versions_map_raw = layer_versions_raw.get(layer_id, {})
+        versions_map = {str(k): int(v) for k, v in versions_map_raw.items()}
+
+        visible = _coerce_bool(raw_props.pop("visible", None))
+        opacity = _coerce_float(raw_props.pop("opacity", None))
+        blending = raw_props.pop("blending", None)
+        blending = str(blending) if blending is not None else None
+        interpolation = raw_props.pop("interpolation", None)
+        interpolation = str(interpolation) if interpolation is not None else None
+        colormap_value = raw_props.pop("colormap", None)
+        colormap = str(colormap_value) if colormap_value is not None else None
+        gamma = _coerce_float(raw_props.pop("gamma", None))
+        contrast_limits = _coerce_contrast_limits(raw_props.pop("contrast_limits", None))
+        depiction = raw_props.pop("depiction", None)
+        depiction = str(depiction) if depiction is not None else None
+        rendering = raw_props.pop("rendering", None)
+        rendering = str(rendering) if rendering is not None else None
+        attenuation = _coerce_float(raw_props.pop("attenuation", None))
+        iso_threshold = _coerce_float(raw_props.pop("iso_threshold", None))
+
+        metadata_value = raw_props.pop("metadata", None)
+        metadata: dict[str, Any] = {}
+        if isinstance(metadata_value, Mapping):
+            metadata = {str(k): v for k, v in metadata_value.items()}
+
+        thumbnail_value = raw_props.pop("thumbnail", None)
+        thumbnail_payload: Optional[dict[str, Any]] = None
+        if isinstance(thumbnail_value, Mapping):
+            thumbnail_payload = {str(k): v for k, v in thumbnail_value.items()}
+
+        extra = {str(k): v for k, v in raw_props.items()}
+
+        layer_states[layer_id] = LayerVisualState(
+            layer_id=str(layer_id),
+            visible=visible,
+            opacity=opacity,
+            blending=blending,
+            interpolation=interpolation,
+            colormap=colormap,
+            gamma=gamma,
+            contrast_limits=contrast_limits,
+            depiction=depiction,
+            rendering=rendering,
+            attenuation=attenuation,
+            iso_threshold=iso_threshold,
+            metadata=metadata,
+            thumbnail=thumbnail_payload,
+            extra=extra,
+            versions=versions_map,
+        )
 
     camera_versions: dict[str, int] = {}
     for scope_name, prefix in (("camera_plane", "plane"), ("camera_volume", "volume")):
@@ -934,8 +1029,7 @@ def build_ledger_snapshot(
         volume_clim=volume_clim,
         volume_opacity=volume_opacity,
         volume_sample_step=volume_sample_step,
-        layer_values=layer_values or None,
-        layer_versions=layer_versions or None,
+        layer_values=layer_states or None,
         camera_versions=camera_versions_payload,
         op_seq=op_seq_value,
     )

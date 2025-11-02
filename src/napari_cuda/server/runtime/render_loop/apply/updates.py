@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.render_loop.apply.render_state import (
@@ -19,6 +19,7 @@ from napari_cuda.server.runtime.render_loop.apply_interface import (
 from napari_cuda.server.runtime.viewport import updates as viewport_updates
 from napari_cuda.server.runtime.viewport.state import RenderMode
 from napari_cuda.server.scene import (
+    LayerVisualState,
     RenderLedgerSnapshot,
 )
 
@@ -34,32 +35,120 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_layer_state(state: LayerVisualState) -> LayerVisualState:
+    def _bool_or_none(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off"):
+            return False
+        return None
+
+    def _float_or_none(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    def _contrast_limits(value: Any) -> Optional[tuple[float, float]]:
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            lo = _float_or_none(value[0])
+            hi = _float_or_none(value[1])
+            if lo is None or hi is None:
+                return None
+            if hi < lo:
+                lo, hi = hi, lo
+            return (lo, hi)
+        return None
+
+    metadata = dict(state.metadata) if state.metadata else {}
+    thumbnail = dict(state.thumbnail) if isinstance(state.thumbnail, Mapping) else None
+    extra = {str(k): v for k, v in state.extra.items()} if state.extra else {}
+    versions = {str(k): int(v) for k, v in state.versions.items()} if state.versions else {}
+
+    return LayerVisualState(
+        layer_id=str(state.layer_id),
+        visible=_bool_or_none(state.visible),
+        opacity=_float_or_none(state.opacity),
+        blending=str(state.blending) if state.blending is not None else None,
+        interpolation=str(state.interpolation) if state.interpolation is not None else None,
+        colormap=str(state.colormap) if state.colormap is not None else None,
+        gamma=_float_or_none(state.gamma),
+        contrast_limits=_contrast_limits(state.contrast_limits),
+        depiction=str(state.depiction) if state.depiction is not None else None,
+        rendering=str(state.rendering) if state.rendering is not None else None,
+        attenuation=_float_or_none(state.attenuation),
+        iso_threshold=_float_or_none(state.iso_threshold),
+        metadata=metadata,
+        thumbnail=thumbnail,
+        extra=extra,
+        versions=versions,
+    )
+def _layer_state_subset(layer_state: LayerVisualState, props: Iterable[str]) -> LayerVisualState:
+    prop_set = {str(p) for p in props}
+    versions_subset = {
+        str(key): int(value)
+        for key, value in layer_state.versions.items()
+        if str(key) in prop_set
+    }
+
+    kwargs: dict[str, Any] = {"layer_id": layer_state.layer_id}
+    for field_name in (
+        "visible",
+        "opacity",
+        "blending",
+        "interpolation",
+        "colormap",
+        "gamma",
+        "contrast_limits",
+        "depiction",
+        "rendering",
+        "attenuation",
+        "iso_threshold",
+    ):
+        if field_name in prop_set:
+            value = getattr(layer_state, field_name)
+            if value is not None:
+                kwargs[field_name] = value
+    if "metadata" in prop_set:
+        kwargs["metadata"] = dict(layer_state.metadata) if layer_state.metadata else {}
+    if "thumbnail" in prop_set:
+        kwargs["thumbnail"] = (
+            dict(layer_state.thumbnail)
+            if layer_state.thumbnail is not None
+            else None
+        )
+
+    extra_subset = {str(k): v for k, v in layer_state.extra.items() if str(k) in prop_set}
+    if extra_subset:
+        kwargs["extra"] = extra_subset
+    if versions_subset:
+        kwargs["versions"] = versions_subset
+
+    return LayerVisualState(**kwargs)
+
+
 def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
     """Return a render-thread-friendly copy of *state*."""
 
-    layer_values = None
+    layer_states = None
     if state.layer_values:
-        values: dict[str, dict[str, object]] = {}
-        for layer_id, props in state.layer_values.items():
-            if not props:
+        values: dict[str, LayerVisualState] = {}
+        for layer_id, layer_state in state.layer_values.items():
+            if not isinstance(layer_state, LayerVisualState):
                 continue
-            values[str(layer_id)] = {str(key): value for key, value in props.items()}
+            normalized = _normalize_layer_state(layer_state)
+            if normalized.to_mapping() or normalized.versions:
+                values[str(layer_id)] = normalized
         if values:
-            layer_values = values
-
-    layer_versions = None
-    if state.layer_versions:
-        versions: dict[str, dict[str, int]] = {}
-        for layer_id, props in state.layer_versions.items():
-            if not props:
-                continue
-            mapped: dict[str, int] = {}
-            for key, version in props.items():
-                mapped[str(key)] = int(version)
-            if mapped:
-                versions[str(layer_id)] = mapped
-        if versions:
-            layer_versions = versions
+            layer_states = values
 
     return RenderLedgerSnapshot(
         plane_center=(
@@ -142,8 +231,7 @@ def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
             if state.volume_sample_step is not None
             else None
         ),
-        layer_values=layer_values,
-        layer_versions=layer_versions,
+        layer_values=layer_states,
     )
 
 
@@ -181,30 +269,28 @@ def record_snapshot_versions(
 def extract_layer_changes(
     applied_versions: AppliedVersions,
     state: RenderLedgerSnapshot,
-) -> dict[str, dict[str, Any]]:
-    layer_changes: dict[str, dict[str, Any]] = {}
-    layer_versions = state.layer_versions or {}
+) -> dict[str, LayerVisualState]:
+    layer_changes: dict[str, LayerVisualState] = {}
     if not state.layer_values:
         return layer_changes
 
-    for raw_layer_id, props in state.layer_values.items():
-        if not props:
-            continue
-        layer_id = str(raw_layer_id)
-        version_map = layer_versions.get(layer_id)
-        if version_map is None and raw_layer_id in layer_versions:
-            version_map = layer_versions[raw_layer_id]
-        for raw_prop, value in props.items():
-            prop = str(raw_prop)
-            version_value = None
-            if version_map is not None and prop in version_map:
-                version_value = int(version_map[prop])
-                key = ("layer", layer_id, prop)
+    for layer_id, layer_state in state.layer_values.items():
+        changed_props: list[str] = []
+        if layer_state.versions:
+            for prop, version in layer_state.versions.items():
+                key = ("layer", str(layer_id), str(prop))
+                version_value = int(version)
                 previous = applied_versions.get(key)
                 if previous is not None and previous == version_value:
                     continue
                 applied_versions[key] = version_value
-            layer_changes.setdefault(layer_id, {})[prop] = value
+                changed_props.append(str(prop))
+        else:
+            changed_props = list(layer_state.keys())
+
+        if changed_props:
+            layer_changes[str(layer_id)] = _layer_state_subset(layer_state, changed_props)
+
     return layer_changes
 
 
@@ -249,23 +335,9 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
     layer_changes = extract_layer_changes(applied_versions, state)
 
     if layer_changes:
-        layer_version_subset: dict[str, dict[str, int]] = {}
-        original_versions = state.layer_versions or {}
-        for layer_id, props in layer_changes.items():
-            version_map = original_versions.get(layer_id, {})
-            subset: dict[str, int] = {}
-            for prop in props:
-                if prop in version_map:
-                    subset[prop] = int(version_map[prop])
-            if subset:
-                layer_version_subset[layer_id] = subset
-        state_for_apply = replace(
-            state,
-            layer_values=layer_changes,
-            layer_versions=layer_version_subset or None,
-        )
+        state_for_apply = replace(state, layer_values=layer_changes)
     else:
-        state_for_apply = replace(state, layer_values=None, layer_versions=None)
+        state_for_apply = replace(state, layer_values=None)
 
     if updates.plane_state is not None:
         tick_iface.viewport_state.plane = deepcopy(updates.plane_state)

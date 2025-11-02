@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.server.scene import (
+    LayerVisualState,
     PlaneState,
     RenderLedgerSnapshot,
     RenderMode,
@@ -199,24 +200,17 @@ class RenderUpdateMailbox:
             )
 
         layer_token = None
-        if state.layer_versions:
-            version_items: list[tuple[str, str, int]] = []
-            for layer_id, props in state.layer_versions.items():
-                if not props:
-                    continue
-                for prop, version in props.items():
-                    version_items.append((str(layer_id), str(prop), int(version)))
-            if version_items:
-                layer_token = ("lver", tuple(sorted(version_items)))
-        elif state.layer_values:
+        if state.layer_values:
             layer_items = []
-            for layer_id, props in state.layer_values.items():
-                if not props:
+            for layer_id, layer_state in state.layer_values.items():
+                if not isinstance(layer_state, LayerVisualState):
                     continue
-                normalized = tuple(
-                    sorted((str(key), _canonical(val)) for key, val in props.items())
+                mapping = {str(key): layer_state.get(key) for key in layer_state.keys()}
+                canonical_mapping = _canonical(mapping)
+                version_tuple = tuple(
+                    sorted((str(key), int(value)) for key, value in layer_state.versions.items())
                 )
-                layer_items.append((str(layer_id), normalized))
+                layer_items.append((str(layer_id), canonical_mapping, version_tuple))
             if layer_items:
                 layer_token = ("lvals", tuple(sorted(layer_items)))
 

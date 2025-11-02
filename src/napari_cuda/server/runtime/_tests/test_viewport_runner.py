@@ -38,7 +38,6 @@ def _make_snapshot(
         plane_center=(0.0, 0.0),
         plane_zoom=1.0,
         layer_values=None,
-        layer_versions=None,
     )
 
 

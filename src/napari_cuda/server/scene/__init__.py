@@ -18,6 +18,7 @@ from .defaults import default_volume_state
 from .models import (
     BootstrapSceneMetadata,
     CameraDeltaCommand,
+    LayerVisualState,
     RenderLedgerSnapshot,
 )
 from .render_update import RenderUpdate
@@ -37,6 +38,7 @@ __all__ = [
     "CONTROL_KEYS",
     "BootstrapSceneMetadata",
     "CameraDeltaCommand",
+    "LayerVisualState",
     "PlanePose",
     "PlaneRequest",
     "PlaneResult",
