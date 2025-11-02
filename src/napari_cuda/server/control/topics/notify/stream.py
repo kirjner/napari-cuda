@@ -17,6 +17,78 @@ from napari_cuda.server.control.protocol.runtime import (
 from napari_cuda.server.control.resumable_history_store import EnvelopeSnapshot
 
 
+async def _deliver_stream_frame(
+    server: Any,
+    *,
+    payload: NotifyStreamPayload,
+    timestamp: Optional[float],
+    targets: Optional[list[Any]] = None,
+    force_snapshot: bool = False,
+) -> None:
+    clients = targets if targets is not None else list(server._state_clients)
+    if not clients:
+        store = history_store(server)
+        if store is not None:
+            now = __import__("time").time() if timestamp is None else float(timestamp)
+            payload_dict = payload.to_dict()
+            if store.current_snapshot(NOTIFY_STREAM_TYPE) is None:
+                store.snapshot_envelope(NOTIFY_STREAM_TYPE, payload=payload_dict, timestamp=now)
+            else:
+                store.delta_envelope(NOTIFY_STREAM_TYPE, payload=payload_dict, timestamp=now)
+        return
+
+    now = __import__("time").time() if timestamp is None else float(timestamp)
+    store = history_store(server)
+    snapshot: EnvelopeSnapshot | None = None
+    snapshot_mode = force_snapshot
+    if store is not None:
+        payload_dict = payload.to_dict()
+        if snapshot_mode or store.current_snapshot(NOTIFY_STREAM_TYPE) is None:
+            snapshot = store.snapshot_envelope(
+                NOTIFY_STREAM_TYPE,
+                payload=payload_dict,
+                timestamp=now,
+            )
+            snapshot_mode = True
+        else:
+            snapshot = store.delta_envelope(
+                NOTIFY_STREAM_TYPE,
+                payload=payload_dict,
+                timestamp=now,
+            )
+
+    tasks: list[Awaitable[None]] = []
+    for ws in clients:
+        if not feature_enabled(ws, "notify.stream"):
+            continue
+        session_id = state_session(ws)
+        if not session_id:
+            continue
+        kwargs: dict[str, Any] = {
+            "session_id": session_id,
+            "payload": payload,
+            "timestamp": snapshot.timestamp if snapshot is not None else now,
+        }
+        seq = state_sequencer(ws, NOTIFY_STREAM_TYPE)
+        if snapshot is not None:
+            kwargs["seq"] = snapshot.seq
+            kwargs["delta_token"] = snapshot.delta_token
+            kwargs["frame_id"] = snapshot.frame_id
+            seq.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
+        else:
+            if snapshot_mode or seq.seq is None:
+                cursor = seq.snapshot()
+                kwargs["seq"] = cursor.seq
+                kwargs["delta_token"] = cursor.delta_token
+            else:
+                kwargs["sequencer"] = seq
+        frame = build_notify_stream(**kwargs)
+        tasks.append(send_frame(server, ws, frame))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def send_stream_frame(
     server: Any,
     ws: Any,
@@ -26,48 +98,15 @@ async def send_stream_frame(
     snapshot: EnvelopeSnapshot | None = None,
     force_snapshot: bool = False,
 ) -> EnvelopeSnapshot | None:
-    session_id = state_session(ws)
-    if not session_id:
-        return snapshot
     if not isinstance(payload, NotifyStreamPayload):
         payload = NotifyStreamPayload.from_dict(payload)
-    now = __import__("time").time() if timestamp is None else float(timestamp)
-    store = history_store(server)
-    if snapshot is None and store is not None:
-        payload_dict = payload.to_dict()
-        if force_snapshot:
-            snapshot = store.snapshot_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-        else:
-            snapshot = store.delta_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-
-    kwargs: dict[str, Any] = {
-        "session_id": session_id,
-        "payload": payload,
-        "timestamp": snapshot.timestamp if snapshot is not None else now,
-    }
-    sequencer = state_sequencer(ws, NOTIFY_STREAM_TYPE)
-    if snapshot is not None:
-        kwargs["seq"] = snapshot.seq
-        kwargs["delta_token"] = snapshot.delta_token
-        kwargs["frame_id"] = snapshot.frame_id
-        sequencer.resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
-    else:
-        if force_snapshot or sequencer.seq is None:
-            cursor = sequencer.snapshot()
-            kwargs["seq"] = cursor.seq
-            kwargs["delta_token"] = cursor.delta_token
-        else:
-            kwargs["sequencer"] = sequencer
-    frame = build_notify_stream(**kwargs)
-    await send_frame(server, ws, frame)
+    await _deliver_stream_frame(
+        server,
+        payload=payload,
+        timestamp=timestamp,
+        targets=[ws],
+        force_snapshot=force_snapshot,
+    )
     return snapshot
 
 
@@ -94,68 +133,23 @@ async def broadcast_stream_config(
     payload: NotifyStreamPayload,
     timestamp: Optional[float] = None,
 ) -> None:
-    clients = list(server._state_clients)
-    if not clients:
-        store = history_store(server)
-        if store is not None:
-            now = __import__("time").time() if timestamp is None else float(timestamp)
-            if store.current_snapshot(NOTIFY_STREAM_TYPE) is None:
-                store.snapshot_envelope(
-                    NOTIFY_STREAM_TYPE,
-                    payload=payload.to_dict(),
-                    timestamp=now,
-                )
-            else:
-                store.delta_envelope(
-                    NOTIFY_STREAM_TYPE,
-                    payload=payload.to_dict(),
-                    timestamp=now,
-                )
-        return
+    await _deliver_stream_frame(server, payload=payload, timestamp=timestamp, targets=None)
 
-    now = __import__("time").time() if timestamp is None else float(timestamp)
-    store = history_store(server)
-    snapshot: EnvelopeSnapshot | None = None
-    snapshot_mode = False
-    if store is not None:
-        payload_dict = payload.to_dict()
-        snapshot_mode = store.current_snapshot(NOTIFY_STREAM_TYPE) is None
-        if snapshot_mode:
-            snapshot = store.snapshot_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
-        else:
-            snapshot = store.delta_envelope(
-                NOTIFY_STREAM_TYPE,
-                payload=payload_dict,
-                timestamp=now,
-            )
 
-    tasks = []
-    for ws in clients:
-        if not feature_enabled(ws, "notify.stream"):
-            continue
-        if not state_session(ws):
-            continue
-        tasks.append(
-            send_stream_frame(
-                server,
-                ws,
-                payload=payload,
-                timestamp=now,
-                snapshot=snapshot,
-                force_snapshot=snapshot_mode,
-            )
-        )
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+async def send_stream_payload(
+    server: Any,
+    ws: Any,
+    *,
+    payload: NotifyStreamPayload,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_stream_frame(server, payload=payload, timestamp=timestamp, targets=[ws])
 
 
 __all__ = [
     "broadcast_stream_config",
+    "broadcast_stream_config",
     "send_stream_frame",
+    "send_stream_payload",
     "send_stream_snapshot",
 ]

@@ -9,13 +9,25 @@ from .layers import (  # noqa: F401
     send_layer_snapshot,
     send_layers_delta,
 )
-from .scene import send_scene_baseline  # noqa: F401
-from .stream import broadcast_stream_config, send_stream_frame, send_stream_snapshot  # noqa: F401
+from .scene import (  # noqa: F401
+    broadcast_scene_snapshot,
+    send_scene_baseline,
+    send_scene_snapshot,
+    send_scene_snapshot_direct,
+    send_scene_snapshot_payload,
+)
+from .stream import (  # noqa: F401
+    broadcast_stream_config,
+    send_stream_frame,
+    send_stream_payload,
+    send_stream_snapshot,
+)
 
 __all__ = [
     "broadcast_camera_update",
     "broadcast_dims_state",
     "broadcast_layers_delta",
+    "broadcast_scene_snapshot",
     "broadcast_stream_config",
     "orchestrate_connect",
     "send_camera_update",
@@ -24,6 +36,10 @@ __all__ = [
     "send_layer_baseline",
     "send_layer_snapshot",
     "send_scene_baseline",
+    "send_scene_snapshot",
+    "send_scene_snapshot_direct",
+    "send_scene_snapshot_payload",
     "send_stream_frame",
+    "send_stream_payload",
     "send_stream_snapshot",
 ]

@@ -147,16 +147,16 @@ async def send_scene_snapshot_direct(
         logger.debug("notify.scene direct sent")
 
 
-async def broadcast_scene_snapshot(
+async def _deliver_scene_snapshot(
     server: Any,
     *,
     payload: NotifyScenePayload,
     timestamp: Optional[float] = None,
+    targets: Optional[list[Any]] = None,
 ) -> None:
-    """Broadcast a scene snapshot to all eligible clients; snapshot/reset epochs when history store exists."""
-    clients = list(getattr(server, "_state_clients", []))
+    """Deliver a scene snapshot to the provided clients (or all if targets missing)."""
+    clients = list(targets) if targets is not None else list(getattr(server, "_state_clients", []))
     if not clients:
-        # Even without clients, ensure the history reflects the latest scene
         store = history_store(server)
         if store is not None:
             now = time.time() if timestamp is None else float(timestamp)
@@ -211,11 +211,35 @@ async def broadcast_scene_snapshot(
         if snapshot is not None:
             for ws in clients:
                 state_sequencer(ws, NOTIFY_SCENE_TYPE).resume(seq=snapshot.seq, delta_token=snapshot.delta_token)
-    count = len(tasks)
-    if server._log_dims_info:
-        logger.info("notify.scene broadcast to %d clients", count)
-    else:
-        logger.debug("notify.scene broadcast to %d clients", count)
+    if snapshot is not None:
+        for ws in clients:
+            state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
+            state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
+    if targets is None:
+        count = len(tasks)
+        if server._log_dims_info:
+            logger.info("notify.scene broadcast to %d clients", count)
+        else:
+            logger.debug("notify.scene broadcast to %d clients", count)
+
+
+async def broadcast_scene_snapshot(
+    server: Any,
+    *,
+    payload: NotifyScenePayload,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_scene_snapshot(server, payload=payload, timestamp=timestamp, targets=None)
+
+
+async def send_scene_snapshot_payload(
+    server: Any,
+    ws: Any,
+    *,
+    payload: NotifyScenePayload,
+    timestamp: Optional[float] = None,
+) -> None:
+    await _deliver_scene_snapshot(server, payload=payload, timestamp=timestamp, targets=[ws])
 
 
 __all__ = [
@@ -223,4 +247,5 @@ __all__ = [
     "send_scene_baseline",
     "send_scene_snapshot",
     "send_scene_snapshot_direct",
+    "send_scene_snapshot_payload",
 ]
