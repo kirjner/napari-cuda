@@ -303,11 +303,7 @@ def _schedule_keyframe_and_thumbnail(server: Any) -> None:
     assert hasattr(server, "_ensure_keyframe"), "server must expose _ensure_keyframe"
     server._schedule_coro(server._ensure_keyframe(), "state-baseline-keyframe")
 
-    assert hasattr(server, "_queue_thumbnail_refresh"), "server must expose _queue_thumbnail_refresh"
-    assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
-    layer_id = server._default_layer_id()
-    if layer_id:
-        server._queue_thumbnail_refresh(layer_id)
+    # Post-frame thumbnail emission handles updates; no explicit queue here.
 
 
 __all__ = ["orchestrate_connect"]

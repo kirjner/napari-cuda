@@ -43,6 +43,27 @@ class LedgerEvent:
 logger = logging.getLogger(__name__)
 
 
+def _summarize_value(value: Any) -> str:
+    """Create a compact, human-friendly summary for large values.
+
+    Specifically avoids logging full pixel arrays for thumbnails while still
+    exposing useful metadata like shape/dtype/timestamp to aid debugging.
+    """
+    if isinstance(value, dict):
+        # Protocol thumbnails are dicts with keys: array (list), shape, dtype, generated_at
+        if "array" in value:
+            shape = value.get("shape")
+            dtype = value.get("dtype")
+            generated_at = value.get("generated_at")
+            return f"<thumbnail shape={shape} dtype={dtype} generated_at={generated_at}>"
+        # Some payloads may wrap under "thumbnail": [...] — also summarize
+        thumb = value.get("thumbnail")
+        if isinstance(thumb, list):
+            return "<thumbnail array>"
+    # Fallback to repr for small/normal values
+    return repr(value)
+
+
 class ServerStateLedger:
     """Thread-safe ledger mirroring the client-side confirmed state store."""
 
@@ -126,13 +147,20 @@ class ServerStateLedger:
             per_key = list(self._subscribers.get(property_key, ()))
             globals_copy = list(self._global_subscribers)
 
+        # Always avoid dumping full arrays for thumbnails/metadata. Summarize.
+        value_for_log: str | Any
+        if scope == "layer" and key in {"thumbnail", "metadata"}:
+            value_for_log = _summarize_value(value)
+        else:
+            value_for_log = value
+
         logger.info(
             "ledger write: scope=%s target=%s key=%s origin=%s value=%r",
             scope,
             target,
             key,
             origin,
-            value,
+            value_for_log,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -230,13 +258,20 @@ class ServerStateLedger:
                 globals_copy = list(self._global_subscribers)
                 notifications.append((event, per_key, globals_copy))
 
+                # Summarize thumbnails in batch mode as well
+                batched_value_for_log: str | Any
+                if scope == "layer" and key in {"thumbnail", "metadata"}:
+                    batched_value_for_log = _summarize_value(value)
+                else:
+                    batched_value_for_log = value
+
                 logger.info(
                     "ledger write: scope=%s target=%s key=%s origin=%s value=%r",
                     scope,
                     target,
                     key,
                     origin,
-                    value,
+                    batched_value_for_log,
                 )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(

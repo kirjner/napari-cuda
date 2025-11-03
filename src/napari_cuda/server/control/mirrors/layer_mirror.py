@@ -8,6 +8,7 @@ from typing import Optional
 
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
+from napari_cuda.server.utils.signatures import layer_payload_signature
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[str, LayerVisualState, Optional[str], float], Awaitable[None]]
@@ -55,6 +56,7 @@ class ServerLayerMirror:
         self._last_versions: dict[tuple[str, str], int] = {}
         self._latest_states: dict[str, LayerVisualState] = {}
         self._ndisplay: Optional[int] = None
+        self._last_payload_sig: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -73,6 +75,7 @@ class ServerLayerMirror:
             self._pending_intents.clear()
             self._last_versions.clear()
             self._latest_states.clear()
+            self._last_payload_sig.clear()
             layer_values = ledger_snapshot.layer_values or {}
             for layer_id, layer_state in layer_values.items():
                 norm_id = str(layer_id)
@@ -109,6 +112,7 @@ class ServerLayerMirror:
             self._latest_states.clear()
             self._op_open = False
             self._ndisplay = None
+            self._last_payload_sig.clear()
 
     # ------------------------------------------------------------------
     def _on_op_state(self, event: LedgerEvent) -> None:
@@ -218,6 +222,15 @@ class ServerLayerMirror:
             subset = state.subset(props)
             if not subset.keys():
                 continue
+            # Content signature gating for emission (dedupe by values, not versions)
+            sig = layer_payload_signature(subset)
+            last = self._last_payload_sig.get(layer_id)
+            if last is not None and last == sig:
+                # No change in outward payload content; skip broadcast
+                for prop in props:
+                    _ = self._pending_versions.pop((layer_id, prop), None)
+                continue
+            self._last_payload_sig[layer_id] = sig
             for prop in props:
                 version = self._pending_versions.pop((layer_id, prop), None)
                 if version is not None:

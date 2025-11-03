@@ -18,6 +18,7 @@ from napari_cuda.server.scene import (
     RenderUpdate,
     VolumeState,
 )
+from napari_cuda.server.utils.signatures import scene_content_signature_tuple
 
 logger = logging.getLogger(__name__)
 
@@ -139,99 +140,9 @@ class RenderUpdateMailbox:
 
     @staticmethod
     def _build_signature(state: RenderLedgerSnapshot) -> tuple:
-        def _canonical(value: Any) -> Any:
-            if value is None:
-                return None
-            if isinstance(value, (list, tuple)):
-                return tuple(_canonical(v) for v in value)
-            if isinstance(value, dict):
-                return tuple(sorted((str(k), _canonical(v)) for k, v in value.items()))
-            return value
-
-        dims_token: tuple
-        if state.dims_version is not None:
-            dims_token = ("dv", int(state.dims_version))
-        else:
-            dims_token = (
-                "dvals",
-                _canonical(state.current_step),
-                _canonical(state.order),
-                _canonical(state.displayed),
-            )
-
-        ndisplay_value = int(state.ndisplay) if state.ndisplay is not None else None
-
-        view_token: tuple
-        if state.view_version is not None:
-            view_token = ("vv", int(state.view_version), ndisplay_value)
-        else:
-            view_token = (
-                "vvals",
-                ndisplay_value,
-                _canonical(state.displayed),
-                _canonical(state.order),
-            )
-
-        multiscale_token: tuple
-        if state.multiscale_level_version is not None:
-            multiscale_token = ("lv", int(state.multiscale_level_version))
-        else:
-            multiscale_token = (
-                "lvals",
-                int(state.current_level) if state.current_level is not None else None,
-                _canonical(state.level_shapes),
-            )
-
-        if state.camera_versions:
-            camera_token = (
-                "cv",
-                tuple(sorted((str(k), int(v)) for k, v in state.camera_versions.items())),
-            )
-        else:
-            camera_token = (
-                "cvals",
-                (
-                    _canonical(state.plane_center),
-                    _canonical(state.plane_zoom),
-                    _canonical(state.plane_rect),
-                    _canonical(state.volume_center),
-                    _canonical(state.volume_angles),
-                    _canonical(state.volume_distance),
-                    _canonical(state.volume_fov),
-                ),
-            )
-
-        layer_token = None
-        if state.layer_values:
-            layer_items = []
-            for layer_id, layer_state in state.layer_values.items():
-                if not isinstance(layer_state, LayerVisualState):
-                    continue
-                mapping = {str(key): layer_state.get(key) for key in layer_state.keys()}
-                canonical_mapping = _canonical(mapping)
-                version_tuple = tuple(
-                    sorted((str(key), int(value)) for key, value in layer_state.versions.items())
-                )
-                layer_items.append((str(layer_id), canonical_mapping, version_tuple))
-            if layer_items:
-                layer_token = ("lvals", tuple(sorted(layer_items)))
-
-        volume_token = (
-            _canonical(state.volume_mode),
-            _canonical(state.volume_colormap),
-            _canonical(state.volume_clim),
-            _canonical(state.volume_opacity),
-            _canonical(state.volume_sample_step),
-        )
-
-        return (
-            dims_token,
-            view_token,
-            multiscale_token,
-            camera_token,
-            layer_token,
-            volume_token,
-        )
+        # Content-only signature tuple (op_seq-free), unified across server
+        # Note: dataset_id not tracked at this point; pass None.
+        return scene_content_signature_tuple(state, dataset_id=None)
 
 
 __all__ = [

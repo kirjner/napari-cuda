@@ -35,6 +35,7 @@ from napari_cuda.server.state_ledger import (
     PropertyKey,
     ServerStateLedger,
 )
+from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
 
 logger = logging.getLogger(__name__)
 
@@ -1726,3 +1727,45 @@ __all__ = [
     "reduce_volume_sample_step",
     "resolve_axis_index",
 ]
+
+
+def reduce_thumbnail_capture(
+    ledger: ServerStateLedger,
+    *,
+    layer_id: str,
+    payload: Mapping[str, Any],
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "server.thumbnail",
+) -> ServerLedgerUpdate:
+    """Reducer wrapper for thumbnail capture ingestion.
+
+    Records the normalized thumbnail payload and updates per-layer thumbnail
+    state (last_signature, seq, attempts=0). Returns the layer thumbnail entry
+    version as a ServerLedgerUpdate for observability if needed.
+    """
+    ts = _now(timestamp)
+
+    stored_entries = apply_thumbnail_capture(
+        ledger=ledger,
+        layer_id=str(layer_id),
+        payload=payload,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    entry = stored_entries.get(("layer", str(layer_id), "thumbnail"))
+    assert entry is not None, "thumbnail transaction must return layer thumbnail entry"
+    assert entry.version is not None, "thumbnail transaction must yield version"
+    version = int(entry.version)
+
+    return ServerLedgerUpdate(
+        scope="layer",
+        target=str(layer_id),
+        key="thumbnail",
+        value=dict(payload),
+        intent_id=intent_id,
+        timestamp=ts,
+        origin=origin,
+        version=version,
+    )

@@ -11,13 +11,14 @@ import numpy as np
 from ..messages.level_switch import LevelSwitchIntent
 
 
-RenderSignaturePayload = Tuple[int, int, Tuple[int, ...], Tuple[int, ...], Tuple[Tuple[str, int], ...]]
-
-
 @dataclass
-class ThumbnailIntent:
+class ThumbnailCapture:
+    """Worker → control thumbnail candidate.
+
+    The payload carries only the raw pixel array and target layer id.
+    Dedupe is performed on the control loop using inputs-only content tokens.
+    """
     layer_id: str
-    signature: RenderSignaturePayload
     array: np.ndarray
 
 
@@ -26,8 +27,8 @@ class WorkerIntentMailbox:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._latest_intent: Optional[LevelSwitchIntent] = None
-        self._latest_thumbnail: Optional[ThumbnailIntent] = None
+        self._latest_level_switch: Optional[LevelSwitchIntent] = None
+        self._latest_thumbnail_capture: Optional[ThumbnailCapture] = None
 
     # -- Level switch intents -------------------------------------------------
 
@@ -35,31 +36,31 @@ class WorkerIntentMailbox:
         """Store the latest level switch intent."""
 
         with self._lock:
-            self._latest_intent = intent
+            self._latest_level_switch = intent
 
     def pop_level_switch(self) -> Optional[LevelSwitchIntent]:
         """Pop the most recent level switch intent, if any."""
 
         with self._lock:
-            intent = self._latest_intent
-            self._latest_intent = None
+            intent = self._latest_level_switch
+            self._latest_level_switch = None
             return intent
 
     # -- Thumbnail payloads ---------------------------------------------------
 
-    def enqueue_thumbnail(self, payload: ThumbnailIntent) -> None:
-        """Store the latest thumbnail payload."""
+    def enqueue_thumbnail_capture(self, payload: ThumbnailCapture) -> None:
+        """Store the latest thumbnail capture payload."""
 
         with self._lock:
-            self._latest_thumbnail = payload
+            self._latest_thumbnail_capture = payload
 
-    def pop_thumbnail(self) -> Optional[ThumbnailIntent]:
-        """Pop the most recent thumbnail payload, if any."""
+    def pop_thumbnail_capture(self) -> Optional[ThumbnailCapture]:
+        """Pop the most recent thumbnail capture payload, if any."""
 
         with self._lock:
-            payload = self._latest_thumbnail
-            self._latest_thumbnail = None
+            payload = self._latest_thumbnail_capture
+            self._latest_thumbnail_capture = None
             return payload
 
 
-__all__ = ["ThumbnailIntent", "WorkerIntentMailbox"]
+__all__ = ["ThumbnailCapture", "WorkerIntentMailbox"]

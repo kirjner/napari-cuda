@@ -16,7 +16,6 @@ class ServerLifecycleHooks:
     stop_worker: Callable[[], None]
     clear_frame_queue: Callable[[], None]
     reset_mirrors: Callable[[], None]
-    reset_thumbnail_state: Callable[[], None]
     refresh_scene_snapshot: Callable[[Optional[RenderLedgerSnapshot]], None]
     start_mirrors_if_needed: Callable[[], None]
     pull_render_snapshot: Callable[[], RenderLedgerSnapshot]
@@ -29,7 +28,6 @@ def _reset_runtime_state(hooks: ServerLifecycleHooks, ledger: ServerStateLedger)
     hooks.stop_worker()
     hooks.clear_frame_queue()
     hooks.reset_mirrors()
-    hooks.reset_thumbnail_state()
     ledger.clear_scope("layer")
     ledger.clear_scope("multiscale")
     ledger.clear_scope("volume")

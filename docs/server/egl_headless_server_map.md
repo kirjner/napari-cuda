@@ -111,7 +111,9 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   the worker, captures the napari thumbnail, and records both metadata and
   `thumbnail` ledger entries so mirrors can broadcast notify.layers deltas. The
   remaining glue ensures the default layer id is resolved whenever observers
-  queue a refresh.
+  queue a refresh. Signature comparisons now rely on
+  `server.utils.signatures.RenderSignature`, so the render tick, worker intent,
+  and ledger ingestion agree on one canonical structure instead of ad-hoc tuples.
   TODO: add integration coverage once the control-plane harness exists so
   regressions in thumbnail refresh sequencing are caught automatically.
 

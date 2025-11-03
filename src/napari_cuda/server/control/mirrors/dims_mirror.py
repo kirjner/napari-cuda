@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.server.utils.signatures import dims_payload_signature
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
@@ -216,20 +217,7 @@ class ServerDimsMirror:
 
     @staticmethod
     def _compute_signature(payload: NotifyDimsPayload) -> tuple[Any, ...]:
-        levels_sig = tuple(tuple(sorted(level.items())) for level in payload.levels)
-        return (
-            payload.current_step,
-            payload.current_level,
-            payload.ndisplay,
-            payload.mode,
-            payload.displayed,
-            payload.axis_labels,
-            payload.order,
-            payload.labels,
-            levels_sig,
-            payload.level_shapes,
-            payload.downgraded,
-        )
+        return dims_payload_signature(payload)
 
 
 __all__ = ["ServerDimsMirror"]

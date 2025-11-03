@@ -51,14 +51,6 @@ from napari_cuda.server.app.scene_publisher import (
     build_scene_payload as build_scene_payload_helper,
     cache_scene_history,
 )
-from napari_cuda.server.app.thumbnail import (
-    RenderSignature,
-    ThumbnailState,
-    handle_render_tick,
-    ingest_thumbnail_payload,
-    queue_thumbnail_refresh,
-    reset_thumbnail_state,
-)
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.server.config import ServerConfig, ServerCtx
 from napari_cuda.server.control.control_channel_server import ingest_state
@@ -102,7 +94,6 @@ from napari_cuda.server.engine.api import (
     send_cached_stream_snapshot,
     send_stream_snapshot_if_needed,
 )
-from napari_cuda.server.util.websocket import safe_send
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.bootstrap.runtime_driver import (
     probe_scene_bootstrap,
@@ -119,7 +110,6 @@ from napari_cuda.server.runtime.worker import (
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
-from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailIntent
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
     LayerVisualState,
@@ -135,6 +125,11 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.util.websocket import safe_send
+from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
+from napari_cuda.server.utils.signatures import layer_token
+import hashlib
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -244,8 +239,7 @@ class EGLHeadlessServer:
         self._bootstrap_snapshot: Optional[RenderLedgerSnapshot] = None
         # Camera sequencing per target
         self._camera_command_seq: dict[str, int] = {}
-        # Thumbnail scheduling
-        self._thumbnail_state = ThumbnailState()
+        # Thumbnail scheduling via worker mailbox; no server state machine
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -261,12 +255,6 @@ class EGLHeadlessServer:
             loop = self._control_loop
             if loop is not None:
                 loop.call_soon_threadsafe(self._refresh_scene_snapshot)
-            loop_worker = self._control_loop
-            if loop_worker is not None:
-                loop_worker.call_soon_threadsafe(
-                    self._queue_thumbnail_refresh,
-                    self._default_layer_id(),
-                )
 
         self._dims_mirror = ServerDimsMirror(
             ledger=self._state_ledger,
@@ -324,6 +312,8 @@ class EGLHeadlessServer:
         self._debug_only_this_logger = bool(debug) or bool(self._ctx.debug_policy.enabled)
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
         # Populate multiscale description from NGFF metadata if available
+        # In-memory last-accepted content tokens for thumbnails (per layer)
+        self._last_thumb_token: dict[str, tuple] = {}
 
     @property
     def _worker(self) -> Optional[EGLRendererWorker]:
@@ -423,7 +413,7 @@ class EGLHeadlessServer:
                 volume_state=intent.volume_state,
             )
         )
-        self._queue_thumbnail_refresh(self._default_layer_id())
+        # No explicit thumbnail queue; post-frame logic will emit
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:
@@ -491,7 +481,7 @@ class EGLHeadlessServer:
             ),
             "worker-camera-pose",
         )
-        self._queue_thumbnail_refresh(self._default_layer_id())
+        # No explicit thumbnail queue; post-frame logic will emit
 
     def _try_reset_encoder(self, *, reason: str = "unspecified") -> bool:
         worker = self._worker
@@ -538,7 +528,8 @@ class EGLHeadlessServer:
         task.add_done_callback(_log_task_result)
 
     def _reset_thumbnail_state(self) -> None:
-        reset_thumbnail_state(self._thumbnail_state)
+        # Deprecated; no-op
+        return
 
     def _reset_mirrors(self) -> None:
         self._layer_mirror.reset()
@@ -564,7 +555,6 @@ class EGLHeadlessServer:
             stop_worker=self._stop_worker,
             clear_frame_queue=self._clear_frame_queue,
             reset_mirrors=self._reset_mirrors,
-            reset_thumbnail_state=self._reset_thumbnail_state,
             refresh_scene_snapshot=self._refresh_scene_snapshot,
             start_mirrors_if_needed=self._start_mirrors_if_needed,
             pull_render_snapshot=lambda: pull_render_snapshot(self),
@@ -574,60 +564,58 @@ class EGLHeadlessServer:
         )
 
     def _queue_thumbnail_refresh(self, layer_id: Optional[str]) -> None:
-        if not layer_id:
-            layer_id = self._default_layer_id()
-        if not layer_id:
-            return
-        worker = self._worker
-        mark_render_tick = None
-        if worker is not None and hasattr(worker, "_mark_render_tick_needed"):
-            mark_render_tick = getattr(worker, "_mark_render_tick_needed")
-        queue_thumbnail_refresh(
-            self._thumbnail_state,
-            layer_id,
-            mark_render_tick=mark_render_tick,
-        )
+        # Deprecated: no-op
+        return
 
     def _on_render_tick(self, snapshot: RenderLedgerSnapshot) -> None:
-        worker = self._worker
-        mark_render_tick = None
-        worker_ready = False
-        if worker is not None:
-            worker_ready = bool(worker.is_ready)
-            if hasattr(worker, "_mark_render_tick_needed"):
-                mark_render_tick = getattr(worker, "_mark_render_tick_needed")
-        payload = handle_render_tick(
-            self._thumbnail_state,
-            snapshot,
-            worker_ready=worker_ready,
-            fetch_thumbnail=lambda target_layer, signature: self._layer_thumbnail(
-                target_layer,
-                signature=signature,
-            ),
-            request_render_tick=mark_render_tick,
-        )
-        if payload is None:
-            return
-        self._worker_intents.enqueue_thumbnail(payload)
-        loop = self._control_loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._handle_worker_thumbnails)
+        # Deprecated: thumbnails are emitted via worker mailbox
+        return
 
     def _handle_worker_thumbnails(self) -> None:
         while True:
-            payload = self._worker_intents.pop_thumbnail()
+            payload = self._worker_intents.pop_thumbnail_capture()
             if payload is None:
                 break
             self._ingest_worker_thumbnail(payload)
 
-    def _ingest_worker_thumbnail(self, payload: ThumbnailIntent) -> None:
-        updated = ingest_thumbnail_payload(
-            self._thumbnail_state,
-            payload,
+    def _ingest_worker_thumbnail(self, payload) -> None:
+        layer_id = str(payload.layer_id)
+        # Compute an inputs-only content token from the current snapshot
+        snapshot = snapshot_render_state(self._state_ledger)
+        dataset_id = None
+        if self._zarr_path:
+            dataset_id = hashlib.sha1(str(self._zarr_path).encode("utf-8")).hexdigest()
+        token = layer_token(snapshot, layer_id, dataset_id=dataset_id, include_camera=False)
+        last = self._last_thumb_token.get(layer_id)
+        if last is not None and last == token:
+            return
+        arr = np.asarray(payload.array)
+        if arr.dtype == np.uint8:
+            arr = arr.astype(np.float32) / 255.0
+        else:
+            arr = np.asarray(arr, dtype=np.float32)
+            if arr.size > 0:
+                max_val = float(np.nanmax(arr))
+                if max_val > 0.0:
+                    arr = arr / max_val
+        np.clip(arr, 0.0, 1.0, out=arr)
+        arr = np.flip(arr, axis=0)
+        ts = time.time()
+        payload_dict = {
+            "array": arr.tolist(),
+            "shape": list(arr.shape),
+            "dtype": "float32",
+            "generated_at": float(ts),
+        }
+        reduce_thumbnail_capture(
             self._state_ledger,
+            layer_id=layer_id,
+            payload=payload_dict,
+            origin="server.thumbnail",
+            timestamp=ts,
         )
-        if updated:
-            self._refresh_scene_snapshot()
+        self._last_thumb_token[layer_id] = token
+        self._refresh_scene_snapshot()
 
     async def _ensure_keyframe(self) -> None:
         """Request a clean keyframe and arrange for watchdog + config resend."""
@@ -747,7 +735,7 @@ class EGLHeadlessServer:
             return None
         return snapshot.layers[0].layer_id
 
-    def _layer_thumbnail(self, layer_id: str, signature: Optional[RenderSignature] = None) -> Optional[np.ndarray]:
+    def _layer_thumbnail(self, layer_id: str) -> Optional[np.ndarray]:
         worker = self._worker
         if worker is None:
             return None
@@ -882,7 +870,6 @@ class EGLHeadlessServer:
             loop = asyncio.get_running_loop()
             self._start_worker(loop)
             self._refresh_scene_snapshot()
-            self._queue_thumbnail_refresh(self._default_layer_id())
 
             scene_payload = self._build_scene_payload()
             cache_scene_history(self._resumable_store, self._state_clients, scene_payload)
@@ -904,10 +891,9 @@ class EGLHeadlessServer:
         retries: int = 5,
         delay_s: float = 0.25,
     ) -> None:
-        if not layer_id:
-            logger.debug("thumbnail emission skipped (no active layer)")
-            return
-        self._queue_thumbnail_refresh(layer_id)
+        # Deprecated: thumbnails are emitted post-frame automatically
+        _ = (layer_id, retries, delay_s)
+        return
 
     def _require_data_root(self) -> Path:
         root_candidate = self._data_root or str(self._browse_root)

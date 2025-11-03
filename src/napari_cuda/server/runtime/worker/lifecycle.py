@@ -31,6 +31,8 @@ from napari_cuda.server.scene import (
     pull_render_snapshot,
     snapshot_multiscale_state,
 )
+import numpy as np
+from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailCapture
 
 from .egl import EGLRendererWorker
 
@@ -246,12 +248,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             # Now flip worker ready
             worker._is_ready = True
 
-            def _queue_initial_thumbnail() -> None:
-                layer_id = server._default_layer_id()
-                if layer_id:
-                    server._queue_thumbnail_refresh(layer_id)
-
-            control_loop.call_soon_threadsafe(_queue_initial_thumbnail)
+            # No explicit thumbnail queue; post-frame logic will emit automatically
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
@@ -305,9 +302,49 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     server._animate,
                 )
                 consume_render_snapshot(worker, frame_state)
-                server._on_render_tick(frame_state)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
+                # Post-frame: capture thumbnail on worker and hand off via mailbox
+                viewer = worker.viewer_model()
+                if viewer is not None and viewer.layers:
+                    # Choose target layer id: prefer first from snapshot.layer_values
+                    target_layer_id: Optional[str] = None
+                    if frame_state.layer_values:
+                        keys = list(frame_state.layer_values.keys())
+                        if keys:
+                            target_layer_id = str(keys[0])
+                    # Resolve layer object
+                    if len(viewer.layers) == 1:
+                        layer_obj = viewer.layers[0]
+                    else:
+                        layer_obj = None
+                        if target_layer_id is not None:
+                            for candidate in viewer.layers:
+                                if candidate.name == target_layer_id:
+                                    layer_obj = candidate
+                                    break
+                        if layer_obj is None:
+                            layer_obj = viewer.layers[0]
+                    if layer_obj is not None:
+                        layer_obj._update_thumbnail()
+                        thumb = layer_obj.thumbnail
+                        if thumb is not None:
+                            arr = np.asarray(thumb)
+                            layer_state = None
+                            if frame_state.layer_values:
+                                if target_layer_id is not None and target_layer_id in frame_state.layer_values:
+                                    layer_state = frame_state.layer_values[target_layer_id]
+                                else:
+                                    values = list(frame_state.layer_values.values())
+                                    if values:
+                                        layer_state = values[0]
+                            if layer_state is not None:
+                                payload = ThumbnailCapture(
+                                    layer_id=str(target_layer_id or "layer-0"),
+                                    array=arr,
+                                )
+                                server._worker_intents.enqueue_thumbnail_capture(payload)
+                                control_loop.call_soon_threadsafe(server._handle_worker_thumbnails)
 
                 server.metrics.observe_ms("napari_cuda_render_ms", timings.render_ms)
                 if timings.blit_gpu_ns is not None:
