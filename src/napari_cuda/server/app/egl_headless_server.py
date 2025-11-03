@@ -256,6 +256,7 @@ class EGLHeadlessServer:
         # Thumbnail scheduling
         self._pending_thumbnail_id: Optional[str] = None
         self._thumbnail_job_scheduled = False
+        self._last_thumbnail_signature: Optional[tuple[Any, ...]] = None
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -556,10 +557,21 @@ class EGLHeadlessServer:
         self._pending_thumbnail_id = layer_id
         self._schedule_thumbnail_task()
 
-    def _on_render_tick(self) -> None:
+    def _on_render_tick(self, snapshot: RenderLedgerSnapshot) -> None:
         layer_id = self._default_layer_id()
         if not layer_id:
             return
+
+        current_step = tuple(int(v) for v in (snapshot.current_step or ()))
+        signature = (
+            int(snapshot.current_level or 0),
+            current_step,
+            tuple(int(v) for v in (snapshot.displayed or ())),
+        )
+        if self._last_thumbnail_signature == signature:
+            return
+        self._last_thumbnail_signature = signature
+
         loop = self._control_loop
         if loop is None:
             return
@@ -603,6 +615,12 @@ class EGLHeadlessServer:
         existing = self._state_ledger.get("layer", layer_id, "metadata")
         if existing is not None and isinstance(existing.value, dict):
             merged = dict(existing.value)
+            prev = merged.get("thumbnail")
+            if prev is not None:
+                prev_arr = np.asarray(prev, dtype=np.float32)
+                if prev_arr.shape == arr.shape and np.allclose(prev_arr, arr, atol=1e-3):
+                    self._pending_thumbnail_id = None
+                    return
             merged.update(metadata_update)
             metadata = merged
         else:
@@ -840,6 +858,7 @@ class EGLHeadlessServer:
         self._dims_mirror.reset()
         self._pending_thumbnail_id = None
         self._thumbnail_job_scheduled = False
+        self._last_thumbnail_signature = None
         self._state_ledger.clear_scope("layer")
         self._state_ledger.clear_scope("multiscale")
         self._state_ledger.clear_scope("volume")
@@ -918,6 +937,7 @@ class EGLHeadlessServer:
             self._dims_mirror.reset()
             self._pending_thumbnail_id = None
             self._thumbnail_job_scheduled = False
+            self._last_thumbnail_signature = None
             self._state_ledger.clear_scope("layer")
             self._state_ledger.clear_scope("multiscale")
             self._state_ledger.clear_scope("volume")

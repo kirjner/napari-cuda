@@ -305,7 +305,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     server._animate,
                 )
                 consume_render_snapshot(worker, frame_state)
-                server._on_render_tick()
+                server._on_render_tick(frame_state)
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 
