@@ -246,15 +246,12 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             # Now flip worker ready
             worker._is_ready = True
 
-            def _send_initial_thumbnail() -> None:
+            def _queue_initial_thumbnail() -> None:
                 layer_id = server._default_layer_id()
                 if layer_id:
-                    server._schedule_coro(
-                        server._send_layer_thumbnail(layer_id),
-                        "initial-layer-thumbnail",
-                    )
+                    server._queue_thumbnail_refresh(layer_id)
 
-            control_loop.call_soon_threadsafe(_send_initial_thumbnail)
+            control_loop.call_soon_threadsafe(_queue_initial_thumbnail)
 
             tick = 1.0 / max(1, server.cfg.fps)
             next_tick = time.perf_counter()
@@ -308,6 +305,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     server._animate,
                 )
                 consume_render_snapshot(worker, frame_state)
+                server._on_render_tick()
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
 

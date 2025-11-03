@@ -253,6 +253,9 @@ class EGLHeadlessServer:
         self._bootstrap_snapshot: Optional[RenderLedgerSnapshot] = None
         # Camera sequencing per target
         self._camera_command_seq: dict[str, int] = {}
+        # Thumbnail scheduling
+        self._pending_thumbnail_id: Optional[str] = None
+        self._thumbnail_job_scheduled = False
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -541,6 +544,64 @@ class EGLHeadlessServer:
 
         task.add_done_callback(_log_task_result)
 
+    def _schedule_thumbnail_task(self) -> None:
+        if self._thumbnail_job_scheduled:
+            return
+        self._thumbnail_job_scheduled = True
+        self._schedule_coro(self._attempt_thumbnail(), "layer-thumbnail")
+
+    def _queue_thumbnail_refresh(self, layer_id: Optional[str]) -> None:
+        if not layer_id:
+            return
+        self._pending_thumbnail_id = layer_id
+        self._schedule_thumbnail_task()
+
+    def _on_render_tick(self) -> None:
+        if self._pending_thumbnail_id is None:
+            return
+        loop = self._control_loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(self._schedule_thumbnail_task)
+
+    async def _attempt_thumbnail(self) -> None:
+        self._thumbnail_job_scheduled = False
+        layer_id = self._pending_thumbnail_id
+        if not layer_id:
+            return
+        worker = self._worker
+        if worker is None or not worker.is_ready:
+            return
+        array = self._layer_thumbnail(layer_id)
+        if array is None or array.size == 0:
+            return
+        arr = np.asarray(array, dtype=np.float32)
+        np.clip(arr, 0.0, 1.0, out=arr)
+
+        metadata_update = {
+            "thumbnail": arr.tolist(),
+            "thumbnail_shape": list(arr.shape),
+            "thumbnail_dtype": str(arr.dtype),
+            "thumbnail_version": float(time.time()),
+        }
+        existing = self._state_ledger.get("layer", layer_id, "metadata")
+        if existing is not None and isinstance(existing.value, dict):
+            merged = dict(existing.value)
+            merged.update(metadata_update)
+            metadata = merged
+        else:
+            metadata = metadata_update
+
+        self._state_ledger.record_confirmed(
+            "layer",
+            layer_id,
+            "metadata",
+            metadata,
+            origin="server.thumbnail",
+        )
+        self._pending_thumbnail_id = None
+        self._refresh_scene_snapshot()
+
     async def _ensure_keyframe(self) -> None:
         """Request a clean keyframe and arrange for watchdog + config resend."""
 
@@ -761,6 +822,8 @@ class EGLHeadlessServer:
         self._clear_frame_queue()
         self._layer_mirror.reset()
         self._dims_mirror.reset()
+        self._pending_thumbnail_id = None
+        self._thumbnail_job_scheduled = False
         self._state_ledger.clear_scope("layer")
         self._state_ledger.clear_scope("multiscale")
         self._state_ledger.clear_scope("volume")
@@ -837,6 +900,8 @@ class EGLHeadlessServer:
             self._clear_frame_queue()
             self._layer_mirror.reset()
             self._dims_mirror.reset()
+            self._pending_thumbnail_id = None
+            self._thumbnail_job_scheduled = False
             self._state_ledger.clear_scope("layer")
             self._state_ledger.clear_scope("multiscale")
             self._state_ledger.clear_scope("volume")
@@ -865,6 +930,7 @@ class EGLHeadlessServer:
             loop = asyncio.get_running_loop()
             self._start_worker(loop)
             self._refresh_scene_snapshot()
+            self._queue_thumbnail_refresh(self._default_layer_id())
 
             scene_payload = self._build_scene_payload()
             self._cache_scene_history(scene_payload)
@@ -899,48 +965,7 @@ class EGLHeadlessServer:
         if not layer_id:
             logger.debug("thumbnail emission skipped (no active layer)")
             return
-        worker = self._worker
-        if worker is None or not worker.is_ready:
-            if retries > 1:
-                await asyncio.sleep(delay_s)
-                await self._send_layer_thumbnail(layer_id, retries=retries - 1, delay_s=delay_s)
-            else:
-                logger.debug("thumbnail emission skipped for layer %s (worker not ready)", layer_id)
-            return
-
-        array = self._layer_thumbnail(layer_id)
-        if array is None or array.size == 0:
-            if retries > 1:
-                await asyncio.sleep(delay_s)
-                await self._send_layer_thumbnail(layer_id, retries=retries - 1, delay_s=delay_s)
-            else:
-                logger.debug("thumbnail emission skipped for layer %s (no data)", layer_id)
-            return
-
-        arr = np.asarray(array, dtype=np.float32)
-        np.clip(arr, 0.0, 1.0, out=arr)
-
-        metadata = {
-            "thumbnail": arr.tolist(),
-            "thumbnail_shape": list(arr.shape),
-            "thumbnail_dtype": str(arr.dtype),
-            "thumbnail_version": float(time.time()),
-        }
-        existing = self._state_ledger.get("layer", layer_id, "metadata")
-        if existing is not None and isinstance(existing.value, dict):
-            merged = dict(existing.value)
-            merged.update(metadata)
-            metadata = merged
-        metadata.pop("thumbnail_status", None)
-
-        self._state_ledger.record_confirmed(
-            "layer",
-            layer_id,
-            "metadata",
-            metadata,
-            origin="server.thumbnail",
-        )
-        self._refresh_scene_snapshot()
+        self._queue_thumbnail_refresh(layer_id)
 
     def _require_data_root(self) -> Path:
         root_candidate = self._data_root or str(self._browse_root)

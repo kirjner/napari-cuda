@@ -290,11 +290,11 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
 
     # Proactively refresh the layer thumbnail after view mode changes so thin
     # clients update immediately (without waiting for unrelated input).
-    assert hasattr(server, "_send_layer_thumbnail"), "server must expose _send_layer_thumbnail"
+    assert hasattr(server, "_queue_thumbnail_refresh"), "server must expose _queue_thumbnail_refresh"
     assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
     layer_id = server._default_layer_id()
     if layer_id:
-        server._schedule_coro(server._send_layer_thumbnail(layer_id), "ndisplay-layer-thumbnail")
+        server._queue_thumbnail_refresh(layer_id)
 
     runtime = getattr(server, "runtime", None)
     if runtime is not None and runtime.is_ready:
