@@ -285,7 +285,7 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     def _default_layer_id() -> Optional[str]:
         snapshot = server._scene_snapshot
         if snapshot is None or not snapshot.layers:
-            return "layer-0"
+            return None
         return snapshot.layers[0].layer_id
 
     server._layer_mirror = ServerLayerMirror(

@@ -144,6 +144,10 @@ class EGLHeadlessServer:
             # Fallback to minimal defaults if ctx load fails for any reason
             self._ctx = load_server_ctx({})  # type: ignore[arg-type]
         self._data_root = self._resolve_env_path(self._ctx_env.get("NAPARI_CUDA_DATA_ROOT"))
+        if not self._data_root:
+            launch_dir = Path.cwd().resolve()
+            self._data_root = str(launch_dir)
+            logger.info("NAPARI_CUDA_DATA_ROOT not set; defaulting data root to %s", launch_dir)
         try:
             configure_bitstream(self._ctx.bitstream)
         except Exception:
@@ -635,7 +639,7 @@ class EGLHeadlessServer:
             ledger_snapshot=ledger_snapshot,
             canvas_size=(self.width, self.height),
             fps_target=float(self.cfg.fps),
-            default_layer_id=DEFAULT_LAYER_ID,
+            default_layer_id=DEFAULT_LAYER_ID if self._zarr_path else None,
             default_layer_name=DEFAULT_LAYER_NAME,
             ndisplay=self._current_ndisplay(),
             zarr_path=self._zarr_path,
@@ -649,7 +653,7 @@ class EGLHeadlessServer:
     def _default_layer_id(self) -> Optional[str]:
         snapshot = self._scene_snapshot
         if snapshot is None or not snapshot.layers:
-            return DEFAULT_LAYER_ID
+            return None
         return snapshot.layers[0].layer_id
 
     def _layer_thumbnail(self, layer_id: str) -> Optional[np.ndarray]:
@@ -754,6 +758,9 @@ class EGLHeadlessServer:
         self._clear_frame_queue()
         self._layer_mirror.reset()
         self._dims_mirror.reset()
+        self._state_ledger.clear_scope("layer")
+        self._state_ledger.clear_scope("multiscale")
+        self._state_ledger.clear_scope("volume")
         step = (0, 0)
         axis_labels = ("y", "x")
         order = (0, 1)
@@ -827,6 +834,9 @@ class EGLHeadlessServer:
             self._clear_frame_queue()
             self._layer_mirror.reset()
             self._dims_mirror.reset()
+            self._state_ledger.clear_scope("layer")
+            self._state_ledger.clear_scope("multiscale")
+            self._state_ledger.clear_scope("volume")
 
             reduce_bootstrap_state(
                 self._state_ledger,
@@ -883,6 +893,9 @@ class EGLHeadlessServer:
         retries: int = 5,
         delay_s: float = 0.25,
     ) -> None:
+        if not layer_id:
+            logger.debug("thumbnail emission skipped (no active layer)")
+            return
         for attempt in range(retries):
             worker = self._worker
             if worker is None or not worker.is_ready:

@@ -306,65 +306,7 @@ def snapshot_scene(
     if volume_state is None or not volume_state:
         volume_state = _resolve_volume_state(render_state, ledger_snapshot)
 
-    layer_overrides: LayerVisualState | Mapping[str, Any] | None = None
-    if layer_controls:
-        layer_overrides = layer_controls.get(default_layer_id)
-    if layer_overrides is None and render_state.layer_values:
-        layer_state = render_state.layer_values.get(default_layer_id)
-        if isinstance(layer_state, LayerVisualState):
-            layer_overrides = layer_state
-
-    controls_block = _resolve_layer_controls(layer_overrides)
-
     geometry = _resolve_layer_geometry(render_state, multiscale_state, ndisplay_value)
-
-    layer_block: dict[str, Any] = {
-        "layer_id": default_layer_id,
-        "layer_type": "image",
-        "name": default_layer_name,
-        "ndim": len(geometry.shape),
-        "shape": geometry.shape,
-        "axis_labels": geometry.axis_labels,
-        "volume": geometry.is_volume,
-        "controls": controls_block,
-        "level_shapes": geometry.level_shapes,
-    }
-
-    layer_metadata: dict[str, Any] = {}
-    if thumbnail_provider is not None:
-        raw_thumbnail = thumbnail_provider(default_layer_id)
-        normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
-        if normalized_thumb is not None:
-            layer_metadata["thumbnail"] = normalized_thumb.tolist()
-            layer_metadata["thumbnail_status"] = "ready"
-    if "thumbnail_status" not in layer_metadata:
-        layer_metadata["thumbnail_status"] = "pending"
-
-    layer_block["metadata"] = layer_metadata
-
-    multiscale_block = _build_multiscale_block(multiscale_state, base_shape=geometry.shape)
-    if multiscale_block:
-        layer_block["multiscale"] = multiscale_block
-
-    render_hints = _build_render_hints(volume_state)
-    if render_hints:
-        layer_block["render"] = render_hints
-
-    contrast_limits = _resolve_contrast_limits(volume_state)
-    if contrast_limits is not None:
-        layer_block["contrast_limits"] = contrast_limits
-
-    scale = _resolve_scale(scene_source)
-    if scale is not None:
-        layer_block["scale"] = scale
-
-    translate = _resolve_translate(scene_source)
-    if translate is not None:
-        layer_block["translate"] = translate
-
-    source_block = _resolve_source_block(scene_source)
-    if source_block is not None:
-        layer_block["source"] = source_block
 
     dims_block = _build_dims_block(geometry)
 
@@ -382,12 +324,75 @@ def snapshot_scene(
         camera=camera_block,
     )
 
-    layer_snapshot = LayerSnapshot(layer_id=default_layer_id, block=layer_block)
+    layer_snapshots: list[LayerSnapshot] = []
+    if default_layer_id:
+        layer_id_str = str(default_layer_id)
+
+        layer_overrides: LayerVisualState | Mapping[str, Any] | None = None
+        if layer_controls:
+            layer_overrides = layer_controls.get(layer_id_str)
+        if layer_overrides is None and render_state.layer_values:
+            layer_state = render_state.layer_values.get(layer_id_str)
+            if isinstance(layer_state, LayerVisualState):
+                layer_overrides = layer_state
+
+        controls_block = _resolve_layer_controls(layer_overrides)
+
+        layer_block: dict[str, Any] = {
+            "layer_id": layer_id_str,
+            "layer_type": "image",
+            "name": default_layer_name,
+            "ndim": len(geometry.shape),
+            "shape": geometry.shape,
+            "axis_labels": geometry.axis_labels,
+            "volume": geometry.is_volume,
+            "controls": controls_block,
+            "level_shapes": geometry.level_shapes,
+        }
+
+        layer_metadata: dict[str, Any] = {}
+        if thumbnail_provider is not None:
+            raw_thumbnail = thumbnail_provider(layer_id_str)
+            normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
+            if normalized_thumb is not None:
+                layer_metadata["thumbnail"] = normalized_thumb.tolist()
+                layer_metadata["thumbnail_status"] = "ready"
+        if "thumbnail_status" not in layer_metadata:
+            layer_metadata["thumbnail_status"] = "pending"
+
+        layer_block["metadata"] = layer_metadata
+
+        multiscale_block = _build_multiscale_block(multiscale_state, base_shape=geometry.shape)
+        if multiscale_block:
+            layer_block["multiscale"] = multiscale_block
+
+        render_hints = _build_render_hints(volume_state)
+        if render_hints:
+            layer_block["render"] = render_hints
+
+        contrast_limits = _resolve_contrast_limits(volume_state)
+        if contrast_limits is not None:
+            layer_block["contrast_limits"] = contrast_limits
+
+        scale = _resolve_scale(scene_source)
+        if scale is not None:
+            layer_block["scale"] = scale
+
+        translate = _resolve_translate(scene_source)
+        if translate is not None:
+            layer_block["translate"] = translate
+
+        source_block = _resolve_source_block(scene_source)
+        if source_block is not None:
+            layer_block["source"] = source_block
+
+        layer_snapshots.append(LayerSnapshot(layer_id=layer_id_str, block=layer_block))
+
     metadata = _scene_metadata(zarr_path=zarr_path, scene_source=scene_source)
 
     return scene_snapshot(
         viewer=viewer,
-        layers=[layer_snapshot],
+        layers=layer_snapshots,
         policies={},
         metadata=metadata,
     )

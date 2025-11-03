@@ -294,6 +294,54 @@ class ServerStateLedger:
         with self._lock:
             return dict(self._state)
 
+    def clear_scope(
+        self,
+        scope: str,
+        *,
+        target: Optional[str] = None,
+        target_prefix: Optional[str] = None,
+    ) -> int:
+        """Remove confirmed entries matching the requested scope/target filters.
+
+        Returns the number of properties removed. Versions and cached entries are
+        purged so follow-up writes restart from version 1. Subscriptions remain
+        intact so future updates on the same property key continue delivering
+        notifications.
+        """
+
+        if target is not None and target_prefix is not None:
+            raise ValueError("clear_scope accepts either target or target_prefix, not both")
+
+        removed = 0
+        scope_key = str(scope)
+
+        with self._lock:
+            to_delete: list[PropertyKey] = []
+            for property_key in self._state:
+                prop_scope, prop_target, _ = property_key
+                if prop_scope != scope_key:
+                    continue
+                if target is not None and prop_target != str(target):
+                    continue
+                if target_prefix is not None and not str(prop_target).startswith(str(target_prefix)):
+                    continue
+                to_delete.append(property_key)
+
+            for property_key in to_delete:
+                self._state.pop(property_key, None)
+                self._versions.pop(property_key, None)
+                removed += 1
+
+        if removed and logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "ledger clear_scope: scope=%s target=%s prefix=%s removed=%d",
+                scope_key,
+                target,
+                target_prefix,
+                removed,
+            )
+        return removed
+
     def get(self, scope: str, target: str, key: str) -> Optional[LedgerEntry]:
         property_key = (str(scope), str(target), str(key))
         with self._lock:

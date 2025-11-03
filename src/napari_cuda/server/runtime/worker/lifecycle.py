@@ -248,10 +248,11 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             def _send_initial_thumbnail() -> None:
                 layer_id = server._default_layer_id()
-                server._schedule_coro(
-                    server._send_layer_thumbnail(layer_id),
-                    "initial-layer-thumbnail",
-                )
+                if layer_id:
+                    server._schedule_coro(
+                        server._send_layer_thumbnail(layer_id),
+                        "initial-layer-thumbnail",
+                    )
 
             control_loop.call_soon_threadsafe(_send_initial_thumbnail)
 

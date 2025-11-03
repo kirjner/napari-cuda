@@ -150,3 +150,20 @@ def test_snapshot_scene_thumbnail_provider() -> None:
     assert layer_metadata is not None
     expected_thumbnail = np.stack([thumbnail, thumbnail, thumbnail], axis=-1).tolist()
     assert layer_metadata.get("thumbnail") == expected_thumbnail
+
+
+def test_snapshot_scene_without_default_layer() -> None:
+    ledger = _seed_plane_ledger()
+    ledger.clear_scope("layer")
+    render_state = snapshot_render_state(ledger)
+
+    scene = snapshot_scene(
+        render_state=render_state,
+        ledger_snapshot=ledger.snapshot(),
+        canvas_size=(320, 240),
+        fps_target=30.0,
+        default_layer_id=None,
+    )
+
+    assert scene.layers == ()
+    assert scene.metadata["status"] == "idle"

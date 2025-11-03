@@ -305,7 +305,9 @@ def _schedule_keyframe_and_thumbnail(server: Any) -> None:
 
     assert hasattr(server, "_send_layer_thumbnail"), "server must expose _send_layer_thumbnail"
     assert hasattr(server, "_default_layer_id"), "server must expose _default_layer_id"
-    server._schedule_coro(server._send_layer_thumbnail(server._default_layer_id()), "baseline-layer-thumbnail")
+    layer_id = server._default_layer_id()
+    if layer_id:
+        server._schedule_coro(server._send_layer_thumbnail(layer_id), "baseline-layer-thumbnail")
 
 
 __all__ = ["orchestrate_connect"]

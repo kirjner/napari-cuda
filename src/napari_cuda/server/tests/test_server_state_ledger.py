@@ -166,3 +166,39 @@ def test_batch_record_confirmed_assigns_versions_per_key() -> None:
     assert len(follow_up) == 2
     assert follow_up[("dims", "main", "current_step")].version == 2
     assert follow_up[("multiscale", "main", "level")].version == 5
+
+
+def test_clear_scope_removes_entries_and_versions() -> None:
+    ledger = ServerStateLedger()
+    ledger.record_confirmed("layer", "layer-1", "visible", True, origin="worker")
+    ledger.record_confirmed("layer", "layer-1", "opacity", 0.5, origin="worker")
+    ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
+
+    removed = ledger.clear_scope("layer", target="layer-1")
+    assert removed == 2
+
+    assert ledger.get("layer", "layer-1", "visible") is None
+    assert ledger.get("layer", "layer-1", "opacity") is None
+    assert ledger.current_version("layer", "layer-1", "visible") is None
+    assert ledger.get("view", "main", "ndisplay") is not None
+
+
+def test_clear_scope_supports_target_prefix() -> None:
+    ledger = ServerStateLedger()
+    ledger.record_confirmed("layer", "layer-1", "visible", True, origin="worker")
+    ledger.record_confirmed("layer", "layer-1", "opacity", 0.5, origin="worker")
+    ledger.record_confirmed("layer", "layer-2", "visible", False, origin="worker")
+    ledger.record_confirmed("layer", "aux-3", "visible", True, origin="worker")
+
+    removed = ledger.clear_scope("layer", target_prefix="layer-")
+    assert removed == 3
+
+    assert ledger.get("layer", "layer-1", "visible") is None
+    assert ledger.get("layer", "layer-2", "visible") is None
+    assert ledger.get("layer", "aux-3", "visible") is not None
+
+
+def test_clear_scope_rejects_conflicting_filters() -> None:
+    ledger = ServerStateLedger()
+    with pytest.raises(ValueError):
+        ledger.clear_scope("layer", target="layer-1", target_prefix="layer-")
