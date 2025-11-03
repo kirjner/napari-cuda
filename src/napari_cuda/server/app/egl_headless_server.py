@@ -577,11 +577,14 @@ class EGLHeadlessServer:
             return
         arr = np.asarray(array, dtype=np.float32)
         np.clip(arr, 0.0, 1.0, out=arr)
+        arr = np.multiply(arr, 255.0, dtype=np.float32)
+        np.clip(arr, 0.0, 255.0, out=arr)
+        arr_uint8 = arr.astype(np.uint8)
 
         metadata_update = {
-            "thumbnail": arr.tolist(),
-            "thumbnail_shape": list(arr.shape),
-            "thumbnail_dtype": str(arr.dtype),
+            "thumbnail": arr_uint8.tolist(),
+            "thumbnail_shape": list(arr_uint8.shape),
+            "thumbnail_dtype": "uint8",
             "thumbnail_version": float(time.time()),
         }
         existing = self._state_ledger.get("layer", layer_id, "metadata")
