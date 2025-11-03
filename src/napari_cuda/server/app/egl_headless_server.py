@@ -585,6 +585,7 @@ class EGLHeadlessServer:
                 if max_val > 0:
                     arr /= max_val
             np.clip(arr, 0.0, 1.0, out=arr)
+        arr = np.flip(arr, axis=0)
 
         metadata_update = {
             "thumbnail": arr.tolist(),
