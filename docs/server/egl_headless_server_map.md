@@ -9,9 +9,10 @@ extract testable helpers without introducing a heavy class hierarchy.
 For the complementary worker breakdown, see `runtime_worker.md`.
 
 ## Lifecycle Overview
-- Class construction pulls environment variables, resolves `ServerCtx`, wires
-  pixel channel state, mirrors, metrics, worker intents, camera queues, and the
-  thumbnail tracker (`__init__`, lines 150-342).
+- Class construction now defers environment/context work to
+  `context.capture_env`, `context.resolve_server_ctx`, and related helpers
+  before wiring pixel channel state, mirrors, metrics, worker intents, camera
+  queues, and the thumbnail tracker (`__init__`, lines 150-345).
 - `start` boots logging, enters idle or loads the configured dataset, starts
   websocket servers, launches the metrics dashboard, kicks off the pixel loop,
   and keeps the async loop alive (`start`, lines 1139-1246).
@@ -20,7 +21,7 @@ For the complementary worker breakdown, see `runtime_worker.md`.
 
 ## State Surfaces (current single-class layout)
 - **Environment & context** – `_ctx_env`, `_ctx`, `_data_root`, `_browse_root`,
-  and encoder bitstream policy (lines 150-206).
+  and encode policy resolved via `context.py` helpers (lines 150-214).
 - **Pixel / encode state** – `Metrics`, `_metrics_runner`, `_pixel_channel`,
   `_pixel_config`, `_param_cache`, `_dump_*`, `_seq`, `_dump_remaining`
   (lines 205-265, 513-540).
@@ -42,12 +43,15 @@ For the complementary worker breakdown, see `runtime_worker.md`.
 ## Responsibility Clusters
 
 ### 1. Env & Configuration Bootstrap
-- **Entry points:** `__init__`, `_resolve_env_path`.
+- **Entry points:** `__init__` delegating to `context.capture_env`,
+  `context.resolve_server_ctx`, `context.resolve_data_roots`,
+  `context.configure_bitstream_policy`, `context.resolve_volume_caps`,
+  `context.resolve_encode_config`.
 - **Shared state:** `_ctx_env`, `_ctx`, `_data_root`, `_browse_root`,
   `_volume_max_bytes_cfg`, `_hw_volume_max_bytes`, `_codec_name`, `cfg`.
-- **Dependencies:** `load_server_ctx`, `configure_bitstream`, `get_hw_limits`.
-- **Notes:** All env parsing, bitstream policy, and codec selection are embedded
-  in `__init__`, making it hard to test context resolution independently.
+- **Dependencies:** `context.py`, `get_hw_limits`.
+- **Notes:** Env parsing and encode policy are now tested in isolation via the
+  new helper module; the constructor simply stores results.
 
 ### 2. Pixel Channel & Encoder Policy
 - **Entry points:** `__init__` (pixel state), `_current_avcc_bytes`,
@@ -70,7 +74,12 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   polling logic, forcing the coordinator to know reducer semantics.
 
 ### 4. Dataset Lifecycle & Idle Flow
-- **Entry points:** `_enter_idle_state`, `_switch_dataset`, `_handle_zarr_load`.
+- **Entry points:** `_enter_idle_state`, `_switch_dataset`, `_handle_zarr_load`
+  (slated for extraction into `dataset_lifecycle.py`). The plan is to expose a
+  `ServerLifecycleHooks` dataclass that carries the minimal callback surface
+  needed by the helpers (stop/start worker, reset mirrors, refresh snapshots,
+  queue thumbnails, mark stream dirty) so we avoid passing the full server
+  object while keeping the helper API explicit.
 - **Shared state:** `_state_ledger`, `_bootstrap_snapshot`, `_layer_mirror`,
   `_dims_mirror`, `_zarr_*`, `_thumbnail_state`.
 - **Dependencies:** `reduce_bootstrap_state`, `discover_dataset_root`,
@@ -163,14 +172,14 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   tests to spin up full servers for simple broadcast assertions.
 
 ## Next Steps (High-Level)
-1. Extract env/config helpers into a small module to shrink `__init__`.
-2. Factor dataset/idle transitions into procedural helpers that operate on
-   simple state bags, enabling isolated tests.
-3. Separate control-plane broadcasting and resumable history from the server
+1. Factor dataset/idle transitions into procedural helpers in
+   `dataset_lifecycle.py`, using a lightweight `ServerLifecycleHooks` surface so
+   helpers can manipulate worker state without importing the server class.
+2. Separate control-plane broadcasting and resumable history from the server
    coordinator.
-4. Design a focused thumbnail pipeline module that can be tested against worker
+3. Design a focused thumbnail pipeline module that can be tested against worker
    tick ordering issues before re-integrating.
-5. Gradually slim `EGLHeadlessServer` into a coordinator that wires helpers and
+4. Gradually slim `EGLHeadlessServer` into a coordinator that wires helpers and
    schedules coroutines, leaving logic in dedicated modules.
 
 This map should guide the incremental refactor: peel off independent surfaces,

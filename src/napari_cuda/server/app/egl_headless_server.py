@@ -42,6 +42,11 @@ from napari_cuda.server.app.context import (
     resolve_server_ctx,
     resolve_volume_caps,
 )
+from napari_cuda.server.app.dataset_lifecycle import (
+    ServerLifecycleHooks,
+    apply_dataset_bootstrap,
+    enter_idle_state,
+)
 from napari_cuda.server.app.thumbnail_utils import (
     RenderSignature,
     ThumbnailState,
@@ -523,6 +528,42 @@ class EGLHeadlessServer:
 
         task.add_done_callback(_log_task_result)
 
+    def _reset_thumbnail_state(self) -> None:
+        reset_thumbnail_state(self._thumbnail_state)
+
+    def _reset_mirrors(self) -> None:
+        self._layer_mirror.reset()
+        self._dims_mirror.reset()
+
+    def _set_dataset_metadata(
+        self,
+        path: Optional[str],
+        level: Optional[str],
+        axes: Optional[str],
+        z_index: Optional[int],
+    ) -> None:
+        self._zarr_path = path
+        self._zarr_level = level
+        self._zarr_axes = axes
+        self._zarr_z = z_index
+
+    def _set_bootstrap_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
+        self._bootstrap_snapshot = snapshot
+
+    def _build_lifecycle_hooks(self) -> ServerLifecycleHooks:
+        return ServerLifecycleHooks(
+            stop_worker=self._stop_worker,
+            clear_frame_queue=self._clear_frame_queue,
+            reset_mirrors=self._reset_mirrors,
+            reset_thumbnail_state=self._reset_thumbnail_state,
+            refresh_scene_snapshot=self._refresh_scene_snapshot,
+            start_mirrors_if_needed=self._start_mirrors_if_needed,
+            pull_render_snapshot=lambda: pull_render_snapshot(self),
+            set_dataset_metadata=self._set_dataset_metadata,
+            set_bootstrap_snapshot=self._set_bootstrap_snapshot,
+            pixel_channel=self._pixel_channel,
+        )
+
     def _queue_thumbnail_refresh(self, layer_id: Optional[str]) -> None:
         if not request_thumbnail_refresh(self._thumbnail_state, layer_id):
             return
@@ -849,44 +890,8 @@ class EGLHeadlessServer:
 
     def _enter_idle_state(self) -> None:
         logger.info("Entering idle state (no dataset)")
-        self._stop_worker()
-        self._clear_frame_queue()
-        self._layer_mirror.reset()
-        self._dims_mirror.reset()
-        reset_thumbnail_state(self._thumbnail_state)
-        self._state_ledger.clear_scope("layer")
-        self._state_ledger.clear_scope("multiscale")
-        self._state_ledger.clear_scope("volume")
-        step = (0, 0)
-        axis_labels = ("y", "x")
-        order = (0, 1)
-        level_shapes = ((1, 1),)
-        levels = (
-            {"index": 0, "shape": [1, 1], "downsample": [1.0, 1.0], "path": ""},
-        )
-        reduce_bootstrap_state(
-            self._state_ledger,
-            step=step,
-            axis_labels=axis_labels,
-            order=order,
-            level_shapes=level_shapes,
-            levels=levels,
-            current_level=0,
-            ndisplay=2,
-            origin="server.idle-bootstrap",
-        )
-        self._zarr_path = None
-        self._zarr_level = None
-        self._zarr_axes = None
-        self._zarr_z = None
-        self._bootstrap_snapshot = pull_render_snapshot(self)
-        self._refresh_scene_snapshot(self._bootstrap_snapshot)
-        mark_stream_config_dirty(self._pixel_channel)
-        self._pixel_channel.last_avcc = None
-        broadcast = self._pixel_channel.broadcast
-        broadcast.last_key_seq = None
-        broadcast.last_key_ts = None
-        broadcast.waiting_for_keyframe = True
+        hooks = self._build_lifecycle_hooks()
+        enter_idle_state(hooks, self._state_ledger)
 
     async def _switch_dataset(
         self,
@@ -926,35 +931,15 @@ class EGLHeadlessServer:
                 cooldown_ms=self._ctx.policy.cooldown_ms,
             )
 
-            self._stop_worker()
-            self._clear_frame_queue()
-            self._layer_mirror.reset()
-            self._dims_mirror.reset()
-            reset_thumbnail_state(self._thumbnail_state)
-            self._state_ledger.clear_scope("layer")
-            self._state_ledger.clear_scope("multiscale")
-            self._state_ledger.clear_scope("volume")
-
-            reduce_bootstrap_state(
+            hooks = self._build_lifecycle_hooks()
+            apply_dataset_bootstrap(
+                hooks,
                 self._state_ledger,
-                step=bootstrap_meta.step,
-                axis_labels=bootstrap_meta.axis_labels,
-                order=bootstrap_meta.order,
-                level_shapes=bootstrap_meta.level_shapes,
-                levels=bootstrap_meta.levels,
-                current_level=bootstrap_meta.current_level,
-                ndisplay=bootstrap_meta.ndisplay,
-                origin="server.bootstrap",
+                bootstrap_meta,
+                resolved_path=str(resolved),
+                preferred_level=preferred_level,
+                z_override=z_override,
             )
-
-            self._zarr_path = str(resolved)
-            self._zarr_level = preferred_level
-            self._zarr_axes = "".join(bootstrap_meta.axis_labels)
-            self._zarr_z = z_override
-
-            self._bootstrap_snapshot = pull_render_snapshot(self)
-            self._start_mirrors_if_needed()
-            self._refresh_scene_snapshot(self._bootstrap_snapshot)
 
             loop = asyncio.get_running_loop()
             self._start_worker(loop)
@@ -963,13 +948,6 @@ class EGLHeadlessServer:
 
             scene_payload = self._build_scene_payload()
             self._cache_scene_history(scene_payload)
-
-            mark_stream_config_dirty(self._pixel_channel)
-            self._pixel_channel.last_avcc = None
-            broadcast = self._pixel_channel.broadcast
-            broadcast.last_key_seq = None
-            broadcast.last_key_ts = None
-            broadcast.waiting_for_keyframe = True
 
             if notify_clients:
                 self._broadcast_state_baseline(reason="dataset-load")
