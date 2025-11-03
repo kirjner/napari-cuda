@@ -33,6 +33,15 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.app import metrics_server
+from napari_cuda.server.app.context import (
+    EncodeConfig,
+    capture_env,
+    configure_bitstream_policy,
+    resolve_data_roots,
+    resolve_encode_config,
+    resolve_server_ctx,
+    resolve_volume_caps,
+)
 from napari_cuda.server.app.thumbnail_utils import (
     RenderSignature,
     ThumbnailState,
@@ -43,7 +52,6 @@ from napari_cuda.server.app.thumbnail_utils import (
     request_thumbnail_refresh,
     reset_thumbnail_state,
 )
-from napari_cuda.server.app.config import load_server_ctx
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.server.config import ServerConfig, ServerCtx
 from napari_cuda.server.control.control_channel_server import ingest_state
@@ -80,7 +88,6 @@ from napari_cuda.server.engine.api import (
     PixelChannelState,
     build_avcc_config,
     build_notify_stream_payload,
-    configure_bitstream,
     ensure_keyframe,
     ingest_client,
     mark_stream_config_dirty,
@@ -132,14 +139,6 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
     from napari_cuda.server.runtime.worker import EGLRendererWorker
 
 
-@dataclass
-class EncodeConfig:
-    fps: int = 60
-    codec: int = 1  # 1=h264, 2=hevc, 3=av1
-    bitrate: int = 12_000_000
-    keyint: int = 120
-
-
 class EGLHeadlessServer:
     def __init__(self, width: int = 1920, height: int = 1080, use_volume: bool = False,
                  host: str = '0.0.0.0', state_port: int = 8081, pixel_port: int = 8082, fps: int = 60,
@@ -148,31 +147,18 @@ class EGLHeadlessServer:
                  zarr_axes: str | None = None, zarr_z: int | None = None,
                  debug: bool = False) -> None:
         # Build once: resolved runtime context (observe-only for now)
-        self._ctx_env: dict[str, str] = dict(os.environ)
-        try:
-            self._ctx: ServerCtx = load_server_ctx(self._ctx_env)
-        except Exception:
-            # Fallback to minimal defaults if ctx load fails for any reason
-            self._ctx = load_server_ctx({})  # type: ignore[arg-type]
-        env_root = self._resolve_env_path(self._ctx_env.get("NAPARI_CUDA_DATA_ROOT"))
-        if env_root:
-            self._data_root = env_root
-            self._browse_root = Path(env_root)
-        else:
-            self._data_root = None
-            self._browse_root = Path.cwd().resolve()
-            logger.info("NAPARI_CUDA_DATA_ROOT not set; defaulting browse root to %s", self._browse_root)
-        try:
-            configure_bitstream(self._ctx.bitstream)
-        except Exception:
-            logger.debug("Bitstream configuration failed", exc_info=True)
+        self._ctx_env: dict[str, str] = capture_env()
+        self._ctx: ServerCtx = resolve_server_ctx(self._ctx_env)
+        self._data_root, self._browse_root = resolve_data_roots(self._ctx_env, logger=logger)
+        configure_bitstream_policy(self._ctx, logger=logger)
 
         hw_limits = get_hw_limits()
-        cfg_limits = self._ctx.cfg
-        self._volume_max_bytes_cfg = int(max(0, getattr(cfg_limits, "max_volume_bytes", 0)))
-        self._volume_max_voxels_cfg = int(max(0, getattr(cfg_limits, "max_volume_voxels", 0)))
-        self._hw_volume_max_bytes = int(getattr(hw_limits, "volume_max_bytes", 0))
-        self._hw_volume_max_voxels = int(getattr(hw_limits, "volume_max_voxels", 0))
+        (
+            self._volume_max_bytes_cfg,
+            self._volume_max_voxels_cfg,
+            self._hw_volume_max_bytes,
+            self._hw_volume_max_voxels,
+        ) = resolve_volume_caps(self._ctx, hw_limits)
 
         self.width = width
         self.height = height
@@ -181,19 +167,7 @@ class EGLHeadlessServer:
         self.state_port = state_port
         self.pixel_port = pixel_port
         encode_cfg = getattr(self._ctx.cfg, 'encode', None)
-        codec_map = {'h264': 1, 'hevc': 2, 'av1': 3}
-        if encode_cfg is None:
-            self._codec_name = 'h264'
-            self.cfg = EncodeConfig(fps=fps)
-        else:
-            codec_name = str(getattr(encode_cfg, 'codec', 'h264')).lower()
-            self._codec_name = codec_name if codec_name in codec_map else 'h264'
-            self.cfg = EncodeConfig(
-                fps=int(getattr(encode_cfg, 'fps', fps)),
-                codec=codec_map.get(codec_name, 1),
-                bitrate=int(getattr(encode_cfg, 'bitrate', 12_000_000)),
-                keyint=int(getattr(encode_cfg, 'keyint', 120)),
-            )
+        self._codec_name, self.cfg = resolve_encode_config(encode_cfg, fallback_fps=fps)
         self._animate = bool(animate)
         try:
             self._animate_dps = float(animate_dps)
@@ -339,11 +313,6 @@ class EGLHeadlessServer:
         self._allowed_render_modes = {'mip', 'translucent', 'iso'}
         # Populate multiscale description from NGFF metadata if available
 
-    @staticmethod
-    def _resolve_env_path(value: Optional[str]) -> Optional[str]:
-        if not value:
-            return None
-        return str(Path(value).expanduser().resolve())
     @property
     def _worker(self) -> Optional[EGLRendererWorker]:
         return self._worker_lifecycle.worker
