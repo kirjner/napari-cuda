@@ -11,6 +11,6 @@ def test_data_root_defaults_to_launch_directory(monkeypatch, tmp_path) -> None:
 
     server = EGLHeadlessServer()
 
-    resolved_root = Path(server._data_root)
-    assert resolved_root == tmp_path.resolve()
+    assert server._data_root is None
+    assert server._browse_root == tmp_path.resolve()
     assert server._require_data_root() == tmp_path.resolve()

@@ -143,11 +143,14 @@ class EGLHeadlessServer:
         except Exception:
             # Fallback to minimal defaults if ctx load fails for any reason
             self._ctx = load_server_ctx({})  # type: ignore[arg-type]
-        self._data_root = self._resolve_env_path(self._ctx_env.get("NAPARI_CUDA_DATA_ROOT"))
-        if not self._data_root:
-            launch_dir = Path.cwd().resolve()
-            self._data_root = str(launch_dir)
-            logger.info("NAPARI_CUDA_DATA_ROOT not set; defaulting data root to %s", launch_dir)
+        env_root = self._resolve_env_path(self._ctx_env.get("NAPARI_CUDA_DATA_ROOT"))
+        if env_root:
+            self._data_root = env_root
+            self._browse_root = Path(env_root)
+        else:
+            self._data_root = None
+            self._browse_root = Path.cwd().resolve()
+            logger.info("NAPARI_CUDA_DATA_ROOT not set; defaulting browse root to %s", self._browse_root)
         try:
             configure_bitstream(self._ctx.bitstream)
         except Exception:
@@ -927,22 +930,22 @@ class EGLHeadlessServer:
         logger.debug("thumbnail emission skipped for layer %s (no data)", layer_id)
 
     def _require_data_root(self) -> Path:
-        if not self._data_root:
-            raise RuntimeError("NAPARI_CUDA_DATA_ROOT not configured")
-        root = Path(self._data_root).expanduser().resolve(strict=True)
+        root_candidate = self._data_root or str(self._browse_root)
+        root = Path(root_candidate).expanduser().resolve(strict=True)
         if not root.is_dir():
             raise RuntimeError(f"Data root is not a directory: {root}")
         return root
 
     def _resolve_data_path(self, path: Optional[str]) -> Path:
-        root = self._require_data_root()
+        base = self._browse_root
         if not path:
-            return root
+            return base
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
-            candidate = root / candidate
+            candidate = base / candidate
         resolved = candidate.resolve(strict=False)
-        resolved.relative_to(root)
+        if self._data_root:
+            resolved.relative_to(Path(self._data_root))
         return resolved
 
     def _resolve_dataset_path(self, path: str) -> Path:
