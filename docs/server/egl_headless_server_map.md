@@ -32,7 +32,8 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   callbacks, `_state_clients`, `_resumable_store`, `_log_*` flags
   (lines 266-339); publishing helpers now live in `scene_publisher.py`.
 - **Scene cache** – `_scene_snapshot`, thumbnail state, default layer helpers
-  (lines 320-373, 567-776).
+  (lines 320-373, 567-776); capture pipeline logic now routes through
+  `thumbnail.py` for queuing, render ticks, and ingestion.
 - **Dataset configuration** – `_zarr_*`, volume budget caps, idle bootstrap
   routed through `dataset_lifecycle.py` (lines 176-208, 376-452, 881-1010).
 - **Filesystem access** – `_require_data_root`, `_resolve_*`, `_list_directory`
@@ -97,18 +98,22 @@ For the complementary worker breakdown, see `runtime_worker.md`.
 - **Notes:** Publishing now lives in a focused helper; clearing client
   sequencers and scheduling baselines no longer require the monolith.
 
-### 6. Thumbnail Pipeline (currently broken)
+### 6. Thumbnail Pipeline
 - **Entry points:** `_queue_thumbnail_refresh`, `_on_render_tick`,
-  `_emit_worker_thumbnail`, `_handle_worker_thumbnails`, `_ingest_worker_thumbnail`,
-  `_layer_thumbnail`.
+  `_handle_worker_thumbnails`, `_ingest_worker_thumbnail`, `_layer_thumbnail`
+  now delegate to `thumbnail.py` for state tracking, render-tick scheduling,
+  and ledger writes.
 - **Shared state:** `_thumbnail_state`, `_worker_intents`, `_scene_snapshot`,
   `_state_ledger`.
-- **Dependencies:** `ThumbnailState` helpers, `ThumbnailIntent`, worker mark-tick
-  methods, numpy transforms.
-- **Notes:** Change detection, worker tick nudging, capture ingestion, and ledger
-  writes are all inlined. The current pipeline suffers race conditions—render
-  ticks queue thumbnails but ledger updates lag a frame—so this extraction must
-  pay special attention to ordering and worker readiness.
+- **Dependencies:** `thumbnail.py`, `ThumbnailIntent`, worker mark-tick hooks,
+  `ServerLayerMirror` (for notify.layers propagation).
+- **Notes:** Thumbnail requests are recorded in the helper module, which nudges
+  the worker, captures the napari thumbnail, and records both metadata and
+  `thumbnail` ledger entries so mirrors can broadcast notify.layers deltas. The
+  remaining glue ensures the default layer id is resolved whenever observers
+  queue a refresh.
+  TODO: add integration coverage once the control-plane harness exists so
+  regressions in thumbnail refresh sequencing are caught automatically.
 
 ### 7. Scene Snapshot & Mirrors
 - **Entry points:** `_refresh_scene_snapshot`, `_start_mirrors_if_needed`,
@@ -171,9 +176,9 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   tests to spin up full servers for simple broadcast assertions.
 
 ## Next Steps (High-Level)
-1. Carve the thumbnail pipeline into a dedicated helper so worker intent
-   sequencing and ledger writes can be tested in isolation (vital for fixing
-   the missing-thumbnail regression).
+1. Validate end-to-end thumbnail refresh (render tick → ledger write →
+   notify.layers) in integration tests or a lightweight harness to ensure the
+   new helper surfaces behave under worker load.
 2. Continue peeling camera/level reducers off the coordinator, following the
    hook-based approach to shrink `_handle_worker_level_intents` and related
    mailboxes.
