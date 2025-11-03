@@ -557,12 +557,19 @@ class EGLHeadlessServer:
         self._schedule_thumbnail_task()
 
     def _on_render_tick(self) -> None:
-        if self._pending_thumbnail_id is None:
+        layer_id = self._default_layer_id()
+        if not layer_id:
             return
         loop = self._control_loop
         if loop is None:
             return
-        loop.call_soon_threadsafe(self._schedule_thumbnail_task)
+
+        def _enqueue() -> None:
+            self._pending_thumbnail_id = layer_id
+            if not self._thumbnail_job_scheduled:
+                self._schedule_thumbnail_task()
+
+        loop.call_soon_threadsafe(_enqueue)
 
     async def _attempt_thumbnail(self) -> None:
         self._thumbnail_job_scheduled = False
