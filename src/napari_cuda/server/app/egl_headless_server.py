@@ -33,6 +33,16 @@ from napari_cuda.protocol import (
 )
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.app import metrics_server
+from napari_cuda.server.app.thumbnail_utils import (
+    RenderSignature,
+    ThumbnailState,
+    build_render_signature,
+    flag_render_change,
+    record_thumbnail_failure,
+    record_thumbnail_success,
+    request_thumbnail_refresh,
+    reset_thumbnail_state,
+)
 from napari_cuda.server.app.config import load_server_ctx
 from napari_cuda.server.app.metrics_core import Metrics
 from napari_cuda.server.config import ServerConfig, ServerCtx
@@ -96,6 +106,7 @@ from napari_cuda.server.runtime.worker import (
     start_worker as lifecycle_start_worker,
     stop_worker as lifecycle_stop_worker,
 )
+from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailIntent
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
     LayerVisualState,
@@ -254,9 +265,7 @@ class EGLHeadlessServer:
         # Camera sequencing per target
         self._camera_command_seq: dict[str, int] = {}
         # Thumbnail scheduling
-        self._pending_thumbnail_id: Optional[str] = None
-        self._thumbnail_job_scheduled = False
-        self._last_thumbnail_signature: Optional[tuple[Any, ...]] = None
+        self._thumbnail_state = ThumbnailState()
 
         def _schedule_from_mirror(coro: Awaitable[None], label: str) -> None:
             loop = self._control_loop
@@ -545,65 +554,71 @@ class EGLHeadlessServer:
 
         task.add_done_callback(_log_task_result)
 
-    def _schedule_thumbnail_task(self) -> None:
-        if self._thumbnail_job_scheduled:
-            return
-        self._thumbnail_job_scheduled = True
-        self._schedule_coro(self._attempt_thumbnail(), "layer-thumbnail")
-
     def _queue_thumbnail_refresh(self, layer_id: Optional[str]) -> None:
-        if not layer_id:
+        if not request_thumbnail_refresh(self._thumbnail_state, layer_id):
             return
-        self._pending_thumbnail_id = layer_id
-        self._schedule_thumbnail_task()
+        worker = self._worker
+        if worker is not None and hasattr(worker, "_mark_render_tick_needed"):
+            try:
+                worker._mark_render_tick_needed()
+            except Exception:
+                logger.debug("thumbnail refresh tick request failed", exc_info=True)
 
     def _on_render_tick(self, snapshot: RenderLedgerSnapshot) -> None:
         layer_id = self._default_layer_id()
         if not layer_id:
             return
 
-        current_step = tuple(int(v) for v in (snapshot.current_step or ()))
-        signature = (
-            int(snapshot.current_level or 0),
-            current_step,
-            tuple(int(v) for v in (snapshot.displayed or ())),
-        )
-        if self._last_thumbnail_signature == signature:
-            return
-        self._last_thumbnail_signature = signature
-
-        loop = self._control_loop
-        if loop is None:
+        signature = build_render_signature(snapshot)
+        state = self._thumbnail_state
+        if not flag_render_change(state, signature, layer_id):
             return
 
-        def _enqueue() -> None:
-            self._pending_thumbnail_id = layer_id
-            if not self._thumbnail_job_scheduled:
-                self._schedule_thumbnail_task()
-
-        loop.call_soon_threadsafe(_enqueue)
-
-    async def _attempt_thumbnail(self) -> None:
-        self._thumbnail_job_scheduled = False
-        layer_id = self._pending_thumbnail_id
-        if not layer_id:
-            return
         worker = self._worker
         if worker is None or not worker.is_ready:
+            record_thumbnail_failure(state)
             return
-        array = self._layer_thumbnail(layer_id)
+
+        array = self._layer_thumbnail(layer_id, signature=signature)
         if array is None or array.size == 0:
+            record_thumbnail_failure(state)
             return
-        arr = np.asarray(array)
-        if arr.dtype == np.uint8:
-            arr = arr.astype(np.float32) / 255.0
-        else:
-            arr = np.asarray(arr, dtype=np.float32)
-            if arr.size > 0:
-                max_val = float(np.nanmax(arr))
-                if max_val > 0:
-                    arr /= max_val
-            np.clip(arr, 0.0, 1.0, out=arr)
+        self._emit_worker_thumbnail(layer_id, signature, array)
+
+    def _emit_worker_thumbnail(self, layer_id: str, signature: RenderSignature, array: np.ndarray) -> None:
+        payload = ThumbnailIntent(
+            layer_id=str(layer_id),
+            signature=signature,
+            array=np.asarray(array).copy(),
+        )
+        self._worker_intents.enqueue_thumbnail(payload)
+        loop = self._control_loop
+        if loop is not None:
+            loop.call_soon_threadsafe(self._handle_worker_thumbnails)
+
+    def _handle_worker_thumbnails(self) -> None:
+        while True:
+            payload = self._worker_intents.pop_thumbnail()
+            if payload is None:
+                break
+            self._ingest_worker_thumbnail(payload)
+
+    def _ingest_worker_thumbnail(self, payload: ThumbnailIntent) -> None:
+        layer_id = payload.layer_id
+        signature = payload.signature
+        state = self._thumbnail_state
+
+        array = np.asarray(payload.array)
+        if array.size == 0:
+            record_thumbnail_failure(state)
+            return
+
+        arr = np.asarray(array, dtype=np.float32)
+        if arr.size > 0:
+            max_val = float(np.nanmax(arr))
+            if max_val > 0:
+                arr /= max_val
+        np.clip(arr, 0.0, 1.0, out=arr)
         arr = np.flip(arr, axis=0)
 
         metadata_update = {
@@ -612,6 +627,7 @@ class EGLHeadlessServer:
             "thumbnail_dtype": "float32",
             "thumbnail_version": float(time.time()),
         }
+
         existing = self._state_ledger.get("layer", layer_id, "metadata")
         if existing is not None and isinstance(existing.value, dict):
             merged = dict(existing.value)
@@ -619,7 +635,7 @@ class EGLHeadlessServer:
             if prev is not None:
                 prev_arr = np.asarray(prev, dtype=np.float32)
                 if prev_arr.shape == arr.shape and np.allclose(prev_arr, arr, atol=1e-3):
-                    self._pending_thumbnail_id = None
+                    record_thumbnail_success(state, signature)
                     return
             merged.update(metadata_update)
             metadata = merged
@@ -633,7 +649,7 @@ class EGLHeadlessServer:
             metadata,
             origin="server.thumbnail",
         )
-        self._pending_thumbnail_id = None
+        record_thumbnail_success(state, signature)
         self._refresh_scene_snapshot()
 
     async def _ensure_keyframe(self) -> None:
@@ -754,13 +770,25 @@ class EGLHeadlessServer:
             return None
         return snapshot.layers[0].layer_id
 
-    def _layer_thumbnail(self, layer_id: str) -> Optional[np.ndarray]:
+    def _layer_thumbnail(self, layer_id: str, signature: Optional[RenderSignature] = None) -> Optional[np.ndarray]:
         worker = self._worker
         if worker is None:
             return None
         viewer = worker.viewer_model()
         if viewer is None or not viewer.layers:
             return None
+        if signature is not None:
+            dims_model = viewer.dims
+            current_step_raw = dims_model.current_step
+            if current_step_raw is None:
+                return None
+            current_step = tuple(int(v) for v in tuple(current_step_raw))
+            target_step = signature[2]
+            if target_step:
+                if len(current_step) < len(target_step):
+                    return None
+                if tuple(current_step[: len(target_step)]) != target_step:
+                    return None
         layer = None
         if not viewer.layers:
             return None
@@ -856,9 +884,7 @@ class EGLHeadlessServer:
         self._clear_frame_queue()
         self._layer_mirror.reset()
         self._dims_mirror.reset()
-        self._pending_thumbnail_id = None
-        self._thumbnail_job_scheduled = False
-        self._last_thumbnail_signature = None
+        reset_thumbnail_state(self._thumbnail_state)
         self._state_ledger.clear_scope("layer")
         self._state_ledger.clear_scope("multiscale")
         self._state_ledger.clear_scope("volume")
@@ -935,9 +961,7 @@ class EGLHeadlessServer:
             self._clear_frame_queue()
             self._layer_mirror.reset()
             self._dims_mirror.reset()
-            self._pending_thumbnail_id = None
-            self._thumbnail_job_scheduled = False
-            self._last_thumbnail_signature = None
+            reset_thumbnail_state(self._thumbnail_state)
             self._state_ledger.clear_scope("layer")
             self._state_ledger.clear_scope("multiscale")
             self._state_ledger.clear_scope("volume")
