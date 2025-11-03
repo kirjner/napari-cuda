@@ -47,6 +47,11 @@ from napari_cuda.server.app.dataset_lifecycle import (
     apply_dataset_bootstrap,
     enter_idle_state,
 )
+from napari_cuda.server.app.scene_publisher import (
+    broadcast_state_baseline,
+    build_scene_payload as build_scene_payload_helper,
+    cache_scene_history,
+)
 from napari_cuda.server.app.thumbnail_utils import (
     RenderSignature,
     ThumbnailState,
@@ -75,7 +80,6 @@ from napari_cuda.server.control.state_reducers import (
     reduce_camera_update,
     reduce_level_update,
 )
-from napari_cuda.server.control.topics.notify.baseline import orchestrate_connect
 from napari_cuda.server.control.topics.notify.camera import broadcast_camera_update
 from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
@@ -857,28 +861,11 @@ class EGLHeadlessServer:
     def _build_scene_payload(self) -> NotifyScenePayload:
         snapshot = self._scene_snapshot
         assert snapshot is not None, "scene snapshot unavailable"
-        return build_notify_scene_payload(
-            scene_snapshot=snapshot,
-            ledger_snapshot=self._state_ledger.snapshot(),
-            viewer_settings=self._viewer_settings(),
+        return build_scene_payload_helper(
+            snapshot,
+            self._state_ledger.snapshot(),
+            self._viewer_settings(),
         )
-
-    def _cache_scene_history(self, payload: NotifyScenePayload) -> None:
-        store = self._resumable_store
-        if store is None:
-            return
-        now = time.time()
-        store.snapshot_envelope(
-            NOTIFY_SCENE_TYPE,
-            payload=payload.to_dict(),
-            timestamp=now,
-        )
-        store.reset_epoch(NOTIFY_LAYERS_TYPE, timestamp=now)
-        store.reset_epoch(NOTIFY_STREAM_TYPE, timestamp=now)
-        for ws in list(self._state_clients):
-            state_sequencer(ws, NOTIFY_SCENE_TYPE).clear()
-            state_sequencer(ws, NOTIFY_LAYERS_TYPE).clear()
-            state_sequencer(ws, NOTIFY_STREAM_TYPE).clear()
 
     def _clear_frame_queue(self) -> None:
         queue = self._pixel_channel.broadcast.frame_queue
@@ -947,20 +934,17 @@ class EGLHeadlessServer:
             self._queue_thumbnail_refresh(self._default_layer_id())
 
             scene_payload = self._build_scene_payload()
-            self._cache_scene_history(scene_payload)
+            cache_scene_history(self._resumable_store, self._state_clients, scene_payload)
 
             if notify_clients:
-                self._broadcast_state_baseline(reason="dataset-load")
+                broadcast_state_baseline(
+                    self,
+                    self._state_clients,
+                    schedule_coro=self._schedule_coro,
+                    reason="dataset-load",
+                )
             else:
                 self._schedule_coro(self._ensure_keyframe(), "dataset-startup-keyframe")
-
-    def _broadcast_state_baseline(self, *, reason: str) -> None:
-        for ws in list(self._state_clients):
-            resume_map = getattr(ws, "_napari_cuda_resume_plan", {}) or {}
-            self._schedule_coro(
-                orchestrate_connect(self, ws, resume_map),
-                f"baseline-{reason}",
-            )
 
     async def _send_layer_thumbnail(
         self,
@@ -1122,7 +1106,7 @@ class EGLHeadlessServer:
             self._start_mirrors_if_needed()
             self._refresh_scene_snapshot()
             idle_payload = self._build_scene_payload()
-            self._cache_scene_history(idle_payload)
+            cache_scene_history(self._resumable_store, self._state_clients, idle_payload)
 
         # Start websocket servers; disable permessage-deflate to avoid CPU and latency on large frames
         async def state_handler(ws: websockets.WebSocketServerProtocol) -> None:

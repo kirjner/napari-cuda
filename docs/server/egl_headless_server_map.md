@@ -30,11 +30,11 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   `_state_lock`, `_bootstrap_snapshot` (lines 233-354).
 - **Mirrors & control-plane** – `_dims_mirror`, `_layer_mirror`, inline mirror
   callbacks, `_state_clients`, `_resumable_store`, `_log_*` flags
-  (lines 266-339).
+  (lines 266-339); publishing helpers now live in `scene_publisher.py`.
 - **Scene cache** – `_scene_snapshot`, thumbnail state, default layer helpers
   (lines 320-373, 567-776).
 - **Dataset configuration** – `_zarr_*`, volume budget caps, idle bootstrap
-  (lines 176-208, 376-452, 881-1010).
+  routed through `dataset_lifecycle.py` (lines 176-208, 376-452, 881-1010).
 - **Filesystem access** – `_require_data_root`, `_resolve_*`, `_list_directory`
   (lines 1030-1117).
 - **Websocket hosting** – `_state_send`, `_broadcast_loop`, `_ingest_pixel`,
@@ -75,28 +75,27 @@ For the complementary worker breakdown, see `runtime_worker.md`.
 
 ### 4. Dataset Lifecycle & Idle Flow
 - **Entry points:** `_enter_idle_state`, `_switch_dataset`, `_handle_zarr_load`
-  (slated for extraction into `dataset_lifecycle.py`). The plan is to expose a
-  `ServerLifecycleHooks` dataclass that carries the minimal callback surface
-  needed by the helpers (stop/start worker, reset mirrors, refresh snapshots,
-  queue thumbnails, mark stream dirty) so we avoid passing the full server
-  object while keeping the helper API explicit.
+  now delegate to `dataset_lifecycle.enter_idle_state` and
+  `dataset_lifecycle.apply_dataset_bootstrap` via `ServerLifecycleHooks`.
 - **Shared state:** `_state_ledger`, `_bootstrap_snapshot`, `_layer_mirror`,
   `_dims_mirror`, `_zarr_*`, `_thumbnail_state`.
-- **Dependencies:** `reduce_bootstrap_state`, `discover_dataset_root`,
+- **Dependencies:** `dataset_lifecycle`, `discover_dataset_root`,
   `pull_render_snapshot`, `probe_scene_bootstrap`, worker start/stop.
-- **Notes:** Idle entry, dataset activation, ledger resets, worker orchestration,
-  and stream reconfiguration are interwoven, making re-entry paths fragile.
+- **Notes:** Lifecycle transitions are finally testable outside the server
+  class; the hooks surface captures the minimal callbacks (worker stop/start,
+  mirror resets, thumbnail reset, stream dirtiness) without passing the whole
+  server.
 
 ### 5. Control-Plane Broadcasting & History
-- **Entry points:** `_build_scene_payload`, `_cache_scene_history`,
-  `_broadcast_state_baseline`, `_scene_snapshot_json`, `_state_send`.
+- **Entry points:** `_build_scene_payload`, `_scene_snapshot_json`, `_state_send`
+  with resumable history handled by `scene_publisher.cache_scene_history` and
+  baseline orchestration by `scene_publisher.broadcast_state_baseline`.
 - **Shared state:** `_scene_snapshot`, `_resumable_store`, `_state_clients`,
   `_state_ledger`, `_log_state_traces`.
-- **Dependencies:** `build_notify_scene_payload`, `state_sequencer`,
-  `orchestrate_connect`, `safe_send`.
-- **Notes:** Snapshot caching, resumable history, websocket sequencing, and
-  baseline orchestration share the same methods, so tests must spin up the
-  entire class.
+- **Dependencies:** `scene_publisher`, `build_notify_scene_payload`,
+  `safe_send`.
+- **Notes:** Publishing now lives in a focused helper; clearing client
+  sequencers and scheduling baselines no longer require the monolith.
 
 ### 6. Thumbnail Pipeline (currently broken)
 - **Entry points:** `_queue_thumbnail_refresh`, `_on_render_tick`,
@@ -172,14 +171,13 @@ For the complementary worker breakdown, see `runtime_worker.md`.
   tests to spin up full servers for simple broadcast assertions.
 
 ## Next Steps (High-Level)
-1. Factor dataset/idle transitions into procedural helpers in
-   `dataset_lifecycle.py`, using a lightweight `ServerLifecycleHooks` surface so
-   helpers can manipulate worker state without importing the server class.
-2. Separate control-plane broadcasting and resumable history from the server
-   coordinator.
-3. Design a focused thumbnail pipeline module that can be tested against worker
-   tick ordering issues before re-integrating.
-4. Gradually slim `EGLHeadlessServer` into a coordinator that wires helpers and
+1. Carve the thumbnail pipeline into a dedicated helper so worker intent
+   sequencing and ledger writes can be tested in isolation (vital for fixing
+   the missing-thumbnail regression).
+2. Continue peeling camera/level reducers off the coordinator, following the
+   hook-based approach to shrink `_handle_worker_level_intents` and related
+   mailboxes.
+3. Gradually slim `EGLHeadlessServer` into a coordinator that wires helpers and
    schedules coroutines, leaving logic in dedicated modules.
 
 This map should guide the incremental refactor: peel off independent surfaces,
