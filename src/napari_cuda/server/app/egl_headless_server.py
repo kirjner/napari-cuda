@@ -127,7 +127,6 @@ from napari_cuda.server.scene import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.util.websocket import safe_send
 from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
-from napari_cuda.server.utils.signatures import signature_hash_tuple
 import hashlib
 import time
 
@@ -586,12 +585,6 @@ class EGLHeadlessServer:
         token = tuple(payload.frame_token)
         last = self._last_thumb_token.get(layer_id)
         if last is not None and last == token:
-            logger.info(
-                "server.thumbnail drop: layer=%s token_hash=%s token=%r",
-                layer_id,
-                signature_hash_tuple(token),
-                token,
-            )
             return
         arr = np.asarray(payload.array)
         if arr.dtype == np.uint8:
@@ -617,12 +610,6 @@ class EGLHeadlessServer:
             payload=payload_dict,
             origin="server.thumbnail",
             timestamp=ts,
-        )
-        logger.info(
-            "server.thumbnail accept: layer=%s token_hash=%s token=%r",
-            layer_id,
-            signature_hash_tuple(token),
-            token,
         )
         self._last_thumb_token[layer_id] = token
         self._refresh_scene_snapshot()
