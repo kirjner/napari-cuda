@@ -12,13 +12,13 @@ __all__ = [
     "RemoteImageLayer",
     "RemoteLayerRegistry",
     "RemoteMultiscale",
-    "RemotePreview",
+    "RemoteThumbnail",
     "build_remote_data",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"RemoteArray", "RemoteMultiscale", "RemotePreview", "build_remote_data"}:
+    if name in {"RemoteArray", "RemoteMultiscale", "RemoteThumbnail", "build_remote_data"}:
         module = import_module(".remote_data", __name__)
         return getattr(module, name)
     if name in {"RemoteLayerRegistry", "RegistrySnapshot", "LayerRecord"}:

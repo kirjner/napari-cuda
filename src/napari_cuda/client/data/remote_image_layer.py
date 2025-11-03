@@ -21,7 +21,7 @@ try:
 except Exception:  # pragma: no cover - best effort import
     QtCore = None
 
-from .remote_data import RemoteArray, RemotePreview, build_remote_data
+from .remote_data import RemoteArray, RemoteThumbnail, build_remote_data
 
 try:
     from napari_cuda.client.runtime.client_loop.scheduler import CallProxy
@@ -62,11 +62,11 @@ class RemoteImageLayer(Image):
             multiscale_flag = False
 
         self._remote_arrays = arrays
-        self._remote_preview = RemotePreview()
+        self._remote_thumbnail = RemoteThumbnail()
         self._control_event_proxy: Optional[CallProxy] = None
 
         metadata = dict(self._remote_block.get("metadata") or {})
-        preview = self._preview_from_metadata(metadata)
+        preview = self._thumbnail_from_metadata(metadata)
         metadata.setdefault(self._REMOTE_ID_META_KEY, self._remote_id)
 
         init_kwargs = self._build_init_kwargs(self._remote_block, metadata, multiscale_flag)
@@ -77,8 +77,8 @@ class RemoteImageLayer(Image):
 
         self._apply_render(self._remote_block.get("render"))
         self._install_empty_slice()
-        default_preview = self._extract_preview() if preview is None else preview
-        self.update_preview(default_preview)
+        default_thumbnail = self._extract_thumbnail() if preview is None else preview
+        self.update_thumbnail(default_thumbnail)
         controls_block = self._remote_block["controls"]
         assert isinstance(controls_block, Mapping), "remote layer missing controls mapping"
         self._apply_controls(controls_block)
@@ -90,7 +90,7 @@ class RemoteImageLayer(Image):
         self._remote_block = new_block
 
         metadata = dict(self._remote_block.get("metadata") or {})
-        preview = self._preview_from_metadata(metadata)
+        preview = self._thumbnail_from_metadata(metadata)
         metadata.setdefault(self._REMOTE_ID_META_KEY, self._remote_id)
 
         if not control_only:
@@ -141,16 +141,16 @@ class RemoteImageLayer(Image):
             self.metadata = metadata
 
             self._install_empty_slice()
-            default_preview = self._extract_preview() if preview is None else preview
-            self.update_preview(default_preview)
+            default_thumbnail = self._extract_thumbnail() if preview is None else preview
+            self.update_thumbnail(default_thumbnail)
         else:
             if metadata:
                 try:
                     self.metadata = metadata
                 except Exception:
                     self.metadata.update(metadata)
-            default_preview = self._extract_preview() if preview is None else preview
-            self.update_preview(default_preview)
+            default_thumbnail = self._extract_thumbnail() if preview is None else preview
+            self.update_thumbnail(default_thumbnail)
 
         self._apply_render(self._remote_block.get("render"))
         controls_block = self._remote_block["controls"]
@@ -159,11 +159,11 @@ class RemoteImageLayer(Image):
 
     def apply_metadata(self, metadata: Mapping[str, Any]) -> None:
         meta_dict = dict(metadata)
-        preview = self._preview_from_metadata(dict(meta_dict))
+        preview = self._thumbnail_from_metadata(dict(meta_dict))
         meta_dict.setdefault(self._REMOTE_ID_META_KEY, self._remote_id)
         self.metadata = meta_dict
         if preview is not None:
-            self.update_preview(preview)
+            self.update_thumbnail(preview)
     # ------------------------------------------------------------------
     def _build_init_kwargs(self, block: Mapping[str, Any], metadata: dict[str, Any], multiscale_flag: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -206,7 +206,7 @@ class RemoteImageLayer(Image):
         # layer slice so thumbnails reflect the new view mode immediately
         # (e.g., 3D↔2D). Avoid clearing to an empty slice which would blank
         # the thumbnail until the next preview metadata arrives.
-        self._apply_preview_to_slice()
+        self._apply_thumbnail_to_slice()
         # Schedule a thumbnail refresh on the GUI thread when available.
         self._schedule_thumbnail_refresh()
 
@@ -433,17 +433,17 @@ class RemoteImageLayer(Image):
         logger.debug("RemoteImageLayer: ignoring data mutation attempt")
 
     # ------------------------------------------------------------------
-    def update_preview(self, preview: np.ndarray | None) -> None:
-        self._remote_preview.update(preview)
+    def update_thumbnail(self, preview: np.ndarray | None) -> None:
+        self._remote_thumbnail.update(preview)
         self._update_thumbnail()
-        if preview is not None or self._remote_preview.data is not None:
+        if preview is not None or self._remote_thumbnail.data is not None:
             try:
                 self._set_loaded(True)
             except Exception:
                 logger.debug("RemoteImageLayer: failed to mark preview as loaded", exc_info=True)
 
     # ------------------------------------------------------------------
-    def _extract_preview(self) -> Optional[np.ndarray]:
+    def _extract_thumbnail(self) -> Optional[np.ndarray]:
         if not self._remote_arrays:
             return None
         try:
@@ -468,12 +468,12 @@ class RemoteImageLayer(Image):
         QtCore.QTimer.singleShot(0, self._update_thumbnail)  # type: ignore[arg-type]
         return True
 
-    def _apply_preview_to_slice(self) -> None:
+    def _apply_thumbnail_to_slice(self) -> None:
         try:
             if not hasattr(self, "_slice"):
                 return
             thumb_shape = getattr(self, "_thumbnail_shape", (16, 16))
-            preview = self._remote_preview.as_thumbnail(
+            preview = self._remote_thumbnail.to_canvas(
                 self.rgb, (thumb_shape[0], thumb_shape[1])
             )
             if (
@@ -495,11 +495,11 @@ class RemoteImageLayer(Image):
         if not self._ensure_main_thread():
             if self._schedule_thumbnail_refresh():
                 return
-        self._apply_preview_to_slice()
+        self._apply_thumbnail_to_slice()
         super()._update_thumbnail()
 
     # ------------------------------------------------------------------
-    def _preview_from_metadata(self, metadata: dict[str, Any]) -> Optional[np.ndarray]:
+    def _thumbnail_from_metadata(self, metadata: dict[str, Any]) -> Optional[np.ndarray]:
         if not metadata:
             return None
         raw = metadata.pop("thumbnail", None)

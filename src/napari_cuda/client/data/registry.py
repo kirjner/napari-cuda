@@ -238,9 +238,9 @@ class RemoteLayerRegistry:
                             thumb = thumbnail_delta.get("data")
                     if thumb is not None:
                         arr = np.asarray(thumb)
-                        layer.update_preview(arr)
+                    layer.update_thumbnail(arr)
                 elif preview_payload is not None:
-                    layer.update_preview(preview_payload)
+                    layer.update_thumbnail(preview_payload)
 
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:

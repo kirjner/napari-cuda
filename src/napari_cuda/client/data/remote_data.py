@@ -216,8 +216,8 @@ class RemoteArray(LayerDataProtocol):
 
 
 @dataclass
-class RemotePreview:
-    """Holds an optional preview image for a remote layer."""
+class RemoteThumbnail:
+    """Holds the latest thumbnail sample for a remote layer."""
 
     data: np.ndarray | None = None
 
@@ -236,7 +236,7 @@ class RemotePreview:
         np.clip(arr, 0.0, 1.0, out=arr)
         self.data = arr
 
-    def as_thumbnail(self, rgb: bool, target_shape: tuple[int, int]) -> np.ndarray:
+    def to_canvas(self, rgb: bool, target_shape: tuple[int, int]) -> np.ndarray:
         h, w = int(target_shape[0]), int(target_shape[1])
         if h <= 0 or w <= 0:
             return np.zeros((1, 1, 3 if rgb else 1), dtype=np.float32)

@@ -8,7 +8,7 @@ try:
     from napari_cuda.client.data import (
         LayerRecord,
         RegistrySnapshot,
-        RemotePreview,
+        RemoteThumbnail,
     )
     from napari_cuda.client.data.registry import RemoteLayerRegistry
     from napari_cuda.client.data.remote_data import RemoteArray
@@ -24,7 +24,7 @@ except Exception as exc:  # pragma: no cover - environment dependent import guar
     NAPARI_AVAILABLE = False
     NAPARI_IMPORT_ERROR = str(exc)
     pytestmark = pytest.mark.skip(reason=f"napari unavailable: {NAPARI_IMPORT_ERROR}")
-    LayerRecord = RegistrySnapshot = RemoteArray = RemoteLayerRegistry = RemoteImageLayer = RemotePreview = object  # type: ignore[assignment]
+    LayerRecord = RegistrySnapshot = RemoteArray = RemoteLayerRegistry = RemoteImageLayer = RemoteThumbnail = object  # type: ignore[assignment]
     LayerDelta = LayerSnapshot = SceneSnapshot = ViewerSnapshot = object  # type: ignore[assignment]
 
 if NAPARI_AVAILABLE:
@@ -91,21 +91,21 @@ def test_remote_image_layer_applies_spec():
     assert "thumbnail" not in layer.metadata
 
 
-def test_remote_preview_handles_none_and_arrays():
-    preview = RemotePreview()
-    thumb_rgb = preview.as_thumbnail(True, (16, 16))
+def test_remote_thumbnail_handles_none_and_arrays():
+    preview = RemoteThumbnail()
+    thumb_rgb = preview.to_canvas(True, (16, 16))
     assert thumb_rgb.shape == (16, 16, 3)
     assert np.allclose(thumb_rgb, 0.0)
     data = np.linspace(0, 1, 16, dtype=np.float32).reshape(4, 4)
     preview.update(data)
-    thumb_scalar = preview.as_thumbnail(False, (8, 8))
+    thumb_scalar = preview.to_canvas(False, (8, 8))
     assert thumb_scalar.shape == (8, 8)
     assert np.isclose(thumb_scalar[0, 0], 0.0)
     assert np.isclose(thumb_scalar.max(), 1.0)
 
     line = np.linspace(0.0, 1.0, 32, dtype=np.float32)
     preview.update(line)
-    thumb_line = preview.as_thumbnail(False, (4, 16))
+    thumb_line = preview.to_canvas(False, (4, 16))
     assert thumb_line.shape == (4, 16)
     expected = np.zeros((4, 16), dtype=np.float32)
     expected[0, :16] = line[:16]
@@ -116,14 +116,14 @@ def test_remote_image_layer_uses_metadata_thumbnail():
     preview = np.linspace(0.0, 1.0, 48, dtype=np.float32).reshape(4, 4, 3)
     block = make_layer_block(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": preview.tolist()})
     layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
-    assert layer._remote_preview.data is not None
-    np.testing.assert_allclose(layer._remote_preview.data, preview.astype(np.float32))
+    assert layer._remote_thumbnail.data is not None
+    np.testing.assert_allclose(layer._remote_thumbnail.data, preview.astype(np.float32))
     assert "thumbnail" not in layer.metadata
     updated_preview = np.zeros_like(preview)
     updated = make_layer_block(shape=list(preview.shape), ndim=preview.ndim, metadata={"source": "test", "thumbnail": updated_preview.tolist()})
     layer.update_from_block(updated)
-    assert layer._remote_preview.data is not None
-    np.testing.assert_allclose(layer._remote_preview.data, updated_preview.astype(np.float32))
+    assert layer._remote_thumbnail.data is not None
+    np.testing.assert_allclose(layer._remote_thumbnail.data, updated_preview.astype(np.float32))
     assert "thumbnail" not in layer.metadata
 
 
@@ -161,8 +161,8 @@ def test_remote_layer_registry_lifecycle():
     assert latest.layer.metadata["added"] is True
     assert latest.layer.metadata["source"] == "test"
     assert "thumbnail" not in latest.layer.metadata
-    assert latest.layer._remote_preview.data is not None
-    np.testing.assert_allclose(latest.layer._remote_preview.data, preview.astype(np.float32))
+    assert latest.layer._remote_thumbnail.data is not None
+    np.testing.assert_allclose(latest.layer._remote_thumbnail.data, preview.astype(np.float32))
     registry.apply_delta(LayerDelta.removal(block["layer_id"]))
     assert not registry.snapshot().layers
 
@@ -198,10 +198,10 @@ def test_remote_image_layer_updates_thumbnail_from_preview():
     block = make_layer_block(shape=[4, 4, 3], ndim=3, render={"opacity": 1.0, "visibility": True})
     layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
     preview = np.linspace(0, 1, 48, dtype=np.float32).reshape(4, 4, 3)
-    layer.update_preview(preview)
+    layer.update_thumbnail(preview)
     layer._update_thumbnail()
     assert layer.loaded is True
-    base = layer._remote_preview.as_thumbnail(layer.rgb, layer._thumbnail_shape[:2])
+    base = layer._remote_thumbnail.to_canvas(layer.rgb, layer._thumbnail_shape[:2])
     if layer.rgb:
         expected_rgba = np.concatenate([base, np.ones(base.shape[:2] + (1,), dtype=base.dtype)], axis=2)
     else:
@@ -227,7 +227,7 @@ def test_remote_image_layer_gamma_handles_1d_preview():
     block = make_layer_block()
     layer = RemoteImageLayer(layer_id=block["layer_id"], block=block)
     preview = np.linspace(0.0, 1.0, 32, dtype=np.float32)
-    layer.update_preview(preview)
+    layer.update_thumbnail(preview)
 
     layer._slice_input = replace(layer._slice_input, ndisplay=3)
     layer.gamma = 0.5
