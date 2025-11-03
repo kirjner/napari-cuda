@@ -156,6 +156,14 @@ class RemoteImageLayer(Image):
         controls_block = self._remote_block["controls"]
         assert isinstance(controls_block, Mapping), "remote layer missing controls mapping"
         self._apply_controls(controls_block)
+
+    def apply_metadata(self, metadata: Mapping[str, Any]) -> None:
+        meta_dict = dict(metadata)
+        preview = self._preview_from_metadata(dict(meta_dict))
+        meta_dict.setdefault(self._REMOTE_ID_META_KEY, self._remote_id)
+        self.metadata = meta_dict
+        if preview is not None:
+            self.update_preview(preview)
     # ------------------------------------------------------------------
     def _build_init_kwargs(self, block: Mapping[str, Any], metadata: dict[str, Any], multiscale_flag: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {

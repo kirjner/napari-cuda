@@ -197,8 +197,18 @@ class RemoteLayerRegistry:
                                     block["contrast_limits"] = value
 
                 # Apply metadata (non-visual context)
+                preview_payload = None
                 if metadata_delta is not None:
                     block["metadata"] = dict(metadata_delta)
+                    preview_raw = block["metadata"].get("thumbnail")
+                    if preview_raw is not None:
+                        arr = np.asarray(preview_raw, dtype=np.float32)
+                        if arr.size > 0:
+                            max_val = float(np.nanmax(arr))
+                            if max_val > 0:
+                                arr = arr / max_val
+                        np.clip(arr, 0.0, 1.0, out=arr)
+                        preview_payload = arr
 
                 layer = self._layers.get(layer_id)
                 if layer is None:
@@ -215,7 +225,6 @@ class RemoteLayerRegistry:
                     elif controls_delta:
                         layer.apply_control_changes(block, controls_delta)
                     else:
-                        # metadata-only: no action on layer object here
                         pass
 
                 # Apply/refresh thumbnail after layer existence ensured
@@ -230,6 +239,8 @@ class RemoteLayerRegistry:
                     if thumb is not None:
                         arr = np.asarray(thumb)
                         layer.update_preview(arr)
+                elif preview_payload is not None:
+                    layer.update_preview(preview_payload)
 
                 emitted = self._snapshot_locked()
                 if _LAYER_DEBUG:
