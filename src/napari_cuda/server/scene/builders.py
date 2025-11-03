@@ -356,9 +356,6 @@ def snapshot_scene(
             normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
             if normalized_thumb is not None:
                 layer_metadata["thumbnail"] = normalized_thumb.tolist()
-                layer_metadata["thumbnail_status"] = "ready"
-        if "thumbnail_status" not in layer_metadata:
-            layer_metadata["thumbnail_status"] = "pending"
 
         layer_block["metadata"] = layer_metadata
 

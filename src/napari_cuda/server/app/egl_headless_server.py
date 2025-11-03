@@ -899,35 +899,48 @@ class EGLHeadlessServer:
         if not layer_id:
             logger.debug("thumbnail emission skipped (no active layer)")
             return
-        for attempt in range(retries):
-            worker = self._worker
-            if worker is None or not worker.is_ready:
+        worker = self._worker
+        if worker is None or not worker.is_ready:
+            if retries > 1:
                 await asyncio.sleep(delay_s)
-                continue
-            array = self._layer_thumbnail(layer_id)
-            if array is None or array.size == 0:
-                await asyncio.sleep(delay_s)
-                continue
-            arr = np.asarray(array, dtype=np.float32)
-            np.clip(arr, 0.0, 1.0, out=arr)
-            metadata = {
-                "thumbnail": arr.tolist(),
-                "thumbnail_status": "ready",
-                "thumbnail_shape": list(arr.shape),
-                "thumbnail_dtype": str(arr.dtype),
-                "thumbnail_version": float(time.time()),
-            }
-            self._state_ledger.record_confirmed(
-                "layer",
-                layer_id,
-                "metadata",
-                metadata,
-                origin="server.thumbnail",
-            )
-            self._refresh_scene_snapshot()
+                await self._send_layer_thumbnail(layer_id, retries=retries - 1, delay_s=delay_s)
+            else:
+                logger.debug("thumbnail emission skipped for layer %s (worker not ready)", layer_id)
             return
 
-        logger.debug("thumbnail emission skipped for layer %s (no data)", layer_id)
+        array = self._layer_thumbnail(layer_id)
+        if array is None or array.size == 0:
+            if retries > 1:
+                await asyncio.sleep(delay_s)
+                await self._send_layer_thumbnail(layer_id, retries=retries - 1, delay_s=delay_s)
+            else:
+                logger.debug("thumbnail emission skipped for layer %s (no data)", layer_id)
+            return
+
+        arr = np.asarray(array, dtype=np.float32)
+        np.clip(arr, 0.0, 1.0, out=arr)
+
+        metadata = {
+            "thumbnail": arr.tolist(),
+            "thumbnail_shape": list(arr.shape),
+            "thumbnail_dtype": str(arr.dtype),
+            "thumbnail_version": float(time.time()),
+        }
+        existing = self._state_ledger.get("layer", layer_id, "metadata")
+        if existing is not None and isinstance(existing.value, dict):
+            merged = dict(existing.value)
+            merged.update(metadata)
+            metadata = merged
+        metadata.pop("thumbnail_status", None)
+
+        self._state_ledger.record_confirmed(
+            "layer",
+            layer_id,
+            "metadata",
+            metadata,
+            origin="server.thumbnail",
+        )
+        self._refresh_scene_snapshot()
 
     def _require_data_root(self) -> Path:
         root_candidate = self._data_root or str(self._browse_root)
