@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 import numpy as np
 
@@ -20,6 +20,7 @@ class ThumbnailCapture:
     """
     layer_id: str
     array: np.ndarray
+    frame_token: Tuple[Any, ...]
 
 
 class WorkerIntentMailbox:

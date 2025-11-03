@@ -127,7 +127,7 @@ from napari_cuda.server.scene import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.util.websocket import safe_send
 from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
-from napari_cuda.server.utils.signatures import layer_token
+from napari_cuda.server.utils.signatures import signature_hash_tuple
 import hashlib
 import time
 
@@ -534,6 +534,8 @@ class EGLHeadlessServer:
     def _reset_mirrors(self) -> None:
         self._layer_mirror.reset()
         self._dims_mirror.reset()
+        # Clear last-accepted tokens so dataset resets don't hold stale dedupe
+        self._last_thumb_token.clear()
 
     def _set_dataset_metadata(
         self,
@@ -580,14 +582,16 @@ class EGLHeadlessServer:
 
     def _ingest_worker_thumbnail(self, payload) -> None:
         layer_id = str(payload.layer_id)
-        # Compute an inputs-only content token from the current snapshot
-        snapshot = snapshot_render_state(self._state_ledger)
-        dataset_id = None
-        if self._zarr_path:
-            dataset_id = hashlib.sha1(str(self._zarr_path).encode("utf-8")).hexdigest()
-        token = layer_token(snapshot, layer_id, dataset_id=dataset_id, include_camera=False)
+        # Use the worker-provided frame token (inputs used for that frame)
+        token = tuple(payload.frame_token)
         last = self._last_thumb_token.get(layer_id)
         if last is not None and last == token:
+            logger.info(
+                "server.thumbnail drop: layer=%s token_hash=%s token=%r",
+                layer_id,
+                signature_hash_tuple(token),
+                token,
+            )
             return
         arr = np.asarray(payload.array)
         if arr.dtype == np.uint8:
@@ -613,6 +617,12 @@ class EGLHeadlessServer:
             payload=payload_dict,
             origin="server.thumbnail",
             timestamp=ts,
+        )
+        logger.info(
+            "server.thumbnail accept: layer=%s token_hash=%s token=%r",
+            layer_id,
+            signature_hash_tuple(token),
+            token,
         )
         self._last_thumb_token[layer_id] = token
         self._refresh_scene_snapshot()

@@ -33,6 +33,7 @@ from napari_cuda.server.scene import (
 )
 import numpy as np
 from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailCapture
+from napari_cuda.server.utils.signatures import layer_token, signature_hash_tuple
 
 from .egl import EGLRendererWorker
 
@@ -339,9 +340,19 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                                     if values:
                                         layer_state = values[0]
                             if layer_state is not None:
+                                # Build inputs-only token from the same frame_state we just rendered
+                                lid = str(target_layer_id or "layer-0")
+                                token = layer_token(frame_state, lid, dataset_id=None, include_camera=False)
+                                logger.info(
+                                    "worker.thumbnail captured: layer=%s token_hash=%s token=%r",
+                                    lid,
+                                    signature_hash_tuple(token),
+                                    token,
+                                )
                                 payload = ThumbnailCapture(
-                                    layer_id=str(target_layer_id or "layer-0"),
+                                    layer_id=lid,
                                     array=arr,
+                                    frame_token=token,
                                 )
                                 server._worker_intents.enqueue_thumbnail_capture(payload)
                                 control_loop.call_soon_threadsafe(server._handle_worker_thumbnails)
