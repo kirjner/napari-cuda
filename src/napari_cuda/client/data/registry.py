@@ -44,6 +44,7 @@ _CONTROL_ONLY_KEYS = {
     "visible",
     "blending",
     "interpolation",
+    "depiction",
     "colormap",
     "rendering",
     "gamma",

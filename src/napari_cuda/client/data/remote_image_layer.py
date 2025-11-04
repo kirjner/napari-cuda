@@ -242,6 +242,7 @@ class RemoteImageLayer(Image):
             "blending",
             "interpolation",
             "colormap",
+            "depiction",
             "rendering",
             "gamma",
             "contrast_limits",
@@ -305,6 +306,14 @@ class RemoteImageLayer(Image):
                 with self.events.colormap.blocker():
                     self.colormap = new_val
                 pending_events.append((self.events.colormap, new_val))
+
+        if "depiction" in controls:
+            new_val = str(controls["depiction"])
+            if str(self.depiction) != new_val:
+                with self.events.depiction.blocker():
+                    self.depiction = new_val
+                # Depiction listeners read layer.depiction; value is not used.
+                pending_events.append((self.events.depiction, new_val))
 
         if "rendering" in controls:
             new_val = str(controls["rendering"])
