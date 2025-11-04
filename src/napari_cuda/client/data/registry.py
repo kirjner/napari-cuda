@@ -238,6 +238,8 @@ class RemoteLayerRegistry:
                             thumb = thumbnail_delta.get("data")
                     if thumb is not None:
                         arr = np.asarray(thumb)
+                    else:
+                        arr = None
                     layer.update_thumbnail(arr)
                 elif preview_payload is not None:
                     layer.update_thumbnail(preview_payload)

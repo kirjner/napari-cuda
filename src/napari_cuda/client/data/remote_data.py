@@ -225,14 +225,23 @@ class RemoteThumbnail:
         if data is None:
             self.data = None
             return
-        try:
-            arr = np.asarray(data, dtype=np.float32)
-        except Exception:
-            self.data = None
-            return
+        arr = np.asarray(data)
         if arr.size == 0:
             self.data = None
             return
+        # If input looks like color (RGB/RGBA), normalize per 255 when needed
+        if arr.ndim >= 3 and arr.shape[-1] in (3, 4):
+            arr = arr.astype(np.float32, copy=False)
+            if np.nanmax(arr) > 1.0:
+                arr *= (1.0 / 255.0)
+            np.clip(arr, 0.0, 1.0, out=arr)
+            self.data = arr
+            return
+        # Grayscale path: coerce to float32 and clip into [0, 1]
+        if arr.dtype.kind in ("i", "u") and np.nanmax(arr) > 1.0:
+            arr = arr.astype(np.float32, copy=False) * (1.0 / 255.0)
+        else:
+            arr = arr.astype(np.float32, copy=False)
         np.clip(arr, 0.0, 1.0, out=arr)
         self.data = arr
 
@@ -271,9 +280,9 @@ class RemoteThumbnail:
                 pad = np.zeros(arr.shape[:2] + (3 - channels,), dtype=arr.dtype)
                 arr = np.concatenate([arr, pad], axis=-1)
         else:
+            # For scalar thumbnails, prefer grayscale; if source is color, take
+            # its luminance (first channel) to keep ScalarField expectations.
             if channels > 1:
-                arr = arr[..., 0]
-            else:
                 arr = arr[..., 0]
             arr = np.asarray(arr, dtype=arr.dtype)
 
@@ -287,6 +296,39 @@ class RemoteThumbnail:
             out[:copy_h, :copy_w, ...] = arr[:copy_h, :copy_w, : out.shape[-1]]
         else:
             out[:copy_h, :copy_w] = arr[:copy_h, :copy_w]
+        return out
+
+    def to_rgba_canvas(self, target_shape: tuple[int, int]) -> np.ndarray | None:
+        """Return an (H, W, 4) float canvas in [0,1] if source has color.
+
+        If stored data has 4 channels, preserve alpha. If it has 3 channels,
+        append an opaque alpha. Returns None for scalar sources.
+        """
+        src = self.data
+        if src is None:
+            return None
+        arr = np.asarray(src)
+        if arr.ndim < 3 or arr.shape[-1] not in (3, 4):
+            return None
+        h, w = int(target_shape[0]), int(target_shape[1])
+        if h <= 0 or w <= 0:
+            return np.zeros((1, 1, 4), dtype=np.float32)
+        # Ensure channels last, squeeze extra dims by max
+        while arr.ndim > 3:
+            arr = arr.max(axis=0)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        channels = arr.shape[-1]
+        if channels == 3:
+            alpha = np.ones(arr.shape[:2] + (1,), dtype=arr.dtype)
+            arr = np.concatenate([arr, alpha], axis=-1)
+        elif channels > 4:
+            arr = arr[..., :4]
+        # Build canvas and copy
+        out = np.zeros((h, w, 4), dtype=np.float32)
+        copy_h = min(h, arr.shape[0])
+        copy_w = min(w, arr.shape[1])
+        out[:copy_h, :copy_w, ...] = arr[:copy_h, :copy_w, :4]
         return out
 
 

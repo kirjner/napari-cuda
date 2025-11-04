@@ -443,33 +443,48 @@ class RemoteImageLayer(Image):
         assert QtCore is not None, "Qt required for thumbnail refresh"
         app = QtCore.QCoreApplication.instance()
         assert app is not None, "Qt application instance must exist"
-        logger.info(
-            "RemoteImageLayer[%s]: scheduling thumbnail refresh via CallProxy (thread=%s)",
-            self._remote_id,
-            QtCore.QThread.currentThread().objectName() or "MainThread",
-        )
         QtCore.QTimer.singleShot(0, self._update_thumbnail)  # type: ignore[arg-type]
         return True
+
+    def _compose_thumbnail_rgba(self, preview: np.ndarray) -> np.ndarray:
+        """Map preview to RGBA uint8 using current clims/gamma/colormap.
+
+        - Scalar layers: normalize by clims, apply gamma and colormap.
+        - RGB layers: ensure 3 channels and add opaque alpha.
+        """
+        if not self.rgb:
+            lo, hi = float(self.contrast_limits[0]), float(self.contrast_limits[1])
+            if not np.isfinite(hi) or not np.isfinite(lo) or hi <= lo:
+                hi = lo + 1.0
+            norm = (preview - lo) / (hi - lo)
+            norm = np.clip(norm, 0.0, 1.0)
+            g = float(self.gamma)
+            if abs(g - 1.0) > 1e-6:
+                norm = np.clip(norm, 0.0, 1.0) ** (1.0 / g)
+            rgba = self.colormap.map(norm)
+            rgba = np.clip(rgba * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+            return rgba
+        # RGB path
+        arr = np.asarray(preview)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        if arr.shape[-1] == 1:
+            arr = np.repeat(arr, 3, axis=-1)
+        if arr.shape[-1] > 3:
+            arr = arr[..., :3]
+        alpha = np.ones(arr.shape[:2] + (1,), dtype=arr.dtype)
+        rgba = np.concatenate([arr, alpha], axis=-1)
+        return np.clip(rgba * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
 
     def _apply_thumbnail_to_slice(self) -> None:
         thumb_shape = self._thumbnail_shape
         preview = self._remote_thumbnail.to_canvas(
             self.rgb, (thumb_shape[0], thumb_shape[1])
         )
-        # Denormalize preview from [0,1] into current data units so that
-        # napari's subsequent normalization with contrast_limits preserves
-        # intended intensities and avoids underflow to the colormap 'under'.
-        if not self.rgb:
-            lo, hi = float(self.contrast_limits[0]), float(self.contrast_limits[1])
-            if not np.isfinite(hi) or not np.isfinite(lo) or hi <= lo:
-                hi = lo + 1.0
-            preview = (preview * (hi - lo)) + lo
-        if (
-            self._slice_input.ndisplay == 3
-            and self.ndim > 2
-            and preview.ndim >= 2
-        ):
-            preview = preview[np.newaxis, ...]
+        # Keep preview in [0, 1] space here; the RGBA thumbnail composition
+        # applies clims/gamma/colormap explicitly.
+        # Mode-agnostic: keep preview as 2D (HxW) or color (HxWxC) without
+        # inserting a leading axis for 3D. This avoids 2D↔3D toggle races.
         thumbnail_view = _ScalarFieldView.from_view(preview)
         self._slice = replace(self._slice, thumbnail=thumbnail_view, empty=False)
         self._set_loaded(True)
@@ -478,28 +493,19 @@ class RemoteImageLayer(Image):
         if not self._ensure_main_thread():
             if self._schedule_thumbnail_refresh():
                 return
-        logger.info(
-            "RemoteImageLayer[%s]: applying thumbnail update on UI thread",
-            self._remote_id,
-        )
+        # Keep internal slice consistent with current preview
         self._apply_thumbnail_to_slice()
-        super()._update_thumbnail()
-        # Optional: compute digest for diagnostics
-        arr = self.thumbnail
-        a = np.asarray(arr)
-        if a.size > 0:
-            import hashlib
-
-            d = hashlib.md5(a.tobytes()).hexdigest()
-            same = (d == self._last_thumb_md5)
-            self._last_thumb_md5 = d
-            logger.debug(
-                "RemoteImageLayer[%s]: thumbnail md5=%s same=%s shape=%s",
-                self._remote_id,
-                d,
-                same,
-                tuple(a.shape),
-            )
+        # Build canvas and compose RGBA thumbnail explicitly (bypass napari normalization)
+        h, w = self._thumbnail_shape[:2]
+        # Prefer pass-through if server provided color thumbnail
+        rgba = self._remote_thumbnail.to_rgba_canvas((h, w))
+        if rgba is not None:
+            thumb_rgba = np.clip(rgba * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+        else:
+            preview = self._remote_thumbnail.to_canvas(self.rgb, (h, w))
+            thumb_rgba = self._compose_thumbnail_rgba(preview)
+        self._thumbnail = thumb_rgba
+        self.events.thumbnail()
 
     # ------------------------------------------------------------------
     def _thumbnail_from_metadata(self, metadata: dict[str, Any]) -> Optional[np.ndarray]:
