@@ -48,6 +48,7 @@ def _make_layer(remote_id: str = "layer-1") -> RemoteImageLayer:
         "controls": {
             "visible": True,
             "opacity": 0.5,
+            "blending": "opaque",
             "rendering": "mip",
             "colormap": "gray",
             "gamma": 1.0,
@@ -108,6 +109,22 @@ def test_layer_opacity_dispatches(emitter_setup: EmitterSetup) -> None:
     assert pending.key == "opacity"
     assert pending.value == pytest.approx(0.25)
     assert pending.metadata == {"layer_id": layer.remote_id, "property": "opacity"}
+
+
+def test_layer_blending_dispatches(emitter_setup: EmitterSetup) -> None:
+    emitter = emitter_setup.emitter
+    layer = emitter_setup.layer
+    dispatch = emitter_setup.dispatch
+
+    layer.blending = "translucent"
+
+    pending, origin = dispatch.calls[-1]
+    assert origin == "layer:blending"
+    assert pending.scope == "layer"
+    assert pending.target == layer.remote_id
+    assert pending.key == "blending"
+    assert pending.value == "translucent"
+    assert pending.metadata == {"layer_id": layer.remote_id, "property": "blending"}
 
 
 def test_handle_ack_accept_clears_runtime(emitter_setup: EmitterSetup) -> None:

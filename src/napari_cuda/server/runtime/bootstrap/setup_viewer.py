@@ -261,7 +261,7 @@ class ViewerBuilder:
                     contrast_limits=(0.0, 1.0),
                     scale=(sy, sx),
                 )
-                # Make sure layer draws fully opaque and on top for debugging
+                # Seed layer visuals with napari defaults
                 layer.opacity = 1.0
                 layer.blending = 'opaque'
                 layer.gamma = 1.0

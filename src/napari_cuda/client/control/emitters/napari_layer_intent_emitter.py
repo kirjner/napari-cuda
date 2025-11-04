@@ -39,6 +39,10 @@ def _event_opacity(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.opacity
 
 
+def _event_blending(layer: RemoteImageLayer) -> EventEmitter:
+    return layer.events.blending
+
+
 def _event_rendering(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.rendering
 
@@ -69,6 +73,14 @@ def _get_opacity(layer: RemoteImageLayer) -> float:
 
 def _set_opacity(layer: RemoteImageLayer, value: float) -> None:
     layer.opacity = float(value)
+
+
+def _get_blending(layer: RemoteImageLayer) -> str:
+    return str(layer.blending)
+
+
+def _set_blending(layer: RemoteImageLayer, value: str) -> None:
+    layer.blending = str(value)
 
 
 def _get_rendering(layer: RemoteImageLayer) -> str:
@@ -146,6 +158,13 @@ def _block_opacity(block: Mapping[str, Any]) -> float | None:
     controls = block.get("controls")
     if isinstance(controls, Mapping) and "opacity" in controls:
         return _encode_float(controls["opacity"])
+    return None
+
+
+def _block_blending(block: Mapping[str, Any]) -> str | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "blending" in controls:
+        return _encode_str(controls["blending"])
     return None
 
 
@@ -228,6 +247,15 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         encoder=_encode_float,
         equals=_equals_float,
         block_getter=_block_opacity,
+    ),
+    PropertyConfig(
+        key="blending",
+        event_getter=_event_blending,
+        getter=_get_blending,
+        setter=_set_blending,
+        encoder=_encode_str,
+        equals=_equals_str,
+        block_getter=_block_blending,
     ),
     PropertyConfig(
         key="rendering",
