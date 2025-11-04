@@ -46,17 +46,12 @@ def emit_layer_thumbnail_data_changed(viewer: Any, layer: Any) -> bool:
     if src_index is None:
         return False
 
-    # Prefer emitting on the source model; fall back to proxy
-    try:
-        source.dataChanged.emit(src_index, src_index, [])
-    except Exception:
-        proxy_index = model.mapFromSource(src_index)
-        model.dataChanged.emit(proxy_index, proxy_index, [])
+    # Emit on the proxy model to guarantee view update
+    proxy_index = model.mapFromSource(src_index)
+    model.dataChanged.emit(proxy_index, proxy_index, [])
 
     # Nudge the viewport in case the view needs an update
-    vp = ll.viewport()
-    if vp is not None and hasattr(vp, "update"):
-        vp.update()
+    ll.viewport().update()
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("ThumbnailInjector: dataChanged emitted for layer row")
     return True

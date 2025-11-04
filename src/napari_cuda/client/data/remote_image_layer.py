@@ -117,7 +117,7 @@ class RemoteImageLayer(Image):
                 self.multiscale = multiscale_flag
                 target_ndim = int(new_block.get("ndim") or 0) or (
                     len(arrays[-1].shape) if arrays else len(new_block.get("shape") or ())
-                ) or getattr(self, "ndim", 2)
+                ) or self.ndim
                 self.corner_pixels = np.zeros((2, int(target_ndim)), dtype=int)
                 Image.data.fset(self, new_data)
             finally:
@@ -146,10 +146,7 @@ class RemoteImageLayer(Image):
             self.update_thumbnail(default_thumbnail)
         else:
             if metadata:
-                try:
-                    self.metadata = metadata
-                except Exception:
-                    self.metadata.update(metadata)
+                self.metadata = metadata
             default_thumbnail = self._extract_thumbnail() if preview is None else preview
             self.update_thumbnail(default_thumbnail)
 
@@ -191,16 +188,13 @@ class RemoteImageLayer(Image):
 
 
     def _install_empty_slice(self) -> None:
-        try:
-            empty = _ScalarFieldSliceResponse.make_empty(
-                slice_input=self._slice_input,
-                rgb=bool(getattr(self, "rgb", False)),
-                dtype=self.dtype,
-            )
-            self._update_slice_response(empty)
-            self._set_loaded(False)
-        except Exception:
-            logger.debug("RemoteImageLayer: failed to install empty slice", exc_info=True)
+        empty = _ScalarFieldSliceResponse.make_empty(
+            slice_input=self._slice_input,
+            rgb=bool(self.rgb),
+            dtype=self.dtype,
+        )
+        self._update_slice_response(empty)
+        self._set_loaded(False)
 
     def _set_view_slice(self) -> None:
         # On dim/ndisplay changes, re-apply the current preview into the
@@ -216,20 +210,11 @@ class RemoteImageLayer(Image):
         if not hints:
             return
         if hints.get("mode"):
-            try:
-                self.rendering = str(hints["mode"])
-            except Exception:
-                logger.debug("RemoteImageLayer: render mode %s unsupported", hints["mode"], exc_info=True)
+            self.rendering = str(hints["mode"])
         if hints.get("colormap"):
-            try:
-                self.colormap = str(hints["colormap"])
-            except Exception:
-                logger.debug("RemoteImageLayer: colormap %s unsupported", hints["colormap"], exc_info=True)
+            self.colormap = str(hints["colormap"])
         if hints.get("shading"):
-            try:
-                self.shading = str(hints["shading"])
-            except Exception:
-                logger.debug("RemoteImageLayer: shading update failed", exc_info=True)
+            self.shading = str(hints["shading"])
         if hints.get("opacity") is not None:
             self.opacity = float(hints["opacity"])
         if hints.get("visibility") is not None:
@@ -428,7 +413,7 @@ class RemoteImageLayer(Image):
 
     @Image.data.setter  # type: ignore[misc]
     def data(self, data):  # type: ignore[override]
-        if getattr(self, "_allow_data_update", False):
+        if self._allow_data_update:
             Image.data.fset(self, data)
             return
         logger.debug("RemoteImageLayer: ignoring data mutation attempt")
@@ -438,19 +423,13 @@ class RemoteImageLayer(Image):
         self._remote_thumbnail.update(preview)
         self._update_thumbnail()
         if preview is not None or self._remote_thumbnail.data is not None:
-            try:
-                self._set_loaded(True)
-            except Exception:
-                logger.debug("RemoteImageLayer: failed to mark preview as loaded", exc_info=True)
+            self._set_loaded(True)
 
     # ------------------------------------------------------------------
     def _extract_thumbnail(self) -> Optional[np.ndarray]:
         if not self._remote_arrays:
             return None
-        try:
-            return self._remote_arrays[0].preview
-        except Exception:
-            return None
+        return self._remote_arrays[0].preview
 
     def _ensure_main_thread(self) -> bool:
         if QtCore is None:
@@ -473,27 +452,19 @@ class RemoteImageLayer(Image):
         return True
 
     def _apply_thumbnail_to_slice(self) -> None:
-        try:
-            if not hasattr(self, "_slice"):
-                return
-            thumb_shape = getattr(self, "_thumbnail_shape", (16, 16))
-            preview = self._remote_thumbnail.to_canvas(
-                self.rgb, (thumb_shape[0], thumb_shape[1])
-            )
-            if (
-                self._slice_input.ndisplay == 3
-                and self.ndim > 2
-                and preview.ndim >= 2
-            ):
-                preview = preview[np.newaxis, ...]
-            thumbnail_view = _ScalarFieldView.from_view(preview)
-            self._slice = replace(self._slice, thumbnail=thumbnail_view, empty=False)
-            try:
-                self._set_loaded(True)
-            except Exception:
-                logger.debug("RemoteImageLayer: failed to mark slice loaded", exc_info=True)
-        except Exception:
-            logger.debug("RemoteImageLayer: failed to apply preview thumbnail", exc_info=True)
+        thumb_shape = self._thumbnail_shape
+        preview = self._remote_thumbnail.to_canvas(
+            self.rgb, (thumb_shape[0], thumb_shape[1])
+        )
+        if (
+            self._slice_input.ndisplay == 3
+            and self.ndim > 2
+            and preview.ndim >= 2
+        ):
+            preview = preview[np.newaxis, ...]
+        thumbnail_view = _ScalarFieldView.from_view(preview)
+        self._slice = replace(self._slice, thumbnail=thumbnail_view, empty=False)
+        self._set_loaded(True)
 
     def _update_thumbnail(self) -> None:  # type: ignore[override]
         if not self._ensure_main_thread():
@@ -529,11 +500,7 @@ class RemoteImageLayer(Image):
         raw = metadata.pop("thumbnail", None)
         if raw is None:
             return None
-        try:
-            arr = np.asarray(raw, dtype=np.float32)
-        except Exception:
-            logger.debug("RemoteImageLayer: failed to coerce thumbnail metadata", exc_info=True)
-            return None
+        arr = np.asarray(raw, dtype=np.float32)
         if arr.size == 0:
             return None
         np.clip(arr, 0.0, 1.0, out=arr)

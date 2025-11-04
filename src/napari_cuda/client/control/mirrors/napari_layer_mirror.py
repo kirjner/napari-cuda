@@ -172,7 +172,7 @@ class NapariLayerMirror:
 
         layers_events = layers_obj.events
         blocker = layers_events.blocker()
-        previous_flag = getattr(viewer, "_suppress_forward_flag", False)
+        previous_flag = viewer._suppress_forward_flag
         viewer._suppress_forward_flag = True
         try:
             with blocker:
@@ -239,18 +239,9 @@ class NapariLayerMirror:
         viewer = self._current_viewer()
         if viewer is None:
             return
-        window = getattr(viewer, "window", None)
-        qt_viewer = getattr(window, "_qt_viewer", None)
-        if qt_viewer is None:
-            return
-        setter = getattr(qt_viewer, "set_welcome_visible", None)
-        if callable(setter):
-            setter(bool(visible))
-            return
-        overlay = getattr(qt_viewer, "_welcome_widget", None)
-        toggler = getattr(overlay, "set_welcome_visible", None)
-        if callable(toggler):
-            toggler(bool(visible))
+        qt_viewer = viewer.window._qt_viewer
+        setter = qt_viewer.set_welcome_visible
+        setter(bool(visible))
 
     @staticmethod
     def _should_show_welcome(
