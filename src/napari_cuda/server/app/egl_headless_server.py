@@ -125,7 +125,7 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.server.util.websocket import safe_send
+from napari_cuda.server.utils.websocket import safe_send
 from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
 import hashlib
 import time
@@ -457,19 +457,6 @@ class EGLHeadlessServer:
 
         # reducer call persists the pose for both plane and volume scopes
 
-        # Close any open op after camera commit so dims+level+camera are atomic for mirrors
-        op_state = self._state_ledger.get("scene", "main", "op_state")
-        if op_state is not None:
-            val = str(op_state.value)
-            if val == "open":
-                self._state_ledger.record_confirmed(
-                    "scene",
-                    "main",
-                    "op_state",
-                    "applied",
-                    origin="worker.state.camera",
-                )
-
         self._schedule_coro(
             broadcast_camera_update(
                 self,
@@ -535,6 +522,32 @@ class EGLHeadlessServer:
         self._dims_mirror.reset()
         # Clear last-accepted tokens so dataset resets don't hold stale dedupe
         self._last_thumb_token.clear()
+
+    def _ack_scene_op_if_open(
+        self,
+        *,
+        frame_state: RenderLedgerSnapshot,
+        origin: str,
+    ) -> None:
+        op_entry = self._state_ledger.get("scene", "main", "op_state")
+        if op_entry is None or str(op_entry.value) != "open":
+            return
+        latest_seq_entry = self._state_ledger.get("scene", "main", "op_seq")
+        latest_seq = None
+        if latest_seq_entry is not None and isinstance(latest_seq_entry.value, int):
+            latest_seq = int(latest_seq_entry.value)
+        frame_seq = None
+        if isinstance(frame_state.op_seq, int):
+            frame_seq = int(frame_state.op_seq)
+        if latest_seq is not None and frame_seq is not None and frame_seq != latest_seq:
+            return
+        self._state_ledger.record_confirmed(
+            "scene",
+            "main",
+            "op_state",
+            "applied",
+            origin=origin,
+        )
 
     def _set_dataset_metadata(
         self,

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from napari_cuda.server.util.websocket import safe_send
+from napari_cuda.server.utils.websocket import safe_send
 
 
 async def send_text(ws: Any, text: str) -> bool:

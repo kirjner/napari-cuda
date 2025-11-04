@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Optional
@@ -30,6 +31,8 @@ _ALLOWED_LAYER_KEYS = {
     "metadata",
     "thumbnail",
 }
+
+logger = logging.getLogger(__name__)
 
 
 class ServerLayerMirror:

@@ -10,8 +10,9 @@ Note: legacy RenderSignature has been removed in favor of content signatures.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Iterable, Mapping, Optional, Tuple
 import hashlib
+import numbers
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
 
@@ -70,6 +71,7 @@ class DimsSignature:
     current_step: Tuple[int, ...]
     current_level: Optional[int]
     axis_labels: Tuple[str, ...]
+    mode: Optional[str]
 
     @classmethod
     def from_snapshot(cls, snapshot: RenderLedgerSnapshot) -> "DimsSignature":
@@ -79,6 +81,7 @@ class DimsSignature:
         current_step = tuple(int(v) for v in (snapshot.current_step or ()))
         current_level = int(snapshot.current_level) if snapshot.current_level is not None else None
         axis_labels = tuple(str(v) for v in (snapshot.axis_labels or ()))
+        mode = str(snapshot.dims_mode) if snapshot.dims_mode is not None else None
         return cls(
             ndisplay=ndisplay,
             order=order,
@@ -86,6 +89,7 @@ class DimsSignature:
             current_step=current_step,
             current_level=current_level,
             axis_labels=axis_labels,
+            mode=mode,
         )
 
 # -----------------------------------------------------------------------------
@@ -120,95 +124,88 @@ def _dims_token(snapshot: RenderLedgerSnapshot) -> tuple:
             None if snapshot.current_level is None else int(snapshot.current_level),
         ),
         ("axis_labels", tuple(str(v) for v in (snapshot.axis_labels or ()))),
+        ("mode", str(snapshot.dims_mode) if snapshot.dims_mode is not None else None),
     )
 
 
-def _camera_token(snapshot: RenderLedgerSnapshot) -> tuple:
-    """Stable camera token based on counters, not raw floats."""
-    cv = snapshot.camera_versions or {}
-    return tuple(sorted((str(k), int(v)) for k, v in cv.items()))
+def _normalize_visual_value(value: Any, *, places: int = 6) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, numbers.Real):
+        return round(float(value), places)
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_visual_value(v, places=places) for v in value)
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _normalize_visual_value(v, places=places)) for k, v in value.items()))
+    return value
 
 
-def _filter_visual_versions(
-    versions: Mapping[str, int] | None,
+def _layer_visual_items(
+    state: Optional[LayerVisualState],
     *,
     ndisplay: Optional[int],
-) -> tuple[tuple[str, int], ...]:
-    if not versions:
+) -> tuple[tuple[str, Any], ...]:
+    if state is None:
         return ()
     nd = int(ndisplay) if ndisplay is not None else 2
-    items: list[tuple[str, int]] = []
-    for k, v in versions.items():
-        sk = str(k)
-        if sk in _EXCLUDED_LAYER_VERSION_KEYS:
+    items: list[tuple[str, Any]] = []
+    for key in _PIXEL_VISUAL_KEYS:
+        value = state.get(key)
+        if value is None:
             continue
-        if sk in _PIXEL_VISUAL_KEYS:
-            items.append((sk, int(v)))
-            continue
-        # Include volume.* extras only for 3D mode
-        if nd >= 3 and sk.startswith("volume."):
-            items.append((sk, int(v)))
+        items.append((str(key), _normalize_visual_value(value)))
+    if state.extra:
+        for key, value in state.extra.items():
+            sk = str(key)
+            normalized = _normalize_visual_value(value)
+            if normalized is None:
+                continue
+            if nd < 3 and sk.startswith("volume."):
+                continue
+            items.append((sk, normalized))
     return tuple(sorted(items))
 
 
-def layer_token(
-    snapshot: RenderLedgerSnapshot,
-    layer_id: str,
-    *,
-    dataset_id: Optional[str] = None,
-    include_camera: bool = False,
-) -> tuple:
-    """Inputs-only content token for a single layer, for gating expensive work.
-
-    Never includes outputs, timestamps, or non-visual metadata.
-    """
-    lv = (snapshot.layer_values or {}).get(str(layer_id))
-    visuals = _filter_visual_versions(getattr(lv, "versions", {}), ndisplay=snapshot.ndisplay)
-    token: list[tuple[Any, Any]] = [
-        ("layer", str(layer_id)),
-        ("dataset", dataset_id),
-        ("dims", _dims_token(snapshot)),
-        ("visuals", visuals),
-    ]
-    if include_camera:
-        token.append(("camera", _camera_token(snapshot)))
-    return tuple(token)
+def _plane_pose_token(snapshot: RenderLedgerSnapshot) -> Optional[tuple[tuple[str, Any], ...]]:
+    pose = PlanePoseSignature.from_snapshot(snapshot)
+    if pose.center is None and pose.zoom is None and pose.rect is None:
+        return None
+    return (
+        ("center", pose.center),
+        ("zoom", pose.zoom),
+        ("rect", pose.rect),
+    )
 
 
-def scene_token(
-    snapshot: RenderLedgerSnapshot,
-    *,
-    dataset_id: Optional[str] = None,
-    include_camera: bool = False,
-) -> tuple:
-    """Inputs-only content token for the entire scene.
+def _volume_pose_token(snapshot: RenderLedgerSnapshot) -> Optional[tuple[tuple[str, Any], ...]]:
+    pose = VolumePoseSignature.from_snapshot(snapshot)
+    if (
+        pose.center is None
+        and pose.angles is None
+        and pose.distance is None
+        and pose.fov is None
+    ):
+        return None
+    return (
+        ("center", pose.center),
+        ("angles", pose.angles),
+        ("distance", pose.distance),
+        ("fov", pose.fov),
+    )
 
-    Useful for gating global work; not required for thumbnails.
-    """
-    layers_visuals: list[tuple[str, tuple[tuple[str, int], ...]]] = []
-    if snapshot.layer_values:
-        for layer_id, state in sorted(snapshot.layer_values.items()):
-            if isinstance(state, LayerVisualState):
-                items = _filter_visual_versions(state.versions, ndisplay=snapshot.ndisplay)
-                layers_visuals.append((str(layer_id), items))
-    token: list[tuple[Any, Any]] = [
-        ("dataset", dataset_id),
-        ("dims", _dims_token(snapshot)),
-        ("layers_visuals", tuple(layers_visuals)),
-        (
-            "volume_settings",
-            (
-                _canon(snapshot.volume_mode),
-                _canon(snapshot.volume_colormap),
-                _canon(snapshot.volume_clim),
-                _canon(snapshot.volume_opacity),
-                _canon(snapshot.volume_sample_step),
-            ),
-        ),
-    ]
-    if include_camera:
-        token.append(("camera", _camera_token(snapshot)))
-    return tuple(token)
+
+def _view_token(snapshot: RenderLedgerSnapshot) -> tuple[tuple[str, Any], ...]:
+    nd = None if snapshot.ndisplay is None else int(snapshot.ndisplay)
+    plane = _plane_pose_token(snapshot)
+    volume = _volume_pose_token(snapshot)
+    return (
+        ("ndisplay", nd),
+        ("mode", str(snapshot.dims_mode) if snapshot.dims_mode is not None else None),
+        ("plane", plane),
+        ("volume", volume),
+    )
 
 
 @dataclass(frozen=True)
@@ -256,20 +253,18 @@ class VolumePoseSignature:
 
 @dataclass(frozen=True)
 class LayerVisualSignature:
-    versions: Tuple[Tuple[str, int], ...]
+    """Normalized layer visual property values that affect rendered pixels."""
+
+    values: Tuple[Tuple[str, Any], ...]
 
     @classmethod
-    def from_layer_state(cls, state: LayerVisualState) -> "LayerVisualSignature":
-        if not state.versions:
-            return cls(())
-        items = tuple(
-            sorted(
-                (str(k), int(v))
-                for k, v in state.versions.items()
-                if str(k) not in _EXCLUDED_LAYER_VERSION_KEYS
-            )
-        )
-        return cls(items)
+    def from_layer_state(
+        cls,
+        state: LayerVisualState,
+        *,
+        ndisplay: Optional[int],
+    ) -> "LayerVisualSignature":
+        return cls(_layer_visual_items(state, ndisplay=ndisplay))
 
 
 @dataclass(frozen=True)
@@ -297,6 +292,74 @@ class SceneContentSignature:
     volume_settings: Tuple[Any, ...]
 
 
+def layer_token(
+    snapshot: RenderLedgerSnapshot,
+    layer_id: str,
+    *,
+    dataset_id: Optional[str] = None,
+) -> tuple:
+    """Inputs-only content token for a single layer, for gating expensive work.
+
+    Tokens capture dims, view pose, and layer visual properties only (no outputs).
+    """
+    layer_map = snapshot.layer_values or {}
+    state = layer_map.get(str(layer_id))
+    view = _view_token(snapshot)
+    if isinstance(state, LayerVisualState):
+        sig = build_layer_content_signature(snapshot, state, dataset_id=dataset_id)
+        return (
+            ("layer", sig.layer_id),
+            ("dataset", sig.dataset),
+            ("dims", sig.dims),
+            ("pose_plane", sig.pose_plane),
+            ("pose_volume", sig.pose_volume),
+            ("visuals", sig.visuals.values),
+            ("view", view),
+        )
+    # Fallback when layer state is missing: still include dims + view so toggles refresh
+    return (
+        ("layer", str(layer_id)),
+        ("dataset", DatasetSignature(dataset_id=dataset_id)),
+        ("dims", DimsSignature.from_snapshot(snapshot)),
+        ("pose_plane", None),
+        ("pose_volume", None),
+        ("visuals", ()),
+        ("view", view),
+    )
+
+
+def scene_token(
+    snapshot: RenderLedgerSnapshot,
+    *,
+    dataset_id: Optional[str] = None,
+) -> tuple:
+    """Inputs-only content token for the entire scene (dims + view + visuals)."""
+    layers_visuals: list[tuple[str, tuple[tuple[str, Any], ...]]] = []
+    if snapshot.layer_values:
+        for layer_id, state in sorted(snapshot.layer_values.items()):
+            if isinstance(state, LayerVisualState):
+                items = _layer_visual_items(state, ndisplay=snapshot.ndisplay)
+                layers_visuals.append((str(layer_id), items))
+    token: list[tuple[Any, Any]] = [
+        ("dataset", dataset_id),
+        ("dims", _dims_token(snapshot)),
+        ("layers_visuals", tuple(layers_visuals)),
+        (
+            "volume_settings",
+            (
+                _canon(snapshot.volume_mode),
+                _canon(snapshot.volume_colormap),
+                _canon(snapshot.volume_clim),
+                _canon(snapshot.volume_opacity),
+                _canon(snapshot.volume_sample_step),
+            ),
+        ),
+    ]
+    token.append(("view", _view_token(snapshot)))
+    return tuple(token)
+
+
+
 def build_layer_content_signature(
     snapshot: RenderLedgerSnapshot,
     layer_state: LayerVisualState,
@@ -305,9 +368,30 @@ def build_layer_content_signature(
 ) -> LayerContentSignature:
     dims = DimsSignature.from_snapshot(snapshot)
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
-    pose_plane = PlanePoseSignature.from_snapshot(snapshot) if nd < 3 else None
-    pose_volume = VolumePoseSignature.from_snapshot(snapshot) if nd >= 3 else None
-    visuals = LayerVisualSignature.from_layer_state(layer_state)
+    plane_sig = PlanePoseSignature.from_snapshot(snapshot)
+    pose_plane = (
+        plane_sig
+        if (
+            nd < 3
+            and (plane_sig.center is not None or plane_sig.zoom is not None or plane_sig.rect is not None)
+        )
+        else None
+    )
+    volume_sig = VolumePoseSignature.from_snapshot(snapshot)
+    pose_volume = (
+        volume_sig
+        if (
+            nd >= 3
+            and (
+                volume_sig.center is not None
+                or volume_sig.angles is not None
+                or volume_sig.distance is not None
+                or volume_sig.fov is not None
+            )
+        )
+        else None
+    )
+    visuals = LayerVisualSignature.from_layer_state(layer_state, ndisplay=snapshot.ndisplay)
     ds = DatasetSignature(dataset_id=dataset_id)
     return LayerContentSignature(
         layer_id=str(layer_state.layer_id),
@@ -326,14 +410,21 @@ def build_scene_content_signature(
 ) -> SceneContentSignature:
     dims = DimsSignature.from_snapshot(snapshot)
     nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
-    pose_plane = PlanePoseSignature.from_snapshot(snapshot) if nd < 3 else None
-    pose_volume = VolumePoseSignature.from_snapshot(snapshot) if nd >= 3 else None
+    plane_sig = PlanePoseSignature.from_snapshot(snapshot)
+    pose_plane = plane_sig if (nd < 3 and (plane_sig.center is not None or plane_sig.zoom is not None or plane_sig.rect is not None)) else None
+    volume_sig = VolumePoseSignature.from_snapshot(snapshot)
+    pose_volume = volume_sig if (nd >= 3 and (volume_sig.center is not None or volume_sig.angles is not None or volume_sig.distance is not None or volume_sig.fov is not None)) else None
 
     layers_visuals: list[tuple[str, LayerVisualSignature]] = []
     if snapshot.layer_values:
         for layer_id, state in sorted(snapshot.layer_values.items()):
             if isinstance(state, LayerVisualState):
-                layers_visuals.append((str(layer_id), LayerVisualSignature.from_layer_state(state)))
+                layers_visuals.append(
+                    (
+                        str(layer_id),
+                        LayerVisualSignature.from_layer_state(state, ndisplay=snapshot.ndisplay),
+                    )
+                )
 
     volume_settings = (
         _canon(snapshot.volume_mode),
@@ -374,7 +465,7 @@ def scene_content_signature_tuple(
             if volume is None
             else (volume.center, volume.angles, volume.distance, volume.fov),
         ),
-        ("layers_visuals", tuple((lid, lv.versions) for lid, lv in sig.layers_visuals)),
+        ("layers_visuals", tuple((lid, lv.values) for lid, lv in sig.layers_visuals)),
         ("volume_settings", sig.volume_settings),
     )
 

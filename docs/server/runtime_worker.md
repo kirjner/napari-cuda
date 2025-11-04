@@ -271,4 +271,4 @@ without losing sight of the shared state or cross-thread contracts.
 - `notify.camera`: use `send_camera_update` / `broadcast_camera_update`.
 - `notify.scene`: use `send_scene_snapshot_payload` (single) or `broadcast_scene_snapshot`; baselines go through `send_scene_baseline`.
 - `notify.stream`: use `send_stream_payload` (single) or `broadcast_stream_config`.
-- All state-channel frames flow through `control.protocol.io.send_frame`, which relies on `server.util.websocket.safe_send` for socket safety.
+- All state-channel frames flow through `control.protocol.io.send_frame`, which relies on `server.utils.websocket.safe_send` for socket safety.

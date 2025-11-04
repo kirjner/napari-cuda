@@ -303,6 +303,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     server._animate,
                 )
                 consume_render_snapshot(worker, frame_state)
+                server._ack_scene_op_if_open(
+                    frame_state=frame_state,
+                    origin="worker.render.apply",
+                )
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
                 # Post-frame: capture thumbnail on worker and hand off via mailbox
@@ -327,6 +331,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         if layer_obj is None:
                             layer_obj = viewer.layers[0]
                     if layer_obj is not None:
+                        layer_obj._set_view_slice()
                         layer_obj._update_thumbnail()
                         thumb = layer_obj.thumbnail
                         if thumb is not None:
@@ -342,7 +347,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                             if layer_state is not None:
                                 # Build inputs-only token from the same frame_state we just rendered
                                 lid = str(target_layer_id or "layer-0")
-                                token = layer_token(frame_state, lid, dataset_id=None, include_camera=False)
+                                token = layer_token(frame_state, lid, dataset_id=None)
                                 payload = ThumbnailCapture(
                                     layer_id=lid,
                                     array=arr,

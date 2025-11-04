@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Optional
 
 import websockets
 
-from napari_cuda.server.util.websocket import safe_send as safe_send_ws
+from napari_cuda.server.utils.websocket import safe_send as safe_send_ws
 
 if TYPE_CHECKING:  # pragma: no cover - metrics interface is runtime provided
     from napari_cuda.server.metrics import Metrics
