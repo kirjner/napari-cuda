@@ -9,7 +9,7 @@ from typing import Optional
 
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
-from napari_cuda.server.utils.signatures import layer_payload_signature
+from napari_cuda.server.utils.signatures import SignatureToken, layer_content_signature
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[str, LayerVisualState, Optional[str], float], Awaitable[None]]
@@ -59,7 +59,7 @@ class ServerLayerMirror:
         self._last_versions: dict[tuple[str, str], int] = {}
         self._latest_states: dict[str, LayerVisualState] = {}
         self._ndisplay: Optional[int] = None
-        self._last_payload_sig: dict[str, tuple] = {}
+        self._last_payload_sig: dict[str, SignatureToken] = {}
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -226,9 +226,9 @@ class ServerLayerMirror:
             if not subset.keys():
                 continue
             # Content signature gating for emission (dedupe by values, not versions)
-            sig = layer_payload_signature(subset)
+            sig = layer_content_signature(subset)
             last = self._last_payload_sig.get(layer_id)
-            if last is not None and last == sig:
+            if not sig.changed(last):
                 # No change in outward payload content; skip broadcast
                 for prop in props:
                     _ = self._pending_versions.pop((layer_id, prop), None)

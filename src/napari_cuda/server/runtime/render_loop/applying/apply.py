@@ -126,6 +126,12 @@ def _resolve_snapshot_ops(
         "volume": None,
     }
 
+    version_prefix = (
+        None if snapshot.dims_version is None else int(snapshot.dims_version),
+        None if snapshot.view_version is None else int(snapshot.view_version),
+        None if snapshot.multiscale_level_version is None else int(snapshot.multiscale_level_version),
+    )
+
     if target_volume:
         requested_level = int(target_level)
         selected_level, downgraded = snapshot_iface.resolve_volume_intent_level(
@@ -162,9 +168,9 @@ def _resolve_snapshot_ops(
 
         signature_token: tuple[Any, ...] = ("volume", int(effective_level), step_hint)
         ops["signature"] = (
-            snapshot.dims_version,
-            snapshot.view_version,
-            snapshot.multiscale_level_version,
+            version_prefix[0],
+            version_prefix[1],
+            version_prefix[2],
             signature_token,
         )
         ops["volume"] = {
@@ -219,9 +225,9 @@ def _resolve_snapshot_ops(
     level_changed = target_level != prev_level
     skip_slice = not level_changed and last_slice_signature == signature_token
     snapshot_signature = (
-        snapshot.dims_version,
-        snapshot.view_version,
-        snapshot.multiscale_level_version,
+        version_prefix[0],
+        version_prefix[1],
+        version_prefix[2],
         signature_token,
     )
     chunk_tuple = (

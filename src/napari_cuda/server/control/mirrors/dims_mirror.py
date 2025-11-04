@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.server.utils.signatures import dims_payload_signature
-from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
+from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
+from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[NotifyDimsPayload], Awaitable[None]]
@@ -54,7 +54,7 @@ class ServerDimsMirror:
         self._on_payload = on_payload
         self._lock = threading.Lock()
         self._started = False
-        self._last_signature: Optional[tuple[Any, ...]] = None
+        self._last_signature: Optional[SignatureToken] = None
         self._latest_payload: Optional[NotifyDimsPayload] = None
 
     # ------------------------------------------------------------------
@@ -65,8 +65,10 @@ class ServerDimsMirror:
             self._started = True
         for key in self._WATCH_KEYS:
             self._ledger.subscribe(key.scope, key.target, key.key, self._on_ledger_event)
-        payload = self._build_payload()
-        signature = self._compute_signature(payload)
+        snapshot = self._ledger.snapshot()
+        state = self._extract_state(snapshot)
+        signature = self._compute_state_signature(state)
+        payload = self._build_payload_from_state(state)
         with self._lock:
             self._latest_payload = payload
             self._last_signature = signature
@@ -74,20 +76,20 @@ class ServerDimsMirror:
     # ------------------------------------------------------------------
     def _on_ledger_event(self, event: LedgerEvent) -> None:
         # Gate notifications on op_state if present
-        snap = self._ledger.snapshot()
-        op_entry = snap.get(("scene", "main", "op_state"))
+        snapshot = self._ledger.snapshot()
+        op_entry = snapshot.get(("scene", "main", "op_state"))
         if op_entry is not None:
             text = str(op_entry.value)
             if text != "applied":
                 return
 
-        payload = self._build_payload()
-
-        signature = self._compute_signature(payload)
+        state = self._extract_state(snapshot)
+        token = self._compute_state_signature(state)
         with self._lock:
-            if self._last_signature == signature:
+            if not token.changed(self._last_signature):
                 return
-            self._last_signature = signature
+            self._last_signature = token
+            payload = self._build_payload_from_state(state)
             self._latest_payload = payload
 
         if self._on_payload is not None:
@@ -99,11 +101,13 @@ class ServerDimsMirror:
         with self._lock:
             if self._latest_payload is not None:
                 return self._latest_payload
-        payload = self._build_payload()
-        signature = self._compute_signature(payload)
+        snapshot = self._ledger.snapshot()
+        state = self._extract_state(snapshot)
+        token = self._compute_state_signature(state)
+        payload = self._build_payload_from_state(state)
         with self._lock:
             self._latest_payload = payload
-            self._last_signature = signature
+            self._last_signature = token
             return payload
 
     def reset(self) -> None:
@@ -112,8 +116,9 @@ class ServerDimsMirror:
             self._latest_payload = None
 
     # ------------------------------------------------------------------
-    def _build_payload(self) -> NotifyDimsPayload:
-        snapshot = self._ledger.snapshot()
+    def _extract_state(
+        self, snapshot: dict[tuple[str, str, str], LedgerEntry]
+    ) -> dict[str, Any]:
         required = {
             ("dims", "main", "current_step"),
             ("multiscale", "main", "level"),
@@ -138,18 +143,33 @@ class ServerDimsMirror:
         labels = self._optional_str_tuple(snapshot.get(("dims", "main", "labels")))
         downgraded = self._optional_bool(snapshot.get(("multiscale", "main", "downgraded")))
 
+        return {
+            "current_step": current_step,
+            "current_level": current_level,
+            "levels": levels,
+            "level_shapes": level_shapes,
+            "ndisplay": ndisplay,
+            "mode": mode,
+            "displayed": displayed,
+            "order": order,
+            "axis_labels": axis_labels,
+            "labels": labels,
+            "downgraded": downgraded,
+        }
+
+    def _build_payload_from_state(self, state: dict[str, Any]) -> NotifyDimsPayload:
         return NotifyDimsPayload(
-            current_step=current_step,
-            level_shapes=level_shapes,
-            levels=levels,
-            current_level=current_level,
-            downgraded=downgraded,
-            mode=mode,
-            ndisplay=ndisplay,
-            axis_labels=axis_labels,
-            order=order,
-            displayed=displayed,
-            labels=labels,
+            current_step=state["current_step"],
+            level_shapes=state["level_shapes"],
+            levels=state["levels"],
+            current_level=state["current_level"],
+            downgraded=state["downgraded"],
+            mode=state["mode"],
+            ndisplay=state["ndisplay"],
+            axis_labels=state["axis_labels"],
+            order=state["order"],
+            displayed=state["displayed"],
+            labels=state["labels"],
         )
 
     # ------------------------------------------------------------------
@@ -215,9 +235,20 @@ class ServerDimsMirror:
             return None
         return bool(value)
 
-    @staticmethod
-    def _compute_signature(payload: NotifyDimsPayload) -> tuple[Any, ...]:
-        return dims_payload_signature(payload)
+    def _compute_state_signature(self, state: dict[str, Any]) -> SignatureToken:
+        return dims_content_signature(
+            current_step=state["current_step"],
+            current_level=state["current_level"],
+            ndisplay=state["ndisplay"],
+            mode=state["mode"],
+            displayed=state["displayed"],
+            axis_labels=state["axis_labels"],
+            order=state["order"],
+            labels=state["labels"],
+            levels=state["levels"],
+            level_shapes=state["level_shapes"],
+            downgraded=state["downgraded"],
+        )
 
 
 __all__ = ["ServerDimsMirror"]

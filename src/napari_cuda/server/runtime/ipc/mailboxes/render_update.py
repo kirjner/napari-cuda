@@ -18,7 +18,7 @@ from napari_cuda.server.scene import (
     RenderUpdate,
     VolumeState,
 )
-from napari_cuda.server.utils.signatures import scene_content_signature_tuple
+from napari_cuda.server.utils.signatures import SignatureToken, scene_content_signature
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class RenderUpdateMailbox:
         self._volume_state: Optional[VolumeState] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
         self._camera_ops: list = []
-        self._last_signature: Optional[tuple] = None
+        self._last_signature: Optional[SignatureToken] = None
         self._lock = threading.Lock()
 
     def set_scene_state(self, state: RenderLedgerSnapshot) -> None:
@@ -55,7 +55,7 @@ class RenderUpdateMailbox:
                     return
                 if op_seq == current_op:
                     signature = self._build_signature(state)
-                    if signature == self._last_signature:
+                    if not signature.changed(self._last_signature):
                         return
             self._scene_state = state
             self._scene_op_seq = op_seq
@@ -131,18 +131,18 @@ class RenderUpdateMailbox:
             return drained
 
     def update_state_signature(self, state: RenderLedgerSnapshot) -> bool:
-        signature = self._build_signature(state)
+        token = self._build_signature(state)
         with self._lock:
-            if signature == self._last_signature:
+            if not token.changed(self._last_signature):
                 return False
-            self._last_signature = signature
+            self._last_signature = token
             return True
 
     @staticmethod
-    def _build_signature(state: RenderLedgerSnapshot) -> tuple:
-        # Content-only signature tuple (op_seq-free), unified across server
-        # Note: dataset_id not tracked at this point; pass None.
-        return scene_content_signature_tuple(state, dataset_id=None)
+    def _build_signature(state: RenderLedgerSnapshot) -> SignatureToken:
+        # Content-only signature token (op_seq-free), unified across server.
+        # Dataset identifiers are not tracked at this point, so rely on defaults.
+        return scene_content_signature(state)
 
 
 __all__ = [

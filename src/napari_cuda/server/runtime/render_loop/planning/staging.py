@@ -22,6 +22,7 @@ from napari_cuda.server.scene import (
     LayerVisualState,
     RenderLedgerSnapshot,
 )
+from napari_cuda.server.utils.signatures import snapshot_versions
 
 from .interface import RenderPlanInterface
 
@@ -200,28 +201,7 @@ def record_snapshot_versions(
     applied_versions: AppliedVersions,
     state: RenderLedgerSnapshot,
 ) -> None:
-    if state.dims_version is not None:
-        applied_versions[("dims", "main", "current_step")] = int(state.dims_version)
-    if state.view_version is not None:
-        applied_versions[("view", "main", "ndisplay")] = int(state.view_version)
-    if state.multiscale_level_version is not None:
-        applied_versions[("multiscale", "main", "level")] = int(state.multiscale_level_version)
-    if state.camera_versions:
-        for key, version in state.camera_versions.items():
-            scope = "camera"
-            attr = str(key)
-            if "." in attr:
-                prefix, remainder = attr.split(".", 1)
-                if prefix == "plane":
-                    scope = "camera_plane"
-                    attr = remainder
-                elif prefix == "volume":
-                    scope = "camera_volume"
-                    attr = remainder
-                elif prefix == "legacy":
-                    scope = "camera"
-                    attr = remainder
-            applied_versions[(scope, "main", attr)] = int(version)
+    snapshot_versions(state).apply(applied_versions)
 
 
 def extract_layer_changes(
