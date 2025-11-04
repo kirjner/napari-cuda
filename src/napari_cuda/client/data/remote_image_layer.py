@@ -456,6 +456,14 @@ class RemoteImageLayer(Image):
         preview = self._remote_thumbnail.to_canvas(
             self.rgb, (thumb_shape[0], thumb_shape[1])
         )
+        # Denormalize preview from [0,1] into current data units so that
+        # napari's subsequent normalization with contrast_limits preserves
+        # intended intensities and avoids underflow to the colormap 'under'.
+        if not self.rgb:
+            lo, hi = float(self.contrast_limits[0]), float(self.contrast_limits[1])
+            if not np.isfinite(hi) or not np.isfinite(lo) or hi <= lo:
+                hi = lo + 1.0
+            preview = (preview * (hi - lo)) + lo
         if (
             self._slice_input.ndisplay == 3
             and self.ndim > 2
