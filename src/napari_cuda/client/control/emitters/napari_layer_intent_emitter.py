@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from qtpy import QtCore
+import contextlib
 
 from napari.utils.events import EventEmitter
 from napari_cuda.client.control.client_state_ledger import (
@@ -47,11 +48,51 @@ def _event_rendering(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.rendering
 
 
+class _CompositeEmitter:
+    """Minimal emitter proxy that multiplexes two EventEmitters.
+
+    Provides ``connect``, ``disconnect`` and ``blocker`` used by the
+    NapariLayerIntentEmitter. The composite is used to subscribe to both
+    ``interpolation2d`` and ``interpolation3d`` events while retaining the
+    PropertyConfig wiring pattern.
+    """
+
+    def __init__(self, a: EventEmitter, b: EventEmitter) -> None:
+        self._a = a
+        self._b = b
+
+    def connect(self, callback) -> None:  # type: ignore[no-untyped-def]
+        self._a.connect(callback)
+        self._b.connect(callback)
+
+    def disconnect(self, callback) -> None:  # type: ignore[no-untyped-def]
+        with contextlib.suppress(Exception):
+            self._a.disconnect(callback)
+        with contextlib.suppress(Exception):
+            self._b.disconnect(callback)
+
+    def blocker(self, callback=None):  # type: ignore[no-untyped-def]
+        a_blk = self._a.blocker(callback)
+        b_blk = self._b.blocker(callback)
+
+        class _Ctx:
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                self._a_tok = a_blk.__enter__()
+                self._b_tok = b_blk.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+                ok_b = b_blk.__exit__(exc_type, exc, tb)
+                ok_a = a_blk.__exit__(exc_type, exc, tb)
+                return bool(ok_a and ok_b)
+
+        return _Ctx()
+
+
 def _event_interpolation(layer: RemoteImageLayer) -> EventEmitter:
-    # napari still emits a consolidated `interpolation` event alongside
-    # the 2D/3D-specific ones; listen to the consolidated signal so we
-    # don't need dual handlers here.
-    return layer.events.interpolation
+    # Subscribe to both non-deprecated events and avoid the consolidated
+    # `interpolation` WarningEmitter to prevent deprecation noise.
+    return _CompositeEmitter(layer.events.interpolation2d, layer.events.interpolation3d)  # type: ignore[return-value]
 
 
 def _event_depiction(layer: RemoteImageLayer) -> EventEmitter:
