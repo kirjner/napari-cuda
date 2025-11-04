@@ -27,7 +27,6 @@ from .plane import (
     apply_slice_camera_pose,
     apply_slice_level,
     apply_slice_roi as _apply_slice_roi,
-    dims_signature,
     update_z_index_from_snapshot,
 )
 from .viewer_metadata import apply_plane_metadata, apply_volume_metadata
@@ -67,19 +66,13 @@ def apply_render_snapshot(snapshot_iface: RenderApplyInterface, snapshot: Render
 
     snapshot_ops = _resolve_snapshot_ops(snapshot_iface, snapshot)
 
-    dims_token = dims_signature(snapshot)
-    dims_changed = dims_token.changed(snapshot_iface.last_dims_signature())
-
-    if dims_changed:
-        with _suspend_fit_callbacks(viewer):
-            if logger.isEnabledFor(logging.INFO):
-                logger.info("snapshot.apply.begin: suppress fit; applying dims")
-            apply_dims_from_snapshot(snapshot_iface, snapshot, signature=dims_token)
-            _apply_snapshot_ops(snapshot_iface, snapshot, snapshot_ops)
-            if logger.isEnabledFor(logging.INFO):
-                logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
-    else:
+    with _suspend_fit_callbacks(viewer):
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("snapshot.apply.begin: suppress fit; applying dims")
+        apply_dims_from_snapshot(snapshot_iface, snapshot)
         _apply_snapshot_ops(snapshot_iface, snapshot, snapshot_ops)
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
 
 
 __all__ = [
@@ -247,7 +240,6 @@ def _apply_snapshot_ops(
         if entering_volume:
             snapshot_iface.viewport_state.mode = RenderMode.VOLUME
             snapshot_iface.ensure_volume_visual()
-            snapshot_iface.set_last_dims_signature(None)
 
         runner = snapshot_iface.viewport_runner
         if runner is not None and entering_volume:
@@ -287,7 +279,6 @@ def _apply_snapshot_ops(
         snapshot_iface.viewport_state.mode = RenderMode.PLANE
         snapshot_iface.ensure_plane_visual()
         snapshot_iface.configure_camera_for_mode()
-        snapshot_iface.set_last_dims_signature(None)
 
     apply_plane_metadata(snapshot_iface, source, plane_ops["applied_context"])
     snapshot_iface.viewport_state.volume.downgraded = False

@@ -104,12 +104,11 @@ see `docs/server/architecture.md`.
   `render_loop.planning.staging.extract_layer_changes`,
   `render_loop.planning.staging.apply_viewport_state_snapshot`,
   `render_loop.planning.staging.drain_scene_updates`,
-  `render_loop.applying.plane.dims_signature`,
   `render_loop.applying.plane.apply_dims_from_snapshot`,
   `render_loop.applying.plane.update_z_index_from_snapshot`,
   `snapshot_dims_metadata`, `_set_dims_range_for_level`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
-  `_applied_versions`, `_last_dims_signature`,
+  `_applied_versions`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.render_loop.plan.ledger_access`).
 - **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
   `napari_cuda.server.scene`), `runtime.render_loop.applying.*`,

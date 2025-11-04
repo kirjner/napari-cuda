@@ -13,8 +13,8 @@ the control/runtime/engine dependency contract this plan works toward.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
 ### 1.2 Worker fields mutated during apply
-- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded`, `worker._last_dims_signature` (`render_loop/apply/apply.py:209`, `render_loop/apply/apply.py:298`).
-- Plane metadata: `_data_wh`, `_last_slice_signature`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_loop/apply/apply.py:120`–`render_loop/apply/apply.py:150`, `render_loop/apply/apply.py:418`).
+- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded` (`render_loop/apply/apply.py:209`, `render_loop/apply/apply.py:298`).
+- Plane metadata: `_data_wh`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_loop/apply/apply.py:120`–`render_loop/apply/apply.py:150`, `render_loop/apply/apply.py:418`).
 - Volume metadata: `_volume_scale`, `_data_d` (`render_loop/apply/apply.py:404`), plus logging via `_layer_logger`.
 - Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_loop/apply/apply.py:430`, `worker/egl.py:1623`).
 

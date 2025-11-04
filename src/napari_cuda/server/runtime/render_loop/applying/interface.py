@@ -20,6 +20,7 @@ class RenderApplyInterface:
     """Expose the worker state that slice/volume apply helpers mutate."""
 
     worker: EGLRendererWorker
+    _slice_signature: Optional[SignatureToken] = None
 
     # Viewport access --------------------------------------------------
     @property
@@ -64,17 +65,11 @@ class RenderApplyInterface:
         self.worker._emit_current_camera_pose(reason)  # type: ignore[attr-defined]
 
     # Snapshot bookkeeping --------------------------------------------
-    def last_dims_signature(self) -> Optional[SignatureToken]:
-        return getattr(self.worker, "_last_dims_signature", None)
-
-    def set_last_dims_signature(self, signature: Optional[SignatureToken]) -> None:
-        self.worker._last_dims_signature = signature  # type: ignore[attr-defined]
-
     def last_slice_signature(self) -> Optional[SignatureToken]:
-        return getattr(self.worker, "_last_slice_signature", None)
+        return self._slice_signature
 
     def set_last_slice_signature(self, signature: Optional[SignatureToken]) -> None:
-        self.worker._last_slice_signature = signature  # type: ignore[attr-defined]
+        self._slice_signature = signature
 
     # Data / cache -----------------------------------------------------
     def z_index(self) -> Optional[int]:

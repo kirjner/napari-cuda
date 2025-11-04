@@ -74,25 +74,9 @@ def aligned_roi_signature(
     return aligned_roi, chunk_shape, signature
 
 
-def dims_signature(snapshot: RenderLedgerSnapshot) -> SignatureToken:
-    """Compute a signature for snapshot dims updates."""
-
-    token = (
-        int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
-        tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
-        tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
-        tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None,
-        int(snapshot.current_level) if snapshot.current_level is not None else None,
-        tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
-    )
-    return SignatureToken(token)
-
-
 def apply_dims_from_snapshot(
     snapshot_iface: RenderApplyInterface,
     snapshot: RenderLedgerSnapshot,
-    *,
-    signature: SignatureToken,
 ) -> None:
     """Apply dims metadata from ``snapshot`` back onto the worker viewer."""
 
@@ -100,7 +84,6 @@ def apply_dims_from_snapshot(
     if viewer is None:
         return
 
-    snapshot_iface.set_last_dims_signature(signature)
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
@@ -242,7 +225,6 @@ def apply_slice_snapshot(
     if was_volume:
         snapshot_iface.viewport_state.mode = RenderMode.PLANE
         snapshot_iface.configure_camera_for_mode()
-        snapshot_iface.set_last_dims_signature(None)
         snapshot_iface.reset_last_plane_pose()
 
     apply_plane_metadata(worker, source, applied_context)
@@ -478,7 +460,6 @@ __all__ = [
     "apply_slice_level",
     "apply_slice_roi",
     "apply_slice_snapshot",
-    "dims_signature",
     "update_z_index_from_snapshot",
 ]
 def _create_slice_task(

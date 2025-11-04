@@ -85,7 +85,6 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
-from napari_cuda.server.utils.signatures import SignatureToken
 from napari_cuda.server.state_ledger import ServerStateLedger
 
 _SENTINEL = object()
@@ -336,7 +335,6 @@ class CaptureWorker:
         self._z_index = 0
         self._pose_seq = 0
         self._max_camera_command_seq = 0
-        self._last_dims_signature = None
         self._axis_labels = ("z", "y", "x")
         self._axis_order = (0, 1, 2)
         self._displayed = (1, 2)
@@ -445,20 +443,8 @@ class CaptureWorker:
     def _mark_render_tick_needed(self) -> None:
         self._render_tick_required = True
 
-    def _dims_signature(self, snapshot: RenderLedgerSnapshot) -> SignatureToken:
-        token = (
-            int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
-            tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
-            tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
-            tuple(int(v) for v in snapshot.current_step) if snapshot.current_step is not None else None,
-            int(snapshot.current_level) if snapshot.current_level is not None else None,
-            tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
-        )
-        return SignatureToken(token)
-
-    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot, *, signature: SignatureToken) -> None:
+    def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
         dims = self._viewer.dims
-        self._last_dims_signature = signature
 
         if snapshot.ndisplay is not None:
             dims.ndisplay = max(1, int(snapshot.ndisplay))
