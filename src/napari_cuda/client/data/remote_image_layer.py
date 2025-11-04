@@ -461,20 +461,14 @@ class RemoteImageLayer(Image):
         return QtCore.QThread.currentThread() is app.thread()
 
     def _schedule_thumbnail_refresh(self) -> bool:
-        if QtCore is None:
-            return False
+        assert QtCore is not None, "Qt required for thumbnail refresh"
         app = QtCore.QCoreApplication.instance()
-        if app is None:
-            return False
-        try:
-            logger.info(
-                "RemoteImageLayer[%s]: scheduling thumbnail refresh via CallProxy (thread=%s)",
-                self._remote_id,
-                getattr(QtCore.QThread.currentThread(), "objectName", lambda: "?")() or "MainThread",
-            )
-        except Exception:
-            # Keep best-effort info log; don't block scheduling
-            pass
+        assert app is not None, "Qt application instance must exist"
+        logger.info(
+            "RemoteImageLayer[%s]: scheduling thumbnail refresh via CallProxy (thread=%s)",
+            self._remote_id,
+            QtCore.QThread.currentThread().objectName() or "MainThread",
+        )
         QtCore.QTimer.singleShot(0, self._update_thumbnail)  # type: ignore[arg-type]
         return True
 
@@ -505,35 +499,28 @@ class RemoteImageLayer(Image):
         if not self._ensure_main_thread():
             if self._schedule_thumbnail_refresh():
                 return
-        try:
-            logger.info(
-                "RemoteImageLayer[%s]: applying thumbnail update on UI thread",
-                self._remote_id,
-            )
-        except Exception:
-            pass
+        logger.info(
+            "RemoteImageLayer[%s]: applying thumbnail update on UI thread",
+            self._remote_id,
+        )
         self._apply_thumbnail_to_slice()
         super()._update_thumbnail()
         # Optional: compute digest for diagnostics
-        try:
-            arr = getattr(self, "thumbnail", None)
-            if arr is not None:
-                a = np.asarray(arr)
-                if a.size > 0:
-                    import hashlib
+        arr = self.thumbnail
+        a = np.asarray(arr)
+        if a.size > 0:
+            import hashlib
 
-                    d = hashlib.md5(a.tobytes()).hexdigest()
-                    same = (d == self._last_thumb_md5)
-                    self._last_thumb_md5 = d
-                    logger.debug(
-                        "RemoteImageLayer[%s]: thumbnail md5=%s same=%s shape=%s",
-                        self._remote_id,
-                        d,
-                        same,
-                        tuple(a.shape),
-                    )
-        except Exception:
-            logger.debug("RemoteImageLayer: thumbnail digest failed", exc_info=True)
+            d = hashlib.md5(a.tobytes()).hexdigest()
+            same = (d == self._last_thumb_md5)
+            self._last_thumb_md5 = d
+            logger.debug(
+                "RemoteImageLayer[%s]: thumbnail md5=%s same=%s shape=%s",
+                self._remote_id,
+                d,
+                same,
+                tuple(a.shape),
+            )
 
     # ------------------------------------------------------------------
     def _thumbnail_from_metadata(self, metadata: dict[str, Any]) -> Optional[np.ndarray]:
