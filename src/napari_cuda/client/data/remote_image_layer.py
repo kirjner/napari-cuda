@@ -291,11 +291,13 @@ class RemoteImageLayer(Image):
                 if change_2d:
                     with self.events.interpolation2d.blocker():
                         self.interpolation2d = new_val
-                    pending_events.append((self.events.interpolation2d, new_val))
+                    # emit the Interpolation enum object to match napari
+                    pending_events.append((self.events.interpolation2d, getattr(self, "_interpolation2d", new_val)))
                 if change_3d:
                     with self.events.interpolation3d.blocker():
                         self.interpolation3d = new_val
-                    pending_events.append((self.events.interpolation3d, new_val))
+                    # emit the Interpolation enum object to match napari
+                    pending_events.append((self.events.interpolation3d, getattr(self, "_interpolation3d", new_val)))
 
         if "colormap" in controls:
             new_val = str(controls["colormap"])
