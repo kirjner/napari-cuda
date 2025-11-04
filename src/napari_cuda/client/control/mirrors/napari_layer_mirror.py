@@ -17,6 +17,10 @@ from napari_cuda.client.data.registry import (
 )
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.rendering.presenter_facade import PresenterFacade
+from napari_cuda.client._qt.thumbnail_injector import (
+    emit_layer_thumbnail_data_changed,
+    flush_all_layers,
+)
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol.messages import NotifyLayersFrame, NotifySceneFrame
 from napari_cuda.protocol.snapshots import (
@@ -89,6 +93,13 @@ class NapariLayerMirror:
         with self._suppress_emitter():
             self._registry.apply_snapshot(snapshot)
         self._update_welcome_overlay(snapshot.metadata, len(snapshot.layers))
+        # Optionally force layer-list thumbnails to repaint immediately
+        try:
+            injected = flush_all_layers(self._current_viewer())
+            if injected and logger.isEnabledFor(logging.DEBUG):
+                logger.debug("notify.scene applied: forced %s thumbnail repaints", injected)
+        except Exception:
+            logger.debug("notify.scene: thumbnail injector failed", exc_info=True)
         logger.debug("notify.scene applied: layers=%s", len(snapshot.layers))
 
     def ingest_layer_delta(self, frame: NotifyLayersFrame) -> None:
@@ -100,6 +111,21 @@ class NapariLayerMirror:
             if emitter is not None and delta.controls:
                 emitter.apply_remote_values(delta.layer_id, delta.controls)
         self._presenter.apply_layer_delta(delta)
+        # Optionally force a repaint of the specific layer row to reflect new thumbnail
+        try:
+            # Resolve the updated layer instance from the registry snapshot
+            record = None
+            snap = self._registry.snapshot()
+            for r in snap.iter():
+                if r.layer_id == delta.layer_id:
+                    record = r
+                    break
+            if record is not None:
+                viewer = self._current_viewer()
+                if viewer is not None:
+                    emit_layer_thumbnail_data_changed(viewer, record.layer)
+        except Exception:
+            logger.debug("notify.layers: thumbnail injector failed", exc_info=True)
         keys = tuple((delta.controls or {}).keys())
         logger.debug("notify.layers applied: id=%s controls=%s", delta.layer_id, keys)
 
@@ -131,6 +157,13 @@ class NapariLayerMirror:
                     self._attached_layers.discard(layer_id)
         with self._suppress_emitter():
             self._sync_viewer_layers(snapshot)
+        # Optionally ensure UI repaints thumbnails for all rows
+        try:
+            injected = flush_all_layers(self._current_viewer())
+            if injected and logger.isEnabledFor(logging.DEBUG):
+                logger.debug("registry snapshot: forced %s thumbnail repaints", injected)
+        except Exception:
+            logger.debug("registry snapshot: thumbnail injector failed", exc_info=True)
         self._update_welcome_overlay(self._last_scene_metadata, len(tuple(snapshot.iter())))
 
     # ------------------------------------------------------------------ helpers
