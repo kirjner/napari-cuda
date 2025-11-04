@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from napari._vispy.layers.image import _napari_cmap_to_vispy
+from napari.layers import Image as NapariImage
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 from napari_cuda.server.scene.viewport import RenderMode
@@ -47,7 +48,16 @@ def _set_blending(worker: Any, layer: Any, value: Any) -> bool:
 
 
 def _set_interpolation(worker: Any, layer: Any, value: Any) -> bool:
-    layer.interpolation = str(value)  # type: ignore[assignment]
+    """Apply unified interpolation token to both 2D and 3D on Image layers.
+
+    napari exposes separate properties (`interpolation2d`/`interpolation3d`).
+    Our state uses a single `interpolation` token. For correctness across
+    2D/3D mode switches we set both on Image.
+    """
+    assert isinstance(layer, NapariImage), "interpolation apply requires napari Image layer"
+    token = str(value)
+    layer.interpolation2d = token  # type: ignore[assignment]
+    layer.interpolation3d = token  # type: ignore[assignment]
     return True
 
 

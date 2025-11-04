@@ -47,6 +47,25 @@ def _event_rendering(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.rendering
 
 
+def _event_interpolation(layer: RemoteImageLayer) -> EventEmitter:
+    # napari still emits a consolidated `interpolation` event alongside
+    # the 2D/3D-specific ones; listen to the consolidated signal so we
+    # don't need dual handlers here.
+    return layer.events.interpolation
+
+
+def _event_depiction(layer: RemoteImageLayer) -> EventEmitter:
+    return layer.events.depiction
+
+
+def _event_iso_threshold(layer: RemoteImageLayer) -> EventEmitter:
+    return layer.events.iso_threshold
+
+
+def _event_attenuation(layer: RemoteImageLayer) -> EventEmitter:
+    return layer.events.attenuation
+
+
 def _event_colormap(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.colormap
 
@@ -89,6 +108,45 @@ def _get_rendering(layer: RemoteImageLayer) -> str:
 
 def _set_rendering(layer: RemoteImageLayer, value: str) -> None:
     layer.rendering = str(value)
+
+
+def _get_interpolation(layer: RemoteImageLayer) -> str:
+    # RemoteImageLayer mirrors napari Image and maintains 2D/3D values.
+    # In our stack we keep them equal; read the 2D value.
+    return str(getattr(layer, "interpolation2d"))
+
+
+def _set_interpolation(layer: RemoteImageLayer, value: str) -> None:
+    token = str(value)
+    # Set both 2D and 3D to keep them in sync for intents/state.
+    # We subscribe to the consolidated `interpolation` event, so
+    # these per-dimension event emissions won't loop back.
+    layer.interpolation2d = token
+    layer.interpolation3d = token
+
+
+def _get_depiction(layer: RemoteImageLayer) -> str:
+    return str(layer.depiction)
+
+
+def _set_depiction(layer: RemoteImageLayer, value: str) -> None:
+    layer.depiction = str(value)
+
+
+def _get_iso_threshold(layer: RemoteImageLayer) -> float:
+    return float(layer.iso_threshold)
+
+
+def _set_iso_threshold(layer: RemoteImageLayer, value: float) -> None:
+    layer.iso_threshold = float(value)
+
+
+def _get_attenuation(layer: RemoteImageLayer) -> float:
+    return float(layer.attenuation)
+
+
+def _set_attenuation(layer: RemoteImageLayer, value: float) -> None:
+    layer.attenuation = float(value)
 
 
 def _get_colormap(layer: RemoteImageLayer) -> str:
@@ -151,6 +209,42 @@ def _block_visible(block: Mapping[str, Any]) -> bool | None:
     controls = block.get("controls")
     if isinstance(controls, Mapping) and "visible" in controls:
         return _encode_bool(controls["visible"])
+    return None
+
+
+def _block_interpolation(block: Mapping[str, Any]) -> Any | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "interpolation" in controls:
+        return _encode_str(controls["interpolation"])  # type: ignore[return-value]
+    if "interpolation" in block:
+        return _encode_str(block["interpolation"])  # type: ignore[return-value]
+    return None
+
+
+def _block_depiction(block: Mapping[str, Any]) -> Any | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "depiction" in controls:
+        return _encode_str(controls["depiction"])  # type: ignore[return-value]
+    if "depiction" in block:
+        return _encode_str(block["depiction"])  # type: ignore[return-value]
+    return None
+
+
+def _block_iso_threshold(block: Mapping[str, Any]) -> Any | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "iso_threshold" in controls:
+        return _encode_float(controls["iso_threshold"])  # type: ignore[return-value]
+    if "iso_threshold" in block:
+        return _encode_float(block["iso_threshold"])  # type: ignore[return-value]
+    return None
+
+
+def _block_attenuation(block: Mapping[str, Any]) -> Any | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "attenuation" in controls:
+        return _encode_float(controls["attenuation"])  # type: ignore[return-value]
+    if "attenuation" in block:
+        return _encode_float(block["attenuation"])  # type: ignore[return-value]
     return None
 
 
@@ -258,6 +352,15 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         block_getter=_block_blending,
     ),
     PropertyConfig(
+        key="interpolation",
+        event_getter=_event_interpolation,
+        getter=_get_interpolation,
+        setter=_set_interpolation,
+        encoder=_encode_str,
+        equals=_equals_str,
+        block_getter=_block_interpolation,
+    ),
+    PropertyConfig(
         key="rendering",
         event_getter=_event_rendering,
         getter=_get_rendering,
@@ -265,6 +368,15 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         encoder=_encode_str,
         equals=_equals_str,
         block_getter=_block_rendering,
+    ),
+    PropertyConfig(
+        key="depiction",
+        event_getter=_event_depiction,
+        getter=_get_depiction,
+        setter=_set_depiction,
+        encoder=_encode_str,
+        equals=_equals_str,
+        block_getter=_block_depiction,
     ),
     PropertyConfig(
         key="colormap",
@@ -292,6 +404,24 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         encoder=_encode_limits,
         equals=_equals_limits,
         block_getter=_block_contrast_limits,
+    ),
+    PropertyConfig(
+        key="iso_threshold",
+        event_getter=_event_iso_threshold,
+        getter=_get_iso_threshold,
+        setter=_set_iso_threshold,
+        encoder=_encode_float,
+        equals=_equals_float,
+        block_getter=_block_iso_threshold,
+    ),
+    PropertyConfig(
+        key="attenuation",
+        event_getter=_event_attenuation,
+        getter=_get_attenuation,
+        setter=_set_attenuation,
+        encoder=_encode_float,
+        equals=_equals_float,
+        block_getter=_block_attenuation,
     ),
 )
 
