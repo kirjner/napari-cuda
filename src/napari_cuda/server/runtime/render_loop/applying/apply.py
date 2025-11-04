@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.lod.context import build_level_context
@@ -19,6 +19,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 )
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.server.utils.signatures import SignatureToken
 
 from .plane import (
     aligned_roi_signature,
@@ -65,25 +66,20 @@ def apply_render_snapshot(snapshot_iface: RenderApplyInterface, snapshot: Render
     assert viewer is not None, "RenderTxn requires an active viewer"
 
     snapshot_ops = _resolve_snapshot_ops(snapshot_iface, snapshot)
-    ops_signature = snapshot_ops["signature"]
-    if ops_signature == snapshot_iface.last_snapshot_signature():
-        return
 
-    signature = dims_signature(snapshot)
-    dims_changed = signature != snapshot_iface.last_dims_signature()
+    dims_token = dims_signature(snapshot)
+    dims_changed = dims_token.changed(snapshot_iface.last_dims_signature())
 
     if dims_changed:
         with _suspend_fit_callbacks(viewer):
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.begin: suppress fit; applying dims")
-            apply_dims_from_snapshot(snapshot_iface, snapshot, signature=signature)
+            apply_dims_from_snapshot(snapshot_iface, snapshot, signature=dims_token)
             _apply_snapshot_ops(snapshot_iface, snapshot, snapshot_ops)
             if logger.isEnabledFor(logging.INFO):
                 logger.info("snapshot.apply.end: dims applied; resuming fit callbacks")
     else:
         _apply_snapshot_ops(snapshot_iface, snapshot, snapshot_ops)
-
-    snapshot_iface.set_last_snapshot_signature(ops_signature)
 
 
 __all__ = [
@@ -121,16 +117,9 @@ def _resolve_snapshot_ops(
         "source": source,
         "target_volume": target_volume,
         "was_volume": was_volume,
-        "signature": None,
         "plane": None,
         "volume": None,
     }
-
-    version_prefix = (
-        None if snapshot.dims_version is None else int(snapshot.dims_version),
-        None if snapshot.view_version is None else int(snapshot.view_version),
-        None if snapshot.multiscale_level_version is None else int(snapshot.multiscale_level_version),
-    )
 
     if target_volume:
         requested_level = int(target_level)
@@ -166,13 +155,6 @@ def _resolve_snapshot_ops(
                 last_step=step_hint,
             )
 
-        signature_token: tuple[Any, ...] = ("volume", int(effective_level), step_hint)
-        ops["signature"] = (
-            version_prefix[0],
-            version_prefix[1],
-            version_prefix[2],
-            signature_token,
-        )
         ops["volume"] = {
             "entering_volume": not was_volume,
             "downgraded": bool(downgraded),
@@ -220,22 +202,15 @@ def _resolve_snapshot_ops(
         level_int,
         roi_current,
     )
-    signature_token = (level_int, step_tuple, roi_signature)
-    last_slice_signature = snapshot_iface.last_slice_signature()
+    slice_token = SignatureToken((level_int, step_tuple, roi_signature))
+    last_slice_token = snapshot_iface.last_slice_signature()
     level_changed = target_level != prev_level
-    skip_slice = not level_changed and last_slice_signature == signature_token
-    snapshot_signature = (
-        version_prefix[0],
-        version_prefix[1],
-        version_prefix[2],
-        signature_token,
-    )
+    skip_slice = not level_changed and last_slice_token is not None and last_slice_token.value == slice_token.value
     chunk_tuple = (
         (int(chunk_shape[0]), int(chunk_shape[1]))
         if chunk_shape is not None
         else (0, 0)
     )
-    ops["signature"] = snapshot_signature
     ops["plane"] = {
         "applied_context": applied_context,
         "aligned_roi": aligned_roi,
@@ -251,6 +226,7 @@ def _resolve_snapshot_ops(
         "level_int": level_int,
         "level_changed": level_changed,
         "was_volume": was_volume,
+        "slice_token": slice_token,
     }
     return ops
 
@@ -305,6 +281,7 @@ def _apply_snapshot_ops(
 
     plane_ops = ops["plane"]
     assert plane_ops is not None
+    slice_token: Optional[SignatureToken] = plane_ops.get("slice_token")
 
     if plane_ops["was_volume"]:
         snapshot_iface.viewport_state.mode = RenderMode.PLANE
@@ -324,6 +301,8 @@ def _apply_snapshot_ops(
             slice_task = SliceTask(**plane_ops["slice_payload"])
             runner.mark_level_applied(slice_task.level)
             runner.mark_slice_applied(slice_task)
+        if slice_token is not None:
+            snapshot_iface.set_last_slice_signature(slice_token)
         update_z_index_from_snapshot(snapshot_iface, snapshot)
         return
 

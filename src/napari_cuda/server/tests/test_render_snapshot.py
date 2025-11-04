@@ -15,6 +15,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.server.utils.signatures import SignatureToken
 
 
 class _NoopEvent:
@@ -82,7 +83,7 @@ class _StubWorker:
             fov=45.0,
         )
         self.configure_calls = 0
-        self._last_dims_signature: tuple[int, ...] | None = None
+        self._last_dims_signature: SignatureToken | None = None
         self._scene_source = _FakeSource()
         self._volume_max_bytes = None
         self._volume_max_voxels = None
@@ -346,13 +347,10 @@ def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch:
 
     snapshot_iface = RenderApplyInterface(worker)
     ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
-    snapshot_iface.set_last_snapshot_signature(ops["signature"])
     snapshot_iface.set_last_dims_signature(plane_mod.dims_signature(snapshot))
-
-    def _fail_apply(*_args, **_kwargs) -> None:
-        raise AssertionError("apply_snapshot_ops should not be invoked when signature matches")
-
-    monkeypatch.setattr(snapshot_mod, "_apply_snapshot_ops", _fail_apply)
+    plane_ops = ops["plane"]
+    assert plane_ops is not None
+    snapshot_iface.set_last_slice_signature(plane_ops["slice_token"])
 
     snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
     assert worker._apply_dims_calls == 0

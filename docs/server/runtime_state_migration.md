@@ -8,7 +8,7 @@ the control/runtime/engine dependency contract this plan works toward.
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply
-- `render_loop.applying.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) resolves snapshot ops before touching napari state, short-circuits when the signature matches `_last_snapshot_signature`, and only then suppresses fit callbacks while applying dims.
+- `render_loop.applying.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) resolves snapshot ops before touching napari state, relies on the render mailbox to filter duplicate scene snapshots, and only suppresses fit callbacks while applying dims if the dims signature token changed.
 - `_resolve_snapshot_ops` computes the per-mode metadata (level intent, ROI alignment, slice signature) and `_apply_snapshot_ops` performs the actual mutations, invoking `apply_volume_level` or `apply_slice_level` as needed.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 

@@ -30,6 +30,7 @@ from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
 )
 from napari_cuda.server.scene.viewport import PlaneState, RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.server.utils.signatures import SignatureToken
 
 from .viewer_metadata import apply_plane_metadata
 
@@ -73,10 +74,10 @@ def aligned_roi_signature(
     return aligned_roi, chunk_shape, signature
 
 
-def dims_signature(snapshot: RenderLedgerSnapshot) -> tuple:
+def dims_signature(snapshot: RenderLedgerSnapshot) -> SignatureToken:
     """Compute a signature for snapshot dims updates."""
 
-    return (
+    token = (
         int(snapshot.ndisplay) if snapshot.ndisplay is not None else None,
         tuple(int(v) for v in snapshot.order) if snapshot.order is not None else None,
         tuple(int(v) for v in snapshot.displayed) if snapshot.displayed is not None else None,
@@ -84,13 +85,14 @@ def dims_signature(snapshot: RenderLedgerSnapshot) -> tuple:
         int(snapshot.current_level) if snapshot.current_level is not None else None,
         tuple(str(v) for v in snapshot.axis_labels) if snapshot.axis_labels is not None else None,
     )
+    return SignatureToken(token)
 
 
 def apply_dims_from_snapshot(
     snapshot_iface: RenderApplyInterface,
     snapshot: RenderLedgerSnapshot,
     *,
-    signature: tuple,
+    signature: SignatureToken,
 ) -> None:
     """Apply dims metadata from ``snapshot`` back onto the worker viewer."""
 
@@ -363,13 +365,14 @@ def apply_slice_level(
             )
         )
 
-    snapshot_iface.set_last_slice_signature(
+    slice_token = SignatureToken(
         (
             int(applied.level),
             tuple(int(v) for v in applied.step),
             roi_signature,
         )
     )
+    snapshot_iface.set_last_slice_signature(slice_token)
 
     return SliceApplyResult(
         level=int(applied.level),
@@ -448,13 +451,14 @@ def apply_slice_roi(
             if rect is not None:
                 runner.update_camera_rect(rect)
 
-    snapshot_iface.set_last_slice_signature(
+    slice_token = SignatureToken(
         (
             int(level),
             step_tuple,
             roi_signature,
         )
     )
+    snapshot_iface.set_last_slice_signature(slice_token)
     if logger.isEnabledFor(logging.INFO):
         logger.info(
             "updated last slice signature: level=%s step=%s roi_sig=%s",

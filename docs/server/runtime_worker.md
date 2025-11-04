@@ -109,7 +109,7 @@ see `docs/server/architecture.md`.
   `render_loop.applying.plane.update_z_index_from_snapshot`,
   `snapshot_dims_metadata`, `_set_dims_range_for_level`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
-  `_applied_versions`, `_last_snapshot_signature`, `_last_dims_signature`,
+  `_applied_versions`, `_last_dims_signature`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.render_loop.plan.ledger_access`).
 - **Dependencies:** `RenderUpdateMailbox`, `RenderLedgerSnapshot` (from
   `napari_cuda.server.scene`), `runtime.render_loop.applying.*`,

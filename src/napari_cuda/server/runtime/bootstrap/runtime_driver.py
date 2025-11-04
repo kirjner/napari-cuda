@@ -226,7 +226,6 @@ def setup_worker_runtime(
     worker._max_camera_command_seq = 0  # type: ignore[attr-defined]
     worker._level_policy_suppressed = False  # type: ignore[attr-defined]
     worker._last_slice_signature = None  # type: ignore[attr-defined]
-    worker._last_snapshot_signature = None  # type: ignore[attr-defined]
     worker._last_dims_signature = None  # type: ignore[attr-defined]
     worker._applied_versions = {}  # type: ignore[attr-defined]
     worker._last_plane_pose = None  # type: ignore[attr-defined]

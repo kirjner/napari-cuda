@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 from napari_cuda.server.data import SliceROI
+from napari_cuda.server.utils.signatures import SignatureToken
 
 if TYPE_CHECKING:
     from napari_cuda.server.scene.viewport import ViewportState
@@ -63,22 +64,16 @@ class RenderApplyInterface:
         self.worker._emit_current_camera_pose(reason)  # type: ignore[attr-defined]
 
     # Snapshot bookkeeping --------------------------------------------
-    def last_snapshot_signature(self):
-        return getattr(self.worker, "_last_snapshot_signature", None)
-
-    def set_last_snapshot_signature(self, signature) -> None:
-        self.worker._last_snapshot_signature = signature  # type: ignore[attr-defined]
-
-    def last_dims_signature(self):
+    def last_dims_signature(self) -> Optional[SignatureToken]:
         return getattr(self.worker, "_last_dims_signature", None)
 
-    def set_last_dims_signature(self, signature) -> None:
+    def set_last_dims_signature(self, signature: Optional[SignatureToken]) -> None:
         self.worker._last_dims_signature = signature  # type: ignore[attr-defined]
 
-    def last_slice_signature(self):
+    def last_slice_signature(self) -> Optional[SignatureToken]:
         return getattr(self.worker, "_last_slice_signature", None)
 
-    def set_last_slice_signature(self, signature) -> None:
+    def set_last_slice_signature(self, signature: Optional[SignatureToken]) -> None:
         self.worker._last_slice_signature = signature  # type: ignore[attr-defined]
 
     # Data / cache -----------------------------------------------------
