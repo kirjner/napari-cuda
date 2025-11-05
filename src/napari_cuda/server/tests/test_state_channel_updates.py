@@ -829,7 +829,7 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
 
 
 
-def test_volume_render_mode_update() -> None:
+def test_volume_rendering_update() -> None:
     server, scheduled, captured = _make_server()
     fake_ws = next(iter(server._state_clients))
     server._allowed_render_modes = {"mip", "iso"}
@@ -837,7 +837,7 @@ def test_volume_render_mode_update() -> None:
     payload = {
         "scope": "volume",
         "target": "main",
-        "key": "render_mode",
+        "key": "rendering",
         "value": "iso",
     }
 
@@ -846,9 +846,9 @@ def test_volume_render_mode_update() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
-    entry = server._state_ledger.get("volume", "main", "render_mode")
+    entry = server._state_ledger.get("volume", "main", "rendering")
     assert entry is not None and entry.value == "iso"
-    volume_entry = server._state_ledger.get("volume", "main", "render_mode")
+    volume_entry = server._state_ledger.get("volume", "main", "rendering")
     assert volume_entry is not None
     assert volume_entry.version is not None
 

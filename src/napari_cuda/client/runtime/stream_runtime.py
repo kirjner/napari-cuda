@@ -1269,8 +1269,8 @@ class ClientStreamLoop:
         return emitter.dims_set_index(axis, value, origin=origin)
 
     # --- Volume/multiscale intent senders --------------------------------------
-    def volume_set_render_mode(self, mode: str, *, origin: str = 'ui') -> bool:
-        return control_actions.volume_set_render_mode(
+    def volume_set_rendering(self, mode: str, *, origin: str = 'ui') -> bool:
+        return control_actions.volume_set_rendering(
             self._control_state,
             self._loop_state,
             self._state_ledger,

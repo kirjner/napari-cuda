@@ -13,7 +13,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_volume_colormap,
     reduce_volume_contrast_limits,
     reduce_volume_opacity,
-    reduce_volume_render_mode,
+    reduce_volume_rendering,
     reduce_volume_sample_step,
 )
 
@@ -28,17 +28,17 @@ async def handle_volume_update(ctx: "StateUpdateContext") -> bool:
     key = ctx.key
     value = ctx.value
 
-    if key == 'render_mode':
+    if key == 'rendering':
         mode = str(value or '').lower().strip()
         if not is_valid_render_mode(mode, server._allowed_render_modes):
-            logger.debug("state.update volume ignored invalid render_mode=%r", value)
+            logger.debug("state.update volume ignored invalid rendering=%r", value)
             await ctx.reject(
                 "state.invalid",
-                "unknown render_mode",
+                "unknown rendering",
                 details={"scope": ctx.scope, "key": key, "value": value},
             )
             return True
-        result = reduce_volume_render_mode(
+        result = reduce_volume_rendering(
             server._state_ledger,
             mode=mode,
             intent_id=ctx.intent_id,

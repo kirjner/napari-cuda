@@ -378,25 +378,7 @@ def _seed_dims_baseline(
         if policy_val is not None:
             state_ledger.record_confirmed('multiscale', 'main', 'policy', str(policy_val))
 
-    render_meta = state.dims_meta.get('render')
-    if isinstance(render_meta, dict):
-        mode_val = render_meta.get('mode') or render_meta.get('render_mode')
-        if mode_val is not None:
-            state_ledger.record_confirmed('volume', 'main', 'render_mode', str(mode_val))
-        clim_val = render_meta.get('contrast_limits')
-        if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
-            lo = float(clim_val[0])
-            hi = float(clim_val[1])
-            state_ledger.record_confirmed('volume', 'main', 'contrast_limits', (lo, hi))
-        cmap_val = render_meta.get('colormap')
-        if cmap_val is not None:
-            state_ledger.record_confirmed('volume', 'main', 'colormap', str(cmap_val))
-        opacity_val = render_meta.get('opacity')
-        if opacity_val is not None:
-            state_ledger.record_confirmed('volume', 'main', 'opacity', float(opacity_val))
-        sample_val = render_meta.get('sample_step')
-        if sample_val is not None:
-            state_ledger.record_confirmed('volume', 'main', 'sample_step', float(sample_val))
+    # Volume state is seeded from notify.scene metadata, not dims.
 
 
 def _seed_dims_indices(
@@ -461,10 +443,7 @@ def _apply_dims_meta_snapshot(
     if 'volume' in snapshot:
         meta['volume'] = bool(snapshot['volume'])
 
-    if 'render' in snapshot:
-        render = snapshot['render']
-        assert isinstance(render, Mapping)
-        meta['render'] = dict(render)
+    # No dims 'render' cache; volume state arrives via notify.scene metadata
 
     if 'multiscale' in snapshot:
         multiscale = snapshot['multiscale']
@@ -735,9 +714,6 @@ def handle_generic_ack(
                         logger.debug("presenter dims update failed", exc_info=True)
     elif scope == 'volume' and confirmed_value is not None:
         state.volume_state[key] = confirmed_value
-        render_meta = state.dims_meta.setdefault('render', {})
-        if isinstance(render_meta, dict):
-            render_meta[key] = confirmed_value
     elif scope == 'multiscale' and confirmed_value is not None:
         state.multiscale_state[key] = confirmed_value
         ms_meta = state.dims_meta.setdefault('multiscale', {})
@@ -980,7 +956,7 @@ def camera_set(
     return ok
 
 
-def volume_set_render_mode(
+def volume_set_rendering(
     state: ControlStateContext,
     loop_state: ClientLoopState,
     state_ledger: ClientStateLedger,
@@ -1001,7 +977,7 @@ def volume_set_render_mode(
         dispatch_state_update,
         scope="volume",
         target="main",
-        key="render_mode",
+        key="rendering",
         value=mode_value,
         origin=origin,
     )
@@ -1188,7 +1164,7 @@ def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int],
 
     controls = meta.get('controls') if isinstance(meta.get('controls'), dict) else None
     if isinstance(controls, dict):
-        snap['render_mode'] = controls.get('rendering')
+        snap['rendering'] = controls.get('rendering')
         clim = controls.get('contrast_limits')
         if isinstance(clim, Sequence):
             snap['clim_lo'] = _float_or_none(clim[0] if len(clim) > 0 else None)
@@ -1198,11 +1174,8 @@ def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int],
             snap['clim_hi'] = None
         snap['colormap'] = controls.get('colormap')
         snap['opacity'] = _float_or_none(controls.get('opacity'))
-    render_meta = meta.get('render') if isinstance(meta.get('render'), dict) else None
-    if isinstance(render_meta, dict):
-        snap['sample_step'] = _float_or_none(render_meta.get('sample_step'))
-    elif 'sample_step' not in snap:
-        snap['sample_step'] = None
+    # sample_step comes from volume state, not dims meta
+    snap['sample_step'] = _float_or_none(state.volume_state.get('sample_step')) if state.volume_state else None
 
     multiscale = meta.get('multiscale') if isinstance(meta.get('multiscale'), dict) else None
     if isinstance(multiscale, dict):

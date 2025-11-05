@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from napari.layers.image._image_constants import (
     Interpolation as NapariInterpolation,
+    ImageProjectionMode as NapariProjectionMode,
 )
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
@@ -64,6 +65,8 @@ _ALLOWED_RENDERING = {
     "additive",
     "average",
 }
+
+_ALLOWED_PROJECTION = {mode.value for mode in NapariProjectionMode}
 
 
 def _now(timestamp: Optional[float]) -> float:
@@ -459,6 +462,8 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
         return _normalize_string(value, allowed=_ALLOWED_DEPICTION)
     if prop == "rendering":
         return _normalize_string(value, allowed=_ALLOWED_RENDERING)
+    if prop == "projection_mode":
+        return _normalize_string(value, allowed=_ALLOWED_PROJECTION)
     if prop == "attenuation":
         return max(0.0, float(value))
     if prop == "iso_threshold":
@@ -490,6 +495,10 @@ def reduce_layer_property(
         updates.append(("volume", "main", "contrast_limits", (lo, hi)))
     elif prop == "opacity":
         updates.append(("volume", "main", "opacity", float(canonical)))
+    elif prop == "rendering":
+        # Route layer.rendering to volume when in volume mode; ignore in plane
+        if _current_ndisplay(ledger) >= 3:
+            updates.append(("volume", "main", "rendering", canonical))
 
     next_op_seq = _next_scene_op_seq(ledger)
 
@@ -520,7 +529,7 @@ def reduce_layer_property(
     )
 
 
-def reduce_volume_render_mode(
+def reduce_volume_rendering(
     ledger: ServerStateLedger,
     mode: str,
     *,
@@ -536,7 +545,10 @@ def reduce_volume_render_mode(
 
     stored_entries = apply_layer_property_transaction(
         ledger=ledger,
-        updates=[("volume", "main", "render_mode", normalized)],
+        updates=[
+            ("volume", "main", "rendering", normalized),
+            ("layer", "layer-0", "rendering", normalized),
+        ],
         origin=origin,
         timestamp=ts,
         metadata=metadata,
@@ -544,7 +556,7 @@ def reduce_volume_render_mode(
         op_kind="volume-update",
     )
 
-    entry = stored_entries.get(("volume", "main", "render_mode"))
+    entry = stored_entries.get(("volume", "main", "rendering"))
     assert entry is not None, "volume transaction must return entry"
     assert entry.version is not None, "volume transaction must yield version"
     version = int(entry.version)
@@ -552,7 +564,7 @@ def reduce_volume_render_mode(
     return ServerLedgerUpdate(
         scope="volume",
         target="main",
-        key="render_mode",
+        key="rendering",
         value=normalized,
         intent_id=intent_id,
         timestamp=ts,
@@ -1722,7 +1734,7 @@ __all__ = [
     "reduce_volume_colormap",
     "reduce_volume_contrast_limits",
     "reduce_volume_opacity",
-    "reduce_volume_render_mode",
+    "reduce_volume_rendering",
     "reduce_volume_restore",
     "reduce_volume_sample_step",
     "resolve_axis_index",

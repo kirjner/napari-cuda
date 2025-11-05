@@ -319,7 +319,6 @@ def _record_dims_snapshot(
         ledger.batch_record_confirmed(entries)
 
     _record_multiscale_metadata(state, ledger)
-    _record_volume_metadata(state, ledger)
 
 
 def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
@@ -444,37 +443,8 @@ def _record_multiscale_metadata(state: ControlStateContext, ledger: ClientStateL
     if entries:
         ledger.batch_record_confirmed(entries)
 
-def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:
-    render_meta = state.dims_meta.get('render')
-    if not isinstance(render_meta, Mapping):
-        return
-
-    entries: list[tuple[Any, ...]] = []
-
-    mode_val = render_meta.get('mode') or render_meta.get('render_mode')
-    if mode_val is not None:
-        entries.append(('volume', 'main', 'render_mode', str(mode_val)))
-
-    clim_val = render_meta.get('contrast_limits')
-    if isinstance(clim_val, (list, tuple)) and len(clim_val) >= 2:
-        lo = float(clim_val[0])
-        hi = float(clim_val[1])
-        entries.append(('volume', 'main', 'contrast_limits', (lo, hi)))
-
-    cmap_val = render_meta.get('colormap')
-    if cmap_val is not None:
-        entries.append(('volume', 'main', 'colormap', str(cmap_val)))
-
-    opacity_val = render_meta.get('opacity')
-    if opacity_val is not None:
-        entries.append(('volume', 'main', 'opacity', float(opacity_val)))
-
-    sample_val = render_meta.get('sample_step')
-    if sample_val is not None:
-        entries.append(('volume', 'main', 'sample_step', float(sample_val)))
-
-    if entries:
-        ledger.batch_record_confirmed(entries)
+def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:  # pragma: no cover - removed
+    return
 
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:

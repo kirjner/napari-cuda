@@ -98,8 +98,10 @@ def _set_depiction(worker: Any, layer: Any, value: Any) -> bool:
     return True
 
 
-def _set_rendering(worker: Any, layer: Any, value: Any) -> bool:
-    layer.rendering = str(value)  # type: ignore[assignment]
+# 'rendering' is a volume-only control in our model; layer path ignores it.
+
+def _set_projection_mode(worker: Any, layer: Any, value: Any) -> bool:
+    layer.projection_mode = str(value)  # type: ignore[assignment]
     return True
 
 
@@ -127,7 +129,7 @@ def _noop_setter(worker: Any, layer: Any, value: Any) -> bool:
     return False
 
 
-_PLANE_ONLY_PROPS = {"depiction", "rendering"}
+_PLANE_ONLY_PROPS = {"projection_mode"}
 _ALLOW_NONE_PROPS = {"metadata", "thumbnail"}
 _LAYER_SETTERS = {
     "visible": _set_visible,
@@ -138,7 +140,7 @@ _LAYER_SETTERS = {
     "gamma": _set_gamma,
     "contrast_limits": _set_contrast_limits,
     "depiction": _set_depiction,
-    "rendering": _set_rendering,
+    "projection_mode": _set_projection_mode,
     "attenuation": _set_attenuation,
     "iso_threshold": _set_iso_threshold,
     "metadata": _set_metadata,
@@ -154,7 +156,11 @@ def apply_layer_visual_state(worker: Any, layer_state: LayerVisualState, *, mode
     changed = False
     active_keys = layer_state.keys()
     for key in active_keys:
+        # Skip plane-only props in volume
         if key in _PLANE_ONLY_PROPS and mode is RenderMode.VOLUME:
+            continue
+        # depiction is 3D-only; ignore in plane mode
+        if key == "depiction" and mode is not RenderMode.VOLUME:
             continue
         setter = _LAYER_SETTERS.get(key)
         if setter is None:

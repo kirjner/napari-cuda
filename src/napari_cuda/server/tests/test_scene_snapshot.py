@@ -104,7 +104,7 @@ def test_snapshot_scene_volume_camera() -> None:
     )
     ledger.record_confirmed("camera_volume", "main", "distance", 100.0, origin="test.volume")
     ledger.record_confirmed("camera_volume", "main", "fov", 60.0, origin="test.volume")
-    ledger.record_confirmed("volume", "main", "render_mode", "mip", origin="test.volume")
+    ledger.record_confirmed("volume", "main", "rendering", "mip", origin="test.volume")
 
     render_state = snapshot_render_state(ledger)
 

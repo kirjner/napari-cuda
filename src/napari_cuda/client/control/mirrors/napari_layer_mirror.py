@@ -90,6 +90,26 @@ class NapariLayerMirror:
         self._assert_gui_thread()
         snapshot = scene_snapshot_from_payload(frame.payload)
         self._last_scene_metadata = dict(snapshot.metadata) if snapshot.metadata else None
+        # Seed client ledger with volume_state (strictly) for HUD/UX; dims stays separate
+        if self._last_scene_metadata is not None:
+            vol = self._last_scene_metadata.get("volume_state")
+            if isinstance(vol, dict):
+                entries: list[tuple[str, str, str, object]] = []
+                if "rendering" in vol:
+                    entries.append(("volume", "main", "rendering", str(vol["rendering"])))
+                if "colormap" in vol:
+                    entries.append(("volume", "main", "colormap", str(vol["colormap"])))
+                clim = vol.get("clim")
+                if isinstance(clim, (list, tuple)) and len(clim) >= 2:
+                    lo = float(clim[0])
+                    hi = float(clim[1])
+                    entries.append(("volume", "main", "contrast_limits", (lo, hi)))
+                if "opacity" in vol:
+                    entries.append(("volume", "main", "opacity", float(vol["opacity"])))
+                if "sample_step" in vol:
+                    entries.append(("volume", "main", "sample_step", float(vol["sample_step"])))
+                if entries:
+                    self._ledger.batch_record_confirmed(entries)
         with self._suppress_emitter():
             self._registry.apply_snapshot(snapshot)
         self._update_welcome_overlay(snapshot.metadata, len(snapshot.layers))

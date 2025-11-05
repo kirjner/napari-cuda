@@ -118,6 +118,9 @@ def _event_gamma(layer: RemoteImageLayer) -> EventEmitter:
 def _event_contrast_limits(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.contrast_limits
 
+def _event_projection_mode(layer: RemoteImageLayer) -> EventEmitter:
+    return layer.events.projection_mode
+
 
 def _get_visible(layer: RemoteImageLayer) -> bool:
     return bool(layer.visible)
@@ -218,6 +221,12 @@ def _get_contrast_limits(layer: RemoteImageLayer) -> tuple[float, float]:
 def _set_contrast_limits(layer: RemoteImageLayer, value: Mapping[str, Any] | tuple[Any, Any] | list[Any]) -> None:
     lo, hi = value  # type: ignore[assignment]
     layer.contrast_limits = (float(lo), float(hi))
+
+def _get_projection_mode(layer: RemoteImageLayer) -> str:
+    return str(layer.projection_mode)
+
+def _set_projection_mode(layer: RemoteImageLayer, value: str) -> None:
+    layer.projection_mode = str(value)
 
 
 def _encode_bool(value: Any) -> bool:
@@ -330,6 +339,14 @@ def _block_contrast_limits(block: Mapping[str, Any]) -> tuple[float, float] | No
         return _encode_limits(controls["contrast_limits"])
     if "contrast_limits" in block:
         return _encode_limits(block["contrast_limits"])
+    return None
+
+def _block_projection_mode(block: Mapping[str, Any]) -> str | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "projection_mode" in controls:
+        return _encode_str(controls["projection_mode"])  # type: ignore[return-value]
+    if "projection_mode" in block:
+        return _encode_str(block["projection_mode"])  # type: ignore[return-value]
     return None
 
 
@@ -463,6 +480,15 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         encoder=_encode_float,
         equals=_equals_float,
         block_getter=_block_attenuation,
+    ),
+    PropertyConfig(
+        key="projection_mode",
+        event_getter=_event_projection_mode,
+        getter=_get_projection_mode,
+        setter=_set_projection_mode,
+        encoder=_encode_str,
+        equals=_equals_str,
+        block_getter=_block_projection_mode,
     ),
 )
 

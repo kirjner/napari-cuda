@@ -226,7 +226,7 @@ def snapshot_volume_state(
 
     mapping: dict[str, Any] = {}
     for ledger_key, field in (
-        (("volume", "main", "render_mode"), "mode"),
+        (("volume", "main", "rendering"), "rendering"),
         (("volume", "main", "colormap"), "colormap"),
         (("volume", "main", "contrast_limits"), "clim"),
         (("volume", "main", "opacity"), "opacity"),
@@ -909,10 +909,7 @@ def build_ledger_snapshot(
     )
 
     defaults = default_volume_state()
-    volume_mode = _string_or_none(
-        _ledger_value(snapshot, "volume", "main", "render_mode"),
-        fallback=defaults.get("mode"),
-    )
+    volume_mode = _string_or_none(_ledger_value(snapshot, "volume", "main", "rendering"), fallback=defaults.get("mode"))
     volume_colormap = _string_or_none(
         _ledger_value(snapshot, "volume", "main", "colormap"),
         fallback=defaults.get("colormap"),

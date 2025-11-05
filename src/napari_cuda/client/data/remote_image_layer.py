@@ -244,6 +244,7 @@ class RemoteImageLayer(Image):
             "colormap",
             "depiction",
             "rendering",
+            "projection_mode",
             "gamma",
             "contrast_limits",
             "iso_threshold",
@@ -321,6 +322,13 @@ class RemoteImageLayer(Image):
                 with self.events.rendering.blocker():
                     self.rendering = new_val
                 pending_events.append((self.events.rendering, new_val))
+
+        if "projection_mode" in controls:
+            new_val = str(controls["projection_mode"])
+            if str(self.projection_mode) != new_val:
+                with self.events.projection_mode.blocker():
+                    self.projection_mode = new_val
+                pending_events.append((self.events.projection_mode, new_val))
 
         if "gamma" in controls:
             value = controls["gamma"]
