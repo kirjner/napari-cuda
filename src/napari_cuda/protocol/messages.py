@@ -711,7 +711,7 @@ class NotifyDimsPayload:
         _ensure_keyset(
             mapping,
             required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes"),
-            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step"),
+            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step", "axes_spec"),
             context="notify.dims payload",
         )
 

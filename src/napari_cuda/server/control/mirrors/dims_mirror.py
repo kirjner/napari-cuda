@@ -163,6 +163,7 @@ class ServerDimsMirror:
             "axis_labels": axis_labels,
             "labels": labels,
             "downgraded": downgraded,
+            "axes_spec": axes_spec,
         }
 
     def _build_payload_from_state(self, state: dict[str, Any]) -> NotifyDimsPayload:
@@ -178,6 +179,7 @@ class ServerDimsMirror:
             order=state["order"],
             displayed=state["displayed"],
             labels=state["labels"],
+            axes_spec=state["axes_spec"],
         )
 
     # ------------------------------------------------------------------
