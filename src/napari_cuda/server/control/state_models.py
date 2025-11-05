@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from napari_cuda.shared.axis_spec import AxesSpec
+
 
 @dataclass(frozen=True)
 class ClientStateUpdateRequest:
@@ -35,3 +37,4 @@ class ServerLedgerUpdate:
     version: Optional[int] = None
     axis_index: Optional[int] = None
     current_step: Optional[tuple[int, ...]] = None
+    axes_spec: Optional[AxesSpec] = None

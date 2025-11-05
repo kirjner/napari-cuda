@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 from numbers import Integral
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
-from napari_cuda.server.control.state_models import ClientStateUpdateRequest
-from napari_cuda.server.control.state_reducers import reduce_dims_update
+from napari_cuda.server.control.state_reducers import (
+    reduce_dims_update,
+    reduce_dims_margins_update,
+)
 
 if TYPE_CHECKING:
     from napari_cuda.server.control.control_channel_server import StateUpdateContext
@@ -29,12 +31,11 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
         return True
 
     step_delta: Optional[int] = None
-    value_arg_int: Optional[int] = None
-    value_arg_float: Optional[float] = None
+    value_arg: Optional[float] = None
 
-    if key == 'index':
+    if key == "index":
         if isinstance(ctx.value, Integral):
-            value_arg_int = int(ctx.value)
+            value_arg = float(int(ctx.value))
         else:
             logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -43,20 +44,21 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
                 details={"scope": ctx.scope, "key": key, "target": target},
             )
             return True
-    elif key == 'step':
+    elif key == "step":
         if isinstance(ctx.value, Integral):
             step_delta = int(ctx.value)
+            value_arg = float(step_delta)
         else:
-            logger.debug("state.update dims ignored (non-integer step delta) axis=%s value=%r", target, ctx.value)
+            logger.debug("state.update dims ignored (non-integer step) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
                 "state.invalid",
                 "step delta must be integer",
                 details={"scope": ctx.scope, "key": key, "target": target},
             )
             return True
-    elif key in ('margin_left', 'margin_right'):
+    elif key in {"margin_left", "margin_right"}:
         try:
-            value_arg_float = float(ctx.value)
+            value_arg = float(ctx.value)
         except Exception:
             logger.debug("state.update dims ignored (non-float margin) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -74,55 +76,74 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
         )
         return True
 
-    metadata: dict[str, Any] = {}
-    if step_delta is not None:
-        metadata["step_delta"] = step_delta
-    if value_arg_int is not None:
-        metadata["value"] = value_arg_int
-    if value_arg_float is not None:
-        metadata["value"] = value_arg_float
+    assert value_arg is not None or step_delta is not None, "dims update missing value"
 
-    request = ClientStateUpdateRequest(
-        scope="dims",
-        target=str(target),
-        key=str(key),
-        value=value_arg_int if value_arg_int is not None else value_arg_float,
-        intent_id=ctx.intent_id,
-        timestamp=ctx.timestamp,
-        metadata=metadata or None,
-    )
-
-    try:
-        if key in ('margin_left', 'margin_right'):
-            from napari_cuda.server.control.state_reducers import reduce_dims_margins_update
+    if key in {"margin_left", "margin_right"}:
+        assert value_arg is not None, "margin update requires value"
+        try:
             result = reduce_dims_margins_update(
                 server._state_ledger,
-                axis=request.target,
+                axis=str(target),
                 side=key,
-                value=float(request.value),
-                intent_id=request.intent_id,
-                timestamp=request.timestamp,
-                origin='client.state.dims',
+                value=float(value_arg),
+                intent_id=ctx.intent_id,
+                timestamp=ctx.timestamp,
+                origin="client.state.dims",
             )
-        else:
+        except ValueError as exc:
+            logger.debug(
+                "state.update dims rejected (invalid margin) axis=%s key=%s error=%s",
+                target,
+                key,
+                exc,
+            )
+            await ctx.reject(
+                "state.invalid",
+                str(exc) or "dims margin update invalid",
+                details={"scope": ctx.scope, "key": key, "target": target},
+            )
+            return True
+        except Exception:
+            logger.exception("state.update dims failed axis=%s key=%s", target, key)
+            await ctx.reject(
+                "state.error",
+                "dims update failed",
+                details={"scope": ctx.scope, "key": key, "target": target},
+            )
+            return True
+    else:
+        try:
             result = reduce_dims_update(
                 server._state_ledger,
-                axis=request.target,
-                prop=request.key,
-                value=request.value,
-                step_delta=metadata.get("step_delta"),
-                intent_id=request.intent_id,
-                timestamp=request.timestamp,
-                origin='client.state.dims',
+                axis=str(target),
+                prop=str(key),
+                value=int(value_arg) if key == "index" else None,
+                step_delta=step_delta,
+                intent_id=ctx.intent_id,
+                timestamp=ctx.timestamp,
+                origin="client.state.dims",
             )
-    except Exception:
-        logger.exception("state.update dims failed axis=%s key=%s", target, key)
-        await ctx.reject(
-            "state.error",
-            "dims update failed",
-            details={"scope": ctx.scope, "key": key, "target": target},
-        )
-        return True
+        except ValueError as exc:
+            logger.debug(
+                "state.update dims rejected (invalid step/index) axis=%s key=%s error=%s",
+                target,
+                key,
+                exc,
+            )
+            await ctx.reject(
+                "state.invalid",
+                str(exc) or "dims update invalid",
+                details={"scope": ctx.scope, "key": key, "target": target},
+            )
+            return True
+        except Exception:
+            logger.exception("state.update dims failed axis=%s key=%s", target, key)
+            await ctx.reject(
+                "state.error",
+                "dims update failed",
+                details={"scope": ctx.scope, "key": key, "target": target},
+            )
+            return True
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(

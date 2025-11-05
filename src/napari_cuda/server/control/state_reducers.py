@@ -37,7 +37,13 @@ from napari_cuda.server.state_ledger import (
     ServerStateLedger,
 )
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
-from napari_cuda.shared.axis_spec import build_axes_spec_from_ledger, validate_ledger_against_spec
+from napari_cuda.shared.axis_spec import (
+    AxesSpec,
+    axes_spec_from_payload,
+    axes_spec_to_payload,
+    build_axes_spec_from_ledger,
+    validate_ledger_against_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -864,10 +870,40 @@ def _dims_entries_from_payload(
     return entries
 
 
+def _refresh_axes_spec(
+    ledger: ServerStateLedger,
+    *,
+    origin: str,
+    timestamp: Optional[float],
+) -> AxesSpec:
+    snapshot = ledger.snapshot()
+    spec = build_axes_spec_from_ledger(snapshot)
+    payload = axes_spec_to_payload(spec)
+    assert payload is not None, "axes spec serialization failed"
+    ledger.record_confirmed(
+        "dims",
+        "main",
+        "axes_spec",
+        payload,
+        origin=origin,
+        timestamp=timestamp,
+    )
+    return spec
+
+
 def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
-    axes_spec = build_axes_spec_from_ledger(snapshot)
-    validate_ledger_against_spec(axes_spec, snapshot)
+
+    spec_entry = snapshot.get(("dims", "main", "axes_spec"))
+    axes_spec: AxesSpec
+    if spec_entry is not None:
+        spec_payload = getattr(spec_entry, "value", spec_entry)
+        axes_spec = axes_spec_from_payload(spec_payload)
+        assert axes_spec is not None, "axes spec ledger entry missing payload"
+        validate_ledger_against_spec(axes_spec, snapshot)
+    else:
+        axes_spec = build_axes_spec_from_ledger(snapshot)
+        validate_ledger_against_spec(axes_spec, snapshot)
 
     def require(scope: str, key: str) -> Any:
         entry = snapshot.get((scope, "main", key))
@@ -879,40 +915,19 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         entry = snapshot.get((scope, "main", key))
         return None if entry is None else entry.value
 
-    current_step_raw = require("dims", "current_step")
-    current_step = tuple(int(v) for v in current_step_raw)
-    level_shapes_raw = require("multiscale", "level_shapes")
-    level_shapes = tuple(
-        tuple(int(dim) for dim in shape) for shape in level_shapes_raw
-    )
+    current_step = tuple(int(v) for v in axes_spec.current_step)
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in axes_spec.level_shapes)
     levels_raw = require("multiscale", "levels")
     levels = tuple(dict(level) for level in levels_raw)
-    current_level = int(require("multiscale", "level"))
+    current_level = int(axes_spec.current_level)
     downgraded_raw = optional("multiscale", "downgraded")
     downgraded = None if downgraded_raw is None else bool(downgraded_raw)
-    ndisplay = int(require("view", "ndisplay"))
-    mode = "volume" if int(ndisplay) >= 3 else "plane"
+    ndisplay = int(axes_spec.ndisplay)
+    mode = "volume" if ndisplay >= 3 else "plane"
 
-    axis_labels_raw = optional("dims", "axis_labels")
-    axis_labels = (
-        tuple(str(label) for label in axis_labels_raw)
-        if axis_labels_raw is not None
-        else None
-    )
-
-    order_raw = optional("dims", "order")
-    order = (
-        tuple(int(idx) for idx in order_raw)
-        if order_raw is not None
-        else None
-    )
-
-    displayed_raw = optional("view", "displayed")
-    displayed = (
-        tuple(int(idx) for idx in displayed_raw)
-        if displayed_raw is not None
-        else None
-    )
+    axis_labels = tuple(axis.label for axis in axes_spec.axes)
+    order = tuple(int(idx) for idx in axes_spec.order)
+    displayed = tuple(int(idx) for idx in axes_spec.displayed)
 
     labels_raw = optional("dims", "labels")
     labels = (
@@ -1047,6 +1062,12 @@ def reduce_bootstrap_state(
     dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
     view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
 
+    axes_spec = _refresh_axes_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     dims_update = ServerLedgerUpdate(
         scope="dims",
         target=axis_target,
@@ -1058,6 +1079,7 @@ def reduce_bootstrap_state(
         current_step=resolved_step,
         origin=origin,
         version=dims_version,
+        axes_spec=axes_spec,
     )
     view_update = ServerLedgerUpdate(
         scope="view",
@@ -1068,6 +1090,7 @@ def reduce_bootstrap_state(
         timestamp=ts,
         origin=origin,
         version=view_version,
+        axes_spec=axes_spec,
     )
 
     return [dims_update, view_update]
@@ -1183,6 +1206,12 @@ def reduce_dims_update(
             metadata=metadata,
         )
 
+    axes_spec = _refresh_axes_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
@@ -1194,6 +1223,7 @@ def reduce_dims_update(
         current_step=requested_step,
         origin=origin,
         version=version,
+        axes_spec=axes_spec,
     )
 
 def reduce_dims_margins_update(
@@ -1244,6 +1274,12 @@ def reduce_dims_margins_update(
     ledger.batch_record_confirmed(entries, origin=origin, timestamp=ts)
 
     # Build update
+    axes_spec = _refresh_axes_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return ServerLedgerUpdate(
         scope="dims",
         target=str(axis),
@@ -1253,6 +1289,7 @@ def reduce_dims_margins_update(
         timestamp=ts,
         origin=origin,
         version=int(stored_entries[("dims", "main", "current_step")].version) if stored_entries[("dims", "main", "current_step")].version is not None else 0,
+        axes_spec=axes_spec,
     )
 
 
@@ -1365,6 +1402,12 @@ def reduce_view_update(
         metadata=metadata,
     )
 
+    axes_spec = _refresh_axes_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -1374,6 +1417,7 @@ def reduce_view_update(
         timestamp=ts,
         origin=origin,
         version=version,
+        axes_spec=axes_spec,
     )
 
 
@@ -1618,6 +1662,12 @@ def reduce_level_update(
             metadata=_metadata_from_intent(intent_id),
         )
 
+    axes_spec = _refresh_axes_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
@@ -1628,6 +1678,7 @@ def reduce_level_update(
         origin=origin,
         current_step=step_tuple,
         version=level_version,
+        axes_spec=axes_spec,
     )
 
 
