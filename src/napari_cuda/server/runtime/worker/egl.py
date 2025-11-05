@@ -80,12 +80,9 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
-    axis_labels as ledger_axis_labels,
-    displayed as ledger_displayed,
+    axes_spec as ledger_axes_spec,
     level as ledger_level,
     level_shapes as ledger_level_shapes,
-    ndisplay as ledger_ndisplay,
-    order as ledger_order,
     step as ledger_step,
 )
 from napari_cuda.server.scene.viewport import (
@@ -384,56 +381,29 @@ class EGLRendererWorker:
 
     def snapshot_dims_metadata(self) -> dict[str, Any]:
         meta: dict[str, Any] = {}
+        spec = ledger_axes_spec(ledger)
+        assert spec is not None, "ledger missing axes spec for snapshot"
 
-        axes = ledger_axis_labels(ledger)
-        if axes:
-            meta["axis_labels"] = list(axes)
-            meta["axes"] = list(axes)
+        meta["axis_labels"] = [axis.label for axis in spec.axes]
+        meta["axes"] = [axis.label for axis in spec.axes]
+        meta["order"] = list(spec.order)
+        meta["displayed"] = list(spec.displayed)
+        meta["ndisplay"] = int(spec.ndisplay)
+        meta["mode"] = "plane" if spec.plane_mode else "volume"
+        meta["current_step"] = list(spec.current_step)
+        meta["level_shapes"] = [list(shape) for shape in spec.level_shapes]
+        meta["ndim"] = int(spec.ndim)
 
-        order = ledger_order(ledger)
-        if order:
-            meta["order"] = list(order)
-
-        displayed = ledger_displayed(ledger)
-        if displayed:
-            meta["displayed"] = list(displayed)
-
-        ndisplay = ledger_ndisplay(ledger)
-        if ndisplay is not None:
-            meta["ndisplay"] = int(ndisplay)
-            meta["mode"] = "volume" if int(ndisplay) >= 3 else "plane"
-
-        current_step = ledger_step(ledger)
-        if current_step:
-            meta["current_step"] = list(current_step)
-
-        level_shapes = ledger_level_shapes(ledger)
-        if level_shapes:
-            meta["level_shapes"] = [list(shape) for shape in level_shapes]
-        level_idx = ledger_level(ledger)
-        if level_shapes and level_idx is not None and 0 <= level_idx < len(level_shapes):
-            current_shape = level_shapes[level_idx]
+        level_idx = int(spec.current_level)
+        if 0 <= level_idx < len(spec.level_shapes):
+            current_shape = spec.level_shapes[level_idx]
             meta["sizes"] = [int(size) for size in current_shape]
-
-        ndim_candidates: list[int] = []
-        if axes:
-            ndim_candidates.append(len(axes))
-        if order:
-            ndim_candidates.append(len(order))
-        if current_step:
-            ndim_candidates.append(len(current_step))
-        if level_shapes:
-            ndim_candidates.extend(len(shape) for shape in level_shapes if shape)
-        if displayed:
-            ndim_candidates.append(len(displayed))
-
-        ndim = max(ndim_candidates) if ndim_candidates else 1
-        meta["ndim"] = ndim
-
-        if "sizes" not in meta:
-            meta["sizes"] = [1] * ndim
+        else:
+            meta["sizes"] = [1] * int(spec.ndim)
 
         meta["range"] = [[0, max(0, size - 1)] for size in meta["sizes"]]
+        meta["margin_left"] = [float(axis.margin_left_steps) for axis in spec.axes]
+        meta["margin_right"] = [float(axis.margin_right_steps) for axis in spec.axes]
 
         return meta
 

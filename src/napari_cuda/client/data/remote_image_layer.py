@@ -515,7 +515,15 @@ class RemoteImageLayer(Image):
         # Mode-agnostic: keep preview as 2D (HxW) or color (HxWxC) without
         # inserting a leading axis for 3D. This avoids 2D↔3D toggle races.
         thumbnail_view = _ScalarFieldView.from_view(preview)
-        self._slice = replace(self._slice, thumbnail=thumbnail_view, empty=False)
+        # Mirror the preview into the main slice payload so downstream callers
+        # observe the latest dims context (SliceInput/order) immediately.
+        self._slice = replace(
+            self._slice,
+            image=thumbnail_view,
+            thumbnail=thumbnail_view,
+            slice_input=self._slice_input,
+            empty=False,
+        )
         self._set_loaded(True)
 
     def _update_thumbnail(self) -> None:  # type: ignore[override]

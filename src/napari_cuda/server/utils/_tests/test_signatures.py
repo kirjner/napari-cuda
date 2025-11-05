@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
+from napari_cuda.shared.axis_spec import AxisExtent, AxesSpec, AxesSpecAxis
 from napari_cuda.server.utils.signatures import (
     SignatureToken,
     dims_content_signature,
@@ -13,12 +14,54 @@ from napari_cuda.server.utils.signatures import (
 )
 
 
-def _sample_snapshot() -> RenderLedgerSnapshot:
-    return RenderLedgerSnapshot(
+def _sample_axes_spec() -> AxesSpec:
+    level_shapes = ((100, 100), (50, 50))
+    axes = []
+    for idx, label in enumerate(("z", "y")):
+        per_steps = tuple(shape[idx] if idx < len(shape) else 1 for shape in level_shapes)
+        per_world = tuple(AxisExtent(start=0.0, stop=float(max(0, step - 1)), step=1.0) for step in per_steps)
+        axes.append(
+            AxesSpecAxis(
+                index=idx,
+                label=label,
+                role=label,
+                displayed=idx in (0, 1),
+                order_position=idx,
+                current_step=1 if idx == 0 else 0,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=per_steps,
+                per_level_world=per_world,
+            )
+        )
+    return AxesSpec(
+        version=1,
+        ndim=2,
         ndisplay=2,
-        current_step=(1, 0, 0),
+        order=(0, 1),
+        displayed=(0, 1),
         current_level=0,
+        current_step=(1, 0),
+        level_shapes=level_shapes,
+        plane_mode=True,
+        axes=tuple(axes),
+    )
+
+
+def _sample_snapshot() -> RenderLedgerSnapshot:
+    spec = _sample_axes_spec()
+    return RenderLedgerSnapshot(
+        ndisplay=spec.ndisplay,
+        current_step=spec.current_step,
+        current_level=spec.current_level,
+        order=spec.order,
+        displayed=spec.displayed,
+        axis_labels=tuple(axis.label for axis in spec.axes),
+        level_shapes=spec.level_shapes,
         dims_mode="plane",
+        axes_spec=spec,
         layer_values={
             "layer-0": LayerVisualState(
                 layer_id="layer-0",

@@ -2,101 +2,64 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Optional
 
 from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.shared.axis_spec import AxesSpec, build_axes_spec_from_ledger
 
 
-def step(ledger: Optional[ServerStateLedger]) -> Optional[tuple[int, ...]]:
+def axes_spec(ledger: ServerStateLedger | None) -> AxesSpec | None:
     if ledger is None:
         return None
-    entry = ledger.get("dims", "main", "current_step")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, (list, tuple)):
-        return tuple(int(v) for v in value)
-    return None
+    return _memoized_spec(id(ledger), ledger)
 
 
-def level(ledger: Optional[ServerStateLedger]) -> Optional[int]:
+@lru_cache(maxsize=16)
+def _memoized_spec(_ledger_id: int, ledger: ServerStateLedger | None) -> AxesSpec | None:
     if ledger is None:
         return None
-    entry = ledger.get("multiscale", "main", "level")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, int):
-        return int(value)
-    return None
+    snapshot = ledger.snapshot()
+    return build_axes_spec_from_ledger(snapshot)
 
 
-def axis_labels(ledger: Optional[ServerStateLedger]) -> Optional[tuple[str, ...]]:
-    if ledger is None:
-        return None
-    entry = ledger.get("dims", "main", "axis_labels")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, (list, tuple)):
-        return tuple(str(v) for v in value)
-    return None
+def _require_spec(ledger: ServerStateLedger | None) -> AxesSpec:
+    spec = axes_spec(ledger)
+    assert spec is not None, "axes spec missing from ledger snapshot"
+    return spec
 
 
-def order(ledger: Optional[ServerStateLedger]) -> Optional[tuple[int, ...]]:
-    if ledger is None:
-        return None
-    entry = ledger.get("dims", "main", "order")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, (list, tuple)):
-        return tuple(int(v) for v in value)
-    return None
+def step(ledger: ServerStateLedger | None) -> tuple[int, ...]:
+    return _require_spec(ledger).current_step
 
 
-def ndisplay(ledger: Optional[ServerStateLedger]) -> Optional[int]:
-    if ledger is None:
-        return None
-    entry = ledger.get("view", "main", "ndisplay")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, int):
-        return int(value)
-    return None
+def level(ledger: ServerStateLedger | None) -> int:
+    return int(_require_spec(ledger).current_level)
 
 
-def displayed(ledger: Optional[ServerStateLedger]) -> Optional[tuple[int, ...]]:
-    if ledger is None:
-        return None
-    entry = ledger.get("view", "main", "displayed")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, (list, tuple)):
-        return tuple(int(v) for v in value)
-    return None
+def axis_labels(ledger: ServerStateLedger | None) -> tuple[str, ...]:
+    spec = _require_spec(ledger)
+    return tuple(axis.label for axis in spec.axes)
 
 
-def level_shapes(ledger: Optional[ServerStateLedger]) -> Optional[tuple[tuple[int, ...], ...]]:
-    if ledger is None:
-        return None
-    entry = ledger.get("multiscale", "main", "level_shapes")
-    if entry is None:
-        return None
-    value = entry.value
-    if isinstance(value, (list, tuple)):
-        shapes: list[tuple[int, ...]] = []
-        for shape in value:
-            if isinstance(shape, (list, tuple)):
-                shapes.append(tuple(int(v) for v in shape))
-        if shapes:
-            return tuple(shapes)
-    return None
+def order(ledger: ServerStateLedger | None) -> tuple[int, ...]:
+    return tuple(int(v) for v in _require_spec(ledger).order)
+
+
+def ndisplay(ledger: ServerStateLedger | None) -> int:
+    return int(_require_spec(ledger).ndisplay)
+
+
+def displayed(ledger: ServerStateLedger | None) -> tuple[int, ...]:
+    return tuple(int(v) for v in _require_spec(ledger).displayed)
+
+
+def level_shapes(ledger: ServerStateLedger | None) -> tuple[tuple[int, ...], ...]:
+    return tuple(tuple(int(dim) for dim in shape) for shape in _require_spec(ledger).level_shapes)
 
 
 __all__ = [
+    "axes_spec",
     "axis_labels",
     "displayed",
     "level",

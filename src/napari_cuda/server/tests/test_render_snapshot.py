@@ -15,6 +15,71 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.shared.axis_spec import AxisExtent, AxesSpec, AxesSpecAxis
+
+
+def _make_axes_spec(
+    *,
+    ndisplay: int,
+    current_level: int,
+    current_step: tuple[int, ...],
+    level_shapes: tuple[tuple[int, ...], ...],
+    order: tuple[int, ...] = (0, 1, 2),
+    axis_labels: tuple[str, ...] = ("z", "y", "x"),
+) -> AxesSpec:
+    displayed = order[-ndisplay:]
+    axes: list[AxesSpecAxis] = []
+    for idx, label in enumerate(axis_labels):
+        per_level_steps = tuple(shape[idx] for shape in level_shapes)
+        per_level_world = tuple(
+            AxisExtent(start=0.0, stop=float(max(0, count - 1)), step=1.0)
+            for count in per_level_steps
+        )
+        axes.append(
+            AxesSpecAxis(
+                index=idx,
+                label=label,
+                role=label,
+                displayed=idx in displayed,
+                order_position=order.index(idx),
+                current_step=current_step[idx],
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=per_level_steps,
+                per_level_world=per_level_world,
+            )
+        )
+    return AxesSpec(
+        version=1,
+        ndim=len(order),
+        ndisplay=ndisplay,
+        order=order,
+        displayed=displayed,
+        current_level=current_level,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        plane_mode=ndisplay < 3,
+        axes=tuple(axes),
+    )
+
+
+def _seed_ledger(worker: _StubWorker, spec: AxesSpec) -> None:
+    ledger = worker._ledger
+    ledger.record_confirmed("dims", "main", "current_step", spec.current_step, origin="test")
+    ledger.record_confirmed("view", "main", "ndisplay", int(spec.ndisplay), origin="test")
+    ledger.record_confirmed("dims", "main", "order", tuple(int(v) for v in spec.order), origin="test")
+    ledger.record_confirmed("view", "main", "displayed", tuple(int(v) for v in spec.displayed), origin="test")
+    ledger.record_confirmed("dims", "main", "axis_labels", tuple(axis.label for axis in spec.axes), origin="test")
+    ledger.record_confirmed("multiscale", "main", "level", int(spec.current_level), origin="test")
+    ledger.record_confirmed(
+        "multiscale",
+        "main",
+        "level_shapes",
+        tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes),
+        origin="test",
+    )
 
 
 class _NoopEvent:
@@ -92,7 +157,62 @@ class _StubWorker:
         self._viewport_runner = None
         self._level_metadata = None
         event = _NoopEvent()
-        self._viewer = SimpleNamespace(dims=SimpleNamespace(events=SimpleNamespace(ndisplay=event, order=event)))
+        dims_events = SimpleNamespace(ndisplay=event, order=event)
+
+        class _TestDims:
+            def __init__(self) -> None:
+                self.events = dims_events
+                self._ndim = 0
+                self._ndisplay = 2
+                self._order: tuple[int, ...] = ()
+                self._displayed: tuple[int, ...] = ()
+                self.axis_labels: tuple[str, ...] = ()
+                self.current_step: tuple[int, ...] = ()
+
+            @property
+            def ndim(self) -> int:
+                return self._ndim
+
+            @ndim.setter
+            def ndim(self, value: int) -> None:
+                self._ndim = int(value)
+
+            @property
+            def ndisplay(self) -> int:
+                return self._ndisplay
+
+            @ndisplay.setter
+            def ndisplay(self, value: int) -> None:
+                self._ndisplay = max(1, int(value))
+                if self._order:
+                    self._displayed = self._order[-self._ndisplay :]
+
+            @property
+            def order(self) -> tuple[int, ...]:
+                return self._order
+
+            @order.setter
+            def order(self, value: tuple[int, ...]) -> None:
+                self._order = tuple(int(v) for v in value)
+                if self._order:
+                    self._displayed = self._order[-self._ndisplay :]
+
+            @property
+            def displayed(self) -> tuple[int, ...]:
+                return self._displayed
+
+            @displayed.setter
+            def displayed(self, value: tuple[int, ...]) -> None:
+                self._displayed = tuple(int(v) for v in value)
+
+        class _Viewer:
+            def __init__(self) -> None:
+                self.dims = _TestDims()
+
+            def fit_to_view(self) -> None:
+                return None
+
+        self._viewer = _Viewer()
         self._apply_dims_calls = 0
         self._roi_align_chunks = False
         self._roi_ensure_contains_viewport = False
@@ -104,6 +224,8 @@ class _StubWorker:
         self.height = 480
         self._log_layer_debug = False
         self._ledger = ServerStateLedger()
+        self._plane_visual_handle = SimpleNamespace(visible=True)
+        self._volume_visual_handle = SimpleNamespace(visible=False)
 
     def _ensure_scene_source(self) -> object:
         return self._scene_source
@@ -116,6 +238,16 @@ class _StubWorker:
             else _StubPanZoomCamera()
         )
         self.view.camera = camera
+
+    def _ensure_plane_visual(self) -> Any:
+        self._plane_visual_handle.visible = True
+        self._volume_visual_handle.visible = False
+        return self._plane_visual_handle
+
+    def _ensure_volume_visual(self) -> Any:
+        self._plane_visual_handle.visible = False
+        self._volume_visual_handle.visible = True
+        return self._volume_visual_handle
 
     def _estimate_level_bytes(self, source, level: int) -> tuple[int, int]:
         descriptor = source.level_descriptors[level]
@@ -166,7 +298,29 @@ class _StubWorker:
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=0, current_step=(5, 0, 0))
+    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
+    current_step = (5, 0, 0)
+    order = (0, 1, 2)
+    axis_labels = ("z", "y", "x")
+    spec = _make_axes_spec(
+        ndisplay=3,
+        current_level=0,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        order=order,
+        axis_labels=axis_labels,
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(
+        ndisplay=3,
+        current_level=0,
+        current_step=current_step,
+        order=order,
+        displayed=order[-3:],
+        axis_labels=axis_labels,
+        level_shapes=level_shapes,
+        axes_spec=spec,
+    )
     calls: dict[str, object] = {}
     call_order: list[str] = []
 
@@ -219,7 +373,29 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
 def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=True, level=2)
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=2, current_step=(9, 0, 0))
+    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
+    current_step = (9, 0, 0)
+    order = (0, 1, 2)
+    axis_labels = ("z", "y", "x")
+    spec = _make_axes_spec(
+        ndisplay=3,
+        current_level=2,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        order=order,
+        axis_labels=axis_labels,
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(
+        ndisplay=3,
+        current_level=2,
+        current_step=current_step,
+        order=order,
+        displayed=order[-3:],
+        axis_labels=axis_labels,
+        level_shapes=level_shapes,
+        axes_spec=spec,
+    )
     prepare_called = False
     volume_called = False
 
@@ -254,7 +430,29 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
 
 def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=True, level=2)
-    snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(3, 0, 0))
+    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
+    current_step = (3, 0, 0)
+    order = (0, 1, 2)
+    axis_labels = ("z", "y", "x")
+    spec = _make_axes_spec(
+        ndisplay=2,
+        current_level=1,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        order=order,
+        axis_labels=axis_labels,
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(
+        ndisplay=2,
+        current_level=1,
+        current_step=current_step,
+        order=order,
+        displayed=order[-2:],
+        axis_labels=axis_labels,
+        level_shapes=level_shapes,
+        axes_spec=spec,
+    )
     calls: dict[str, object] = {}
 
     def _fake_build(decision, *, source, prev_level, last_step):
@@ -292,7 +490,29 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
 def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
     worker._volume_max_voxels = 20  # force fallback from level 0
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=0, current_step=(7, 0, 0))
+    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
+    current_step = (7, 0, 0)
+    order = (0, 1, 2)
+    axis_labels = ("z", "y", "x")
+    spec = _make_axes_spec(
+        ndisplay=3,
+        current_level=0,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        order=order,
+        axis_labels=axis_labels,
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(
+        ndisplay=3,
+        current_level=0,
+        current_step=current_step,
+        order=order,
+        displayed=order[-3:],
+        axis_labels=axis_labels,
+        level_shapes=level_shapes,
+        axes_spec=spec,
+    )
     calls: dict[str, object] = {}
 
     def _fake_build(decision, *, source, prev_level, last_step):
@@ -328,7 +548,29 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
 
 def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
-    snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(5, 0, 0))
+    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
+    current_step = (5, 0, 0)
+    order = (0, 1, 2)
+    axis_labels = ("z", "y", "x")
+    spec = _make_axes_spec(
+        ndisplay=2,
+        current_level=1,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        order=order,
+        axis_labels=axis_labels,
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(
+        ndisplay=2,
+        current_level=1,
+        current_step=current_step,
+        order=order,
+        displayed=order[-2:],
+        axis_labels=axis_labels,
+        level_shapes=level_shapes,
+        axes_spec=spec,
+    )
 
     original_apply_dims = plane_mod.apply_dims_from_snapshot
 

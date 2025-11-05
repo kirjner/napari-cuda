@@ -126,17 +126,20 @@ def dims_content_signature(
 def dims_content_signature_from_payload(payload: Any) -> SignatureToken:
     """Convenience wrapper that derives the signature from a NotifyDims payload."""
 
+    spec = getattr(payload, "axes_spec", None)
+    assert spec is not None, "notify.dims missing axes spec"
+
     return dims_content_signature(
-        current_step=tuple(int(v) for v in payload.current_step),
-        current_level=int(payload.current_level),
-        ndisplay=int(payload.ndisplay),
-        mode=str(payload.mode),
-        displayed=None if payload.displayed is None else tuple(int(v) for v in payload.displayed),
-        axis_labels=None if payload.axis_labels is None else tuple(str(v) for v in payload.axis_labels),
-        order=None if payload.order is None else tuple(int(v) for v in payload.order),
+        current_step=tuple(int(v) for v in spec.current_step),
+        current_level=int(spec.current_level),
+        ndisplay=int(spec.ndisplay),
+        mode="plane" if spec.plane_mode else "volume",
+        displayed=tuple(int(v) for v in spec.displayed),
+        axis_labels=tuple(axis.label for axis in spec.axes),
+        order=tuple(int(v) for v in spec.order),
         labels=None if payload.labels is None else tuple(str(v) for v in payload.labels),
         levels=tuple(dict(level) for level in payload.levels),
-        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
+        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes),
         downgraded=payload.downgraded,
     )
 
@@ -180,14 +183,17 @@ def _split_camera_attr(attr: str) -> Tuple[str, str]:
 
 
 def _dims_tuple_from_snapshot(snapshot: RenderLedgerSnapshot) -> SignatureTuple:
+    spec = snapshot.axes_spec
+    assert spec is not None, "render snapshot missing axes spec"
+
     return (
-        None if snapshot.ndisplay is None else int(snapshot.ndisplay),
-        None if snapshot.order is None else tuple(int(v) for v in snapshot.order),
-        None if snapshot.displayed is None else tuple(int(v) for v in snapshot.displayed),
-        None if snapshot.current_step is None else tuple(int(v) for v in snapshot.current_step),
-        None if snapshot.current_level is None else int(snapshot.current_level),
-        None if snapshot.axis_labels is None else tuple(str(v) for v in snapshot.axis_labels),
-        None if snapshot.dims_mode is None else str(snapshot.dims_mode),
+        int(spec.ndisplay),
+        tuple(int(v) for v in spec.order),
+        tuple(int(v) for v in spec.displayed),
+        tuple(int(v) for v in spec.current_step),
+        int(spec.current_level),
+        tuple(axis.label for axis in spec.axes),
+        "plane" if spec.plane_mode else "volume",
     )
 
 

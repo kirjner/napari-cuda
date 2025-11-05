@@ -344,13 +344,6 @@ __all__ = [
     "consume_render_snapshot",
     "drain_scene_updates",
     "extract_layer_changes",
-    "ledger_axis_labels",
-    "ledger_displayed",
-    "ledger_level",
-    "ledger_level_shapes",
-    "ledger_ndisplay",
-    "ledger_order",
-    "ledger_step",
     "normalize_scene_state",
     "record_snapshot_versions",
 ]

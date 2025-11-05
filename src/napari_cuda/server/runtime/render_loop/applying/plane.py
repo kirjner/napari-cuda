@@ -99,85 +99,33 @@ def apply_dims_from_snapshot(
     ndim = int(getattr(dims, "ndim", 0) or 0)
 
     axes_spec: AxesSpec | None = snapshot.axes_spec
-    if axes_spec is not None:
-        ndim = max(ndim, int(axes_spec.ndim))
-        labels = tuple(axis.label for axis in axes_spec.axes)
-        dims.axis_labels = labels
-        step_tuple = tuple(int(v) for v in axes_spec.current_step)
-        order_values = tuple(int(v) for v in axes_spec.order)
-        displayed_tuple = tuple(int(v) for v in axes_spec.displayed)
-        target_ndisplay = int(axes_spec.ndisplay)
-        if snapshot.axis_labels is not None:
-            assert tuple(str(v) for v in snapshot.axis_labels) == labels
-        if snapshot.order is not None:
-            assert tuple(int(v) for v in snapshot.order) == order_values
-        if snapshot.displayed is not None:
-            assert tuple(int(v) for v in snapshot.displayed) == displayed_tuple
-    else:
-        axis_labels_src = snapshot.axis_labels
-        if axis_labels_src:
-            labels = tuple(str(v) for v in axis_labels_src)
-            dims.axis_labels = labels
-            ndim = max(ndim, len(labels))
+    assert axes_spec is not None, "render snapshot missing axes_spec"
 
-        order_src = snapshot.order
-        if order_src:
-            ndim = max(ndim, len(tuple(int(v) for v in order_src)))
+    ndim = max(ndim, int(axes_spec.ndim))
+    labels = tuple(axis.label for axis in axes_spec.axes)
+    dims.axis_labels = labels
 
-        fallback_order: Optional[tuple[int, ...]] = None
-        current_order = getattr(dims, "order", None)
-        if current_order is not None:
-            fallback_order = tuple(int(v) for v in current_order)
+    step_tuple = axes_spec.current_step
+    order_values = axes_spec.order
+    displayed_tuple = axes_spec.displayed
+    target_ndisplay = int(axes_spec.ndisplay)
 
-        if snapshot.level_shapes and snapshot.current_level is not None:
-            level_shapes = snapshot.level_shapes
-            level_idx = int(snapshot.current_level)
-            if level_shapes and 0 <= level_idx < len(level_shapes):
-                ndim = max(ndim, len(level_shapes[level_idx]))
+    if snapshot.axis_labels is not None:
+        assert tuple(str(v) for v in snapshot.axis_labels) == labels
+    if snapshot.order is not None:
+        assert tuple(int(v) for v in snapshot.order) == order_values
+    if snapshot.displayed is not None:
+        assert tuple(int(v) for v in snapshot.displayed) == displayed_tuple
 
-        if ndim <= 0:
-            ndim = max(len(dims.current_step), len(dims.axis_labels)) or 1
-        if dims.ndim != ndim:
-            dims.ndim = ndim
-
-        if snapshot.current_step is not None:
-            step_tuple = tuple(int(v) for v in snapshot.current_step)
-            if len(step_tuple) < ndim:
-                step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))
-            elif len(step_tuple) > ndim:
-                step_tuple = step_tuple[:ndim]
-        else:
-            step_tuple = tuple(int(v) for v in getattr(dims, "current_step", ()) or ())
-            if len(step_tuple) < ndim:
-                step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))
-            elif len(step_tuple) > ndim:
-                step_tuple = step_tuple[:ndim]
-
-        if snapshot.order is not None:
-            order_values = tuple(int(v) for v in snapshot.order)
-        else:
-            assert fallback_order is not None, "ledger missing dims order"
-            order_values = fallback_order
-        displayed_src = snapshot.displayed
-        if displayed_src is not None:
-            displayed_tuple = tuple(int(v) for v in displayed_src)
-        else:
-            current_displayed = getattr(dims, "displayed", None)
-            assert current_displayed is not None, "ledger missing dims displayed"
-            displayed_tuple = tuple(int(v) for v in current_displayed)
-
-        target_ndisplay = int(snapshot.ndisplay) if snapshot.ndisplay is not None else max(1, len(displayed_tuple))
-
-    if snapshot.level_shapes and snapshot.current_level is not None:
-        level_idx = int(snapshot.current_level)
-        level_shapes = snapshot.level_shapes
-        if level_shapes and 0 <= level_idx < len(level_shapes):
-            ndim = max(ndim, len(level_shapes[level_idx]))
+    if axes_spec.level_shapes and axes_spec.current_level is not None:
+        level_idx = int(axes_spec.current_level)
+        level_shapes_spec = axes_spec.level_shapes
+        if level_shapes_spec and 0 <= level_idx < len(level_shapes_spec):
+            ndim = max(ndim, len(level_shapes_spec[level_idx]))
     if dims.ndim != ndim:
         dims.ndim = ndim
 
-    if snapshot.current_level is not None:
-        snapshot_iface.set_current_level_index(int(snapshot.current_level))
+    snapshot_iface.set_current_level_index(int(axes_spec.current_level))
 
     if len(step_tuple) < ndim:
         step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))
@@ -188,14 +136,11 @@ def apply_dims_from_snapshot(
     assert order_values, "ledger emitted empty dims order"
     dims.order = order_values
 
-    dims.ndisplay = max(1, int(target_ndisplay))
+    dims.ndisplay = max(1, target_ndisplay)
 
-    assert displayed_tuple, "ledger emitted empty dims displayed"
-    current_displayed = tuple(int(v) for v in getattr(dims, "displayed", ()))
-    expected_displayed = tuple(order_values[-len(current_displayed):]) if current_displayed else ()
-    if current_displayed:
-        assert current_displayed == expected_displayed, "napari displayed mismatch order/ndisplay"
-        assert current_displayed == displayed_tuple, "ledger displayed mismatch applied state"
+    assert displayed_tuple, "axes spec emitted empty displayed"
+    computed_displayed = tuple(int(v) for v in dims.displayed)
+    assert computed_displayed == displayed_tuple, "napari displayed mismatch order/ndisplay"
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(

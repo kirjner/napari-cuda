@@ -409,11 +409,13 @@ def _init_viewer_scene(worker: EGLRendererWorker, source: Optional[ZarrSceneSour
     facade = ViewerBootstrapInterface(worker)
     builder = ViewerBuilder(facade)
     ledger = worker._ledger
-    step_hint = ledger_step(ledger)
-    level_hint = ledger_level(ledger)
-    axis_labels = ledger_axis_labels(ledger)
-    order = ledger_order(ledger)
-    ndisplay = ledger_ndisplay(ledger)
+    spec = ledger_axes_spec(ledger)
+    assert spec is not None, "ledger missing axes spec during bootstrap"
+    step_hint = spec.current_step
+    level_hint = int(spec.current_level)
+    axis_labels = tuple(axis.label for axis in spec.axes)
+    order = tuple(int(v) for v in spec.order)
+    ndisplay = int(spec.ndisplay)
     canvas, view, viewer = builder.build(
         source,
         level=level_hint,
@@ -434,11 +436,7 @@ def _init_viewer_scene(worker: EGLRendererWorker, source: Optional[ZarrSceneSour
 
 
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (  # noqa: E402  (avoid circular import during module load)
-    axis_labels as ledger_axis_labels,
-    level as ledger_level,
-    ndisplay as ledger_ndisplay,
-    order as ledger_order,
-    step as ledger_step,
+    axes_spec as ledger_axes_spec,
 )
 
 __all__ = [
