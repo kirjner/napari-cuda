@@ -285,9 +285,14 @@ def _record_axis_spec(
     except AssertionError:
         prior_spec = None
 
-    axis_labels_raw = _snapshot_optional(snapshot, "dims", "axis_labels")
-    order_raw = _snapshot_optional(snapshot, "dims", "order")
-    displayed_raw = _snapshot_optional(snapshot, "view", "displayed")
+    axes_entry = snapshot.get(("dims", "main", "axes"))
+    if axes_entry is None or not isinstance(axes_entry.value, Mapping):
+        raise AssertionError("ledger missing axis spec when recording")
+    current_spec = axis_spec_from_payload(axes_entry.value)
+
+    axis_labels_raw = [axis.label for axis in current_spec.axes]
+    order_raw = list(current_spec.order)
+    displayed_raw = list(current_spec.displayed)
     current_step_raw = _snapshot_optional(snapshot, "dims", "current_step")
     level_shapes_raw = _snapshot_optional(snapshot, "multiscale", "level_shapes") or ()
     current_level_raw = _snapshot_optional(snapshot, "multiscale", "level")
@@ -298,9 +303,9 @@ def _record_axis_spec(
             level_shapes.append(tuple(int(dim) for dim in shape))
 
     spec = _build_axis_spec_from_components(
-        axis_labels=tuple(str(label) for label in axis_labels_raw) if axis_labels_raw is not None else None,
-        order=tuple(int(idx) for idx in order_raw) if order_raw is not None else None,
-        displayed=tuple(int(idx) for idx in displayed_raw) if displayed_raw is not None else None,
+        axis_labels=tuple(axis_labels_raw),
+        order=tuple(order_raw),
+        displayed=tuple(displayed_raw),
         current_step=tuple(int(v) for v in current_step_raw) if current_step_raw is not None else None,
         level_shapes=level_shapes,
         current_level=int(current_level_raw) if current_level_raw is not None else 0,
@@ -1462,6 +1467,15 @@ def reduce_view_update(
     baseline_order = tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None
 
     if target_ndisplay >= 3:
+        volume_state = _load_volume_state(ledger)
+        _store_volume_state(
+            ledger,
+            volume_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=metadata,
+        )
+    else:
         plane_state = _load_plane_state(ledger)
         level_idx = int(dims_payload.current_level)
         if baseline_step is not None:
@@ -1475,15 +1489,6 @@ def reduce_view_update(
         _store_plane_state(
             ledger,
             plane_state,
-            origin=origin,
-            timestamp=ts,
-            metadata=metadata,
-        )
-
-        volume_state = _load_volume_state(ledger)
-        _store_volume_state(
-            ledger,
-            volume_state,
             origin=origin,
             timestamp=ts,
             metadata=metadata,
