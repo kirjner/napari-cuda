@@ -8,8 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
-from napari_cuda.shared.dims_spec import dims_spec_from_payload as axes_spec_from_payload
+from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_from_payload
 from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
@@ -136,18 +135,18 @@ class ServerDimsMirror:
 
         spec_entry = snapshot[("dims", "main", "axes_spec")]
         spec_payload = getattr(spec_entry, "value", spec_entry)
-        axes_spec = axes_spec_from_payload(spec_payload)
-        assert isinstance(axes_spec, AxesSpec), "ledger axes_spec entry malformed"
+        dims_spec = dims_spec_from_payload(spec_payload)
+        assert isinstance(dims_spec, DimsSpec), "ledger dims_spec entry malformed"
 
-        current_step = tuple(int(v) for v in axes_spec.current_step)
-        current_level = int(axes_spec.current_level)
-        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in axes_spec.level_shapes)
-        ndisplay = int(axes_spec.ndisplay)
+        current_step = tuple(int(v) for v in dims_spec.current_step)
+        current_level = int(dims_spec.current_level)
+        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
+        ndisplay = int(dims_spec.ndisplay)
         mode = "volume" if ndisplay >= 3 else "plane"
 
-        displayed = tuple(int(idx) for idx in axes_spec.displayed)
-        order = tuple(int(idx) for idx in axes_spec.order)
-        axis_labels = tuple(axis.label for axis in axes_spec.axes)
+        displayed = tuple(int(idx) for idx in dims_spec.displayed)
+        order = tuple(int(idx) for idx in dims_spec.order)
+        axis_labels = tuple(axis.label for axis in dims_spec.axes)
         labels = self._optional_str_tuple(snapshot.get(("dims", "main", "labels")))
         downgraded = self._optional_bool(snapshot.get(("multiscale", "main", "downgraded")))
         levels = self._as_level_sequence(snapshot[("multiscale", "main", "levels")].value)
@@ -164,7 +163,7 @@ class ServerDimsMirror:
             "axis_labels": axis_labels,
             "labels": labels,
             "downgraded": downgraded,
-            "axes_spec": axes_spec,
+            "axes_spec": dims_spec,
         }
 
     def _build_payload_from_state(self, state: dict[str, Any]) -> NotifyDimsPayload:

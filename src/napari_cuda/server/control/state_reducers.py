@@ -39,12 +39,12 @@ from napari_cuda.server.state_ledger import (
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
-    DimsSpec as AxesSpec,
-    DimsSpecAxis as AxesSpecAxis,
-    dims_spec_from_payload as axes_spec_from_payload,
-    dims_spec_to_payload as axes_spec_to_payload,
-    build_dims_spec_from_ledger as build_axes_spec_from_ledger,
-    validate_ledger_against_dims_spec as validate_ledger_against_spec,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_from_payload,
+    dims_spec_to_payload,
+    build_dims_spec_from_ledger,
+    validate_ledger_against_dims_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,8 +87,8 @@ def is_valid_render_mode(mode: str, allowed_modes: Sequence[str]) -> bool:
     return str(mode or "").lower() in {str(m).lower() for m in allowed_modes}
 
 
-def _serialize_axes_spec(spec: AxesSpec) -> dict[str, Any]:
-    payload = axes_spec_to_payload(spec)
+def _serialize_dims_spec(spec: DimsSpec) -> dict[str, Any]:
+    payload = dims_spec_to_payload(spec)
     assert payload is not None, "axes spec serialization failed"
     return payload
 
@@ -891,15 +891,15 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
 
     spec_entry = snapshot.get(("dims", "main", "axes_spec"))
-    axes_spec: AxesSpec
+    dims_spec: DimsSpec
     if spec_entry is not None:
         spec_payload = getattr(spec_entry, "value", spec_entry)
-        axes_spec = axes_spec_from_payload(spec_payload)
-        assert axes_spec is not None, "axes spec ledger entry missing payload"
-        validate_ledger_against_spec(axes_spec, snapshot)
+        dims_spec = dims_spec_from_payload(spec_payload)
+        assert dims_spec is not None, "axes spec ledger entry missing payload"
+        validate_ledger_against_spec(dims_spec, snapshot)
     else:
-        axes_spec = build_axes_spec_from_ledger(snapshot)
-        validate_ledger_against_spec(axes_spec, snapshot)
+        dims_spec = build_dims_spec_from_ledger(snapshot)
+        validate_ledger_against_dims_spec(dims_spec, snapshot)
 
     def require(scope: str, key: str) -> Any:
         entry = snapshot.get((scope, "main", key))
@@ -911,19 +911,19 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         entry = snapshot.get((scope, "main", key))
         return None if entry is None else entry.value
 
-    current_step = tuple(int(v) for v in axes_spec.current_step)
-    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in axes_spec.level_shapes)
+    current_step = tuple(int(v) for v in dims_spec.current_step)
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
     levels_raw = require("multiscale", "levels")
     levels = tuple(dict(level) for level in levels_raw)
-    current_level = int(axes_spec.current_level)
+    current_level = int(dims_spec.current_level)
     downgraded_raw = optional("multiscale", "downgraded")
     downgraded = None if downgraded_raw is None else bool(downgraded_raw)
-    ndisplay = int(axes_spec.ndisplay)
+    ndisplay = int(dims_spec.ndisplay)
     mode = "volume" if ndisplay >= 3 else "plane"
 
-    axis_labels = tuple(axis.label for axis in axes_spec.axes)
-    order = tuple(int(idx) for idx in axes_spec.order)
-    displayed = tuple(int(idx) for idx in axes_spec.displayed)
+    axis_labels = tuple(axis.label for axis in dims_spec.axes)
+    order = tuple(int(idx) for idx in dims_spec.order)
+    displayed = tuple(int(idx) for idx in dims_spec.displayed)
 
     labels_raw = optional("dims", "labels")
     labels = (
@@ -944,7 +944,7 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         order=order,
         displayed=displayed,
         labels=labels,
-        axes_spec=axes_spec,
+        axes_spec=dims_spec,
     )
 
 
@@ -1019,7 +1019,7 @@ def reduce_bootstrap_state(
         axis_target=axis_target,
     )
 
-    axes_entries: list[AxesSpecAxis] = []
+    axes_entries: list[DimsSpecAxis] = []
     order_lookup = {int(idx): pos for pos, idx in enumerate(resolved_order)}
     displayed_set = set(int(idx) for idx in displayed_tuple)
     for axis_idx in range(ndim):
@@ -1030,7 +1030,7 @@ def reduce_bootstrap_state(
         current_step_val = resolved_step[axis_idx] if axis_idx < len(resolved_step) else 0
         per_level_steps = [int(shape[axis_idx]) for shape in resolved_level_shapes] if resolved_level_shapes else [1]
         axes_entries.append(
-            AxesSpecAxis(
+            DimsSpecAxis(
                 index=int(axis_idx),
                 label=label,
                 role=label.lower(),
@@ -1046,7 +1046,7 @@ def reduce_bootstrap_state(
             )
         )
 
-    axes_spec = AxesSpec(
+    dims_spec = DimsSpec(
         version=1,
         ndim=int(ndim),
         ndisplay=int(resolved_ndisplay),
@@ -1064,7 +1064,7 @@ def reduce_bootstrap_state(
             "dims",
             "main",
             "axes_spec",
-            _serialize_axes_spec(axes_spec),
+            _serialize_dims_spec(dims_spec),
         )
     )
 
@@ -1198,7 +1198,7 @@ def reduce_dims_update(
     }
 
     current_spec = payload.axes_spec
-    assert isinstance(current_spec, AxesSpec), "axes spec missing from ledger payload"
+    assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list = list(current_spec.axes)
     assert idx < len(axes_list), "axes spec missing target axis"
@@ -1214,7 +1214,7 @@ def reduce_dims_update(
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=requested_step,
-        axes_spec_payload=_serialize_axes_spec(new_spec),
+        axes_spec_payload=_serialize_dims_spec(new_spec),
         metadata=step_metadata,
         origin=origin,
         timestamp=ts,
@@ -1307,7 +1307,7 @@ def reduce_dims_margins_update(
     arr[idx] = float(value)
 
     axes_spec = payload.axes_spec
-    assert isinstance(axes_spec, AxesSpec), "axes spec missing from ledger payload"
+    assert isinstance(axes_spec, DimsSpec), "dims spec missing from ledger payload"
     axes_list = list(axes_spec.axes)
     axis_entry = axes_list[idx]
     if side_key == "margin_left":
@@ -1327,7 +1327,7 @@ def reduce_dims_margins_update(
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=tuple(int(v) for v in payload.current_step),
-        axes_spec_payload=_serialize_axes_spec(new_spec),
+        axes_spec_payload=_serialize_dims_spec(new_spec),
         origin=origin,
         timestamp=ts,
         op_seq=_next_scene_op_seq(ledger),
@@ -1423,7 +1423,7 @@ def reduce_view_update(
     )
 
     spec = dims_payload.axes_spec
-    assert isinstance(spec, AxesSpec), "axes spec missing from ledger payload"
+    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list: list[AxesSpecAxis] = []
     order_lookup = {int(axis_idx): pos for pos, axis_idx in enumerate(order_value)}
@@ -1456,7 +1456,7 @@ def reduce_view_update(
         target_ndisplay=int(target_ndisplay),
         order_value=order_value,
         displayed_value=displayed_value,
-        axes_spec_payload=_serialize_axes_spec(new_spec),
+        axes_spec_payload=_serialize_dims_spec(new_spec),
         origin=origin,
         timestamp=ts,
     )
@@ -1700,7 +1700,7 @@ def reduce_level_update(
     next_op_seq = _next_scene_op_seq(ledger)
 
     spec = dims_payload.axes_spec
-    assert isinstance(spec, AxesSpec), "axes spec missing from ledger payload"
+    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     level_shapes_final = updated_level_shapes if updated_level_shapes else spec.level_shapes
     axes_list: list[AxesSpecAxis] = []
@@ -1731,7 +1731,7 @@ def reduce_level_update(
         ledger=ledger,
         level=level,
         step=step_tuple,
-        axes_spec_payload=_serialize_axes_spec(new_spec),
+        axes_spec_payload=_serialize_dims_spec(new_spec),
         level_shapes=updated_level_shapes if updated_level_shapes else None,
         downgraded=bool(downgraded) if downgraded is not None else None,
         step_metadata=step_metadata,

@@ -1,7 +1,6 @@
-"""DimsSpec (formerly AxesSpec): canonical applied dims document.
+"""DimsSpec: canonical applied dims document.
 
 This module defines the applied dims snapshot document and helpers.
-It also exposes legacy AxesSpec names as aliases for compatibility.
 """
 
 from __future__ import annotations
@@ -356,18 +355,7 @@ def _infer_axis_role(label: str, index: int) -> str:
     return f"axis-{index}"
 
 
-# Legacy aliases (compat)
-AxesSpecAxis = DimsSpecAxis
-AxesSpec = DimsSpec
-build_axes_spec_from_ledger = build_dims_spec_from_ledger
-axes_spec_to_payload = dims_spec_to_payload
-axes_spec_from_payload = dims_spec_from_payload
-axes_spec_from_notify_payload = dims_spec_from_notify_payload
-validate_ledger_against_spec = validate_ledger_against_dims_spec
-
-
 __all__ = [
-    # New
     "DimsSpec",
     "DimsSpecAxis",
     "build_dims_spec_from_ledger",
@@ -375,14 +363,6 @@ __all__ = [
     "dims_spec_from_payload",
     "dims_spec_to_payload",
     "validate_ledger_against_dims_spec",
-    # Legacy
-    "AxesSpec",
-    "AxesSpecAxis",
-    "build_axes_spec_from_ledger",
-    "axes_spec_from_notify_payload",
-    "axes_spec_from_payload",
-    "axes_spec_to_payload",
-    "validate_ledger_against_spec",
     # Shared
     "AxisExtent",
 ]
