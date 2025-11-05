@@ -41,7 +41,7 @@ def _default_dims_meta() -> dict[str, object | None]:
         'volume': None,
         'render': None,
         'multiscale': None,
-        'axes_spec': None,
+        'dims_spec': None,
     }
 
 
@@ -178,10 +178,10 @@ def handle_notify_camera(
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
+    dims_spec = state.dims_meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
         try:
-            axis = axes_spec.axis_by_index(axis_idx)
+            axis = dims_spec.axis_by_index(axis_idx)
             if axis.label:
                 return axis.label
         except KeyError:
@@ -196,9 +196,9 @@ def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
-    axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
-        for axis in axes_spec.axes:
+    dims_spec = state.dims_meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
+        for axis in dims_spec.axes:
             if axis.label == target or axis.label.lower() == target_lower:
                 return axis.index
     labels = state.dims_meta.get('axis_labels')
@@ -1222,10 +1222,10 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
         return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
     if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
         return int(axis)
-    axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
+    dims_spec = state.dims_meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
         try:
-            return axes_spec.axis_by_label(str(axis)).index
+            return dims_spec.axis_by_label(str(axis)).index
         except KeyError:
             pass
     labels = state.dims_meta.get('axis_labels')
@@ -1237,10 +1237,10 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
 
 
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
-    axes_spec = meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
-        if axes_spec.order:
-            return int(axes_spec.order[0])
+    dims_spec = meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
+        if dims_spec.order:
+            return int(dims_spec.order[0])
         return 0
     order = meta.get('order')
     ndisplay = meta.get('ndisplay')

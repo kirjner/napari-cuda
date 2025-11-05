@@ -77,32 +77,32 @@ class NapariDimsMirror:
         was_ready = bool(state.dims_ready)
         payload = frame.payload
 
-        axes_spec = payload.axes_spec
-        assert isinstance(axes_spec, DimsSpec), 'notify.dims requires axes_spec'
+        dims_spec = payload.axes_spec
+        assert isinstance(dims_spec, DimsSpec), 'notify.dims requires axes_spec'
 
-        meta['axes_spec'] = axes_spec
+        meta['dims_spec'] = dims_spec
 
-        storage_step = [int(value) for value in axes_spec.current_step]
+        storage_step = [int(value) for value in dims_spec.current_step]
         meta['current_step'] = storage_step
-        ndisplay_value = int(axes_spec.ndisplay)
+        ndisplay_value = int(dims_spec.ndisplay)
         meta['ndisplay'] = ndisplay_value
         mode_text = 'volume' if ndisplay_value >= 3 else 'plane'
         meta['mode'] = mode_text
-        meta['volume'] = not bool(axes_spec.plane_mode)
+        meta['volume'] = not bool(dims_spec.plane_mode)
 
-        level_shapes = [[int(dim) for dim in shape] for shape in axes_spec.level_shapes]
+        level_shapes = [[int(dim) for dim in shape] for shape in dims_spec.level_shapes]
         meta['level_shapes'] = level_shapes
 
-        active_level = int(axes_spec.current_level)
+        active_level = int(dims_spec.current_level)
         assert 0 <= active_level < len(level_shapes), 'active level out of bounds for level_shapes'
         active_shape = [int(dim) for dim in level_shapes[active_level]]
         meta['active_level_shape'] = active_shape
         meta['range'] = [[0, max(0, dim - 1)] for dim in active_shape]
-        meta['ndim'] = int(axes_spec.ndim)
+        meta['ndim'] = int(dims_spec.ndim)
 
-        meta['order'] = [int(idx) for idx in axes_spec.order]
-        meta['axis_labels'] = [str(axis.label) for axis in axes_spec.axes]
-        meta['displayed'] = [int(idx) for idx in axes_spec.displayed]
+        meta['order'] = [int(idx) for idx in dims_spec.order]
+        meta['axis_labels'] = [str(axis.label) for axis in dims_spec.axes]
+        meta['displayed'] = [int(idx) for idx in dims_spec.displayed]
 
         if 'sizes' in meta:
             meta.pop('sizes', None)
@@ -366,9 +366,9 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
     meta = state.dims_meta
     payload: dict[str, Any] = {}
 
-    axes_spec = meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
-        payload['axes_spec'] = axes_spec
+    dims_spec = meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
+        payload['axes_spec'] = dims_spec
     else:
         payload['axes_spec'] = None
 
@@ -450,9 +450,9 @@ def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedge
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
-    axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
-        for axis in axes_spec.axes:
+    dims_spec = state.dims_meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
+        for axis in dims_spec.axes:
             if axis.label == target or axis.label.lower() == target_lower:
                 return axis.index
     labels = state.dims_meta.get('axis_labels')
@@ -470,10 +470,10 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
 
 
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
-    axes_spec = meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
-        if axes_spec.order:
-            return int(axes_spec.order[0])
+    dims_spec = meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
+        if dims_spec.order:
+            return int(dims_spec.order[0])
         return 0
     order = meta.get('order')
     ndisplay = meta.get('ndisplay')
@@ -492,10 +492,10 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, DimsSpec):
+    dims_spec = state.dims_meta.get('dims_spec')
+    if isinstance(dims_spec, DimsSpec):
         try:
-            axis = axes_spec.axis_by_index(axis_idx)
+            axis = dims_spec.axis_by_index(axis_idx)
             if axis.label:
                 return axis.label
         except KeyError:
