@@ -13,16 +13,6 @@ from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any
 
-from napari_cuda.shared.axis_spec import (
-    AxisSpec,
-    axis_spec_from_payload,
-    axis_spec_to_payload,
-    derive_axis_labels,
-    derive_current_step,
-    derive_displayed,
-    derive_order,
-)
-
 PROTO_VERSION = 2
 
 # Session frame types
@@ -673,13 +663,16 @@ class NotifyStreamPayload:
 
 @dataclass(slots=True)
 class NotifyDimsPayload:
+    current_step: tuple[int, ...]
     level_shapes: tuple[tuple[int, ...], ...]
     levels: tuple[dict[str, Any], ...]
     current_level: int
     downgraded: bool | None
     mode: str
     ndisplay: int
-    axes_spec: AxisSpec
+    axis_labels: tuple[str, ...] | None
+    order: tuple[int, ...] | None
+    displayed: tuple[int, ...] | None
     labels: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -696,12 +689,14 @@ class NotifyDimsPayload:
 
         if self.downgraded is not None:
             payload["downgraded"] = bool(self.downgraded)
+        if self.axis_labels is not None:
+            payload["axis_labels"] = [str(lbl) for lbl in self.axis_labels]
+        if self.order is not None:
+            payload["order"] = [int(idx) for idx in self.order]
+        if self.displayed is not None:
+            payload["displayed"] = [int(idx) for idx in self.displayed]
         if self.labels is not None:
             payload["labels"] = [str(label) for label in self.labels]
-        payload["axes_spec"] = axis_spec_to_payload(self.axes_spec)
-        payload["axis_labels"] = [str(label) for label in self.axis_labels]
-        payload["order"] = [int(idx) for idx in self.order]
-        payload["displayed"] = [int(idx) for idx in self.displayed]
         return payload
 
     @classmethod
@@ -709,16 +704,38 @@ class NotifyDimsPayload:
         mapping = _as_mapping(data, "notify.dims payload")
         _ensure_keyset(
             mapping,
-            required=("levels", "current_level", "mode", "ndisplay", "level_shapes", "axes_spec"),
-            optional=("downgraded", "labels", "step", "current_step", "axis_labels", "order", "displayed"),
+            required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes"),
+            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step"),
             context="notify.dims payload",
         )
 
-        _ = mapping.get("step"), mapping.get("current_step")  # legacy fields ignored in favor of axes_spec
+        step_seq = _as_sequence(mapping["step"], "notify.dims payload.step")
+        current_step_seq = _as_sequence(mapping.get("current_step", step_seq), "notify.dims payload.current_step")
         levels_seq = _as_sequence(mapping["levels"], "notify.dims payload.levels")
 
         downgraded_value = mapping.get("downgraded")
         downgraded = bool(downgraded_value) if downgraded_value is not None else None
+
+        axis_labels_value = mapping.get("axis_labels")
+        axis_labels = (
+            tuple(str(lbl) for lbl in _as_sequence(axis_labels_value, "notify.dims payload.axis_labels"))
+            if axis_labels_value is not None
+            else None
+        )
+
+        order_value = mapping.get("order")
+        order = (
+            tuple(int(idx) for idx in _as_sequence(order_value, "notify.dims payload.order"))
+            if order_value is not None
+            else None
+        )
+
+        displayed_value = mapping.get("displayed")
+        displayed = (
+            tuple(int(idx) for idx in _as_sequence(displayed_value, "notify.dims payload.displayed"))
+            if displayed_value is not None
+            else None
+        )
 
         labels_value = mapping.get("labels")
         labels = (
@@ -726,11 +743,6 @@ class NotifyDimsPayload:
             if labels_value is not None
             else None
         )
-
-        axes_spec_value = mapping.get("axes_spec")
-        if axes_spec_value is None:
-            raise ValueError("notify.dims payload.axes_spec is required")
-        axes_spec = axis_spec_from_payload(_as_mapping(axes_spec_value, "notify.dims payload.axes_spec"))
 
         level_shapes_value = mapping["level_shapes"]
         level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
@@ -745,31 +757,18 @@ class NotifyDimsPayload:
             levels.append(dict(_as_mapping(entry, f"notify.dims payload.levels[{idx}]")))
 
         return cls(
+            current_step=tuple(int(v) for v in current_step_seq),
             level_shapes=level_shapes,
             levels=tuple(levels),
             current_level=int(mapping["current_level"]),
             downgraded=downgraded,
             mode=str(mapping["mode"]),
             ndisplay=int(mapping["ndisplay"]),
-            axes_spec=axes_spec,
+            axis_labels=axis_labels,
+            order=order,
+            displayed=displayed,
             labels=labels,
         )
-
-    @property
-    def current_step(self) -> tuple[int, ...]:
-        return derive_current_step(self.axes_spec)
-
-    @property
-    def axis_labels(self) -> tuple[str, ...]:
-        return derive_axis_labels(self.axes_spec)
-
-    @property
-    def order(self) -> tuple[int, ...]:
-        return derive_order(self.axes_spec)
-
-    @property
-    def displayed(self) -> tuple[int, ...]:
-        return derive_displayed(self.axes_spec)
 
 
 @dataclass(slots=True)

@@ -144,16 +144,6 @@ def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
             if state.current_step is not None
             else None
         ),
-        margin_left=(
-            tuple(float(m) for m in state.margin_left)
-            if getattr(state, "margin_left", None) is not None
-            else None
-        ),
-        margin_right=(
-            tuple(float(m) for m in state.margin_right)
-            if getattr(state, "margin_right", None) is not None
-            else None
-        ),
         dims_version=(int(state.dims_version) if state.dims_version is not None else None),
         ndisplay=(int(state.ndisplay) if state.ndisplay is not None else None),
         view_version=(int(state.view_version) if state.view_version is not None else None),
@@ -201,7 +191,6 @@ def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
             else None
         ),
         layer_values=layer_states,
-        axes=state.axes,
     )
 
 

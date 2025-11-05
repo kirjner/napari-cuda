@@ -31,7 +31,6 @@ from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
 from napari_cuda.server.scene.viewport import PlaneState, RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.utils.signatures import SignatureToken
-from napari_cuda.shared.axis_spec import AxisSpec, derive_margins
 
 from .viewer_metadata import apply_plane_metadata
 
@@ -86,29 +85,43 @@ def apply_dims_from_snapshot(
         return
 
 
-    axis_spec: AxisSpec = snapshot.axes
-    assert axis_spec is not None, "render snapshot missing axis spec"
-
     if logger.isEnabledFor(logging.INFO):
         logger.info(
             "dims.apply: ndisplay=%s order=%s displayed=%s current_step=%s",
-            str(axis_spec.ndisplay),
-            str(axis_spec.order),
-            str(axis_spec.displayed),
+            str(snapshot.ndisplay),
+            str(snapshot.order),
+            str(snapshot.displayed),
             str(snapshot.current_step),
         )
 
     dims = viewer.dims
-    ndim = axis_spec.ndim
+    ndim = int(getattr(dims, "ndim", 0) or 0)
+
+    axis_labels_src = snapshot.axis_labels
+    if axis_labels_src:
+        labels = tuple(str(v) for v in axis_labels_src)
+        dims.axis_labels = labels
+        ndim = max(ndim, len(labels))
+
+    order_src = snapshot.order
+    if order_src:
+        ndim = max(ndim, len(tuple(int(v) for v in order_src)))
+
+    fallback_order: Optional[tuple[int, ...]] = None
+    current_order = getattr(dims, "order", None)
+    if current_order is not None:
+        fallback_order = tuple(int(v) for v in current_order)
+
     if snapshot.level_shapes and snapshot.current_level is not None:
         level_shapes = snapshot.level_shapes
         level_idx = int(snapshot.current_level)
         if level_shapes and 0 <= level_idx < len(level_shapes):
             ndim = max(ndim, len(level_shapes[level_idx]))
+
+    if ndim <= 0:
+        ndim = max(len(dims.current_step), len(dims.axis_labels)) or 1
     if dims.ndim != ndim:
         dims.ndim = ndim
-
-    dims.axis_labels = tuple(axis.label for axis in axis_spec.axes)
 
     if snapshot.current_step is not None:
         step_tuple = tuple(int(v) for v in snapshot.current_step)
@@ -120,26 +133,35 @@ def apply_dims_from_snapshot(
     if snapshot.current_level is not None:
         snapshot_iface.set_current_level_index(int(snapshot.current_level))
 
-    if not axis_spec.order:
-        raise AssertionError("axis spec missing order data")
-    order_values = tuple(int(v) for v in axis_spec.order)
+    if snapshot.order is not None:
+        order_values = tuple(int(v) for v in snapshot.order)
+    else:
+        assert fallback_order is not None, "ledger missing dims order"
+        order_values = fallback_order
+    assert order_values, "ledger emitted empty dims order"
     dims.order = order_values
 
-    dims.ndisplay = max(1, axis_spec.ndisplay)
+    displayed_src = snapshot.displayed
+    if displayed_src is not None:
+        displayed_tuple = tuple(int(v) for v in displayed_src)
+    else:
+        current_displayed = getattr(dims, "displayed", None)
+        assert current_displayed is not None, "ledger missing dims displayed"
+        displayed_tuple = tuple(int(v) for v in current_displayed)
+    assert displayed_tuple, "ledger emitted empty dims displayed"
+    expected_displayed = tuple(order_values[-len(displayed_tuple):])
+    assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
 
-    margin_left_vals, margin_right_vals = derive_margins(axis_spec, prefer_world=True)
-    dims.margin_left = tuple(float(v) for v in margin_left_vals)
-    dims.margin_right = tuple(float(v) for v in margin_right_vals)
+    if snapshot.ndisplay is not None:
+        dims.ndisplay = max(1, int(snapshot.ndisplay))
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
-            "dims.applied: ndim=%d order=%s displayed=%s ndisplay=%d margin_left=%s margin_right=%s",
+            "dims.applied: ndim=%d order=%s displayed=%s ndisplay=%d",
             int(dims.ndim),
             str(tuple(dims.order)),
-            str(tuple(order_values[-axis_spec.ndisplay:])),
+            str(tuple(dims.displayed)),
             int(dims.ndisplay),
-            tuple(float(v) for v in dims.margin_left),
-            tuple(float(v) for v in dims.margin_right),
         )
 
 
@@ -148,15 +170,14 @@ def update_z_index_from_snapshot(
 ) -> None:
     """Update the cached z-index if the snapshot provides axis labels."""
 
-    axis_spec = snapshot.axes
-    assert axis_spec is not None, "render snapshot missing axis spec for z-index update"
-    if snapshot.current_step is None:
-        raise AssertionError("render snapshot missing current_step for z-index update")
-    for axis in axis_spec.axes:
-        if axis.role == "z" or axis.label.lower() == "z":
-            if axis.index < len(snapshot.current_step):
-                snapshot_iface.set_z_index(int(snapshot.current_step[axis.index]))
-            return
+    if snapshot.axis_labels is None or snapshot.current_step is None:
+        return
+    labels = [str(label).lower() for label in snapshot.axis_labels]
+    if "z" not in labels:
+        return
+    idx = labels.index("z")
+    if idx < len(snapshot.current_step):
+        snapshot_iface.set_z_index(int(snapshot.current_step[idx]))
 
 
 def apply_slice_snapshot(

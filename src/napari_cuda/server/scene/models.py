@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Literal, Optional
 
-from napari_cuda.shared.axis_spec import AxisSpec
-
 
 @dataclass(frozen=True)
 class BootstrapSceneMetadata:
@@ -51,8 +49,6 @@ class RenderLedgerSnapshot:
     volume_distance: Optional[float] = None
     volume_fov: Optional[float] = None
     current_step: Optional[tuple[int, ...]] = None
-    margin_left: Optional[tuple[float, ...]] = None
-    margin_right: Optional[tuple[float, ...]] = None
     dims_version: Optional[int] = None
     ndisplay: Optional[int] = None
     view_version: Optional[int] = None
@@ -72,7 +68,6 @@ class RenderLedgerSnapshot:
     layer_values: Optional[dict[str, "LayerVisualState"]] = None
     camera_versions: Optional[dict[str, int]] = None
     op_seq: int = 0
-    axes: Optional[AxisSpec] = None
 
 
 @dataclass(frozen=True)

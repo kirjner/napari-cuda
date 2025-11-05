@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.shared.axis_spec import AxisSpec, axis_spec_from_payload
 from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
@@ -29,8 +28,11 @@ class ServerDimsMirror:
 
     _WATCH_KEYS: tuple[_Key, ...] = (
         _Key("view", "main", "ndisplay"),
+        _Key("view", "main", "displayed"),
         _Key("dims", "main", "current_step"),
-        _Key("dims", "main", "axes"),
+        _Key("dims", "main", "order"),
+        _Key("dims", "main", "axis_labels"),
+        _Key("dims", "main", "labels"),
         _Key("multiscale", "main", "level"),
         _Key("multiscale", "main", "levels"),
         _Key("multiscale", "main", "level_shapes"),
@@ -128,21 +130,16 @@ class ServerDimsMirror:
             if key not in snapshot:
                 raise ValueError("ledger missing required dims entry")
 
-        axes_entry = snapshot.get(("dims", "main", "axes"))
-        if axes_entry is None or not isinstance(axes_entry.value, dict):
-            raise ValueError("ledger missing axis spec entry")
-        axis_spec = axis_spec_from_payload(axes_entry.value)
-
         current_step = self._as_int_tuple(snapshot[("dims", "main", "current_step")].value)
-        current_level = axis_spec.current_level
+        current_level = int(snapshot[("multiscale", "main", "level")].value)
         levels = self._as_level_sequence(snapshot[("multiscale", "main", "levels")].value)
-        level_shapes = axis_spec.level_shapes
-        ndisplay = axis_spec.ndisplay
-        mode = "plane" if axis_spec.plane_mode else "volume"
+        level_shapes = self._as_shape_sequence(snapshot[("multiscale", "main", "level_shapes")].value)
+        ndisplay = int(snapshot[("view", "main", "ndisplay")].value)
+        mode = "volume" if int(ndisplay) >= 3 else "plane"
 
-        axis_labels = tuple(axis.label for axis in axis_spec.axes)
-        order = axis_spec.order
-        displayed = axis_spec.displayed
+        displayed = self._optional_int_tuple(snapshot.get(("view", "main", "displayed")))
+        order = self._optional_int_tuple(snapshot.get(("dims", "main", "order")))
+        axis_labels = self._optional_str_tuple(snapshot.get(("dims", "main", "axis_labels")))
         labels = self._optional_str_tuple(snapshot.get(("dims", "main", "labels")))
         downgraded = self._optional_bool(snapshot.get(("multiscale", "main", "downgraded")))
 
@@ -158,20 +155,21 @@ class ServerDimsMirror:
             "axis_labels": axis_labels,
             "labels": labels,
             "downgraded": downgraded,
-            "axis_spec": axis_spec,
         }
 
     def _build_payload_from_state(self, state: dict[str, Any]) -> NotifyDimsPayload:
-        axis_spec: AxisSpec = state["axis_spec"]
         return NotifyDimsPayload(
-            level_shapes=tuple(state["level_shapes"]),
+            current_step=state["current_step"],
+            level_shapes=state["level_shapes"],
             levels=state["levels"],
             current_level=state["current_level"],
             downgraded=state["downgraded"],
             mode=state["mode"],
             ndisplay=state["ndisplay"],
+            axis_labels=state["axis_labels"],
+            order=state["order"],
+            displayed=state["displayed"],
             labels=state["labels"],
-            axes_spec=axis_spec,
         )
 
     # ------------------------------------------------------------------
@@ -238,7 +236,6 @@ class ServerDimsMirror:
         return bool(value)
 
     def _compute_state_signature(self, state: dict[str, Any]) -> SignatureToken:
-        spec = state["axis_spec"]
         return dims_content_signature(
             current_step=state["current_step"],
             current_level=state["current_level"],
@@ -251,7 +248,6 @@ class ServerDimsMirror:
             levels=state["levels"],
             level_shapes=state["level_shapes"],
             downgraded=state["downgraded"],
-            axis_spec=spec,
         )
 
 

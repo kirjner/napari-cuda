@@ -28,13 +28,6 @@ from napari_cuda.server.scene.models import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
-from napari_cuda.shared.axis_spec import (
-    AxisSpec,
-    axis_spec_from_payload,
-    axis_spec_to_payload,
-    derive_axis_labels,
-    derive_margins,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +308,18 @@ def snapshot_scene(
 
     geometry = _resolve_layer_geometry(render_state, multiscale_state, ndisplay_value)
 
-    dims_block = _build_dims_block(geometry, render_state.axes)
+    dims_block = _build_dims_block(geometry)
+    # Attach optional dims margins if present in ledger
+    ml_entry = ledger_snapshot.get(("dims", "main", "margin_left"))
+    mr_entry = ledger_snapshot.get(("dims", "main", "margin_right"))
+    if ml_entry is not None and ml_entry.value is not None:
+        vals = ml_entry.value
+        if isinstance(vals, (list, tuple)):
+            dims_block["margin_left"] = [float(v) for v in vals]
+    if mr_entry is not None and mr_entry.value is not None:
+        vals = mr_entry.value
+        if isinstance(vals, (list, tuple)):
+            dims_block["margin_right"] = [float(v) for v in vals]
 
     camera_block = _build_camera_block(render_state, geometry, ndisplay_value)
 
@@ -683,8 +687,8 @@ def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[list[f
     return None
 
 
-def _build_dims_block(geometry: _LayerGeometry, axis_spec: AxisSpec | None = None) -> dict[str, Any]:
-    block = {
+def _build_dims_block(geometry: _LayerGeometry) -> dict[str, Any]:
+    return {
         "ndim": len(geometry.shape),
         "axis_labels": list(geometry.axis_labels),
         "order": list(geometry.order),
@@ -694,11 +698,6 @@ def _build_dims_block(geometry: _LayerGeometry, axis_spec: AxisSpec | None = Non
         "displayed": list(geometry.displayed),
         "ndisplay": int(geometry.ndisplay),
     }
-    if axis_spec is not None:
-        left, right = derive_margins(axis_spec, prefer_world=True)
-        block["margin_left"] = [float(v) for v in left]
-        block["margin_right"] = [float(v) for v in right]
-    return block
 
 
 def _build_camera_block(
@@ -902,29 +901,23 @@ def build_ledger_snapshot(
     current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
     dims_version = None if dims_entry is None else _version_or_none(dims_entry.version)
 
-    axes_entry = snapshot.get(("dims", "main", "axes"))
-    if axes_entry is None or not isinstance(axes_entry.value, Mapping):
-        raise AssertionError("render snapshot missing axis spec")
-    axis_spec = axis_spec_from_payload(axes_entry.value)
-
     view_entry_key = ("view", "main", "ndisplay")
     view_entry = snapshot.get(view_entry_key)
-    ndisplay_val = axis_spec.ndisplay
-    dims_mode = "plane" if axis_spec.plane_mode else "volume"
-
-    displayed_axes = axis_spec.displayed
-    order_axes = axis_spec.order
-    axis_labels = derive_axis_labels(axis_spec)
+    ndisplay_val = _int_or_none(_ledger_value(snapshot, "view", "main", "ndisplay"))
+    dims_mode = None
+    if ndisplay_val is not None:
+        dims_mode = "volume" if int(ndisplay_val) >= 3 else "plane"
+    displayed_axes = _tuple_or_none(_ledger_value(snapshot, "view", "main", "displayed"), int)
+    order_axes = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "order"), int)
+    axis_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "axis_labels"), str)
     dims_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "labels"), str)
-    level_shapes = axis_spec.level_shapes
+    level_shapes = _shape_sequence(_ledger_value(snapshot, "multiscale", "main", "level_shapes"))
     multiscale_level_entry_key = ("multiscale", "main", "level")
     multiscale_level_entry = snapshot.get(multiscale_level_entry_key)
-    current_level = axis_spec.current_level
+    current_level = _int_or_none(_ledger_value(snapshot, "multiscale", "main", "level"))
     multiscale_level_version = (
         None if multiscale_level_entry is None else _version_or_none(multiscale_level_entry.version)
     )
-
-    margin_left_vals, margin_right_vals = derive_margins(axis_spec, prefer_world=True)
 
     defaults = default_volume_state()
     volume_mode = _string_or_none(_ledger_value(snapshot, "volume", "main", "rendering"), fallback=defaults.get("mode"))
@@ -1037,8 +1030,6 @@ def build_ledger_snapshot(
         volume_distance=volume_distance_float,
         volume_fov=volume_fov_float,
         current_step=current_step,
-        margin_left=margin_left_vals,
-        margin_right=margin_right_vals,
         ndisplay=ndisplay_val,
         view_version=_version_or_none(view_entry.version) if view_entry is not None else None,
         displayed=displayed_axes,
@@ -1058,7 +1049,6 @@ def build_ledger_snapshot(
         layer_values=layer_states or None,
         camera_versions=camera_versions_payload,
         op_seq=op_seq_value,
-        axes=axis_spec,
     )
 
 
