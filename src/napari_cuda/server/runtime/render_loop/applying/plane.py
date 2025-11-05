@@ -182,9 +182,7 @@ def apply_slice_snapshot(
         target_level = int(plane_state.target_level)
 
     step_hint: Optional[tuple[int, ...]] = None
-    if plane_state.target_ndisplay < 3 and plane_state.target_step is not None:
-        step_hint = tuple(int(v) for v in plane_state.target_step)
-    elif snapshot.current_step is not None:
+    if snapshot.current_step is not None:
         step_hint = tuple(int(v) for v in snapshot.current_step)
     if step_hint is None:
         ledger_snapshot_step = snapshot_iface.ledger_step()
@@ -192,7 +190,8 @@ def apply_slice_snapshot(
             step_hint = tuple(int(v) for v in ledger_snapshot_step)
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
-    stage_prev_level = target_level if was_volume else prev_level
+    # Avoid remap by treating previous==target level; step comes from snapshot.
+    stage_prev_level = target_level
 
     decision = lod.LevelDecision(
         desired_level=int(target_level),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
     PropertyKey,
@@ -16,6 +18,7 @@ def apply_view_toggle_transaction(
     target_ndisplay: int,
     order_value: tuple[int, ...],
     displayed_value: tuple[int, ...],
+    axes_spec_payload: Mapping[str, Any],
     origin: str,
     timestamp: float,
 ) -> dict[PropertyKey, LedgerEntry]:
@@ -29,6 +32,7 @@ def apply_view_toggle_transaction(
             ("view", "main", "ndisplay", int(target_ndisplay)),
             ("view", "main", "displayed", tuple(int(idx) for idx in displayed_value)),
             ("dims", "main", "order", tuple(int(idx) for idx in order_value)),
+            ("dims", "main", "axes_spec", dict(axes_spec_payload)),
         ),
         origin=origin,
         timestamp=timestamp,

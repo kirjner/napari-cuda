@@ -17,6 +17,7 @@ def apply_level_switch_transaction(
     ledger: ServerStateLedger,
     level: int,
     step: Sequence[int],
+    axes_spec_payload: Mapping[str, Any],
     level_shapes: Optional[Sequence[Sequence[int]]] = None,
     downgraded: Optional[bool] = None,
     step_metadata: Optional[Mapping[str, object]] = None,
@@ -85,6 +86,8 @@ def apply_level_switch_transaction(
                 ),
             )
 
+    # Persist the requested step with the level switch so the worker can apply
+    # the snapshot verbatim without additional remapping.
     if step_metadata is not None:
         batch_entries.append(
             ("dims", "main", "current_step", step_tuple, dict(step_metadata)),
@@ -123,6 +126,8 @@ def apply_level_switch_transaction(
                     dict(viewport_metadata),
                 ),
             )
+
+    batch_entries.append(("dims", "main", "axes_spec", dict(axes_spec_payload)))
 
     return ledger.batch_record_confirmed(
         batch_entries,

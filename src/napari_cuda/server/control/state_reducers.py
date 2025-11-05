@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import MappingProxyType
 from typing import Any, Optional
 
@@ -38,7 +38,9 @@ from napari_cuda.server.state_ledger import (
 )
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
 from napari_cuda.shared.axis_spec import (
+    AxisExtent,
     AxesSpec,
+    AxesSpecAxis,
     axes_spec_from_payload,
     axes_spec_to_payload,
     build_axes_spec_from_ledger,
@@ -83,6 +85,21 @@ def _now(timestamp: Optional[float]) -> float:
 
 def is_valid_render_mode(mode: str, allowed_modes: Sequence[str]) -> bool:
     return str(mode or "").lower() in {str(m).lower() for m in allowed_modes}
+
+
+def _serialize_axes_spec(spec: AxesSpec) -> dict[str, Any]:
+    payload = axes_spec_to_payload(spec)
+    assert payload is not None, "axes spec serialization failed"
+    return payload
+
+
+def _axis_extents_for_steps(steps: Sequence[int]) -> tuple[AxisExtent, ...]:
+    extents: list[AxisExtent] = []
+    for count in steps:
+        size = int(count)
+        stop = float(max(size - 1, 0))
+        extents.append(AxisExtent(start=0.0, stop=stop, step=1.0))
+    return tuple(extents)
 
 
 def normalize_clim(lo: object, hi: object) -> tuple[float, float]:
@@ -870,27 +887,6 @@ def _dims_entries_from_payload(
     return entries
 
 
-def _refresh_axes_spec(
-    ledger: ServerStateLedger,
-    *,
-    origin: str,
-    timestamp: Optional[float],
-) -> AxesSpec:
-    snapshot = ledger.snapshot()
-    spec = build_axes_spec_from_ledger(snapshot)
-    payload = axes_spec_to_payload(spec)
-    assert payload is not None, "axes spec serialization failed"
-    ledger.record_confirmed(
-        "dims",
-        "main",
-        "axes_spec",
-        payload,
-        origin=origin,
-        timestamp=timestamp,
-    )
-    return spec
-
-
 def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
 
@@ -1023,6 +1019,55 @@ def reduce_bootstrap_state(
         axis_target=axis_target,
     )
 
+    axes_entries: list[AxesSpecAxis] = []
+    order_lookup = {int(idx): pos for pos, idx in enumerate(resolved_order)}
+    displayed_set = set(int(idx) for idx in displayed_tuple)
+    for axis_idx in range(ndim):
+        if resolved_axis_labels and axis_idx < len(resolved_axis_labels):
+            label = str(resolved_axis_labels[axis_idx])
+        else:
+            label = f"axis-{axis_idx}"
+        current_step_val = resolved_step[axis_idx] if axis_idx < len(resolved_step) else 0
+        per_level_steps = [int(shape[axis_idx]) for shape in resolved_level_shapes] if resolved_level_shapes else [1]
+        axes_entries.append(
+            AxesSpecAxis(
+                index=int(axis_idx),
+                label=label,
+                role=label.lower(),
+                displayed=int(axis_idx) in displayed_set,
+                order_position=int(order_lookup.get(axis_idx, axis_idx)),
+                current_step=int(current_step_val),
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=tuple(int(v) for v in per_level_steps),
+                per_level_world=_axis_extents_for_steps(per_level_steps),
+            )
+        )
+
+    axes_spec = AxesSpec(
+        version=1,
+        ndim=int(ndim),
+        ndisplay=int(resolved_ndisplay),
+        order=tuple(int(v) for v in resolved_order),
+        displayed=displayed_tuple,
+        current_level=int(resolved_current_level),
+        current_step=resolved_step,
+        level_shapes=resolved_level_shapes,
+        plane_mode=resolved_ndisplay < 3,
+        axes=tuple(axes_entries),
+    )
+
+    entries.append(
+        (
+            "dims",
+            "main",
+            "axes_spec",
+            _serialize_axes_spec(axes_spec),
+        )
+    )
+
     axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
     axis_index_metadata = {
         "axis_index": axis_index,
@@ -1061,12 +1106,6 @@ def reduce_bootstrap_state(
 
     dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
     view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
-
-    axes_spec = _refresh_axes_spec(
-        ledger,
-        origin=origin,
-        timestamp=ts,
-    )
 
     dims_update = ServerLedgerUpdate(
         scope="dims",
@@ -1158,11 +1197,24 @@ def reduce_dims_update(
         "axis_target": control_target,
     }
 
+    current_spec = payload.axes_spec
+    assert isinstance(current_spec, AxesSpec), "axes spec missing from ledger payload"
+
+    axes_list = list(current_spec.axes)
+    assert idx < len(axes_list), "axes spec missing target axis"
+    axes_list[idx] = replace(axes_list[idx], current_step=int(requested_step[idx]))
+    new_spec = replace(
+        current_spec,
+        current_step=requested_step,
+        axes=tuple(axes_list),
+    )
+
     next_op_seq = _next_scene_op_seq(ledger)
 
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=requested_step,
+        axes_spec_payload=_serialize_axes_spec(new_spec),
         metadata=step_metadata,
         origin=origin,
         timestamp=ts,
@@ -1206,12 +1258,6 @@ def reduce_dims_update(
             metadata=metadata,
         )
 
-    axes_spec = _refresh_axes_spec(
-        ledger,
-        origin=origin,
-        timestamp=ts,
-    )
-
     return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
@@ -1223,7 +1269,7 @@ def reduce_dims_update(
         current_step=requested_step,
         origin=origin,
         version=version,
-        axes_spec=axes_spec,
+        axes_spec=new_spec,
     )
 
 def reduce_dims_margins_update(
@@ -1260,10 +1306,28 @@ def reduce_dims_margins_update(
         arr.extend([0.0] * (len(payload.current_step) - len(arr)))
     arr[idx] = float(value)
 
+    axes_spec = payload.axes_spec
+    assert isinstance(axes_spec, AxesSpec), "axes spec missing from ledger payload"
+    axes_list = list(axes_spec.axes)
+    axis_entry = axes_list[idx]
+    if side_key == "margin_left":
+        axes_list[idx] = replace(
+            axis_entry,
+            margin_left_steps=float(arr[idx]),
+            margin_left_world=float(arr[idx]),
+        )
+    else:
+        axes_list[idx] = replace(
+            axis_entry,
+            margin_right_steps=float(arr[idx]),
+            margin_right_world=float(arr[idx]),
+        )
+    new_spec = replace(axes_spec, axes=tuple(axes_list))
+
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=tuple(int(v) for v in payload.current_step),
-        metadata={},
+        axes_spec_payload=_serialize_axes_spec(new_spec),
         origin=origin,
         timestamp=ts,
         op_seq=_next_scene_op_seq(ledger),
@@ -1272,13 +1336,6 @@ def reduce_dims_margins_update(
     # Additionally store margins arrays atomically
     entries: list[tuple] = [("dims", "main", side_key, tuple(float(v) for v in arr))]
     ledger.batch_record_confirmed(entries, origin=origin, timestamp=ts)
-
-    # Build update
-    axes_spec = _refresh_axes_spec(
-        ledger,
-        origin=origin,
-        timestamp=ts,
-    )
 
     return ServerLedgerUpdate(
         scope="dims",
@@ -1289,7 +1346,7 @@ def reduce_dims_margins_update(
         timestamp=ts,
         origin=origin,
         version=int(stored_entries[("dims", "main", "current_step")].version) if stored_entries[("dims", "main", "current_step")].version is not None else 0,
-        axes_spec=axes_spec,
+        axes_spec=new_spec,
     )
 
 
@@ -1365,6 +1422,31 @@ def reduce_view_update(
         target_ndisplay=target_ndisplay,
     )
 
+    spec = dims_payload.axes_spec
+    assert isinstance(spec, AxesSpec), "axes spec missing from ledger payload"
+
+    axes_list: list[AxesSpecAxis] = []
+    order_lookup = {int(axis_idx): pos for pos, axis_idx in enumerate(order_value)}
+    displayed_set = {int(idx) for idx in displayed_value}
+    for axis in spec.axes:
+        axis_index = int(axis.index)
+        axes_list.append(
+            replace(
+                axis,
+                order_position=int(order_lookup.get(axis_index, axis.order_position)),
+                displayed=axis_index in displayed_set,
+            )
+        )
+
+    new_spec = replace(
+        spec,
+        ndisplay=int(target_ndisplay),
+        order=tuple(int(v) for v in order_value),
+        displayed=tuple(int(v) for v in displayed_value),
+        plane_mode=int(target_ndisplay) < 3,
+        axes=tuple(axes_list),
+    )
+
     op_entry = ledger.get("scene", "main", "op_seq")
     next_op_seq = int(op_entry.value) + 1 if op_entry is not None and isinstance(op_entry.value, int) else 1
 
@@ -1374,6 +1456,7 @@ def reduce_view_update(
         target_ndisplay=int(target_ndisplay),
         order_value=order_value,
         displayed_value=displayed_value,
+        axes_spec_payload=_serialize_axes_spec(new_spec),
         origin=origin,
         timestamp=ts,
     )
@@ -1402,12 +1485,6 @@ def reduce_view_update(
         metadata=metadata,
     )
 
-    axes_spec = _refresh_axes_spec(
-        ledger,
-        origin=origin,
-        timestamp=ts,
-    )
-
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -1417,7 +1494,7 @@ def reduce_view_update(
         timestamp=ts,
         origin=origin,
         version=version,
-        axes_spec=axes_spec,
+        axes_spec=new_spec,
     )
 
 
@@ -1622,10 +1699,39 @@ def reduce_level_update(
 
     next_op_seq = _next_scene_op_seq(ledger)
 
+    spec = dims_payload.axes_spec
+    assert isinstance(spec, AxesSpec), "axes spec missing from ledger payload"
+
+    level_shapes_final = updated_level_shapes if updated_level_shapes else spec.level_shapes
+    axes_list: list[AxesSpecAxis] = []
+    for axis in spec.axes:
+        axis_index = int(axis.index)
+        current_step_value = step_tuple[axis_index] if axis_index < len(step_tuple) else axis.current_step
+        per_level_steps = list(axis.per_level_steps)
+        if level_shapes_final:
+            per_level_steps = [int(shape[axis_index]) for shape in level_shapes_final]
+        axes_list.append(
+            replace(
+                axis,
+                current_step=int(current_step_value),
+                per_level_steps=tuple(per_level_steps),
+                per_level_world=_axis_extents_for_steps(per_level_steps),
+            )
+        )
+
+    new_spec = replace(
+        spec,
+        current_level=int(level),
+        current_step=step_tuple,
+        level_shapes=tuple(level_shapes_final),
+        axes=tuple(axes_list),
+    )
+
     stored_entries = apply_level_switch_transaction(
         ledger=ledger,
         level=level,
         step=step_tuple,
+        axes_spec_payload=_serialize_axes_spec(new_spec),
         level_shapes=updated_level_shapes if updated_level_shapes else None,
         downgraded=bool(downgraded) if downgraded is not None else None,
         step_metadata=step_metadata,
@@ -1662,12 +1768,6 @@ def reduce_level_update(
             metadata=_metadata_from_intent(intent_id),
         )
 
-    axes_spec = _refresh_axes_spec(
-        ledger,
-        origin=origin,
-        timestamp=ts,
-    )
-
     return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
@@ -1678,7 +1778,7 @@ def reduce_level_update(
         origin=origin,
         current_step=step_tuple,
         version=level_version,
-        axes_spec=axes_spec,
+        axes_spec=new_spec,
     )
 
 

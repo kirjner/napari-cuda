@@ -144,7 +144,7 @@ def _resolve_snapshot_ops(
             applied_context = build_level_context(
                 decision,
                 source=source,
-                prev_level=prev_level,
+                prev_level=effective_level,
                 last_step=step_hint,
             )
 
@@ -159,9 +159,8 @@ def _resolve_snapshot_ops(
         }
         return ops
 
-    stage_prev_level = prev_level
-    if was_volume and not target_volume:
-        stage_prev_level = target_level
+    # Avoid remap by treating previous==target level; step comes from snapshot.
+    stage_prev_level = target_level
 
     if snapshot_step is not None:
         step_hint = snapshot_step
