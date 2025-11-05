@@ -32,7 +32,7 @@ def apply_view_toggle_transaction(
             ("view", "main", "ndisplay", int(target_ndisplay)),
             ("view", "main", "displayed", tuple(int(idx) for idx in displayed_value)),
             ("dims", "main", "order", tuple(int(idx) for idx in order_value)),
-            ("dims", "main", "axes_spec", dict(axes_spec_payload)),
+            ("dims", "main", "dims_spec", dict(axes_spec_payload)),
         ),
         origin=origin,
         timestamp=timestamp,

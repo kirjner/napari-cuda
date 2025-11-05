@@ -46,7 +46,7 @@ def apply_dims_step_transaction(
                 dict(metadata),
             )
         )
-    entries.append(("dims", "main", "axes_spec", dict(axes_spec_payload)))
+    entries.append(("dims", "main", "dims_spec", dict(axes_spec_payload)))
 
     return ledger.batch_record_confirmed(
         entries,

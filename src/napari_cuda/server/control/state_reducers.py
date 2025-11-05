@@ -890,7 +890,7 @@ def _dims_entries_from_payload(
 def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
 
-    spec_entry = snapshot.get(("dims", "main", "axes_spec"))
+    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
     dims_spec: DimsSpec
     if spec_entry is not None:
         spec_payload = getattr(spec_entry, "value", spec_entry)
@@ -944,7 +944,7 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         order=order,
         displayed=displayed,
         labels=labels,
-        axes_spec=dims_spec,
+        dims_spec=dims_spec,
     )
 
 
@@ -1059,14 +1059,7 @@ def reduce_bootstrap_state(
         axes=tuple(axes_entries),
     )
 
-    entries.append(
-        (
-            "dims",
-            "main",
-            "axes_spec",
-            _serialize_dims_spec(dims_spec),
-        )
-    )
+    entries.append(("dims", "main", "dims_spec", _serialize_dims_spec(dims_spec)))
 
     axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
     axis_index_metadata = {

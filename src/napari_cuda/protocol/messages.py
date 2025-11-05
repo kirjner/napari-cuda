@@ -677,7 +677,7 @@ class NotifyDimsPayload:
     order: tuple[int, ...] | None
     displayed: tuple[int, ...] | None
     labels: tuple[str, ...] | None = None
-    axes_spec: DimsSpec | None = None
+    dims_spec: DimsSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -701,9 +701,9 @@ class NotifyDimsPayload:
             payload["displayed"] = [int(idx) for idx in self.displayed]
         if self.labels is not None:
             payload["labels"] = [str(label) for label in self.labels]
-        axes_payload = dims_spec_to_payload(self.axes_spec)
-        if axes_payload is not None:
-            payload["axes_spec"] = axes_payload
+        dims_payload = dims_spec_to_payload(self.dims_spec)
+        if dims_payload is not None:
+            payload["dims_spec"] = dims_payload
         return payload
 
     @classmethod
@@ -712,7 +712,7 @@ class NotifyDimsPayload:
         _ensure_keyset(
             mapping,
             required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes"),
-            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step", "axes_spec"),
+            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step", "dims_spec"),
             context="notify.dims payload",
         )
 
@@ -751,8 +751,8 @@ class NotifyDimsPayload:
             else None
         )
 
-        axes_spec_value = mapping.get("axes_spec")
-        axes_spec = dims_spec_from_payload(axes_spec_value)
+        dims_spec_value = mapping.get("dims_spec")
+        dims_spec = dims_spec_from_payload(dims_spec_value)
 
         level_shapes_value = mapping["level_shapes"]
         level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
@@ -778,7 +778,7 @@ class NotifyDimsPayload:
             order=order,
             displayed=displayed,
             labels=labels,
-            axes_spec=axes_spec,
+            dims_spec=dims_spec,
         )
 
 

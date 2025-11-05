@@ -80,7 +80,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
-    axes_spec as ledger_axes_spec,
+    dims_spec as ledger_dims_spec,
     level as ledger_level,
     level_shapes as ledger_level_shapes,
     step as ledger_step,

@@ -61,7 +61,7 @@ def _sample_snapshot() -> RenderLedgerSnapshot:
         axis_labels=tuple(axis.label for axis in spec.axes),
         level_shapes=spec.level_shapes,
         dims_mode="plane",
-        axes_spec=spec,
+        dims_spec=spec,
         layer_values={
             "layer-0": LayerVisualState(
                 layer_id="layer-0",

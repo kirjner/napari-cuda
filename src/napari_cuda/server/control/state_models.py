@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec
 
 
 @dataclass(frozen=True)
@@ -37,4 +37,4 @@ class ServerLedgerUpdate:
     version: Optional[int] = None
     axis_index: Optional[int] = None
     current_step: Optional[tuple[int, ...]] = None
-    axes_spec: Optional[AxesSpec] = None
+    dims_spec: Optional[DimsSpec] = None

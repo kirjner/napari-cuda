@@ -191,7 +191,7 @@ def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
             else None
         ),
         layer_values=layer_states,
-        axes_spec=state.axes_spec,
+        dims_spec=state.dims_spec,
     )
 
 

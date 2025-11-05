@@ -77,8 +77,8 @@ class NapariDimsMirror:
         was_ready = bool(state.dims_ready)
         payload = frame.payload
 
-        dims_spec = payload.axes_spec
-        assert isinstance(dims_spec, DimsSpec), 'notify.dims requires axes_spec'
+        dims_spec = payload.dims_spec
+        assert isinstance(dims_spec, DimsSpec), 'notify.dims requires dims_spec'
 
         meta['dims_spec'] = dims_spec
 
@@ -368,9 +368,9 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
 
     dims_spec = meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        payload['axes_spec'] = dims_spec
+        payload['dims_spec'] = dims_spec
     else:
-        payload['axes_spec'] = None
+        payload['dims_spec'] = None
 
     current_step = meta.get('current_step')
     if isinstance(current_step, Sequence):

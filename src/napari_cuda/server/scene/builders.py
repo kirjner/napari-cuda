@@ -1055,7 +1055,7 @@ def build_ledger_snapshot(
         layer_values=layer_states or None,
         camera_versions=camera_versions_payload,
         op_seq=op_seq_value,
-        axes_spec=axes_spec,
+        dims_spec=dims_spec,
     )
 
 

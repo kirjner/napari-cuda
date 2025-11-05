@@ -60,7 +60,7 @@ class RenderLedgerSnapshot:
     dims_labels: Optional[tuple[str, ...]] = None
     level_shapes: Optional[tuple[tuple[int, ...], ...]] = None
     current_level: Optional[int] = None
-    axes_spec: Optional[DimsSpec] = None
+    dims_spec: Optional[DimsSpec] = None
     multiscale_level_version: Optional[int] = None
     dims_mode: Optional[str] = None
     volume_mode: Optional[str] = None

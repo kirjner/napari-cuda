@@ -127,7 +127,7 @@ def apply_level_switch_transaction(
                 ),
             )
 
-    batch_entries.append(("dims", "main", "axes_spec", dict(axes_spec_payload)))
+    batch_entries.append(("dims", "main", "dims_spec", dict(axes_spec_payload)))
 
     return ledger.batch_record_confirmed(
         batch_entries,

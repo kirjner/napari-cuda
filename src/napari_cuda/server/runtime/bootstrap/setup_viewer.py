@@ -436,7 +436,7 @@ def _init_viewer_scene(worker: EGLRendererWorker, source: Optional[ZarrSceneSour
 
 
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (  # noqa: E402  (avoid circular import during module load)
-    axes_spec as ledger_axes_spec,
+    dims_spec as ledger_dims_spec,
 )
 
 __all__ = [

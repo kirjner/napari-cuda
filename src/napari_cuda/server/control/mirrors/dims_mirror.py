@@ -39,7 +39,7 @@ class ServerDimsMirror:
         _Key("multiscale", "main", "level_shapes"),
         _Key("multiscale", "main", "downgraded"),
         _Key("scene", "main", "op_state"),
-        _Key("dims", "main", "axes_spec"),
+        _Key("dims", "main", "dims_spec"),
     )
 
     def __init__(
@@ -127,13 +127,13 @@ class ServerDimsMirror:
             ("multiscale", "main", "levels"),
             ("multiscale", "main", "level_shapes"),
             ("view", "main", "ndisplay"),
-            ("dims", "main", "axes_spec"),
+            ("dims", "main", "dims_spec"),
         }
         for key in required:
             if key not in snapshot:
                 raise ValueError("ledger missing required dims entry")
 
-        spec_entry = snapshot[("dims", "main", "axes_spec")]
+        spec_entry = snapshot[("dims", "main", "dims_spec")]
         spec_payload = getattr(spec_entry, "value", spec_entry)
         dims_spec = dims_spec_from_payload(spec_payload)
         assert isinstance(dims_spec, DimsSpec), "ledger dims_spec entry malformed"
@@ -163,7 +163,7 @@ class ServerDimsMirror:
             "axis_labels": axis_labels,
             "labels": labels,
             "downgraded": downgraded,
-            "axes_spec": dims_spec,
+            "dims_spec": dims_spec,
         }
 
     def _build_payload_from_state(self, state: dict[str, Any]) -> NotifyDimsPayload:
@@ -179,7 +179,7 @@ class ServerDimsMirror:
             order=state["order"],
             displayed=state["displayed"],
             labels=state["labels"],
-            axes_spec=state["axes_spec"],
+            dims_spec=state["dims_spec"],
         )
 
     # ------------------------------------------------------------------

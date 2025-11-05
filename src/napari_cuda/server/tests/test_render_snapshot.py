@@ -319,7 +319,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
         displayed=order[-3:],
         axis_labels=axis_labels,
         level_shapes=level_shapes,
-        axes_spec=spec,
+        dims_spec=spec,
     )
     calls: dict[str, object] = {}
     call_order: list[str] = []
@@ -394,7 +394,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
         displayed=order[-3:],
         axis_labels=axis_labels,
         level_shapes=level_shapes,
-        axes_spec=spec,
+        dims_spec=spec,
     )
     prepare_called = False
     volume_called = False
@@ -451,7 +451,7 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
         displayed=order[-2:],
         axis_labels=axis_labels,
         level_shapes=level_shapes,
-        axes_spec=spec,
+        dims_spec=spec,
     )
     calls: dict[str, object] = {}
 
@@ -511,7 +511,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
         displayed=order[-3:],
         axis_labels=axis_labels,
         level_shapes=level_shapes,
-        axes_spec=spec,
+        dims_spec=spec,
     )
     calls: dict[str, object] = {}
 
@@ -569,7 +569,7 @@ def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch:
         displayed=order[-2:],
         axis_labels=axis_labels,
         level_shapes=level_shapes,
-        axes_spec=spec,
+        dims_spec=spec,
     )
 
     original_apply_dims = plane_mod.apply_dims_from_snapshot

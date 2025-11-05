@@ -60,7 +60,7 @@ def level_shapes(ledger: ServerStateLedger | None) -> tuple[tuple[int, ...], ...
 
 
 __all__ = [
-    "axes_spec",
+    "dims_spec",
     "axis_labels",
     "displayed",
     "level",

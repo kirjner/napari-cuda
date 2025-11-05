@@ -165,9 +165,9 @@ def build_dims_spec_from_ledger(snapshot: LedgerSnapshot) -> DimsSpec:
 def dims_spec_to_payload(spec: DimsSpec | None) -> dict[str, Any] | None:
     if spec is None:
         return None
-    axes_payload = []
+    dims_payload = []
     for axis in spec.axes:
-        axes_payload.append(
+        dims_payload.append(
             {
                 "index": axis.index,
                 "label": axis.label,
@@ -196,14 +196,14 @@ def dims_spec_to_payload(spec: DimsSpec | None) -> dict[str, Any] | None:
         "current_step": list(spec.current_step),
         "level_shapes": [list(shape) for shape in spec.level_shapes],
         "plane_mode": spec.plane_mode,
-        "axes": axes_payload,
+        "axes": dims_payload,
     }
 
 
 def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
     if data is None:
         return None
-    axes_payload = []
+    dims_payload = []
     axes_seq = data.get("axes")
     assert isinstance(axes_seq, Sequence), "dims spec payload requires axes sequence"
     for entry in axes_seq:
@@ -212,7 +212,7 @@ def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
         per_level_world_entry = entry.get("per_level_world")
         assert isinstance(per_level_steps_entry, Sequence), "per_level_steps must be sequence"
         assert isinstance(per_level_world_entry, Sequence), "per_level_world must be sequence"
-        axes_payload.append(
+        dims_payload.append(
             DimsSpecAxis(
                 index=int(entry["index"]),
                 label=str(entry["label"]),
@@ -245,17 +245,17 @@ def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
         current_step=tuple(int(v) for v in data["current_step"]),
         level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in data["level_shapes"]),
         plane_mode=bool(data["plane_mode"]),
-        axes=tuple(axes_payload),
+        axes=tuple(dims_payload),
     )
 
 
 def dims_spec_from_notify_payload(payload: Any) -> DimsSpec | None:
-    data = getattr(payload, "axes_spec", None)
+    data = getattr(payload, "dims_spec", None)
     if isinstance(data, Mapping):
         return dims_spec_from_payload(data)
     if data is None:
         return None
-    raise TypeError("notify.dims axes_spec payload must be mapping or None")
+    raise TypeError("notify.dims dims_spec payload must be mapping or None")
 
 
 def validate_ledger_against_dims_spec(spec: DimsSpec, snapshot: LedgerSnapshot) -> None:

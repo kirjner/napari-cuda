@@ -98,8 +98,8 @@ def apply_dims_from_snapshot(
     dims = viewer.dims
     ndim = int(getattr(dims, "ndim", 0) or 0)
 
-    dims_spec: DimsSpec | None = snapshot.axes_spec  # type: ignore[assignment]
-    assert dims_spec is not None, "render snapshot missing dims/spec"
+    dims_spec: DimsSpec | None = snapshot.dims_spec  # type: ignore[assignment]
+    assert dims_spec is not None, "render snapshot missing dims_spec"
 
     ndim = max(ndim, int(dims_spec.ndim))
     labels = tuple(axis.label for axis in dims_spec.axes)
