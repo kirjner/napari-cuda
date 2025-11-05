@@ -69,6 +69,7 @@ _ALLOWED_RENDERING = {
 _ALLOWED_PROJECTION = {mode.value for mode in NapariProjectionMode}
 
 
+
 def _now(timestamp: Optional[float]) -> float:
     return float(timestamp) if timestamp is not None else time.time()
 
@@ -464,6 +465,9 @@ def _normalize_layer_property(prop: str, value: object) -> Any:
         return _normalize_string(value, allowed=_ALLOWED_RENDERING)
     if prop == "projection_mode":
         return _normalize_string(value, allowed=_ALLOWED_PROJECTION)
+    if prop == "plane_thickness":
+        val = float(value)
+        return max(0.0, val)
     if prop == "attenuation":
         return max(0.0, float(value))
     if prop == "iso_threshold":
@@ -1186,6 +1190,65 @@ def reduce_dims_update(
         current_step=requested_step,
         origin=origin,
         version=version,
+    )
+
+def reduce_dims_margins_update(
+    ledger: ServerStateLedger,
+    *,
+    axis: object,
+    side: str,
+    value: float,
+    intent_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    origin: str = "control.dims",
+) -> ServerLedgerUpdate:
+    ts = _now(timestamp)
+    payload = _ledger_dims_payload(ledger)
+
+    idx = resolve_axis_index(
+        axis,
+        order=payload.order,
+        axis_labels=payload.axis_labels,
+        ndim=len(payload.current_step),
+    )
+    if idx is None:
+        raise ValueError("unable to resolve axis index for dims margins update")
+
+    side_key = "margin_left" if side == "margin_left" else "margin_right"
+    # Start from existing ledger values if present, else zeros of length ndim
+    existing_entry = ledger.get("dims", "main", side_key)
+    if existing_entry is not None and isinstance(existing_entry.value, (tuple, list)):
+        arr = [float(v) for v in existing_entry.value]
+    else:
+        arr = [0.0 for _ in range(len(payload.current_step))]
+    # Ensure length
+    if len(arr) < len(payload.current_step):
+        arr.extend([0.0] * (len(payload.current_step) - len(arr)))
+    arr[idx] = float(value)
+
+    stored_entries = apply_dims_step_transaction(
+        ledger=ledger,
+        step=tuple(int(v) for v in payload.current_step),
+        metadata={},
+        origin=origin,
+        timestamp=ts,
+        op_seq=_next_scene_op_seq(ledger),
+        op_kind="dims-update",
+    )
+    # Additionally store margins arrays atomically
+    entries: list[tuple] = [("dims", "main", side_key, tuple(float(v) for v in arr))]
+    ledger.batch_record_confirmed(entries, origin=origin, timestamp=ts)
+
+    # Build update
+    return ServerLedgerUpdate(
+        scope="dims",
+        target=str(axis),
+        key=side_key,
+        value=tuple(float(v) for v in arr),
+        intent_id=intent_id,
+        timestamp=ts,
+        origin=origin,
+        version=int(stored_entries[("dims", "main", "current_step")].version) if stored_entries[("dims", "main", "current_step")].version is not None else 0,
     )
 
 

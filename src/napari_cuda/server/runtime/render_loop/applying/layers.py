@@ -104,6 +104,10 @@ def _set_projection_mode(worker: Any, layer: Any, value: Any) -> bool:
     layer.projection_mode = str(value)  # type: ignore[assignment]
     return True
 
+def _set_plane_thickness(worker: Any, layer: Any, value: Any) -> bool:
+    layer.plane.thickness = float(value)  # type: ignore[assignment]
+    return True
+
 
 def _set_attenuation(worker: Any, layer: Any, value: Any) -> bool:
     layer.attenuation = float(value)  # type: ignore[assignment]
@@ -141,6 +145,7 @@ _LAYER_SETTERS = {
     "contrast_limits": _set_contrast_limits,
     "depiction": _set_depiction,
     "projection_mode": _set_projection_mode,
+    "plane_thickness": _set_plane_thickness,
     "attenuation": _set_attenuation,
     "iso_threshold": _set_iso_threshold,
     "metadata": _set_metadata,
@@ -161,6 +166,9 @@ def apply_layer_visual_state(worker: Any, layer_state: LayerVisualState, *, mode
             continue
         # depiction is 3D-only; ignore in plane mode
         if key == "depiction" and mode is not RenderMode.VOLUME:
+            continue
+        # plane_thickness is 3D-only (slicing plane)
+        if key == "plane_thickness" and mode is not RenderMode.VOLUME:
             continue
         setter = _LAYER_SETTERS.get(key)
         if setter is None:

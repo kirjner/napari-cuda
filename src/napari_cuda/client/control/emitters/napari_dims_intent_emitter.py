@@ -64,6 +64,8 @@ class NapariDimsIntentEmitter:
         self._suppress_count = 0
         self._is_playing = False
         self._play_axis: int | None = None
+        self._last_margin_left: tuple[float, ...] | None = None
+        self._last_margin_right: tuple[float, ...] | None = None
 
     # --------------------------------------------------------------------- lifecycle
     def attach_viewer(self, viewer: Any) -> None:
@@ -80,6 +82,10 @@ class NapariDimsIntentEmitter:
 
         events.current_step.connect(self._on_dims_change)
         events.ndisplay.connect(self._on_ndisplay_change)
+        # Sync slab margins for 2D projection thickness
+        if hasattr(events, 'margin_left') and hasattr(events, 'margin_right'):
+            events.margin_left.connect(self._on_margins_change)
+            events.margin_right.connect(self._on_margins_change)
 
         self._viewer_ref = weakref.ref(viewer)
         self._viewer_dims = dims
@@ -90,14 +96,10 @@ class NapariDimsIntentEmitter:
         if dims is not None:
             events = getattr(dims, "events", None)
             if events is not None:
-                try:
-                    events.current_step.disconnect(self._on_dims_change)
-                except Exception:
-                    pass
-                try:
-                    events.ndisplay.disconnect(self._on_ndisplay_change)
-                except Exception:
-                    pass
+                events.current_step.disconnect(self._on_dims_change)
+                events.ndisplay.disconnect(self._on_ndisplay_change)
+                events.margin_left.disconnect(self._on_margins_change)
+                events.margin_right.disconnect(self._on_margins_change)
         if self._dims_tx_timer is not None:
             self._dims_tx_timer.stop()
             self._dims_tx_timer.deleteLater()
@@ -108,6 +110,8 @@ class NapariDimsIntentEmitter:
         self._last_step_ui = None
         self._is_playing = False
         self._play_axis = None
+        self._last_margin_left = None
+        self._last_margin_right = None
 
     def shutdown(self) -> None:
         self.detach_viewer()
@@ -224,6 +228,50 @@ class NapariDimsIntentEmitter:
             return False
         self._state.last_dims_send = now
         return True
+
+    # ---------------------------------------------------------------- margins sync
+    def _on_margins_change(self, _event=None) -> None:
+        dims = self._viewer_dims
+        assert dims is not None, "viewer dims missing"
+        left = tuple(float(v) for v in getattr(dims, 'margin_left'))
+        right = tuple(float(v) for v in getattr(dims, 'margin_right'))
+        # Initialize cache
+        if self._last_margin_left is None:
+            self._last_margin_left = left
+        if self._last_margin_right is None:
+            self._last_margin_right = right
+
+        nd = len(left)
+        # Emit per-axis updates for changed entries
+        for idx in range(nd):
+            if idx < len(self._last_margin_left) and left[idx] != self._last_margin_left[idx]:
+                self._emit_margin_update(idx, 'margin_left', left[idx])
+            if idx < len(self._last_margin_right) and right[idx] != self._last_margin_right[idx]:
+                self._emit_margin_update(idx, 'margin_right', right[idx])
+        self._last_margin_left = left
+        self._last_margin_right = right
+
+    def _emit_margin_update(self, axis_idx: int, key: str, value: float) -> None:
+        assert self._state.dims_ready, "dims intents require initial notify"
+        target_label = control_actions._axis_target_label(self._state, axis_idx)
+        ok, _ = _emit_state_update(
+            self._state,
+            self._loop_state,
+            self._ledger,
+            self._dispatch_state_update,
+            scope="dims",
+            target=target_label,
+            key=key,
+            value=float(value),
+            origin="ui",
+            metadata={
+                "axis_index": axis_idx,
+                "axis_target": target_label,
+                "update_kind": "margin",
+            },
+        )
+        if ok and self._log_dims_info:
+            logger.info("dims margin update: axis=%s key=%s value=%s", axis_idx, key, value)
 
     def handle_wheel(self, data: Mapping[str, Any]) -> bool:
         ay = int(data.get('angle_y') or 0)

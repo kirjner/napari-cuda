@@ -121,6 +121,10 @@ def _event_contrast_limits(layer: RemoteImageLayer) -> EventEmitter:
 def _event_projection_mode(layer: RemoteImageLayer) -> EventEmitter:
     return layer.events.projection_mode
 
+def _event_plane_thickness(layer: RemoteImageLayer) -> EventEmitter:
+    # Plane thickness changes are emitted on layer.plane.events.thickness
+    return layer.plane.events.thickness  # type: ignore[return-value]
+
 
 def _get_visible(layer: RemoteImageLayer) -> bool:
     return bool(layer.visible)
@@ -227,6 +231,12 @@ def _get_projection_mode(layer: RemoteImageLayer) -> str:
 
 def _set_projection_mode(layer: RemoteImageLayer, value: str) -> None:
     layer.projection_mode = str(value)
+
+def _get_plane_thickness(layer: RemoteImageLayer) -> float:
+    return float(layer.plane.thickness)
+
+def _set_plane_thickness(layer: RemoteImageLayer, value: float) -> None:
+    layer.plane.thickness = float(value)
 
 
 def _encode_bool(value: Any) -> bool:
@@ -347,6 +357,14 @@ def _block_projection_mode(block: Mapping[str, Any]) -> str | None:
         return _encode_str(controls["projection_mode"])  # type: ignore[return-value]
     if "projection_mode" in block:
         return _encode_str(block["projection_mode"])  # type: ignore[return-value]
+    return None
+
+def _block_plane_thickness(block: Mapping[str, Any]) -> float | None:
+    controls = block.get("controls")
+    if isinstance(controls, Mapping) and "plane_thickness" in controls:
+        return _encode_float(controls["plane_thickness"])  # type: ignore[return-value]
+    if "plane_thickness" in block:
+        return _encode_float(block["plane_thickness"])  # type: ignore[return-value]
     return None
 
 
@@ -489,6 +507,15 @@ PROPERTY_CONFIGS: tuple[PropertyConfig, ...] = (
         encoder=_encode_str,
         equals=_equals_str,
         block_getter=_block_projection_mode,
+    ),
+    PropertyConfig(
+        key="plane_thickness",
+        event_getter=_event_plane_thickness,
+        getter=_get_plane_thickness,
+        setter=_set_plane_thickness,
+        encoder=_encode_float,
+        equals=_equals_float,
+        block_getter=_block_plane_thickness,
     ),
 )
 

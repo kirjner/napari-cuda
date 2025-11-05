@@ -36,6 +36,7 @@ STATE_UPDATE_HANDLERS: dict[str, StateUpdateHandler] = {
     "multiscale:policy": handle_multiscale_level,
     "dims:index": handle_dims_update,
     "dims:step": handle_dims_update,
+    "dims:*": handle_dims_update,
 }
 
 __all__ = ["STATE_UPDATE_HANDLERS"]

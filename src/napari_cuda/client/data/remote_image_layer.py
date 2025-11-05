@@ -245,6 +245,7 @@ class RemoteImageLayer(Image):
             "depiction",
             "rendering",
             "projection_mode",
+            "plane_thickness",
             "gamma",
             "contrast_limits",
             "iso_threshold",
@@ -329,6 +330,15 @@ class RemoteImageLayer(Image):
                 with self.events.projection_mode.blocker():
                     self.projection_mode = new_val
                 pending_events.append((self.events.projection_mode, new_val))
+
+        if "plane_thickness" in controls:
+            value = controls["plane_thickness"]
+            assert value is not None, "plane_thickness cannot be None"
+            new_val = float(value)
+            if float(self.plane.thickness) != new_val:
+                with self.plane.events.thickness.blocker():  # type: ignore[attr-defined]
+                    self.plane.thickness = new_val
+                pending_events.append((self.plane.events.thickness, new_val))  # type: ignore[attr-defined]
 
         if "gamma" in controls:
             value = controls["gamma"]

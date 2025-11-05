@@ -62,6 +62,8 @@ def build_notify_layers_delta_payload(result: ServerLedgerUpdate) -> NotifyLayer
         "interpolation",
         "colormap",
         "rendering",
+        "projection_mode",
+        "plane_thickness",
         "gamma",
         "contrast_limits",
         "iso_threshold",

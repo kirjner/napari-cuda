@@ -309,6 +309,17 @@ def snapshot_scene(
     geometry = _resolve_layer_geometry(render_state, multiscale_state, ndisplay_value)
 
     dims_block = _build_dims_block(geometry)
+    # Attach optional dims margins if present in ledger
+    ml_entry = ledger_snapshot.get(("dims", "main", "margin_left"))
+    mr_entry = ledger_snapshot.get(("dims", "main", "margin_right"))
+    if ml_entry is not None and ml_entry.value is not None:
+        vals = ml_entry.value
+        if isinstance(vals, (list, tuple)):
+            dims_block["margin_left"] = [float(v) for v in vals]
+    if mr_entry is not None and mr_entry.value is not None:
+        vals = mr_entry.value
+        if isinstance(vals, (list, tuple)):
+            dims_block["margin_right"] = [float(v) for v in vals]
 
     camera_block = _build_camera_block(render_state, geometry, ndisplay_value)
 
