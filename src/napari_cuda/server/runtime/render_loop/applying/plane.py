@@ -106,6 +106,7 @@ def apply_dims_from_snapshot(
         step_tuple = tuple(int(v) for v in axes_spec.current_step)
         order_values = tuple(int(v) for v in axes_spec.order)
         displayed_tuple = tuple(int(v) for v in axes_spec.displayed)
+        target_ndisplay = int(axes_spec.ndisplay)
         if snapshot.axis_labels is not None:
             assert tuple(str(v) for v in snapshot.axis_labels) == labels
         if snapshot.order is not None:
@@ -165,8 +166,7 @@ def apply_dims_from_snapshot(
             assert current_displayed is not None, "ledger missing dims displayed"
             displayed_tuple = tuple(int(v) for v in current_displayed)
 
-        if snapshot.ndisplay is not None:
-            dims.ndisplay = max(1, int(snapshot.ndisplay))
+        target_ndisplay = int(snapshot.ndisplay) if snapshot.ndisplay is not None else max(1, len(displayed_tuple))
 
     if snapshot.level_shapes and snapshot.current_level is not None:
         level_idx = int(snapshot.current_level)
@@ -188,11 +188,14 @@ def apply_dims_from_snapshot(
     assert order_values, "ledger emitted empty dims order"
     dims.order = order_values
 
+    dims.ndisplay = max(1, int(target_ndisplay))
+
     assert displayed_tuple, "ledger emitted empty dims displayed"
-    expected_displayed = tuple(order_values[-len(displayed_tuple):])
-    assert displayed_tuple == expected_displayed, "ledger displayed mismatch order/ndisplay"
-    dims.ndisplay = max(1, int(snapshot.ndisplay or len(displayed_tuple)))
-    dims.displayed = displayed_tuple
+    current_displayed = tuple(int(v) for v in getattr(dims, "displayed", ()))
+    expected_displayed = tuple(order_values[-len(current_displayed):]) if current_displayed else ()
+    if current_displayed:
+        assert current_displayed == expected_displayed, "napari displayed mismatch order/ndisplay"
+        assert current_displayed == displayed_tuple, "ledger displayed mismatch applied state"
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(
