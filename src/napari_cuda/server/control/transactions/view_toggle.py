@@ -27,6 +27,8 @@ def apply_view_toggle_transaction(
             ("scene", "main", "op_state", "open"),
             ("scene", "main", "op_kind", "view-toggle"),
             ("view", "main", "ndisplay", int(target_ndisplay)),
+            ("view", "main", "displayed", tuple(int(idx) for idx in displayed_value)),
+            ("dims", "main", "order", tuple(int(idx) for idx in order_value)),
         ),
         origin=origin,
         timestamp=timestamp,
