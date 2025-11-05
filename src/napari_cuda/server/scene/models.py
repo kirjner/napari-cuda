@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Literal, Optional
 
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ class RenderLedgerSnapshot:
     dims_labels: Optional[tuple[str, ...]] = None
     level_shapes: Optional[tuple[tuple[int, ...], ...]] = None
     current_level: Optional[int] = None
-    axes_spec: Optional[AxesSpec] = None
+    axes_spec: Optional[DimsSpec] = None
     multiscale_level_version: Optional[int] = None
     dims_mode: Optional[str] = None
     volume_mode: Optional[str] = None

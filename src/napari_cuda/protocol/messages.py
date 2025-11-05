@@ -13,11 +13,8 @@ from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any
 
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec  # type: ignore[F401]
-from napari_cuda.shared.dims_spec import (
-    dims_spec_from_payload as axes_spec_from_payload,
-    dims_spec_to_payload as axes_spec_to_payload,
-)
+from napari_cuda.shared.dims_spec import DimsSpec
+from napari_cuda.shared.dims_spec import dims_spec_from_payload, dims_spec_to_payload
 
 PROTO_VERSION = 2
 
@@ -680,7 +677,7 @@ class NotifyDimsPayload:
     order: tuple[int, ...] | None
     displayed: tuple[int, ...] | None
     labels: tuple[str, ...] | None = None
-    axes_spec: AxesSpec | None = None
+    axes_spec: DimsSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -704,7 +701,7 @@ class NotifyDimsPayload:
             payload["displayed"] = [int(idx) for idx in self.displayed]
         if self.labels is not None:
             payload["labels"] = [str(label) for label in self.labels]
-        axes_payload = axes_spec_to_payload(self.axes_spec)
+        axes_payload = dims_spec_to_payload(self.axes_spec)
         if axes_payload is not None:
             payload["axes_spec"] = axes_payload
         return payload
@@ -755,7 +752,7 @@ class NotifyDimsPayload:
         )
 
         axes_spec_value = mapping.get("axes_spec")
-        axes_spec = axes_spec_from_payload(axes_spec_value)
+        axes_spec = dims_spec_from_payload(axes_spec_value)
 
         level_shapes_value = mapping["level_shapes"]
         level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")

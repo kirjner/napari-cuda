@@ -14,7 +14,7 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -179,7 +179,7 @@ def handle_notify_camera(
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         try:
             axis = axes_spec.axis_by_index(axis_idx)
             if axis.label:
@@ -197,7 +197,7 @@ def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
     axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         for axis in axes_spec.axes:
             if axis.label == target or axis.label.lower() == target_lower:
                 return axis.index
@@ -1223,7 +1223,7 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
     if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
         return int(axis)
     axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         try:
             return axes_spec.axis_by_label(str(axis)).index
         except KeyError:
@@ -1238,7 +1238,7 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
 
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
     axes_spec = meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         if axes_spec.order:
             return int(axes_spec.order[0])
         return 0

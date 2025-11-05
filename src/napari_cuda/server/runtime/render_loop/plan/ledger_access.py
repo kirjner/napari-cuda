@@ -6,26 +6,26 @@ from functools import lru_cache
 from typing import Optional
 
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec  # type: ignore[F401]
-from napari_cuda.shared.dims_spec import build_dims_spec_from_ledger as build_axes_spec_from_ledger
+from napari_cuda.shared.dims_spec import DimsSpec
+from napari_cuda.shared.dims_spec import build_dims_spec_from_ledger
 
 
-def axes_spec(ledger: ServerStateLedger | None) -> AxesSpec | None:
+def dims_spec(ledger: ServerStateLedger | None) -> DimsSpec | None:
     if ledger is None:
         return None
     return _memoized_spec(id(ledger), ledger)
 
 
 @lru_cache(maxsize=16)
-def _memoized_spec(_ledger_id: int, ledger: ServerStateLedger | None) -> AxesSpec | None:
+def _memoized_spec(_ledger_id: int, ledger: ServerStateLedger | None) -> DimsSpec | None:
     if ledger is None:
         return None
     snapshot = ledger.snapshot()
-    return build_axes_spec_from_ledger(snapshot)
+    return build_dims_spec_from_ledger(snapshot)
 
 
-def _require_spec(ledger: ServerStateLedger | None) -> AxesSpec:
-    spec = axes_spec(ledger)
+def _require_spec(ledger: ServerStateLedger | None) -> DimsSpec:
+    spec = dims_spec(ledger)
     assert spec is not None, "axes spec missing from ledger snapshot"
     return spec
 

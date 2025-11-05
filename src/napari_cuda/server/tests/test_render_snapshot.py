@@ -15,7 +15,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
-from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec as AxesSpec, DimsSpecAxis as AxesSpecAxis
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis
 
 
 def _make_axes_spec(
@@ -26,9 +26,9 @@ def _make_axes_spec(
     level_shapes: tuple[tuple[int, ...], ...],
     order: tuple[int, ...] = (0, 1, 2),
     axis_labels: tuple[str, ...] = ("z", "y", "x"),
-) -> AxesSpec:
+) -> DimsSpec:
     displayed = order[-ndisplay:]
-    axes: list[AxesSpecAxis] = []
+    axes: list[DimsSpecAxis] = []
     for idx, label in enumerate(axis_labels):
         per_level_steps = tuple(shape[idx] for shape in level_shapes)
         per_level_world = tuple(
@@ -36,7 +36,7 @@ def _make_axes_spec(
             for count in per_level_steps
         )
         axes.append(
-            AxesSpecAxis(
+            DimsSpecAxis(
                 index=idx,
                 label=label,
                 role=label,
@@ -51,7 +51,7 @@ def _make_axes_spec(
                 per_level_world=per_level_world,
             )
         )
-    return AxesSpec(
+    return DimsSpec(
         version=1,
         ndim=len(order),
         ndisplay=ndisplay,
@@ -65,7 +65,7 @@ def _make_axes_spec(
     )
 
 
-def _seed_ledger(worker: _StubWorker, spec: AxesSpec) -> None:
+def _seed_ledger(worker: _StubWorker, spec: DimsSpec) -> None:
     ledger = worker._ledger
     ledger.record_confirmed("dims", "main", "current_step", spec.current_step, origin="test")
     ledger.record_confirmed("view", "main", "ndisplay", int(spec.ndisplay), origin="test")

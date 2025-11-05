@@ -144,7 +144,7 @@ def _resolve_snapshot_ops(
             applied_context = build_level_context(
                 decision,
                 source=source,
-                prev_level=effective_level,
+                prev_level=prev_level,
                 last_step=step_hint,
             )
 

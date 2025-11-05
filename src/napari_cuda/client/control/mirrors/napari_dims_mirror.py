@@ -14,7 +14,7 @@ from napari_cuda.client.control.client_state_ledger import (
     MirrorEvent,
 )
 from napari_cuda.protocol.messages import NotifyDimsFrame
-from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
@@ -78,7 +78,7 @@ class NapariDimsMirror:
         payload = frame.payload
 
         axes_spec = payload.axes_spec
-        assert isinstance(axes_spec, AxesSpec), 'notify.dims requires axes_spec'
+        assert isinstance(axes_spec, DimsSpec), 'notify.dims requires axes_spec'
 
         meta['axes_spec'] = axes_spec
 
@@ -367,7 +367,7 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
     payload: dict[str, Any] = {}
 
     axes_spec = meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         payload['axes_spec'] = axes_spec
     else:
         payload['axes_spec'] = None
@@ -451,7 +451,7 @@ def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedge
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
     axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         for axis in axes_spec.axes:
             if axis.label == target or axis.label.lower() == target_lower:
                 return axis.index
@@ -471,7 +471,7 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
 
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
     axes_spec = meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         if axes_spec.order:
             return int(axes_spec.order[0])
         return 0
@@ -493,7 +493,7 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     axes_spec = state.dims_meta.get('axes_spec')
-    if isinstance(axes_spec, AxesSpec):
+    if isinstance(axes_spec, DimsSpec):
         try:
             axis = axes_spec.axis_by_index(axis_idx)
             if axis.label:

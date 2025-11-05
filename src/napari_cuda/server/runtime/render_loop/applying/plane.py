@@ -98,17 +98,17 @@ def apply_dims_from_snapshot(
     dims = viewer.dims
     ndim = int(getattr(dims, "ndim", 0) or 0)
 
-    axes_spec: DimsSpec | None = snapshot.axes_spec  # type: ignore[assignment]
-    assert axes_spec is not None, "render snapshot missing dims/spec"
+    dims_spec: DimsSpec | None = snapshot.axes_spec  # type: ignore[assignment]
+    assert dims_spec is not None, "render snapshot missing dims/spec"
 
-    ndim = max(ndim, int(axes_spec.ndim))
-    labels = tuple(axis.label for axis in axes_spec.axes)
+    ndim = max(ndim, int(dims_spec.ndim))
+    labels = tuple(axis.label for axis in dims_spec.axes)
     dims.axis_labels = labels
 
-    step_tuple = axes_spec.current_step
-    order_values = axes_spec.order
-    displayed_tuple = axes_spec.displayed
-    target_ndisplay = int(axes_spec.ndisplay)
+    step_tuple = dims_spec.current_step
+    order_values = dims_spec.order
+    displayed_tuple = dims_spec.displayed
+    target_ndisplay = int(dims_spec.ndisplay)
 
     if snapshot.axis_labels is not None:
         assert tuple(str(v) for v in snapshot.axis_labels) == labels
@@ -117,15 +117,15 @@ def apply_dims_from_snapshot(
     if snapshot.displayed is not None:
         assert tuple(int(v) for v in snapshot.displayed) == displayed_tuple
 
-    if axes_spec.level_shapes and axes_spec.current_level is not None:
-        level_idx = int(axes_spec.current_level)
-        level_shapes_spec = axes_spec.level_shapes
+    if dims_spec.level_shapes and dims_spec.current_level is not None:
+        level_idx = int(dims_spec.current_level)
+        level_shapes_spec = dims_spec.level_shapes
         if level_shapes_spec and 0 <= level_idx < len(level_shapes_spec):
             ndim = max(ndim, len(level_shapes_spec[level_idx]))
     if dims.ndim != ndim:
         dims.ndim = ndim
 
-    snapshot_iface.set_current_level_index(int(axes_spec.current_level))
+    snapshot_iface.set_current_level_index(int(dims_spec.current_level))
 
     if len(step_tuple) < ndim:
         step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))

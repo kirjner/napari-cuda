@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
-from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec as AxesSpec, DimsSpecAxis as AxesSpecAxis
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis
 from napari_cuda.server.utils.signatures import (
     SignatureToken,
     dims_content_signature,
@@ -14,14 +14,14 @@ from napari_cuda.server.utils.signatures import (
 )
 
 
-def _sample_axes_spec() -> AxesSpec:
+def _sample_axes_spec() -> DimsSpec:
     level_shapes = ((100, 100), (50, 50))
     axes = []
     for idx, label in enumerate(("z", "y")):
         per_steps = tuple(shape[idx] if idx < len(shape) else 1 for shape in level_shapes)
         per_world = tuple(AxisExtent(start=0.0, stop=float(max(0, step - 1)), step=1.0) for step in per_steps)
         axes.append(
-            AxesSpecAxis(
+            DimsSpecAxis(
                 index=idx,
                 label=label,
                 role=label,
@@ -36,7 +36,7 @@ def _sample_axes_spec() -> AxesSpec:
                 per_level_world=per_world,
             )
         )
-    return AxesSpec(
+    return DimsSpec(
         version=1,
         ndim=2,
         ndisplay=2,
