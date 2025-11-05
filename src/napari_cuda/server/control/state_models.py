@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from napari_cuda.shared.axis_spec import AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
-from napari_cuda.shared.axis_spec import AxisExtent, AxesSpec, AxesSpecAxis
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec as AxesSpec, DimsSpecAxis as AxesSpecAxis
 
 
 def _make_axes_spec(

@@ -37,14 +37,14 @@ from napari_cuda.server.state_ledger import (
     ServerStateLedger,
 )
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
-from napari_cuda.shared.axis_spec import (
+from napari_cuda.shared.dims_spec import (
     AxisExtent,
-    AxesSpec,
-    AxesSpecAxis,
-    axes_spec_from_payload,
-    axes_spec_to_payload,
-    build_axes_spec_from_ledger,
-    validate_ledger_against_spec,
+    DimsSpec as AxesSpec,
+    DimsSpecAxis as AxesSpecAxis,
+    dims_spec_from_payload as axes_spec_from_payload,
+    dims_spec_to_payload as axes_spec_to_payload,
+    build_dims_spec_from_ledger as build_axes_spec_from_ledger,
+    validate_ledger_against_dims_spec as validate_ledger_against_spec,
 )
 
 logger = logging.getLogger(__name__)

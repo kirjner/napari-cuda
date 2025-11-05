@@ -28,7 +28,10 @@ from napari_cuda.server.scene.models import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
-from napari_cuda.shared.axis_spec import build_axes_spec_from_ledger, validate_ledger_against_spec
+from napari_cuda.shared.dims_spec import (
+    build_dims_spec_from_ledger as build_axes_spec_from_ledger,
+    validate_ledger_against_dims_spec as validate_ledger_against_spec,
+)
 
 logger = logging.getLogger(__name__)
 

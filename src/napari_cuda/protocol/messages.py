@@ -13,7 +13,11 @@ from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any
 
-from napari_cuda.shared.axis_spec import AxesSpec, axes_spec_from_payload, axes_spec_to_payload
+from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec  # type: ignore[F401]
+from napari_cuda.shared.dims_spec import (
+    dims_spec_from_payload as axes_spec_from_payload,
+    dims_spec_to_payload as axes_spec_to_payload,
+)
 
 PROTO_VERSION = 2
 

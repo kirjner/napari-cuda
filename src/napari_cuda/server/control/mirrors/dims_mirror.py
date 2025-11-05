@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.shared.axis_spec import AxesSpec, axes_spec_from_payload
+from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
+from napari_cuda.shared.dims_spec import dims_spec_from_payload as axes_spec_from_payload
 from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 

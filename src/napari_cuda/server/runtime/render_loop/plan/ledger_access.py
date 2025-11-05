@@ -6,7 +6,8 @@ from functools import lru_cache
 from typing import Optional
 
 from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.shared.axis_spec import AxesSpec, build_axes_spec_from_ledger
+from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec  # type: ignore[F401]
+from napari_cuda.shared.dims_spec import build_dims_spec_from_ledger as build_axes_spec_from_ledger
 
 
 def axes_spec(ledger: ServerStateLedger | None) -> AxesSpec | None:

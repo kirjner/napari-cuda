@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
-from napari_cuda.shared.axis_spec import AxisExtent, AxesSpec, AxesSpecAxis
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec as AxesSpec, DimsSpecAxis as AxesSpecAxis
 from napari_cuda.server.utils.signatures import (
     SignatureToken,
     dims_content_signature,

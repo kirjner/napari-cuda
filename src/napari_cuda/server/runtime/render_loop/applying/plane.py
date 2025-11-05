@@ -31,7 +31,7 @@ from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
 from napari_cuda.server.scene.viewport import PlaneState, RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.utils.signatures import SignatureToken
-from napari_cuda.shared.axis_spec import AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec
 
 from .viewer_metadata import apply_plane_metadata
 
@@ -98,8 +98,8 @@ def apply_dims_from_snapshot(
     dims = viewer.dims
     ndim = int(getattr(dims, "ndim", 0) or 0)
 
-    axes_spec: AxesSpec | None = snapshot.axes_spec
-    assert axes_spec is not None, "render snapshot missing axes_spec"
+    axes_spec: DimsSpec | None = snapshot.axes_spec  # type: ignore[assignment]
+    assert axes_spec is not None, "render snapshot missing dims/spec"
 
     ndim = max(ndim, int(axes_spec.ndim))
     labels = tuple(axis.label for axis in axes_spec.axes)

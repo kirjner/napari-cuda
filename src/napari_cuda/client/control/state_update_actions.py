@@ -14,7 +14,7 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
-from napari_cuda.shared.axis_spec import AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade

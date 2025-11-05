@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from napari_cuda.shared.axis_spec import (
-    axes_spec_from_payload,
-    axes_spec_to_payload,
-    build_axes_spec_from_ledger,
-    validate_ledger_against_spec,
+from napari_cuda.shared.dims_spec import (
+    dims_spec_from_payload as axes_spec_from_payload,
+    dims_spec_to_payload as axes_spec_to_payload,
+    build_dims_spec_from_ledger as build_axes_spec_from_ledger,
+    validate_ledger_against_dims_spec as validate_ledger_against_spec,
 )
 
 

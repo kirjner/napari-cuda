@@ -14,7 +14,7 @@ from napari_cuda.client.control.client_state_ledger import (
     MirrorEvent,
 )
 from napari_cuda.protocol.messages import NotifyDimsFrame
-from napari_cuda.shared.axis_spec import AxesSpec
+from napari_cuda.shared.dims_spec import DimsSpec as AxesSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
