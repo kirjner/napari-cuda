@@ -122,7 +122,8 @@ def apply_dims_from_snapshot(
 
     if not axis_spec.order:
         raise AssertionError("axis spec missing order data")
-    dims.order = tuple(int(v) for v in axis_spec.order)
+    order_values = tuple(int(v) for v in axis_spec.order)
+    dims.order = order_values
 
     dims.ndisplay = max(1, axis_spec.ndisplay)
 
