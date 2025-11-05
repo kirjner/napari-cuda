@@ -28,10 +28,7 @@ from napari_cuda.server.scene.models import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
-from napari_cuda.shared.dims_spec import (
-    build_dims_spec_from_ledger,
-    validate_ledger_against_dims_spec,
-)
+from napari_cuda.shared.dims_spec import dims_spec_from_payload, validate_ledger_against_dims_spec
 
 logger = logging.getLogger(__name__)
 
@@ -879,7 +876,12 @@ def build_ledger_snapshot(
     """Construct a render snapshot from confirmed ledger state."""
 
     snapshot = snapshot if snapshot is not None else ledger.snapshot()
-    dims_spec = build_dims_spec_from_ledger(snapshot)
+    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
+    if spec_entry is None:
+        raise AssertionError("ledger missing dims_spec entry for render snapshot")
+    assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
+    dims_spec = dims_spec_from_payload(spec_entry.value)
+    assert dims_spec is not None, "dims spec ledger entry missing payload"
     validate_ledger_against_dims_spec(dims_spec, snapshot)
 
     plane_center_tuple = _tuple_or_none(

@@ -134,7 +134,8 @@ class ServerDimsMirror:
                 raise ValueError("ledger missing required dims entry")
 
         spec_entry = snapshot[("dims", "main", "dims_spec")]
-        spec_payload = getattr(spec_entry, "value", spec_entry)
+        assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
+        spec_payload = spec_entry.value
         dims_spec = dims_spec_from_payload(spec_payload)
         assert isinstance(dims_spec, DimsSpec), "ledger dims_spec entry malformed"
 
@@ -220,7 +221,8 @@ class ServerDimsMirror:
     def _optional_int_tuple(entry: Any) -> Optional[tuple[int, ...]]:
         if entry is None:
             return None
-        value = getattr(entry, "value", entry)
+        assert isinstance(entry, LedgerEntry), "expected ledger entry"
+        value = entry.value
         if value is None:
             return None
         return ServerDimsMirror._as_int_tuple(value)
@@ -229,7 +231,8 @@ class ServerDimsMirror:
     def _optional_str_tuple(entry: Any) -> Optional[tuple[str, ...]]:
         if entry is None:
             return None
-        value = getattr(entry, "value", entry)
+        assert isinstance(entry, LedgerEntry), "expected ledger entry"
+        value = entry.value
         if value is None:
             return None
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
@@ -240,7 +243,8 @@ class ServerDimsMirror:
     def _optional_bool(entry: Any) -> Optional[bool]:
         if entry is None:
             return None
-        value = getattr(entry, "value", entry)
+        assert isinstance(entry, LedgerEntry), "expected ledger entry"
+        value = entry.value
         if value is None:
             return None
         return bool(value)

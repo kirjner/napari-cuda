@@ -43,7 +43,6 @@ from napari_cuda.shared.dims_spec import (
     DimsSpecAxis,
     dims_spec_from_payload,
     dims_spec_to_payload,
-    build_dims_spec_from_ledger,
     validate_ledger_against_dims_spec,
 )
 
@@ -891,15 +890,12 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
 
     spec_entry = snapshot.get(("dims", "main", "dims_spec"))
-    dims_spec: DimsSpec
-    if spec_entry is not None:
-        spec_payload = getattr(spec_entry, "value", spec_entry)
-        dims_spec = dims_spec_from_payload(spec_payload)
-        assert dims_spec is not None, "dims spec ledger entry missing payload"
-        validate_ledger_against_dims_spec(dims_spec, snapshot)
-    else:
-        dims_spec = build_dims_spec_from_ledger(snapshot)
-        validate_ledger_against_dims_spec(dims_spec, snapshot)
+    if spec_entry is None:
+        raise AssertionError("ledger missing dims_spec entry")
+    assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
+    dims_spec = dims_spec_from_payload(spec_entry.value)
+    assert dims_spec is not None, "dims spec ledger entry missing payload"
+    validate_ledger_against_dims_spec(dims_spec, snapshot)
 
     def require(scope: str, key: str) -> Any:
         entry = snapshot.get((scope, "main", key))
@@ -1190,7 +1186,7 @@ def reduce_dims_update(
         "axis_target": control_target,
     }
 
-    current_spec = payload.axes_spec
+    current_spec = payload.dims_spec
     assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list = list(current_spec.axes)
@@ -1299,7 +1295,7 @@ def reduce_dims_margins_update(
         arr.extend([0.0] * (len(payload.current_step) - len(arr)))
     arr[idx] = float(value)
 
-    axes_spec = payload.axes_spec
+    axes_spec = payload.dims_spec
     assert isinstance(axes_spec, DimsSpec), "dims spec missing from ledger payload"
     axes_list = list(axes_spec.axes)
     axis_entry = axes_list[idx]
@@ -1415,7 +1411,7 @@ def reduce_view_update(
         target_ndisplay=target_ndisplay,
     )
 
-    spec = dims_payload.axes_spec
+    spec = dims_payload.dims_spec
     assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list: list[AxesSpecAxis] = []
@@ -1692,7 +1688,7 @@ def reduce_level_update(
 
     next_op_seq = _next_scene_op_seq(ledger)
 
-    spec = dims_payload.axes_spec
+    spec = dims_payload.dims_spec
     assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     level_shapes_final = updated_level_shapes if updated_level_shapes else spec.level_shapes

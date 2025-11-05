@@ -184,10 +184,8 @@ def apply_slice_snapshot(
     step_hint: Optional[tuple[int, ...]] = None
     if snapshot.current_step is not None:
         step_hint = tuple(int(v) for v in snapshot.current_step)
-    if step_hint is None:
-        ledger_snapshot_step = snapshot_iface.ledger_step()
-        if ledger_snapshot_step is not None:
-            step_hint = tuple(int(v) for v in ledger_snapshot_step)
+    if step_hint is None and snapshot.dims_spec is not None:
+        step_hint = tuple(int(v) for v in snapshot.dims_spec.current_step)
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     # Avoid remap by treating previous==target level; step comes from snapshot.

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from napari_cuda.server.scene import (
-    build_ledger_snapshot,
-    snapshot_render_state,
-)
+from napari_cuda.server.scene import build_ledger_snapshot, snapshot_render_state
 from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.shared.dims_spec import build_dims_spec_from_ledger, dims_spec_to_payload
 
 
 def test_snapshot_render_state_preserves_dims_metadata() -> None:
@@ -19,6 +17,14 @@ def test_snapshot_render_state_preserves_dims_metadata() -> None:
             ("multiscale", "main", "level", 1),
             ("multiscale", "main", "level_shapes", ((10, 20, 30), (5, 10, 15))),
         ],
+        origin="test",
+    )
+    spec = build_dims_spec_from_ledger(ledger.snapshot())
+    ledger.record_confirmed(
+        "dims",
+        "main",
+        "dims_spec",
+        dims_spec_to_payload(spec),
         origin="test",
     )
 

@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import Optional
-
-from napari_cuda.server.state_ledger import ServerStateLedger
-from napari_cuda.shared.dims_spec import DimsSpec
-from napari_cuda.shared.dims_spec import build_dims_spec_from_ledger
+from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.shared.dims_spec import (
+    DimsSpec,
+    dims_spec_from_payload,
+    validate_ledger_against_dims_spec,
+)
 
 
 def dims_spec(ledger: ServerStateLedger | None) -> DimsSpec | None:
     if ledger is None:
         return None
-    return _memoized_spec(id(ledger), ledger)
-
-
-@lru_cache(maxsize=16)
-def _memoized_spec(_ledger_id: int, ledger: ServerStateLedger | None) -> DimsSpec | None:
-    if ledger is None:
-        return None
     snapshot = ledger.snapshot()
-    return build_dims_spec_from_ledger(snapshot)
+    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
+    if spec_entry is not None:
+        assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
+        spec = dims_spec_from_payload(spec_entry.value)
+        assert spec is not None, "dims spec ledger entry missing payload"
+        validate_ledger_against_dims_spec(spec, snapshot)
+        return spec
+    raise AssertionError("ledger missing dims spec for snapshot")
 
 
 def _require_spec(ledger: ServerStateLedger | None) -> DimsSpec:
