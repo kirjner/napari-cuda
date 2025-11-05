@@ -130,7 +130,7 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
             target,
             key,
             step_delta,
-            value_arg,
+            request.value,
             result.current_step,
         )
 

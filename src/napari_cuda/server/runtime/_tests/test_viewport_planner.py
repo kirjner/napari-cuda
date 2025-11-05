@@ -10,8 +10,11 @@ from napari_cuda.server.runtime.render_loop.planning.viewport_planner import (
     ViewportPlanner,
 )
 from napari_cuda.server.scene.viewport import PoseEvent
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
+from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.shared.axis_spec import (
+    derive_axis_labels,
+    derive_margins,
+    fabricate_axis_spec,
 )
 
 
@@ -30,6 +33,17 @@ def _make_snapshot(
     ndisplay: int = 2,
     rect: Optional[tuple[float, float, float, float]] = (0.0, 0.0, 100.0, 60.0),
 ) -> RenderLedgerSnapshot:
+    spec = fabricate_axis_spec(
+        ndim=3,
+        ndisplay=ndisplay,
+        current_level=level,
+        level_shapes=[(32, 32, 32)],
+        order=(0, 1, 2),
+        displayed=(1, 2) if ndisplay >= 2 else (2,),
+        labels=("z", "y", "x"),
+        current_step=(0, 0, 0),
+    )
+    margins = derive_margins(spec, prefer_world=True)
     return RenderLedgerSnapshot(
         ndisplay=ndisplay,
         current_level=level,
@@ -38,6 +52,13 @@ def _make_snapshot(
         plane_center=(0.0, 0.0),
         plane_zoom=1.0,
         layer_values=None,
+        level_shapes=spec.level_shapes,
+        axis_labels=tuple(derive_axis_labels(spec)),
+        order=spec.order,
+        displayed=spec.displayed,
+        margin_left=margins[0],
+        margin_right=margins[1],
+        axes=spec,
     )
 
 

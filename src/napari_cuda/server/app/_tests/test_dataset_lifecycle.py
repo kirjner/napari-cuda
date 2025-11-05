@@ -8,6 +8,7 @@ from napari_cuda.server.app.dataset_lifecycle import (
     enter_idle_state,
 )
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.shared.axis_spec import AxisSpec, derive_axis_labels, fabricate_axis_spec
 from napari_cuda.server.state_ledger import ServerStateLedger
 
 
@@ -30,7 +31,6 @@ def _make_hooks(pixel_channel: StubPixelChannel, snapshot: RenderLedgerSnapshot)
         "stop": 0,
         "clear": 0,
         "reset_mirrors": 0,
-        "reset_thumbnail": 0,
         "start_mirrors": 0,
     }
     refreshed: list[RenderLedgerSnapshot | None] = []
@@ -44,7 +44,6 @@ def _make_hooks(pixel_channel: StubPixelChannel, snapshot: RenderLedgerSnapshot)
         stop_worker=lambda: incr("stop"),
         clear_frame_queue=lambda: incr("clear"),
         reset_mirrors=lambda: incr("reset_mirrors"),
-        reset_thumbnail_state=lambda: incr("reset_thumbnail"),
         refresh_scene_snapshot=lambda render_state: refreshed.append(render_state),
         start_mirrors_if_needed=lambda: incr("start_mirrors"),
         pull_render_snapshot=lambda: snapshot,
@@ -60,7 +59,19 @@ def _make_hooks(pixel_channel: StubPixelChannel, snapshot: RenderLedgerSnapshot)
 def test_enter_idle_state_resets_runtime() -> None:
     ledger = ServerStateLedger()
     pixel_channel = StubPixelChannel()
-    snapshot = RenderLedgerSnapshot(op_seq=1, current_level=0, current_step=(0, 0))
+    step = (0, 0)
+    spec = _simple_axis_spec(step, ndisplay=2, current_level=0)
+    snapshot = RenderLedgerSnapshot(
+        op_seq=1,
+        current_level=0,
+        current_step=step,
+        axis_labels=tuple(derive_axis_labels(spec)),
+        order=spec.order,
+        displayed=spec.displayed,
+        level_shapes=spec.level_shapes,
+        axes=spec,
+        ndisplay=spec.ndisplay,
+    )
     hooks, calls, refreshed, dataset_meta, stored_snapshot = _make_hooks(pixel_channel, snapshot)
 
     enter_idle_state(hooks, ledger)
@@ -69,7 +80,6 @@ def test_enter_idle_state_resets_runtime() -> None:
         "stop": 1,
         "clear": 1,
         "reset_mirrors": 1,
-        "reset_thumbnail": 1,
         "start_mirrors": 0,
     }
     assert pixel_channel.needs_stream_config is True
@@ -87,7 +97,19 @@ def test_enter_idle_state_resets_runtime() -> None:
 def test_apply_dataset_bootstrap_applies_metadata_and_snapshot() -> None:
     ledger = ServerStateLedger()
     pixel_channel = StubPixelChannel()
-    snapshot = RenderLedgerSnapshot(op_seq=2, current_level=1, current_step=(4, 5, 6))
+    step = (4, 5, 6)
+    spec = _simple_axis_spec(step, ndisplay=3, current_level=1)
+    snapshot = RenderLedgerSnapshot(
+        op_seq=2,
+        current_level=1,
+        current_step=step,
+        axis_labels=tuple(derive_axis_labels(spec)),
+        order=spec.order,
+        displayed=spec.displayed,
+        level_shapes=spec.level_shapes,
+        axes=spec,
+        ndisplay=spec.ndisplay,
+    )
     hooks, calls, refreshed, dataset_meta, stored_snapshot = _make_hooks(pixel_channel, snapshot)
 
     bootstrap_meta = SimpleNamespace(
@@ -115,7 +137,6 @@ def test_apply_dataset_bootstrap_applies_metadata_and_snapshot() -> None:
     assert calls["stop"] == 1
     assert calls["clear"] == 1
     assert calls["reset_mirrors"] == 1
-    assert calls["reset_thumbnail"] == 1
     assert calls["start_mirrors"] == 1
 
     assert dataset_meta[-1] == ("/data/sample.zarr", "level_0", "zyx", 5)
@@ -124,3 +145,19 @@ def test_apply_dataset_bootstrap_applies_metadata_and_snapshot() -> None:
     assert pixel_channel.needs_stream_config is True
     assert pixel_channel.last_avcc is None
     assert pixel_channel.broadcast.waiting_for_keyframe is True
+def _simple_axis_spec(step: tuple[int, ...], *, ndisplay: int, current_level: int) -> AxisSpec:
+    ndim = len(step) if step else 1
+    level_shape = tuple(max(1, abs(int(value)) + 1) for value in (step or (0,)))
+    if len(level_shape) < ndim:
+        level_shape = level_shape + tuple(1 for _ in range(ndim - len(level_shape)))
+    spec = fabricate_axis_spec(
+        ndim=ndim,
+        ndisplay=ndisplay,
+        current_level=current_level,
+        level_shapes=[level_shape],
+        order=tuple(range(ndim)),
+        displayed=tuple(range(max(0, ndim - ndisplay), ndim)),
+        labels=tuple(f"axis-{idx}" for idx in range(ndim)),
+        current_step=step,
+    )
+    return spec

@@ -19,6 +19,7 @@ from napari_cuda.client.control.mirrors.napari_dims_mirror import (
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
+from napari_cuda.shared.axis_spec import axis_spec_to_payload, fabricate_axis_spec
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +102,18 @@ def _make_notify_dims_frame(
         payload['order'] = [int(index) for index in order]
     if displayed is not None:
         payload['displayed'] = [int(index) for index in displayed]
+
+    spec = fabricate_axis_spec(
+        ndim=len(step_values) if step_values else len(level_shapes[0]),
+        ndisplay=int(ndisplay),
+        current_level=int(current_level),
+        level_shapes=[tuple(int(dim) for dim in shape) for shape in level_shapes],
+        order=order,
+        displayed=displayed,
+        labels=axis_labels,
+        current_step=step_values,
+    )
+    payload['axes_spec'] = axis_spec_to_payload(spec)
 
     return build_notify_dims(
         session_id=session_id,
@@ -205,7 +218,10 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
     mirror.ingest_dims_notify(frame)
 
     assert state.dims_ready is True
-    assert loop_state.last_dims_payload == {
+    payload = dict(loop_state.last_dims_payload)
+    axes_spec_payload = payload.pop('axes_spec', None)
+    assert axes_spec_payload is not None
+    assert payload == {
         'current_step': [1, 2, 3],
         'ndisplay': 2,
         'ndim': 3,
@@ -260,7 +276,9 @@ def test_handle_dims_update_modes_volume_flag() -> None:
     assert state.dims_meta['mode'] == 'volume'
     assert state.dims_meta['volume'] is True
     assert loop_state.last_dims_payload['volume'] is True
-    assert presenter.calls[-1]['mode'] == 'volume'
+    presenter_payload = dict(presenter.calls[-1])
+    assert presenter_payload.pop('axes_spec', None) is not None
+    assert presenter_payload['mode'] == 'volume'
 
 
 def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
@@ -314,19 +332,27 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
         ndisplay=3,
         level_shapes=[[32, 32, 32]],
         mode='volume',
+        axis_labels=['z', 'y', 'x'],
     )
 
     mirror.ingest_dims_notify(frame)
 
     assert viewer.calls, "viewer should receive dims update"
-    payload = viewer.calls[-1]
+    payload = dict(viewer.calls[-1])
+    payload.pop('axes_spec', None)
     assert payload['ndisplay'] == 3
     assert tuple(payload['current_step']) == (1, 2, 3)
     assert payload['axis_labels'] == ['z', 'y', 'x']
 
-    assert presenter.calls[-1]['ndisplay'] == 3
-    assert loop_state.last_dims_payload['ndisplay'] == 3
-    assert loop_state.last_dims_payload['mode'] == 'volume'
+    presenter_payload = dict(presenter.calls[-1])
+    presenter_axes_spec = presenter_payload.pop('axes_spec', None)
+    assert presenter_axes_spec is not None
+    assert presenter_payload['ndisplay'] == 3
+
+    dims_payload = dict(loop_state.last_dims_payload)
+    assert dims_payload.pop('axes_spec', None) is not None
+    assert dims_payload['ndisplay'] == 3
+    assert dims_payload['mode'] == 'volume'
 
 
 def test_scene_level_then_dims_updates_slider_bounds() -> None:
@@ -379,7 +405,8 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
     assert dims_range and dims_range[2][1] == 31
 
     assert viewer.calls, 'viewer should receive updated dims metadata'
-    payload = viewer.calls[-1]
+    payload = dict(viewer.calls[-1])
+    payload.pop('axes_spec', None)
     assert payload['dims_range'][2][1] == 31
 
 
@@ -437,6 +464,9 @@ def test_dims_notify_preserves_optional_metadata() -> None:
         current_step=[10, 20, 30],
         ndisplay=2,
         level_shapes=[[256, 128, 64]],
+        axis_labels=['z', 'y', 'x'],
+        order=[0, 1, 2],
+        displayed=[1, 2],
     )
 
     mirror.ingest_dims_notify(frame)
@@ -512,6 +542,16 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
             'ndim': 3,
         }
     )
+    state.axis_spec = fabricate_axis_spec(
+        ndim=3,
+        ndisplay=2,
+        current_level=0,
+        level_shapes=[(256, 128, 64)],
+        order=(0, 1, 2),
+        displayed=(1, 2),
+        labels=('z', 'y', 'x'),
+        current_step=(148, 0, 0),
+    )
     viewer = ViewerStub()
     presenter = PresenterStub()
 
@@ -584,6 +624,17 @@ def test_dims_step_attaches_axis_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta['current_step'] = [5, 0, 0]
+    current_step = tuple(state.dims_meta['current_step'])
+    state.axis_spec = fabricate_axis_spec(
+        ndim=len(current_step),
+        ndisplay=2,
+        current_level=0,
+        level_shapes=[tuple(max(1, int(v) + 1) for v in current_step)],
+        order=tuple(range(len(current_step))),
+        displayed=tuple(range(max(0, len(current_step) - 2), len(current_step))),
+        labels=tuple(str(idx) for idx in range(len(current_step))),
+        current_step=current_step,
+    )
 
     emitter = NapariDimsIntentEmitter(
         ledger=ledger,
@@ -611,6 +662,16 @@ def test_dims_set_index_suppresses_duplicate_value() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
     state.dims_meta['current_step'] = [7]
+    state.axis_spec = fabricate_axis_spec(
+        ndim=1,
+        ndisplay=1,
+        current_level=0,
+        level_shapes=[(8,)],
+        order=(0,),
+        displayed=(0,),
+        labels=("0",),
+        current_step=(7,),
+    )
     ledger.record_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
     emitter = NapariDimsIntentEmitter(

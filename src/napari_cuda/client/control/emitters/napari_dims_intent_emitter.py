@@ -148,8 +148,6 @@ class NapariDimsIntentEmitter:
     def dims_step(self, axis: int | str, delta: int, *, origin: str = "ui") -> bool:
         assert self._state.dims_ready, "dims intents require initial notify"
         idx = control_actions._axis_to_index(self._state, axis)
-        if idx is None:
-            return False
         viewer_obj = self._viewer_ref() if self._viewer_ref is not None else None
         if control_actions._is_axis_playing(viewer_obj, idx) and origin != "play":
             return False
@@ -190,8 +188,6 @@ class NapariDimsIntentEmitter:
     def dims_set_index(self, axis: int | str, value: int, *, origin: str = "ui") -> bool:
         assert self._state.dims_ready, "dims intents require initial notify"
         idx = control_actions._axis_to_index(self._state, axis)
-        if idx is None:
-            return False
         viewer_obj = self._viewer_ref() if self._viewer_ref is not None else None
         if control_actions._is_axis_playing(viewer_obj, idx) and origin != "play":
             return False

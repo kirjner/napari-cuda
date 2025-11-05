@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
+from napari_cuda.shared.axis_spec import AxisSpec, axis_spec_to_payload
 
 SignatureTuple = Tuple[Any, ...]
 VersionKey = Tuple[str, str, str]
@@ -103,6 +104,7 @@ def dims_content_signature(
     levels: Tuple[Mapping[str, Any], ...],
     level_shapes: Tuple[Tuple[int, ...], ...],
     downgraded: Optional[bool],
+    axis_spec: AxisSpec,
 ) -> SignatureToken:
     """Signature describing the dims payload delivered to clients."""
 
@@ -119,6 +121,7 @@ def dims_content_signature(
         levels_sig,
         tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
         None if downgraded is None else bool(downgraded),
+        _canon(axis_spec_to_payload(axis_spec)),
     )
     return SignatureToken(token)
 
@@ -138,6 +141,7 @@ def dims_content_signature_from_payload(payload: Any) -> SignatureToken:
         levels=tuple(dict(level) for level in payload.levels),
         level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
         downgraded=payload.downgraded,
+        axis_spec=payload.axes_spec,
     )
 
 
@@ -188,6 +192,7 @@ def _dims_tuple_from_snapshot(snapshot: RenderLedgerSnapshot) -> SignatureTuple:
         None if snapshot.current_level is None else int(snapshot.current_level),
         None if snapshot.axis_labels is None else tuple(str(v) for v in snapshot.axis_labels),
         None if snapshot.dims_mode is None else str(snapshot.dims_mode),
+        None if snapshot.axes is None else _canon(axis_spec_to_payload(snapshot.axes)),
     )
 
 

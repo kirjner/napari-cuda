@@ -11,14 +11,37 @@ from napari_cuda.server.utils.signatures import (
     scene_content_signature,
     snapshot_versions,
 )
+from napari_cuda.shared.axis_spec import (
+    derive_axis_labels,
+    derive_margins,
+    fabricate_axis_spec,
+)
 
 
 def _sample_snapshot() -> RenderLedgerSnapshot:
-    return RenderLedgerSnapshot(
+    spec = fabricate_axis_spec(
+        ndim=3,
         ndisplay=2,
-        current_step=(1, 0, 0),
         current_level=0,
+        level_shapes=[(64, 32, 16)],
+        order=(0, 1, 2),
+        displayed=(1, 2),
+        labels=("z", "y", "x"),
+        current_step=(1, 0, 0),
+    )
+    margins_left, margins_right = derive_margins(spec, prefer_world=True)
+    return RenderLedgerSnapshot(
+        ndisplay=spec.ndisplay,
+        current_step=(1, 0, 0),
+        current_level=spec.current_level,
         dims_mode="plane",
+        axis_labels=tuple(derive_axis_labels(spec)),
+        order=spec.order,
+        displayed=spec.displayed,
+        level_shapes=spec.level_shapes,
+        margin_left=margins_left,
+        margin_right=margins_right,
+        axes=spec,
         layer_values={
             "layer-0": LayerVisualState(
                 layer_id="layer-0",
@@ -81,6 +104,15 @@ def test_layer_content_signature_includes_metadata_values() -> None:
 
 
 def test_dims_content_signature_sorts_level_items() -> None:
+    axis_spec = fabricate_axis_spec(
+        ndim=2,
+        ndisplay=2,
+        current_level=1,
+        level_shapes=[(100, 100), (50, 50)],
+        order=(0, 1),
+        displayed=None,
+        labels=("z", "y"),
+    )
     token_a = dims_content_signature(
         current_step=(0, 0),
         current_level=1,
@@ -96,6 +128,7 @@ def test_dims_content_signature_sorts_level_items() -> None:
         ),
         level_shapes=((100, 100), (50, 50)),
         downgraded=False,
+        axis_spec=axis_spec,
     )
     token_b = dims_content_signature(
         current_step=(0, 0),
@@ -109,12 +142,14 @@ def test_dims_content_signature_sorts_level_items() -> None:
         levels=({"downsample": (1, 1), "shape": (100, 100)}, {"downsample": (2, 2), "shape": (50, 50)}),
         level_shapes=((100, 100), (50, 50)),
         downgraded=False,
+        axis_spec=axis_spec,
     )
     assert token_a.value == token_b.value
 
 
 def test_snapshot_versions_apply_updates_mapping() -> None:
-    snapshot = RenderLedgerSnapshot(
+    snapshot = replace(
+        _sample_snapshot(),
         dims_version=3,
         view_version=4,
         multiscale_level_version=5,

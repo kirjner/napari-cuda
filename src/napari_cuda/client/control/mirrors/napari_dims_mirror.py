@@ -14,6 +14,11 @@ from napari_cuda.client.control.client_state_ledger import (
     MirrorEvent,
 )
 from napari_cuda.protocol.messages import NotifyDimsFrame
+from napari_cuda.shared.axis_spec import (
+    AxisSpec,
+    axis_by_index,
+    axis_spec_to_payload,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
@@ -76,38 +81,30 @@ class NapariDimsMirror:
         was_ready = bool(state.dims_ready)
         payload = frame.payload
 
+        axis_spec = payload.axes_spec
+        state.axis_spec = axis_spec
+        meta['axis_spec'] = axis_spec
+
         storage_step = [int(value) for value in payload.current_step]
         meta['current_step'] = storage_step
-        meta['ndisplay'] = int(payload.ndisplay)
-        mode_text = str(payload.mode)
+        meta['ndisplay'] = axis_spec.ndisplay
+        mode_text = 'volume' if not axis_spec.plane_mode else 'plane'
         meta['mode'] = mode_text
-        meta['volume'] = mode_text.lower() == 'volume'
+        meta['volume'] = not axis_spec.plane_mode
 
-        raw_level_shapes = payload.level_shapes
-        assert raw_level_shapes is not None, 'notify.dims requires level_shapes'
-        level_shapes = [[int(dim) for dim in shape] for shape in raw_level_shapes]
+        level_shapes = [[int(dim) for dim in shape] for shape in axis_spec.level_shapes]
         meta['level_shapes'] = level_shapes
 
-        active_level = int(payload.current_level)
+        active_level = int(axis_spec.current_level)
         assert 0 <= active_level < len(level_shapes), 'active level out of bounds for level_shapes'
         active_shape = [int(dim) for dim in level_shapes[active_level]]
         meta['active_level_shape'] = active_shape
         meta['range'] = [[0, max(0, dim - 1)] for dim in active_shape]
         meta['ndim'] = len(active_shape)
 
-        order = payload.order
-        if order is not None:
-            meta['order'] = [int(idx) for idx in order]
-        else:
-            meta['order'] = list(range(len(active_shape)))
-
-        axis_labels = payload.axis_labels
-        if axis_labels is not None:
-            meta['axis_labels'] = [str(label) for label in axis_labels]
-
-        displayed = payload.displayed
-        if displayed is not None:
-            meta['displayed'] = [int(idx) for idx in displayed]
+        meta['order'] = [int(idx) for idx in axis_spec.order]
+        meta['axis_labels'] = [axis.label for axis in axis_spec.axes]
+        meta['displayed'] = [int(idx) for idx in axis_spec.displayed]
 
         if 'sizes' in meta:
             meta.pop('sizes', None)
@@ -195,7 +192,6 @@ class NapariDimsMirror:
                 axis_idx = None
         if axis_idx is None:
             axis_idx = _axis_index_from_target(self._state, str(update.target))
-        assert axis_idx is not None, f"unknown dims axis target={update.target!r}"
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -218,6 +214,9 @@ class NapariDimsMirror:
             current.append(0)
         current[axis_idx] = value_int
         meta['current_step'] = current
+
+        if self._state.axis_spec is not None:
+            meta['axis_spec'] = self._state.axis_spec
 
         self._state.dims_state[(str(update.target), str(update.key))] = value_int
         self._state.primary_axis_index = _compute_primary_axis_index(meta)
@@ -315,6 +314,10 @@ def _record_dims_snapshot(
     if isinstance(displayed, (list, tuple)):
         entries.append(('view', 'main', 'displayed', tuple(int(v) for v in displayed)))
 
+    if state.axis_spec is None:
+        raise AssertionError('axis spec missing in control state during snapshot record')
+    entries.append(('dims', 'main', 'axes', axis_spec_to_payload(state.axis_spec)))
+
     if entries:
         ledger.batch_record_confirmed(entries)
 
@@ -346,7 +349,11 @@ def _record_dims_delta(
     update_kind: str,
 ) -> None:
     current_step = payload.get('current_step')
+    if state.axis_spec is None:
+        raise AssertionError('axis spec missing in control state during delta record')
+    spec_payload = axis_spec_to_payload(state.axis_spec)
     if not isinstance(current_step, (list, tuple)):
+        ledger.batch_record_confirmed([('dims', 'main', 'axes', spec_payload)])
         return
     entries: list[tuple[Any, ...]] = []
     for idx, value in enumerate(current_step):
@@ -363,6 +370,8 @@ def _record_dims_delta(
         }
         entries.append(('dims', target_label, 'index', value_int, metadata))
 
+    entries.append(('dims', 'main', 'axes', spec_payload))
+
     if entries:
         ledger.batch_record_confirmed(entries)
 
@@ -377,11 +386,13 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
     else:
         payload['current_step'] = None
 
-    ndisplay = meta.get('ndisplay')
-    payload['ndisplay'] = int(ndisplay) if ndisplay is not None else None
+    spec = state.axis_spec
 
-    ndim = meta.get('ndim')
-    payload['ndim'] = int(ndim) if ndim is not None else None
+    if spec is None:
+        raise AssertionError('axis spec missing from control state')
+
+    payload['ndisplay'] = int(spec.ndisplay)
+    payload['ndim'] = int(spec.ndim)
 
     dims_range = meta.get('range')
     if isinstance(dims_range, Sequence):
@@ -389,23 +400,10 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
     else:
         payload['dims_range'] = None
 
-    order = meta.get('order')
-    if isinstance(order, Sequence):
-        payload['order'] = list(order)
-    else:
-        payload['order'] = None
-
-    labels = meta.get('axis_labels')
-    if isinstance(labels, Sequence):
-        payload['axis_labels'] = [str(label) for label in labels]
-    else:
-        payload['axis_labels'] = None
-
-    displayed = meta.get('displayed')
-    if isinstance(displayed, Sequence):
-        payload['displayed'] = [int(val) for val in displayed]
-    else:
-        payload['displayed'] = None
+    payload['order'] = [int(idx) for idx in spec.order]
+    payload['axis_labels'] = [axis.label for axis in spec.axes]
+    payload['displayed'] = [int(idx) for idx in spec.displayed]
+    payload['axes_spec'] = axis_spec_to_payload(spec)
 
     mode = meta.get('mode')
     payload['mode'] = str(mode) if mode is not None else None
@@ -447,46 +445,35 @@ def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedge
     return
 
 
-def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
-    target_lower = target.lower()
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence):
-        for idx, label in enumerate(labels):
-            text = str(label)
-            if text == target or text.lower() == target_lower:
-                return int(idx)
-    if target.startswith('axis-'):
-        target = target.split('-', 1)[1]
-    try:
-        return int(target)
-    except Exception:
-        return None
+def _axis_index_from_target(state: ControlStateContext, target: str) -> int:
+    if state.axis_spec is None:
+        raise AssertionError('axis spec unavailable for target lookup')
+    text = target.strip()
+    if text == '':
+        raise ValueError('axis target must not be empty')
+    if text.lstrip('-').isdigit():
+        return state.axis_spec.axis_by_index(int(text)).index
+    lowered = text.lower()
+    if lowered.startswith('axis-') and lowered[5:].isdigit():
+        return state.axis_spec.axis_by_index(int(lowered[5:])).index
+    return state.axis_spec.axis_by_label(text).index
 
 
-def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
-    order = meta.get('order')
-    ndisplay = meta.get('ndisplay')
-    labels = meta.get('axis_labels')
-    nd = int(ndisplay) if ndisplay is not None else 2
-    idx_order: list[int] | None = None
-    if isinstance(order, Sequence) and len(order) > 0:
-        if all(isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order):
-            idx_order = [int(x) for x in order]
-        elif isinstance(labels, Sequence) and all(isinstance(x, str) for x in order):
-            label_to_index = {str(lbl): i for i, lbl in enumerate(labels)}
-            idx_order = [int(label_to_index.get(str(lbl), i)) for i, lbl in enumerate(order)]
-    if idx_order and len(idx_order) > nd:
-        return int(idx_order[0])
-    return 0
+def _compute_primary_axis_index(meta: dict[str, object | None]) -> int:
+    axis_spec_obj = meta.get('axis_spec')
+    if not isinstance(axis_spec_obj, AxisSpec):
+        raise AssertionError('axis spec missing for primary axis compute')
+    order = axis_spec_obj.order
+    assert order, "axis spec missing order sequence"
+    nd = max(1, axis_spec_obj.ndisplay)
+    return int(order[0] if len(order) > nd else order[0])
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
-        label = labels[axis_idx]
-        if isinstance(label, str) and label.strip():
-            return label
-    return str(axis_idx)
+    if state.axis_spec is None:
+        raise AssertionError('axis spec unavailable for target label lookup')
+    extent = axis_by_index(state.axis_spec, axis_idx)
+    return extent.label
 
 
 def _coerce_step_value(value: Any) -> Optional[int]:

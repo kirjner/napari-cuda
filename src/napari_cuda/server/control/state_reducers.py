@@ -37,6 +37,15 @@ from napari_cuda.server.state_ledger import (
     ServerStateLedger,
 )
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
+from napari_cuda.shared.axis_spec import (
+    AxisExtent,
+    AxisRole,
+    AxisSpec,
+    WorldSpan,
+    axis_spec_from_payload,
+    axis_spec_to_payload,
+    with_updated_margins,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +76,249 @@ _ALLOWED_RENDERING = {
 }
 
 _ALLOWED_PROJECTION = {mode.value for mode in NapariProjectionMode}
+
+_ROLE_ALIASES: dict[str, AxisRole] = {
+    "x": "x",
+    "lon": "x",
+    "u": "x",
+    "y": "y",
+    "lat": "y",
+    "v": "y",
+    "z": "z",
+    "depth": "depth",
+    "d": "depth",
+    "time": "time",
+    "t": "time",
+    "channel": "channel",
+    "c": "channel",
+}
+
+
+def _snapshot_optional(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+    scope: str,
+    key: str,
+) -> Any:
+    entry = snapshot.get((scope, "main", key))
+    if entry is None:
+        return None
+    return entry.value
+
+
+def _infer_axis_role(label: str, *, fallback: AxisRole = "unknown") -> AxisRole:
+    text = str(label or "").strip().lower()
+    if not text:
+        return fallback
+    return _ROLE_ALIASES.get(text, fallback)
+
+
+def _build_axis_spec_from_components(
+    *,
+    axis_labels: Sequence[str] | None,
+    order: Sequence[int] | None,
+    displayed: Sequence[int] | None,
+    current_step: Sequence[int] | None,
+    level_shapes: Sequence[Sequence[int]],
+    current_level: int,
+    ndisplay: int,
+    margin_left: Sequence[float] | None,
+    margin_right: Sequence[float] | None,
+    plane_mode: bool,
+    prior_spec: AxisSpec | None = None,
+) -> AxisSpec:
+    prior_axes = {axis.index: axis for axis in prior_spec.axes} if prior_spec is not None else {}
+
+    level_shapes_seq: list[tuple[int, ...]] = [
+        tuple(int(dim) for dim in shape) for shape in level_shapes
+    ]
+    if not level_shapes_seq and prior_spec is not None:
+        level_shapes_seq = [tuple(int(dim) for dim in shape) for shape in prior_spec.level_shapes]
+
+    if not level_shapes_seq:
+        inferred_ndim = len(current_step) if current_step else len(axis_labels or ()) or len(prior_axes) or 1
+        level_shapes_seq = [tuple(0 for _ in range(inferred_ndim))]
+
+    level_index = max(0, min(int(current_level), len(level_shapes_seq) - 1))
+    base_shape = level_shapes_seq[level_index]
+    ndim = len(base_shape) if base_shape else (
+        len(current_step) if current_step else len(axis_labels or ()) or len(prior_axes) or 1
+    )
+
+    order_tuple = tuple(int(idx) for idx in order) if order else tuple(range(ndim))
+    displayed_tuple = (
+        tuple(int(idx) for idx in displayed)
+        if displayed
+        else tuple(order_tuple[-min(len(order_tuple), max(1, int(ndisplay))):])
+    )
+
+    step_values = list(current_step[:ndim]) if current_step else [0] * ndim
+    if len(step_values) < ndim:
+        step_values.extend([0] * (ndim - len(step_values)))
+
+    def _prior_margin(idx: int, side: str) -> float:
+        prior_axis = prior_axes.get(idx)
+        if prior_axis is None:
+            return 0.0
+        return float(prior_axis.margin_left_world if side == "left" else prior_axis.margin_right_world)
+
+    left_values = list(margin_left[:ndim]) if margin_left is not None else []
+    right_values = list(margin_right[:ndim]) if margin_right is not None else []
+    if len(left_values) < ndim:
+        left_values.extend(_prior_margin(idx, "left") for idx in range(len(left_values), ndim))
+    if len(right_values) < ndim:
+        right_values.extend(_prior_margin(idx, "right") for idx in range(len(right_values), ndim))
+
+    labels: list[str] = []
+    for axis_idx in range(ndim):
+        if axis_labels and axis_idx < len(axis_labels) and str(axis_labels[axis_idx]).strip():
+            labels.append(str(axis_labels[axis_idx]))
+        elif axis_idx in prior_axes:
+            labels.append(prior_axes[axis_idx].label)
+        else:
+            labels.append(f"axis-{axis_idx}")
+
+    axes: list[AxisExtent] = []
+    for axis_idx in range(ndim):
+        prior = prior_axes.get(axis_idx)
+        role = prior.role if prior and prior.role != "unknown" else _infer_axis_role(labels[axis_idx])
+        order_pos = order_tuple.index(axis_idx) if axis_idx in order_tuple else axis_idx
+
+        per_level_steps: list[int] = []
+        per_level_world: list[WorldSpan | None] = []
+        for level_idx, shape in enumerate(level_shapes_seq):
+            step_count = int(shape[axis_idx]) if axis_idx < len(shape) else 0
+            per_level_steps.append(step_count)
+            prior_span = None
+            if prior and level_idx < len(prior.per_level_world):
+                prior_span = prior.per_level_world[level_idx]
+            if prior_span is not None:
+                per_level_world.append(prior_span)
+            elif step_count > 0:
+                stop = float(max(0, step_count - 1))
+                per_level_world.append(WorldSpan(start=0.0, stop=stop, step=1.0, scale=None))
+            else:
+                per_level_world.append(None)
+
+        if margin_left is None and prior is not None:
+            margin_left_world = float(prior.margin_left_world)
+            margin_left_steps = float(prior.margin_left_steps)
+        else:
+            margin_left_world = float(left_values[axis_idx])
+            margin_left_steps = (
+                float(prior.margin_left_steps)
+                if prior is not None
+                else float(left_values[axis_idx])
+            )
+
+        if margin_right is None and prior is not None:
+            margin_right_world = float(prior.margin_right_world)
+            margin_right_steps = float(prior.margin_right_steps)
+        else:
+            margin_right_world = float(right_values[axis_idx])
+            margin_right_steps = (
+                float(prior.margin_right_steps)
+                if prior is not None
+                else float(right_values[axis_idx])
+            )
+
+        axes.append(
+            AxisExtent(
+                index=axis_idx,
+                label=labels[axis_idx],
+                role=role,
+                displayed=axis_idx in displayed_tuple,
+                order_pos=order_pos,
+                current_step=int(step_values[axis_idx]),
+                margin_left_world=margin_left_world,
+                margin_right_world=margin_right_world,
+                margin_left_steps=float(margin_left_steps),
+                margin_right_steps=float(margin_right_steps),
+                per_level_steps=tuple(per_level_steps),
+                per_level_world=tuple(per_level_world),
+            )
+        )
+
+    return AxisSpec(
+        axes=tuple(axes),
+        ndim=ndim,
+        ndisplay=max(1, int(ndisplay)),
+        displayed=displayed_tuple,
+        order=order_tuple,
+        current_level=level_index,
+        level_shapes=tuple(level_shapes_seq),
+        plane_mode=bool(plane_mode),
+        version=prior_spec.version if prior_spec else 1,
+    )
+
+
+def _axis_extent_from_target(spec: AxisSpec, axis: object) -> AxisExtent:
+    if isinstance(axis, (int, float)):
+        idx = int(axis)
+        return spec.axis_by_index(idx)
+    if isinstance(axis, str):
+        text = axis.strip()
+        if text == "":
+            raise ValueError("axis target must not be empty")
+        if text.lstrip("-").isdigit():
+            return spec.axis_by_index(int(text))
+        return spec.axis_by_label(text)
+    raise TypeError(f"unsupported axis target type: {type(axis)!r}")
+
+
+def _axis_spec_from_snapshot(snapshot: Mapping[tuple[str, str, str], LedgerEntry]) -> AxisSpec:
+    axes_entry = snapshot.get(("dims", "main", "axes"))
+    if axes_entry is None or not isinstance(axes_entry.value, Mapping):
+        raise AssertionError("ledger missing axis spec payload")
+    return axis_spec_from_payload(axes_entry.value)
+
+
+def _record_axis_spec(
+    ledger: ServerStateLedger,
+    *,
+    origin: str,
+    timestamp: float,
+) -> None:
+    snapshot = ledger.snapshot()
+    prior_spec: AxisSpec | None = None
+    try:
+        prior_spec = _axis_spec_from_snapshot(snapshot)
+    except AssertionError:
+        prior_spec = None
+
+    axis_labels_raw = _snapshot_optional(snapshot, "dims", "axis_labels")
+    order_raw = _snapshot_optional(snapshot, "dims", "order")
+    displayed_raw = _snapshot_optional(snapshot, "view", "displayed")
+    current_step_raw = _snapshot_optional(snapshot, "dims", "current_step")
+    level_shapes_raw = _snapshot_optional(snapshot, "multiscale", "level_shapes") or ()
+    current_level_raw = _snapshot_optional(snapshot, "multiscale", "level")
+    ndisplay_raw = _snapshot_optional(snapshot, "view", "ndisplay")
+    level_shapes: list[tuple[int, ...]] = []
+    for shape in level_shapes_raw:
+        if isinstance(shape, Sequence):
+            level_shapes.append(tuple(int(dim) for dim in shape))
+
+    spec = _build_axis_spec_from_components(
+        axis_labels=tuple(str(label) for label in axis_labels_raw) if axis_labels_raw is not None else None,
+        order=tuple(int(idx) for idx in order_raw) if order_raw is not None else None,
+        displayed=tuple(int(idx) for idx in displayed_raw) if displayed_raw is not None else None,
+        current_step=tuple(int(v) for v in current_step_raw) if current_step_raw is not None else None,
+        level_shapes=level_shapes,
+        current_level=int(current_level_raw) if current_level_raw is not None else 0,
+        ndisplay=int(ndisplay_raw) if ndisplay_raw is not None else (prior_spec.ndisplay if prior_spec else 2),
+        margin_left=None,
+        margin_right=None,
+        plane_mode=bool(int(ndisplay_raw) < 3) if ndisplay_raw is not None else (prior_spec.plane_mode if prior_spec else True),
+        prior_spec=prior_spec,
+    )
+
+    payload = axis_spec_to_payload(spec)
+    ledger.batch_record_confirmed(
+        [
+            ("dims", "main", "axes", payload),
+        ],
+        origin=origin,
+        timestamp=timestamp,
+    )
 
 
 
@@ -332,34 +584,6 @@ def clamp_level(level: object, levels: Sequence[Mapping[str, Any]]) -> int:
     if count > 0:
         return max(0, min(count - 1, idx))
     return max(0, idx)
-
-
-def resolve_axis_index(
-    axis: object,
-    *,
-    order: Sequence[Any] | None,
-    axis_labels: Sequence[Any] | None,
-    ndim: int,
-) -> Optional[int]:
-    if isinstance(axis, int):
-        return axis if 0 <= axis < max(0, ndim) else None
-    if isinstance(axis, str):
-        stripped = axis.strip()
-        if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
-            idx = int(stripped)
-            return idx if 0 <= idx < max(0, ndim) else None
-        lowered = stripped.lower()
-        if order is not None:
-            lowered_order = [str(x).lower() for x in order]
-            if lowered in lowered_order:
-                position = lowered_order.index(lowered)
-                return position if 0 <= position < max(0, ndim) else None
-        if axis_labels is not None:
-            lowered_labels = [str(x).lower() for x in axis_labels]
-            if lowered in lowered_labels:
-                position = lowered_labels.index(lowered)
-                return position if 0 <= position < max(0, ndim) else None
-    return None
 
 
 def _normalize_bool(value: object) -> bool:
@@ -746,24 +970,6 @@ def reduce_volume_sample_step(
     )
 
 
-def _axis_label_from_axes(
-    order: Sequence[Any] | None,
-    axis_labels: Sequence[Any] | None,
-    idx: int,
-) -> Optional[str]:
-    if isinstance(order, Sequence) and idx < len(order):
-        candidate = order[idx]
-        if isinstance(candidate, str) and candidate.strip():
-            return str(candidate)
-
-    if isinstance(axis_labels, Sequence) and idx < len(axis_labels):
-        candidate = axis_labels[idx]
-        if isinstance(candidate, str) and candidate.strip():
-            return str(candidate)
-
-    return None
-
-
 def _normalize_view_order(
     *,
     baseline_order: Optional[Sequence[int]],
@@ -818,9 +1024,10 @@ def _dims_entries_from_payload(
 ) -> list[tuple[Any, ...]]:
     entries: list[tuple[Any, ...]] = []
 
+    spec = payload.axes_spec
+
     entries.append(("view", "main", "ndisplay", int(payload.ndisplay)))
-    if payload.displayed is not None:
-        entries.append(("view", "main", "displayed", tuple(int(idx) for idx in payload.displayed)))
+    entries.append(("view", "main", "displayed", tuple(int(idx) for idx in spec.displayed)))
 
     current_step = tuple(int(v) for v in payload.current_step)
     entries.append(
@@ -834,10 +1041,8 @@ def _dims_entries_from_payload(
     )
 
     # mode is derived from view.ndisplay; do not persist dims.mode
-    if payload.order is not None:
-        entries.append(("dims", "main", "order", tuple(int(idx) for idx in payload.order)))
-    if payload.axis_labels is not None:
-        entries.append(("dims", "main", "axis_labels", tuple(str(label) for label in payload.axis_labels)))
+    entries.append(("dims", "main", "order", tuple(int(idx) for idx in spec.order)))
+    entries.append(("dims", "main", "axis_labels", tuple(axis.label for axis in spec.axes)))
     if getattr(payload, "labels", None) is not None:
         entries.append(("dims", "main", "labels", tuple(str(label) for label in payload.labels)))
 
@@ -860,11 +1065,14 @@ def _dims_entries_from_payload(
     )
     entries.append(("multiscale", "main", "downgraded", payload.downgraded))
 
+    entries.append(("dims", "main", "axes", axis_spec_to_payload(payload.axes_spec)))
+
     return entries
 
 
 def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
+    axis_spec = _axis_spec_from_snapshot(snapshot)
 
     def require(scope: str, key: str) -> Any:
         entry = snapshot.get((scope, "main", key))
@@ -876,40 +1084,16 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         entry = snapshot.get((scope, "main", key))
         return None if entry is None else entry.value
 
-    current_step_raw = require("dims", "current_step")
-    current_step = tuple(int(v) for v in current_step_raw)
+    require("dims", "current_step")
     level_shapes_raw = require("multiscale", "level_shapes")
     level_shapes = tuple(
         tuple(int(dim) for dim in shape) for shape in level_shapes_raw
     )
     levels_raw = require("multiscale", "levels")
     levels = tuple(dict(level) for level in levels_raw)
-    current_level = int(require("multiscale", "level"))
+    current_level = axis_spec.current_level
     downgraded_raw = optional("multiscale", "downgraded")
     downgraded = None if downgraded_raw is None else bool(downgraded_raw)
-    ndisplay = int(require("view", "ndisplay"))
-    mode = "volume" if int(ndisplay) >= 3 else "plane"
-
-    axis_labels_raw = optional("dims", "axis_labels")
-    axis_labels = (
-        tuple(str(label) for label in axis_labels_raw)
-        if axis_labels_raw is not None
-        else None
-    )
-
-    order_raw = optional("dims", "order")
-    order = (
-        tuple(int(idx) for idx in order_raw)
-        if order_raw is not None
-        else None
-    )
-
-    displayed_raw = optional("view", "displayed")
-    displayed = (
-        tuple(int(idx) for idx in displayed_raw)
-        if displayed_raw is not None
-        else None
-    )
 
     labels_raw = optional("dims", "labels")
     labels = (
@@ -918,18 +1102,18 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         else None
     )
 
+    ndisplay = axis_spec.ndisplay
+    mode = "plane" if axis_spec.plane_mode else "volume"
+
     return NotifyDimsPayload(
-        current_step=current_step,
         level_shapes=level_shapes,
         levels=levels,
         current_level=current_level,
         downgraded=downgraded,
         mode=mode,
         ndisplay=ndisplay,
-        axis_labels=axis_labels,
-        order=order,
-        displayed=displayed,
         labels=labels,
+        axes_spec=axis_spec,
     )
 
 
@@ -977,25 +1161,35 @@ def reduce_bootstrap_state(
     else:
         axis_target = str(axis_index)
 
-    displayed = (
-        resolved_order[-resolved_ndisplay:]
+    displayed_tuple = (
+        tuple(resolved_order[-resolved_ndisplay:])
         if resolved_order
         else tuple(range(max(ndim - resolved_ndisplay, 0), ndim))
     )
-    displayed_tuple = tuple(int(v) for v in displayed)
+
+    axis_spec = _build_axis_spec_from_components(
+        axis_labels=resolved_axis_labels,
+        order=resolved_order,
+        displayed=displayed_tuple,
+        current_step=resolved_step,
+        level_shapes=resolved_level_shapes,
+        current_level=resolved_current_level,
+        ndisplay=resolved_ndisplay,
+        margin_left=None,
+        margin_right=None,
+        plane_mode=resolved_ndisplay < 3,
+        prior_spec=None,
+    )
 
     dims_payload = NotifyDimsPayload(
-        current_step=resolved_step,
         level_shapes=resolved_level_shapes,
         levels=resolved_levels,
         current_level=resolved_current_level,
         downgraded=False,
         mode=mode_value,
         ndisplay=resolved_ndisplay,
-        axis_labels=resolved_axis_labels if resolved_axis_labels else None,
-        order=resolved_order if resolved_order else None,
-        displayed=displayed_tuple if displayed_tuple else None,
         labels=None,
+        axes_spec=axis_spec,
     )
 
     entries = _dims_entries_from_payload(
@@ -1085,25 +1279,15 @@ def reduce_dims_update(
 
     ts = _now(timestamp)
     payload = _ledger_dims_payload(ledger)
+    axis_spec = payload.axes_spec
+    extent = _axis_extent_from_target(axis_spec, axis)
 
     step = [int(v) for v in payload.current_step]
     ndim = len(step)
     assert ndim > 0, "ledger dims metadata missing dimensions"
 
-    if len(step) < ndim:
-        step.extend([0] * (ndim - len(step)))
-
-    idx = resolve_axis_index(
-        axis,
-        order=payload.order,
-        axis_labels=payload.axis_labels,
-        ndim=len(step),
-    )
-    if idx is None:
-        raise ValueError("unable to resolve axis index for dims update")
-
-    axis_label = _axis_label_from_axes(payload.order, payload.axis_labels, idx)
-    control_target = axis_label or str(idx)
+    idx = extent.index
+    control_target = extent.label or f"axis-{idx}"
 
     target = int(step[idx])
     if value is not None:
@@ -1179,6 +1363,12 @@ def reduce_dims_update(
             metadata=metadata,
         )
 
+    _record_axis_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
@@ -1204,51 +1394,45 @@ def reduce_dims_margins_update(
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     payload = _ledger_dims_payload(ledger)
-
-    idx = resolve_axis_index(
-        axis,
-        order=payload.order,
-        axis_labels=payload.axis_labels,
-        ndim=len(payload.current_step),
-    )
-    if idx is None:
-        raise ValueError("unable to resolve axis index for dims margins update")
+    axis_spec = payload.axes_spec
+    extent = _axis_extent_from_target(axis_spec, axis)
 
     side_key = "margin_left" if side == "margin_left" else "margin_right"
-    # Start from existing ledger values if present, else zeros of length ndim
-    existing_entry = ledger.get("dims", "main", side_key)
-    if existing_entry is not None and isinstance(existing_entry.value, (tuple, list)):
-        arr = [float(v) for v in existing_entry.value]
-    else:
-        arr = [0.0 for _ in range(len(payload.current_step))]
-    # Ensure length
-    if len(arr) < len(payload.current_step):
-        arr.extend([0.0] * (len(payload.current_step) - len(arr)))
-    arr[idx] = float(value)
 
-    stored_entries = apply_dims_step_transaction(
-        ledger=ledger,
-        step=tuple(int(v) for v in payload.current_step),
-        metadata={},
+    updated_spec = with_updated_margins(
+        axis_spec,
+        extent.index,
+        margin_left_world=value if side == "margin_left" else None,
+        margin_right_world=value if side == "margin_right" else None,
+    )
+
+    stored = ledger.batch_record_confirmed(
+        [
+            ("dims", "main", "axes", axis_spec_to_payload(updated_spec)),
+        ],
         origin=origin,
         timestamp=ts,
-        op_seq=_next_scene_op_seq(ledger),
-        op_kind="dims-update",
     )
-    # Additionally store margins arrays atomically
-    entries: list[tuple] = [("dims", "main", side_key, tuple(float(v) for v in arr))]
-    ledger.batch_record_confirmed(entries, origin=origin, timestamp=ts)
 
-    # Build update
+    _record_axis_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
+    axes_entry = stored.get(("dims", "main", "axes"))
+    assert axes_entry is not None, "margin update must persist axis spec"
+    assert axes_entry.version is not None, "axes entry must provide version"
+
     return ServerLedgerUpdate(
         scope="dims",
-        target=str(axis),
+        target=extent.label or f"axis-{extent.index}",
         key=side_key,
-        value=tuple(float(v) for v in arr),
+        value=float(value),
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
-        version=int(stored_entries[("dims", "main", "current_step")].version) if stored_entries[("dims", "main", "current_step")].version is not None else 0,
+        version=int(axes_entry.version),
     )
 
 
@@ -1359,6 +1543,12 @@ def reduce_view_update(
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+    )
+
+    _record_axis_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
     )
 
     return ServerLedgerUpdate(
@@ -1594,6 +1784,12 @@ def reduce_level_update(
         op_kind="level-update",
     )
 
+    _record_axis_spec(
+        ledger,
+        origin=origin,
+        timestamp=ts,
+    )
+
     level_entry = stored_entries.get(("multiscale", "main", "level"))
     assert level_entry is not None, "level switch transaction must return level entry"
     level_version = None if level_entry.version is None else int(level_entry.version)
@@ -1800,7 +1996,6 @@ __all__ = [
     "reduce_volume_rendering",
     "reduce_volume_restore",
     "reduce_volume_sample_step",
-    "resolve_axis_index",
 ]
 
 

@@ -36,6 +36,13 @@ from websockets.protocol import State
 from napari.components import viewer_model
 from napari_cuda.protocol import NotifyStreamPayload
 from napari_cuda.protocol.messages import NotifyDimsPayload, SessionHello
+from napari_cuda.shared.axis_spec import (
+    axis_spec_to_payload,
+    derive_axis_labels,
+    derive_margins,
+    derive_order,
+    fabricate_axis_spec,
+)
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control import (
     control_channel_server as state_channel_handler,
@@ -446,20 +453,20 @@ class CaptureWorker:
     def _apply_dims_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
         dims = self._viewer.dims
 
-        if snapshot.ndisplay is not None:
-            dims.ndisplay = max(1, int(snapshot.ndisplay))
+        axis_spec = snapshot.axes
+        if axis_spec is None:
+            raise AssertionError('render snapshot missing axis spec in harness')
 
-        if snapshot.axis_labels is not None:
-            dims.axis_labels = tuple(str(v) for v in snapshot.axis_labels)  # type: ignore[assignment]
-
-        if snapshot.order is not None:
-            dims.order = tuple(int(v) for v in snapshot.order)  # type: ignore[assignment]
-
-        # napari derives `displayed` from order/ndisplay; no direct setter is available.
+        dims.ndisplay = max(1, axis_spec.ndisplay)
+        dims.axis_labels = tuple(derive_axis_labels(axis_spec))  # type: ignore[assignment]
+        dims.order = tuple(int(v) for v in (axis_spec.order or derive_order(axis_spec)))  # type: ignore[assignment]
 
         if snapshot.current_step is not None:
-            step_tuple = tuple(int(v) for v in snapshot.current_step)
-            dims.current_step = step_tuple  # type: ignore[assignment]
+            dims.current_step = tuple(int(v) for v in snapshot.current_step)  # type: ignore[assignment]
+
+        margin_left_vals, margin_right_vals = derive_margins(axis_spec, prefer_world=True)
+        dims.margin_left = tuple(float(v) for v in margin_left_vals)  # type: ignore[assignment]
+        dims.margin_right = tuple(float(v) for v in margin_right_vals)  # type: ignore[assignment]
 
         if snapshot.current_level is not None:
             level = int(snapshot.current_level)
@@ -470,15 +477,14 @@ class CaptureWorker:
         self._update_z_index_from_snapshot(snapshot)
 
     def _update_z_index_from_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:
-        if snapshot.axis_labels is None or snapshot.current_step is None:
-            return
-        labels = [str(label).lower() for label in snapshot.axis_labels]
-        if "z" not in labels:
-            return
-        idx = labels.index("z")
-        steps = tuple(int(v) for v in snapshot.current_step)
-        if idx < len(steps):
-            self._z_index = int(steps[idx])
+        axis_spec = snapshot.axes
+        if axis_spec is None or snapshot.current_step is None:
+            raise AssertionError('render snapshot missing axis spec for z-index in harness')
+        for axis in axis_spec.axes:
+            if axis.role == 'z' or axis.label.lower() == 'z':
+                if axis.index < len(snapshot.current_step):
+                    self._z_index = int(snapshot.current_step[axis.index])
+                return
 
     def _ensure_scene_source(self) -> _HarnessSceneSource:
         if self._scene_source is None:
@@ -997,6 +1003,16 @@ def frames_of_type(frames: Iterable[dict[str, Any]], frame_type: str) -> list[di
 
 
 def _default_dims_snapshot() -> dict[str, Any]:
+    level_shapes = [[512, 256, 64], [256, 128, 32]]
+    axis_spec = fabricate_axis_spec(
+        ndim=3,
+        ndisplay=2,
+        current_level=0,
+        level_shapes=level_shapes,
+        order=[0, 1, 2],
+        displayed=[1, 2],
+        labels=["z", "y", "x"],
+    )
     return {
         "step": [0, 0, 0],
         "current_step": [0, 0, 0],
@@ -1010,5 +1026,6 @@ def _default_dims_snapshot() -> dict[str, Any]:
             {"index": 1, "shape": [256, 128, 32]},
         ],
         "current_level": 0,
-        "level_shapes": [[512, 256, 64], [256, 128, 32]],
+        "level_shapes": level_shapes,
+        "axes_spec": axis_spec_to_payload(axis_spec),
     }

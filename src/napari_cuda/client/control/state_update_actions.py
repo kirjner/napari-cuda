@@ -14,6 +14,13 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
+from napari_cuda.shared.axis_spec import (
+    AxisSpec,
+    axis_by_index,
+    axis_by_label,
+    axis_spec_from_payload,
+    axis_spec_to_payload,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -40,6 +47,7 @@ def _default_dims_meta() -> dict[str, object | None]:
         'volume': None,
         'render': None,
         'multiscale': None,
+        'axis_spec': None,
     }
 
 
@@ -73,6 +81,7 @@ class ControlStateContext:
     dims_ready: bool = False
     dims_meta: dict[str, object | None] = field(default_factory=_default_dims_meta)
     primary_axis_index: int | None = None
+    axis_spec: AxisSpec | None = None
     session_id: Optional[str] = None
     ack_timeout_ms: Optional[int] = None
     intent_counter: int = 0
@@ -132,11 +141,13 @@ class ControlRuntime:
 def on_state_connected(state: ControlStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
+    state.axis_spec = None
 
 
 def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContext) -> None:
     state.dims_ready = False
     state.primary_axis_index = None
+    state.axis_spec = None
     loop_state.pending_intents.clear()
     loop_state.last_dims_payload = None
     state.control_runtimes.clear()
@@ -176,28 +187,23 @@ def handle_notify_camera(
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
-        label = labels[axis_idx]
-        if isinstance(label, str) and label.strip():
-            return label
-    return str(axis_idx)
+    if state.axis_spec is None:
+        raise AssertionError('axis spec missing for axis label lookup')
+    return axis_by_index(state.axis_spec, axis_idx).label
 
 
-def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
-    target_lower = target.lower()
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence):
-        for idx, label in enumerate(labels):
-            text = str(label)
-            if text == target or text.lower() == target_lower:
-                return int(idx)
-    if target.startswith('axis-'):
-        target = target.split('-', 1)[1]
-    try:
-        return int(target)
-    except Exception:
-        return None
+def _axis_index_from_target(state: ControlStateContext, target: str) -> int:
+    spec = state.axis_spec
+    assert spec is not None, 'axis spec missing for axis lookup'
+    text = str(target).strip()
+    if text == '':
+        raise ValueError('axis target must not be empty')
+    if text.lstrip('-').isdigit():
+        return spec.axis_by_index(int(text)).index
+    lowered = text.lower()
+    if lowered.startswith('axis-') and lowered[5:].isdigit():
+        return spec.axis_by_index(int(lowered[5:])).index
+    return spec.axis_by_label(text).index
 
 
 def _runtime_key(scope: str, target: str, key: str) -> str:
@@ -1202,34 +1208,38 @@ def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int],
     return snap
 
 
-def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]:
+def _axis_to_index(state: ControlStateContext, axis: int | str) -> int:
+    spec = state.axis_spec
+    assert spec is not None, 'axis spec missing during axis resolve'
     if axis == 'primary':
-        return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
-    if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
-        return int(axis)
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence):
-        label_map = {str(lbl): i for i, lbl in enumerate(labels)}
-        match = label_map.get(str(axis))
-        return int(match) if match is not None else None
-    return None
+        if state.primary_axis_index is not None:
+            return int(state.primary_axis_index)
+        assert spec.order, 'axis spec missing order for primary axis'
+        return int(spec.order[0])
+
+    if isinstance(axis, (int, float)):
+        return spec.axis_by_index(int(axis)).index
+
+    text = str(axis).strip()
+    if text == '':
+        raise ValueError('axis target must not be empty')
+
+    if text.lstrip('-').isdigit():
+        return spec.axis_by_index(int(text)).index
+
+    lowered = text.lower()
+    if lowered.startswith('axis-') and lowered[5:].isdigit():
+        return spec.axis_by_index(int(lowered[5:])).index
+
+    return spec.axis_by_label(text).index
 
 
-def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
-    order = meta.get('order')
-    ndisplay = meta.get('ndisplay')
-    labels = meta.get('axis_labels')
-    nd = int(ndisplay) if ndisplay is not None else 2
-    idx_order: list[int] | None = None
-    if isinstance(order, Sequence) and len(order) > 0:
-        if all(isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order):
-            idx_order = [int(x) for x in order]
-        elif isinstance(labels, Sequence) and all(isinstance(x, str) for x in order):
-            label_to_index = {str(lbl): i for i, lbl in enumerate(labels)}
-            idx_order = [int(label_to_index.get(str(lbl), i)) for i, lbl in enumerate(order)]
-    if idx_order and len(idx_order) > nd:
-        return int(idx_order[0])
-    return 0
+def _compute_primary_axis_index(meta: dict[str, object | None]) -> int:
+    axis_spec_obj = meta.get('axis_spec')
+    if not isinstance(axis_spec_obj, AxisSpec):
+        raise AssertionError('axis spec missing for primary axis compute')
+    assert axis_spec_obj.order, 'axis spec missing order sequence'
+    return int(axis_spec_obj.order[0])
 
 
 def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:

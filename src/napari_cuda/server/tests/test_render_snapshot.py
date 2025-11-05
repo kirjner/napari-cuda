@@ -15,6 +15,12 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.shared.axis_spec import (
+    derive_axis_labels,
+    derive_margins,
+    fabricate_axis_spec,
+    with_updated_margins,
+)
 
 
 class _NoopEvent:
@@ -166,7 +172,7 @@ class _StubWorker:
 
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=0, current_step=(5, 0, 0))
+    snapshot = _make_snapshot(ndisplay=3, current_level=0, current_step=(5, 0, 0))
     calls: dict[str, object] = {}
     call_order: list[str] = []
 
@@ -219,7 +225,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
 def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=True, level=2)
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=2, current_step=(9, 0, 0))
+    snapshot = _make_snapshot(ndisplay=3, current_level=2, current_step=(9, 0, 0))
     prepare_called = False
     volume_called = False
 
@@ -254,7 +260,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
 
 def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=True, level=2)
-    snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(3, 0, 0))
+    snapshot = _make_snapshot(ndisplay=2, current_level=1, current_step=(3, 0, 0))
     calls: dict[str, object] = {}
 
     def _fake_build(decision, *, source, prev_level, last_step):
@@ -292,7 +298,7 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
 def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
     worker._volume_max_voxels = 20  # force fallback from level 0
-    snapshot = RenderLedgerSnapshot(ndisplay=3, current_level=0, current_step=(7, 0, 0))
+    snapshot = _make_snapshot(ndisplay=3, current_level=0, current_step=(7, 0, 0))
     calls: dict[str, object] = {}
 
     def _fake_build(decision, *, source, prev_level, last_step):
@@ -328,7 +334,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
 
 def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
-    snapshot = RenderLedgerSnapshot(ndisplay=2, current_level=1, current_step=(5, 0, 0))
+    snapshot = _make_snapshot(ndisplay=2, current_level=1, current_step=(5, 0, 0))
 
     original_apply_dims = plane_mod.apply_dims_from_snapshot
 
@@ -351,3 +357,61 @@ def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch:
 
     snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
     assert worker._apply_dims_calls == 0
+def _make_snapshot(**kwargs) -> RenderLedgerSnapshot:
+    current_step = tuple(int(v) for v in kwargs.get("current_step", ()))
+    ndisplay = int(kwargs.get("ndisplay", 2))
+    current_level = int(kwargs.get("current_level", 0))
+    axis_labels = kwargs.get("axis_labels")
+    order = kwargs.get("order")
+    displayed = kwargs.get("displayed")
+    level_shapes = kwargs.get("level_shapes")
+
+    if level_shapes is None:
+        ndim = len(current_step) if current_step else len(axis_labels or ()) or max(1, ndisplay)
+        default_shape = tuple(max(1, abs(int(current_step[i])) + 1) if i < len(current_step) else 8 for i in range(ndim))
+        level_shapes = [default_shape]
+    else:
+        level_shapes = [tuple(int(dim) for dim in shape) for shape in level_shapes]
+
+    step_for_spec = current_step if current_step else tuple(0 for _ in level_shapes[0])
+
+    spec = fabricate_axis_spec(
+        ndim=len(level_shapes[0]),
+        ndisplay=ndisplay,
+        current_level=current_level,
+        level_shapes=level_shapes,
+        order=order,
+        displayed=displayed,
+        labels=axis_labels,
+        current_step=step_for_spec,
+    )
+
+    margin_left = kwargs.get("margin_left")
+    margin_right = kwargs.get("margin_right")
+    if margin_left is not None or margin_right is not None:
+        left_vals = tuple(float(v) for v in (margin_left or (0.0,) * len(spec.axes)))
+        right_vals = tuple(float(v) for v in (margin_right or (0.0,) * len(spec.axes)))
+        for idx, (left_val, right_val) in enumerate(zip(left_vals, right_vals, strict=False)):
+            spec = with_updated_margins(
+                spec,
+                idx,
+                margin_left_world=left_val,
+                margin_right_world=right_val,
+                margin_left_steps=left_val,
+                margin_right_steps=right_val,
+            )
+
+    world_margins = derive_margins(spec, prefer_world=True)
+
+    kwargs.setdefault("current_step", current_step if current_step else tuple(int(v) for v in step_for_spec))
+    kwargs.setdefault("current_level", current_level)
+    kwargs.setdefault("ndisplay", ndisplay)
+    kwargs.setdefault("level_shapes", tuple(tuple(int(dim) for dim in shape) for shape in level_shapes))
+    kwargs.setdefault("axis_labels", tuple(derive_axis_labels(spec)))
+    kwargs.setdefault("order", spec.order)
+    kwargs.setdefault("displayed", spec.displayed)
+    kwargs.setdefault("margin_left", world_margins[0])
+    kwargs.setdefault("margin_right", world_margins[1])
+    kwargs.setdefault("axes", spec)
+
+    return RenderLedgerSnapshot(**kwargs)
