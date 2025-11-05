@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
+from napari_cuda.shared.axis_spec import AxesSpec, axes_spec_from_payload
 from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
@@ -38,6 +39,7 @@ class ServerDimsMirror:
         _Key("multiscale", "main", "level_shapes"),
         _Key("multiscale", "main", "downgraded"),
         _Key("scene", "main", "op_state"),
+        _Key("dims", "main", "axes_spec"),
     )
 
     def __init__(
@@ -125,23 +127,29 @@ class ServerDimsMirror:
             ("multiscale", "main", "levels"),
             ("multiscale", "main", "level_shapes"),
             ("view", "main", "ndisplay"),
+            ("dims", "main", "axes_spec"),
         }
         for key in required:
             if key not in snapshot:
                 raise ValueError("ledger missing required dims entry")
 
-        current_step = self._as_int_tuple(snapshot[("dims", "main", "current_step")].value)
-        current_level = int(snapshot[("multiscale", "main", "level")].value)
-        levels = self._as_level_sequence(snapshot[("multiscale", "main", "levels")].value)
-        level_shapes = self._as_shape_sequence(snapshot[("multiscale", "main", "level_shapes")].value)
-        ndisplay = int(snapshot[("view", "main", "ndisplay")].value)
-        mode = "volume" if int(ndisplay) >= 3 else "plane"
+        spec_entry = snapshot[("dims", "main", "axes_spec")]
+        spec_payload = getattr(spec_entry, "value", spec_entry)
+        axes_spec = axes_spec_from_payload(spec_payload)
+        assert isinstance(axes_spec, AxesSpec), "ledger axes_spec entry malformed"
 
-        displayed = self._optional_int_tuple(snapshot.get(("view", "main", "displayed")))
-        order = self._optional_int_tuple(snapshot.get(("dims", "main", "order")))
-        axis_labels = self._optional_str_tuple(snapshot.get(("dims", "main", "axis_labels")))
+        current_step = tuple(int(v) for v in axes_spec.current_step)
+        current_level = int(axes_spec.current_level)
+        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in axes_spec.level_shapes)
+        ndisplay = int(axes_spec.ndisplay)
+        mode = "volume" if ndisplay >= 3 else "plane"
+
+        displayed = tuple(int(idx) for idx in axes_spec.displayed)
+        order = tuple(int(idx) for idx in axes_spec.order)
+        axis_labels = tuple(axis.label for axis in axes_spec.axes)
         labels = self._optional_str_tuple(snapshot.get(("dims", "main", "labels")))
         downgraded = self._optional_bool(snapshot.get(("multiscale", "main", "downgraded")))
+        levels = self._as_level_sequence(snapshot[("multiscale", "main", "levels")].value)
 
         return {
             "current_step": current_step,

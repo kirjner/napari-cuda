@@ -77,44 +77,32 @@ class NapariDimsMirror:
         was_ready = bool(state.dims_ready)
         payload = frame.payload
 
-        storage_step = [int(value) for value in payload.current_step]
-        meta['current_step'] = storage_step
-        meta['ndisplay'] = int(payload.ndisplay)
-        mode_text = str(payload.mode)
-        meta['mode'] = mode_text
-        meta['volume'] = mode_text.lower() == 'volume'
+        axes_spec = payload.axes_spec
+        assert isinstance(axes_spec, AxesSpec), 'notify.dims requires axes_spec'
 
-        raw_level_shapes = payload.level_shapes
-        assert raw_level_shapes is not None, 'notify.dims requires level_shapes'
-        level_shapes = [[int(dim) for dim in shape] for shape in raw_level_shapes]
+        meta['axes_spec'] = axes_spec
+
+        storage_step = [int(value) for value in axes_spec.current_step]
+        meta['current_step'] = storage_step
+        ndisplay_value = int(axes_spec.ndisplay)
+        meta['ndisplay'] = ndisplay_value
+        mode_text = 'volume' if ndisplay_value >= 3 else 'plane'
+        meta['mode'] = mode_text
+        meta['volume'] = not bool(axes_spec.plane_mode)
+
+        level_shapes = [[int(dim) for dim in shape] for shape in axes_spec.level_shapes]
         meta['level_shapes'] = level_shapes
 
-        active_level = int(payload.current_level)
+        active_level = int(axes_spec.current_level)
         assert 0 <= active_level < len(level_shapes), 'active level out of bounds for level_shapes'
         active_shape = [int(dim) for dim in level_shapes[active_level]]
         meta['active_level_shape'] = active_shape
         meta['range'] = [[0, max(0, dim - 1)] for dim in active_shape]
-        meta['ndim'] = len(active_shape)
+        meta['ndim'] = int(axes_spec.ndim)
 
-        order = payload.order
-        if order is not None:
-            meta['order'] = [int(idx) for idx in order]
-        else:
-            meta['order'] = list(range(len(active_shape)))
-
-        axis_labels = payload.axis_labels
-        if axis_labels is not None:
-            meta['axis_labels'] = [str(label) for label in axis_labels]
-
-        displayed = payload.displayed
-        if displayed is not None:
-            meta['displayed'] = [int(idx) for idx in displayed]
-
-        axes_spec = payload.axes_spec
-        if axes_spec is not None:
-            meta['axes_spec'] = axes_spec
-        else:
-            meta.pop('axes_spec', None)
+        meta['order'] = [int(idx) for idx in axes_spec.order]
+        meta['axis_labels'] = [str(axis.label) for axis in axes_spec.axes]
+        meta['displayed'] = [int(idx) for idx in axes_spec.displayed]
 
         if 'sizes' in meta:
             meta.pop('sizes', None)
@@ -377,6 +365,12 @@ def _record_dims_delta(
 def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientLoopState) -> dict[str, Any]:
     meta = state.dims_meta
     payload: dict[str, Any] = {}
+
+    axes_spec = meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        payload['axes_spec'] = axes_spec
+    else:
+        payload['axes_spec'] = None
 
     current_step = meta.get('current_step')
     if isinstance(current_step, Sequence):
