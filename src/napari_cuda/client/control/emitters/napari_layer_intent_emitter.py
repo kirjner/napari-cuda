@@ -641,19 +641,27 @@ class NapariLayerIntentEmitter:
         config: PropertyConfig,
     ) -> Callable[[Any], None]:
         def _handler(_event: Any = None) -> None:
-            self._on_property_change(binding, config)
+            self._on_property_change(binding, config, event=_event)
 
         return _handler
 
-    def _on_property_change(self, binding: LayerBinding, config: PropertyConfig) -> None:
+    def _on_property_change(self, binding: LayerBinding, config: PropertyConfig, *, event: Any | None = None) -> None:
         self._assert_gui_thread()
         if self._suppress_depth > 0:
             return
         if config.key in binding.suspended:
             return
 
-        current_value = config.getter(binding.layer)
-        encoded = config.encoder(current_value)
+        # Special handling for interpolation: use the event payload to avoid
+        # sampling only the 2D value when the 3D signal fires.
+        if config.key == "interpolation" and event is not None and hasattr(event, "value"):
+            raw = getattr(event, "value")
+            # `raw` is an Interpolation enum in napari; prefer its `.value`.
+            raw_str = str(getattr(raw, "value", raw))
+            encoded = config.encoder(raw_str)
+        else:
+            current_value = config.getter(binding.layer)
+            encoded = config.encoder(current_value)
         if self._tx_interval_ms > 0:
             binding.pending[config.key] = encoded
             assert binding.timer is not None, "coalescing timer missing"
