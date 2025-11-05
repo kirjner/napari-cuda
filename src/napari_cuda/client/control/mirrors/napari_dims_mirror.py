@@ -14,6 +14,7 @@ from napari_cuda.client.control.client_state_ledger import (
     MirrorEvent,
 )
 from napari_cuda.protocol.messages import NotifyDimsFrame
+from napari_cuda.shared.axis_spec import AxesSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
@@ -108,6 +109,12 @@ class NapariDimsMirror:
         displayed = payload.displayed
         if displayed is not None:
             meta['displayed'] = [int(idx) for idx in displayed]
+
+        axes_spec = payload.axes_spec
+        if axes_spec is not None:
+            meta['axes_spec'] = axes_spec
+        else:
+            meta.pop('axes_spec', None)
 
         if 'sizes' in meta:
             meta.pop('sizes', None)
@@ -449,6 +456,11 @@ def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedge
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
+    axes_spec = state.dims_meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        for axis in axes_spec.axes:
+            if axis.label == target or axis.label.lower() == target_lower:
+                return axis.index
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         for idx, label in enumerate(labels):
@@ -464,6 +476,11 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
 
 
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
+    axes_spec = meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        if axes_spec.order:
+            return int(axes_spec.order[0])
+        return 0
     order = meta.get('order')
     ndisplay = meta.get('ndisplay')
     labels = meta.get('axis_labels')
@@ -481,6 +498,14 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
+    axes_spec = state.dims_meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        try:
+            axis = axes_spec.axis_by_index(axis_idx)
+            if axis.label:
+                return axis.label
+        except KeyError:
+            pass
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
         label = labels[axis_idx]

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any
 
+from napari_cuda.shared.axis_spec import AxesSpec, axes_spec_from_payload, axes_spec_to_payload
+
 PROTO_VERSION = 2
 
 # Session frame types
@@ -674,6 +676,7 @@ class NotifyDimsPayload:
     order: tuple[int, ...] | None
     displayed: tuple[int, ...] | None
     labels: tuple[str, ...] | None = None
+    axes_spec: AxesSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -697,6 +700,9 @@ class NotifyDimsPayload:
             payload["displayed"] = [int(idx) for idx in self.displayed]
         if self.labels is not None:
             payload["labels"] = [str(label) for label in self.labels]
+        axes_payload = axes_spec_to_payload(self.axes_spec)
+        if axes_payload is not None:
+            payload["axes_spec"] = axes_payload
         return payload
 
     @classmethod
@@ -744,6 +750,9 @@ class NotifyDimsPayload:
             else None
         )
 
+        axes_spec_value = mapping.get("axes_spec")
+        axes_spec = axes_spec_from_payload(axes_spec_value)
+
         level_shapes_value = mapping["level_shapes"]
         level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
         parsed_shapes: list[tuple[int, ...]] = []
@@ -768,6 +777,7 @@ class NotifyDimsPayload:
             order=order,
             displayed=displayed,
             labels=labels,
+            axes_spec=axes_spec,
         )
 
 

@@ -37,6 +37,7 @@ from napari_cuda.server.state_ledger import (
     ServerStateLedger,
 )
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
+from napari_cuda.shared.axis_spec import build_axes_spec_from_ledger, validate_ledger_against_spec
 
 logger = logging.getLogger(__name__)
 
@@ -865,6 +866,8 @@ def _dims_entries_from_payload(
 
 def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     snapshot = ledger.snapshot()
+    axes_spec = build_axes_spec_from_ledger(snapshot)
+    validate_ledger_against_spec(axes_spec, snapshot)
 
     def require(scope: str, key: str) -> Any:
         entry = snapshot.get((scope, "main", key))
@@ -930,6 +933,7 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         order=order,
         displayed=displayed,
         labels=labels,
+        axes_spec=axes_spec,
     )
 
 

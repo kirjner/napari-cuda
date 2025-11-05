@@ -28,6 +28,7 @@ from napari_cuda.server.scene.models import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.shared.axis_spec import build_axes_spec_from_ledger, validate_ledger_against_spec
 
 logger = logging.getLogger(__name__)
 
@@ -875,6 +876,8 @@ def build_ledger_snapshot(
     """Construct a render snapshot from confirmed ledger state."""
 
     snapshot = snapshot if snapshot is not None else ledger.snapshot()
+    axes_spec = build_axes_spec_from_ledger(snapshot)
+    validate_ledger_against_spec(axes_spec, snapshot)
 
     plane_center_tuple = _tuple_or_none(
         _ledger_value(snapshot, "camera_plane", "main", "center"),
@@ -1049,6 +1052,7 @@ def build_ledger_snapshot(
         layer_values=layer_states or None,
         camera_versions=camera_versions_payload,
         op_seq=op_seq_value,
+        axes_spec=axes_spec,
     )
 
 

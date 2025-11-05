@@ -14,6 +14,7 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
+from napari_cuda.shared.axis_spec import AxesSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -40,6 +41,7 @@ def _default_dims_meta() -> dict[str, object | None]:
         'volume': None,
         'render': None,
         'multiscale': None,
+        'axes_spec': None,
     }
 
 
@@ -176,6 +178,14 @@ def handle_notify_camera(
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
+    axes_spec = state.dims_meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        try:
+            axis = axes_spec.axis_by_index(axis_idx)
+            if axis.label:
+                return axis.label
+        except KeyError:
+            pass
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
         label = labels[axis_idx]
@@ -186,6 +196,11 @@ def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
+    axes_spec = state.dims_meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        for axis in axes_spec.axes:
+            if axis.label == target or axis.label.lower() == target_lower:
+                return axis.index
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         for idx, label in enumerate(labels):
@@ -1207,6 +1222,12 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
         return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
     if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
         return int(axis)
+    axes_spec = state.dims_meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        try:
+            return axes_spec.axis_by_label(str(axis)).index
+        except KeyError:
+            pass
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         label_map = {str(lbl): i for i, lbl in enumerate(labels)}
@@ -1216,6 +1237,11 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
 
 
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
+    axes_spec = meta.get('axes_spec')
+    if isinstance(axes_spec, AxesSpec):
+        if axes_spec.order:
+            return int(axes_spec.order[0])
+        return 0
     order = meta.get('order')
     ndisplay = meta.get('ndisplay')
     labels = meta.get('axis_labels')
