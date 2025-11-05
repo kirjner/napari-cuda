@@ -409,8 +409,8 @@ def _init_viewer_scene(worker: EGLRendererWorker, source: Optional[ZarrSceneSour
     facade = ViewerBootstrapInterface(worker)
     builder = ViewerBuilder(facade)
     ledger = worker._ledger
-    spec = ledger_axes_spec(ledger)
-    assert spec is not None, "ledger missing axes spec during bootstrap"
+    spec = ledger_dims_spec(ledger)
+    assert spec is not None, "ledger missing dims spec during bootstrap"
     step_hint = spec.current_step
     level_hint = int(spec.current_level)
     axis_labels = tuple(axis.label for axis in spec.axes)

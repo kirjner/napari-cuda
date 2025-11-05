@@ -17,7 +17,7 @@ def apply_level_switch_transaction(
     ledger: ServerStateLedger,
     level: int,
     step: Sequence[int],
-    axes_spec_payload: Mapping[str, Any],
+    dims_spec_payload: Mapping[str, Any],
     level_shapes: Optional[Sequence[Sequence[int]]] = None,
     downgraded: Optional[bool] = None,
     step_metadata: Optional[Mapping[str, object]] = None,
@@ -127,7 +127,7 @@ def apply_level_switch_transaction(
                 ),
             )
 
-    batch_entries.append(("dims", "main", "dims_spec", dict(axes_spec_payload)))
+    batch_entries.append(("dims", "main", "dims_spec", dict(dims_spec_payload)))
 
     return ledger.batch_record_confirmed(
         batch_entries,

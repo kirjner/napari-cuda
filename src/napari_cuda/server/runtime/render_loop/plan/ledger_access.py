@@ -26,7 +26,7 @@ def _memoized_spec(_ledger_id: int, ledger: ServerStateLedger | None) -> DimsSpe
 
 def _require_spec(ledger: ServerStateLedger | None) -> DimsSpec:
     spec = dims_spec(ledger)
-    assert spec is not None, "axes spec missing from ledger snapshot"
+    assert spec is not None, "dims spec missing from ledger snapshot"
     return spec
 
 

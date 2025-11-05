@@ -381,8 +381,8 @@ class EGLRendererWorker:
 
     def snapshot_dims_metadata(self) -> dict[str, Any]:
         meta: dict[str, Any] = {}
-        spec = ledger_axes_spec(ledger)
-        assert spec is not None, "ledger missing axes spec for snapshot"
+        spec = ledger_dims_spec(ledger)
+        assert spec is not None, "ledger missing dims spec for snapshot"
 
         meta["axis_labels"] = [axis.label for axis in spec.axes]
         meta["axes"] = [axis.label for axis in spec.axes]

@@ -138,7 +138,7 @@ def apply_dims_from_snapshot(
 
     dims.ndisplay = max(1, target_ndisplay)
 
-    assert displayed_tuple, "axes spec emitted empty displayed"
+    assert displayed_tuple, "dims spec emitted empty displayed"
     computed_displayed = tuple(int(v) for v in dims.displayed)
     assert computed_displayed == displayed_tuple, "napari displayed mismatch order/ndisplay"
 

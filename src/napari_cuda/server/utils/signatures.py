@@ -127,7 +127,7 @@ def dims_content_signature_from_payload(payload: Any) -> SignatureToken:
     """Convenience wrapper that derives the signature from a NotifyDims payload."""
 
     spec = getattr(payload, "dims_spec", None)
-    assert spec is not None, "notify.dims missing axes spec"
+    assert spec is not None, "notify.dims missing dims spec"
 
     return dims_content_signature(
         current_step=tuple(int(v) for v in spec.current_step),
@@ -184,7 +184,7 @@ def _split_camera_attr(attr: str) -> Tuple[str, str]:
 
 def _dims_tuple_from_snapshot(snapshot: RenderLedgerSnapshot) -> SignatureTuple:
     spec = snapshot.dims_spec
-    assert spec is not None, "render snapshot missing axes spec"
+    assert spec is not None, "render snapshot missing dims spec"
 
     return (
         int(spec.ndisplay),

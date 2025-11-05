@@ -1,6 +1,5 @@
-"""Shared helpers for client/server coordination."""
+"""Shared helpers for client/server coordination (DimsSpec-first)."""
 
-# Prefer dims_spec (new names), but re-export legacy axes_spec for compatibility
 from .dims_spec import (  # noqa: F401
     AxisExtent,
     DimsSpec,

@@ -89,7 +89,7 @@ def is_valid_render_mode(mode: str, allowed_modes: Sequence[str]) -> bool:
 
 def _serialize_dims_spec(spec: DimsSpec) -> dict[str, Any]:
     payload = dims_spec_to_payload(spec)
-    assert payload is not None, "axes spec serialization failed"
+    assert payload is not None, "dims spec serialization failed"
     return payload
 
 
@@ -895,8 +895,8 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     if spec_entry is not None:
         spec_payload = getattr(spec_entry, "value", spec_entry)
         dims_spec = dims_spec_from_payload(spec_payload)
-        assert dims_spec is not None, "axes spec ledger entry missing payload"
-        validate_ledger_against_spec(dims_spec, snapshot)
+        assert dims_spec is not None, "dims spec ledger entry missing payload"
+        validate_ledger_against_dims_spec(dims_spec, snapshot)
     else:
         dims_spec = build_dims_spec_from_ledger(snapshot)
         validate_ledger_against_dims_spec(dims_spec, snapshot)
@@ -1111,7 +1111,7 @@ def reduce_bootstrap_state(
         current_step=resolved_step,
         origin=origin,
         version=dims_version,
-        axes_spec=axes_spec,
+        dims_spec=dims_spec,
     )
     view_update = ServerLedgerUpdate(
         scope="view",
@@ -1122,7 +1122,7 @@ def reduce_bootstrap_state(
         timestamp=ts,
         origin=origin,
         version=view_version,
-        axes_spec=axes_spec,
+        dims_spec=dims_spec,
     )
 
     return [dims_update, view_update]
@@ -1194,7 +1194,7 @@ def reduce_dims_update(
     assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list = list(current_spec.axes)
-    assert idx < len(axes_list), "axes spec missing target axis"
+    assert idx < len(axes_list), "dims spec missing target axis"
     axes_list[idx] = replace(axes_list[idx], current_step=int(requested_step[idx]))
     new_spec = replace(
         current_spec,
@@ -1207,7 +1207,7 @@ def reduce_dims_update(
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=requested_step,
-        axes_spec_payload=_serialize_dims_spec(new_spec),
+        dims_spec_payload=_serialize_dims_spec(new_spec),
         metadata=step_metadata,
         origin=origin,
         timestamp=ts,
@@ -1262,7 +1262,7 @@ def reduce_dims_update(
         current_step=requested_step,
         origin=origin,
         version=version,
-        axes_spec=new_spec,
+        dims_spec=new_spec,
     )
 
 def reduce_dims_margins_update(
@@ -1320,7 +1320,7 @@ def reduce_dims_margins_update(
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=tuple(int(v) for v in payload.current_step),
-        axes_spec_payload=_serialize_dims_spec(new_spec),
+        dims_spec_payload=_serialize_dims_spec(new_spec),
         origin=origin,
         timestamp=ts,
         op_seq=_next_scene_op_seq(ledger),
@@ -1339,7 +1339,7 @@ def reduce_dims_margins_update(
         timestamp=ts,
         origin=origin,
         version=int(stored_entries[("dims", "main", "current_step")].version) if stored_entries[("dims", "main", "current_step")].version is not None else 0,
-        axes_spec=new_spec,
+        dims_spec=new_spec,
     )
 
 
@@ -1449,7 +1449,7 @@ def reduce_view_update(
         target_ndisplay=int(target_ndisplay),
         order_value=order_value,
         displayed_value=displayed_value,
-        axes_spec_payload=_serialize_dims_spec(new_spec),
+        dims_spec_payload=_serialize_dims_spec(new_spec),
         origin=origin,
         timestamp=ts,
     )
@@ -1487,7 +1487,7 @@ def reduce_view_update(
         timestamp=ts,
         origin=origin,
         version=version,
-        axes_spec=new_spec,
+        dims_spec=new_spec,
     )
 
 
@@ -1724,7 +1724,7 @@ def reduce_level_update(
         ledger=ledger,
         level=level,
         step=step_tuple,
-        axes_spec_payload=_serialize_dims_spec(new_spec),
+        dims_spec_payload=_serialize_dims_spec(new_spec),
         level_shapes=updated_level_shapes if updated_level_shapes else None,
         downgraded=bool(downgraded) if downgraded is not None else None,
         step_metadata=step_metadata,
@@ -1771,7 +1771,7 @@ def reduce_level_update(
         origin=origin,
         current_step=step_tuple,
         version=level_version,
-        axes_spec=new_spec,
+        dims_spec=new_spec,
     )
 
 
