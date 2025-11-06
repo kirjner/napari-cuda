@@ -288,7 +288,7 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         'current_step': (1, 2, 3),
         'ndisplay': 2,
         'ndim': 3,
-        'dims_range': ((0, 10), (0, 5), (0, 3)),
+        'dims_range': ((0.0, 10.0, 1.0), (0.0, 5.0, 1.0), (0.0, 3.0, 1.0)),
         'order': (0, 1, 2),
         'axis_labels': ('z', 'y', 'x'),
         'displayed': (1, 2),

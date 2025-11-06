@@ -50,7 +50,10 @@ def viewer_update_from_spec(spec: DimsSpec, projection: DimsProjection) -> dict[
     else:
         active_shape = ()
 
-    dims_range = tuple((0, max(0, int(dim) - 1)) for dim in active_shape)
+    dims_range = tuple(
+        (0.0, float(max(0, int(dim) - 1)), 1.0)
+        for dim in active_shape
+    )
 
     return {
         'current_step': projection.step,
